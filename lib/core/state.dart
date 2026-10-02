@@ -6,6 +6,8 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart'
+    show Brightness, WidgetsBinding;
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -3172,6 +3174,7 @@ class AppState extends ChangeNotifier {
       shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true;
       shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true;
       lightTheme = prefs.getBool(_kTheme) ?? false;
+      themeMode = prefs.getString(_kThemeMode) ?? 'dark';
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
       githubSync = prefs.getBool(_kGithubSync) ?? true;
@@ -4396,7 +4399,12 @@ class AppState extends ChangeNotifier {
 
   // ── Light/dark theme (the theme controller light/dark preference parity) ──
   static const _kTheme = 'ovid_light_theme';
+  static const _kThemeMode = 'ovid_theme_mode';
   bool lightTheme = false;
+
+  /// Theme mode: 'system', 'light', or 'dark'. Default 'dark' preserves
+  /// backwards compatibility. 'system' follows platform brightness.
+  String themeMode = 'dark';
 
   /// Native device-integrity probe results (root / hooking framework /
   /// debugger). Refreshed at readiness; drives the Settings integrity row
@@ -4648,10 +4656,37 @@ class AppState extends ChangeNotifier {
   Future<void> setLightTheme(bool v) async {
     lightTheme = v;
     Aether.dark = !v;
+    // A manual light/dark toggle implies leaving system mode.
+    themeMode = v ? 'light' : 'dark';
     notifyListeners();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kTheme, v);
+      await prefs.setString(_kThemeMode, themeMode);
+    } catch (e) {
+      Diag.swallow('state', e);
+    }
+  }
+
+  /// Set the theme mode: 'system', 'light', or 'dark'.
+  Future<void> setThemeMode(String mode) async {
+    themeMode = mode;
+    if (mode == 'system') {
+      // Resolve from platform brightness.
+      final brightness = WidgetsBinding.instance.platformDispatcher.platformBrightness;
+      final isLight = brightness == Brightness.light;
+      lightTheme = isLight;
+      Aether.dark = !isLight;
+    } else {
+      final isLight = mode == 'light';
+      lightTheme = isLight;
+      Aether.dark = !isLight;
+    }
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kThemeMode, mode);
+      await prefs.setBool(_kTheme, lightTheme);
     } catch (e) {
       Diag.swallow('state', e);
     }
@@ -8495,558 +8530,97 @@ class AppState extends ChangeNotifier {
       ),
     ]);
 
-    // community library (dummy bulk)
-    const extra = <(String, String, String, String, int)>[
+    // Community/native-capability catalog rows. Install counts are not known
+    // for seeded rows — `installsKnown: false` means the UI never shows a
+    // fabricated number.
+    const extra = <(String, String, String, String)>[
       // ── Top CLI-used plugins/MCP ──
-      (
-        'Puppeteer MCP',
-        'mcp-community',
-        'Headless browser automation for agents.',
-        'MCP',
-        18200,
-      ),
-      (
-        'Postgres Tools',
-        'mcp-community',
-        'Query and inspect Postgres databases.',
-        'MCP',
-        9400,
-      ),
-      ('Figma Bridge', 'figma', 'Read design frames and tokens.', 'MCP', 12600),
-      (
-        'Slack Notify',
-        'community',
-        'Send agent updates to Slack channels.',
-        'Tool',
-        5100,
-      ),
-      (
-        'Shell History',
-        'ovidai',
-        'Searchable sandbox terminal history.',
-        'Tool',
-        3400,
-      ),
-      (
-        'Linear Sync',
-        'community',
-        'Create and update Linear issues from chat.',
-        'Tool',
-        2800,
-      ),
-      (
-        'Sentry Watch',
-        'community',
-        'Pull errors into chat and let agents fix them.',
-        'Tool',
-        3300,
-      ),
-      (
-        'Stripe MCP',
-        'stripe',
-        'Payments, invoices and customers via MCP.',
-        'MCP',
-        5400,
-      ),
-      (
-        'Vercel Deploy',
-        'vercel',
-        'Ship previews straight from the sandbox.',
-        'Tool',
-        11300,
-      ),
-      (
-        'DB Designer',
-        'community',
-        'Draw and migrate schemas in chat.',
-        'Tool',
-        4700,
-      ),
-      (
-        'Audio Notes',
-        'community',
-        'Transcribe meetings into sessions.',
-        'Tool',
-        3600,
-      ),
-      (
-        'Tailwind Helper',
-        'community',
-        'Tailwind-aware UI generation.',
-        'Tool',
-        9800,
-      ),
-      (
-        'Terraform MCP',
-        'hashicorp',
-        'Plan and apply infra safely.',
-        'MCP',
-        2500,
-      ),
-      (
-        'Notion Sync',
-        'community',
-        'Two-way sync with Notion databases.',
-        'Tool',
-        8600,
-      ),
-      (
-        'WhatsApp Bridge',
-        'community',
-        'Let the agent reply on WhatsApp via template.',
-        'Tool',
-        6200,
-      ),
-      (
-        'YouTube Summarizer',
-        'community',
-        'Paste a link, get a summary + chapters.',
-        'Tool',
-        14700,
-      ),
-      (
-        'Email Drafts',
-        'community',
-        'Generate and queue emails from chat.',
-        'Tool',
-        7900,
-      ),
-      // ── Batch 2: More popular tools/MCP ──
-      (
-        'Exa Search MCP',
-        'exa',
-        'Semantic web search — find docs, APIs, papers.',
-        'MCP',
-        22100,
-      ),
-      (
-        'Playwright MCP',
-        'playwright',
-        'Modern browser automation with smart waiting.',
-        'MCP',
-        19800,
-      ),
-      (
-        'Discord MCP',
-        'discord-mcp',
-        'Read/send Discord messages, manage servers.',
-        'MCP',
-        8900,
-      ),
-      (
-        'Telegram MCP',
-        'telegram',
-        'Bot API — send messages, listen to channels.',
-        'MCP',
-        7200,
-      ),
-      (
-        'Obsidian MCP',
-        'obsidian',
-        'Read/write Obsidian vault notes.',
-        'MCP',
-        6600,
-      ),
-      (
-        'Firebase MCP',
-        'firebase',
-        'Firestore, Auth, Storage — full Firebase access.',
-        'MCP',
-        5800,
-      ),
-      (
-        'Supabase MCP',
-        'supabase',
-        'Postgres + Auth + Storage from Supabase.',
-        'MCP',
-        9100,
-      ),
-      (
-        'Airtable MCP',
-        'airtable',
-        'Read/write Airtable bases and tables.',
-        'MCP',
-        4700,
-      ),
-      (
-        'Google Drive MCP',
-        'google',
-        'Search, read, and upload files to Drive.',
-        'MCP',
-        12300,
-      ),
-      (
-        'GitLab MCP',
-        'gitlab',
-        'GitLab repos, MRs, issues — full DevOps.',
-        'MCP',
-        6100,
-      ),
-      (
-        'Jira MCP',
-        'atlassian',
-        'Create and update Jira issues and sprints.',
-        'MCP',
-        8400,
-      ),
-      (
-        'Trello MCP',
-        'atlassian',
-        'Boards, cards, lists — Trello automation.',
-        'MCP',
-        3900,
-      ),
-      (
-        'Redis MCP',
-        'redis',
-        'Key-value store operations and pub/sub.',
-        'MCP',
-        2100,
-      ),
-      (
-        'MongoDB MCP',
-        'mongodb',
-        'Document queries, aggregations, indexes.',
-        'MCP',
-        5400,
-      ),
-      (
-        'S3 MCP',
-        'aws',
-        'S3 buckets — upload, list, download, presigned URLs.',
-        'MCP',
-        7600,
-      ),
-      (
-        'Cloudflare MCP',
-        'cloudflare',
-        'Workers, KV, R2, DNS — edge compute.',
-        'MCP',
-        4800,
-      ),
-      (
-        'Docker MCP',
-        'docker',
-        'Manage containers, images, volumes, networks.',
-        'MCP',
-        9200,
-      ),
-      (
-        'Kubernetes MCP',
-        'k8s',
-        'Pods, services, deployments — cluster control.',
-        'MCP',
-        6800,
-      ),
-      (
-        'OpenAI DALL·E MCP',
-        'openai',
-        'Image generation via DALL·E 3.',
-        'MCP',
-        11200,
-      ),
-      (
-        'ElevenLabs MCP',
-        'elevenlabs',
-        'Text-to-speech with realistic voices.',
-        'MCP',
-        7100,
-      ),
-      (
-        'LangChain MCP',
-        'langchain',
-        'Chains, agents, memory — full LangChain.',
-        'MCP',
-        4400,
-      ),
-      (
-        'AutoGPT Bridge',
-        'agpt',
-        'Chain multiple agents for complex tasks.',
-        'MCP',
-        3800,
-      ),
-      (
-        'Vector DB MCP',
-        'pinecone',
-        'Pinecone/Weaviate — vector search & memory.',
-        'MCP',
-        5200,
-      ),
-      (
-        'Appwrite MCP',
-        'appwrite',
-        'Auth, DB, storage, functions — backend suite.',
-        'MCP',
-        3600,
-      ),
-      (
-        'PocketBase MCP',
-        'pocketbase',
-        'Lightweight backend in a single binary.',
-        'MCP',
-        2900,
-      ),
-      (
-        'Cal.com MCP',
-        'cal',
-        'Scheduling, bookings, calendar management.',
-        'MCP',
-        4100,
-      ),
-      (
-        'Zapier MCP',
-        'zapier',
-        'Trigger zaps and read automation results.',
-        'MCP',
-        6300,
-      ),
-      (
-        'Make.com MCP',
-        'make',
-        'Run Make.com scenarios from agent.',
-        'MCP',
-        3400,
-      ),
-      (
-        'Bitbucket MCP',
-        'atlassian',
-        'Repos, PRs, pipelines for Bitbucket.',
-        'MCP',
-        4200,
-      ),
-      (
-        'Vercel MCP',
-        'vercel',
-        'Deploy, manage projects, domains via API.',
-        'MCP',
-        8100,
-      ),
-      (
-        'Railway MCP',
-        'railway',
-        'Deploy and manage Railway services.',
-        'MCP',
-        3200,
-      ),
-      (
-        'Heroku MCP',
-        'heroku',
-        'Dyno management, config vars, addons.',
-        'MCP',
-        2600,
-      ),
-      (
-        'DigitalOcean MCP',
-        'digitalocean',
-        'Droplets, App Platform, Spaces, DNS.',
-        'MCP',
-        5700,
-      ),
-      (
-        'Twilio MCP',
-        'twilio',
-        'SMS, calls, WhatsApp — messaging APIs.',
-        'MCP',
-        5100,
-      ),
-      (
-        'Discord Bot Builder',
-        'discord-mcp',
-        'Build and deploy Discord bots from chat.',
-        'Agent',
-        7800,
-      ),
-      (
-        'Web Scraper Pro',
-        'ovidai',
-        'Visual CSS selector → structured data.',
-        'Tool',
-        12500,
-      ),
-      (
-        'API Tester',
-        'ovidai',
-        'Build and test REST APIs from chat.',
-        'Tool',
-        8900,
-      ),
-      (
-        'Regex Builder',
-        'ovidai',
-        'Natural language → regex with tests.',
-        'Tool',
-        6700,
-      ),
-      (
-        'SQL Formatter',
-        'ovidai',
-        'Pretty-print and optimize SQL queries.',
-        'Tool',
-        5400,
-      ),
-      (
-        'JSON Visualizer',
-        'ovidai',
-        'Paste JSON → interactive tree explorer.',
-        'Tool',
-        7600,
-      ),
-      (
-        'Env Manager',
-        'ovidai',
-        'Manage .env files across repos safely.',
-        'Tool',
-        4300,
-      ),
-      (
-        'Log Analyzer',
-        'ovidai',
-        'Parse and explain log files with patterns.',
-        'Tool',
-        5100,
-      ),
-      (
-        'Git Diff Explain',
-        'ovidai',
-        'AI explanation of what a diff actually does.',
-        'Tool',
-        6800,
-      ),
-      (
-        'File Converter',
-        'ovidai',
-        'Convert between formats: CSV/JSON/YAML/XML.',
-        'Tool',
-        8200,
-      ),
-      (
-        'QR Generator',
-        'ovidai',
-        'Generate QR codes for URLs, WiFi, contact cards.',
-        'Tool',
-        9700,
-      ),
-      (
-        'Password Vault',
-        'ovidai',
-        'Secure local password manager with autofill.',
-        'Tool',
-        11400,
-      ),
-      (
-        'SSH Key Manager',
-        'ovidai',
-        'Generate and manage SSH keys for servers.',
-        'Tool',
-        5600,
-      ),
-      (
-        'Cron Designer',
-        'ovidai',
-        'Visual cron schedule builder and explainer.',
-        'Tool',
-        4600,
-      ),
-      (
-        'Markdown Editor',
-        'ovidai',
-        'Live-preview markdown editor with export.',
-        'Tool',
-        6900,
-      ),
-      (
-        'Mermaid Diagrams',
-        'ovidai',
-        'Flowcharts, sequence diagrams from text.',
-        'Tool',
-        10300,
-      ),
-      (
-        'Excalidraw Bridge',
-        'excalidraw',
-        'Draw diagrams in Excalidraw, sync to repo.',
-        'Tool',
-        4800,
-      ),
-      (
-        'Color Palette Gen',
-        'ovidai',
-        'Generate accessible color palettes from descriptions.',
-        'Tool',
-        7900,
-      ),
-      (
-        'Icon Library',
-        'ovidai',
-        'Search 200k+ icons (Lucide, Material, Feather).',
-        'Tool',
-        6200,
-      ),
-      (
-        'Font Preview',
-        'ovidai',
-        'Preview Google Fonts with custom text.',
-        'Tool',
-        5500,
-      ),
-      (
-        'Code Review AI',
-        'ovidai',
-        'AI-powered code review with fix suggestions.',
-        'Agent',
-        13800,
-      ),
-      (
-        'Test Writer',
-        'ovidai',
-        'Generate unit tests for any function/class.',
-        'Agent',
-        9400,
-      ),
-      (
-        'README Writer',
-        'ovidai',
-        'Auto-generate professional README files.',
-        'Agent',
-        8700,
-      ),
-      (
-        'Changelog Gen',
-        'ovidai',
-        'Generate changelog from git history.',
-        'Agent',
-        4500,
-      ),
-      (
-        'Commit Msg Helper',
-        'ovidai',
-        'AI commit messages following Conventional Commits.',
-        'Agent',
-        7300,
-      ),
-      (
-        'Issue Triager',
-        'ovidai',
-        'Categorize and prioritize GitHub issues.',
-        'Agent',
-        5600,
-      ),
-      (
-        'Release Notes',
-        'ovidai',
-        'Draft release notes from merged PRs.',
-        'Agent',
-        6100,
-      ),
+      ('Puppeteer MCP', 'mcp-community', 'Headless browser automation for agents.', 'MCP'),
+      ('Postgres Tools', 'mcp-community', 'Query and inspect Postgres databases.', 'MCP'),
+      ('Figma Bridge', 'figma', 'Read design frames and tokens.', 'MCP'),
+      ('Slack Notify', 'community', 'Send agent updates to Slack channels.', 'Tool'),
+      ('Shell History', 'ovidai', 'Searchable sandbox terminal history.', 'Tool'),
+      ('Linear Sync', 'community', 'Create and update Linear issues from chat.', 'Tool'),
+      ('Sentry Watch', 'community', 'Pull errors into chat and let agents fix them.', 'Tool'),
+      ('Stripe MCP', 'stripe', 'Payments, invoices and customers via MCP.', 'MCP'),
+      ('Vercel Deploy', 'vercel', 'Ship previews straight from the sandbox.', 'Tool'),
+      ('DB Designer', 'community', 'Draw and migrate schemas in chat.', 'Tool'),
+      ('Audio Notes', 'community', 'Transcribe meetings into sessions.', 'Tool'),
+      ('Tailwind Helper', 'community', 'Tailwind-aware UI generation.', 'Tool'),
+      ('Terraform MCP', 'hashicorp', 'Plan and apply infra safely.', 'MCP'),
+      ('Notion Sync', 'community', 'Two-way sync with Notion databases.', 'Tool'),
+      ('WhatsApp Bridge', 'community', 'Let the agent reply on WhatsApp via template.', 'Tool'),
+      ('YouTube Summarizer', 'community', 'Paste a link, get a summary + chapters.', 'Tool'),
+      ('Email Drafts', 'community', 'Generate and queue emails from chat.', 'Tool'),
+      ('Exa Search MCP', 'exa', 'Semantic web search — find docs, APIs, papers.', 'MCP'),
+      ('Playwright MCP', 'playwright', 'Modern browser automation with smart waiting.', 'MCP'),
+      ('Discord MCP', 'discord-mcp', 'Read/send Discord messages, manage servers.', 'MCP'),
+      ('Telegram MCP', 'telegram', 'Bot API — send messages, listen to channels.', 'MCP'),
+      ('Obsidian MCP', 'obsidian', 'Read/write Obsidian vault notes.', 'MCP'),
+      ('Firebase MCP', 'firebase', 'Firestore, Auth, Storage — full Firebase access.', 'MCP'),
+      ('Supabase MCP', 'supabase', 'Postgres + Auth + Storage from Supabase.', 'MCP'),
+      ('Airtable MCP', 'airtable', 'Read/write Airtable bases and tables.', 'MCP'),
+      ('Google Drive MCP', 'google', 'Search, read, and upload files to Drive.', 'MCP'),
+      ('GitLab MCP', 'gitlab', 'GitLab repos, MRs, issues — full DevOps.', 'MCP'),
+      ('Jira MCP', 'atlassian', 'Create and update Jira issues and sprints.', 'MCP'),
+      ('Trello MCP', 'atlassian', 'Boards, cards, lists — Trello automation.', 'MCP'),
+      ('Redis MCP', 'redis', 'Key-value store operations and pub/sub.', 'MCP'),
+      ('MongoDB MCP', 'mongodb', 'Document queries, aggregations, indexes.', 'MCP'),
+      ('S3 MCP', 'aws', 'S3 buckets — upload, list, download, presigned URLs.', 'MCP'),
+      ('Cloudflare MCP', 'cloudflare', 'Workers, KV, R2, DNS — edge compute.', 'MCP'),
+      ('Docker MCP', 'docker', 'Manage containers, images, volumes, networks.', 'MCP'),
+      ('Kubernetes MCP', 'k8s', 'Pods, services, deployments — cluster control.', 'MCP'),
+      ('OpenAI DALL\u00b7E MCP', 'openai', 'Image generation via DALL\u00b7E 3.', 'MCP'),
+      ('ElevenLabs MCP', 'elevenlabs', 'Text-to-speech with realistic voices.', 'MCP'),
+      ('LangChain MCP', 'langchain', 'Chains, agents, memory — full LangChain.', 'MCP'),
+      ('AutoGPT Bridge', 'agpt', 'Chain multiple agents for complex tasks.', 'MCP'),
+      ('Vector DB MCP', 'pinecone', 'Pinecone/Weaviate — vector search & memory.', 'MCP'),
+      ('Appwrite MCP', 'appwrite', 'Auth, DB, storage, functions — backend suite.', 'MCP'),
+      ('PocketBase MCP', 'pocketbase', 'Lightweight backend in a single binary.', 'MCP'),
+      ('Cal.com MCP', 'cal', 'Scheduling, bookings, calendar management.', 'MCP'),
+      ('Zapier MCP', 'zapier', 'Trigger zaps and read automation results.', 'MCP'),
+      ('Make.com MCP', 'make', 'Run Make.com scenarios from agent.', 'MCP'),
+      ('Bitbucket MCP', 'atlassian', 'Repos, PRs, pipelines for Bitbucket.', 'MCP'),
+      ('Vercel MCP', 'vercel', 'Deploy, manage projects, domains via API.', 'MCP'),
+      ('Railway MCP', 'railway', 'Deploy and manage Railway services.', 'MCP'),
+      ('Heroku MCP', 'heroku', 'Dyno management, config vars, addons.', 'MCP'),
+      ('DigitalOcean MCP', 'digitalocean', 'Droplets, App Platform, Spaces, DNS.', 'MCP'),
+      ('Twilio MCP', 'twilio', 'SMS, calls, WhatsApp — messaging APIs.', 'MCP'),
+      ('Discord Bot Builder', 'discord-mcp', 'Build and deploy Discord bots from chat.', 'Agent'),
+      ('Web Scraper Pro', 'ovidai', 'Visual CSS selector \u2192 structured data.', 'Tool'),
+      ('API Tester', 'ovidai', 'Build and test REST APIs from chat.', 'Tool'),
+      ('Regex Builder', 'ovidai', 'Natural language \u2192 regex with tests.', 'Tool'),
+      ('SQL Formatter', 'ovidai', 'Pretty-print and optimize SQL queries.', 'Tool'),
+      ('JSON Visualizer', 'ovidai', 'Paste JSON \u2192 interactive tree explorer.', 'Tool'),
+      ('Env Manager', 'ovidai', 'Manage .env files across repos safely.', 'Tool'),
+      ('Log Analyzer', 'ovidai', 'Parse and explain log files with patterns.', 'Tool'),
+      ('Git Diff Explain', 'ovidai', 'AI explanation of what a diff actually does.', 'Tool'),
+      ('File Converter', 'ovidai', 'Convert between formats: CSV/JSON/YAML/XML.', 'Tool'),
+      ('QR Generator', 'ovidai', 'Generate QR codes for URLs, WiFi, contact cards.', 'Tool'),
+      ('Password Vault', 'ovidai', 'Secure local password manager with autofill.', 'Tool'),
+      ('SSH Key Manager', 'ovidai', 'Generate and manage SSH keys for servers.', 'Tool'),
+      ('Cron Designer', 'ovidai', 'Visual cron schedule builder and explainer.', 'Tool'),
+      ('Markdown Editor', 'ovidai', 'Live-preview markdown editor with export.', 'Tool'),
+      ('Mermaid Diagrams', 'ovidai', 'Flowcharts, sequence diagrams from text.', 'Tool'),
+      ('Excalidraw Bridge', 'excalidraw', 'Draw diagrams in Excalidraw, sync to repo.', 'Tool'),
+      ('Color Palette Gen', 'ovidai', 'Generate accessible color palettes from descriptions.', 'Tool'),
+      ('Icon Library', 'ovidai', 'Search 200k+ icons (Lucide, Material, Feather).', 'Tool'),
+      ('Font Preview', 'ovidai', 'Preview Google Fonts with custom text.', 'Tool'),
+      ('Code Review AI', 'ovidai', 'AI-powered code review with fix suggestions.', 'Agent'),
+      ('Test Writer', 'ovidai', 'Generate unit tests for any function/class.', 'Agent'),
+      ('README Writer', 'ovidai', 'Auto-generate professional README files.', 'Agent'),
+      ('Changelog Gen', 'ovidai', 'Generate changelog from git history.', 'Agent'),
+      ('Commit Msg Helper', 'ovidai', 'AI commit messages following Conventional Commits.', 'Agent'),
+      ('Issue Triager', 'ovidai', 'Categorize and prioritize GitHub issues.', 'Agent'),
+      ('Release Notes', 'ovidai', 'Draft release notes from merged PRs.', 'Agent'),
     ];
     plugins.addAll([
-      for (final (n, a, d, c, i) in extra)
+      for (final (n, a, d, c) in extra)
         PluginItem(
           name: n,
           author: a,
           description: d,
-          version: '1.${(i % 9) + 0}.${i % 7}',
+          version: '1.0.0',
           category: c,
           installs: 0,
           installsKnown: false,

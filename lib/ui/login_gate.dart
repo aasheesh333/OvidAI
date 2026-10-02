@@ -1,12 +1,18 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
 
-/// Mandatory Google sign-in gate (2026-10-01).
+/// Mandatory Google sign-in gate with tri-state splash (2026-10-02).
+///
+/// Three states:
+///  1. **loading** — Firebase is initializing; show a splash screen.
+///  2. **unauthenticated** — Firebase ready, no user; show the login screen.
+///  3. **authenticated** — signed in; show the child (app).
 ///
 /// Ovid Cloud assigns a per-user key only after a verified Google sign-in, so
 /// the app requires login before use. On the first signed-in frame the gate
@@ -31,10 +37,25 @@ class LoginGate extends StatefulWidget {
 class _LoginGateState extends State<LoginGate> {
   bool _bindStarted = false;
 
+  /// True while Firebase.initializeApp is in flight. The splash screen is
+  /// shown until this drops to false — no child frame leaks through.
+  bool _initializing = true;
+
   @override
   void initState() {
     super.initState();
     FirebaseService.I.addListener(_onAuth);
+    _kickFirebaseInit();
+  }
+
+  Future<void> _kickFirebaseInit() async {
+    try {
+      await FirebaseService.I.initialize();
+    } catch (_) {
+      // Firebase is optional; failure is handled below (isAvailable == false).
+    }
+    if (!mounted) return;
+    setState(() => _initializing = false);
     _onAuth();
   }
 
@@ -59,18 +80,230 @@ class _LoginGateState extends State<LoginGate> {
   @override
   Widget build(BuildContext context) {
     if (LoginGate.disabledForTest) return widget.child;
+
+    // ── State 1: loading (Firebase initializing) ──
+    if (_initializing) return const _SplashScreen();
+
     return AnimatedBuilder(
       animation: FirebaseService.I,
       builder: (_, _) {
         final fb = FirebaseService.I;
         // Firebase not configured in this build → do not block usage.
         if (!fb.isAvailable) return widget.child;
-        if (fb.isSignedIn) return widget.child;
+        // ── State 3: authenticated ──
+        if (fb.isSignedIn) {
+          return _PostLoginWelcomeGate(child: widget.child);
+        }
+        // ── State 2: unauthenticated ──
         return const _LoginScreen();
       },
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Splash screen — shown while Firebase initializes.
+// ---------------------------------------------------------------------------
+
+class _SplashScreen extends StatelessWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.auto_awesome, size: 56, color: Aether.accent),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.5,
+                color: Aether.accent.withValues(alpha: 0.6),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Post-login welcome overlay — shown once per install after first sign-in.
+// ---------------------------------------------------------------------------
+
+/// SharedPreferences key. Present ⇒ the welcome has been shown.
+const _kWelcomedPref = 'ovid_welcomed';
+
+class _PostLoginWelcomeGate extends StatefulWidget {
+  const _PostLoginWelcomeGate({required this.child});
+  final Widget child;
+
+  @override
+  State<_PostLoginWelcomeGate> createState() => _PostLoginWelcomeGateState();
+}
+
+class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
+  bool _checked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _maybeShowWelcome();
+  }
+
+  Future<void> _maybeShowWelcome() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_kWelcomedPref) == true) {
+      // Already welcomed — nothing to do.
+      if (mounted) setState(() => _checked = true);
+      return;
+    }
+    // Mark as welcomed immediately so it never fires twice.
+    await prefs.setBool(_kWelcomedPref, true);
+    if (!mounted) return;
+    setState(() => _checked = true);
+    // Show the non-modal overlay after the first frame of the app is painted.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _showWelcomeOverlay();
+    });
+  }
+
+  void _showWelcomeOverlay() {
+    final overlay = Overlay.of(context, rootOverlay: true);
+    late final OverlayEntry entry;
+    Timer? autoDismiss;
+
+    void remove() {
+      autoDismiss?.cancel();
+      entry.remove();
+    }
+
+    entry = OverlayEntry(
+      builder: (_) => _WelcomeBanner(onDismiss: remove),
+    );
+    overlay.insert(entry);
+    autoDismiss = Timer(const Duration(seconds: 5), remove);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // While checking prefs (microtask-fast), still render the child — the
+    // welcome overlay appears ON TOP of the app, it never blocks it.
+    if (!_checked) return widget.child;
+    return widget.child;
+  }
+}
+
+class _WelcomeBanner extends StatefulWidget {
+  const _WelcomeBanner({required this.onDismiss});
+  final VoidCallback onDismiss;
+
+  @override
+  State<_WelcomeBanner> createState() => _WelcomeBannerState();
+}
+
+class _WelcomeBannerState extends State<_WelcomeBanner>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _anim;
+  late final Animation<Offset> _slide;
+  late final Animation<double> _fade;
+
+  @override
+  void initState() {
+    super.initState();
+    _anim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 350),
+    );
+    _slide = Tween<Offset>(
+      begin: const Offset(0, 1),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _anim, curve: Curves.easeOutCubic));
+    _fade = CurvedAnimation(parent: _anim, curve: Curves.easeIn);
+    _anim.forward();
+  }
+
+  @override
+  void dispose() {
+    _anim.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.of(context).padding.bottom;
+    return Positioned(
+      left: 16,
+      right: 16,
+      bottom: 16 + bottom,
+      child: SlideTransition(
+        position: _slide,
+        child: FadeTransition(
+          opacity: _fade,
+          child: GestureDetector(
+            onTap: widget.onDismiss,
+            child: Material(
+              elevation: 8,
+              borderRadius: BorderRadius.circular(16),
+              color: Aether.surface,
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Welcome to Ovid',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: Aether.text,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Your AI assistant is ready. Chat with any model, '
+                      'create agents, browse the web.',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        height: 1.5,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Aether.accent,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        onPressed: widget.onDismiss,
+                        child: const Text("Let's go"),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Login screen — shown when Firebase is available but user is not signed in.
+// ---------------------------------------------------------------------------
 
 class _LoginScreen extends StatefulWidget {
   const _LoginScreen();

@@ -992,7 +992,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
                     onChanged: (v) => setState(() => _query = v),
                     style: const TextStyle(fontSize: 13),
                     decoration: InputDecoration(
-                      hintText: 'Search 4,800+ community plugins…',
+                      hintText: 'Search ${items.length} plugins…',
                       prefixIcon: Icon(
                         Icons.search,
                         size: 16,

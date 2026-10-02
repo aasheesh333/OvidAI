@@ -13,7 +13,14 @@ Future<void> main() async {
   AppState.enableSessionPersistDebounce();
   await AppState.I.initializeForFirstFrame();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
-  Aether.dark = !AppState.I.lightTheme;
+  if (AppState.I.themeMode == 'system') {
+    final brightness =
+        WidgetsBinding.instance.platformDispatcher.platformBrightness;
+    Aether.dark = brightness != Brightness.light;
+    AppState.I.lightTheme = brightness == Brightness.light;
+  } else {
+    Aether.dark = !AppState.I.lightTheme;
+  }
   // First launch goes straight to the chat shell — there is no setup gate
   // anymore. The sandbox (core + runtimes) installs on Studio first-open
   // via openStudio(); the sandboxInstalled detection above stays available
@@ -32,7 +39,7 @@ class OvidApp extends StatefulWidget {
   State<OvidApp> createState() => _OvidAppState();
 }
 
-class _OvidAppState extends State<OvidApp> {
+class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   /// The theme value this widget last built with.
   ///
   /// PERF (2026-09-24): this is the ROOT of the app and `AppState` notifies on
@@ -44,6 +51,7 @@ class _OvidAppState extends State<OvidApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Rebuild the whole app when the user toggles the theme in Settings.
     AppState.I.addListener(_onThemeChanged);
   }
@@ -55,7 +63,24 @@ class _OvidAppState extends State<OvidApp> {
   }
 
   @override
+  void didChangePlatformBrightness() {
+    // When in system theme mode, follow the OS brightness change.
+    if (AppState.I.themeMode == 'system') {
+      final brightness =
+          WidgetsBinding.instance.platformDispatcher.platformBrightness;
+      final isLight = brightness == Brightness.light;
+      AppState.I.lightTheme = isLight;
+      Aether.dark = !isLight;
+      if (mounted && Aether.dark != _builtDark) {
+        _builtDark = Aether.dark;
+        setState(() {});
+      }
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     AppState.I.removeListener(_onThemeChanged);
     super.dispose();
   }

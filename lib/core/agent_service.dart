@@ -990,6 +990,17 @@ class AgentService extends ChangeNotifier {
 
   final Map<String, AgentRun> _runs = {};
 
+  /// Full-text settlement notices from BACKGROUND subagents that settled while
+  /// their parent was idle, keyed by parent session id. The parent's next
+  /// runTask injects these as context so the model actually receives the
+  /// child's full result (not just the cosmetic transcript row). Fixes the
+  /// "background subagent result never reaches an idle parent" bug.
+  final Map<String, List<String>> _pendingParentNotices = {};
+
+  @visibleForTesting
+  Map<String, List<String>> get pendingParentNoticesForTest =>
+      _pendingParentNotices;
+
   /// The run bound to the current target session.  Subagents (no session)
   /// use a detached run keyed to ''.
   AgentRun get _run {
@@ -2350,6 +2361,29 @@ class AgentService extends ChangeNotifier {
     'deb', 'rpm', 'jar', 'whl',
   };
 
+  /// Maximum byte length for messages received from page-side JavaScript
+  /// channels (OvidConsole, OvidPopup, OvidGeolocation). A hostile page can
+  /// send arbitrarily large payloads through `postMessage`; capping them
+  /// prevents memory exhaustion and stops oversized content from being
+  /// injected into tool results or the model's context window.
+  static const _kMaxChannelMessageBytes = 10 * 1024; // 10 KB
+
+  /// Truncate a JS-channel message to [_kMaxChannelMessageBytes].
+  static String _capChannelMessage(String raw) {
+    if (raw.length <= _kMaxChannelMessageBytes) return raw;
+    return '${raw.substring(0, _kMaxChannelMessageBytes)} [truncated — '
+        '${raw.length} bytes total]';
+  }
+
+  /// Cap cookie data returned to the model. Prevents leaking oversized auth
+  /// tokens or a hostile page from stuffing huge cookie values into the
+  /// model's context window.
+  static String _capCookieResult(String raw) {
+    if (raw.length <= _kMaxChannelMessageBytes) return raw;
+    return '${raw.substring(0, _kMaxChannelMessageBytes)} [truncated — '
+        '${raw.length} bytes total]';
+  }
+
   /// Whether [uri] points at a downloadable file rather than a web page.
   ///
   /// The WebView has no DownloadListener, so without this check tapping a
@@ -2778,6 +2812,58 @@ class AgentService extends ChangeNotifier {
         'into a page that can exfiltrate them, or hand control to another '
         'app — none of which a host permission grant can cover. Explain what '
         'you were trying to do and ask the user how to proceed.';
+  }
+
+  /// SSRF gate: returns `true` when [url] may be opened by a tool (new tab or
+  /// navigate). Returns `false` for schemes rejected by [isLoadableTabUrl] and
+  /// for hosts that resolve to private/internal IP ranges, localhost, or link-
+  /// local addresses. The model should never be able to make the device call
+  /// home or probe internal infrastructure.
+  @visibleForTesting
+  static bool isAllowedBrowserUrl(String url) {
+    if (!isLoadableTabUrl(url)) return false;
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null) return true; // scheme-less → relative, resolved later
+    final host = uri.host.toLowerCase();
+    if (host.isEmpty) return true; // relative path
+    if (host == 'localhost' || host == '[::1]') return false;
+    // IPv6 loopback without brackets (Uri.host strips them).
+    if (host == '::1') return false;
+    final ip = InternetAddress.tryParse(host);
+    if (ip != null) {
+      // IPv6 loopback.
+      if (ip.type == InternetAddressType.IPv6 &&
+          ip.address == '::1') {
+        return false;
+      }
+      if (ip.type == InternetAddressType.IPv4) {
+        final bytes = ip.rawAddress;
+        // 127.0.0.0/8
+        if (bytes[0] == 127) return false;
+        // 10.0.0.0/8
+        if (bytes[0] == 10) return false;
+        // 172.16.0.0/12
+        if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) return false;
+        // 192.168.0.0/16
+        if (bytes[0] == 192 && bytes[1] == 168) return false;
+        // 169.254.0.0/16 (link-local)
+        if (bytes[0] == 169 && bytes[1] == 254) return false;
+      }
+    }
+    return true;
+  }
+
+  /// Refusal text when [url] targets a private/internal host, or null when the
+  /// URL is allowed. Layered on top of [unloadableUrlReason] (scheme gate).
+  static String? _ssrfUrlReason(String url, {required String tool}) {
+    if (isAllowedBrowserUrl(url)) return null;
+    // If the scheme itself is bad, unloadableUrlReason already covers it.
+    if (!isLoadableTabUrl(url)) return null;
+    return '$tool refused a URL targeting a private or internal host. '
+        'Navigating to localhost, 127.x, 10.x, 172.16-31.x, 192.168.x, '
+        '169.254.x, or [::1] is not allowed — these could probe internal '
+        'infrastructure. Explain what you were trying to do and ask the user '
+        'how to proceed.';
   }
 
   /// Navigate [tab] to [url], binding its session profile first.
@@ -3584,11 +3670,11 @@ class AgentService extends ChangeNotifier {
   /// `window.__ovidGeoReply(id, …)` evaluated on the SAME tab, because a
   /// JavaScriptChannel message has no return path.
   ///
-  /// Permission rule mirrors the camera/mic handler in [controllerForTab]:
-  /// a page gets only what Ovid itself already holds, and the OS dialog is
-  /// raised only while the USER is browsing. Mid-agent-run a modal would stall
-  /// the run, so the page gets an honest PERMISSION_DENIED — the same answer a
-  /// real browser gives when the user says no.
+  /// Permission rule: DENY BY DEFAULT. Geolocation is always refused for
+  /// embedded pages. A blanket grant would let any page the agent navigates
+  /// to silently harvest the user's location without explicit per-origin
+  /// consent. Pages receive an honest W3C PERMISSION_DENIED (code 1), the
+  /// same answer a real browser gives when the user says no.
   Future<void> _onGeoRequest(BrowserTab tab, String raw) async {
     var id = -1;
     try {
@@ -3600,36 +3686,11 @@ class AgentService extends ChangeNotifier {
     if (id < 0) return;
 
     final host = Uri.tryParse(tab.url)?.host ?? tab.url;
-    // Deliberately NOT `final`: every path assigns exactly once, but the catch
-    // below can run *after* the try already assigned (e.g. the native call
-    // throws), and a `final` local forbids that — `assignment_to_final_local`.
-    // Still definitely-assigned by the time it is read below.
-    Map<String, Object?> payload;
-    try {
-      const permission = Permission.locationWhenInUse;
-      var status = await permission.status;
-      if (!status.isGranted && !busy && !browserBusy) {
-        status = await permission.request();
-      }
-      if (!status.isGranted) {
-        payload = geoPayloadFromFix(const {}, denied: true);
-      } else {
-        final fix = await _webviewChannel.invokeMapMethod<String, dynamic>(
-          'locationFix',
-          <String, dynamic>{
-            'tabId': tab.id,
-            'webViewIdentifier': webViewIdentifierFor(tab),
-          },
-        );
-        payload = geoPayloadFromFix(fix ?? const {});
-      }
-    } catch (e) {
-      payload = <String, Object?>{
-        'ok': false,
-        'code': 2,
-        'message': 'location bridge failed: $e',
-      };
-    }
+    // SECURITY (2026-10-02): geolocation is now denied by default for all
+    // origins. The previous blanket grant shared the device's precise location
+    // with every page the agent (or user) visited, with no per-origin consent.
+    final Map<String, Object?> payload =
+        geoPayloadFromFix(const {}, denied: true);
 
     // Surfaced the way every other page-permission decision is: the Browser
     // timeline AND the tab console, so `browser_console` can explain why a
@@ -3721,8 +3782,9 @@ class AgentService extends ChangeNotifier {
       ..addJavaScriptChannel(
         'OvidConsole',
         onMessageReceived: (msg) {
+          final text = _capChannelMessage(msg.message);
           final bucket = consoleBucketFor(tab);
-          bucket.add((at: DateTime.now(), kind: 'page', text: msg.message));
+          bucket.add((at: DateTime.now(), kind: 'page', text: text));
           if (bucket.length > 200) {
             bucket.removeRange(0, bucket.length - 200);
           }
@@ -3733,7 +3795,8 @@ class AgentService extends ChangeNotifier {
       // The shim below forwards every attempt to [_onPagePopup].
       ..addJavaScriptChannel(
         'OvidPopup',
-        onMessageReceived: (msg) => _onPagePopup(tab, msg.message),
+        onMessageReceived: (msg) =>
+            _onPagePopup(tab, _capChannelMessage(msg.message)),
       )
       // Geolocation bridge: webview_flutter_android delivers no geolocation
       // prompt at all (its permission request covers only audio/video/MIDI/
@@ -3743,7 +3806,8 @@ class AgentService extends ChangeNotifier {
       // channels, it survives navigation. See [_onGeoRequest].
       ..addJavaScriptChannel(
         'OvidGeolocation',
-        onMessageReceived: (msg) => unawaited(_onGeoRequest(tab, msg.message)),
+        onMessageReceived: (msg) =>
+            unawaited(_onGeoRequest(tab, _capChannelMessage(msg.message))),
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -9431,6 +9495,13 @@ if (!window.__ovidBlankHooked) {
       }
     }
 
+    // Drain pending background-subagent settlement notices so the model
+    // receives the full result from children that settled while idle.
+    final pendingNotices = _pendingParentNotices.remove(s.id);
+    if (pendingNotices != null && pendingNotices.isNotEmpty) {
+      prompt = '${pendingNotices.join('\n\n')}\n\n$prompt';
+    }
+
     // Parallel-session safety: the ENTIRE run body runs inside a Zone
     // carrying this run's context (bucket + session + provider). Every
     // async continuation — SSE stream handlers, tool dispatch, subagent
@@ -12742,6 +12813,12 @@ ${await _agentsMdBlock()}
           tool: 'browser_navigate',
         );
         if (schemeRefusal2 != null) return schemeRefusal2;
+        // SECURITY (SSRF): refuse private/internal hosts.
+        final ssrfRefusal2 = _ssrfUrlReason(
+          url,
+          tool: 'browser_navigate',
+        );
+        if (ssrfRefusal2 != null) return ssrfRefusal2;
         // Strict permission model: same host-grant gate as browser_open.
         final navUri2 = Uri.tryParse(url);
         final navScheme2 = navUri2?.scheme.toLowerCase() ?? '';
@@ -12773,6 +12850,18 @@ ${await _agentsMdBlock()}
       // ── Tab management so the model can drive the user-visible strip ──
       case 'browser_new_tab':
         final url = args['url'] as String;
+        // SECURITY: refuse bad schemes (file/javascript/data).
+        final newTabSchemeRefusal = unloadableUrlReason(
+          url,
+          tool: 'browser_new_tab',
+        );
+        if (newTabSchemeRefusal != null) return newTabSchemeRefusal;
+        // SECURITY (SSRF): refuse private/internal hosts.
+        final newTabSsrfRefusal = _ssrfUrlReason(
+          url,
+          tool: 'browser_new_tab',
+        );
+        if (newTabSsrfRefusal != null) return newTabSsrfRefusal;
         final ok = await _maybeApprove(
           'browser_new_tab',
           url,
@@ -14533,7 +14622,7 @@ ${await _agentsMdBlock()}
           try {
             final r = await tab.controller!.runJavaScriptReturningResult(js);
             _emit('shell', 'cookie set');
-            return 'cookies: ${r.toString()}';
+            return 'cookies: ${_capCookieResult(r.toString())}';
           } catch (e) {
             return 'cookies failed: $e';
           }
@@ -14584,7 +14673,7 @@ ${await _agentsMdBlock()}
           final text = raw.startsWith('"') && raw.endsWith('"')
               ? jsonDecode(raw) as String
               : raw;
-          return 'cookies: $text';
+          return 'cookies: ${_capCookieResult(text)}';
         } catch (e) {
           return 'cookies failed: $e';
         }
@@ -20102,6 +20191,16 @@ ${await _agentsMdBlock()}
       sub.messages.add(text);
       _emit('think', 'queued follow-up for ${sub.id}');
       notifyListeners();
+      // Race guard: if the subagent handle is live (not finished) but no run
+      // is actually executing (e.g. the run hasn't started yet, or it ended
+      // without marking the handle finished), the inbox will never be drained.
+      // Kick off a fresh run so the message is consumed.
+      if (!busyFor(sub.sessionId)) {
+        child.messages.add(Message(role: 'user', content: text));
+        AppState.I.refresh();
+        AppState.I.persistSessions();
+        unawaited(runTask(text, sessionId: sub.sessionId));
+      }
       return 'queued as the next turn for ${sub.id}';
     }
     // Settled but continuable → start a fresh turn on the same transcript.
@@ -20956,6 +21055,10 @@ ${await _agentsMdBlock()}
               '⛁ Background agent ${sub.label} (${sub.id}) $outcome$shortClosing',
         ),
       );
+      // Also stash the FULL notice so the parent model receives the complete
+      // result on its next turn (the cosmetic turnTail row above is never
+      // sent to the model).
+      (_pendingParentNotices[sub.parentSessionId] ??= []).add(notice);
       AppState.I.refresh();
       AppState.I.persistSessions();
     }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart' as import_url_launcher;
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/agent_service.dart';
@@ -258,7 +259,13 @@ class SettingsScreen extends StatelessWidget {
             setter: _setNotificationsEnabled,
           ),
           const _DeviceIntegrityTile(),
-          _settingTile(Icons.info_outline, 'About', 'Ovid AI $kAppVersion'),
+          _navTile(
+            context,
+            Icons.info_outline,
+            'About',
+            'Ovid AI $kAppVersion',
+            const _AboutScreen(),
+          ),
         ],
       ),
     );
@@ -281,19 +288,6 @@ class SettingsScreen extends StatelessWidget {
       trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
       onTap: () =>
           Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen)),
-    );
-  }
-
-  Widget _settingTile(IconData icon, String title, String trailing) {
-    return ListTile(
-      dense: true,
-      leading: Icon(icon, size: 19, color: Aether.textMuted),
-      title: Text(title, style: const TextStyle(fontSize: 14)),
-      trailing: Text(
-        trailing,
-        style: TextStyle(fontSize: 12, color: Aether.textFaint),
-      ),
-      onTap: () {},
     );
   }
 
@@ -877,7 +871,7 @@ class _KeepAliveToggle extends StatelessWidget {
   }
 }
 
-/// Light/dark theme toggle — flips Aether palette app-wide, persisted.
+/// Theme mode selector — System / Light / Dark (replaces the old toggle).
 class _ThemeToggle extends StatelessWidget {
   const _ThemeToggle();
 
@@ -886,22 +880,51 @@ class _ThemeToggle extends StatelessWidget {
     final app = AppState.I;
     return AnimatedBuilder(
       animation: app,
-      builder: (_, _) => SwitchListTile(
-        dense: true,
-        secondary: Icon(
-          Icons.light_mode_outlined,
-          size: 19,
-          color: Aether.textMuted,
-        ),
-        title: const Text('Light theme', style: TextStyle(fontSize: 14)),
-        subtitle: Text(
-          app.lightTheme ? 'ON — bright surfaces' : 'OFF — dark (default)',
-          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-        ),
-        value: app.lightTheme,
-        activeTrackColor: Aether.accent,
-        onChanged: (v) => app.setLightTheme(v),
-      ),
+      builder: (_, _) {
+        final mode = app.themeMode;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ListTile(
+              dense: true,
+              leading: Icon(
+                mode == 'system'
+                    ? Icons.brightness_auto_outlined
+                    : mode == 'light'
+                    ? Icons.light_mode_outlined
+                    : Icons.dark_mode_outlined,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              title: const Text('Theme', style: TextStyle(fontSize: 14)),
+              subtitle: Text(
+                mode == 'system'
+                    ? 'Follow system — ${app.lightTheme ? 'currently light' : 'currently dark'}'
+                    : mode == 'light'
+                    ? 'Light — bright surfaces'
+                    : 'Dark (default)',
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+              trailing: SegmentedButton<String>(
+                style: SegmentedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  selectedBackgroundColor: Aether.accentSoft,
+                  selectedForegroundColor: Aether.accent,
+                  textStyle: const TextStyle(fontSize: 11),
+                ),
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'system', label: Text('Auto')),
+                  ButtonSegment(value: 'light', label: Text('Light')),
+                  ButtonSegment(value: 'dark', label: Text('Dark')),
+                ],
+                selected: {mode},
+                onSelectionChanged: (v) => app.setThemeMode(v.first),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -1269,6 +1292,162 @@ class _DeleteAllDataScreenState extends State<_DeleteAllDataScreen> {
             onPressed: _delete,
             icon: const Icon(Icons.delete_forever_outlined, size: 18),
             label: const Text('Delete all data'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// About screen — app name, version, developer, website link.
+class _AboutScreen extends StatelessWidget {
+  const _AboutScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('About'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(24),
+        children: [
+          const SizedBox(height: 24),
+          Center(
+            child: Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                color: Aether.accent,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Center(
+                child: Text(
+                  'O',
+                  style: TextStyle(
+                    fontSize: 36,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Center(
+            child: Text(
+              'Ovid',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.w700,
+                color: Aether.text,
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Center(
+            child: Text(
+              'Version $kAppVersion',
+              style: TextStyle(
+                fontSize: 14,
+                color: Aether.textMuted,
+                fontFamily: Aether.mono,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Center(
+            child: Text(
+              'by Dhanuk Softwares',
+              style: TextStyle(
+                fontSize: 13,
+                color: Aether.textFaint,
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+          Center(
+            child: Text(
+              'AI super-app: chat, agents, plugins & MCP.\n'
+              'Chat-first. Agent-native. Free by default.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.6,
+                color: Aether.textMuted,
+              ),
+            ),
+          ),
+          const SizedBox(height: 32),
+          ListTile(
+            leading: Icon(
+              Icons.public,
+              size: 20,
+              color: Aether.accent,
+            ),
+            title: const Text(
+              'Website',
+              style: TextStyle(fontSize: 14),
+            ),
+            subtitle: Text(
+              'dhanuk.page.gd/ovid',
+              style: TextStyle(fontSize: 12, color: Aether.textFaint),
+            ),
+            trailing: Icon(
+              Icons.open_in_new,
+              size: 16,
+              color: Aether.textFaint,
+            ),
+            onTap: () {
+              final uri = Uri.tryParse('https://dhanuk.page.gd/ovid');
+              if (uri != null) {
+                import_url_launcher.launchUrl(
+                  uri,
+                  mode: import_url_launcher.LaunchMode.externalApplication,
+                );
+              }
+            },
+          ),
+          ListTile(
+            leading: Icon(
+              Icons.privacy_tip_outlined,
+              size: 20,
+              color: Aether.textMuted,
+            ),
+            title: const Text(
+              'Privacy policy',
+              style: TextStyle(fontSize: 14),
+            ),
+            subtitle: Text(
+              'dhanuk.page.gd/ovid',
+              style: TextStyle(fontSize: 12, color: Aether.textFaint),
+            ),
+            trailing: Icon(
+              Icons.open_in_new,
+              size: 16,
+              color: Aether.textFaint,
+            ),
+            onTap: () {
+              final uri = Uri.tryParse('https://dhanuk.page.gd/ovid/');
+              if (uri != null) {
+                import_url_launcher.launchUrl(
+                  uri,
+                  mode: import_url_launcher.LaunchMode.externalApplication,
+                );
+              }
+            },
+          ),
+          const SizedBox(height: 24),
+          Center(
+            child: Text(
+              '© ${DateTime.now().year} Dhanuk Softwares',
+              style: TextStyle(
+                fontSize: 11.5,
+                color: Aether.textFaint,
+              ),
+            ),
           ),
         ],
       ),

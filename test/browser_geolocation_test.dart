@@ -191,7 +191,8 @@ void main() {
   group('wiring pins — a detached shim is a silent hang again', () {
     test('the bridge channel is registered with the controller', () {
       expect(agentSrc, contains("'OvidGeolocation'"));
-      expect(agentSrc, contains('_onGeoRequest(tab, msg.message)'));
+      // The channel handler length-caps the message before forwarding.
+      expect(agentSrc, contains('_onGeoRequest(tab, _capChannelMessage(msg.message))'));
     });
 
     test('the shim is injected from onPageFinished, not once per tab', () {
@@ -208,14 +209,16 @@ void main() {
       );
     });
 
-    test('the native side answers locationFix from a cached fix only', () {
-      expect(agentSrc, contains("'locationFix'"));
+    test('the Dart side no longer calls the native locationFix channel', () {
+      // SECURITY (2026-10-02): geolocation is now denied by default — the Dart
+      // handler never calls the native side at all. The Kotlin handler still
+      // has the locationFix channel (backward compat), but the Dart source
+      // must not invoke it.
+      expect(agentSrc, isNot(contains("'locationFix'")));
+      // The native handler still exists for future per-origin opt-in:
       expect(handlerSrc, contains('"locationFix"'));
       expect(handlerSrc, contains('getLastKnownLocation'));
-      // Never start a location stream on behalf of a web page: that switches on
-      // a radio and keeps it awake from inside somebody's login flow. Pinned on
-      // the CALL form, so the explanatory comment that names the API neither
-      // satisfies nor breaks the check.
+      // Still must never start a location stream:
       expect(handlerSrc, isNot(contains('.requestLocationUpdates(')));
       expect(handlerSrc, isNot(contains('.requestSingleUpdate(')));
       expect(handlerSrc, isNot(contains('FusedLocationProviderClient')));
@@ -238,14 +241,13 @@ void main() {
       expect(manifest, contains('android.permission.ACCESS_COARSE_LOCATION'));
     });
 
-    test('the OS dialog is raised only while the user is browsing', () {
-      // Same discipline as the camera/mic handler above it: a modal mid-run
-      // stalls the agent, so the page gets PERMISSION_DENIED instead.
+    test('geolocation is denied by default for all origins', () {
+      // SECURITY (2026-10-02): the previous blanket grant shared the device's
+      // precise location with every page. Now _onGeoRequest denies immediately
+      // with no OS dialog, no permission check, and no conditional grant.
       final start = agentSrc.indexOf('Future<void> _onGeoRequest(');
       expect(start, greaterThan(-1));
       final body = agentSrc.substring(start, start + 4000);
-      expect(body, contains('Permission.locationWhenInUse'));
-      expect(body, contains('!busy && !browserBusy'));
       expect(body, contains('geoPayloadFromFix(const {}, denied: true)'));
     });
 

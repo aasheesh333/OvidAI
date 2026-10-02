@@ -29,11 +29,12 @@ void main() {
   group('popup capture: both escape routes are bridged', () {
     test('a dedicated JS channel exists and routes to _onPagePopup', () {
       // Without this channel the page-side shim has nowhere to post, and the
-      // whole feature is inert.
+      // whole feature is inert. The handler length-caps the message before
+      // forwarding (security: untrusted page data).
       expect(agentSrc, contains("'OvidPopup',"));
       expect(
         agentSrc,
-        contains('onMessageReceived: (msg) => _onPagePopup(tab, msg.message),'),
+        contains('_onPagePopup(tab, _capChannelMessage(msg.message))'),
       );
     });
 

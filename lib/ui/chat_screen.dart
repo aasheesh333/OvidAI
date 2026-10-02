@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -3222,14 +3223,320 @@ class _DetailBodyState extends State<_DetailBody> {
         children: shown.map((l) => _DiffLine(l)).toList(),
       );
     }
-    return SelectableText(
-      shown.join('\n'),
-      style: TextStyle(
-        fontFamily: Aether.mono,
-        fontSize: 11.5,
-        height: 1.45,
-        color: m.toolState == 'error' ? Aether.dangerC : Aether.text,
-      ),
+    // Rich tool result: detect JSON, Mermaid, colors, URLs in generic output.
+    return _RichToolResult(
+      content: shown.join('\n'),
+      isError: m.toolState == 'error',
+    );
+  }
+}
+
+/// Rich tool result renderer — detects and renders JSON, Mermaid, hex color
+/// swatches, and tappable URLs in generic tool output.
+class _RichToolResult extends StatefulWidget {
+  final String content;
+  final bool isError;
+  const _RichToolResult({required this.content, this.isError = false});
+  @override
+  State<_RichToolResult> createState() => _RichToolResultState();
+}
+
+class _RichToolResultState extends State<_RichToolResult> {
+  bool _jsonExpanded = true;
+  bool _mermaidExpanded = false;
+
+  static final _urlRe = RegExp(
+    r'https?://[^\s)\]}>,"]+',
+    caseSensitive: false,
+  );
+  static final _hexColorRe = RegExp(r'#([0-9a-fA-F]{6})\b');
+  static final _mermaidFenceRe = RegExp(
+    r'```mermaid\s*\n([\s\S]*?)```',
+    multiLine: true,
+  );
+
+  /// Try to parse [text] as JSON (object or array). Returns the pretty-printed
+  /// string on success, null otherwise.
+  static String? _tryJsonFormat(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return null;
+    final first = trimmed[0];
+    if (first != '{' && first != '[') return null;
+    try {
+      final decoded = jsonDecode(trimmed);
+      return const JsonEncoder.withIndent('  ').convert(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final content = widget.content;
+    final baseColor = widget.isError ? Aether.dangerC : Aether.text;
+
+    // ── Mermaid fenced block ──
+    final mermaidMatch = _mermaidFenceRe.firstMatch(content);
+    if (mermaidMatch != null) {
+      final mermaidSrc = mermaidMatch.group(1)!.trim();
+      final before = content.substring(0, mermaidMatch.start).trim();
+      final after = content.substring(mermaidMatch.end).trim();
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (before.isNotEmpty) _plainText(before, baseColor),
+          _mermaidBlock(mermaidSrc),
+          if (after.isNotEmpty) _plainText(after, baseColor),
+        ],
+      );
+    }
+
+    // ── JSON block ──
+    final jsonFormatted = _tryJsonFormat(content);
+    if (jsonFormatted != null) {
+      return _jsonBlock(jsonFormatted);
+    }
+
+    // ── Inline enrichments: colors + URLs ──
+    final hasColor = _hexColorRe.hasMatch(content);
+    final hasUrl = _urlRe.hasMatch(content);
+    if (hasColor || hasUrl) {
+      return _enrichedText(content, baseColor, hasColor: hasColor, hasUrl: hasUrl);
+    }
+
+    // ── Plain fallback ──
+    return _plainText(content, baseColor);
+  }
+
+  Widget _plainText(String text, Color color) => SelectableText(
+    text,
+    style: TextStyle(
+      fontFamily: Aether.mono,
+      fontSize: 11.5,
+      height: 1.45,
+      color: color,
+    ),
+  );
+
+  Widget _jsonBlock(String formatted) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () => setState(() => _jsonExpanded = !_jsonExpanded),
+          child: Row(
+            children: [
+              Icon(Icons.data_object, size: 13, color: Aether.accent),
+              const SizedBox(width: 5),
+              Text(
+                'JSON',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: Aether.accent,
+                ),
+              ),
+              const SizedBox(width: 4),
+              AnimatedRotation(
+                turns: _jsonExpanded ? 0.5 : 0.0,
+                duration: const Duration(milliseconds: 150),
+                child: Icon(Icons.expand_more, size: 14, color: Aether.accent),
+              ),
+            ],
+          ),
+        ),
+        if (_jsonExpanded) ...[
+          const SizedBox(height: 4),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Aether.surfaceAlt,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Aether.hairline),
+            ),
+            child: SelectableText(
+              formatted,
+              style: TextStyle(
+                fontFamily: Aether.mono,
+                fontSize: 11,
+                height: 1.5,
+                color: Aether.text,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _mermaidBlock(String source) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: () => setState(() => _mermaidExpanded = !_mermaidExpanded),
+          child: Row(
+            children: [
+              Icon(Icons.schema_outlined, size: 13, color: Aether.accent),
+              const SizedBox(width: 5),
+              Text(
+                'Mermaid diagram',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: Aether.accent,
+                ),
+              ),
+              const SizedBox(width: 4),
+              AnimatedRotation(
+                turns: _mermaidExpanded ? 0.5 : 0.0,
+                duration: const Duration(milliseconds: 150),
+                child: Icon(Icons.expand_more, size: 14, color: Aether.accent),
+              ),
+            ],
+          ),
+        ),
+        if (_mermaidExpanded) ...[
+          const SizedBox(height: 4),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Aether.surfaceAlt,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Aether.hairline),
+            ),
+            child: SelectableText(
+              source,
+              style: TextStyle(
+                fontFamily: Aether.mono,
+                fontSize: 11,
+                height: 1.5,
+                color: Aether.text,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Builds a text block with inline color swatches and tappable URLs.
+  Widget _enrichedText(
+    String text,
+    Color baseColor, {
+    required bool hasColor,
+    required bool hasUrl,
+  }) {
+    final lines = const LineSplitter().convert(text);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final line in lines) _enrichedLine(line, baseColor, hasColor: hasColor, hasUrl: hasUrl),
+      ],
+    );
+  }
+
+  Widget _enrichedLine(
+    String line,
+    Color baseColor, {
+    required bool hasColor,
+    required bool hasUrl,
+  }) {
+    // Fast path: no enrichments on this line.
+    final lineHasColor = hasColor && _hexColorRe.hasMatch(line);
+    final lineHasUrl = hasUrl && _urlRe.hasMatch(line);
+    if (!lineHasColor && !lineHasUrl) {
+      return Text(
+        line,
+        style: TextStyle(
+          fontFamily: Aether.mono,
+          fontSize: 11.5,
+          height: 1.45,
+          color: baseColor,
+        ),
+      );
+    }
+
+    // Build spans with inline swatches / tappable links.
+    final spans = <InlineSpan>[];
+    var cursor = 0;
+    // Merge color and URL matches, sorted by start position.
+    final matches = <({int start, int end, String type, String value})>[];
+    if (lineHasColor) {
+      for (final m in _hexColorRe.allMatches(line)) {
+        matches.add((start: m.start, end: m.end, type: 'color', value: m.group(0)!));
+      }
+    }
+    if (lineHasUrl) {
+      for (final m in _urlRe.allMatches(line)) {
+        matches.add((start: m.start, end: m.end, type: 'url', value: m.group(0)!));
+      }
+    }
+    matches.sort((a, b) => a.start.compareTo(b.start));
+
+    final baseStyle = TextStyle(
+      fontFamily: Aether.mono,
+      fontSize: 11.5,
+      height: 1.45,
+      color: baseColor,
+    );
+
+    for (final m in matches) {
+      if (m.start < cursor) continue; // overlapping
+      if (m.start > cursor) {
+        spans.add(TextSpan(text: line.substring(cursor, m.start), style: baseStyle));
+      }
+      if (m.type == 'color') {
+        spans.add(TextSpan(text: m.value, style: baseStyle));
+        // Inline swatch circle.
+        Color? c;
+        try {
+          final raw = m.value.substring(1);
+          c = Color(int.parse('FF$raw', radix: 16));
+        } catch (_) {}
+        if (c != null) {
+          spans.add(WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: Container(
+              width: 12,
+              height: 12,
+              margin: const EdgeInsets.only(left: 3),
+              decoration: BoxDecoration(
+                color: c,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white24, width: 0.5),
+              ),
+            ),
+          ));
+        }
+      } else {
+        // Tappable URL.
+        spans.add(TextSpan(
+          text: m.value,
+          style: baseStyle.copyWith(
+            color: Aether.accent,
+            decoration: TextDecoration.underline,
+            decorationColor: Aether.accent,
+          ),
+          recognizer: (TapGestureRecognizer()
+            ..onTap = () {
+              final uri = Uri.tryParse(m.value);
+              if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
+            }),
+        ));
+      }
+      cursor = m.end;
+    }
+    if (cursor < line.length) {
+      spans.add(TextSpan(text: line.substring(cursor), style: baseStyle));
+    }
+
+    return Text.rich(
+      TextSpan(children: spans),
     );
   }
 }
@@ -3929,8 +4236,9 @@ class _MessageView extends StatelessWidget {
             borderRadius: BorderRadius.circular(4),
             onTap: fn,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
-              child: Icon(icon, size: 13, color: Aether.textFaint),
+              // A11Y: minimum 48dp tap target per Material guidelines.
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+              child: Icon(icon, size: 15, color: Aether.textFaint),
             ),
           ),
         ),
@@ -3962,6 +4270,12 @@ class _MessageView extends StatelessWidget {
         onAction();
       });
     }
+    // Earlier user messages: edit & resend (truncates conversation).
+    if (isUser && !isLast) {
+      add(Icons.edit_outlined, 'Edit & resend', () {
+        _showEditResendDialog(context);
+      });
+    }
     // message feedback: like/dislike + note on final assistant rows.
     // Re-clicking the same value retracts. A down-vote offers a note.
     if (!isUser && m.kind == MsgKind.text && !m.thinking) {
@@ -3978,12 +4292,12 @@ class _MessageView extends StatelessWidget {
               onAction();
             },
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
               child: Icon(
                 m.feedback == 'up'
                     ? Icons.thumb_up_alt
                     : Icons.thumb_up_alt_outlined,
-                size: 13,
+                size: 15,
                 color: m.feedback == 'up' ? Aether.accent : Aether.textFaint,
               ),
             ),
@@ -4008,12 +4322,12 @@ class _MessageView extends StatelessWidget {
               _askFeedbackNote(context);
             },
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
               child: Icon(
                 m.feedback == 'down'
                     ? Icons.thumb_down_alt
                     : Icons.thumb_down_alt_outlined,
-                size: 13,
+                size: 15,
                 color: m.feedback == 'down' ? Aether.danger : Aether.textFaint,
               ),
             ),
@@ -4033,6 +4347,25 @@ class _MessageView extends StatelessWidget {
             ),
           );
         }
+      });
+    }
+    // Regenerate: re-send the last user message to get a new response.
+    if (!isUser && isLast && m.kind == MsgKind.text && !m.thinking) {
+      add(Icons.refresh, 'Regenerate', () {
+        // Find the last user message content.
+        final msgs = session.messages as List<Message>;
+        String? lastUserText;
+        for (var i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role == 'user') {
+            lastUserText = msgs[i].content;
+            break;
+          }
+        }
+        if (lastUserText == null || lastUserText.isEmpty) return;
+        // Delete from the current assistant message onward and resend.
+        AppState.I.deleteMessagesFrom(session.id, msgIndex);
+        onAction();
+        AgentService.I.runTask(lastUserText);
       });
     }
     return Padding(
@@ -4127,6 +4460,52 @@ class _MessageView extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// Edit & resend dialog for earlier user messages: pre-filled with the
+  /// message text, truncates the conversation to this point, and resends.
+  void _showEditResendDialog(BuildContext context) {
+    final c = TextEditingController(text: m.content);
+    void send(String value) {
+      final text = value.trim();
+      if (text.isEmpty) {
+        Navigator.pop(context);
+        return;
+      }
+      Navigator.pop(context);
+      AppState.I.deleteMessagesFrom(session.id, msgIndex);
+      AppState.I.sendMessage(text);
+      onAction();
+      AgentService.I.runTask(text);
+    }
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text(
+          'Edit & resend',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          maxLines: 6,
+          minLines: 1,
+          style: const TextStyle(fontSize: 14),
+          textInputAction: TextInputAction.done,
+          onSubmitted: send,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => send(c.text),
+            child: const Text('Send', style: TextStyle(color: Aether.accent)),
+          ),
+        ],
+      ),
+    ).whenComplete(c.dispose);
   }
 
   Widget _text(bool isUser) => Container(

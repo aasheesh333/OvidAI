@@ -78,9 +78,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     FirebaseService.I.addListener(_onFirebaseReady);
     // Ask for telemetry consent once (Play policy) after first frame.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
-    // First-run welcome notice (the onboarding flow welcomeNoticeVersion):
-    // one dialog per version, after the consent dialog settles.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeWelcome());
+    // First-run welcome notice moved to LoginGate (post-login overlay).
     // Studio first-open owns the sandbox install now (mandatory full
     // install incl. Node.js/Python via openStudio). The shell still kicks
     // the background job below, but it is verify-only unless the user
@@ -230,38 +228,4 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     );
   }
 
-  /// First-run welcome notice (the onboarding flow welcomeNoticeVersion
-  /// parity): shown once per [AppState.welcomeVersion], skipped while the
-  /// telemetry consent dialog is still pending so the two never stack.
-  void _maybeWelcome() {
-    final app = AppState.I;
-    if (!mounted || app.welcomeSeen) return;
-    if (FirebaseService.I.isAvailable && !FirebaseService.I.consentAsked) {
-      // Consent dialog owns this frame — retry next frame.
-      WidgetsBinding.instance.addPostFrameCallback((_) => _maybeWelcome());
-      return;
-    }
-    showDialog<void>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text('Welcome to Ovid AI', style: TextStyle(fontSize: 16)),
-        content: const Text(
-          'An on-device coding agent: chat, run real Linux commands in the '
-          'sandbox, browse the web, and sync with GitHub. '
-          'Keys stay on your device. Open Settings any time to tune providers, '
-          'reply language, and privacy.',
-          style: TextStyle(fontSize: 13, height: 1.5),
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () {
-              app.markWelcomeSeen();
-              Navigator.pop(d);
-            },
-            child: const Text("Let's go"),
-          ),
-        ],
-      ),
-    );
-  }
 }
