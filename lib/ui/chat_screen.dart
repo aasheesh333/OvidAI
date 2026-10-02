@@ -3407,7 +3407,9 @@ class _RichToolResultState extends State<_RichToolResult> {
         try {
           final raw = m.value.substring(1);
           c = Color(int.parse('FF$raw', radix: 16));
-        } catch (_) {}
+        } catch (e) {
+          Diag.swallow('chat_screen.color_parse', e);
+        }
         if (c != null) {
           spans.add(WidgetSpan(
             alignment: PlaceholderAlignment.middle,

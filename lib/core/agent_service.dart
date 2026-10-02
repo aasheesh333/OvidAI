@@ -8439,11 +8439,38 @@ if (!window.__ovidBlankHooked) {
     'type': 'function',
     'function': {
       'name': 'generate_image',
-      'description': 'Generate an image from a text description.',
+      'description':
+          'Generate an image from a text description. Optionally specify '
+          'dimensions and a model.',
       'parameters': {
         'type': 'object',
         'properties': {
-          'prompt': {'type': 'string'},
+          'prompt': {
+            'type': 'string',
+            'description': 'The image description / prompt.',
+          },
+          'width': {
+            'type': 'integer',
+            'description': 'Image width in pixels (default 1024).',
+          },
+          'height': {
+            'type': 'integer',
+            'description': 'Image height in pixels (default 1024).',
+          },
+          'model': {
+            'type': 'string',
+            'description':
+                'Image model to use. Options: flux (default), '
+                'flux-realism, flux-anime, flux-3d, flux-pro, turbo.',
+            'enum': [
+              'flux',
+              'flux-realism',
+              'flux-anime',
+              'flux-3d',
+              'flux-pro',
+              'turbo',
+            ],
+          },
         },
         'required': ['prompt'],
       },
@@ -12932,9 +12959,17 @@ ${await _agentsMdBlock()}
         }
       case 'generate_image':
         final prompt = args['prompt'] as String;
+        final width = (args['width'] as num?)?.toInt() ?? 1024;
+        final height = (args['height'] as num?)?.toInt() ?? 1024;
+        final model = (args['model'] as String?) ?? 'flux';
         _emit('shell', 'image gen: $prompt');
         try {
-          return await _generateImage(prompt);
+          return await _generateImage(
+            prompt,
+            width: width,
+            height: height,
+            model: model,
+          );
         } catch (e) {
           return 'image generation failed: $e';
         }
@@ -21421,12 +21456,24 @@ ${await _agentsMdBlock()}
     return results;
   }
 
-  /// Free image generation via Pollinations.ai — no key, no signup.
+  /// Image generation via Pollinations.ai — no key, no signup.
+  /// Supports model selection (flux, flux-realism, flux-anime, flux-3d,
+  /// flux-pro, turbo) and custom dimensions.
   /// Returns a markdown image link the chat renderer shows inline.
-  Future<String> _generateImage(String prompt) async {
+  Future<String> _generateImage(
+    String prompt, {
+    int width = 1024,
+    int height = 1024,
+    String model = 'flux',
+  }) async {
+    // Clamp dimensions to sane limits.
+    final w = width.clamp(256, 2048);
+    final h = height.clamp(256, 2048);
     final encoded = Uri.encodeQueryComponent(prompt);
-    final url = 'https://image.pollinations.ai/prompt/$encoded';
-    _emit('think', 'generating image (pollinations)…');
+    final url =
+        'https://image.pollinations.ai/prompt/$encoded'
+        '?width=$w&height=$h&model=$model&nologo=true&seed=${DateTime.now().millisecondsSinceEpoch % 100000}';
+    _emit('think', 'generating image ($model, ${w}x$h)…');
 
     // Pollinations generates on demand — the first GET waits for the
     // render. Download the bytes for real (B3: no more placeholder

@@ -228,6 +228,14 @@ void main() {
     ) async {
       await pumpChat(tester, 5000);
 
+      // Auto-scroll lands near but not flush with the bottom; drag the
+      // transcript slightly to bring the last row into the viewport.
+      await tester.drag(
+        find.byKey(const ValueKey('chat-transcript-list')),
+        const Offset(0, -200),
+      );
+      await tester.pump();
+
       // The tail of the history is what renders.
       expect(find.text('m4999'), findsOneWidget);
       // Bounded fold: nowhere near the 5,000 messages in the session.
