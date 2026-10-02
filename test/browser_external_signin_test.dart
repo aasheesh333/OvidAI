@@ -6,11 +6,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/ui/browser_screen.dart';
 
 /// Owner screenshot (2026-09-27): the in-app browser showed Google's sign-in
-/// wall with the "provider blocks embedded sign-in" banner. The banner itself
-/// is correct — Google refuses WebView logins — but the host table behind it
-/// treated `facebook.com`, `x.com`, `twitter.com` and `linkedin.com` as
-/// ALWAYS-sign-in origins, so the same scary banner fired over ordinary
-/// timelines, profiles and posts.
+/// wall with the "provider blocks embedded sign-in" banner.  That blocking
+/// banner was replaced (2026-10-02) with a non-blocking, once-per-session
+/// snackbar tip.  The URL classification logic is unchanged.
 ///
 /// Contract: dedicated auth origins warn on any path; general-purpose social
 /// origins warn only on a real sign-in path.
@@ -127,8 +125,6 @@ void main() {
     });
 
     test('path-gated social origins are NOT always-external', () {
-      // Their sign-in forms often DO work inside a WebView — the banner must
-      // not tell the user trying is pointless.
       expect(
         isAlwaysExternalSignInUrl('https://www.facebook.com/login.php'),
         isFalse,
@@ -142,12 +138,9 @@ void main() {
     });
   });
 
-  /// Owner bug (2026-09-30): "Open in browser → sign in → Reload" left the
-  /// tab logged out, because the banner's "Reload - I signed in" button
-  /// implied something Android makes impossible — no app can read another
-  /// browser's cookies, so an external sign-in can NEVER be imported back.
-  /// The copy must say that plainly and offer only real options.
-  group('notice copy is honest and actionable', () {
+  /// The old blocking banner was replaced with a non-blocking snackbar tip.
+  /// The notice text is now a short, friendly one-liner per provider.
+  group('notice copy is a non-blocking tip', () {
     test('every covered host gets a notice', () {
       const covered = [
         'https://accounts.google.com/signin',
@@ -172,38 +165,30 @@ void main() {
       expect(externalSignInNoticeText('https://example.com/'), isNull);
     });
 
-    test('blocked provider: names the truth — the login cannot come back', () {
+    test('always-external provider: tip names the provider', () {
       final text = externalSignInNoticeText(
         'https://accounts.google.com/signin',
       )!;
       expect(text, contains('Google'));
-      expect(text, contains('embedded browser'));
-      // The hard Android truth, stated plainly:
-      expect(text, contains('cannot be brought back'));
-      expect(text.toLowerCase(), contains('cookie'));
-      // ...so no wording may imply a reload would pick the sign-in up.
+      // The tip is a short suggestion, not a blocking wall.
+      expect(text, contains('Tip'));
+      expect(text, contains('your browser'));
+      // Must NOT contain the old blocking banner language.
+      expect(text, isNot(contains('refuses sign-in')));
       expect(text, isNot(contains('Reload - I signed in')));
-      expect(text.toLowerCase(), isNot(contains('worth trying')));
-      // Real options: continue externally, or a token-style sign-in in-tab.
-      expect(text, contains('real browser'));
-      expect(text.toLowerCase(), contains('app password'));
-      expect(text, contains('API key'));
     });
 
-    test('path-gated provider: offers the in-tab attempt honestly', () {
+    test('path-gated provider: same friendly tip format', () {
       final text = externalSignInNoticeText(
         'https://www.facebook.com/login.php',
       )!;
       expect(text, contains('Facebook'));
-      // Trying the form inside the tab is a REAL option for these hosts.
-      expect(text.toLowerCase(), contains('try'));
-      // The no-import truth applies here too.
-      expect(text, contains('cannot be brought back'));
-      expect(text, contains('real browser'));
+      expect(text, contains('Tip'));
+      expect(text, contains('your browser'));
     });
   });
 
-  group('notice actions', () {
+  group('notice widget is now non-blocking', () {
     Future<void> pumpNotice(WidgetTester tester, String url) async {
       await tester.pumpWidget(
         MaterialApp(
@@ -213,33 +198,31 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('offers Open in browser + Copy link, and NO reload button', (
+    testWidgets('ExternalSignInNotice renders nothing (SizedBox.shrink)', (
       tester,
     ) async {
       await pumpNotice(tester, 'https://accounts.google.com/signin');
-      expect(find.byKey(const ValueKey('external-signin-open')), findsOne);
-      expect(find.byKey(const ValueKey('external-signin-copy')), findsOne);
-      // The fake-fix button is gone for good.
+      // The widget no longer renders a MaterialBanner — it returns
+      // SizedBox.shrink.  The snackbar tip is shown by the BrowserScreen
+      // state, not by this widget.
+      expect(find.byKey(const ValueKey('external-signin-open')), findsNothing);
+      expect(find.byKey(const ValueKey('external-signin-copy')), findsNothing);
       expect(find.byKey(const ValueKey('external-signin-reload')), findsNothing);
-      expect(find.textContaining('Reload'), findsNothing);
-    });
-
-    testWidgets('the banner renders for every always-external provider', (
-      tester,
-    ) async {
-      await pumpNotice(tester, 'https://login.live.com/');
-      expect(find.textContaining('Microsoft'), findsOneWidget);
-      await pumpNotice(tester, 'https://id.apple.com/');
-      expect(find.textContaining('Apple'), findsOneWidget);
+      expect(find.byType(MaterialBanner), findsNothing);
     });
 
     test('browser_screen no longer wires a reload into the notice', () {
-      // The old onReload plumbing (`_reloadActiveTab` → "Reload - I signed
-      // in") is what made the owner's dead end look like a supported flow.
       final src = File('lib/ui/browser_screen.dart').readAsStringSync();
       expect(src.contains('Reload - I signed in'), isFalse);
       expect(src.contains('_reloadActiveTab'), isFalse);
       expect(src.contains('external-signin-reload'), isFalse);
+    });
+
+    test('browser_screen no longer places ExternalSignInNotice in the Column', () {
+      final src = File('lib/ui/browser_screen.dart').readAsStringSync();
+      // The old inline usage was:  ExternalSignInNotice(url: tab.url)
+      // inside the Column's children.  That line is gone.
+      expect(src, isNot(contains('ExternalSignInNotice(url: tab.url)')));
     });
   });
 }

@@ -1420,14 +1420,10 @@ class _ChatScreenState extends State<ChatScreen>
                                         // visibility): only at the top of the
                                         // loaded window so it never shifts the
                                         // paging row.
-                                        final sysPrompt = hiddenMessages == 0
-                                            ? s.systemPromptSnapshot
-                                            : null;
-                                        final showSysPrompt =
-                                            sysPrompt != null &&
-                                            sysPrompt.trim().isNotEmpty;
+                                        // SECURITY: the system prompt snapshot
+                                        // contains internal agent instructions
+                                        // and must never be shown to the user.
                                         final count =
-                                            (showSysPrompt ? 1 : 0) +
                                             (hiddenMessages > 0 ? 1 : 0) +
                                             items.length +
                                             (typing ? 1 : 0) +
@@ -1455,16 +1451,9 @@ class _ChatScreenState extends State<ChatScreen>
                                           itemCount: count,
                                           itemBuilder: (_, i) {
                                             var idx = i;
-                                            // Row 0 (no paging): the system-prompt
-                                            // disclosure for the latest turn.
-                                            if (showSysPrompt && idx == 0) {
-                                              return _RowIn(
-                                                child: _SystemPromptRow(
-                                                  text: sysPrompt,
-                                                ),
-                                              );
-                                            }
-                                            if (showSysPrompt) idx -= 1;
+                                            // System prompt row removed —
+                                            // internal instructions are hidden.
+
                                             // Next row: paging affordance. The
                                             // spinner shows only while a page is
                                             // actually loading — it used to spin
@@ -2618,85 +2607,6 @@ class _EmptyState extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-/// Collapsible "System prompt" disclosure for the latest turn — shows the
-/// exact assembled system prompt the model received (context visibility).
-class _SystemPromptRow extends StatefulWidget {
-  final String text;
-  const _SystemPromptRow({required this.text});
-  @override
-  State<_SystemPromptRow> createState() => _SystemPromptRowState();
-}
-
-class _SystemPromptRowState extends State<_SystemPromptRow> {
-  bool _open = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      key: const ValueKey('chat-system-prompt-row'),
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          InkWell(
-            key: const ValueKey('chat-system-prompt-summary'),
-            borderRadius: BorderRadius.circular(6),
-            onTap: () => setState(() => _open = !_open),
-            child: SizedBox(
-              height: 28,
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.terminal_outlined,
-                    size: 14,
-                    color: Aether.textMuted,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    'System prompt',
-                    style: TextStyle(fontSize: 13, color: Aether.textMuted),
-                  ),
-                  const Spacer(),
-                  AnimatedRotation(
-                    turns: _open ? 0.0 : -0.25,
-                    duration: const Duration(milliseconds: 100),
-                    child: Icon(
-                      Icons.chevron_right,
-                      size: 16,
-                      color: Aether.textMuted,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (_open)
-            Container(
-              key: const ValueKey('chat-system-prompt-body'),
-              width: double.infinity,
-              margin: const EdgeInsets.only(top: 4),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Aether.codeBg,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: SelectableText(
-                widget.text,
-                style: TextStyle(
-                  fontFamily: Aether.mono,
-                  fontSize: 11,
-                  height: 19 / 11,
-                  color: Aether.text,
-                ),
-              ),
-            ),
-        ],
-      ),
     );
   }
 }

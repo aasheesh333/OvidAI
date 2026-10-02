@@ -37,6 +37,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
   final TextEditingController _url = TextEditingController();
   bool _editingUrl = false;
 
+  /// Providers whose sign-in snackbar has already been shown this session.
+  /// Once a provider (e.g. "Google") appears here, the tip is never repeated.
+  final Set<String> _warnedProviders = {};
+
+  /// The last URL we evaluated for sign-in warnings, so we don't re-fire the
+  /// snackbar on every [_onAgentChanged] call for the same page.
+  String? _lastWarnedUrl;
+
   @override
   void initState() {
     super.initState();
@@ -75,7 +83,65 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (tab != null && !_editingUrl && _url.text != _omnibarText(tab)) {
       _url.text = _omnibarText(tab);
     }
+    // Show a non-blocking snackbar tip when the user navigates to a sign-in
+    // domain — at most once per provider per browser session.
+    if (tab != null && tab.url != _lastWarnedUrl) {
+      _lastWarnedUrl = tab.url;
+      _maybeShowSignInTip(tab.url);
+    }
     setState(() {});
+  }
+
+  /// Shows a brief, non-blocking snackbar when [url] belongs to a provider
+  /// that may refuse sign-in inside an embedded WebView.  The tip fires at
+  /// most once per provider per session.
+  void _maybeShowSignInTip(String url) {
+    final provider = externalSignInProvider(url);
+    if (provider == null) return;
+    if (_warnedProviders.contains(provider)) return;
+    _warnedProviders.add(provider);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          "Tip: If $provider sign-in doesn't work here, try opening in "
+          'your browser.',
+        ),
+        duration: const Duration(seconds: 6),
+        action: SnackBarAction(
+          label: 'Open in browser',
+          onPressed: () => _openInExternalBrowser(url),
+        ),
+      ),
+    );
+  }
+
+  /// Launch [url] in the device's real browser (e.g. Chrome).
+  Future<void> _openInExternalBrowser(String url) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    var launched = false;
+    try {
+      launched = await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (_) {
+      launched = false;
+    }
+    if (launched) return;
+    await Clipboard.setData(ClipboardData(text: url));
+    messenger?.showSnackBar(
+      SnackBar(
+        content: const Text(
+          'Could not open your browser — the link is copied.',
+        ),
+        action: SnackBarAction(
+          label: 'Copy link',
+          onPressed: () => Clipboard.setData(ClipboardData(text: url)),
+        ),
+      ),
+    );
   }
 
   String _omnibarText(BrowserTab tab) {
@@ -381,12 +447,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 ],
               ),
             ),
-            // Google/Microsoft/Apple sign-in cannot complete inside an
-            // embedded WebView, and a sign-in done in the REAL browser can
-            // never be imported back (Android gives apps no access to
-            // another browser's cookies). The banner says exactly that and
-            // offers only options that are real — see ExternalSignInNotice.
-            if (tab != null) ExternalSignInNotice(url: tab.url),
+            // Google/Microsoft/Apple sign-in: instead of the old blocking
+            // banner, a one-time snackbar tip fires in _onAgentChanged when
+            // the URL matches a sign-in domain. The user can always reach
+            // "Open in browser" via the toolbar icon above the omnibar.
+            //
             // Held popups (window.open / target=_blank clicks captured
             // for the agent): without this chip such a click looked
             // like a dead UI. Desktop browsers show a blocked-popup
@@ -701,41 +766,23 @@ bool isAlwaysExternalSignInUrl(String url) {
   return h.isNotEmpty && _hostProvider(h, _alwaysExternalSignInHosts) != null;
 }
 
-/// The banner body for [url], or null when no notice applies.
+/// The snackbar tip for [url], or null when no notice applies.
 ///
-/// Split out from the widget so tests can pin the honesty contract on the
-/// exact copy: an external sign-in can NEVER be imported back into this tab
-/// (Android gives apps no access to another browser's cookies — a reload will
-/// not pick it up), and every option the text offers must be a real one.
+/// Kept as a standalone function so tests can verify the copy without pumping
+/// a widget tree.  The old blocking MaterialBanner was replaced with a
+/// one-time non-blocking snackbar (fired by [_BrowserScreenState._maybeShowSignInTip]).
 @visibleForTesting
 String? externalSignInNoticeText(String url) {
   final provider = externalSignInProvider(url);
   if (provider == null) return null;
-  if (isAlwaysExternalSignInUrl(url)) {
-    return '$provider refuses sign-in inside an embedded browser — this is '
-        'the provider\'s own rule, not an Ovid setting. The sign-in also '
-        'cannot be brought back into this tab: Android never lets an app '
-        'read another browser\'s cookies, so after signing in over there, '
-        'reloading here will not log you in. What does work: continue in '
-        'your real browser (Open in browser), or, if the site offers an app '
-        'password, API key, or device-code sign-in, use that in this tab.';
-  }
-  return '$provider may refuse sign-in inside an embedded browser. You can '
-      'still try the form in this tab — if it completes here, the login is '
-      'real and stays in this session. If it refuses: the sign-in cannot be '
-      'brought back into this tab — Android never lets an app read another '
-      'browser\'s cookies, so reloading here after signing in over there '
-      'will not log you in. Continue in your real browser instead, or use '
-      'an app password, API key, or device-code sign-in here if the site '
-      'offers one.';
+  return "Tip: If $provider sign-in doesn't work here, try opening in "
+      'your browser.';
 }
 
-/// The external-sign-in banner for [url]; renders nothing when the URL is
-/// not a blocked sign-in surface.
-///
-/// Public with @visibleForTesting because the copy and the action set are
-/// pinned by test/browser_external_signin_test.dart; production use is
-/// [BrowserScreen] in this same file.
+/// Legacy widget kept only for backward compatibility with existing test
+/// imports.  Production code no longer places this in the widget tree — the
+/// sign-in tip is delivered as a non-blocking [SnackBar] by
+/// [_BrowserScreenState._maybeShowSignInTip] instead.
 @visibleForTesting
 class ExternalSignInNotice extends StatelessWidget {
   const ExternalSignInNotice({super.key, required this.url});
@@ -744,77 +791,9 @@ class ExternalSignInNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final text = externalSignInNoticeText(url);
-    if (text == null) return const SizedBox.shrink();
-    return MaterialBanner(
-      backgroundColor: Aether.surfaceAlt,
-      leading: const Icon(Icons.gpp_maybe_outlined),
-      content: Text(
-        text,
-        style: const TextStyle(fontSize: 12.5, height: 1.4),
-      ),
-      actions: [
-        TextButton(
-          key: const ValueKey('external-signin-open'),
-          onPressed: () => _openInRealBrowser(context),
-          child: const Text('Open in browser'),
-        ),
-        // First-class fallback for a broken/missing browser handler — the
-        // user is never left without a way to move the URL over.
-        TextButton(
-          key: const ValueKey('external-signin-copy'),
-          onPressed: () async {
-            final messenger = ScaffoldMessenger.maybeOf(context);
-            await Clipboard.setData(ClipboardData(text: url));
-            messenger?.showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Link copied — paste it into your browser to finish '
-                  'signing in.',
-                ),
-              ),
-            );
-          },
-          child: const Text('Copy link'),
-        ),
-      ],
-    );
-  }
-
-  /// Open [url] in the user's REAL browser (LaunchMode.externalApplication
-  /// hands it to the default browser app, e.g. Chrome, with the user's own
-  /// profile — the sign-in can complete there). What CANNOT happen on
-  /// Android is the return trip: no app can read Chrome's cookies, so the
-  /// login stays in the browser. The banner text says so plainly.
-  Future<void> _openInRealBrowser(BuildContext context) async {
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    var launched = false;
-    try {
-      launched = await launchUrl(
-        Uri.parse(url),
-        mode: LaunchMode.externalApplication,
-      );
-    } catch (_) {
-      launched = false;
-    }
-    if (launched) return;
-    // The user pressed a button and nothing happened. `launchUrl`
-    // returns false (no handler) or throws (malformed/blocked) and
-    // the old empty catch swallowed both — so say plainly that it
-    // failed and hand over the URL instead.
-    await Clipboard.setData(ClipboardData(text: url));
-    messenger?.showSnackBar(
-      SnackBar(
-        content: const Text(
-          'Could not open your browser — the link is copied. '
-          'Paste it into Chrome to finish signing in.',
-        ),
-        action: SnackBarAction(
-          label: 'Copy link',
-          onPressed: () => Clipboard.setData(ClipboardData(text: url)),
-        ),
-      ),
-    );
+    // No longer renders an inline banner — the snackbar tip is shown by
+    // _BrowserScreenState._maybeShowSignInTip once per provider per session.
+    return const SizedBox.shrink();
   }
 }
 

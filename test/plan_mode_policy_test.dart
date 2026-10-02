@@ -186,7 +186,13 @@ void main() {
       final f = AgentService.I.dispatchForTest('exit_plan_mode', {
         'plan': 'Do the thing',
       });
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+      // The dispatch path traverses several async gates (ledger, plan-mode
+      // path/shell checks) before reaching _askQuestions; poll until the
+      // approval request lands rather than relying on a fixed delay.
+      for (var i = 0; i < 20; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        if (AgentService.I.pendingApproval != null) break;
+      }
       expect(AgentService.I.pendingApproval, isNotNull);
       AgentService.I.pendingApproval!.answers['plan_exit'] = 'Yes';
       AgentService.I.approve(true);

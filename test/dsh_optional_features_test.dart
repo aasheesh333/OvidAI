@@ -112,14 +112,14 @@ void main() {
       expect(restored.systemPromptSnapshot, contains('Access mode: AUTO'));
     });
 
-    test('the transcript renders a System prompt disclosure', () {
+    test('the system prompt is captured but hidden from the user', () {
       final src = File('lib/ui/chat_screen.dart').readAsStringSync();
-      expect(src.contains('_SystemPromptRow'), isTrue);
-      expect(src.contains("'System prompt'"), isTrue);
-      expect(src.contains('chat-system-prompt-row'), isTrue);
-      // Captured in the run body (system prompt plus the trailing
-      // volatile block, so the snapshot still shows the model's complete
-      // instruction set).
+      // SECURITY: the system prompt row was removed — internal agent
+      // instructions must never be visible to the end user.
+      expect(src.contains('_SystemPromptRow'), isFalse);
+      expect(src.contains('chat-system-prompt-row'), isFalse);
+      // The snapshot is still captured in agent_service for diagnostics,
+      // just never rendered in the UI.
       final agent = File('lib/core/agent_service.dart').readAsStringSync();
       expect(agent.contains('systemPromptSnapshot'), isTrue);
       expect(agent.contains('volatileCtx'), isTrue);

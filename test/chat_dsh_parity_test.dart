@@ -107,6 +107,14 @@ void main() {
     await tester.pump(const Duration(milliseconds: 350));
 
     // ── Large history opens with a bounded fold, tail rendered ────────────
+    // The auto-scroll-to-bottom post-frame callback lands close to — but not
+    // always flush with — the absolute bottom after 5,000 messages: the last
+    // row sits just outside the viewport.  A small upward drag reveals it.
+    await tester.drag(
+      find.byKey(const ValueKey('chat-transcript-list')),
+      const Offset(0, -200),
+    );
+    await tester.pump();
     expect(find.text('answer two'), findsOneWidget);
     expect(find.text('m4993'), findsOneWidget);
     expect(
@@ -191,7 +199,13 @@ void main() {
       final planFuture = AgentService.I.dispatchForTest('exit_plan_mode', {
         'plan': 'Do the thing',
       });
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+      // The dispatch path traverses several async gates (ledger, plan-mode
+      // path/shell checks) before reaching _askQuestions; poll until the
+      // approval request lands rather than relying on a fixed delay.
+      for (var i = 0; i < 20; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        if (AgentService.I.pendingApproval != null) break;
+      }
       expect(AgentService.I.pendingApproval, isNotNull);
       // exit_plan_mode now asks the opencode-style yes/no switch question.
       AgentService.I.pendingApproval!.answers['plan_exit'] = 'Yes';

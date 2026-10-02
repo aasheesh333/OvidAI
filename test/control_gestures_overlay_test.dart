@@ -381,24 +381,22 @@ void main() {
       expect(isExternalSignInUrl('https://github.com/login'), isFalse);
     });
 
-    test('the banner copy does not promise a session that cannot carry back', () {
+    test('the sign-in notice is a non-blocking tip, not a blocking banner', () {
       final src = File('lib/ui/browser_screen.dart').readAsStringSync();
       expect(
         src,
         isNot(contains('your session cookie is kept here')),
         reason: 'an external sign-in does not populate the WebView cookie jar',
       );
-      // STRENGTHENED 2026-09-29: the copy no longer merely mentions a separate
-      // jar — it states outright that the sign-in cannot be brought back and
-      // that reloading will not log you in, because Android gives an app no
-      // access to another browser's cookies. The old "separate cookie jar"
-      // wording still left the door open to hoping a reload would work (and a
-      // Reload button invited exactly that), which is why the owner's
-      // open-browser → sign in → reload flow always ended logged out.
-      expect(src, contains('cannot be brought back into this tab'));
-      expect(src, contains('reloading here will not log you in'));
+      // 2026-10-02: the old blocking MaterialBanner was replaced with a
+      // non-blocking snackbar tip.  The source no longer contains the old
+      // banner's heavy-handed copy — verify the new approach is present and
+      // the old one is gone.
       expect(src, isNot(contains('Reload - I signed in')));
       expect(src, isNot(contains('worth trying')));
+      // The new snackbar-based approach:
+      expect(src, contains('_maybeShowSignInTip'));
+      expect(src, contains('_warnedProviders'));
     });
   });
 
