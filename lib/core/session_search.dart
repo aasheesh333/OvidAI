@@ -26,7 +26,8 @@ class SessionSearch {
   Future<Database> _open() async {
     if (_db != null) return _db!;
     return _opening ??= () async {
-      final path = dbPathOverrideForTest ??
+      final path =
+          dbPathOverrideForTest ??
           '${(await getApplicationDocumentsDirectory()).path}/session-search.db';
       final db = sqlite3.open(path);
       db.execute('''
@@ -46,12 +47,9 @@ class SessionSearch {
   /// Rows have changed → drop and rebuild. Cheap (thousands of rows).
   Future<void> reindex(
     Iterable<
-      ({
-        String id,
-        String model,
-        List<({String role, String content})> rows,
-      })
-    > sessions,
+      ({String id, String model, List<({String role, String content})> rows})
+    >
+    sessions,
   ) async {
     final db = await _open();
     db.execute('BEGIN');
@@ -83,18 +81,17 @@ class SessionSearch {
     final db = await _open();
     // FTS5 treats bare words as implicit AND; quoted phrases match
     // literally — same literal-phrase semantics as the query service.
-    final q = query.replaceAll("'", "''");
     final where = [
-      "msgs MATCH '$q'",
-      if (sessionId != null) "sessionId = '$sessionId'",
-      if (model != null) "model = '$model'",
+      'msgs MATCH ?',
+      if (sessionId != null) 'sessionId = ?',
+      if (model != null) 'model = ?',
     ].join(' AND ');
     final rows = db.select(
       "SELECT sessionId, model, role, snippet(msgs, 3, '→', '←', '…', 12), "
       'bm25(msgs) AS rank '
       'FROM msgs WHERE $where '
       'ORDER BY rank LIMIT ? OFFSET ?',
-      [limit, cursor],
+      [query, ?sessionId, ?model, limit, cursor],
     );
     return [
       for (final r in rows)
@@ -120,4 +117,3 @@ class SessionSearchHit {
     required this.snippet,
   });
 }
-

@@ -1,17 +1,21 @@
 import 'dart:async';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'diag.dart';
+import 'account_service.dart';
+import 'account_session.dart';
+import 'image_studio.dart';
 
 /// Firebase bootstrap + auth + consent-gated telemetry.
 ///
 /// Design:
-///  • Optional sign-in (BYOK chat works without an account).
+///  • Google/email identity; LoginGate requires a nonanonymous account.
 ///  • Analytics & Crashlytics are OFF until the user explicitly opts in
 ///    (Play-policy: data collection requires consent). Consent is persisted.
 ///  • google-services.json is injected at build time via the
@@ -40,7 +44,17 @@ class FirebaseService extends ChangeNotifier {
   bool get isAvailable => _available;
   bool get consentGiven => _consentGiven;
   bool get consentAsked => _consentAsked;
-  bool get isSignedIn => _user != null;
+  bool get isSignedIn => _user != null && !_user!.isAnonymous;
+  final _accountSession = AccountSession();
+  bool get accountReady =>
+      isSignedIn && (!accountService.enabled || _accountSession.ready);
+  String? get accountError => _accountSession.error;
+  late final accountService = AccountService(
+    idToken: (force) => getIdToken(forceRefresh: force),
+    appCheck: () => FirebaseAppCheck.instance.getToken(),
+    currentUid: () => uid,
+  );
+  AccountDeletion? lastDeletionReceipt;
   User? get user => _user;
   String? get email => _user?.email;
   String? get displayName => _user?.displayName;
@@ -94,11 +108,13 @@ class FirebaseService extends ChangeNotifier {
     try {
       await _restoreConsent();
 
-      _authSub ??= FirebaseAuth.instance.authStateChanges().listen((user) {
-        _user = user;
-        notifyListeners();
-      });
-      _user = FirebaseAuth.instance.currentUser;
+      if (accountService.enabled) {
+        await FirebaseAppCheck.instance.activate(
+          androidProvider: AndroidProvider.playIntegrity,
+        );
+      }
+      _authSub ??= FirebaseAuth.instance.authStateChanges().listen(_onUser);
+      _onUser(FirebaseAuth.instance.currentUser);
 
       // Route Flutter + platform errors to Crashlytics only when consented.
       if (_consentGiven) _attachCrashHandlers();
@@ -107,6 +123,81 @@ class FirebaseService extends ChangeNotifier {
       _available = false;
       rethrow;
     }
+  }
+
+  void _onUser(User? user) {
+    final changed = _user?.uid != user?.uid;
+    if (changed) ImageStudio.I.clearCapabilities();
+    _user = user;
+    if (changed || user == null) _accountSession.clear();
+    notifyListeners();
+    if (isSignedIn && accountService.enabled && !_accountSession.ready) {
+      unawaited(retryAccountLogin());
+    }
+  }
+
+  Future<void> retryAccountLogin() async {
+    final u = _user;
+    if (u == null || u.isAnonymous || !accountService.enabled) return;
+    await _accountSession.bind(u.uid, () async {
+      final result = await accountService.acknowledgeLogin();
+      if (result.allowsLogin) lastDeletionReceipt = null;
+    });
+    notifyListeners();
+  }
+
+  bool get usesPassword =>
+      _user?.providerData.any((p) => p.providerId == 'password') ?? false;
+
+  /// Reauthenticate the current UID, never sign in as a replacement account.
+  Future<String?> reauthenticate({String? password}) async {
+    final u = _user;
+    if (u == null || u.isAnonymous) return 'Please sign in first.';
+    try {
+      AuthCredential credential;
+      if (usesPassword) {
+        if (password == null || password.isEmpty || u.email == null) {
+          return 'Enter your password.';
+        }
+        credential = EmailAuthProvider.credential(
+          email: u.email!,
+          password: password,
+        );
+      } else if (u.providerData.any((p) => p.providerId == 'google.com')) {
+        final google = await GoogleSignIn().signIn();
+        if (google == null) return 'cancelled';
+        final tokens = await google.authentication;
+        credential = GoogleAuthProvider.credential(
+          accessToken: tokens.accessToken,
+          idToken: tokens.idToken,
+        );
+      } else {
+        return 'This sign-in provider does not support account deletion in this build.';
+      }
+      await u.reauthenticateWithCredential(credential);
+      await u.getIdToken(true);
+      return null;
+    } on FirebaseAuthException catch (e) {
+      return e.message ?? 'Could not verify your identity.';
+    } catch (_) {
+      return 'Could not verify your identity. Please retry.';
+    }
+  }
+
+  Future<AccountDeletion> requestAccountDeletion(String requestId) async {
+    final result = await accountService.requestDeletion(requestId);
+    if (result.isPending) {
+      lastDeletionReceipt = result;
+      // The retained server request is the success criterion; signing out only
+      // prevents this device's old session from continuing to use the account.
+      try {
+        await signOut();
+      } catch (e) {
+        // Server acceptance remains true even if local provider sign-out fails.
+        Diag.swallow('account.signout_after_request', e);
+      }
+    }
+    return result;
   }
 
   Future<void> _restoreConsent() async {
@@ -252,8 +343,17 @@ class FirebaseService extends ChangeNotifier {
   }
 
   Future<void> signOut() async {
+    ImageStudio.I.clearCapabilities();
     if (!_available) return;
+    _accountSession.clear();
+    _user = null;
+    notifyListeners();
     await FirebaseAuth.instance.signOut();
+    try {
+      await GoogleSignIn().signOut();
+    } catch (e) {
+      Diag.swallow('firebase.google_signout', e);
+    }
   }
 
   /// Lightweight analytics event — only fires when consent is given.

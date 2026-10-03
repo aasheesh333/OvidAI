@@ -6,6 +6,7 @@ import '../core/state.dart';
 import '../core/agent_service.dart';
 import 'settings_screen.dart';
 import 'trajectory_screen.dart';
+import 'schedule_screen.dart';
 
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
@@ -217,6 +218,18 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
             ),
 
             const Divider(),
+            Material(color: Colors.transparent, child: ListTile(
+              dense: true,
+              leading: const Icon(Icons.schedule_outlined, size: 20),
+              title: const Text('Schedule'),
+              trailing: const Icon(Icons.chevron_right, size: 16),
+              enabled: app.activeSessionId != null,
+              onTap: app.activeSessionId == null ? null : () {
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => ScheduleScreen(sessionId: app.activeSessionId!),
+                ));
+              },
+            )),
             // PR27/B2: trajectory moved here from the chat header (the
             // header keeps only jobs + studio + browser). Disabled when
             // there is no active session — pushing with an empty id lands
@@ -258,14 +271,14 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             ),
                           ),
                           SizedBox(width: 12),
-                          Text(
-                            'Trajectory — event ledger',
+                           Expanded(child: Text(
+                             'Trajectory — event ledger',
+                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               fontSize: 13,
                               color: Aether.textMuted,
                             ),
-                          ),
-                          Spacer(),
+                           )),
                           Icon(
                             Icons.chevron_right,
                             size: 16,

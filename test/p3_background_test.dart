@@ -12,13 +12,8 @@ void main() {
     expect(m.contains('.BootReceiver'), isTrue);
   });
 
-  test('boot receiver respects the keep-alive pref', () {
-    final kt = File(
-      'android/app/src/main/kotlin/com/dhanuk/ovidai/BootReceiver.kt',
-    ).readAsStringSync();
-    expect(kt.contains('flutter.ovid_keep_alive'), isTrue);
-    expect(kt.contains('AgentForegroundService'), isTrue);
-  });
+  // Boot alarm rearming and stopped-runtime behavior are executed under
+  // Robolectric in BackgroundRuntimeTest, rather than pinned to source text.
 
   test('native exposes a battery-exemption request', () {
     final kt = File(
@@ -65,15 +60,6 @@ void main() {
     expect(kt.contains('wakeLockAcquiredAt'), isTrue);
   });
 
-  test('failed foreground start stays sticky so the system restarts it', () {
-    // Only the explicit EXIT path may be NOT_STICKY; a startForeground
-    // failure must stay STICKY so the OS restarts the service instead of
-    // letting the agent die in the background.
-    final kt = File(
-      'android/app/src/main/kotlin/com/dhanuk/ovidai/AgentForegroundService.kt',
-    ).readAsStringSync();
-    expect('START_NOT_STICKY'.allMatches(kt).length, 1);
-  });
 
   test('foreground service declares dataSync + specialUse with reason', () {
     // Android 14+ needs a matching type + permission + property, or the
@@ -90,12 +76,6 @@ void main() {
     expect(m.contains('PROPERTY_SPECIAL_USE_FGS_SUBTYPE'), isTrue);
   });
 
-  test('in-app exit cancels runs and stops the service', () {
-    final src = File('lib/core/agent_notification_service.dart').readAsStringSync();
-    final idx = src.indexOf('Future<void> agentExit');
-    expect(idx, greaterThan(0));
-    final body = src.substring(idx, idx + 300);
-    expect(body.contains('cancelAllRuns'), isTrue);
-    expect(body.contains("agentServiceStop"), isTrue);
-  });
+  // In-app/notification Exit is covered behaviorally by
+  // schedule_background_test.dart and session_stop_isolation_test.dart.
 }

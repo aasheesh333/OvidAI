@@ -37,14 +37,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
   final TextEditingController _url = TextEditingController();
   bool _editingUrl = false;
 
-  /// Providers whose sign-in snackbar has already been shown this session.
-  /// Once a provider (e.g. "Google") appears here, the tip is never repeated.
-  final Set<String> _warnedProviders = {};
-
-  /// The last URL we evaluated for sign-in warnings, so we don't re-fire the
-  /// snackbar on every [_onAgentChanged] call for the same page.
-  String? _lastWarnedUrl;
-
   @override
   void initState() {
     super.initState();
@@ -83,38 +75,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (tab != null && !_editingUrl && _url.text != _omnibarText(tab)) {
       _url.text = _omnibarText(tab);
     }
-    // Show a non-blocking snackbar tip when the user navigates to a sign-in
-    // domain — at most once per provider per browser session.
-    if (tab != null && tab.url != _lastWarnedUrl) {
-      _lastWarnedUrl = tab.url;
-      _maybeShowSignInTip(tab.url);
-    }
     setState(() {});
-  }
-
-  /// Shows a brief, non-blocking snackbar when [url] belongs to a provider
-  /// that may refuse sign-in inside an embedded WebView.  The tip fires at
-  /// most once per provider per session.
-  void _maybeShowSignInTip(String url) {
-    final provider = externalSignInProvider(url);
-    if (provider == null) return;
-    if (_warnedProviders.contains(provider)) return;
-    _warnedProviders.add(provider);
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    if (messenger == null) return;
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          "Tip: If $provider sign-in doesn't work here, try opening in "
-          'your browser.',
-        ),
-        duration: const Duration(seconds: 6),
-        action: SnackBarAction(
-          label: 'Open in browser',
-          onPressed: () => _openInExternalBrowser(url),
-        ),
-      ),
-    );
   }
 
   /// Launch [url] in the device's real browser (e.g. Chrome).
@@ -232,6 +193,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     await agent.setTabDesktopMode(tab, !tab.desktopMode);
                     setState(() {});
                   },
+          ),
+          IconButton(
+            tooltip: 'Open in browser',
+            icon: const Icon(Icons.open_in_new, size: 19),
+            onPressed: tab == null || tab.localPreviewPath != null
+                ? null
+                : () => _openInExternalBrowser(tab.url),
           ),
           IconButton(
             tooltip: 'New tab',
@@ -447,11 +415,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 ],
               ),
             ),
-            // Google/Microsoft/Apple sign-in: instead of the old blocking
-            // banner, a one-time snackbar tip fires in _onAgentChanged when
-            // the URL matches a sign-in domain. The user can always reach
-            // "Open in browser" via the toolbar icon above the omnibar.
-            //
             // Held popups (window.open / target=_blank clicks captured
             // for the agent): without this chip such a click looked
             // like a dead UI. Desktop browsers show a blocked-popup
@@ -554,9 +517,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
 /// `FittedBox` (not `Transform.scale`) is the correct primitive: it lays the
 /// child out with unbounded constraints at its own size and then scales the
 /// paint, so a 1280-wide child inside a 360-wide parent is not a layout
-/// overflow. `InteractiveViewer` restores pinch-zoom and panning, which the
-/// shrink-to-fit would otherwise make unusable on a phone screen.
-class _SizedBrowserView extends StatelessWidget {
+/// overflow. The horizontal pan surface and persistent scrollbar expose the
+/// overflow width; vertical document scrolling remains owned by the WebView.
+class _SizedBrowserView extends StatefulWidget {
   const _SizedBrowserView({
     super.key,
     required this.tab,
@@ -575,8 +538,22 @@ class _SizedBrowserView extends StatelessWidget {
   static const double desktopHeight = 800;
 
   @override
+  State<_SizedBrowserView> createState() => _SizedBrowserViewState();
+}
+
+class _SizedBrowserViewState extends State<_SizedBrowserView> {
+  final _pan = ScrollController();
+
+  @override
+  void dispose() {
+    _pan.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (!tab.desktopMode) return child;
+    final child = widget.child;
+    if (!widget.tab.desktopMode) return child;
     // FILL THE HEIGHT (2026-09-25). `BoxFit.contain` scaled to the WIDTH, so on
     // a phone the 1280×800 frame came out ~225dp tall inside a much taller
     // parent: a desktop page rendered as a postage stamp with dead space below
@@ -591,19 +568,29 @@ class _SizedBrowserView extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, c) {
         if (!c.maxHeight.isFinite || c.maxHeight <= 0) return child;
+        const desktopWidth = _SizedBrowserView.desktopWidth;
+        const desktopHeight = _SizedBrowserView.desktopHeight;
         final scale = c.maxHeight / desktopHeight;
-        return SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: SizedBox(
-            width: desktopWidth * scale,
-            height: c.maxHeight,
-            child: FittedBox(
-              fit: BoxFit.contain,
-              alignment: Alignment.topLeft,
-              child: SizedBox(
-                width: desktopWidth,
-                height: desktopHeight,
-                child: child,
+        return Scrollbar(
+          controller: _pan,
+          thumbVisibility: true,
+          interactive: true,
+          scrollbarOrientation: ScrollbarOrientation.bottom,
+          child: SingleChildScrollView(
+            controller: _pan,
+            primary: false,
+            scrollDirection: Axis.horizontal,
+            child: SizedBox(
+              width: desktopWidth * scale,
+              height: c.maxHeight,
+              child: FittedBox(
+                fit: BoxFit.contain,
+                alignment: Alignment.topLeft,
+                child: SizedBox(
+                  width: desktopWidth,
+                  height: desktopHeight,
+                  child: child,
+                ),
               ),
             ),
           ),
@@ -651,27 +638,9 @@ class _AgentDot extends StatelessWidget {
 }
 
 
-/// Identity providers that refuse to sign a user in from an embedded WebView.
-///
-/// Google is the one users actually hit. These are not Ovid bugs and cannot be
-/// fixed by spoofing harder: each provider detects the embedded browser
-/// through signals the app does not control — Android WebView sends
-/// `X-Requested-With: <package>` on every request and there is no supported
-/// way to remove it — and then answers "this browser or app may not be
-/// secure", "disallowed_useragent", or a blank redirect loop. Stripping the
-/// `; wv` token from the User-Agent (which [BrowserTab.mobileUserAgent]
-/// already does) is necessary but not sufficient.
-///
-/// So name the provider, say plainly why it will not work here, and offer the
-/// real browser. GitHub already does the equivalent thing by using the device
-/// flow with `LaunchMode.externalApplication`.
-///
-/// WHAT THE NOTICE MUST NEVER PROMISE (2026-09-30 owner bug): that signing in
-/// externally and then reloading this tab logs it in. Android sandboxes each
-/// app's cookie store — there is NO API, public or private, for reading
-/// Chrome's cookies into this app's WebView jars — so an external sign-in can
-/// never be imported back. The old reload button ("I signed in") implied
-/// exactly that and sent users into a guaranteed dead end.
+/// Auth-origin classification retained for callers. Navigation never displays
+/// a proactive sign-in notice. Opening externally does not transfer cookies
+/// back into the embedded browser; changing User-Agent cannot promise login.
 const Map<String, String> _alwaysExternalSignInHosts = {
   'accounts.google.com': 'Google',
   'accounts.youtube.com': 'Google',
@@ -764,37 +733,6 @@ bool isAlwaysExternalSignInUrl(String url) {
   if (u == null) return false;
   final h = u.host.toLowerCase();
   return h.isNotEmpty && _hostProvider(h, _alwaysExternalSignInHosts) != null;
-}
-
-/// The snackbar tip for [url], or null when no notice applies.
-///
-/// Kept as a standalone function so tests can verify the copy without pumping
-/// a widget tree.  The old blocking MaterialBanner was replaced with a
-/// one-time non-blocking snackbar (fired by [_BrowserScreenState._maybeShowSignInTip]).
-@visibleForTesting
-String? externalSignInNoticeText(String url) {
-  final provider = externalSignInProvider(url);
-  if (provider == null) return null;
-  return "Tip: If $provider sign-in doesn't work here, try opening in "
-      'your browser.';
-}
-
-/// Legacy widget kept only for backward compatibility with existing test
-/// imports.  Production code no longer places this in the widget tree — the
-/// sign-in tip is delivered as a non-blocking [SnackBar] by
-/// [_BrowserScreenState._maybeShowSignInTip] instead.
-@visibleForTesting
-class ExternalSignInNotice extends StatelessWidget {
-  const ExternalSignInNotice({super.key, required this.url});
-
-  final String url;
-
-  @override
-  Widget build(BuildContext context) {
-    // No longer renders an inline banner — the snackbar tip is shown by
-    // _BrowserScreenState._maybeShowSignInTip once per provider per session.
-    return const SizedBox.shrink();
-  }
 }
 
 /// Held popups for the active tab, surfaced like a desktop browser's blocked

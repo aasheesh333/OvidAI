@@ -134,7 +134,7 @@ class SessionLifecycleService {
     Object? token,
   ) async {
     try {
-      await _activationWaiter(token);
+      await _activationWaiter(token).timeout(const Duration(seconds: 2));
       await _skillRefresher(session);
       await _hookDispatcher(
         'session_start',

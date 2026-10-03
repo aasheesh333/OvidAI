@@ -3,7 +3,6 @@ package com.dhanuk.ovidai
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 
 /**
  * Notification "Stop agent" / "Exit" button → notifies Dart over the ovid/native
@@ -15,24 +14,12 @@ class AgentStopReceiver : BroadcastReceiver() {
         val action = intent.action
         if (action != AgentForegroundService.ACTION_STOP && action != AgentForegroundService.ACTION_EXIT) return
 
-        val serviceIntent = Intent(context, AgentForegroundService::class.java).apply {
-            this.action = action
-        }
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent)
-            } else {
-                context.startService(serviceIntent)
-            }
-        } catch (_: Exception) {
-            // Safely catch ForegroundServiceStartNotAllowedException on Android 12+ or SecurityException
-        }
-
+        BackgroundScheduleState.stop(context)
         if (action == AgentForegroundService.ACTION_STOP) {
             AgentNotificationBridge.stopHandler?.invoke()
+        } else {
+            AgentNotificationBridge.exitHandler?.invoke()
         }
-        // For ACTION_EXIT, AgentForegroundService.onStartCommand releases wake-lock,
-        // tears down the service, and invokes AgentNotificationBridge.exitHandler once.
     }
 }
 
@@ -46,4 +33,10 @@ object AgentNotificationBridge {
 
     @Volatile
     var exitHandler: (() -> Unit)? = null
+
+    @Volatile
+    var scheduleHandler: (() -> Unit)? = null
+
+    @Volatile
+    var constraintHandler: ((String) -> Unit)? = null
 }

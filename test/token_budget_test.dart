@@ -81,6 +81,7 @@ void main() {
       'memory_search',
       'memory_save',
       'session_search',
+      'session_read',
       'commit',
       'repo_sync',
       'repo_tree',
@@ -98,7 +99,9 @@ void main() {
       'agent_install_mcp',
       'request_permission',
       'ask_user_question',
-      'generate_image',
+      'render_html',
+      'resize_image',
+      'crop_image',
       'read_image',
       'read_attachment',
       'send_message',
@@ -209,7 +212,10 @@ void main() {
     // load-bearing constraint front-loaded, so NOTHING is truncated now —
     // pinned by the next test. Ceiling raised to 10800.
     expect(tools.length, greaterThan(80));
-    expect(approxTokens, lessThan(10800));
+    // Integrated 2026-10-03: 10,929 tokens / 43,717 JSON chars. The added
+    // session_read schema, scoped search authorization, scheduler fields and
+    // render_html contract account for the growth; no capability is removed.
+    expect(approxTokens, lessThan(11100));
   });
 
   test('no advertised tool description is truncated', () {

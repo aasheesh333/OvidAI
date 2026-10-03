@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -10,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
+import 'package:ovid_ai/core/global_repo_registry.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -32,6 +34,9 @@ void main() {
     RepoCache.I.unbind();
     studioListBranchesOverrideForTest = null;
     studioRepoSyncOverrideForTest = null;
+    final registryRoot = Directory.systemTemp.createTempSync('branch-registry-');
+    addTearDown(() => registryRoot.deleteSync(recursive: true));
+    studioRegistryOverrideForTest = GlobalRepoRegistry.createForTest(baseDir: registryRoot);
     app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
     AgentService.I.debugPauseScheduleTimerForTest(true);
@@ -86,9 +91,13 @@ void main() {
 
     expect(syncs, 0, reason: 'same-session cache does not re-sync on mount');
 
-    await tester.tap(find.text('main'));
+    await tester.runAsync(() => tester.tap(find.text('main')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('develop'));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
     await tester.pumpAndSettle();
 
     expect(AgentService.I.sessionBranch, 'develop');
@@ -96,6 +105,50 @@ void main() {
     expect(syncs, 1, reason: 'picking a branch re-syncs the binding');
     expect(find.text('develop'), findsOneWidget);
   });
+
+  for (final fails in [false, true]) {
+    testWidgets('branch checkout ${fails ? 'failure retains old selection' : 'propagates to cwd and context'}', (tester) async {
+      final root = Directory.systemTemp.createTempSync('branch-workspace-');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final old = Directory('${root.path}/old')..createSync();
+      final session = app.activeSession!..repo = 'owner/repo'..branch = 'main'
+        ..workspaceFolder = old.path;
+      final registry = await tester.runAsync(() async => GlobalRepoRegistry.createForTest(baseDir: root,
+        gitRunner: (repo, branch, dest) async {
+          if (fails) throw StateError('checkout unavailable');
+          Directory(dest).createSync(recursive: true);
+          File('$dest/branch.txt').writeAsStringSync(branch);
+        }));
+      studioRegistryOverrideForTest = registry;
+      addTearDown(() => studioRegistryOverrideForTest = null);
+      RepoCache.I.bind('owner/repo', 'tok', sessionId: session.id);
+      RepoCache.I.files['README.md'] = 'old';
+      studioRepoSyncOverrideForTest = () async {};
+      studioListBranchesOverrideForTest = (_, _) async => ['main', 'develop'];
+      await pumpStudio(tester);
+      await tester.runAsync(() => tester.tap(find.text('main')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('develop'));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.runAsync(() async {
+        for (var i = 0; i < 1000; i++) {
+          if (session.branch == 'develop' || fails && i > 5) break;
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      });
+      expect(session.branch, fails ? 'main' : 'develop');
+      await tester.pumpAndSettle();
+      expect(session.branch, fails ? 'main' : 'develop');
+      expect(session.workspaceFolder, fails ? old.path : endsWith('owner__repo__develop'));
+      expect((await AgentService.I.sessionWorkDirForTest()).path, session.workspaceFolder);
+      if (!fails) {
+        expect(RepoCache.I.defaultBranch, 'develop');
+        expect(RepoCache.I.workspaceFolder, session.workspaceFolder);
+        expect(await AgentService.I.workspaceContext(), contains('Branch: develop'));
+      }
+    });
+  }
 
   testWidgets('auth gate rebinds when the cache belongs to another session', (
     tester,

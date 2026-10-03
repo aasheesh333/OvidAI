@@ -227,7 +227,7 @@ void main() {
   );
 
   test(
-    'notification Stop cancels the session represented by its progress',
+    'notification Stop stops background execution across sessions',
     () async {
       final sessionA = ChatSession(
         id: 'stop-isolation-a',
@@ -273,13 +273,14 @@ void main() {
 
       expect(runA.activeRunId, isNull);
       expect(runA.cancelRequested, isTrue);
-      expect(runB.activeRunId, 'run-b');
-      expect(runB.cancelRequested, isFalse);
+      expect(runB.activeRunId, isNull);
+      expect(runB.cancelRequested, isTrue);
+      expect(notification.backgroundStopped, isTrue);
     },
   );
 
   test(
-    'failed pending notification update keeps Stop on displayed session',
+    'failed pending notification update cannot undo global background Stop',
     () async {
       final sessionA = ChatSession(
         id: 'stop-isolation-a',
@@ -328,8 +329,8 @@ void main() {
 
       expect(runA.activeRunId, isNull);
       expect(runA.cancelRequested, isTrue);
-      expect(runB.activeRunId, 'run-b');
-      expect(runB.cancelRequested, isFalse);
+      expect(runB.activeRunId, isNull);
+      expect(runB.cancelRequested, isTrue);
 
       runA
         ..activeRunId = 'run-a-after-failure'
@@ -340,12 +341,12 @@ void main() {
 
       expect(runA.activeRunId, isNull);
       expect(runA.cancelRequested, isTrue);
-      expect(runB.activeRunId, 'run-b');
-      expect(runB.cancelRequested, isFalse);
+      expect(runB.activeRunId, isNull);
+      expect(runB.cancelRequested, isTrue);
     },
   );
 
-  test('successful notification update switches Stop ownership', () async {
+  test('successful notification update still permits global background Stop', () async {
     final sessionA = ChatSession(
       id: 'stop-isolation-a',
       title: 'A',
@@ -389,8 +390,8 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     await _sendNativeAction('onAgentStop');
 
-    expect(runA.cancelRequested, isFalse);
-    expect(runA.activeRunId, 'run-a');
+    expect(runA.cancelRequested, isTrue);
+    expect(runA.activeRunId, isNull);
     expect(runB.activeRunId, isNull);
     expect(runB.cancelRequested, isTrue);
   });
@@ -564,6 +565,7 @@ void main() {
       mode: 'auto',
     );
     app.sessions.addAll([root, parent, child, unrelated]);
+    app.activeSessionId = root.id;
     final parentRun = agent.runBucketForTest(parent.id)
       ..activeRunId = 'run-parent';
     final childRun = agent.runBucketForTest(child.id)
@@ -673,8 +675,8 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     await _sendNativeAction('onAgentStop');
 
-    expect(runs.a.activeRunId, 'run-a');
-    expect(runs.b.activeRunId, 'run-b');
+    expect(runs.a.activeRunId, isNull);
+    expect(runs.b.activeRunId, isNull);
     expect(runs.c.activeRunId, isNull);
   });
 
@@ -710,9 +712,9 @@ void main() {
     await _waitForDisplayedTarget(notification, runs.bId);
     await _sendNativeAction('onAgentStop');
 
-    expect(runs.a.activeRunId, 'run-a');
+    expect(runs.a.activeRunId, isNull);
     expect(runs.b.activeRunId, isNull);
-    expect(runs.c.activeRunId, 'run-c');
+    expect(runs.c.activeRunId, isNull);
   });
 
   test(

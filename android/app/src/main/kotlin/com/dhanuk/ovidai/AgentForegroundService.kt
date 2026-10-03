@@ -20,18 +20,16 @@ import androidx.core.app.NotificationCompat
  * Started from Dart via the ovid/native method channel when an agent run
  * starts; stopped when the run finishes or the user taps Stop.
  *
- * Holds a PARTIAL WakeLock for the run's duration so Doze/device-idle
- * can't throttle CPU/network mid-task (hours-long runs).
+ * Holds a bounded PARTIAL WakeLock during active work. Android/OEM policy can
+ * still delay networking, terminate the process, or refuse a foreground start.
  *
  * Notification actions:
  *  - ACTION_STOP → broadcasts "ovid.agent.STOP" (AgentService listens,
  *    cancels the active run; identical to tapping Stop in the chat UI).
  *
- * Hardened: any failure inside startForeground is caught instead of
- * crashing the whole app (previously a missing manifest permission
- * crashed the process on every agent message) — and the service stays
- * STICKY so the system restarts it rather than letting the agent die in
- * the background. Only the explicit Exit action stops it for good.
+ * Failures are reported to Dart and stop the service. A notification alone
+ * cannot restore the agent runtime; process death is reconciled on reopen.
+ * Explicit Stop/Exit persist a latch that all starts and alarms respect.
  */
 class AgentForegroundService : Service() {
 
@@ -60,8 +58,7 @@ class AgentForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wakeLockAcquiredAt: Long = 0L
 
-    /// Whether the current state justifies holding the wake lock. Survives a
-    /// START_STICKY restart with a null intent.
+    /// Whether the current live runtime justifies holding the wake lock.
     private var wantWakeLock = false
     private var lastTitle: String = "Ovid AI"
     private var lastText: String = "Agent is working…"
@@ -70,6 +67,10 @@ class AgentForegroundService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
+        if (BackgroundScheduleState.stopped(this)) {
+            stopSelf()
+            return
+        }
         // Recents survival: swiping Ovid from recent apps must NOT stop foreground service.
         // Re-assert the notification, and the wake-lock ONLY if a run is
         // actually in flight (see EXTRA_WAKE) — an idle service must not hold
@@ -83,6 +84,7 @@ class AgentForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         if (action == ACTION_EXIT) {
+            BackgroundScheduleState.stop(this)
             // ACTION_EXIT: stops foreground service completely, releases wake-lock, triggers exit bridge.
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -91,16 +93,19 @@ class AgentForegroundService : Service() {
             return START_NOT_STICKY
         }
         if (action == ACTION_STOP) {
-            // ACTION_STOP: cancels running agent jobs, but keeps foreground service running if configured or if tasks remain.
-            // Dart onAgentStop cancels active runs. We update notification copy without calling stopSelf().
-            // No run is in flight any more, so the wake lock goes too.
+            BackgroundScheduleState.stop(this)
             wantWakeLock = false
             releaseWakeLock()
-            lastText = "Agent stopped"
-            try {
-                startForeground(NOTIFICATION_ID, buildNotification(lastTitle, lastText))
-            } catch (_: Exception) {}
-            return START_STICKY
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            AgentNotificationBridge.stopHandler?.invoke()
+            return START_NOT_STICKY
+        }
+        if (BackgroundScheduleState.stopped(this) || AgentNotificationBridge.scheduleHandler == null) {
+            // A restarted notification service is not a restarted Dart agent.
+            releaseWakeLock()
+            stopSelf()
+            return START_NOT_STICKY
         }
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: lastTitle
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: lastText
@@ -112,30 +117,24 @@ class AgentForegroundService : Service() {
         try {
             startForeground(NOTIFICATION_ID, buildNotification(title, text))
         } catch (e: Exception) {
-            // Permission denial / notification-policy failure must NEVER
-            // crash the app — the agent run continues without the
-            // keep-alive notification. Stay STICKY (never NOT_STICKY here)
-            // so the system restarts the service — with a null intent we
-            // re-foreground below from the last title/text — instead of
-            // letting the agent die in the background. Only the explicit
-            // ACTION_EXIT path below is allowed to be NOT_STICKY.
+            BackgroundScheduleState.constraint(this, "Foreground service unavailable: ${e.message}")
             releaseWakeLock()
-            return START_STICKY
+            stopSelf()
+            return START_NOT_STICKY
         }
         // Hold the CPU awake only while an agent run is in flight; an idle
         // "Ready & Listening" service must not (see EXTRA_WAKE).
         if (wantWakeLock) acquireWakeLock() else releaseWakeLock()
-        // STICKY: if the system kills us under memory pressure, restart —
-        // the Dart side re-syncs notification state on the next event.
-        return START_STICKY
+        // Do not restart a notification-only service after process death.
+        return START_NOT_STICKY
     }
 
     private fun acquireWakeLock() {
         try {
             val now = SystemClock.elapsedRealtime()
             if (wakeLock?.isHeld == true) {
-                // 6h ceiling: refresh before expiry so 24/7 runs never
-                // silently lose the lock (and Doze never throttles them).
+                // Refresh the bounded lock on active-work updates. This does
+                // not exempt the process from Android/OEM runtime restrictions.
                 if (now - wakeLockAcquiredAt < 5 * 60 * 60 * 1000L) return
                 releaseWakeLock()
             }
@@ -190,14 +189,14 @@ class AgentForegroundService : Service() {
         // Stop action → the app's Dart receiver cancels the run.
         val stopPi = PendingIntent.getBroadcast(
             this, 1,
-            Intent(ACTION_STOP).setPackage(packageName),
+            Intent(this, AgentStopReceiver::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         // Exit action → stops the foreground service and cancels agent run.
         val exitPi = PendingIntent.getBroadcast(
             this, 2,
-            Intent(ACTION_EXIT).setPackage(packageName),
+            Intent(this, AgentStopReceiver::class.java).setAction(ACTION_EXIT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 

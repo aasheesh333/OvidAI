@@ -137,6 +137,24 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('desktop pan exposes the right edge with a draggable scrollbar', (tester) async {
+    await pumpWithTab(tester, BrowserTab(url: 'https://example.test/', desktopMode: true));
+    final horizontal = find.byWidgetPredicate((w) =>
+        w is SingleChildScrollView && w.scrollDirection == Axis.horizontal);
+    final bar = find.ancestor(of: horizontal, matching: find.byType(Scrollbar));
+    expect(bar, findsOneWidget);
+    final scrollbar = tester.widget<Scrollbar>(bar);
+    expect(scrollbar.interactive, isTrue);
+    final controller = scrollbar.controller!;
+    expect(controller.position.maxScrollExtent, greaterThan(0));
+    await tester.drag(horizontal, const Offset(-2000, 0));
+    await tester.pumpAndSettle();
+    expect(controller.offset, controller.position.maxScrollExtent);
+    final right = tester.getTopRight(find.byKey(stubKey));
+    expect(right.dx, closeTo(tester.getTopRight(horizontal).dx, 1));
+    expect(tester.getSize(find.byKey(stubKey)), const Size(1280, 800));
+  });
+
   testWidgets('toggling desktop mode changes the laid-out size',
       (tester) async {
     final tab = BrowserTab(url: 'https://example.test/', desktopMode: false);
@@ -150,6 +168,26 @@ void main() {
     await tester.pump();
     expect(tester.getSize(find.byKey(stubKey)), browserDesktopLogicalSize);
     expect(desktopFrameCount(tester), 1, reason: 'desktop: one 1280x800 frame');
+  });
+
+  testWidgets('document scroll reaches bottom after horizontal desktop pan', (tester) async {
+    final vertical = ScrollController();
+    addTearDown(vertical.dispose);
+    browserWebViewBuilderForTest = (_) => SingleChildScrollView(
+      controller: vertical,
+      child: const SizedBox(height: 2400, child: Align(
+        alignment: Alignment.bottomRight,
+        child: Text('Document end', key: Key('document-end')),
+      )),
+    );
+    await pumpWithTab(tester, BrowserTab(url: 'https://example.test/', desktopMode: true));
+    final horizontal = tester.widget<Scrollbar>(find.byType(Scrollbar)).controller!;
+    horizontal.jumpTo(horizontal.position.maxScrollExtent);
+    await tester.pump();
+    await tester.dragFrom(const Offset(200, 700), const Offset(0, -2400));
+    await tester.pumpAndSettle();
+    expect(vertical.offset, vertical.position.maxScrollExtent);
+    expect(find.byKey(const Key('document-end')).hitTestable(), findsOneWidget);
   });
 }
 

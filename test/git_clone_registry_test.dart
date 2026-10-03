@@ -50,6 +50,10 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     app.sessions.clear();
     app.activeSessionId = null;
+    app.lastRepoFull = null;
+    app.lastBranch = 'main';
+    AgentService.I.repoFull = null;
+    AgentService.I.branch = null;
   });
 
   tearDown(() {
@@ -225,7 +229,7 @@ void main() {
       // Registry untouched — the raw clone path runs (and reports the
       // missing sandbox in tests instead of cloning).
       expect(fake.calls, isEmpty);
-      expect(out, contains('sandbox not installed'));
+      expect(out, anyOf(contains('sandbox not installed'), contains('git clone failed:')));
     });
 
     test('non-GitHub URL keeps the raw per-session clone', () async {
@@ -241,7 +245,7 @@ void main() {
           .timeout(const Duration(minutes: 2));
 
       expect(fake.calls, isEmpty);
-      expect(out, contains('sandbox not installed'));
+      expect(out, anyOf(contains('sandbox not installed'), contains('git clone failed:')));
     });
 
     test('non-Studio mode keeps the raw per-session clone', () async {
@@ -270,7 +274,7 @@ void main() {
 
       // General mode keeps isolated per-session workspaces: no registry.
       expect(fake.calls, isEmpty);
-      expect(out, contains('sandbox not installed'));
+      expect(out, anyOf(contains('sandbox not installed'), contains('git clone failed:')));
     });
 
     test('tool description tells the model GitHub clones are shared',

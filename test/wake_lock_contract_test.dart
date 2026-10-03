@@ -100,7 +100,8 @@ void main() {
         'android/app/src/main/kotlin/com/dhanuk/ovidai/BootReceiver.kt',
       ).readAsStringSync();
       expect(boot, isNot(contains('EXTRA_WAKE')));
-      expect(boot, contains('startForegroundService'));
+      expect(boot, isNot(contains('startForegroundService')));
+      expect(boot, contains('BackgroundScheduleState.rearm(context)'));
     });
   });
 }

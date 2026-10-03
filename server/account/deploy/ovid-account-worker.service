@@ -1,0 +1,16 @@
+[Unit]
+Description=Ovid durable account deletion sweep
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ovid-account
+WorkingDirectory=/srv/ovid-account
+EnvironmentFile=/etc/ovid-account/runtime.env
+ExecStart=/srv/ovid-account/venv/bin/python -m server.account.worker
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+TimeoutStartSec=15min

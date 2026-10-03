@@ -14,6 +14,7 @@ import 'package:ovid_ai/core/plugin_registry.dart';
 import 'package:ovid_ai/core/plugin_runtime.dart';
 import 'package:ovid_ai/core/plugin_source_resolver.dart';
 import 'package:ovid_ai/core/skills.dart';
+import 'package:ovid_ai/core/session_lifecycle_service.dart';
 import 'package:ovid_ai/core/state.dart';
 
 // Post-install bootstrap: a plugin installed by the agent must be usable in
@@ -60,12 +61,14 @@ void main() {
   void writeFixture() {
     File('${fixture.path}/.claude-plugin/plugin.json')
       ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode({
-        'name': 'bootkit',
-        'version': '9.9.9',
-        'author': {'name': 'acme'},
-        'description': 'bootstrap fixture',
-      }));
+      ..writeAsStringSync(
+        jsonEncode({
+          'name': 'bootkit',
+          'version': '9.9.9',
+          'author': {'name': 'acme'},
+          'description': 'bootstrap fixture',
+        }),
+      );
     File('${fixture.path}/skills/foo/SKILL.md')
       ..createSync(recursive: true)
       ..writeAsStringSync(
@@ -73,18 +76,20 @@ void main() {
       );
     File('${fixture.path}/hooks/hooks.json')
       ..createSync(recursive: true)
-      ..writeAsStringSync(jsonEncode({
-        'hooks': {
-          'SessionStart': [
-            {
-              'matcher': 'startup',
-              'hooks': [
-                {'type': 'command', 'command': 'echo hi'},
-              ],
-            },
-          ],
-        },
-      }));
+      ..writeAsStringSync(
+        jsonEncode({
+          'hooks': {
+            'SessionStart': [
+              {
+                'matcher': 'startup',
+                'hooks': [
+                  {'type': 'command', 'command': 'echo hi'},
+                ],
+              },
+            ],
+          },
+        }),
+      );
   }
 
   Future<PluginItem> installFixture(String sessionId) async {
@@ -125,31 +130,25 @@ void main() {
     return row;
   }
 
-  test(
-    'agent install mounts skills, syncs version, and fires session_start '
-    'for the installing session',
-    () async {
-      final app = AppState.I;
-      final s = ChatSession(id: 'boot-1', title: 'T', model: 'm');
-      app.sessions.add(s);
-      app.activeSessionId = s.id;
+  test('agent install mounts skills, syncs version, and fires session_start '
+      'for the installing session', () async {
+    final app = AppState.I;
+    final s = ChatSession(id: 'boot-1', title: 'T', model: 'm');
+    app.sessions.add(s);
+    app.activeSessionId = s.id;
 
-      final row = await installFixture(s.id);
+    final row = await installFixture(s.id);
 
-      // Row version follows the manifest, not the transient placeholder.
-      expect(row.version, '9.9.9');
-      // Skill resolves with the frontmatter-stripped body.
-      final skill = SkillService.I.resolveForSession(s.id, 'foo').unique;
-      expect(skill, isNotNull);
-      expect(skill!.content, contains('Foo body.'));
-      expect(skill.content, isNot(startsWith('---')));
-      // This session received the plugin bootstrap context.
-      expect(
-        HookService.I.sessionContextFor(s.id),
-        contains('BOOTSTRAP-CTX'),
-      );
-    },
-  );
+    // Row version follows the manifest, not the transient placeholder.
+    expect(row.version, '9.9.9');
+    // Skill resolves with the frontmatter-stripped body.
+    final skill = SkillService.I.resolveForSession(s.id, 'foo').unique;
+    expect(skill, isNotNull);
+    expect(skill!.content, contains('Foo body.'));
+    expect(skill.content, isNot(startsWith('---')));
+    // This session received the plugin bootstrap context.
+    expect(HookService.I.sessionContextFor(s.id), contains('BOOTSTRAP-CTX'));
+  });
 
   test('.cmd hook entrypoint prefers the extensionless sibling', () async {
     final dir = Directory('${fixture.path}/hooks')..createSync(recursive: true);
@@ -182,6 +181,77 @@ void main() {
     expect(resolved, isNot(contains('.cmd')));
   });
 
+  test(
+    'child startup loads installed skills and executes its own session hook',
+    () async {
+      final app = AppState.I;
+      final parent = ChatSession(
+        id: 'runtime-parent',
+        title: 'Parent',
+        model: 'test-model',
+        providerId: 'ollama-local',
+      );
+      final unrelated = ChatSession(
+        id: 'runtime-other',
+        title: 'Other',
+        model: 'm',
+      );
+      app.sessions.addAll([parent, unrelated]);
+      app.activeSessionId = parent.id;
+      final row = await installFixture(parent.id);
+      SessionLifecycleService.I.resetForTest();
+      SessionLifecycleService.I.activationWaiterForTest = (_) async {};
+      addTearDown(SessionLifecycleService.I.resetForTest);
+      final hookSessions = <String>[];
+      HookService.I.executorForTest = (_, env) async {
+        hookSessions.add(env['PLUGIN_SESSION']!);
+        return jsonEncode({
+          'hookSpecificOutput': {
+            'additionalContext': 'BOOT-${env['PLUGIN_SESSION']}',
+          },
+        });
+      };
+      final requests = <String>[];
+      AgentService.llmOnceForTest = (p, msgs, session, tools) async {
+        requests.add(msgs.map((m) => m['content']).join('\n'));
+        final output = await AgentService.I.dispatchForTest('skill', {
+          'name': 'foo',
+        });
+        AgentService.I.streamToBubbleForTest(session, output);
+        return {'content': output, 'finish_reason': 'stop'};
+      };
+      addTearDown(() => AgentService.llmOnceForTest = null);
+      final pending = AgentService.I.dispatchForTest('dispatch_agent', {
+        'prompt': 'use foo',
+        'label': 'Child',
+      });
+      AgentService.setRunSessionForTest('');
+      final result = await pending;
+      final child = app.childrenOf(parent.id).single;
+      addTearDown(() => AgentService.I.removeSubagentForTest(child.agentId!));
+      expect(result, contains('Foo body.'));
+      expect(hookSessions, [child.id]);
+      expect(requests.single, contains('BOOT-${child.id}'));
+      expect(requests.single, isNot(contains('BOOTSTRAP-CTX')));
+      expect(
+        SkillService.I.resolveForSession(child.id, 'foo').unique,
+        isNotNull,
+      );
+      expect(
+        PluginContributionRegistry.I.isPluginActiveForSession(
+          row.runtimeId!,
+          unrelated.id,
+        ),
+        isFalse,
+      );
+      AgentService.setRunSessionForTest(unrelated.id);
+      expect(
+        await AgentService.I.dispatchForTest('skill', {'name': 'foo'}),
+        isNot(contains('Foo body.')),
+      );
+    },
+  );
+
   test('.cmd without a sibling is left untouched (fail-open)', () {
     const pid = 'acme/cmdsolo';
     PluginContributionRegistry.I.register(
@@ -208,20 +278,22 @@ void main() {
     expect(HookService.I.resolveHookPayload(hook), payload);
   });
 
-  test('stdio connect with no command fails loudly, never spawns npx',
-      () async {
-    final server = McpServer(
-      name: 'no-cmd',
-      author: 't',
-      description: 'missing command',
-      category: 'Custom',
-      command: '',
-      custom: true,
-      transport: 'stdio',
-    );
-    AppState.I.mcpServers.add(server);
-    final msg = await McpService.I.connect(server);
-    expect(msg, contains('declares no command'));
-    expect(McpService.I.isConnected(server.canonicalId), isFalse);
-  });
+  test(
+    'stdio connect with no command fails loudly, never spawns npx',
+    () async {
+      final server = McpServer(
+        name: 'no-cmd',
+        author: 't',
+        description: 'missing command',
+        category: 'Custom',
+        command: '',
+        custom: true,
+        transport: 'stdio',
+      );
+      AppState.I.mcpServers.add(server);
+      final msg = await McpService.I.connect(server);
+      expect(msg, contains('declares no command'));
+      expect(McpService.I.isConnected(server.canonicalId), isFalse);
+    },
+  );
 }

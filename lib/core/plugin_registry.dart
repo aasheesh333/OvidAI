@@ -20,8 +20,8 @@
 ///   bare alias `review` becomes ambiguous — [resolveAlias] then returns
 ///   the exact list of canonical options and the caller must not execute.
 /// * Bare aliases exist only when unique (§4.4).
-/// * Session scoping (§7): a `sessionActive` plugin is visible ONLY in
-///   its `immediateSessionId`; `globalActive`/`degraded` are visible in
+/// * Session scoping (§7): a `sessionActive` plugin is visible in
+///   its `immediateSessionId` and durable children; `globalActive`/`degraded` are visible in
 ///   every session; `pendingGlobal`/`failed`/`disabled` are visible in
 ///   none. Callers resolve by the RUNNING session id — never the
 ///   foreground session.
@@ -34,6 +34,7 @@
 library;
 
 import 'plugin_manifest.dart';
+import 'state.dart';
 
 /// The contribution kind — the segment after `plugin:<plugin-id>/` in a
 /// canonical §4.4 id.
@@ -202,9 +203,15 @@ class _Registration {
 /// scoping. One process-wide instance ([I]) serves the agent roster and
 /// dispatch; tests may build isolated instances.
 class PluginContributionRegistry {
-  PluginContributionRegistry();
+  PluginContributionRegistry({this.sessionLineage});
 
-  static final PluginContributionRegistry I = PluginContributionRegistry();
+  static final PluginContributionRegistry I = PluginContributionRegistry(
+    sessionLineage: (id) => AppState.I.lineageOf(id).map((s) => s.id),
+  );
+
+  /// Only durable ancestors confer configuration; siblings and unrelated
+  /// sessions never do. Isolated registries can omit application lineage.
+  final Iterable<String> Function(String sessionId)? sessionLineage;
 
   /// Insertion-ordered by plugin id (Dart maps keep first-insert order,
   /// so a re-register preserves a plugin's roster position).
@@ -257,7 +264,7 @@ class PluginContributionRegistry {
       _registrations.remove(pluginId) != null;
 
   /// §7 visibility: `globalActive`/`degraded` are visible in every
-  /// session; `sessionActive` ONLY in its `immediateSessionId` (an empty
+  /// session; `sessionActive` in its `immediateSessionId` and descendants (an empty
   /// or missing session id never matches — fail-closed);
   /// `pendingGlobal`/`failed`/`disabled`/unregistered are visible in none.
   bool isPluginActiveForSession(String pluginId, String sessionId) {
@@ -266,7 +273,7 @@ class PluginContributionRegistry {
     return _visible(reg, sessionId);
   }
 
-  static bool _visible(_Registration reg, String sessionId) {
+  bool _visible(_Registration reg, String sessionId) {
     switch (reg.activation) {
       // Degraded stays mounted (optional findings only — spec §4.3);
       // honesty about the degradation is the reporter's job, not a
@@ -276,7 +283,10 @@ class PluginContributionRegistry {
         return true;
       case PluginActivation.sessionActive:
         final sid = reg.immediateSessionId;
-        return sid != null && sid.isNotEmpty && sid == sessionId;
+        return sid != null &&
+            sid.isNotEmpty &&
+            (sid == sessionId ||
+                (sessionLineage?.call(sessionId).contains(sid) ?? false));
       case PluginActivation.pendingGlobal:
       case PluginActivation.failed:
       case PluginActivation.disabled:

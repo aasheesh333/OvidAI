@@ -5,7 +5,7 @@ void main() {
   group('path grants are hierarchical', () {
     test('parent folder covers descendants, not siblings or parents', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/work');
+      store.addPathGrant('s1', '/data/work', recursive: true);
 
       // The folder itself and everything beneath it.
       expect(store.isPathGranted('s1', '/data/work'), isTrue);
@@ -22,7 +22,7 @@ void main() {
 
     test('dot segments and redundant slashes normalize before matching', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/work/');
+      store.addPathGrant('s1', '/data/work/', recursive: true);
       expect(store.isPathGranted('s1', '/data/work/./sub/../f.txt'), isTrue);
       expect(store.isPathGranted('s1', '//data//work//f.txt'), isTrue);
       // Escaping above the grant root is not covered.
@@ -33,6 +33,7 @@ void main() {
       final store = GrantStore();
       store.addPathGrant('s1', '/data/work/notes.txt');
       expect(store.isPathGranted('s1', '/data/work/notes.txt'), isTrue);
+      expect(store.isPathGranted('s1', '/data/work/notes.txt/child'), isFalse);
       expect(store.isPathGranted('s1', '/data/work/other.txt'), isFalse);
       expect(store.isPathGranted('s1', '/data/work'), isFalse);
     });
@@ -71,11 +72,10 @@ void main() {
     });
   });
 
-  group('deny is not persisted', () {
-    test('denied path leaves no grant behind', () {
+  group('unanswered access and revocation', () {
+    test('an unrequested path has no implicit grant', () {
       final store = GrantStore();
-      // A deny records nothing: the user said no, so no grant is added and
-      // there is nothing to serialize or revoke later.
+      // Merely querying the store does not record a decision.
       expect(store.isPathGranted('s1', '/data/secret'), isFalse);
       expect(store.sessionGrantsJson('s1'), isEmpty);
       expect(store.isHostGranted('s1', 'evil.example'), isFalse);
@@ -84,7 +84,7 @@ void main() {
 
     test('revoking removes the grant entirely', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/work');
+      store.addPathGrant('s1', '/data/work', recursive: true);
       expect(store.isPathGranted('s1', '/data/work/f'), isTrue);
       expect(store.revokePathGrant('s1', '/data/work'), isTrue);
       expect(store.isPathGranted('s1', '/data/work/f'), isFalse);
@@ -96,7 +96,7 @@ void main() {
   group('scoping: session vs global', () {
     test('session grant does not leak into other sessions', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/work');
+      store.addPathGrant('s1', '/data/work', recursive: true);
       store.addHostGrant('s1', 'example.com');
       expect(store.isPathGranted('s2', '/data/work/f'), isFalse);
       expect(store.isHostGranted('s2', 'api.example.com'), isFalse);
@@ -111,7 +111,7 @@ void main() {
     // Permissions screen can list and delete grants an older build wrote.
     test('the store class can still express an all-sessions grant', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/work');
+      store.addPathGrant('s1', '/data/work', recursive: true);
       store.addHostGrant(null, 'internal.corp', global: true);
       expect(store.isHostGranted('s1', 'db.internal.corp'), isTrue);
       expect(store.isHostGranted('s2', 'db.internal.corp'), isTrue);
@@ -122,8 +122,8 @@ void main() {
 
     test('clearing a session drops only its grants', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/a');
-      store.addPathGrant('s2', '/data/b');
+      store.addPathGrant('s1', '/data/a', recursive: true);
+      store.addPathGrant('s2', '/data/b', recursive: true);
       store.addHostGrant(null, 'example.com', global: true);
       store.clearSession('s1');
       expect(store.isPathGranted('s1', '/data/a/f'), isFalse);
@@ -135,7 +135,7 @@ void main() {
   group('serialization round-trip', () {
     test('grants survive toJson/fromJson', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/work');
+      store.addPathGrant('s1', '/data/work', recursive: true);
       store.addHostGrant('s1', 'example.com');
       store.addHostGrant(null, 'internal.corp', global: true);
 
@@ -172,8 +172,8 @@ void main() {
       // Mirrors a combined approval card ("Always allow" on several
       // paths): each granted path is checked independently.
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/a');
-      store.addPathGrant('s1', '/data/b');
+      store.addPathGrant('s1', '/data/a', recursive: true);
+      store.addPathGrant('s1', '/data/b', recursive: true);
       expect(store.isPathGranted('s1', '/data/a/f.txt'), isTrue);
       expect(store.isPathGranted('s1', '/data/b/deep/f.txt'), isTrue);
       expect(store.isPathGranted('s1', '/data/c/f.txt'), isFalse);
@@ -185,7 +185,7 @@ void main() {
 
     test('path and host grants coexist independently', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/data/work');
+      store.addPathGrant('s1', '/data/work', recursive: true);
       store.addHostGrant('s1', 'example.com');
       expect(store.isPathGranted('s1', '/data/work/f'), isTrue);
       expect(store.isHostGranted('s1', 'api.example.com'), isTrue);

@@ -31,8 +31,9 @@ void main() {
     AppState.resetTestInstance();
   });
 
-  testWidgets('omnibar shows title until tapped, then reveals live URL',
-      (tester) async {
+  testWidgets('omnibar shows title until tapped, then reveals live URL', (
+    tester,
+  ) async {
     final tab = BrowserTab(url: 'https://example.test/live')
       ..title = 'Live page title';
     AgentService.I.browserTabs.add(tab);
@@ -48,7 +49,31 @@ void main() {
 
     await tester.tap(field);
     await tester.pump();
-    expect(tester.widget<TextField>(field).controller!.text,
-        'https://example.test/live');
+    expect(
+      tester.widget<TextField>(field).controller!.text,
+      'https://example.test/live',
+    );
+  });
+
+  testWidgets('Google navigation never shows a tip, external browser remains', (
+    tester,
+  ) async {
+    final tab = BrowserTab(url: 'https://example.test');
+    AgentService.I.browserTabs.add(tab);
+    await tester.pumpWidget(
+      MaterialApp(theme: Aether.theme(), home: const BrowserScreen()),
+    );
+    for (final url in [
+      'https://accounts.google.com/signin',
+      'https://accounts.google.com/v3/signin/identifier',
+    ]) {
+      tab.url = url;
+      AgentService.I.selectBrowserTab(0);
+      await tester.pump();
+      expect(find.byType(SnackBar), findsNothing);
+      expect(find.byType(MaterialBanner), findsNothing);
+      expect(find.textContaining('Tip:'), findsNothing);
+      expect(find.byTooltip('Open in browser'), findsOneWidget);
+    }
   });
 }

@@ -89,7 +89,9 @@ void main() {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       final i = src.indexOf('final budget = _toolTimeoutFor(name);');
       expect(i, greaterThan(-1));
-      final region = src.substring(i, i + 2200);
+      final end = src.indexOf('if (toolMsg != null)', i);
+      expect(end, greaterThan(i));
+      final region = src.substring(i, end);
 
       expect(region, contains('SandboxService.callZoneKey'));
       expect(region, contains('killCallProcesses(callKey)'));

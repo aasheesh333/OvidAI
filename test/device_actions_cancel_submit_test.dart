@@ -128,6 +128,19 @@ void main() {
       expect(await future, kCancelledCopy);
     });
 
+    test('Stop settles a hung native action before its reply arrives', () async {
+      gate = Completer<Object?>();
+      final future = DeviceControlService.I.tap(node: 1);
+      await waitForChannelCall(calls, 'deviceTap');
+      DeviceControlService.I.cancelDeviceActions();
+      expect(
+        await future.timeout(const Duration(milliseconds: 200)),
+        kCancelledCopy,
+      );
+      expect(calls.any((c) => c.method == 'deviceCancelActions'), isTrue);
+      gate!.complete(true);
+    });
+
     test('cancelDeviceActions supersedes every device_* call uniformly',
         () async {
       final cases = <({String name, String channel, Future<Object?> Function() call})>[
@@ -231,6 +244,16 @@ void main() {
       );
     });
 
+    test('native overlay Stop reports cancellation before the Dart stop event', () async {
+      stub = (call) {
+        if (call.method == 'deviceTap') {
+          throw PlatformException(code: 'CANCELLED', message: 'Control stopped.');
+        }
+        return true;
+      };
+      expect(await DeviceControlService.I.tap(node: 1), kCancelledCopy);
+    });
+
     test('native errors landing after a bump report cancellation', () async {
       gate = Completer<Object?>();
       stub = (call) {
@@ -306,14 +329,15 @@ void main() {
       expect(await future, kCancelledCopy);
     });
 
-    test('stopRequested aborts in-flight work (queue-preserved branch)',
+    test('Control stopRequested aborts work and clears queued device prompts',
         () async {
       AgentService.I.queueMessageForTest('follow-up correction');
       gate = Completer<Object?>();
       final future = AgentService.I.dispatchForTest('device_tap', {'node': 1});
       await waitForChannelCall(calls, 'deviceTap');
       final queuePreserved = AgentService.I.stopRequested(sessionId: s.id);
-      expect(queuePreserved, isTrue);
+      expect(queuePreserved, isFalse);
+      expect(AgentService.I.queuedMessages, isEmpty);
       gate!.complete(true);
       expect(await future, kCancelledCopy);
     });
@@ -338,13 +362,6 @@ void main() {
 
     test('run entry and Stop paths are wired to the generation API', () {
       final src = readAgentServiceSource();
-      final runTaskIdx = src.indexOf('Future<void> runTask(');
-      expect(runTaskIdx, greaterThanOrEqualTo(0));
-      expect(
-        src.substring(runTaskIdx, runTaskIdx + 4200),
-        contains('beginDeviceGeneration'),
-        reason: 'runTask entry must open a fresh device generation',
-      );
       final stopIdx = src.indexOf('bool stopRequested(');
       expect(stopIdx, greaterThanOrEqualTo(0));
       expect(

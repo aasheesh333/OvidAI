@@ -464,7 +464,13 @@ void main() {
     await expectLater(commit, throwsA(isA<StateError>()));
     expect(putRequested, isFalse);
     expect(RepoCache.I.repoFull, 'owner/second');
+    expect(RepoCache.I.hasPending, isFalse);
+    expect(RepoCache.I.read('README.md'), isNull);
+    // The interrupted commit retains its draft in the original working copy,
+    // without offering that draft for commit to the newly selected repository.
+    RepoCache.I.bind('owner/first', 'token');
     expect(RepoCache.I.hasPending, isTrue);
+    expect(RepoCache.I.read('README.md'), 'updated');
     client.close();
   });
 
@@ -1962,9 +1968,17 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       'attachFile: stages, copies to workspace, clears; errors safe',
       () async {
         final agent = AgentService.I;
+        final app = AppState.I;
+        final previousSession = app.activeSessionId;
+        final session = ChatSession(
+          id: 'attachment-copy-test',
+          title: 'Attachments',
+          model: 'test-model',
+        );
+        app.sessions.add(session);
+        app.activeSessionId = session.id;
         final tmp = Directory.systemTemp.createTempSync('ovid_att');
-        // Unique name per run — the session workspace persists across tests,
-        // and attachFile de-dupes by suffixing when the name already exists.
+        // The session workspace persists across tests.
         final unique = 'notes_${DateTime.now().microsecondsSinceEpoch}.txt';
         try {
           final src = File('${tmp.path}/$unique')
@@ -1991,6 +2005,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         } finally {
           tmp.deleteSync(recursive: true);
           agent.clearAttachment();
+          app.sessions.remove(session);
+          app.activeSessionId = previousSession;
         }
       },
     );
@@ -6309,6 +6325,10 @@ block</pre>
     });
 
     test('FTS5 search: ranked hits with snippets + session filter', () async {
+      final app = AppState.I;
+      final sharedBefore = app.shareSessionMemory;
+      app.shareSessionMemory = true;
+      addTearDown(() => app.shareSessionMemory = sharedBefore);
       final s1 = newSession('sd-f1');
       s1.messages.addAll([
         Message(role: 'user', content: 'fix the kafka consumer rebalance bug'),
@@ -6327,7 +6347,7 @@ block</pre>
         'limit': 10,
       });
       expect(res, contains('sd-f1'));
-      expect(res, contains('sd-f2'), reason: 'cross-session by default');
+      expect(res, contains('sd-f2'), reason: 'cross-session when sharing is enabled');
       expect(res, contains('rebalance'), reason: 'snippet excerpts shown');
 
       // scope:this — only the run session's rows survive.
@@ -7845,7 +7865,7 @@ block</pre>
       },
     );
 
-    test('chat Stop is a hard stop; notification Stop stays session-scoped', () {
+    test('chat Stop is session-local; notification Stop latches background work', () async {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       expect(src, contains('void cancelAllRuns()'));
       expect(src, contains('killAllProcesses'));
@@ -7861,16 +7881,24 @@ block</pre>
         chat,
         matches(RegExp(r'stopRequested\(\s*sessionId:\s*sessionId,?\s*\)')),
       );
-      // Notification Stop still targets the displayed session only.
-      final notif = File(
-        'lib/core/agent_notification_service.dart',
-      ).readAsStringSync();
-      expect(
-        notif,
-        matches(RegExp(r'stopRequested\(\s*sessionId:\s*sessionId,?\s*\)')),
-      );
-      // Notification Exit remains the explicit global panic path.
-      expect(notif, contains('cancelAllRuns'));
+      final notif = AgentNotificationService.I;
+      notif.resetForTest();
+      AgentService.I.schedules.stopped = false;
+      addTearDown(() {
+        notif.resetForTest();
+        AgentService.I.schedules.stopped = false;
+      });
+      final task = AgentService.I.schedules.create({
+        'prompt': 'background work', 'after_seconds': 60,
+      });
+      app.sessions.add(ChatSession(id: 'notification-stop', title: 'Stop',
+        model: 'm', schedules: [task]));
+      await notif.stopBackground();
+      expect(notif.backgroundStopped, isTrue);
+      expect(AgentService.I.schedules.stopped, isTrue);
+      expect(task['status'], 'paused');
+      notif.agentIdle();
+      expect(notif.activeForTest, isFalse);
     });
 
     test('run start immediately raises the foreground service', () {
@@ -12162,6 +12190,14 @@ You are an expert security auditor reviewing code for vulnerabilities.
     });
 
     group('Task 6: Recents survival + stop vs exit lifecycle', () {
+      setUp(() {
+        AgentNotificationService.I.resetForTest();
+        AgentService.I.schedules.stopped = false;
+      });
+      tearDown(() {
+        AgentNotificationService.I.resetForTest();
+        AgentService.I.schedules.stopped = false;
+      });
       test('idle only stops service when no runs active', () async {
         AgentNotificationService.I.activeForTest = true;
         AgentNotificationService.I.supportedForTest = true;

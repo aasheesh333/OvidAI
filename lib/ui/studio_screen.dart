@@ -55,6 +55,9 @@ studioListBranchesOverrideForTest;
 @visibleForTesting
 Future<void> Function()? studioRepoSyncOverrideForTest;
 
+@visibleForTesting
+GlobalRepoRegistry? studioRegistryOverrideForTest;
+
 /// Test seam: same as [studioRepoSyncOverrideForTest] but receives the
 /// progress sink, so a test can assert that Studio surfaces [RepoCache.sync]'s
 /// `onLine` callback instead of dropping it. The plain override wins when both
@@ -128,6 +131,7 @@ class _StudioScreenState extends State<StudioScreen> {
   /// of fighting the user's last decision on the old geometry.
   bool? _showFilesOverride;
   bool _syncing = false;
+  bool _resyncRequested = false;
   bool _committing = false;
   bool _handledInitialAuth = false;
 
@@ -135,6 +139,7 @@ class _StudioScreenState extends State<StudioScreen> {
   String? _syncError;
   String? _syncErrorDetail;
   String? _cloneStatus;
+  String? _workspaceKey;
 
   /// Live sync progress: a human line plus the parsed 0..1 fraction.
   String? _syncProgress;
@@ -160,19 +165,37 @@ class _StudioScreenState extends State<StudioScreen> {
   @override
   void initState() {
     super.initState();
+    final s = AppState.I.activeSession;
+    _workspaceKey = '${s?.id}|${s?.repo}|${s?.branch}|${s?.workspaceFolder}';
     GitHubService.I.addListener(_handleInitialAuth);
+    AppState.I.addListener(_onWorkspaceChanged);
     // Opening Studio is an explicit "try again now". The automatic restore
     // backoff runs out after ~2.5 minutes and nothing re-arms it, so a
     // secure-storage hiccup longer than that left this screen signed out for the
     // rest of the process. A UI-initiated retry restarts the window.
     unawaited(GitHubService.I.retryRestoreFromUi());
     WidgetsBinding.instance.addPostFrameCallback((_) => _handleInitialAuth());
+    if (s?.workspaceFolder != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _autoSync(); });
+    }
   }
 
   @override
   void dispose() {
     GitHubService.I.removeListener(_handleInitialAuth);
+    AppState.I.removeListener(_onWorkspaceChanged);
     super.dispose();
+  }
+
+  void _onWorkspaceChanged() {
+    final s = AppState.I.activeSession;
+    final key = '${s?.id}|${s?.repo}|${s?.branch}|${s?.workspaceFolder}';
+    if (_workspaceKey == key) return;
+    _workspaceKey = key;
+    if (_cloneStatus != null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _cloneStatus == null) _autoSync();
+    });
   }
 
   void _handleInitialAuth() {
@@ -251,7 +274,13 @@ class _StudioScreenState extends State<StudioScreen> {
 
   Future<void> _autoSync() async {
     final repo = _repo;
-    if (repo == null || _syncing) return;
+    final session = AppState.I.activeSession;
+    final folder = session?.workspaceFolder;
+    if (_syncing) {
+      _resyncRequested = true;
+      return;
+    }
+    if (repo == null && folder == null) return;
     setState(() {
       _syncing = true;
       _syncError = null;
@@ -262,10 +291,11 @@ class _StudioScreenState extends State<StudioScreen> {
     StudioFailure? failure;
     try {
       RepoCache.I.bind(
-        repo,
-        GitHubService.I.token!,
+        repo ?? '',
+        GitHubService.I.token ?? '',
         branch: AgentService.I.sessionBranch,
         sessionId: AppState.I.activeSession?.id,
+        workspaceFolder: folder,
       );
       await _runSync();
     } catch (e) {
@@ -287,6 +317,10 @@ class _StudioScreenState extends State<StudioScreen> {
       });
       showStudioToast(context, failure.message, error: true);
     }
+    if (_resyncRequested) {
+      _resyncRequested = false;
+      await _autoSync();
+    }
   }
 
   /// After a repo+branch is picked, ask where this chat's working copy
@@ -301,9 +335,8 @@ class _StudioScreenState extends State<StudioScreen> {
   /// Either way the session is bound to the working copy. Skipped when the
   /// session already has a binding or a pinned folder; dismissing the
   /// dialog keeps the default session-sandbox workspace.
-  Future<void> _offerCloneTarget(String repo, String branch) async {
-    final s = AppState.I.activeSession;
-    if (!mounted || s == null) return;
+  Future<bool> _offerCloneTarget(ChatSession s, String repo, String branch) async {
+    if (!mounted) return false;
     final sid = s.sandboxId ?? s.id;
     // Private repos need the OAuth token at clone time.
     GlobalRepoRegistry.gitTokenProvider ??= () => GitHubService.I.token;
@@ -318,7 +351,7 @@ class _StudioScreenState extends State<StudioScreen> {
     // the sandbox env (PATH, GIT_EXEC_PATH, GIT_SSL_CAINFO, HOME).
     GlobalRepoRegistry.cloneRunnerOverride ??= _sandboxGitClone;
     final reg = await GlobalRepoRegistry.instance();
-    if (!mounted) return;
+    if (!mounted) return false;
     // Already working in the clone for THIS repo+branch? Then there is nothing
     // to offer.
     //
@@ -328,10 +361,12 @@ class _StudioScreenState extends State<StudioScreen> {
     // inside repo A's folder while the repo bar and the API view showed B.
     final existing = s.workspaceFolder;
     final bound = reg.boundWorkspaceFor(sid);
-    final current = bound ??
-        (existing != null && existing.isNotEmpty ? existing : null);
-    if (current != null && _folderMatchesRepo(current, repo, branch)) {
-      return;
+    final current =
+        (existing != null && existing.isNotEmpty ? existing : null) ?? bound;
+    if (current != null && GlobalRepoRegistry.checkoutMatches(current, repo, branch)) {
+      await reg.bindSession(sid, repo, branch, current);
+      AppState.I.setSessionWorkspaceFolder(current, sessionId: s.id);
+      return true;
     }
     final choice = await showStudioSheet<String>(
       context,
@@ -361,11 +396,11 @@ class _StudioScreenState extends State<StudioScreen> {
         ],
       ),
     );
-    if (!mounted || choice == null) return;
+    if (!mounted || choice == null) return false;
     if (choice == 'session') {
-      await _cloneIntoRegistry(reg, sid, repo, branch);
+      return _cloneIntoRegistry(reg, sid, repo, branch);
     } else {
-      await _cloneIntoPickedFolder(reg, sid, repo, branch);
+      return _cloneIntoPickedFolder(reg, sid, repo, branch);
     }
   }
 
@@ -437,57 +472,28 @@ class _StudioScreenState extends State<StudioScreen> {
     }
   }
 
-  /// "Session clone": clone-once into the global registry (registry hit →
-  /// same folder, no re-clone), then bind this session's workspace to it.
-  /// Moves the session's working copy to [branch], cloning it once if needed.
-  ///
-  /// CLONE-ONCE (2026-09-24): `_autoSync` rebinds only the API-based RepoCache.
-  /// Without this, picking a new branch left the file tree and editor showing
-  /// branch B while the on-disk clone, the registry binding and the pinned
-  /// `workspaceFolder` all still pointed at branch A — and a later agent
-  /// `git_clone` with no explicit branch used `sessionBranch = B`, missed the
-  /// index, and created a SECOND global clone. "Exactly once" had quietly become
-  /// "once per (repo, branch) pair, plus a stale working copy".
-  ///
-  /// Only sessions that actually work in a registry clone are repointed: a
-  /// session pinned to an arbitrary local folder must not be hijacked into one.
-  /// True when [folder] is the registry clone for [repo]@[branch] — i.e. its
-  /// directory name is `GlobalRepoRegistry.folderNameFor(repo, branch)`.
-  ///
-  /// This is what distinguishes "already working in this repo's clone" (skip the
-  /// offer) from "inherited some OTHER repo's clone as a pinned folder" (must
-  /// re-offer). The old check could not tell them apart, so a repo switch was
-  /// silently skipped and the session kept reading and writing inside the
-  /// previous repo's directory while the repo bar showed the new one.
-  static bool _folderMatchesRepo(String folder, String repo, String branch) {
-    final parts = folder
-        .split(RegExp(r'[/\\]'))
-        .where((p) => p.isNotEmpty)
-        .toList();
-    if (parts.isEmpty) return false;
-    return parts.last == GlobalRepoRegistry.folderNameFor(repo, branch);
-  }
-
-  Future<void> _rebindCloneToBranch(String repo, String branch) async {
-    final s = AppState.I.activeSession;
-    if (s == null) return;
+  /// Prepare the selected branch before publishing it to the session. Shared
+  /// clones stay in the registry; local clones stay under the chosen parent.
+  /// The previous checkout (and its local work) is retained on either outcome.
+  Future<void> _rebindCloneToBranch(ChatSession s, String repo, String branch) async {
     final sid = s.sandboxId ?? s.id;
-    try {
-      final reg = await GlobalRepoRegistry.instance();
-      // Remember the choice per repo BEFORE the binding check: an unbound
-      // session still has a branch preference that the next re-pick of this
-      // repo should honour instead of resetting to the repository default.
-      await reg.rememberBranch(repo, branch);
-      if (reg.boundWorkspaceFor(sid) == null) return;
-      if (!mounted) return;
-      await _cloneIntoRegistry(reg, sid, repo, branch);
-    } catch (_) {
-      // A failed rebind must not break the branch switch: the API view already
-      // moved, and _cloneIntoRegistry reports its own failure via a toast.
+    final reg = studioRegistryOverrideForTest ?? await GlobalRepoRegistry.instance();
+    final current = s.workspaceFolder ?? reg.boundWorkspaceFor(sid);
+    if (current != null) {
+      final String path;
+      if (reg.isSharedWorkspace(current)) {
+        path = await reg.ensureCloned(repo, branch);
+      } else {
+        path = '${Directory(current).parent.path}/${GlobalRepoRegistry.folderNameFor(repo, branch)}';
+        await reg.cloneRepo(repo, branch, path);
+      }
+      await reg.bindSession(sid, repo, branch, path);
+      AppState.I.setSessionWorkspaceFolder(path, sessionId: s.id);
     }
+    await reg.rememberBranch(repo, branch);
   }
 
-  Future<void> _cloneIntoRegistry(
+  Future<bool> _cloneIntoRegistry(
     GlobalRepoRegistry reg,
     String sid,
     String repo,
@@ -497,10 +503,14 @@ class _StudioScreenState extends State<StudioScreen> {
     try {
       final path = await reg.ensureCloned(repo, branch);
       await reg.bindSession(sid, repo, branch, path);
-      AppState.I.setSessionWorkspaceFolder(path);
+      final session = AppState.I.sessions.where((s) => (s.sandboxId ?? s.id) == sid).firstOrNull;
+      if (session == null) return false;
+      AppState.I.setSessionWorkspaceFolder(path, sessionId: session.id);
       _toast('Working copy: ${path.split('/').last}');
+      return true;
     } catch (e) {
       _fail(e, 'Clone failed');
+      return false;
     } finally {
       if (mounted) setState(() => _cloneStatus = null);
     }
@@ -509,7 +519,7 @@ class _StudioScreenState extends State<StudioScreen> {
   /// "Local folder clone": the user picks a device folder; the repo is
   /// really cloned (with `git clone -b <branch>`) into a sanitized
   /// subfolder there, and the session workspace is bound to that subfolder.
-  Future<void> _cloneIntoPickedFolder(
+  Future<bool> _cloneIntoPickedFolder(
     GlobalRepoRegistry reg,
     String sid,
     String repo,
@@ -518,18 +528,20 @@ class _StudioScreenState extends State<StudioScreen> {
     final dir = await _pickWritableFolder(
       dialogTitle: 'Pick a folder to clone $repo into',
     );
-    if (!mounted || dir == null) return;
+    if (!mounted || dir == null) return false;
     final dest = '$dir/${GlobalRepoRegistry.folderNameFor(repo, branch)}';
     setState(() => _cloneStatus = 'Cloning $repo@$branch …');
     try {
-      final destDir = Directory(dest);
-      if (destDir.existsSync()) await destDir.delete(recursive: true);
       await reg.cloneRepo(repo, branch, dest);
       await reg.bindSession(sid, repo, branch, dest);
-      AppState.I.setSessionWorkspaceFolder(dest);
+      final session = AppState.I.sessions.where((s) => (s.sandboxId ?? s.id) == sid).firstOrNull;
+      if (session == null) return false;
+      AppState.I.setSessionWorkspaceFolder(dest, sessionId: session.id);
       _toast('Working copy: ${dest.split('/').last}');
+      return true;
     } catch (e) {
       _fail(e, 'Clone failed');
+      return false;
     } finally {
       if (mounted) setState(() => _cloneStatus = null);
     }
@@ -570,7 +582,8 @@ class _StudioScreenState extends State<StudioScreen> {
     );
     if (!mounted || choice == null) return;
     if (choice == 'sandbox') {
-      AppState.I.setSessionWorkspaceFolder(null);
+      await (await GlobalRepoRegistry.instance()).unbindSession(s.sandboxId ?? s.id);
+      AppState.I.setSessionWorkspaceFolder(null, sessionId: s.id);
       _toast('Working in the session sandbox.');
       return;
     }
@@ -579,9 +592,12 @@ class _StudioScreenState extends State<StudioScreen> {
 
   /// Picks a directory and pins it as the active session's working folder.
   Future<void> _pickAndPinFolder({required String dialogTitle}) async {
+    final session = AppState.I.activeSession;
     final path = await _pickWritableFolder(dialogTitle: dialogTitle);
-    if (!mounted || path == null) return;
-    AppState.I.setSessionWorkspaceFolder(path);
+    if (!mounted || path == null || session == null) return;
+    await (await GlobalRepoRegistry.instance()).unbindSession(session.sandboxId ?? session.id);
+    AppState.I.setSessionWorkspaceFolder(path, sessionId: session.id);
+    await _autoSync();
     _toast('Working folder: ${path.split('/').last}');
   }
 
@@ -652,6 +668,8 @@ class _StudioScreenState extends State<StudioScreen> {
   }
 
   Future<void> _pickRepo() async {
+    final session = AppState.I.activeSession;
+    if (session == null) return;
     if (!GitHubService.I.isLoggedIn) {
       showGithubLoginSheet(context);
       return;
@@ -668,21 +686,21 @@ class _StudioScreenState extends State<StudioScreen> {
         (r) => repoFullNameOf(r) == picked,
         orElse: () => const <String, dynamic>{},
       );
-      AgentService.I.sessionRepoFull = picked;
       // A new repo starts on its own default branch — never the previous
       // repo's branch, whose ref may not exist (tree fetch would 404).
       // Honour the branch the user chose for THIS repo before, instead of
       // resetting to the repository default on every re-pick.
       final reg2 = await GlobalRepoRegistry.instance();
-      AgentService.I.sessionBranch =
-          reg2.branchFor(picked) ?? branchForPickedRepo(pickedRepo);
-      await reg2.rememberBranch(picked, AgentService.I.sessionBranch);
-      await _autoSync();
+      final branch = reg2.branchFor(picked) ?? branchForPickedRepo(pickedRepo);
       // Freshly picked repo+branch → offer a real working copy: a
       // clone-once session clone, or a clone into a picked device folder.
       // A new session picking an already-cloned repo+branch hits the
       // registry and reuses the SAME folder (no re-clone).
-      await _offerCloneTarget(picked, AgentService.I.sessionBranch);
+      if (!await _offerCloneTarget(session, picked, branch)) return;
+      AppState.I.setRepoForSession(session.id, picked);
+      AppState.I.setBranchForSession(session.id, branch);
+      await reg2.rememberBranch(picked, branch);
+      await _autoSync();
     } catch (e) {
       _fail(e, null);
     }
@@ -691,8 +709,9 @@ class _StudioScreenState extends State<StudioScreen> {
   /// Change the branch half of the `(repo, branch)` binding, then re-sync so
   /// reads/commits target the chosen ref.
   Future<void> _pickBranch() async {
+    final session = AppState.I.activeSession;
     final repo = _repo;
-    if (repo == null || !GitHubService.I.isLoggedIn) return;
+    if (repo == null || session == null || !GitHubService.I.isLoggedIn) return;
     final parts = repo.split('/');
     if (parts.length != 2 || parts.any((p) => p.isEmpty)) return;
     try {
@@ -706,12 +725,15 @@ class _StudioScreenState extends State<StudioScreen> {
         child: StudioBranchSheet(branches: branches, current: current),
       );
       if (picked != null && picked != current) {
-        AgentService.I.sessionBranch = picked;
+        setState(() => _cloneStatus = 'Switching to $picked …');
+        await _rebindCloneToBranch(session, repo, picked);
+        AppState.I.setBranchForSession(session.id, picked);
         await _autoSync();
-        await _rebindCloneToBranch(repo, picked);
       }
     } catch (e) {
-      _fail(e, 'Branch list failed');
+      _fail(e, 'Branch switch failed');
+    } finally {
+      if (mounted) setState(() => _cloneStatus = null);
     }
   }
 

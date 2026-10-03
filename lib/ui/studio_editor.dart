@@ -8,6 +8,7 @@ import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
 import '../core/theme.dart';
 import 'studio_layout.dart';
+import 'studio_errors.dart';
 
 // ── Studio editor ───────────────────────────────────────────────────────────
 // Extracted from studio_screen.dart and fixed (2026-09-30 audit):
@@ -223,6 +224,7 @@ class _StudioEditorState extends State<StudioEditor> {
   bool _findOpen = false;
   List<TextRange> _matches = const [];
   int _matchIndex = 0;
+  String _lastQuery = '';
 
   TextEditingController? get _ctrl => _buffers[_boundPath];
 
@@ -360,6 +362,9 @@ class _StudioEditorState extends State<StudioEditor> {
 
   // ── find ────────────────────────────────────────────────────────────────
   void _onQueryChanged() {
+    if (_lastQuery == _findCtrl.text) return;
+    _lastQuery = _findCtrl.text;
+    _matchIndex = 0;
     _recomputeMatches();
     if (_matches.isNotEmpty) _selectMatch(_matchIndex);
     _refresh();
@@ -438,7 +443,14 @@ class _StudioEditorState extends State<StudioEditor> {
     final path = _boundPath;
     final ctrl = _buffers[path];
     if (path == null || ctrl == null) return;
-    await AgentService.I.saveStudioFile(path, ctrl.text);
+    try {
+      await AgentService.I.saveStudioFile(path, ctrl.text);
+    } catch (error) {
+      if (mounted) {
+        showStudioToast(context, StudioFailure.of(error).message, error: true);
+      }
+      return;
+    }
     if (!mounted) return;
     setState(() => _dirty = false);
     showStudioToast(context, 'Saved ${path.split('/').last} to the workspace');

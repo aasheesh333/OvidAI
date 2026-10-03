@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ovid_ai/core/hook_service.dart';
@@ -97,32 +95,5 @@ void main() {
     });
   });
 
-  group('the subagent loop honours the block', () {
-    final src = File('lib/core/agent_service.dart').readAsStringSync();
-
-    test('the stop point consults the hook and is bounded', () {
-      final i = src.indexOf('Future<void> _runSubagentSession(');
-      expect(i, greaterThanOrEqualTo(0));
-      final body = src.substring(i, i + 4000);
-      expect(body, contains('_subagentStopBlockReason(child, sub)'));
-      expect(body, contains('stopBlocks < _maxSubagentStopBlocks'),
-          reason: 'a hook that always blocks must not spin the child forever');
-    });
-
-    test('a natural stop does not fire subagent_end twice', () {
-      final i = src.indexOf('Future<void> _runSubagentSession(');
-      final body = src.substring(i, i + 9000);
-      expect(body, contains('if (!endHookFired &&'),
-          reason: 'the settlement fire must be skipped when the stop-point '
-              'gate already fired the same event');
-    });
-
-    test('the blocking check fails open', () {
-      final i = src.indexOf('Future<String?> _subagentStopBlockReason(');
-      expect(i, greaterThanOrEqualTo(0));
-      final body = src.substring(i, src.indexOf('\n  }', i));
-      expect(body, contains('return res.blockedReason;'));
-      expect(body, contains("Diag.swallow('agent_service.subagentStopHook'"));
-    });
-  });
+  // Actual loop/settlement behavior is exercised in p2_subagent_races_test.
 }

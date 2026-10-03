@@ -28,6 +28,7 @@ class StudioShellSession extends ChangeNotifier {
   int _cmdSeq = 0;
   String? _pendingToken;
   String? _shellSid;
+  String? _workspace;
   bool _disposed = false;
   Timer? _watchdog;
 
@@ -62,7 +63,15 @@ class StudioShellSession extends ChangeNotifier {
     String cmd, {
     required String sid,
     required PtySpawner spawner,
+    String? workspace,
   }) async {
+    if (_workspace != workspace && _shellSid != null) {
+      await sub?.cancel();
+      sub = null;
+      shell = null;
+      await PtyPool.I.discard(_shellSid!, tab: tabId, owner: PtyPool.studioOwner);
+    }
+    _workspace = workspace;
     sessionId = sid;
     PtyShell? s;
     try {

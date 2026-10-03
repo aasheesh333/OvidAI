@@ -23,6 +23,10 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -67,6 +71,7 @@ android {
         }
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -111,6 +116,11 @@ tasks.matching { it.name.startsWith("uploadCrashlytics") }.configureEach {
     enabled = false
 }
 
+// Resource-backed host tests consume Flutter's merged assets under AGP 9.
+tasks.matching { it.name == "packageDebugUnitTestForUnitTest" }.configureEach {
+    dependsOn("copyFlutterAssetsDebug")
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
@@ -123,6 +133,9 @@ flutter {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    testImplementation("org.robolectric:robolectric:4.14.1")
     // Desktop-mode client hints: WebSettingsCompat.setUserAgentMetadata and
     // WebViewCompat.addDocumentStartJavaScript live here. webview_flutter_android
     // depends on webkit with `implementation`, so it is NOT on this module's

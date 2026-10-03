@@ -30,6 +30,7 @@ void main() {
   tearDown(() {
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.appCheckTokenProvider = null;
+    OvidCloudService.httpClientFactoryForTest = null;
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
   });
@@ -155,11 +156,86 @@ void main() {
     expect(usage.dailySpentUsd, closeTo(0.42, 1e-9));
     expect(usage.dailyRemainingUsd, closeTo(2.08, 1e-9));
     expect(usage.requestsToday, 7);
-    expect(usage.isMonthly, isTrue);
+    expect(usage.budgetWindow, '30d');
     expect(usage.remainingPct, closeTo(0.832, 1e-9));
     expect(usage.models, hasLength(2));
     expect(usage.models.first.model, 'auto');
-    expect(usage.models[1].per1mOutput, closeTo(75, 1e-6));
+    expect(usage.models[1].remainingPct, closeTo(0.832, 1e-9));
     client.close();
+  });
+
+  test('missing or invalid remaining usage stays unknown, never derived', () {
+    for (final value in [null, -0.1, 1.1, double.nan, double.infinity]) {
+      final usage = OvidUsage.fromJson({
+        'daily_budget_usd': 45,
+        'daily_spent_usd': 9,
+        'remaining_pct': ?value,
+      });
+      expect(usage.remainingFraction, isNull);
+      expect(usage.budgetWindow, isEmpty);
+    }
+  });
+
+  test('server fraction wins over dollar fields and tier multiplier', () {
+    final usage = OvidUsage.fromJson({
+      'tier': '15x',
+      'daily_budget_usd': 45,
+      'daily_spent_usd': 9,
+      'remaining_pct': 0.23,
+      'budget_window': 'server-defined',
+    });
+    expect(usage.remainingFraction, 0.23);
+    expect(usage.budgetWindow, 'server-defined');
+    expect(usage.multiplier, 15);
+    expect(3 * ovidPlanMultiplier('15x'), 45);
+    expect(ovidPlanMultiplier('3x'), 3);
+    expect(ovidPlanMultiplier('7x'), 7);
+  });
+
+  test('model usage preserves independent server fractions and unknowns', () {
+    for (final value in [null, -1.0, 2.0, double.nan, double.infinity]) {
+      expect(
+        OvidModelUsage.fromJson({
+          'model': 'auto',
+          'remaining_pct': ?value,
+        }).remainingFraction,
+        isNull,
+      );
+    }
+    for (final value in [0.0, 0.37, 1.0]) {
+      expect(
+        OvidModelUsage.fromJson({
+          'model': 'auto',
+          'remaining_pct': value,
+        }).remainingFraction,
+        value,
+      );
+    }
+  });
+
+  test('unavailable and malformed usage never produces a snapshot', () async {
+    for (final response in [
+      http.Response('unavailable', 503),
+      http.Response('not json', 200),
+    ]) {
+      final client = MockClient((_) async => response);
+      expect(await OvidCloudService.I.fetchUsage(client: client), isNull);
+      client.close();
+    }
+  });
+
+  test('upgrade requires explicit server success and matching tier', () async {
+    for (final body in [
+      <String, dynamic>{},
+      {'ok': false, 'tier': '15x'},
+      {'ok': true, 'tier': '7x'},
+    ]) {
+      final client = MockClient(
+        (_) async => http.Response(jsonEncode(body), 200),
+      );
+      expect(await OvidCloudService.I.upgrade('15x', client: client), isNull);
+      expect(AppState.I.ovidCloudTier, 'free');
+      client.close();
+    }
   });
 }

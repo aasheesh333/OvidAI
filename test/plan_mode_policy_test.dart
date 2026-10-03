@@ -323,6 +323,9 @@ void main() {
         'repo_sync',
         'dispatch_agent',
         'generate_image',
+        'edit_image',
+        'resize_image',
+        'crop_image',
       ]) {
         // Assert the POLICY first. `repo_sync` (GitHub-sync toggle) and
         // `generate_image` (Image Studio plugin) are only in the base roster

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -76,6 +78,46 @@ void main() {
       );
 
   group('the editor is configured for code, not prose', () {
+    testWidgets('failed local Save retains the draft and reports the error', (tester) async {
+      final root = Directory.systemTemp.createTempSync('editor-refuse-');
+      final outside = Directory.systemTemp.createTempSync('editor-outside-');
+      addTearDown(() { root.deleteSync(recursive: true); outside.deleteSync(recursive: true); });
+      final file = File('${outside.path}/a.txt')..writeAsStringSync('outside');
+      Link('${root.path}/a.txt').createSync(file.path);
+      AppState.I.setSessionWorkspaceFolder(root.path);
+      AgentService.I.openStudioFile('a.txt', 'initial');
+      await pumpEditor(tester);
+      await tester.enterText(find.byKey(studioEditorFieldKey), 'draft');
+      await tester.tap(find.byTooltip('Save changes'));
+      await tester.pumpAndSettle();
+      expect(controller(tester).text, 'draft');
+      expect(file.readAsStringSync(), 'outside');
+      expect(tester.widget<StudioIconButton>(button('Save changes')).onPressed, isNotNull);
+      expect(find.textContaining('Saved a.txt'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('local draft survives sync and Save writes the selected workspace', (tester) async {
+      final root = Directory.systemTemp.createTempSync('editor-save-');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final file = File('${root.path}/a.txt')..writeAsStringSync('disk');
+      final app = AppState.I;
+      app.setSessionWorkspaceFolder(root.path);
+      RepoCache.I.bind('o/r', '', sessionId: app.activeSession!.id,
+        workspaceFolder: root.path);
+      AgentService.I.openStudioFile('a.txt', 'disk');
+      await pumpEditor(tester);
+      await tester.enterText(find.byKey(studioEditorFieldKey), 'draft');
+      await tester.runAsync(() => RepoCache.I.sync());
+      await tester.pump();
+      expect(controller(tester).text, 'draft');
+      expect(file.readAsStringSync(), 'disk');
+      await tester.tap(find.byTooltip('Save changes'));
+      await tester.pumpAndSettle();
+      expect(file.readAsStringSync(), 'draft');
+      expect(RepoCache.I.read('a.txt'), 'draft');
+    });
+
     testWidgets('autocorrect and suggestions are off', (tester) async {
       AgentService.I.openStudioFile('lib/a.dart', 'void main() {}');
       await pumpEditor(tester);
@@ -183,6 +225,56 @@ void main() {
   });
 
   group('find in file', () {
+    testWidgets('a changed query starts at its first result', (tester) async {
+      AgentService.I.openStudioFile('a.dart', 'alpha beta alpha beta');
+      await pumpEditor(tester);
+      await tester.tap(find.byTooltip('Find in file'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(studioFindFieldKey), 'alpha');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Next match'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(studioFindFieldKey), 'beta');
+      await tester.pumpAndSettle();
+      expect(find.text('1 / 2'), findsOneWidget);
+      expect(controller(tester).selection,
+          const TextSelection(baseOffset: 6, extentOffset: 10));
+    });
+
+    testWidgets('moving the query caret does not reset match navigation', (tester) async {
+      AgentService.I.openStudioFile('a.dart', 'foo foo');
+      await pumpEditor(tester);
+      await tester.tap(find.byTooltip('Find in file'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(studioFindFieldKey), 'foo');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Next match'));
+      await tester.pumpAndSettle();
+      final query = tester.widget<TextField>(find.byKey(studioFindFieldKey)).controller!;
+      query.selection = const TextSelection.collapsed(offset: 0);
+      await tester.pumpAndSettle();
+      expect(find.text('2 / 2'), findsOneWidget);
+      expect(controller(tester).selection,
+          const TextSelection(baseOffset: 4, extentOffset: 7));
+    });
+
+    testWidgets('Unicode case folding preserves original source offsets',
+        (tester) async {
+      AgentService.I.openStudioFile('a.dart', 'İ foo FOO');
+      await pumpEditor(tester);
+      await tester.tap(find.byTooltip('Find in file'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(studioFindFieldKey), 'foo');
+      await tester.pumpAndSettle();
+      expect(controller(tester).selection,
+          const TextSelection(baseOffset: 2, extentOffset: 5));
+      await tester.tap(find.byTooltip('Next match'));
+      await tester.pumpAndSettle();
+      expect(controller(tester).selection,
+          const TextSelection(baseOffset: 6, extentOffset: 9));
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('opens, counts matches and moves the selection',
         (tester) async {
       AgentService.I.openStudioFile('a.dart', 'line1\nline2\nline3');

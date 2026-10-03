@@ -193,15 +193,15 @@ void main() {
       expect(s.messages.last.content, 'open notes');
       expect(started, ['parity-send-stop:open notes']);
 
-      // X while a tap is in flight: the tap reports superseded, queue kept.
+      // X while a tap is in flight: cancel it and discard queued device work.
       AgentService.I.queueMessageForTest('follow-up');
       gate = Completer<Object?>();
       final tap = DeviceControlService.I.tap(node: 7);
       await awaitChannelCall(calls, 'deviceTap');
-      expect(await AgentService.I.handleDeviceOverlayStop(), isTrue);
+      expect(await AgentService.I.handleDeviceOverlayStop(), isFalse);
       gate.complete(true);
       expect(await tap, kSuperseded);
-      expect(AgentService.I.queuedMessages, contains('follow-up'));
+      expect(AgentService.I.queuedMessages, isEmpty);
     } finally {
       DeviceControlService.setMethodChannelForTest(null);
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

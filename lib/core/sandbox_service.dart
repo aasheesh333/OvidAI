@@ -361,10 +361,19 @@ class SandboxService {
   // ── Per-session workspaces ─────────────────────────────────────────
   String workDirNameFor(String sessionSandboxId) => 'ws_$sessionSandboxId';
 
+  /// Session state supplies an explicit folder (including an explicit clear)
+  /// without making sandbox startup recursively construct AppState.
+  static ({String? folder})? Function(String sandboxId)? sessionWorkspaceProvider;
+
   Future<Directory> workDirFor(String sessionSandboxId) async {
+    final session = sessionWorkspaceProvider?.call(sessionSandboxId);
+    final pinned = session?.folder;
+    if (pinned != null && Directory(pinned).existsSync()) {
+      return Directory(pinned);
+    }
     // A Studio repo binding wins: the session works inside the shared
     // clone-once working copy instead of an isolated ws_<id> folder.
-    final bound = await _boundWorkspaceFor(sessionSandboxId);
+    final bound = session == null ? await _boundWorkspaceFor(sessionSandboxId) : null;
     if (bound != null) return bound;
     final root = await _ensureFilesRoot();
     final d = Directory('${root.path}/workspaces/ws_$sessionSandboxId');
@@ -389,11 +398,16 @@ class SandboxService {
   /// best-guess Directory that may not exist yet (the picker filters by
   /// existsSync, so this is safe).
   Directory workDirForSync(String sessionSandboxId) {
+    final session = sessionWorkspaceProvider?.call(sessionSandboxId);
+    final pinned = session?.folder;
+    if (pinned != null && Directory(pinned).existsSync()) {
+      return Directory(pinned);
+    }
     // Honor an already-initialized repo binding without blocking; when
     // the registry hasn't warmed yet this is null → default behavior.
-    final bound = GlobalRepoRegistry.maybeInstance?.boundWorkspaceFor(
+    final bound = session == null ? GlobalRepoRegistry.maybeInstance?.boundWorkspaceFor(
       sessionSandboxId,
-    );
+    ) : null;
     if (bound != null) return Directory(bound);
     if (_syncRoot != null) {
       return Directory('${_syncRoot!.path}/workspaces/ws_$sessionSandboxId');
@@ -2373,6 +2387,15 @@ audit=false
     }
   }
 
+  /// Carry exact-file versus directory coverage through a mid-call approval.
+  static void addApprovedPaths(Map<String, bool> paths) {
+    final scope = Zone.current[allowedRootsZoneKey];
+    if (scope is! SandboxRootScope) return;
+    for (final path in paths.entries) {
+      scope.decisions.add(PermissionGrant.path(path.key, recursive: path.value));
+    }
+  }
+
   /// PR32 test seam: access to the tracked-process registry.
   @visibleForTesting
   List<Process> get liveProcessesForTest => _liveProcesses;
@@ -2599,6 +2622,7 @@ audit=false
   /// stop a plain escape, not to model every shell expansion.
   String? _escapingTarget(String cmdLine, String cwd, List<String> roots) {
     final prefix = _prefix?.path;
+    final scope = Zone.current[allowedRootsZoneKey];
     for (final m in _targetToken.allMatches(cmdLine)) {
       var token = m.group(1) ?? '';
       if (token.isEmpty) continue;
@@ -2623,7 +2647,11 @@ audit=false
       }
       final abs = normalizeGrantPath(token, base: cwd);
       if (abs.isEmpty) continue;
-      if (!roots.any((root) => isPathContained(root, abs))) return abs;
+      if (scope is SandboxRootScope && scope.isDenied(abs)) return abs;
+      if (!roots.any((root) => isPathContained(root, abs)) &&
+          !(scope is SandboxRootScope && scope.isGranted(abs))) {
+        return abs;
+      }
     }
     return null;
   }
@@ -2672,7 +2700,13 @@ audit=false
       if (zoneRoots is List) ...zoneRoots.whereType<String>(),
     }.toList();
     if (effectiveCwd != null && roots.isNotEmpty) {
-      final allowed = roots.any((root) => isPathContained(root, effectiveCwd));
+      final allowed =
+          !(zoneRoots is SandboxRootScope && zoneRoots.isDenied(effectiveCwd)) &&
+          (roots.any((root) => isPathContained(root, effectiveCwd)) ||
+              (zoneRoots is SandboxRootScope &&
+                  zoneRoots.decisions.any(
+                    (g) => !g.isDeny && g.recursive && g.coversPath(effectiveCwd),
+                  )));
       if (!allowed) {
         return 'DENIED by sandbox policy: cwd escapes allowed roots';
       }
@@ -3849,7 +3883,18 @@ echo INSTALLED
 /// approved mid-invocation, which is the only way an approval can reach the
 /// target jail — the zone is created before the prompt is shown.
 class SandboxRootScope {
-  SandboxRootScope(Iterable<String> initial) : roots = <String>{...initial};
+  SandboxRootScope(
+    Iterable<String> initial, {
+    Iterable<PermissionGrant> decisions = const [],
+  }) : roots = <String>{...initial},
+       decisions = decisions.toList();
 
   final Set<String> roots;
+  final List<PermissionGrant> decisions;
+
+  bool isDenied(String path) =>
+      decisions.any((g) => g.isDeny && g.coversPath(path));
+  bool isGranted(String path) =>
+      !isDenied(path) &&
+      decisions.any((g) => !g.isDeny && g.coversPath(path));
 }

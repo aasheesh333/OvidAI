@@ -88,6 +88,7 @@ This is response from Claude with other details.
     await tester.pumpAndSettle();
 
     // Verify model tabs rendered as ChoiceChips
+    expect(find.byType(ChoiceChip), findsNWidgets(2));
     expect(find.text('GPT-4o'), findsOneWidget);
     expect(find.text('Claude-3-5'), findsOneWidget);
     expect(find.textContaining('This is response from GPT-4o'), findsOneWidget);

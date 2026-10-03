@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'core/state.dart';
+import 'core/agent_service.dart';
 import 'core/theme.dart';
 import 'ui/login_gate.dart';
 import 'ui/shell.dart';
@@ -60,6 +61,13 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     if (!mounted || Aether.dark == _builtDark) return;
     _builtDark = Aether.dark;
     setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(AgentService.I.wakeSchedules());
+    }
   }
 
   @override

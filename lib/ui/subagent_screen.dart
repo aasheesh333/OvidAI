@@ -70,6 +70,7 @@ class _SubagentScreenState extends State<SubagentScreen> {
     final status = await AgentService.I.continueSubagent(
       widget.sessionId,
       text,
+      userReferences: true,
     );
     if (!mounted) return;
     _input.clear();

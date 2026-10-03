@@ -123,7 +123,6 @@ void main() {
   test('real seeds keep direct install', () {
     for (final name in [
       'Web Search',
-      'Image Studio',
       'File Reader',
       'Web Fetch & Reader',
       'Code Runner',
@@ -146,12 +145,18 @@ void main() {
     }
   });
 
-  test('hydrate heals fake installed flags on backing-less seeds', () async {
+  test('unconfigured Image Studio has no direct installation route', () {
+    final p = PluginItem(name: 'Image Studio', author: 'ovidai',
+      description: 'Unavailable until configured', version: '1.3.0', category: 'Tool');
+    expect(pluginInstallRouteForTest(p).kind, PluginInstallKind.unsupported);
+  });
+
+  test('hydrate heals fake installed flags on retired image seed', () async {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
     var app = AppState.createForTest();
     await app.initialize();
-    final fake = app.plugins.firstWhere((p) => p.name == 'MCP Server Hub');
+    final fake = app.plugins.firstWhere((p) => p.name == 'Image Studio');
     fake.installed = true;
     fake.enabled = true;
     await app.persistPluginState();
@@ -161,7 +166,7 @@ void main() {
     await app.initialize();
     addTearDown(() => AppState.resetTestInstance());
     final reloaded = app.plugins.firstWhere(
-      (p) => p.name == 'MCP Server Hub',
+      (p) => p.name == 'Image Studio',
     );
     expect(reloaded.installed, isFalse);
     expect(reloaded.enabled, isFalse);

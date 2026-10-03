@@ -85,3 +85,5 @@ device-screenshots/
 .setup_flutter.sh
 .tool_*.py
 .otmpfile_*.py
+# Local account verification environment
+.venv-account/

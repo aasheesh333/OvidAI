@@ -2,6 +2,7 @@ package com.dhanuk.ovidai
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
 import android.app.ActivityManager
@@ -33,6 +34,14 @@ import java.util.concurrent.Executors
 import java.util.zip.ZipFile
 
 class MainActivity : FlutterActivity() {
+    // The foreground service keeps the process eligible for background work;
+    // retaining the engine keeps the actual Dart scheduler alive after UI close.
+    // Process death still requires reopen/reconciliation, never a second engine.
+    override fun provideFlutterEngine(context: Context): FlutterEngine? =
+        FlutterEngineCache.getInstance().get("ovid-background")
+
+    override fun shouldDestroyEngineWithHost(): Boolean = false
+
     private val channelName = "ovid/native"
     private val safExportRequestCode = 7407
     private val screenCaptureRequestCode = 7408
@@ -229,12 +238,14 @@ class MainActivity : FlutterActivity() {
         resultCode: Int,
         data: Intent,
     ) {
+        val ticket = (result as? CancelableDeviceResult)?.ticket
         Thread {
             var projection: MediaProjection? = null
             var virtualDisplay: VirtualDisplay? = null
             var reader: ImageReader? = null
             var bitmap: Bitmap? = null
             try {
+                if (ticket?.isCurrent() == false) return@Thread
                 val manager =
                     getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 val activeProjection =
@@ -259,12 +270,14 @@ class MainActivity : FlutterActivity() {
                 var image = activeReader.acquireLatestImage()
                 val deadline = SystemClock.uptimeMillis() + 3000
                 while (image == null && SystemClock.uptimeMillis() < deadline) {
+                    if (ticket?.isCurrent() == false) return@Thread
                     SystemClock.sleep(100)
                     image = activeReader.acquireLatestImage()
                 }
                 val frame = image
                     ?: throw IllegalStateException("No screen frame arrived.")
                 try {
+                    if (ticket?.isCurrent() == false) return@Thread
                     val planes = frame.planes
                     val buffer = planes[0].buffer
                     val pixelStride = planes[0].pixelStride
@@ -345,9 +358,20 @@ class MainActivity : FlutterActivity() {
         result: MethodChannel.Result,
         action: () -> DeviceActionResult,
     ) {
+        val ticket = (result as? CancelableDeviceResult)?.ticket
         gestureExecutor.execute {
-            val outcome = action()
-            runOnUiThread { completeDeviceAction(result, outcome) }
+            if (ticket != null && !ticket.isCurrent()) return@execute
+            deviceActions.current.set(ticket)
+            try {
+                val outcome = action()
+                runOnUiThread { completeDeviceAction(result, outcome) }
+            } catch (_: InterruptedException) {
+                result.error("CANCELLED", "Control stopped.", null)
+            } catch (error: Throwable) {
+                result.error("ACTION_FAILED", error.message, null)
+            } finally {
+                deviceActions.current.remove()
+            }
         }
     }
 
@@ -475,6 +499,17 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
+        )
+        FlutterEngineCache.getInstance().put("ovid-background", flutterEngine)
+        val backgroundChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        AgentNotificationBridge.scheduleHandler = {
+            backgroundChannel.invokeMethod("onScheduleWake", null)
+        }
+        AgentNotificationBridge.constraintHandler = { message ->
+            backgroundChannel.invokeMethod("onBackgroundConstraint", message)
+        }
         webViewHandler = OvidWebViewHandler(
             this,
             flutterEngine,
@@ -494,8 +529,51 @@ class MainActivity : FlutterActivity() {
             }
         }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-            .setMethodCallHandler { call, result ->
+            .setMethodCallHandler { call, rawResult ->
+                val actionMethods = setOf(
+                    "deviceRead", "deviceForegroundPackage", "deviceTap", "deviceType",
+                    "deviceSwipe", "deviceMultiTap", "deviceDrag", "devicePinch",
+                    "deviceTwoFingerSwipe", "deviceSystemNav", "deviceLongPress",
+                    "deviceScroll", "deviceKey", "deviceScreenshot", "deviceOpenApp",
+                    "deviceOpenSettings",
+                )
+                val result = if (call.method in actionMethods) {
+                    CancelableDeviceResult(rawResult).also {
+                        if (it.ticket == null) {
+                            it.cancelled()
+                            return@setMethodCallHandler
+                        }
+                    }
+                } else rawResult
                 when (call.method) {
+                    "deviceBeginActions" -> {
+                        deviceActions.begin()
+                        result.success(null)
+                    }
+                    "deviceCancelActions" -> {
+                        deviceActions.cancel()
+                        OvidAccessibilityService.instance?.stopControlNow()
+                        result.success(null)
+                    }
+                    "backgroundState" -> result.success(BackgroundScheduleState.state(applicationContext))
+                    "backgroundStop" -> {
+                        BackgroundScheduleState.stop(applicationContext)
+                        result.success(true)
+                    }
+                    "backgroundResume" -> {
+                        // Only the app's explicit Resume action clears the latch.
+                        BackgroundScheduleState.resume(applicationContext)
+                        result.success(true)
+                    }
+                    "scheduleAlarm" -> {
+                        try {
+                            BackgroundScheduleState.arm(applicationContext, call.argument<Number>("at")?.toLong())
+                            result.success(true)
+                        } catch (e: Exception) {
+                            BackgroundScheduleState.constraint(applicationContext, "Alarm unavailable: ${e.message}")
+                            result.error("ALARM_UNAVAILABLE", e.message, null)
+                        }
+                    }
                     "getNativeLibraryDir" -> {
                         // This directory is exec-ALLOWED on Android 10+:
                         // the PackageManager labels extracted native libs
@@ -508,6 +586,10 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "agentServiceStart" -> {
+                        if (BackgroundScheduleState.stopped(applicationContext)) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
                         // Foreground service: keeps the app alive while the
                         // agent works. Args: title, text (notification copy).
                         try {
@@ -545,6 +627,10 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "agentServiceUpdate" -> {
+                        if (BackgroundScheduleState.stopped(applicationContext)) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
                         try {
                             val intent = Intent(this, AgentForegroundService::class.java)
                             intent.putExtra(
@@ -706,18 +792,21 @@ class MainActivity : FlutterActivity() {
                                             } catch (_: Throwable) {}
                                         }
                                         Thread {
+                                            val ticket = (result as? CancelableDeviceResult)?.ticket
                                             val deadline =
                                                 android.os.SystemClock.uptimeMillis() + 3500
                                             var retried = false
                                             var landed = isAppForegroundedNow()
-                                            while (!landed &&
+                                            while (!landed && ticket?.isCurrent() != false &&
                                                 android.os.SystemClock.uptimeMillis() < deadline
                                             ) {
                                                 android.os.SystemClock.sleep(250)
-                                                if (!retried) {
-                                                    try {
-                                                        startActivity(launchIntent)
-                                                    } catch (_: Throwable) {}
+                                                if (!retried && ticket?.isCurrent() != false) {
+                                                    runOnUiThread {
+                                                        if (ticket?.isCurrent() != false) {
+                                                            try { startActivity(launchIntent) } catch (_: Throwable) {}
+                                                        }
+                                                    }
                                                     retried = true
                                                 }
                                                 landed = isAppForegroundedNow()
@@ -1134,36 +1223,62 @@ class MainActivity : FlutterActivity() {
                             }
                         }
                     }
+                    "shareText" -> {
+                        val text = call.argument<String>("text")
+                        if (text.isNullOrBlank()) {
+                            result.error("BAD_ARGS", "shareText requires text.", null)
+                        } else {
+                            try {
+                                startActivity(NativeShare.chooser(NativeShare.textIntent(text), call.argument<String>("title") ?: "Share"))
+                                result.success(true)
+                            } catch (e: Exception) {
+                                result.error("SHARE_FAILED", "Could not open sharing: ${e.message}", null)
+                            }
+                        }
+                    }
+                    "shareTranscript" -> {
+                        val text = call.argument<String>("text")
+                        if (text.isNullOrBlank()) {
+                            result.error("BAD_ARGS", "shareTranscript requires text.", null)
+                        } else {
+                            Thread {
+                                try {
+                                    val intent = NativeShare.transcriptIntent(this, text, call.argument<String>("fileName") ?: "ovid-chat.txt")
+                                    runOnUiThread {
+                                        try {
+                                            startActivity(NativeShare.chooser(intent, call.argument<String>("title") ?: "Share chat"))
+                                            result.success(true)
+                                        } catch (e: Exception) {
+                                            result.error("SHARE_FAILED", "Could not open sharing: ${e.message}", null)
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    runOnUiThread { result.error("SHARE_FAILED", "Could not prepare transcript: ${e.message}", null) }
+                                }
+                            }.start()
+                        }
+                    }
                     "shareFile" -> {
                         val filePath = call.argument<String>("filePath")
                         val title = call.argument<String>("title") ?: "Share"
                         if (filePath.isNullOrBlank()) {
                             result.error("BAD_ARGS", "shareFile requires filePath.", null)
                         } else {
-                            try {
-                                val file = File(filePath)
-                                if (!file.exists()) {
-                                    result.error("FILE_NOT_FOUND", "File does not exist: $filePath", null)
-                                } else {
-                                    val uri = androidx.core.content.FileProvider.getUriForFile(
-                                        this,
-                                        "${applicationContext.packageName}.fileprovider",
-                                        file
-                                    )
-                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                        type = URLConnection.guessContentTypeFromName(file.name) ?: "*/*"
-                                        putExtra(Intent.EXTRA_STREAM, uri)
-                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            Thread {
+                                try {
+                                    val intent = NativeShare.fileIntent(this, filePath)
+                                    runOnUiThread {
+                                        try {
+                                            startActivity(NativeShare.chooser(intent, title))
+                                            result.success(true)
+                                        } catch (e: Exception) {
+                                            result.error("SHARE_FAILED", "Could not open sharing: ${e.message}", null)
+                                        }
                                     }
-                                    val chooser = Intent.createChooser(shareIntent, title).apply {
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    }
-                                    startActivity(chooser)
-                                    result.success(true)
+                                } catch (e: Exception) {
+                                    runOnUiThread { result.error("SHARE_FAILED", "Could not prepare file: ${e.message}", null) }
                                 }
-                            } catch (e: Exception) {
-                                result.error("SHARE_FAILED", "Could not share file: ${e.message}", null)
-                            }
+                            }.start()
                         }
                     }
                     "safExportFile" -> {
@@ -1330,6 +1445,7 @@ class MainActivity : FlutterActivity() {
                 super.onActivityResult(requestCode, resultCode, data)
                 return
             }
+            if ((pending as? CancelableDeviceResult)?.ticket?.isCurrent() == false) return
             if (resultCode != Activity.RESULT_OK || data == null) {
                 pending.error(
                     "SCREENSHOT_DENIED",
@@ -1369,9 +1485,12 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        deviceActions.cancel()
+        OvidAccessibilityService.instance?.stopControlNow()
+        OvidAccessibilityService.overlayEventListener?.invoke("deviceControlStopped", null)
         OvidAccessibilityService.overlayEventListener = null
         safExportCoordinator.cleanup()
-        gestureExecutor.shutdown()
+        gestureExecutor.shutdownNow()
         super.onDestroy()
     }
 }

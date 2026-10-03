@@ -368,18 +368,18 @@ void main() {
       expect(await future, kCancelledCopy);
     });
 
-    test('X aborts in-flight device work (queue-preserved branch)', () async {
+    test('X aborts device work and clears queued Control instructions', () async {
       AgentService.I.queueMessageForTest('follow-up correction');
       _gate = Completer<Object?>();
       final future = DeviceControlService.I.tap(node: 7);
       await waitForChannelCall(calls, 'deviceTap');
       final queuePreserved = await AgentService.I.handleDeviceOverlayStop();
-      expect(queuePreserved, isTrue);
+      expect(queuePreserved, isFalse);
       _gate!.complete(true);
       expect(await future, kCancelledCopy);
       expect(
         AgentService.I.queuedMessages,
-        contains('follow-up correction'),
+        isEmpty,
       );
     });
 

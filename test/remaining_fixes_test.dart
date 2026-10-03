@@ -168,11 +168,9 @@ void main() {
 
     test('the schedule tick is no longer 1Hz for the app lifetime', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(src, contains('scheduleTickInterval = Duration(seconds: 5)'));
-      expect(
-        src,
-        contains('Timer.periodic(scheduleTickInterval'),
-      );
+      expect(src, isNot(contains('Timer.periodic(scheduleTickInterval')));
+      expect(src, contains('final next = schedules.nextWake;'));
+      expect(src, contains('if (next == null) return;'));
     });
   });
 

@@ -14,7 +14,7 @@ import 'package:ovid_ai/core/state.dart';
 /// `dispatch_agent`/`workflow`/`ralph` in its roster and passed the depth gate
 /// at depth 1, so it could spawn grandchildren.
 ///
-/// The contract now: at most 49 running at once, enforced atomically, and a
+/// The contract now: at most 50 running per root, enforced atomically, and a
 /// subagent can never spawn a subagent.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -50,7 +50,11 @@ void main() {
     return s;
   }
 
-  void registerLive(String id, {String parent = 'root', bool finished = false}) {
+  void registerLive(
+    String id, {
+    String parent = 'root',
+    bool finished = false,
+  }) {
     final sub = SubagentInfo(
       id: id,
       label: id,
@@ -63,15 +67,12 @@ void main() {
     registered.add(id);
   }
 
-  group('the ceiling is 49 and admission is exact', () {
-    test('49 is the hard maximum, never 50', () {
-      expect(AgentService.maxConcurrentSubagentsForTest, 49);
-    });
-
+  group('the ceiling is 50 per root and admission is exact', () {
     test('admission flips exactly at the ceiling', () {
       expect(agent.canAdmitSubagentForTest(), isTrue);
 
-      for (var i = 1; i <= 48; i++) {
+      newRoot('root');
+      for (var i = 1; i <= 49; i++) {
         registerLive('sub-$i');
         expect(
           agent.canAdmitSubagentForTest(),
@@ -80,12 +81,12 @@ void main() {
         );
       }
 
-      registerLive('sub-49');
-      expect(agent.liveSubagentCountForTest, 49);
+      registerLive('sub-50');
+      expect(agent.liveSubagentCountForTest, 50);
       expect(
         agent.canAdmitSubagentForTest(),
         isFalse,
-        reason: 'the 50th must not be admitted',
+        reason: 'the 51st must not be admitted',
       );
     });
 
@@ -101,24 +102,26 @@ void main() {
       expect(agent.canAdmitSubagentForTest(), isTrue);
     });
 
-    test('dispatch_agent is refused at the ceiling and spawns nothing',
-        () async {
-      final root = newRoot('ceil-root');
-      for (var i = 1; i <= 49; i++) {
-        registerLive('busy-$i', parent: root.id);
-      }
+    test(
+      'dispatch_agent is refused at the ceiling and spawns nothing',
+      () async {
+        final root = newRoot('ceil-root');
+        for (var i = 1; i <= 50; i++) {
+          registerLive('busy-$i', parent: root.id);
+        }
 
-      final res = await agent.dispatchForTest('dispatch_agent', {
-        'prompt': 'one more',
-        'run_in_background': true,
-      });
+        final res = await agent.dispatchForTest('dispatch_agent', {
+          'prompt': 'one more',
+          'run_in_background': true,
+        });
 
-      expect(res, contains('ceiling (49'));
-      expect(res, contains('list_agents'));
-      // Nothing was created: the refusal happens before any session exists.
-      expect(AppState.I.childrenOf(root.id), isEmpty);
-      expect(agent.liveSubagentCountForTest, 49);
-    });
+        expect(res, contains('ceiling (50'));
+        expect(res, contains('list_agents'));
+        // Nothing was created: the refusal happens before any session exists.
+        expect(AppState.I.childrenOf(root.id), isEmpty);
+        expect(agent.liveSubagentCountForTest, 50);
+      },
+    );
   });
 
   group('a subagent can never spawn a subagent', () {
@@ -177,26 +180,32 @@ void main() {
       }
     });
 
-    test('the dispatch gate also refuses the spawn tools for a child', () async {
-      final app = AppState.I;
-      final root = newRoot('gate-root');
-      final child = app.createSubagentSession(
-        parent: root,
-        label: 'child',
-        mode: 'auto',
-      );
-      AgentService.setRunSessionForTest(child.id);
+    test(
+      'the dispatch gate also refuses the spawn tools for a child',
+      () async {
+        final app = AppState.I;
+        final root = newRoot('gate-root');
+        final child = app.createSubagentSession(
+          parent: root,
+          label: 'child',
+          mode: 'auto',
+        );
+        AgentService.setRunSessionForTest(child.id);
 
-      // Layer 1: even if a roster leak occurred, the gate refuses.
-      for (final tool in ['workflow', 'ralph']) {
-        final res = await agent.dispatchForTest(tool, {
-          'phases': [
-            {'name': 'p', 'tasks': ['x']},
-          ],
-          'objective': 'x',
-        });
-        expect(res, contains('SUBAGENT'), reason: '$tool must be gated');
-      }
-    });
+        // Layer 1: even if a roster leak occurred, the gate refuses.
+        for (final tool in ['workflow', 'ralph']) {
+          final res = await agent.dispatchForTest(tool, {
+            'phases': [
+              {
+                'name': 'p',
+                'tasks': ['x'],
+              },
+            ],
+            'objective': 'x',
+          });
+          expect(res, contains('SUBAGENT'), reason: '$tool must be gated');
+        }
+      },
+    );
   });
 }

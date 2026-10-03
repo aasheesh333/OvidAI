@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
@@ -79,6 +80,13 @@ class DeviceControlService {
       result == cancelledSupersededMessage;
 
   int _deviceGeneration = 0;
+  Completer<Object?> _generationCancelled = Completer<Object?>();
+
+  void _advanceGeneration() {
+    _deviceGeneration++;
+    _generationCancelled.complete(cancelledSupersededMessage);
+    _generationCancelled = Completer<Object?>();
+  }
 
   /// Base of the capped exponential backoff between SERVICE_CONNECTING
   /// retries (transient accessibility re-bind window after app restart).
@@ -110,11 +118,15 @@ class DeviceControlService {
   @visibleForTesting
   int get deviceGenerationForTest => _deviceGeneration;
 
+  /// Capture before asynchronous Control UI work; Stop invalidates the token.
+  int get generation => _deviceGeneration;
+
   /// Opens a fresh device generation for a newly starting run. In-flight
   /// `device_*` calls captured under the previous generation report
   /// cancellation when their native results land.
   void beginDeviceGeneration() {
-    _deviceGeneration++;
+    _advanceGeneration();
+    unawaited(_notifyNativeGeneration('deviceBeginActions'));
   }
 
   /// Public Stop hook for Task 4's overlay X (and any future Stop path):
@@ -122,7 +134,16 @@ class DeviceControlService {
   /// Stop. See the [cancelledSupersededMessage] contract for the Android
   /// limit — dispatched gestures still run to completion.
   void cancelDeviceActions() {
-    _deviceGeneration++;
+    _advanceGeneration();
+    unawaited(_notifyNativeGeneration('deviceCancelActions'));
+  }
+
+  Future<void> _notifyNativeGeneration(String method) async {
+    try {
+      await _channel.invokeMethod<void>(method);
+    } catch (e) {
+      Diag.swallow('device_control_service', e);
+    }
   }
 
   /// Runs [invoke] under the current generation: a native result (or error)
@@ -140,14 +161,28 @@ class DeviceControlService {
   /// that is genuinely disabled (enable it in Settings).
   Future<Object?> _invokeGuarded(Future<Object?> Function() invoke) async {
     final generation = _deviceGeneration;
+    final cancellation = _generationCancelled.future;
+    return Future.any([
+      _invokeForGeneration(invoke, generation),
+      cancellation,
+    ]);
+  }
+
+  Future<Object?> _invokeForGeneration(
+    Future<Object?> Function() invoke,
+    int generation,
+  ) async {
     var attempt = 0;
     var waited = Duration.zero;
     while (true) {
+      if (generation != _deviceGeneration) return cancelledSupersededMessage;
       try {
         final result = await invoke();
         if (generation != _deviceGeneration) return cancelledSupersededMessage;
         return result;
       } on PlatformException catch (e) {
+        // Native overlay Stop settles pending results before its Dart event.
+        if (e.code == 'CANCELLED') return cancelledSupersededMessage;
         // A stale bind is terminal: Android is not going to rebind, so burning
         // the 90s retry budget before saying so only delays the one piece of
         // advice that helps. Fail fast and mark it for the UI.
@@ -351,6 +386,9 @@ class DeviceControlService {
         {'mode': full ? 'full' : 'delta', 'full': full},
       ),
     );
+    if (isCancelledResult(result)) {
+      return const {'status': 'cancelled', 'message': cancelledSupersededMessage};
+    }
     final map = result as Map<String, dynamic>?;
     return map ??
         const {'status': 'error', 'message': 'No device read result.'};

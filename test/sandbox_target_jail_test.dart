@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ovid_ai/core/sandbox_service.dart';
+import 'package:ovid_ai/core/grant_store.dart';
 
 /// The sandbox jail must check TARGETS, not just the working directory
 /// (2026-09-24).
@@ -40,14 +41,12 @@ void main() {
   });
 
   String? check(String cmd, {List<String>? zoneRoots}) {
-    String? run() => svc.checkPolicy(
-      ['sh', '-c', cmd],
-      hostWorkDir: root,
-    );
+    String? run() => svc.checkPolicy(['sh', '-c', cmd], hostWorkDir: root);
     if (zoneRoots == null) return run();
-    return runZoned(run, zoneValues: {
-      SandboxService.allowedRootsZoneKey: zoneRoots,
-    });
+    return runZoned(
+      run,
+      zoneValues: {SandboxService.allowedRootsZoneKey: zoneRoots},
+    );
   }
 
   group('relative escapes are refused', () {
@@ -117,6 +116,31 @@ void main() {
   });
 
   group('an approval mid-dispatch reaches the jail', () {
+    test('file approvals are exact and denials override broader roots', () {
+      final file = '${outside.path}/file';
+      final scope = SandboxRootScope([root.path]);
+      runZoned(() {
+        expect(check('cat $file'), isNotNull);
+        SandboxService.addApprovedPaths({file: false});
+        expect(check('cat $file'), isNull);
+        expect(check('cat $file/child'), isNotNull);
+        expect(check('cat $file-other'), isNotNull);
+        SandboxService.addApprovedPaths({outside.path: true});
+        expect(check('cat ${outside.path}/sub/child'), isNull);
+        scope.decisions.add(
+          PermissionGrant.path(
+            file,
+            decision: PermissionGrant.decisionDeny,
+            recursive: false,
+          ),
+        );
+        expect(check('cat $file'), isNotNull);
+        expect(check('cat ${outside.path}/other'), isNull);
+        // Independent command policy still applies to approved targets.
+        expect(check('rm -rf /'), contains('denied pattern'));
+      }, zoneValues: {SandboxService.allowedRootsZoneKey: scope});
+    });
+
     // Regression for the report "Allow and Always Allow both come back DENIED".
     //
     // The dispatch zone is built BEFORE the tool runs, but the approval prompt
@@ -149,7 +173,10 @@ void main() {
 
     test('outside a dispatch zone addApprovedRoots is a no-op', () {
       // No scope installed: nothing to record, and nothing must throw.
-      expect(() => SandboxService.addApprovedRoots(['/whatever']), returnsNormally);
+      expect(
+        () => SandboxService.addApprovedRoots(['/whatever']),
+        returnsNormally,
+      );
     });
   });
 
@@ -174,7 +201,8 @@ void main() {
       expect(
         check(cmd, zoneRoots: [root.path, outside.path]),
         isNull,
-        reason: 'build mode: the approval is honoured, so planning can still '
+        reason:
+            'build mode: the approval is honoured, so planning can still '
             'read files it was granted',
       );
       final d = check(cmd, zoneRoots: [root.path]);
@@ -183,12 +211,18 @@ void main() {
     });
 
     test('a \$HOME form is denied with the jail as the only root', () {
-      expect(check(r'cat $HOME/.ssh/id_rsa', zoneRoots: [root.path]), isNotNull);
+      expect(
+        check(r'cat $HOME/.ssh/id_rsa', zoneRoots: [root.path]),
+        isNotNull,
+      );
     });
 
     test('narrowing never denies the jail itself', () {
       // The one thing plan mode MUST still be able to do: read its own folder.
-      expect(check('cat ${root.path}/notes.txt', zoneRoots: [root.path]), isNull);
+      expect(
+        check('cat ${root.path}/notes.txt', zoneRoots: [root.path]),
+        isNull,
+      );
       expect(check('ls -la', zoneRoots: [root.path]), isNull);
     });
   });

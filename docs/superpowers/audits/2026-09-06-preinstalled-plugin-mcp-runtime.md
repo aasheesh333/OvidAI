@@ -27,7 +27,7 @@ Gate: `AgentService._pluginToolNames` (agent_service.dart). A row seeded
 | Plugin | Seed state | Real handler | Verdict |
 |---|---|---|---|
 | Web Search | installed+enabled | `web_search` → `_ddgSearch` (DuckDuckGo HTML, keyless) | keep installed |
-| Image Studio | installed+enabled | `generate_image` → Pollinations (real bytes) | keep installed |
+| Image Studio | installed+enabled | Local resize/crop; gateway generate/edit only after verified image capability | keep installed |
 | File Reader | installed+enabled | `read_attachment` → attachment reader (real) | keep installed; claimed tool name corrected `file_read` → `read_attachment` (the `file_read` core tool is always-on and unrelated to this row) |
 | Sandbox Runtime | installed+enabled | `run_shell`/fs tools in `_coreTools`, needs SandboxService | keep installed (core built-in; probes cover sandbox in Health screen) |
 | DeepThink Reasoning | **was** installed+enabled | none — reasoning UI is gated by the `showReasoning` preference, never by this row | **demoted to Available** (marketing-only; mounts nothing) |

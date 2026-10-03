@@ -309,8 +309,66 @@ class GlobalRepoRegistry {
 
   /// Run the effective git runner for an explicit destination. Used by the
   /// "local folder clone" flow, which clones outside the global area.
-  Future<void> cloneRepo(String repoFull, String branch, String dest) =>
-      _effectiveRunner(repoFull, branch, dest);
+  Future<void> cloneRepo(String repoFull, String branch, String dest) async {
+    _validate(repoFull, branch);
+    if (checkoutMatches(dest, repoFull, branch)) return;
+    if (Directory(dest).existsSync()) {
+      throw StateError('Destination already exists: $dest');
+    }
+    try {
+      await _effectiveRunner(repoFull, branch, dest);
+    } catch (_) {
+      final partial = Directory(dest);
+      if (partial.existsSync()) await partial.delete(recursive: true);
+      rethrow;
+    }
+  }
+
+  /// Inspect git metadata rather than guessing identity from a folder name.
+  /// Also supports linked worktrees, whose .git is a gitdir pointer.
+  static bool checkoutMatches(String path, String repoFull, String branch) {
+    try {
+      var git = Directory('$path/.git');
+      final pointer = File(git.path);
+      if (pointer.existsSync()) {
+        final text = pointer.readAsStringSync().trim();
+        if (!text.startsWith('gitdir: ')) return false;
+        final target = text.substring(8);
+        git = Directory(target.startsWith('/') ? target : '$path/$target');
+      }
+      if (File('${git.path}/HEAD').readAsStringSync().trim() !=
+          'ref: refs/heads/$branch') {
+        return false;
+      }
+      final commonFile = File('${git.path}/commondir');
+      var common = git.path;
+      if (commonFile.existsSync()) {
+        final target = commonFile.readAsStringSync().trim();
+        common = target.startsWith('/') ? target : '${git.path}/$target';
+      }
+      final config = File('$common/config').readAsLinesSync();
+      var origin = false;
+      for (final line in config) {
+        final value = line.trim();
+        if (value.startsWith('[')) origin = value == '[remote "origin"]';
+        if (!origin) continue;
+        final match = RegExp(r'^url\s*=\s*(.+)$').firstMatch(value);
+        if (match == null) continue;
+        final url = match.group(1)!.replaceAll('"', '');
+        final uri = Uri.tryParse(url);
+        final remote = url.startsWith('git@github.com:')
+            ? url.substring('git@github.com:'.length)
+            : uri?.host.toLowerCase() == 'github.com' ? uri!.path : '';
+        return remote.replaceFirst(RegExp(r'^/'), '')
+                .replaceFirst(RegExp(r'\.git/?$'), '')
+                .replaceFirst(RegExp(r'/$'), '').toLowerCase() ==
+            repoFull.toLowerCase();
+      }
+    } catch (_) {
+      return false;
+    }
+    return false;
+  }
 
   /// Return the shared working copy for (repoFull, branch), cloning once
   /// into `<appSupport>/global/repos/` on a miss. A registry hit whose
@@ -366,9 +424,12 @@ class GlobalRepoRegistry {
     final dest = _destFor(key, repoFull, branch);
     final destDir = Directory(dest);
     if (destDir.existsSync()) {
-      // Stale/partial dir at our path (never a live hit — those return
-      // above): clear it so the clone starts clean.
-      await destDir.delete(recursive: true);
+      if (!checkoutMatches(dest, repoFull, branch)) {
+        throw StateError('Destination already exists: $dest');
+      }
+      _repoPaths[key] = dest;
+      await _save();
+      return dest;
     }
     await destDir.parent.create(recursive: true);
     try {
@@ -390,7 +451,9 @@ class GlobalRepoRegistry {
   /// disambiguate with a short hash of the key.
   String _destFor(String key, String repoFull, String branch) {
     final base = '${_reposDir.path}/${folderNameFor(repoFull, branch)}';
-    if (Directory(base).existsSync() && !_repoPaths.values.contains(base)) {
+    if (Directory(base).existsSync() &&
+        !checkoutMatches(base, repoFull, branch) &&
+        _repoPaths[key] != base) {
       return '${base}__${_shortHash(key)}';
     }
     return base;
@@ -429,6 +492,8 @@ class GlobalRepoRegistry {
 
   /// Number of indexed (repo, branch) clones — handy for diagnostics.
   int get cloneCount => _repoPaths.length;
+
+  bool isSharedWorkspace(String path) => _repoPaths.containsValue(path);
 }
 
 class _SessionBinding {

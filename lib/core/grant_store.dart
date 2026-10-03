@@ -12,14 +12,13 @@
 ///   (`example.com` covers `api.example.com`) and every port/path on it —
 ///   so granting `127.0.0.1` covers everything served from loopback.
 ///
-/// A Deny is never recorded: deny simply grants nothing, so there is nothing
-/// to persist and nothing to revoke.
+/// Allows and denials are remembered on the requesting session.
 ///
 /// Scopes:
 /// * session grants live on the [ChatSession] (`grants` JSON field) and apply
 ///   to that session only;
-/// * global grants live in app settings (`permissionGrants`) and apply to
-///   every session; the user can revoke them from Settings.
+/// * legacy global grants remain in app settings (`permissionGrants`) for
+///   cleanup, but the agent never consults them.
 ///
 /// This file is pure Dart (no Flutter imports) so the matching logic is
 /// unit-testable in `test/grant_store_test.dart`.
@@ -27,15 +26,8 @@ library;
 
 /// A single persisted permission decision.
 ///
-/// STRICT MODEL (2026-09-24): an entry now carries the MODE it was made in and
-/// the DECISION it records. Both were missing, which is why grants leaked across
-/// modes: switching a session from Studio to General left its Studio grants fully
-/// in force, because the store had no mode dimension at all. A grant made in one
-/// mode is now invisible in every other mode.
-///
-/// Denials are persisted too. They never were ("a Deny is never recorded"), so a
-/// user who denied a path was asked again on the very next attempt — and the
-/// model had no durable signal to stop asking.
+/// Mode is retained as audit metadata. Decisions apply across modes in the
+/// owning session; independent tool/read-only policies still apply.
 class PermissionGrant {
   static const kindPath = 'path';
   static const kindHost = 'host';
@@ -43,8 +35,8 @@ class PermissionGrant {
   static const scopeSession = 'session';
   static const scopeGlobal = 'global';
 
-  /// Decisions. `allow` is one-time and never persisted; only `deny` and
-  /// `always` are written to disk.
+  /// Both Allow and Always allow are session decisions for filesystem access.
+  static const decisionAllow = 'allow';
   static const decisionAlways = 'always';
   static const decisionDeny = 'deny';
 
@@ -61,16 +53,15 @@ class PermissionGrant {
   /// Owning session for session-scoped grants; null for global grants.
   final String? sessionId;
 
-  /// AgentMode name this decision was made in ('safe', 'auto', 'studio',
-  /// 'control', 'drive'). A grant only applies when the session is STILL in
-  /// this mode — that is what makes the modes unable to conflict.
-  ///
-  /// Empty means a legacy entry written before mode tagging existed; those are
-  /// honoured in General mode only, the most conservative reading.
+  /// AgentMode name at approval time (audit metadata only).
   final String mode;
 
-  /// 'always' (persistent allow) or 'deny' (persistent refusal).
+  /// 'allow', 'always', or 'deny'; all path decisions persist in the session.
   final String decision;
+
+  /// Only explicitly identified directory grants cover descendants. Untyped
+  /// legacy entries are exact rather than silently authorizing a subtree.
+  final bool recursive;
 
   final DateTime grantedAt;
 
@@ -81,11 +72,18 @@ class PermissionGrant {
     this.sessionId,
     this.mode = '',
     this.decision = decisionAlways,
+    this.recursive = false,
     required this.grantedAt,
   });
 
   /// True when this entry is a persistent refusal rather than a grant.
   bool get isDeny => decision == decisionDeny;
+
+  bool coversPath(String path) =>
+      kind == kindPath &&
+      (recursive
+          ? pathCoveredBy(value, path)
+          : value == normalizeGrantPath(path));
 
   /// Creates a path grant; [rawPath] is normalized to an absolute path.
   factory PermissionGrant.path(
@@ -94,6 +92,7 @@ class PermissionGrant {
     bool global = false,
     String mode = '',
     String decision = decisionAlways,
+    bool recursive = false,
     DateTime? at,
   }) => PermissionGrant(
     kind: kindPath,
@@ -102,6 +101,7 @@ class PermissionGrant {
     sessionId: global ? null : sessionId,
     mode: mode,
     decision: decision,
+    recursive: recursive,
     grantedAt: at ?? DateTime.now(),
   );
 
@@ -131,6 +131,7 @@ class PermissionGrant {
     if (sessionId != null) 'sessionId': sessionId,
     if (mode.isNotEmpty) 'mode': mode,
     if (decision != decisionAlways) 'decision': decision,
+    if (kind == kindPath) 'recursive': recursive,
     'grantedAt': grantedAt.toIso8601String(),
   };
 
@@ -157,7 +158,9 @@ class PermissionGrant {
       throw const FormatException('grant value is empty');
     }
     final decision = j['decision'] as String? ?? decisionAlways;
-    if (decision != decisionAlways && decision != decisionDeny) {
+    if (decision != decisionAlways &&
+        decision != decisionAllow &&
+        decision != decisionDeny) {
       throw FormatException('unknown grant decision: $decision');
     }
     return PermissionGrant(
@@ -167,6 +170,7 @@ class PermissionGrant {
       sessionId: j['sessionId'] as String?,
       mode: j['mode'] as String? ?? '',
       decision: decision,
+      recursive: j['recursive'] as bool? ?? false,
       grantedAt:
           DateTime.tryParse(j['grantedAt'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
@@ -290,20 +294,11 @@ class GrantStore {
   }) : sessionGrants = sessionGrants ?? {},
        globalGrants = globalGrants ?? [];
 
-  /// Entries written before mode tagging existed carry an empty [PermissionGrant.mode].
-  /// They are honoured in General mode only — the most conservative reading of a
-  /// decision whose mode is unknown.
+  /// Default retained for source compatibility; modes no longer filter grants.
   static const legacyModeFallback = 'auto';
 
-  static bool _modeMatches(PermissionGrant g, String mode) =>
-      g.mode.isEmpty ? mode == legacyModeFallback : g.mode == mode;
-
-  /// All decisions visible to [sessionId] **in [mode]**: its own entries plus
-  /// global ones, filtered to the mode.
-  ///
-  /// The mode filter is what makes the modes unable to conflict. Before it, a
-  /// path granted while a session was in Studio stayed fully in force after the
-  /// same session switched to General, because the store had no mode dimension.
+  /// Decisions in this session. Global entries are a legacy store capability;
+  /// AgentService never supplies them for access checks.
   List<PermissionGrant> grantsFor(
     String? sessionId, {
     String mode = legacyModeFallback,
@@ -312,11 +307,13 @@ class GrantStore {
     if (sessionId != null && sessionId.isNotEmpty) {
       out.addAll(
         (sessionGrants[sessionId] ?? const <PermissionGrant>[]).where(
-          (g) => _modeMatches(g, mode),
+          (g) =>
+              g.scope == PermissionGrant.scopeSession &&
+              g.sessionId == sessionId,
         ),
       );
     }
-    out.addAll(globalGrants.where((g) => _modeMatches(g, mode)));
+    out.addAll(globalGrants);
     return out;
   }
 
@@ -329,7 +326,7 @@ class GrantStore {
     for (final g in grantsFor(sessionId, mode: mode)) {
       if (g.kind != PermissionGrant.kindPath) continue;
       if (g.isDeny != deny) continue;
-      if (pathCoveredBy(g.value, normalizedPath)) return true;
+      if (g.coversPath(normalizedPath)) return true;
     }
     return false;
   }
@@ -367,8 +364,12 @@ class GrantStore {
     String? sessionId,
     String rawPath, {
     String mode = legacyModeFallback,
-  }) => _coversPath(sessionId, normalizeGrantPath(rawPath),
-      mode: mode, deny: true);
+  }) => _coversPath(
+    sessionId,
+    normalizeGrantPath(rawPath),
+    mode: mode,
+    deny: true,
+  );
 
   /// True when [rawHost] may be contacted: some visible grant covers it —
   /// exact host or child domain; a host grant covers all ports/paths — and no
@@ -395,8 +396,7 @@ class GrantStore {
     return _coversHost(sessionId, c, mode: mode, deny: true);
   }
 
-  /// Records an "always allow" for a path. Exactly the granted path (and
-  /// its children) is covered — parents and siblings are not.
+  /// Records a path decision. Only explicit directory grants include children.
   /// A non-global grant with a null/empty [sessionId] is refused: it would
   /// land in an unreachable bucket that [grantsFor] never reads, so the
   /// user would believe they allowed something that never applies.
@@ -406,6 +406,7 @@ class GrantStore {
     bool global = false,
     String mode = '',
     String decision = PermissionGrant.decisionAlways,
+    bool recursive = false,
   }) {
     if (!global && (sessionId == null || sessionId.isEmpty)) return;
     final g = PermissionGrant.path(
@@ -414,6 +415,7 @@ class GrantStore {
       global: global,
       mode: mode,
       decision: decision,
+      recursive: recursive,
     );
     if (g.value.isEmpty) return;
     if (global) {
@@ -494,27 +496,30 @@ class GrantStore {
     sessionGrants.remove(sessionId ?? '');
   }
 
-  /// Identity of a stored decision. Mode and decision are part of it, so a
-  /// persistent allow and a persistent deny on the SAME value can coexist (the
-  /// deny wins at match time) and the same path granted in two modes is two
-  /// separate entries rather than one that leaks across both.
+  /// Mode changes must not stack duplicate decisions.
   bool _contains(List<PermissionGrant> list, PermissionGrant g) => list.any(
     (e) =>
         e.kind == g.kind &&
         e.value == g.value &&
-        e.mode == g.mode &&
+        e.recursive == g.recursive &&
         e.decision == g.decision,
   );
 
-  /// Records a persistent DENY, replacing any allow on the same value+mode so
+  /// Records a persistent DENY, replacing any allow on the same value so
   /// the user's most recent, more specific decision is the one that stands.
-  void addPathDeny(String? sessionId, String rawPath, {String mode = ''}) {
+  void addPathDeny(
+    String? sessionId,
+    String rawPath, {
+    String mode = '',
+    bool recursive = false,
+  }) {
     _removeMatching(sessionId, rawPath, PermissionGrant.kindPath, mode);
     addPathGrant(
       sessionId,
       rawPath,
       mode: mode,
       decision: PermissionGrant.decisionDeny,
+      recursive: recursive,
     );
   }
 
@@ -539,12 +544,10 @@ class GrantStore {
         ? normalizeGrantPath(rawValue)
         : normalizeGrantHost(rawValue);
     if (value.isEmpty) return;
-    bool matches(PermissionGrant e) =>
-        e.kind == kind && e.value == value && _modeMatches(e, mode);
+    bool matches(PermissionGrant e) => e.kind == kind && e.value == value;
     if (sessionId != null && sessionId.isNotEmpty) {
       sessionGrants[sessionId]?.removeWhere(matches);
     }
-    globalGrants.removeWhere(matches);
   }
 
   /// Serializes one session's grants for the ChatSession JSON `grants`

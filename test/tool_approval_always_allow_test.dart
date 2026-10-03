@@ -3,8 +3,11 @@ import 'dart:io';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/commands.dart';
+import 'package:ovid_ai/core/grant_store.dart';
+import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -152,7 +155,7 @@ void main() {
     () async {
       // Regression: absolute host paths in agent file tools route through
       // the grant system — no silent bypass, no hard refusal.
-      await testSession('aaa-grant-path');
+      final session = await testSession('aaa-grant-path');
       final outside = File('${ledgerDir.path}/outside-secret.txt')
         ..writeAsStringSync('top-secret-content');
       final fut = AgentService.I.dispatchForTest('file_read', {
@@ -167,18 +170,35 @@ void main() {
       expect(res, contains('top-secret-content'));
       expect(res, isNot(startsWith('ACCESS_DENIED')));
 
-      // Denying the same path surfaces the structured denial, not
-      // "file not found".
+      // Allow survives session serialization and mode changes.
+      final restored = ChatSession.fromJson(session.toJson());
+      session.grants = restored.grants;
+      session.mode = 'studio';
+      final again = await AgentService.I
+          .dispatchForTest('file_read', {'path': outside.path})
+          .timeout(const Duration(seconds: 3));
+      expect(again, contains('top-secret-content'));
+      expect(AgentService.I.pendingApproval, isNull);
+
+      await AgentService.I.revokeSessionPermissionGrant(session.grants.single);
       final fut2 = AgentService.I.dispatchForTest('file_read', {
         'path': outside.path,
       });
-      // The earlier Allow was one-shot (not always) — prompts again.
+      // Explicit revocation makes the next access ask again.
       final req2 = await waitForApproval();
       expect(req2, isNotNull);
       AgentService.I.approve(false);
       final res2 = await fut2.timeout(const Duration(seconds: 60));
       expect(res2, startsWith('ACCESS_DENIED: ${outside.path}.'));
       expect(res2, contains('ask the user what to do next'));
+      for (final mode in ['auto', 'studio', 'control']) {
+        session.mode = mode;
+        final denied = await AgentService.I
+            .dispatchForTest('file_read', {'path': outside.path})
+            .timeout(const Duration(seconds: 3));
+        expect(denied, startsWith('ACCESS_DENIED:'));
+        expect(AgentService.I.pendingApproval, isNull);
+      }
     },
   );
 
@@ -395,34 +415,36 @@ void main() {
     // prompt. Its device tools still auto-approve (a tap-by-tap prompt would
     // make the mode unusable), but its filesystem and network are now confined
     // to the session directory.
-    test('a path outside the session dir prompts instead of passing silently',
-        () async {
-      await testSession('aaa-control-jail', mode: 'control');
-      final outside = File('${ledgerDir.path}/control-outside.txt')
-        ..writeAsStringSync('secret');
+    test(
+      'a path outside the session dir prompts instead of passing silently',
+      () async {
+        await testSession('aaa-control-jail', mode: 'control');
+        final outside = File('${ledgerDir.path}/control-outside.txt')
+          ..writeAsStringSync('secret');
 
-      final fut = AgentService.I.dispatchForTest('file_read', {
-        'path': outside.path,
-      });
-      final req = await waitForApproval();
-      expect(
-        req,
-        isNotNull,
-        reason: 'Control must prompt for a path outside its session dir',
-      );
-      expect(req!.tool, 'grant:path:${outside.path}');
-      expect(req.allowAlways, isTrue);
-      // Captured at prompt time, so the grant is tagged with the mode that
-      // actually asked — not whichever session is foreground when answered.
-      expect(req.modeName, 'control');
+        final fut = AgentService.I.dispatchForTest('file_read', {
+          'path': outside.path,
+        });
+        final req = await waitForApproval();
+        expect(
+          req,
+          isNotNull,
+          reason: 'Control must prompt for a path outside its session dir',
+        );
+        expect(req!.tool, 'grant:path:${outside.path}');
+        expect(req.allowAlways, isTrue);
+        // Captured at prompt time, so the grant is tagged with the mode that
+        // actually asked — not whichever session is foreground when answered.
+        expect(req.modeName, 'control');
 
-      AgentService.I.approve(false);
-      final res = await fut.timeout(const Duration(seconds: 60));
-      expect(res, startsWith('ACCESS_DENIED:'));
-      expect(res, contains('ask the user what to do next'));
-    });
+        AgentService.I.approve(false);
+        final res = await fut.timeout(const Duration(seconds: 60));
+        expect(res, startsWith('ACCESS_DENIED:'));
+        expect(res, contains('ask the user what to do next'));
+      },
+    );
 
-    test('a Control grant does not carry into General', () async {
+    test('a Control grant carries into General and Studio', () async {
       await testSession('aaa-control-grant', mode: 'control');
       final outside = File('${ledgerDir.path}/control-grant.txt')
         ..writeAsStringSync('g');
@@ -435,20 +457,255 @@ void main() {
       AgentService.I.approveAlways();
       await fut.timeout(const Duration(seconds: 60));
 
-      // Same session, switched to General: the Control grant must not apply.
+      // Same session, switched to General: reuse the approval.
       final s = AppState.I.sessionById('aaa-control-grant')!;
       s.mode = AgentMode.auto.name;
       expect(s.grants.every((g) => g.mode == 'control'), isTrue);
 
-      fut = AgentService.I.dispatchForTest('file_read', {'path': outside.path});
-      req = await waitForApproval();
-      expect(
-        req,
-        isNotNull,
-        reason: 'switching mode must re-prompt — that is the isolation',
-      );
-      AgentService.I.approve(false);
-      await fut.timeout(const Duration(seconds: 60));
+      for (final mode in ['auto', 'studio']) {
+        s.mode = mode;
+        final result = await AgentService.I
+            .dispatchForTest('file_read', {'path': outside.path})
+            .timeout(const Duration(seconds: 3));
+        expect(result, contains('g'));
+        expect(AgentService.I.pendingApproval, isNull);
+      }
     });
+  });
+
+  test('Full Access skips app prompts but reports Android denial', () async {
+    await testSession('aaa-full-access', mode: 'drive');
+    const channel = MethodChannel('flutter.baseflow.com/permissions/methods');
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          if (call.method == 'requestPermissions') {
+            return <int, int>{
+              for (final p in call.arguments as List) p as int: 0,
+            };
+          }
+          return 0;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+    final result = await AgentService.I
+        .dispatchForTest('request_permission', {
+          'permission': 'camera',
+          'reason': 'test Android boundary',
+        })
+        .timeout(const Duration(seconds: 3));
+    expect(result.toLowerCase(), contains('denied'));
+    expect(calls.any((c) => c.method == 'requestPermissions'), isTrue);
+    expect(AgentService.I.pendingApproval, isNull);
+    final outside = File('${ledgerDir.path}/full-access.txt')
+      ..writeAsStringSync('full access data');
+    expect(
+      await AgentService.I
+          .dispatchForTest('file_read', {'path': outside.path})
+          .timeout(const Duration(seconds: 3)),
+      contains('full access data'),
+    );
+    expect(await AgentService.I.sandboxAllowedRootsForTest(), ['/']);
+    final policy = SandboxService.I.policy;
+    try {
+      SandboxService.I.policy = (
+        allowedRoots: ['/explicit-policy-root'],
+        deniedCommands: policy.deniedCommands,
+      );
+      expect(await AgentService.I.sandboxAllowedRootsForTest(), [
+        '/explicit-policy-root',
+      ]);
+    } finally {
+      SandboxService.I.policy = policy;
+    }
+    expect(
+      await AgentService.I
+          .dispatchForTest('browser_popups', {
+            'action': 'open',
+            'url': 'http://169.254.169.254/latest/meta-data/',
+          })
+          .timeout(const Duration(seconds: 3)),
+      startsWith('ACCESS_DENIED:'),
+    );
+    // A harmless program whose literal text trips the destructive approval
+    // classifier exercises the Full Access bypass without a destructive action.
+    await AgentService.I
+        .dispatchForTest('run_code', {
+          'code': 'print("rm -rf /")',
+          'lang': 'python',
+        })
+        .timeout(const Duration(seconds: 3));
+    expect(AgentService.I.pendingApproval, isNull);
+  });
+
+  test(
+    'Always file grant stays exact even if target becomes a directory',
+    () async {
+      final s = await testSession('aaa-exact-file', mode: 'auto');
+      final path = '${ledgerDir.path}/exact-target';
+      File(path).writeAsStringSync('file');
+      final first = AgentService.I.dispatchForTest('file_read', {'path': path});
+      expect(await waitForApproval(), isNotNull);
+      AgentService.I.approveAlways();
+      await first;
+      final store = GrantStore(
+        sessionGrants: {
+          s.id: PermissionGrant.listFromJson(
+            s.grants.map((g) => g.toJson()).toList(),
+          ),
+        },
+      );
+      expect(store.isPathGranted(s.id, '$path/child'), isFalse);
+      expect(
+        await AgentService.I.sandboxAllowedRootsForTest(),
+        isNot(contains(path)),
+        reason: 'an exact file must not become a recursive shell root',
+      );
+      File(path).deleteSync();
+      Directory(path).createSync();
+      File('$path/child').writeAsStringSync('private');
+      final next = AgentService.I.dispatchForTest('file_read', {
+        'path': '$path/child',
+      });
+      expect(await waitForApproval(), isNotNull);
+      AgentService.I.approve(false);
+      expect(await next, startsWith('ACCESS_DENIED:'));
+    },
+  );
+
+  test(
+    'a remembered file grant cannot bypass Read-Only write policy',
+    () async {
+      final s = await testSession('aaa-readonly-policy', mode: 'auto');
+      final file = File('${ledgerDir.path}/readonly-file')
+        ..writeAsStringSync('original');
+      final read = AgentService.I.dispatchForTest('file_read', {
+        'path': file.path,
+      });
+      expect(await waitForApproval(), isNotNull);
+      AgentService.I.approve(true);
+      await read;
+      s.mode = 'safe';
+      expect(
+        await AgentService.I.dispatchForTest('file_write', {
+          'path': file.path,
+          'content': 'changed',
+        }),
+        startsWith('READ-ONLY MODE:'),
+      );
+      expect(file.readAsStringSync(), 'original');
+      expect(AgentService.I.pendingApproval, isNull);
+    },
+  );
+
+  for (final always in [false, true]) {
+    test(
+      '${always ? "Always" : "Allow"} directory covers normalized descendants only',
+      () async {
+        final s = await testSession('aaa-directory-$always', mode: 'auto');
+        final dir = Directory('${ledgerDir.path}/dir-$always')..createSync();
+        final child = File('${dir.path}/child.txt')
+          ..writeAsStringSync('child data');
+        final first = AgentService.I.dispatchForTest('fs_glob', {
+          'path': dir.path,
+          'pattern': '*.txt',
+        });
+        expect(await waitForApproval(), isNotNull);
+        if (always) {
+          AgentService.I.approveAlways();
+        } else {
+          AgentService.I.approve(true);
+        }
+        await first;
+        s.grants = ChatSession.fromJson(s.toJson()).grants;
+        for (final mode in ['studio', 'control', 'auto']) {
+          s.mode = mode;
+          final result = await AgentService.I
+              .dispatchForTest('file_read', {
+                'path': '${dir.path}//./child.txt',
+              })
+              .timeout(const Duration(seconds: 3));
+          expect(result, contains('child data'));
+          expect(AgentService.I.pendingApproval, isNull);
+        }
+        final store = GrantStore(sessionGrants: {s.id: s.grants});
+        expect(
+          store.isPathGranted(s.id, '${dir.path}-other/child.txt'),
+          isFalse,
+        );
+        expect(store.isPathGranted(s.id, '${dir.path}/../secret'), isFalse);
+        expect(store.isPathGranted('other', child.path), isFalse);
+        // A symlink inside an approved directory must still gate its real target.
+        final target = File('${ledgerDir.path}/symlink-secret-$always')
+          ..writeAsStringSync('secret');
+        Link('${dir.path}/link').createSync(target.path);
+        final linked = AgentService.I.dispatchForTest('file_read', {
+          'path': '${dir.path}/link',
+        });
+        expect((await waitForApproval())?.tool, 'grant:path:${target.path}');
+        AgentService.I.approve(false);
+        expect(await linked, startsWith('ACCESS_DENIED:'));
+      },
+    );
+  }
+
+  test(
+    'denied directory stops shell and file retries; explicit revoke permits reconsideration',
+    () async {
+      final s = await testSession('aaa-directory-deny', mode: 'auto');
+      final dir = Directory('${ledgerDir.path}/denied-dir')..createSync();
+      final child = File('${dir.path}/child')..writeAsStringSync('secret');
+      final first = AgentService.I.dispatchForTest('fs_glob', {
+        'path': dir.path,
+        'pattern': '*',
+      });
+      expect(await waitForApproval(), isNotNull);
+      AgentService.I.approve(false);
+      expect(await first, startsWith('ACCESS_DENIED:'));
+      s.grants = ChatSession.fromJson(s.toJson()).grants;
+      for (final mode in ['auto', 'studio', 'control']) {
+        s.mode = mode;
+        expect(
+          await AgentService.I
+              .dispatchForTest('file_read', {'path': child.path})
+              .timeout(const Duration(seconds: 3)),
+          startsWith('ACCESS_DENIED:'),
+        );
+        expect(
+          await AgentService.I
+              .dispatchForTest('run_shell', {'command': 'cat ${child.path}'})
+              .timeout(const Duration(seconds: 3)),
+          startsWith('ACCESS_DENIED:'),
+        );
+        expect(AgentService.I.pendingApproval, isNull);
+      }
+      await AgentService.I.revokeSessionPermissionGrant(s.grants.single);
+      final retry = AgentService.I.dispatchForTest('file_read', {
+        'path': child.path,
+      });
+      expect(await waitForApproval(), isNotNull);
+      AgentService.I.approve(true);
+      expect(await retry, contains('secret'));
+    },
+  );
+
+  test('denied host does not automatically reprompt in another mode', () async {
+    final s = await testSession('aaa-host-deny', mode: 'auto');
+    final args = {'action': 'open', 'url': 'https://denied.example/path'};
+    final first = AgentService.I.dispatchForTest('browser_popups', args);
+    expect(await waitForApproval(), isNotNull);
+    AgentService.I.approve(false);
+    expect(await first, startsWith('ACCESS_DENIED:'));
+    s.mode = 'control';
+    expect(
+      await AgentService.I
+          .dispatchForTest('browser_popups', args)
+          .timeout(const Duration(seconds: 3)),
+      startsWith('ACCESS_DENIED:'),
+    );
+    expect(AgentService.I.pendingApproval, isNull);
   });
 }

@@ -6,8 +6,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
+import 'auth_screen.dart';
 
-/// Mandatory Google sign-in gate with tri-state splash (2026-10-02).
+/// Mandatory Firebase sign-in gate with server account acknowledgement.
 ///
 /// Three states:
 ///  1. **loading** — Firebase is initializing; show a splash screen.
@@ -19,9 +20,8 @@ import '../core/theme.dart';
 /// binds the user's Ovid Cloud key in the background (mint → secure storage →
 /// Auto mode).
 ///
-/// Safety: when Firebase is NOT configured in this build (e.g. tests, or a
-/// local dev build with no `google-services.json`), the gate lets the app
-/// through unchanged — it never bricks a build that cannot sign in.
+/// Missing Firebase configuration fails closed. Tests explicitly use
+/// [disabledForTest] when exercising unrelated app features.
 class LoginGate extends StatefulWidget {
   const LoginGate({super.key, required this.child});
   final Widget child;
@@ -52,7 +52,7 @@ class _LoginGateState extends State<LoginGate> {
     try {
       await FirebaseService.I.initialize();
     } catch (_) {
-      // Firebase is optional; failure is handled below (isAvailable == false).
+      // Missing configuration is shown below; no anonymous bypass.
     }
     if (!mounted) return;
     setState(() => _initializing = false);
@@ -68,7 +68,8 @@ class _LoginGateState extends State<LoginGate> {
   void _onAuth() {
     if (!mounted) return;
     final fb = FirebaseService.I;
-    if (fb.isAvailable && fb.isSignedIn && !_bindStarted) {
+    if (!fb.accountReady) _bindStarted = false;
+    if (fb.isAvailable && fb.accountReady && !_bindStarted) {
       _bindStarted = true;
       // Bind the Ovid Cloud key in the background; a failure leaves the app
       // usable with the user's own custom providers.
@@ -88,10 +89,54 @@ class _LoginGateState extends State<LoginGate> {
       animation: FirebaseService.I,
       builder: (_, _) {
         final fb = FirebaseService.I;
-        // Firebase not configured in this build → do not block usage.
-        if (!fb.isAvailable) return widget.child;
+        // Firebase not configured in this build → no anonymous bypass.
+        if (!fb.isAvailable) {
+          return Scaffold(
+            body: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Sign-in is unavailable in this build.'),
+                  TextButton(
+                    onPressed: _kickFirebaseInit,
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
         // ── State 3: authenticated ──
         if (fb.isSignedIn) {
+          if (!fb.accountReady) {
+            return Scaffold(
+              body: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        fb.accountError ?? 'Confirming account status…',
+                        textAlign: TextAlign.center,
+                      ),
+                      if (fb.accountError != null) ...[
+                        TextButton(
+                          onPressed: fb.retryAccountLogin,
+                          child: const Text('Retry account check'),
+                        ),
+                        TextButton(
+                          onPressed: fb.signOut,
+                          child: const Text('Sign out and sign in again'),
+                        ),
+                      ] else
+                        const CircularProgressIndicator(),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }
           return _PostLoginWelcomeGate(child: widget.child);
         }
         // ── State 2: unauthenticated ──
@@ -184,9 +229,7 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
       entry.remove();
     }
 
-    entry = OverlayEntry(
-      builder: (_) => _WelcomeBanner(onDismiss: remove),
-    );
+    entry = OverlayEntry(builder: (_) => _WelcomeBanner(onDismiss: remove));
     overlay.insert(entry);
     autoDismiss = Timer(const Duration(seconds: 5), remove);
   }
@@ -348,6 +391,11 @@ class _LoginScreenState extends State<_LoginScreen> {
               padding: const EdgeInsets.all(28),
               children: [
                 const SizedBox(height: 8),
+                if (FirebaseService.I.lastDeletionReceipt?.isPending == true)
+                  Text(
+                    'Deletion requested on the server. Scheduled after ${FirebaseService.I.lastDeletionReceipt!.deleteAfter!.toUtc().toIso8601String()} (UTC). Sign in before then to cancel.',
+                    textAlign: TextAlign.center,
+                  ),
                 Icon(Icons.auto_awesome, size: 48, color: Aether.accent),
                 const SizedBox(height: 20),
                 Text(
@@ -361,7 +409,7 @@ class _LoginScreenState extends State<_LoginScreen> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  'Sign in with Google to start. Your account unlocks the '
+                  'Sign in to start. Your account unlocks the '
                   'built-in Ovid models and keeps your usage synced across '
                   'devices.',
                   textAlign: TextAlign.center,
@@ -392,6 +440,14 @@ class _LoginScreenState extends State<_LoginScreen> {
                         )
                       : const Icon(Icons.g_mobiledata, size: 26),
                   label: Text(_busy ? 'Signing in…' : 'Continue with Google'),
+                ),
+                TextButton(
+                  onPressed: _busy
+                      ? null
+                      : () => Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const AuthScreen()),
+                        ),
+                  child: const Text('Sign in with email'),
                 ),
                 if (_error != null)
                   Padding(

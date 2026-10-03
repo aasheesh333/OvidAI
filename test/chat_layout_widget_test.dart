@@ -49,6 +49,7 @@ void main() {
     );
     app.sessions.add(session);
     app.activeSessionId = session.id;
+    AgentService.I.clearAttachment();
 
     await tester.pumpWidget(
       MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
@@ -88,6 +89,40 @@ void main() {
         tester.getSize(bubble).width,
         lessThanOrEqualTo(layout.userBubbleMaxWidth + 0.5),
       );
+    });
+  }
+
+  for (final width in <double>[320, 1400]) {
+    testWidgets('20 attachments scroll without overflow at $width', (
+      tester,
+    ) async {
+      await pumpChatAt(tester, width);
+      AgentService.I.pendingAttachments.addAll([
+        for (var i = 0; i < 20; i++)
+          (
+            name: 'very-long-attachment-filename-$i.txt',
+            path: '/work/$i.txt',
+            size: 20000,
+          ),
+      ]);
+      AgentService.I.emitForTest('attach', 'staged');
+      await tester.pump();
+      final scroll = find.byKey(const ValueKey('composer-attachments-scroll'));
+      expect(scroll, findsOneWidget);
+      expect(tester.getSize(scroll).height, lessThanOrEqualTo(132));
+      expect(find.text('20/20 files'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      final scrollable = tester.state<ScrollableState>(
+        find.descendant(of: scroll, matching: find.byType(Scrollable)),
+      );
+      expect(scrollable.position.maxScrollExtent, greaterThan(0));
+      await tester.drag(scroll, const Offset(0, -1000));
+      await tester.pumpAndSettle();
+      expect(scrollable.position.pixels, greaterThan(0));
+      AgentService.I.clearAttachment();
+      await tester.pump();
+      expect(scroll, findsNothing);
+      expect(tester.takeException(), isNull);
     });
   }
 }

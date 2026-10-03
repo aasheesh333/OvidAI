@@ -50,6 +50,21 @@ void main() {
     expect(s.busy, isFalse);
   });
 
+  test('changing workspace replaces a live shell for the same session', () async {
+    final root = Directory.systemTemp.createTempSync('terminal-workspace-');
+    final a = Directory('${root.path}/a')..createSync();
+    final b = Directory('${root.path}/b')..createSync();
+    final s = StudioShellSession(tabId: 'workspace-change');
+    addTearDown(() { s.dispose(); root.deleteSync(recursive: true); });
+    for (final dir in [a, b]) {
+      s.begin('pwd');
+      await s.runPersistent('pwd', sid: 'same-session', workspace: dir.path,
+        spawner: () => Process.start(_bash(), ['--norc'], workingDirectory: dir.path));
+      await _waitFor(() => !s.busy);
+      expect(s.history, contains(dir.path));
+    }
+  });
+
   test('shell exit clears busy and the next command recreates', () async {
     final s = StudioShellSession(tabId: 'u-death');
     addTearDown(s.dispose);

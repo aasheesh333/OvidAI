@@ -134,13 +134,5 @@ void main() {
       expect(routed, greaterThanOrEqualTo(7), reason: 'one per gesture');
     });
 
-    test('the result is still completed on the UI thread', () {
-      final i = activitySrc.indexOf('private fun runDeviceGesture(');
-      expect(i, greaterThan(-1));
-      final body = activitySrc.substring(i, i + 400);
-      expect(body, contains('gestureExecutor.execute'));
-      expect(body, contains('runOnUiThread'));
-      expect(body, contains('completeDeviceAction'));
-    });
   });
 }

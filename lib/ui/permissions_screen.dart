@@ -8,8 +8,8 @@ import '../core/theme.dart';
 /// Settings → Permissions: the path/host decisions THIS SESSION holds, with
 /// revoke.
 ///
-/// STRICTLY PER-SESSION (2026-09-24): grants are recorded per session and per
-/// mode, and an "Always Allow" never applies to another conversation. The old
+/// Decisions are shared across modes in one session and never apply to another
+/// conversation. The old
 /// "All sessions" section is gone because global grants are no longer consulted
 /// by the agent — showing them as active would have been a lie. Any left on disk
 /// by an older build are listed as inert with a one-tap cleanup.
@@ -35,8 +35,8 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
             children: [
               _section(
                 'This session',
-                'Granted for THIS conversation and the mode it was granted '
-                    'in — never for any other session. They persist across '
+                'Decisions apply across modes in THIS conversation '
+                    '— never in another session. They persist across '
                     'restarts and are removed when the session is deleted.',
                 sessionGrants
                     .map(
@@ -48,8 +48,8 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
                     )
                     .toList(),
                 empty:
-                    'No grants for this session yet. They appear here when '
-                    'you pick "Always Allow" on an approval card.',
+                    'No decisions for this session yet. File access appears '
+                    'here after Allow, Always allow, or Deny.',
               ),
               if (legacy.isNotEmpty) ...[
                 const SizedBox(height: 16),
@@ -172,12 +172,18 @@ class _GrantTile extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: ListTile(
         leading: Icon(
-          isPath ? Icons.folder_outlined : Icons.public_outlined,
+          isPath
+              ? (grant.recursive
+                    ? Icons.folder_outlined
+                    : Icons.description_outlined)
+              : Icons.public_outlined,
           size: 20,
         ),
         title: Text(_label(grant), style: const TextStyle(fontSize: 13)),
         subtitle: Text(
-          '${isPath ? 'Path' : 'Host'} · ${global ? 'always allow (all sessions)' : 'always allow (this session)'}',
+          '${isPath ? (grant.recursive ? 'Directory and descendants' : 'Exact path') : 'Host and subdomains'} · '
+          '${grant.isDeny ? 'denied' : 'allowed'} · '
+          '${global ? 'legacy (not applied)' : 'this session, all modes'}',
           style: const TextStyle(fontSize: 11),
         ),
         trailing: IconButton(
@@ -221,9 +227,6 @@ String _label(PermissionGrant g) {
   final what = g.kind == PermissionGrant.kindPath
       ? 'path ${g.value}'
       : 'host ${g.value}';
-  // Grants are mode-scoped now, so name the mode — two entries for the same
-  // path in two modes are two different decisions.
-  final mode = g.mode.isEmpty ? 'general (legacy)' : g.mode;
   final deny = g.isDeny ? ' · denied' : '';
-  return '$what · $mode$deny';
+  return '$what$deny';
 }

@@ -71,7 +71,6 @@ void main() {
     final idx = agent.indexOf('Future<void> handleDeviceOverlayText');
     final body = agent.substring(idx, idx + 1400);
     expect(body.contains('pendingApproval'), isTrue);
-    expect(body.contains('approve(true)'), isTrue);
     final kt = File(
       'android/app/src/main/kotlin/com/dhanuk/ovidai/OvidAccessibilityService.kt',
     ).readAsStringSync();

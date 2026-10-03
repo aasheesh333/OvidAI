@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'diag.dart';
+import 'workspace_files.dart';
 
 /// Audit 2026-09-25 §2 — what one [RepoCache.sync] actually managed to fetch.
 /// Every way the working copy can end up PARTIAL is counted here so callers
@@ -20,6 +21,8 @@ class SyncReport {
     required List<String> failedPaths,
     required List<String> unattemptedPaths,
     required List<String> preservedPaths,
+    this.localWorkspace = false,
+    this.traversalDeadlineExceeded = false,
   }) : failedPaths = List.unmodifiable(failedPaths),
        unattemptedPaths = List.unmodifiable(unattemptedPaths),
        preservedPaths = List.unmodifiable(preservedPaths);
@@ -49,8 +52,10 @@ class SyncReport {
   /// Dirty files whose local edit was preserved over fresh upstream content
   /// (audit 2026-09-25 §1) — a potential-conflict list callers may show.
   final List<String> preservedPaths;
+  final bool localWorkspace;
+  final bool traversalDeadlineExceeded;
 
-  bool get deadlineExceeded => unattemptedPaths.isNotEmpty;
+  bool get deadlineExceeded => traversalDeadlineExceeded || unattemptedPaths.isNotEmpty;
 
   /// True when the in-memory copy is NOT the whole repo.
   bool get partial =>
@@ -64,7 +69,9 @@ class SyncReport {
   List<String> get issues {
     final out = <String>[];
     if (treeTruncated) {
-      out.add('GitHub TRUNCATED the repo tree — some files were never listed');
+      out.add(localWorkspace
+          ? 'Workspace traversal stopped at its limit — more files may exist'
+          : 'GitHub TRUNCATED the repo tree — some files were never listed');
     }
     if (droppedByCap > 0) {
       out.add('$droppedByCap files left out by the sync cap');
@@ -75,9 +82,9 @@ class SyncReport {
       );
     }
     if (deadlineExceeded) {
-      out.add(
-        'deadline exceeded — ${unattemptedPaths.length} files not attempted',
-      );
+      out.add(traversalDeadlineExceeded
+          ? 'deadline exceeded — workspace traversal is incomplete'
+          : 'deadline exceeded — ${unattemptedPaths.length} files not attempted');
     }
     return out;
   }
@@ -207,6 +214,13 @@ class RepoCache extends ChangeNotifier {
   String? get boundSessionId => _boundSessionId;
 
   int _bindingGeneration = 0;
+  String? workspaceFolder;
+  final Set<String> _unsaved = {};
+  final Map<String, ({Map<String, String> files, Set<String> dirty, Set<String> unsaved,
+    List<String> tree})> _workingCopies = {};
+  String get _copyKey => jsonEncode([
+    _boundSessionId, repoFull, defaultBranch, workspaceFolder,
+  ]);
 
   /// path → content (working copy)
   final Map<String, String> files = {};
@@ -240,12 +254,29 @@ class RepoCache extends ChangeNotifier {
     String token, {
     String branch = 'main',
     String? sessionId,
+    String? workspaceFolder,
   }) {
+    final oldKey = _copyKey;
+    final newKey = jsonEncode([sessionId, full, branch, workspaceFolder]);
+    if (oldKey != newKey) {
+      _workingCopies[oldKey] = (
+        files: Map.of(files), dirty: Set.of(_dirty), unsaved: Set.of(_unsaved), tree: List.of(treePaths),
+      );
+      final saved = _workingCopies.remove(newKey);
+      files..clear()..addAll(saved?.files ?? {});
+      _dirty..clear()..addAll(saved?.dirty ?? {});
+      _unsaved..clear()..addAll(saved?.unsaved ?? {});
+      treePaths..clear()..addAll(saved?.tree ?? []);
+      lastSync = null;
+      _lastSyncReport = null;
+      _lastCommit = null;
+    }
     _bindingGeneration++;
     repoFull = full;
     _token = token;
     defaultBranch = branch;
     _boundSessionId = sessionId;
+    this.workspaceFolder = workspaceFolder;
     // Audit 2026-09-25 §7: listeners used to learn about a new binding only
     // when the next sync finished (or failed). Notify at bind time; the
     // generation bump above still keeps any in-flight sync of the OLD
@@ -260,6 +291,9 @@ class RepoCache extends ChangeNotifier {
     _token = null;
     defaultBranch = null;
     _boundSessionId = null;
+    workspaceFolder = null;
+    _workingCopies.clear();
+    _unsaved.clear();
     files.clear();
     treePaths.clear();
     _dirty.clear();
@@ -291,6 +325,9 @@ class RepoCache extends ChangeNotifier {
     Duration deadline = defaultSyncDeadline,
     int concurrency = defaultSyncConcurrency,
   }) async {
+    if (workspaceFolder != null) {
+      return _syncWorkspace(maxFiles: maxFiles, deadline: deadline);
+    }
     final repo = repoFull;
     final token = _token;
     final branch = defaultBranch ?? 'main';
@@ -420,6 +457,95 @@ class RepoCache extends ChangeNotifier {
     }
   }
 
+  /// A selected on-disk checkout is authoritative, including untracked files
+  /// and edits made by shell tools. Never replace it with GitHub API bytes.
+  Future<SyncReport> _syncWorkspace({required int maxFiles, required Duration deadline}) async {
+    final root = Directory(workspaceFolder!);
+    final generation = _bindingGeneration;
+    final deadlineAt = DateTime.now().add(deadline);
+    final paths = <String>[];
+    final contents = <String, String>{};
+    final failed = <String>[];
+    var skipped = 0;
+    var truncated = false;
+    var timedOut = false;
+    var entries = 0;
+    // Bound directory-only trees too, and avoid an unbounded recursion stack.
+    final pending = <({Directory dir, String prefix})>[(dir: root, prefix: '')];
+    bool stop() {
+      _ensureBinding(generation);
+      if (!DateTime.now().isBefore(deadlineAt)) {
+        timedOut = true;
+        return true;
+      }
+      if (paths.length >= maxFiles || entries >= 20000) {
+        truncated = true;
+        return true;
+      }
+      return false;
+    }
+    while (pending.isNotEmpty && !stop()) {
+      final next = pending.removeLast();
+      final dir = next.dir;
+      final prefix = next.prefix;
+      if (prefix.isNotEmpty && workspaceFilePath(root, prefix) == null) continue;
+      await for (final entry in dir.list(followLinks: false).timeout(
+        deadlineAt.difference(DateTime.now()),
+        onTimeout: (sink) {
+          timedOut = true;
+          sink.close();
+        },
+      )) {
+        if (stop()) break;
+        entries++;
+        final name = entry.uri.pathSegments.where((s) => s.isNotEmpty).last;
+        final path = '$prefix$name';
+        if (entry is Link || shouldSkipPath(entry is Directory ? '$path/' : path)) {
+          skipped++;
+          continue;
+        }
+        if (entry is Directory) {
+          pending.add((dir: entry, prefix: '$path/'));
+        } else if (entry is File) {
+          paths.add(path);
+          try {
+            final safe = workspaceFilePath(root, path);
+            if (safe == null) throw StateError('Workspace path is a symlink: $path');
+            final file = File(safe);
+            final bytes = await file.openRead(0, 2 * 1024 * 1024 + 1)
+                .fold<List<int>>([], (all, chunk) => all..addAll(chunk))
+                .timeout(deadlineAt.difference(DateTime.now()));
+            if (bytes.length > 2 * 1024 * 1024) {
+              failed.add(path);
+            } else {
+              contents[path] = utf8.decode(bytes);
+            }
+          } catch (error, stack) {
+            Diag.swallow('repo_cache.syncWorkspace', error, stack);
+            failed.add(path);
+            if (error is TimeoutException) timedOut = true;
+          }
+        }
+        if (timedOut) break;
+      }
+      if (timedOut || truncated) break;
+    }
+    _ensureBinding(generation);
+    // Reapply drafts from the LIVE map: edits may have arrived during traversal.
+    final drafts = {for (final p in _unsaved) if (files[p] != null) p: files[p]!};
+    files..clear()..addAll(contents);
+    files.addAll(drafts);
+    treePaths..clear()..addAll({...paths, ...drafts.keys});
+    final report = SyncReport(requested: paths.length, fetched: contents.length,
+      skippedByFilter: skipped, treeTruncated: truncated, droppedByCap: 0,
+      failedPaths: failed, localWorkspace: true, traversalDeadlineExceeded: timedOut,
+      unattemptedPaths: [], preservedPaths: drafts.keys.toList());
+    lastSync = DateTime.now();
+    _lastSyncReport = report;
+    notifyListeners();
+    return report;
+  }
+
   /// Runs [body] over [items] with at most [concurrency] tasks in flight.
   /// The first thrown error aborts the run (remaining items are not started)
   /// and is rethrown with its original stack.
@@ -456,9 +582,17 @@ class RepoCache extends ChangeNotifier {
   /// sync fails so stale files from a previous repo/branch are never shown
   /// under the new binding.
   void clearWorkingCopy() {
+    final drafts = workspaceFolder == null ? <String, String>{} : {
+      for (final path in _unsaved) if (files[path] != null) path: files[path]!,
+    };
     files.clear();
     treePaths.clear();
     _dirty.clear();
+    _unsaved.clear();
+    files.addAll(drafts);
+    treePaths.addAll(drafts.keys);
+    _dirty.addAll(drafts.keys);
+    _unsaved.addAll(drafts.keys);
     lastSync = null;
     _lastSyncReport = null;
     notifyListeners();
@@ -671,12 +805,42 @@ class RepoCache extends ChangeNotifier {
 
   // ── working copy ops (agent edits land here first) ───────────────────
   void write(String path, String content) {
+    _validateWorkspacePath(path);
     files[path] = content;
     _dirty.add(path);
+    if (workspaceFolder != null) _unsaved.add(path);
     notifyListeners();
   }
 
-  String? read(String path) => files[path];
+  String? read(String path) {
+    final root = workspaceFolder;
+    if (root != null) {
+      try {
+        final safe = workspaceFilePath(Directory(root), path);
+        if (safe == null) return null;
+        if (_unsaved.contains(path)) return files[path];
+        final file = File(safe);
+        if (!file.existsSync()) return null;
+        return file.readAsStringSync();
+      } catch (error, stack) {
+        Diag.swallow('repo_cache.readWorkspace', error, stack);
+        return null;
+      }
+    }
+    return files[path];
+  }
+
+  /// A successful disk save clears draft status, not pending-commit status.
+  void didSaveWorkspaceFile(String path, String content) {
+    if (files[path] == content) _unsaved.remove(path);
+  }
+
+  void _validateWorkspacePath(String path) {
+    final root = workspaceFolder;
+    if (root != null && workspaceFilePath(Directory(root), path) == null) {
+      throw StateError('Path escapes workspace or uses a symlink: $path');
+    }
+  }
 
   /// Public on-demand fetch for a path that exists in the repo tree but was
   /// never synced into memory (e.g. Studio file-tree tap). Returns the real
@@ -694,6 +858,11 @@ class RepoCache extends ChangeNotifier {
     String path, {
     http.Client? client,
   }) async {
+    if (workspaceFolder != null) {
+      final content = read(path);
+      return FetchResult(content,
+        content == null ? FetchFailure.notFound : FetchFailure.none);
+    }
     final repo = repoFull;
     final token = _token;
     if (repo == null) {
@@ -709,9 +878,11 @@ class RepoCache extends ChangeNotifier {
       return FetchResult(files[path], FetchFailure.noToken);
     }
     final branch = defaultBranch ?? 'main';
+    final generation = _bindingGeneration;
     final c = client ?? http.Client();
     try {
       final r = await _fetchRaw(repo, token, path, branch, c);
+      _ensureBinding(generation);
       if (r.content != null) {
         if (!_dirty.contains(path)) {
           files[path] = r.content!;
@@ -745,14 +916,17 @@ class RepoCache extends ChangeNotifier {
   bool exists(String path) => files.containsKey(path);
 
   void create(String path, String content) {
+    _validateWorkspacePath(path);
     files[path] = content;
     _dirty.add(path);
+    if (workspaceFolder != null) _unsaved.add(path);
     if (!treePaths.contains(path)) treePaths.add(path);
   }
 
   void remove(String path) {
     files.remove(path);
     _dirty.remove(path);
+    _unsaved.remove(path);
     treePaths.remove(path);
   }
 

@@ -53,7 +53,7 @@ void main() {
 
     test('store-level root grant', () {
       final store = GrantStore();
-      store.addPathGrant('s1', '/');
+      store.addPathGrant('s1', '/', recursive: true);
       expect(store.isPathGranted('s1', '/anywhere/at/all.txt'), isTrue);
       expect(store.isPathGranted('other', '/anywhere/at/all.txt'), isFalse);
     });
@@ -99,7 +99,7 @@ void main() {
       expect(store.isHostGranted('s1', 'evil.example.com'), isFalse);
 
       // Global grants with a null session id are legitimate.
-      store.addPathGrant(null, '/shared', global: true);
+      store.addPathGrant(null, '/shared', global: true, recursive: true);
       store.addHostGrant(null, 'cdn.example.com', global: true);
       expect(store.isPathGranted('s1', '/shared/f'), isTrue);
       expect(store.isHostGranted('s9', 'cdn.example.com'), isTrue);

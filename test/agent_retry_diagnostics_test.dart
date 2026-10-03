@@ -1,9 +1,11 @@
 import 'dart:ffi' as ffi;
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -146,4 +148,186 @@ void main() {
 
     expect(thinkText(s.id), contains('tokens in context'));
   });
+
+  test(
+    'terminal empty reply has one notice and no invented timeout advice',
+    () async {
+      final s = makeSession('empty-reply');
+      AgentService.llmOnceForTest = (p, msgs, session, includeTools) async {
+        AgentService.I.lastError = 'empty response from test-model';
+        return null;
+      };
+      await AgentService.I.runTask('hi', sessionId: s.id);
+      final replies = s.messages.where((m) => m.role == 'assistant').toList();
+      expect(replies, hasLength(1));
+      expect(
+        replies.single.content,
+        isNot(contains('increase "AI response timeout"')),
+      );
+      expect(replies.single.content.toLowerCase(), contains('retry'));
+    },
+  );
+
+  for (final format in [ApiFormat.openai, ApiFormat.anthropic]) {
+    test(
+      '${format.name} empty stream does not inherit a prior timeout',
+      () async {
+        final s = makeSession('empty-${format.name}');
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        server.listen((req) async {
+          await req.drain<void>();
+          req.response.headers.contentType = ContentType(
+            'text',
+            'event-stream',
+          );
+          req.response.write('data: [DONE]\n\n');
+          await req.response.close();
+        });
+        final p = app.providerById(s.providerId)!;
+        p.baseUrl = 'http://127.0.0.1:${server.port}/v1';
+        p.apiFormat = format;
+        AgentService.I.lastError =
+            'stream error: TimeoutException: prior attempt';
+        final result = await AgentService.I.callLlmOnceForTest(p, [], s);
+        expect(result, isNull);
+        expect(AgentService.I.lastError, startsWith('empty response'));
+        expect(AgentService.I.lastError, isNot(contains('prior attempt')));
+        p.apiFormat = ApiFormat.openai;
+      },
+    );
+  }
+
+  test(
+    'OpenAI SSE provider error survives instead of becoming empty response',
+    () async {
+      final s = makeSession('stream-error');
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((req) async {
+        await req.drain<void>();
+        req.response.headers.contentType = ContentType('text', 'event-stream');
+        req.response.write(
+          'data: {"error":{"message":"quota exhausted","code":"insufficient_quota"}}\n\n',
+        );
+        await req.response.close();
+      });
+      final p = app.providerById(s.providerId)!;
+      p.baseUrl = 'http://127.0.0.1:${server.port}/v1';
+      expect(await AgentService.I.callLlmOnceForTest(p, [], s), isNull);
+      expect(AgentService.I.lastError, contains('quota exhausted'));
+      expect(AgentService.I.lastError, isNot(contains('empty response')));
+    },
+  );
+
+  test(
+    'coordinate deltas are appended once and never copied from tool input',
+    () async {
+      final s = makeSession('coordinate-evidence');
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((req) async {
+        await req.drain<void>();
+        req.response.headers.contentType = ContentType('text', 'event-stream');
+        for (final content in ['(10,20) ', '(10,20) ', 'done']) {
+          req.response.write(
+            'data: ${jsonEncode({
+              'choices': [
+                {
+                  'delta': {'content': content},
+                },
+              ],
+            })}\n\n',
+          );
+        }
+        req.response.write('data: [DONE]\n\n');
+        await req.response.close();
+      });
+      final p = app.providerById(s.providerId)!;
+      p.baseUrl = 'http://127.0.0.1:${server.port}/v1';
+      final result = await AgentService.I.callLlmOnceForTest(p, [
+        {'role': 'tool', 'content': '[1] bounds=(99,98,97,96)'},
+      ], s);
+      expect(result!['content'], '(10,20) (10,20) done');
+      expect(s.messages.last.content, '(10,20) (10,20) done');
+    },
+  );
+
+  test(
+    'native accessibility evidence has one four-coordinate rectangle per node',
+    () {
+      final output = DeviceControlService.formatReadResultForTest({
+        'full': true,
+        'status': 'ok',
+        'package': 'example.app',
+        'added': [
+          {
+            'handle': 1,
+            'text': 'Button',
+            'bounds': [10, 20, 30, 40],
+          },
+          {
+            'handle': 2,
+            'text': 'Container',
+            'bounds': [10, 20, 30, 40],
+          },
+        ],
+      });
+      expect('bounds=(10,20,30,40)'.allMatches(output).length, 2);
+      expect(
+        output.split('\n').where((line) => line.contains('bounds=')).length,
+        2,
+      );
+    },
+  );
+
+  test(
+    'real idle timeout carries facts and only one recovery instruction',
+    () async {
+      final s = makeSession('idle-timeout');
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final previousTimeout = app.responseTimeoutSec;
+      app.responseTimeoutSec = 1;
+      addTearDown(() => app.responseTimeoutSec = previousTimeout);
+      server.listen((req) async {
+        await req.drain<void>();
+        req.response.headers.contentType = ContentType('text', 'event-stream');
+        req.response.write(': heartbeat\n\n');
+        await req.response.flush();
+      });
+      final p = app.providerById(s.providerId)!;
+      p.baseUrl = 'http://127.0.0.1:${server.port}/v1';
+      expect(await AgentService.I.callLlmOnceForTest(p, [], s), isNull);
+      expect(AgentService.I.lastError, contains('idle for 1s'));
+      expect(AgentService.I.lastError, isNot(contains('increase')));
+    },
+  );
+
+  for (final format in [ApiFormat.openai, ApiFormat.anthropic]) {
+    test(
+      '${format.name} malformed SSE is identified without timeout diagnosis',
+      () async {
+        final s = makeSession('malformed-${format.name}');
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        server.listen((req) async {
+          await req.drain<void>();
+          req.response.headers.contentType = ContentType(
+            'text',
+            'event-stream',
+          );
+          req.response.write('data: {broken-json}\n\ndata: [DONE]\n\n');
+          await req.response.close();
+        });
+        final p = app.providerById(s.providerId)!;
+        p.baseUrl = 'http://127.0.0.1:${server.port}/v1';
+        p.apiFormat = format;
+        expect(await AgentService.I.callLlmOnceForTest(p, [], s), isNull);
+        expect(AgentService.I.lastError, startsWith('invalid model response'));
+        expect(AgentService.I.lastError, contains('1 malformed'));
+        p.apiFormat = ApiFormat.openai;
+      },
+    );
+  }
 }

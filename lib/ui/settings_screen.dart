@@ -9,6 +9,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/agent_service.dart';
 import '../core/app_info.dart';
+import '../core/native_share.dart';
 import '../core/firebase_service.dart';
 import '../core/model_limits.dart';
 import '../core/plan_mode.dart';
@@ -18,8 +19,11 @@ import '../core/session_browser_profiles.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
+import 'profile_avatar.dart';
+import 'share_actions.dart';
 import 'billing_screen.dart';
 import 'health_screen.dart';
+import 'memory_screen.dart';
 import 'permissions_screen.dart';
 import 'providers_screen.dart';
 import 'plugins_screen.dart';
@@ -42,7 +46,7 @@ class SettingsScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.only(bottom: 40),
         children: [
-          // Profile header → Account (optional Firebase sign-in)
+          // Firebase profile header → Account
           InkWell(
             onTap: () => Navigator.of(
               context,
@@ -56,41 +60,38 @@ class SettingsScreen extends StatelessWidget {
                   final signedIn = fb.isSignedIn;
                   return Row(
                     children: [
-                      CircleAvatar(
-                        radius: 22,
-                        backgroundColor: Aether.surfaceRaised,
-                        child: Icon(
-                          signedIn ? Icons.person : Icons.person_outline,
-                          size: 22,
-                          color: Aether.textMuted,
+                      ProfileAvatar(photoUrl: fb.photoUrl),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              signedIn
+                                  ? (fb.displayName ?? fb.email ?? 'You')
+                                  : 'You',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 15.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              signedIn
+                                  ? (fb.email ?? 'Signed in')
+                                  : 'Sign in to your account',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Aether.textFaint,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(width: 14),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            signedIn
-                                ? (fb.displayName ?? fb.email ?? 'You')
-                                : 'You',
-                            style: const TextStyle(
-                              fontSize: 15.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            signedIn
-                                ? (fb.email ?? 'Signed in')
-                                : 'Local account · keys stay on device',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Aether.textFaint,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const Spacer(),
                       Text(
                         signedIn ? 'Signed in' : 'Sign in',
                         style: const TextStyle(
@@ -154,11 +155,13 @@ class SettingsScreen extends StatelessWidget {
           const _SettingsSwitchTile(
             icon: Icons.psychology_outlined,
             title: 'Memory',
-            subtitleOn: 'ON — AI remembers across chats (memory_search)',
-            subtitleOff: 'OFF — AI starts fresh every chat',
+            subtitleOn: 'ON — personal and current-chat memory context & tools',
+            subtitleOff: 'OFF — saved memory context & tools disabled',
             getter: _getMemoryEnabled,
             setter: _setMemoryEnabled,
           ),
+          _navTile(context, Icons.description_outlined, 'Memory files',
+              'View, edit, save, add or import Markdown memory', const MemoryScreen()),
           const _SettingsSwitchTile(
             icon: Icons.auto_awesome,
             title: 'Reasoning mode',
@@ -247,6 +250,12 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           const SectionHeader('General'),
+          ListTile(
+            leading: const Icon(Icons.share_outlined),
+            title: const Text('Share Ovid'),
+            subtitle: const Text('Send the app website'),
+            onTap: () => showNativeShare(context, NativeShare.app),
+          ),
           const _KeepAliveToggle(),
           const _ThemeToggle(),
           const _SettingsSwitchTile(
@@ -1307,10 +1316,7 @@ class _AboutScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Aether.bg,
-      appBar: AppBar(
-        leading: const BackButton(),
-        title: const Text('About'),
-      ),
+      appBar: AppBar(leading: const BackButton(), title: const Text('About')),
       body: ListView(
         padding: const EdgeInsets.all(24),
         children: [
@@ -1361,10 +1367,7 @@ class _AboutScreen extends StatelessWidget {
           Center(
             child: Text(
               'by Dhanuk Softwares',
-              style: TextStyle(
-                fontSize: 13,
-                color: Aether.textFaint,
-              ),
+              style: TextStyle(fontSize: 13, color: Aether.textFaint),
             ),
           ),
           const SizedBox(height: 24),
@@ -1382,15 +1385,8 @@ class _AboutScreen extends StatelessWidget {
           ),
           const SizedBox(height: 32),
           ListTile(
-            leading: Icon(
-              Icons.public,
-              size: 20,
-              color: Aether.accent,
-            ),
-            title: const Text(
-              'Website',
-              style: TextStyle(fontSize: 14),
-            ),
+            leading: Icon(Icons.public, size: 20, color: Aether.accent),
+            title: const Text('Website', style: TextStyle(fontSize: 14)),
             subtitle: Text(
               'dhanuk.page.gd/ovid',
               style: TextStyle(fontSize: 12, color: Aether.textFaint),
@@ -1416,10 +1412,7 @@ class _AboutScreen extends StatelessWidget {
               size: 20,
               color: Aether.textMuted,
             ),
-            title: const Text(
-              'Privacy policy',
-              style: TextStyle(fontSize: 14),
-            ),
+            title: const Text('Privacy policy', style: TextStyle(fontSize: 14)),
             subtitle: Text(
               'dhanuk.page.gd/ovid',
               style: TextStyle(fontSize: 12, color: Aether.textFaint),
@@ -1443,10 +1436,7 @@ class _AboutScreen extends StatelessWidget {
           Center(
             child: Text(
               '© ${DateTime.now().year} Dhanuk Softwares',
-              style: TextStyle(
-                fontSize: 11.5,
-                color: Aether.textFaint,
-              ),
+              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
             ),
           ),
         ],
@@ -1885,8 +1875,11 @@ class _PresetTileState extends State<_PresetTile> {
     'browser_click',
     'browser_type',
     'browser_evaluate',
+    'render_html',
     'generate_image',
-    'image_gen',
+    'edit_image',
+    'resize_image',
+    'crop_image',
     'run_shell',
     'run_code',
     'job_start',

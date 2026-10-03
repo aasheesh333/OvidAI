@@ -16,12 +16,15 @@ import '../core/theme.dart';
 import '../core/format.dart';
 import '../core/voice_input_service.dart';
 import '../core/state.dart';
+import '../core/native_share.dart';
+import 'share_actions.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
 import 'sidebar.dart';
 import 'subagent_screen.dart';
 import 'transcript_model.dart';
 import 'chat_layout.dart';
+import 'html_artifact_view.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
 import '../core/device_control_service.dart';
@@ -1185,6 +1188,7 @@ class _ChatScreenState extends State<ChatScreen>
               ),
             ),
             actions: [
+              ChatShareButton(session: s),
               // PR27/B1: the subagents + trajectory icons moved OFF the
               // header (user ask) — subagents live on the subagent screen
               // (chat "Open" links + the catalog sheet from a chat row),
@@ -3126,6 +3130,14 @@ class _DetailBodyState extends State<_DetailBody> {
     if ((m.toolName ?? '').contains('color_palette') && detail.contains('#')) {
       return _ColorPaletteView(content: detail);
     }
+    // Structured plugin renderers take precedence over the prose fallback.
+    // Hook/skill Markdown lists must not be mistaken for file diffs.
+    final name = m.toolName ?? '';
+    if (name == 'hook' || name.startsWith('hook_') ||
+        name.startsWith('hook:') || name == 'skill' ||
+        name.startsWith('plugin:') || name.startsWith('plugin_')) {
+      return _OvidMarkdown(content: detail, fontSize: 12, color: Aether.textMuted);
+    }
     // Default diff or text view
     if (isDiff) {
       return Column(
@@ -4096,6 +4108,11 @@ class _MessageView extends StatelessWidget {
               children: [
                 switch (m.kind) {
                   MsgKind.imageGen => _imageGen(context),
+                  MsgKind.htmlArtifact => HtmlArtifactView(
+                    key: ValueKey('${session.id}:${m.htmlArtifact?.id}'),
+                    artifact: m.htmlArtifact,
+                    sessionId: session.id as String,
+                  ),
                   MsgKind.reasoning => _reasoning(),
                   MsgKind.streaming => _streaming(),
                   MsgKind.tool => _toolCard(),
@@ -4688,22 +4705,7 @@ class _MessageView extends StatelessWidget {
   }
 
   Future<void> _shareLocalFile(BuildContext context, String path) async {
-    try {
-      const channel = MethodChannel('ovid/native');
-      await channel.invokeMethod('shareFile', {
-        'filePath': path,
-        'title': 'Share Generated Image',
-      });
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Could not share ${path.split('/').last}'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    }
+    await showNativeShare(context, () => NativeShare.file(path));
   }
 
   /// Open a local workspace file with the best-matching app.
@@ -4775,59 +4777,81 @@ class _AttachmentChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: AgentService.I,
+      animation: Listenable.merge([AgentService.I, AppState.I]),
       builder: (_, _) {
         final atts = AgentService.I.pendingAttachments;
         if (atts.isEmpty) return const SizedBox.shrink();
-        return Wrap(
-          spacing: 6,
-          runSpacing: 6,
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            for (final att in atts)
-              Container(
-                margin: const EdgeInsets.only(top: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Aether.surface,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: Aether.accent.withValues(alpha: 0.4),
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
+            Padding(
+              padding: const EdgeInsets.only(left: 8, top: 4),
+              child: Text(
+                '${atts.length}/${AgentService.maxAttachments} files',
+                style: TextStyle(fontSize: 11, color: Aether.textMuted),
+              ),
+            ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 132),
+              child: SingleChildScrollView(
+                key: const ValueKey('composer-attachments-scroll'),
+                primary: false,
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
                   children: [
-                    Icon(_iconFor(att.name), size: 16, color: Aether.accent),
-                    const SizedBox(width: 7),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 150),
-                      child: Text(
-                        att.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w600,
+                    for (final att in atts)
+                      Container(
+                        margin: const EdgeInsets.only(top: 6),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Aether.surface,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: Aether.accent.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(_iconFor(att.name), size: 16, color: Aether.accent),
+                            const SizedBox(width: 7),
+                            Flexible(
+                              child: Text(
+                                att.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              _fmtSize(att.size),
+                              style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                            ),
+                            const SizedBox(width: 4),
+                            GestureDetector(
+                              onTap: () => AgentService.I.removeAttachment(att.path),
+                              child: Icon(
+                                Icons.close,
+                                size: 15,
+                                color: Aether.textMuted,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      _fmtSize(att.size),
-                      style: TextStyle(fontSize: 11, color: Aether.textFaint),
-                    ),
-                    const SizedBox(width: 4),
-                    GestureDetector(
-                      onTap: () => AgentService.I.removeAttachment(att.name),
-                      child: Icon(
-                        Icons.close,
-                        size: 15,
-                        color: Aether.textMuted,
-                      ),
-                    ),
                   ],
                 ),
               ),
+            ),
           ],
         );
       },
@@ -5370,14 +5394,14 @@ class _InputBarState extends State<_InputBar> {
               sheetCtx,
               Icons.photo_library_outlined,
               'Photos & videos',
-              'Pick from gallery (multiple, max 20 MB each)',
+              'Up to 20 files per message, max 20 MB each',
               () => _pickMedia(sheetCtx),
             ),
             _attachOption(
               sheetCtx,
               Icons.insert_drive_file_outlined,
               'Document',
-              'PDF, code, text, CSV files',
+              'PDF, code, text, CSV · up to 20 files per message',
               () => _pickDocument(sheetCtx),
             ),
             _attachOption(
@@ -5400,6 +5424,7 @@ class _InputBarState extends State<_InputBar> {
   /// Pick a document (PDF/code/text/CSV) and stage it as an attachment.
   Future<void> _pickDocument(BuildContext sheetCtx) async {
     Navigator.pop(sheetCtx);
+    final sessionId = widget.sessionId;
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: const [
@@ -5430,22 +5455,27 @@ class _InputBarState extends State<_InputBar> {
       allowMultiple: true,
       withData: false,
     );
-    await _stagePicked(result);
+    await _stagePicked(result, sessionId);
   }
 
   /// Pick a photo/video from the gallery and stage it as an attachment.
   Future<void> _pickMedia(BuildContext sheetCtx) async {
     Navigator.pop(sheetCtx);
+    final sessionId = widget.sessionId;
     final result = await FilePicker.platform.pickFiles(
       type: FileType.media,
       allowMultiple: true,
       withData: false,
     );
-    await _stagePicked(result);
+    await _stagePicked(result, sessionId);
   }
 
-  Future<void> _stagePicked(FilePickerResult? result) async {
+  Future<void> _stagePicked(FilePickerResult? result, String? sessionId) async {
     if (result == null || result.files.isEmpty) return;
+    if (sessionId == null) {
+      _toast('Select a chat before attaching files.');
+      return;
+    }
     final files = result.files.where((f) => f.path != null).toList();
     if (files.isEmpty) {
       _toast('Could not access that file.');
@@ -5454,7 +5484,11 @@ class _InputBarState extends State<_InputBar> {
     var ok = 0;
     final errors = <String>[];
     for (final f in files) {
-      final err = await AgentService.I.attachFile(f.path!, f.name);
+      final err = await AgentService.I.attachFile(
+        f.path!,
+        f.name,
+        sessionId: sessionId,
+      );
       if (err != null) {
         errors.add(err);
       } else {

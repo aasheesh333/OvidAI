@@ -245,29 +245,6 @@ void main() {
   });
 
   group('overlay: edge glow reports run state', () {
-    test('the glow is non-touchable so it cannot eat a gesture', () {
-      final i = kotlinSrc.indexOf('private fun showEdgeGlow');
-      expect(i, greaterThan(-1));
-      final body = kotlinSrc.substring(i, i + 2000);
-      expect(body, contains('FLAG_NOT_TOUCHABLE'));
-      expect(body, contains('FLAG_NOT_FOCUSABLE'));
-    });
-
-    test('it fades to transparent a short way in, at low opacity', () {
-      final i = kotlinSrc.indexOf('private fun updateEdgeGlow');
-      final body = kotlinSrc.substring(i, i + 700);
-      expect(body, contains('0x00000000'), reason: 'fades to nothing');
-      expect(body, contains('0x66'), reason: '~40% at the very edge');
-    });
-
-    test('green = running, amber = permission, red = error', () {
-      final i = kotlinSrc.indexOf('private fun overlayColorFor');
-      final body = kotlinSrc.substring(i, i + 400);
-      expect(body, contains('OVERLAY_RUNNING -> 0xFF34C759'));
-      expect(body, contains('OVERLAY_PERMISSION -> 0xFFFFB020'));
-      expect(body, contains('OVERLAY_ERROR -> 0xFFFF453A'));
-    });
-
     test('Dart drives the colour from the single approval setter', () {
       // Hooked in `set pendingApproval`, not at each prompt site, so a new
       // prompt path cannot forget it.
@@ -381,23 +358,8 @@ void main() {
       expect(isExternalSignInUrl('https://github.com/login'), isFalse);
     });
 
-    test('the sign-in notice is a non-blocking tip, not a blocking banner', () {
-      final src = File('lib/ui/browser_screen.dart').readAsStringSync();
-      expect(
-        src,
-        isNot(contains('your session cookie is kept here')),
-        reason: 'an external sign-in does not populate the WebView cookie jar',
-      );
-      // 2026-10-02: the old blocking MaterialBanner was replaced with a
-      // non-blocking snackbar tip.  The source no longer contains the old
-      // banner's heavy-handed copy — verify the new approach is present and
-      // the old one is gone.
-      expect(src, isNot(contains('Reload - I signed in')));
-      expect(src, isNot(contains('worth trying')));
-      // The new snackbar-based approach:
-      expect(src, contains('_maybeShowSignInTip'));
-      expect(src, contains('_warnedProviders'));
-    });
+    // Navigation and explicit external opening are exercised by
+    // browser_external_signin_test.dart; proactive sign-in tips were retired.
   });
 
   group('screenshots and recents are no longer blocked', () {

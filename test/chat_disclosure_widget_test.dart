@@ -27,7 +27,7 @@ void main() {
     AppState.resetTestInstance();
   });
 
-  Future<void> pumpChat(WidgetTester tester) async {
+  Future<void> pumpChat(WidgetTester tester, {Message? tool}) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -48,15 +48,16 @@ void main() {
         ),
         Message(role: 'assistant', kind: MsgKind.text, content: 'answer one'),
         Message(role: 'user', content: 'go'),
-        Message(
-          role: 'assistant',
-          kind: MsgKind.tool,
-          toolName: 'search',
-          toolTitle: 'Search docs',
-          toolSummary: 'query terms',
-          toolDetail: 'DETAIL_BODY_TOKEN',
-          toolState: 'ok',
-        ),
+        tool ??
+            Message(
+              role: 'assistant',
+              kind: MsgKind.tool,
+              toolName: 'search',
+              toolTitle: 'Search docs',
+              toolSummary: 'query terms',
+              toolDetail: 'DETAIL_BODY_TOKEN',
+              toolState: 'ok',
+            ),
         Message(role: 'assistant', kind: MsgKind.text, content: 'answer two'),
       ],
     );
@@ -81,6 +82,39 @@ void main() {
   const toolTitle = ValueKey('chat-tool-title');
   const toolChevron = ValueKey('chat-tool-chevron');
 
+  testWidgets('inline hook output renders Markdown headings and emphasis', (
+    tester,
+  ) async {
+    await pumpChat(
+      tester,
+      tool: Message(
+        role: 'assistant',
+        kind: MsgKind.tool,
+        toolName: 'hook',
+        toolTitle: 'Hook result',
+        toolState: 'ok',
+        toolDetail: '## Hook result\n\n**Ready**\n\n- first\n- second',
+      ),
+    );
+    await tester.tap(find.byKey(toolSummary));
+    await tester.pumpAndSettle();
+    final body = find.byKey(toolBody);
+    final texts = tester.widgetList<SelectableText>(
+      find.descendant(of: body, matching: find.byType(SelectableText)),
+    );
+    expect(
+      texts.map((w) => w.data ?? w.textSpan?.toPlainText() ?? '').join('\n'),
+      isNot(contains('**Ready**')),
+    );
+    expect(
+      find.descendant(
+        of: body,
+        matching: find.text('Ready', findRichText: true),
+      ),
+      findsWidgets,
+    );
+  });
+
   testWidgets('reasoning and tool disclosures are collapsed by default', (
     tester,
   ) async {
@@ -101,10 +135,7 @@ void main() {
       tester.widget<AnimatedRotation>(find.byKey(reasoningChevron)).turns,
       -0.25,
     );
-    expect(
-      tester.widget<AnimatedRotation>(find.byKey(toolChevron)).turns,
-      0.0,
-    );
+    expect(tester.widget<AnimatedRotation>(find.byKey(toolChevron)).turns, 0.0);
   });
 
   testWidgets('collapsed summaries carry no heavy border or background', (
@@ -170,17 +201,11 @@ void main() {
     await tester.tap(find.byKey(toolSummary));
     await tester.pumpAndSettle();
     expect(find.byKey(toolBody), findsOneWidget);
-    expect(
-      tester.widget<AnimatedRotation>(find.byKey(toolChevron)).turns,
-      0.5,
-    );
+    expect(tester.widget<AnimatedRotation>(find.byKey(toolChevron)).turns, 0.5);
 
     await tester.tap(find.byKey(toolSummary));
     await tester.pumpAndSettle();
     expect(find.byKey(toolBody), findsNothing);
-    expect(
-      tester.widget<AnimatedRotation>(find.byKey(toolChevron)).turns,
-      0.0,
-    );
+    expect(tester.widget<AnimatedRotation>(find.byKey(toolChevron)).turns, 0.0);
   });
 }

@@ -72,6 +72,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    AgentService.I.onControlTaskCompleted = _revealControlChat;
     // Foreground-notification wiring (agent keep-alive): registers the
     // notification Stop-button handler.
     unawaited(AgentNotificationService.I.init());
@@ -103,8 +104,16 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     }
   }
 
+  void _revealControlChat(String sessionId) {
+    if (!mounted) return;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
   @override
   void dispose() {
+    if (AgentService.I.onControlTaskCompleted == _revealControlChat) {
+      AgentService.I.onControlTaskCompleted = null;
+    }
     _persistWarnTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     FirebaseService.I.removeListener(_onFirebaseReady);

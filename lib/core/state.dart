@@ -19,9 +19,11 @@ import 'firebase_service.dart';
 import 'github_service.dart';
 import 'grant_store.dart';
 import 'hook_service.dart';
+import 'html_artifact.dart';
 import 'mcp_config_parse.dart';
 import 'mcp_service.dart';
 import 'model_limits.dart';
+import 'memory_store.dart';
 import 'plugin_adapters.dart';
 import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
@@ -749,6 +751,7 @@ enum MsgKind {
   turnTail, // passive turn-tail lane rows: settlement notices, dropped-queue notes
   compact,
   imageGen,
+  htmlArtifact,
   // Live streaming bubble: the in-progress assistant message. Born as
   // `streaming` (never `reasoning`) so the answer is never hidden behind
   // a collapsed thinking card; finalized to `text` (or `reasoning` when
@@ -760,15 +763,24 @@ enum MsgKind {
 class MessageAttachment {
   final String name;
   final int size;
-  MessageAttachment({required this.name, required this.size});
+
+  /// Actual workspace path, retained for later turns and process restarts.
+  /// Null on messages written before attachment paths were persisted.
+  final String? path;
+  MessageAttachment({required this.name, required this.size, this.path});
 
   factory MessageAttachment.fromJson(Map<String, dynamic> j) =>
       MessageAttachment(
         name: j['name'] as String? ?? 'file',
         size: (j['size'] as num?)?.toInt() ?? 0,
+        path: j['path'] as String?,
       );
 
-  Map<String, dynamic> toJson() => {'name': name, 'size': size};
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'size': size,
+    if (path != null) 'path': path,
+  };
 }
 
 class Message {
@@ -822,6 +834,7 @@ class Message {
     this.toolSessionId,
     this.attachments = const [],
     this.imagePath,
+    this.htmlArtifact,
     this.feedback,
     this.feedbackNote,
     DateTime? time,
@@ -830,6 +843,8 @@ class Message {
   /// Local file path for `MsgKind.imageGen` rows — the generated image
   /// saved into the session workspace (rendered in-chat, tappable to open).
   final String? imagePath;
+
+  final HtmlArtifact? htmlArtifact;
 
   /// User feedback on a FINAL assistant message (the chat feedback tracker message-feedback):
   /// 'up' | 'down' | null. Re-clicking the same value retracts (null).
@@ -855,6 +870,7 @@ class Message {
     toolState: j['toolState'] as String? ?? 'ok',
     toolSessionId: j['toolSessionId'] as String?,
     imagePath: j['imagePath'] as String?,
+    htmlArtifact: HtmlArtifact.tryFromJson(j['htmlArtifact']),
     feedback: j['feedback'] as String?,
     feedbackNote: j['feedbackNote'] as String?,
     attachments: [
@@ -878,6 +894,7 @@ class Message {
     if (toolState != 'ok') 'toolState': toolState,
     if (toolSessionId != null) 'toolSessionId': toolSessionId,
     if (imagePath != null) 'imagePath': imagePath,
+    if (htmlArtifact != null) 'htmlArtifact': htmlArtifact!.toJson(),
     if (feedback != null) 'feedback': feedback,
     if (feedbackNote != null && feedbackNote!.isNotEmpty)
       'feedbackNote': feedbackNote,
@@ -1199,6 +1216,11 @@ class ChatSession {
   /// a restart never re-titles (and a manual regenerate can force it again).
   bool titleGenerated;
 
+  /// Read-only transcript grants created by explicit user @session references.
+  /// They belong to this chat, never to its children or other root chats.
+  final Set<String> referencedSessionIds;
+  final List<String> pendingAgentNotices;
+
   ChatSession({
     required this.id,
     required this.title,
@@ -1234,7 +1256,11 @@ class ChatSession {
     DateTime? createdAt,
     SessionAnalytics? analytics,
     this.titleGenerated = false,
+    Iterable<String> referencedSessionIds = const [],
+    Iterable<String> pendingAgentNotices = const [],
   }) : agentAllowedTools = agentAllowedTools ?? [],
+       referencedSessionIds = Set.of(referencedSessionIds),
+       pendingAgentNotices = List.of(pendingAgentNotices),
        grants = grants ?? [],
        messages = messages ?? [],
        todos = todos ?? [],
@@ -1306,6 +1332,10 @@ class ChatSession {
           : null,
     ),
     titleGenerated: j['titleGenerated'] as bool? ?? false,
+    referencedSessionIds:
+        (j['referencedSessionIds'] as List?)?.whereType<String>() ?? const [],
+    pendingAgentNotices:
+        (j['pendingAgentNotices'] as List?)?.whereType<String>() ?? const [],
   );
 
   Map<String, dynamic> toJson() => {
@@ -1347,6 +1377,9 @@ class ChatSession {
     'createdAt': createdAt.toIso8601String(),
     'analytics': analytics.toJson(),
     if (titleGenerated) 'titleGenerated': true,
+    if (referencedSessionIds.isNotEmpty)
+      'referencedSessionIds': referencedSessionIds.toList(),
+    if (pendingAgentNotices.isNotEmpty) 'pendingAgentNotices': pendingAgentNotices,
   };
 
   void recordAnalytics({
@@ -1656,6 +1689,7 @@ class AppState extends ChangeNotifier {
 
   @visibleForTesting
   factory AppState.createForTest({
+    MemoryStore? memoryStore,
     void Function(String stage)? startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
     Map<String, Duration> startupStageTimeouts = const {},
@@ -1666,6 +1700,7 @@ class AppState extends ChangeNotifier {
     Duration sessionPersistDebounce = Duration.zero,
   }) {
     final instance = AppState._(
+      memoryStore: memoryStore,
       startupStageRecorder: startupStageRecorder,
       startupStageDelegates: startupStageDelegates,
       startupStageTimeouts: startupStageTimeouts,
@@ -1702,6 +1737,7 @@ class AppState extends ChangeNotifier {
   }
 
   AppState._({
+    MemoryStore? memoryStore,
     this._startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
     Map<String, Duration> startupStageTimeouts = const {},
@@ -1713,6 +1749,7 @@ class AppState extends ChangeNotifier {
   }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates),
        _startupStageTimeouts = Map.unmodifiable(startupStageTimeouts) {
     _sessionPersistDebounce = sessionPersistDebounce ?? Duration.zero;
+    _memoryStore = memoryStore;
     _pluginBootActivator =
         pluginBootActivator ??
         ((bootToken, connectMcp) => PluginRuntimeManager.I.activateForBoot(
@@ -1730,6 +1767,10 @@ class AppState extends ChangeNotifier {
     // install routing, the agent roster, and dispatch see them from boot.
     registerAllNativePlugins();
     _ensureActiveSession();
+    SandboxService.sessionWorkspaceProvider = (id) {
+      final session = sessions.where((s) => (s.sandboxId ?? s.id) == id).firstOrNull;
+      return session == null ? null : (folder: session.workspaceFolder);
+    };
   }
 
   final void Function(String stage)? _startupStageRecorder;
@@ -3756,6 +3797,10 @@ class AppState extends ChangeNotifier {
   void _scheduleSessionDeletion(String id, String? sandboxId) {
     if (!_notifiedDeletedSessionIds.add(id)) return;
     onSessionDeleted?.call(id);
+    _pendingWorkspaceDeletions.add(() async {
+      final store = await _openMemoryStore();
+      store.deleteSession(id);
+    }().catchError((Object e) { Diag.swallow('memory.deleteSession', e); }));
     if (sandboxId != null) {
       _pendingWorkspaceDeletions.add(_workspaceDeleter(sandboxId));
     }
@@ -3886,7 +3931,10 @@ class AppState extends ChangeNotifier {
         message.feedback,
         message.feedbackNote,
         message.attachments
-            .map((attachment) => '${attachment.name}:${attachment.size}')
+            .map(
+              (attachment) =>
+                  '${attachment.name}:${attachment.size}:${attachment.path}',
+            )
             .join('|'),
       );
     }
@@ -3905,6 +3953,8 @@ class AppState extends ChangeNotifier {
       session.agentState,
       session.agentResult,
       session.agentId,
+      Object.hashAll(session.referencedSessionIds),
+      Object.hashAll(session.pendingAgentNotices),
       session.compactedSummary,
       session.compactedAtCount,
       session.planMode,
@@ -4055,7 +4105,9 @@ class AppState extends ChangeNotifier {
       } catch (e) {
         Diag.swallow('state', e);
       }
-      await prefs.setStringList(_kSessions, encoded);
+      if (!await prefs.setStringList(_kSessions, encoded)) {
+        throw StateError('Session storage rejected write');
+      }
       if (activeSessionId != null) {
         await prefs.setString(_kActive, activeSessionId!);
       } else {
@@ -4214,6 +4266,16 @@ class AppState extends ChangeNotifier {
   /// state to defaults and seeds a fresh session.
   Future<void> deleteAllData() async {
     try {
+      // An unavailable platform directory must not prevent the remaining reset.
+      // Keep the failure visible to memory consumers instead of showing old data.
+      try {
+        (await _openMemoryStore()).deleteAll();
+        _memoryError = null;
+      } catch (e) {
+        _memoryError = 'Memory deletion failed: $e';
+        Diag.swallow('memory.deleteAll', e);
+      }
+      _memoryOpening = null;
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
       await runtimeStatusStore.clear();
@@ -4906,36 +4968,99 @@ class AppState extends ChangeNotifier {
   final List<ChatSession> sessions = [];
   String? activeSessionId;
 
-  /// Durable memories saved via memory_save — survive across sessions
-  /// (the persistent memory store memory tool equivalent).  Persisted as JSON in SharedPreferences.
+  /// Legacy snippets retained only as a compatibility view during migration.
   final List<MemoryItem> memories = [];
   static const _kMemories = 'ovid_memories';
 
-  Future<void> saveMemory(MemoryItem m) async {
-    memories.add(m);
-    if (memories.length > 200) memories.removeRange(0, memories.length - 200);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        _kMemories,
-        jsonEncode(memories.map((e) => e.toJson()).toList()),
-      );
-    } catch (e) {
-      Diag.swallow('state', e);
+  MemoryStore? _memoryStore;
+  Future<MemoryStore>? _memoryOpening;
+  String? _memoryError;
+
+  /// Only trusted persisted parentId lineage grants access to session memory.
+  /// Transcript-sharing settings and @session references grant no memory access.
+  String memoryOwner(String sessionId) {
+    var current = sessionById(sessionId);
+    if (current == null) throw StateError('Memory session no longer exists.');
+    final seen = <String>{};
+    while (current!.parentId != null) {
+      if (!seen.add(current.id)) throw StateError('Invalid memory lineage.');
+      current = sessionById(current.parentId);
+      if (current == null) throw StateError('Memory parent no longer exists.');
     }
+    return current.id;
+  }
+
+  Future<MemoryStore> _openMemoryStore() async => _memoryStore ??=
+      MemoryStore(Directory('${(await getApplicationDocumentsDirectory()).path}/personal-memory'));
+
+  Future<MemoryStore> prepareMemory() => _memoryOpening ??= () async {
+    try {
+      final store = await _openMemoryStore();
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kMemories);
+      if (raw != null) {
+        // Deterministic content-addressed names make interrupted migration
+        // retryable. Never seed over the user's entrypoint or existing edits.
+        final items = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+        final chunks = <String>[];
+        var chunk = StringBuffer();
+        var bytes = 0;
+        for (final item in items) {
+          // Pack legacy snippets instead of consuming one slot per snippet
+          // (the old store allowed 200). Split on rune boundaries if needed.
+          final text = '\n\n## Saved memory ${item['id']}\n${item['content']}';
+          for (final rune in text.runes) {
+            final char = String.fromCharCode(rune);
+            final size = utf8.encode(char).length;
+            if (bytes + size > 24000) {
+              chunks.add(chunk.toString());
+              chunk = StringBuffer();
+              bytes = 0;
+            }
+            chunk.write(char);
+            bytes += size;
+          }
+        }
+        if (chunk.isNotEmpty) chunks.add(chunk.toString());
+        for (final content in chunks) {
+          final digest = sha256.convert(utf8.encode(content)).toString();
+          final name = 'legacy-${digest.substring(0, 24)}.md';
+          if (store.list(null).contains(name)) {
+            if (store.read(null, name).content != content) {
+              throw StateError('Legacy memory conflicts with $name; original snippets retained.');
+            }
+          } else {
+            store.save(null, name, content, mode: 'create');
+          }
+        }
+        await prefs.remove(_kMemories);
+        memories.clear();
+      }
+      _memoryError = null;
+      return store;
+    } catch (e) {
+      _memoryError = '$e';
+      _memoryOpening = null;
+      rethrow;
+    }
+  }();
+
+  String memoryContext(String sessionId) {
+    if (!memoryEnabled) return '';
+    try {
+      final owner = memoryOwner(sessionId);
+      if (_memoryError != null) return 'Memory unavailable: $_memoryError';
+      return _memoryStore?.context(owner) ?? '';
+    } catch (e) { return 'Memory unavailable: $e'; }
+  }
+
+  Future<void> saveMemory(MemoryItem m) async {
+    (await prepareMemory()).save(null, 'MEMORY.md', m.content, mode: 'append');
   }
 
   Future<void> _loadMemories() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kMemories);
-      if (raw == null) return;
-      final list = jsonDecode(raw) as List;
-      memories
-        ..clear()
-        ..addAll(
-          list.map((e) => MemoryItem.fromJson(e as Map<String, dynamic>)),
-        );
+      await prepareMemory();
     } catch (e) {
       Diag.swallow('state', e);
     }
@@ -4995,6 +5120,7 @@ class AppState extends ChangeNotifier {
     String persona = '',
     String outputSchemaHint = '',
     String? model,
+    bool notify = true,
   }) {
     final child = ChatSession(
       id: 'sub-${DateTime.now().microsecondsSinceEpoch}',
@@ -5027,7 +5153,7 @@ class AppState extends ChangeNotifier {
     );
     sessions.insert(0, child);
     _markSessionDirty(child.id);
-    notifyListeners();
+    if (notify) notifyListeners();
     persistSessions();
     return child;
   }
@@ -5165,7 +5291,7 @@ class AppState extends ChangeNotifier {
   void setSessionWorkspaceFolder(String? path, {String? sessionId}) {
     final s = sessionId == null
         ? activeSession
-        : (sessionById(sessionId) ?? activeSession);
+        : sessionById(sessionId);
     if (s == null) return;
     final normalized = (path == null || path.trim().isEmpty)
         ? null
@@ -5460,7 +5586,9 @@ class AppState extends ChangeNotifier {
           const [];
       final ids = <String>[
         for (final m in fetched)
-          (m is Map ? (m['id'] ?? m['name'] ?? '') : '$m').toString(),
+          if (m is! Map ||
+              (m['output_modality'] != 'image' && m['id'] != 'ovid-image'))
+            (m is Map ? (m['id'] ?? m['name'] ?? '') : '$m').toString(),
       ].where((s) => s.isNotEmpty).toList();
       if (ids.isEmpty) return false;
       final merged = <String>{'auto', ...ids}.toList();
@@ -8169,6 +8297,7 @@ class AppState extends ChangeNotifier {
     final session = sessions.where((s) => s.id == sessionId).firstOrNull;
     if (session != null) {
       session.repo = repoFull;
+      _markSessionDirty(session.id);
       lastRepoFull = repoFull;
       unawaited(_persistLastSelection());
       persistSessions();
@@ -8188,6 +8317,7 @@ class AppState extends ChangeNotifier {
     final session = sessions.where((s) => s.id == sessionId).firstOrNull;
     if (session != null) {
       session.branch = branch;
+      _markSessionDirty(session.id);
       lastBranch = branch;
       unawaited(_persistLastSelection());
       persistSessions();
@@ -8366,8 +8496,9 @@ class AppState extends ChangeNotifier {
         name: 'Image Studio',
         author: 'ovidai',
         description:
-            'In-chat image generation and edit via free endpoints (Pollinations / HF Spaces).',
-        version: '1.2.0',
+            'Local image resize and crop. Ovid Cloud generation and editing '
+            'appear when the gateway confirms image access.',
+        version: '2.0.0',
         category: 'Tool',
         installed: true,
         enabled: true,

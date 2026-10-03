@@ -10,12 +10,11 @@ import '../core/state.dart';
 /// ───────────────────────────────────────────────────────────────────
 /// Aggregated from [AppState.usageLog] — real token counts metered per
 /// model call by the agent loop. web-IDE StatsLine + TurnUsage pattern,
-/// plus APPROXIMATE USD pricing per known model family (public list
-/// prices; marked "approx" everywhere).
+/// with server-authoritative remaining usage for Ovid Cloud.
 /// ═══════════════════════════════════════════════════════════════════
 
 /// Approximate public list pricing per model family, USD per 1M tokens
-/// (input, output).  Unknown models return null → UI shows "—".
+/// (input, output). Internal only; costs are not rendered.
 class _Pricing {
   final double inputPer1M;
   final double outputPer1M;
@@ -71,10 +70,6 @@ class _Pricing {
     if (p == null) return null;
     return inTok / 1e6 * p.inputPer1M + outTok / 1e6 * p.outputPer1M;
   }
-
-  static String fmt(double usd) => usd >= 1
-      ? '\$${usd.toStringAsFixed(2)}'
-      : '\$${usd.toStringAsFixed(usd >= 0.01 ? 3 : 4)}';
 }
 
 class ProviderUsage {
@@ -197,8 +192,6 @@ class UsageScreen extends StatelessWidget {
           final reqs = providers.fold<int>(0, (s, p) => s + p.requests);
           final tokensIn = providers.fold<int>(0, (s, p) => s + p.tokensIn);
           final tokensOut = providers.fold<int>(0, (s, p) => s + p.tokensOut);
-          final costUsd = providers.fold<double>(0, (s, p) => s + p.costUsd);
-          final anyPriced = providers.any((p) => p.hasPricedModel);
           final todayEntries = app.usageLog.where((e) {
             final d = e.time;
             final now = DateTime.now();
@@ -226,26 +219,12 @@ class UsageScreen extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    _stat(
-                      'Est. cost',
-                      anyPriced ? _Pricing.fmt(costUsd) : '—',
-                      big: true,
-                    ),
                     _stat('Today', _fmtTok(todayTokens)),
                     _stat('Requests', '$reqs'),
                     _stat('Providers', '${providers.length}'),
                   ],
                 ),
               ),
-              if (anyPriced)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 4, 18, 0),
-                  child: Text(
-                    'Costs are approximate (public list prices per model; '
-                    'cached-input, promos and free tiers not reflected).',
-                    style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-                  ),
-                ),
 
               // ---- tokens banner ----
               Container(
@@ -259,7 +238,10 @@ class UsageScreen extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: Aether.hairline),
                 ),
-                child: Row(
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     Icon(
                       Icons.data_usage_outlined,
@@ -271,7 +253,6 @@ class UsageScreen extends StatelessWidget {
                       'Input · output',
                       style: TextStyle(fontSize: 11, color: Aether.textFaint),
                     ),
-                    const Spacer(),
                     Text(
                       '${_fmtTok(tokensIn)} in · ${_fmtTok(tokensOut)} out',
                       style: TextStyle(
@@ -385,8 +366,7 @@ class _ProviderTile extends StatelessWidget {
         ],
       ),
       subtitle: Text(
-        '${p.requests} requests · ${_fmtK(p.tokensIn)} in · ${_fmtK(p.tokensOut)} out'
-        '${p.hasPricedModel ? ' · ≈ ${_Pricing.fmt(p.costUsd)}' : ''}',
+        '${p.requests} requests · ${_fmtK(p.tokensIn)} in · ${_fmtK(p.tokensOut)} out',
         style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
       trailing: Icon(Icons.chevron_right, size: 14, color: Aether.textFaint),
@@ -465,10 +445,6 @@ class ProviderUsageScreen extends StatelessWidget {
                 _cell('Requests', '${p.requests}'),
                 _cell('Tokens in', _fmtK(p.tokensIn)),
                 _cell('Tokens out', _fmtK(p.tokensOut)),
-                _cell(
-                  'Est. cost',
-                  p.hasPricedModel ? '≈ ${_Pricing.fmt(p.costUsd)}' : '—',
-                ),
               ],
             ),
           ),
@@ -554,19 +530,14 @@ class ProviderUsageScreen extends StatelessWidget {
                 children: [
                   const _Row(
                     h: true,
-                    cells: ['MODEL', 'REQ', 'TOKENS', '≈ COST'],
-                    flexes: [5, 2, 3, 3],
+                    cells: ['MODEL', 'REQ', 'TOKENS'],
+                    flexes: [5, 2, 3],
                   ),
                   const Divider(height: 12),
                   for (final m in p.models)
                     _Row(
-                      cells: [
-                        m.$1,
-                        '${m.$2}',
-                        _fmtK(m.$3),
-                        _modelCost(p.providerId, m.$1),
-                      ],
-                      flexes: const [5, 2, 3, 3],
+                      cells: [m.$1, '${m.$2}', _fmtK(m.$3)],
+                      flexes: const [5, 2, 3],
                     ),
                 ],
               ),
@@ -577,19 +548,6 @@ class ProviderUsageScreen extends StatelessWidget {
   }
 
   String _fmtK(int n) => formatCompactCount(n);
-
-  /// Approx USD cost for ONE model on this provider, computed from the raw
-  /// log (per-model in/out split lives there, not in the aggregate tuple).
-  String _modelCost(String providerId, String model) {
-    var i = 0, o = 0;
-    for (final e in AppState.I.usageLog) {
-      if (e.providerId != providerId || e.model != model) continue;
-      i += e.promptTokens;
-      o += e.completionTokens;
-    }
-    final cost = _Pricing.estimate(model, i, o);
-    return cost == null ? '—' : _Pricing.fmt(cost);
-  }
 
   Widget _cell(String label, String value) {
     return Expanded(
@@ -669,8 +627,7 @@ class _Row extends StatelessWidget {
 ///
 /// Usage is fetched from the gateway's `/usage` (the source of truth), never
 /// computed on the device, so it is identical across a user's devices and
-/// cannot be faked. Free tier is Zen-style: a plain "Free plan" card with NO
-/// numbers. Paid tiers (3x/7x/15x) show today's spend, budget and requests.
+/// shows remaining usage for Free and paid plans without exposing internal costs.
 class _OvidCloudUsageCard extends StatefulWidget {
   const _OvidCloudUsageCard();
 
@@ -718,7 +675,10 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Icon(Icons.auto_awesome, size: 18, color: Aether.accent),
               const SizedBox(width: 8),
@@ -730,7 +690,6 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
                   color: Aether.text,
                 ),
               ),
-              const Spacer(),
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 10,
@@ -762,56 +721,24 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
             )
-          else if (!isPaid)
-            // Zen-style free tier: no numbers at all.
-            Text(
-              'You\u2019re on the free plan. Just chat \u2014 no usage to track. '
-              'Upgrade for a higher daily limit.',
-              style: TextStyle(
-                fontSize: 12.5,
-                height: 1.45,
-                color: Aether.textMuted,
-              ),
-            )
           else
-            _paidUsage(_usage),
+            _remainingUsage(_usage),
         ],
       ),
     );
   }
 
-  Widget _paidUsage(OvidUsage? u) {
-    if (u == null) {
+  Widget _remainingUsage(OvidUsage? u) {
+    final pct = u?.remainingFraction;
+    if (u == null || pct == null) {
       return Text(
-        'Usage will appear here once your plan is active.',
+        'Usage unavailable',
         style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
       );
     }
-    final pct = u.dailyBudgetUsd <= 0
-        ? 0.0
-        : (u.dailySpentUsd / u.dailyBudgetUsd).clamp(0.0, 1.0);
-    final monthly = u.isMonthly;
-    final windowLabel = monthly ? 'this month' : 'today';
-    final resetLabel = monthly
-        ? 'no daily cap · monthly pool'
-        : 'resets every 24h';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            _cloudStat(
-              'Used $windowLabel',
-              '\$${u.dailySpentUsd.toStringAsFixed(2)}',
-            ),
-            _cloudStat(
-              monthly ? 'Monthly budget' : 'Daily limit',
-              '\$${u.dailyBudgetUsd.toStringAsFixed(2)}',
-            ),
-            _cloudStat('Requests', '${u.requestsToday}'),
-          ],
-        ),
-        const SizedBox(height: 12),
         ClipRRect(
           borderRadius: BorderRadius.circular(6),
           child: LinearProgressIndicator(
@@ -819,19 +746,19 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
             minHeight: 7,
             backgroundColor: Aether.surfaceAlt,
             valueColor: AlwaysStoppedAnimation(
-              pct > 0.9 ? Aether.danger : Aether.accent,
+              pct < 0.1 ? Aether.danger : Aether.accent,
             ),
           ),
         ),
         const SizedBox(height: 6),
         Text(
-          '\$${u.dailyRemainingUsd.toStringAsFixed(2)} left $windowLabel \u00b7 $resetLabel',
+          '${(pct * 100).round()}% remaining',
           style: TextStyle(fontSize: 11, color: Aether.textFaint),
         ),
         if (u.models.isNotEmpty) ...[
           const SizedBox(height: 16),
           Text(
-            'AVAILABLE MODELS · remaining of your budget',
+            'AVAILABLE MODELS · remaining usage',
             style: TextStyle(
               fontSize: 10,
               fontWeight: FontWeight.w700,
@@ -843,8 +770,7 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
           for (final m in u.models) _modelBar(m),
           const SizedBox(height: 4),
           Text(
-            'All models share one budget. A costly model drains it faster — '
-            'every model\u2019s bar drops together; a cheaper model leaves more.',
+            'All models share your plan’s usage allowance.',
             style: TextStyle(
               fontSize: 10.5,
               height: 1.4,
@@ -857,81 +783,50 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
   }
 
   Widget _modelBar(OvidModelUsage m) {
-    final pct = m.remainingPct.clamp(0.0, 1.0);
-    final price = m.per1mOutput;
-    final priceLabel = price == null
-        ? ''
-        : '\$${price.toStringAsFixed(price >= 10 ? 0 : 2)}/1M out';
+    final pct = m.remainingFraction;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: Text(
-                  ovidModelLabel(m.model),
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontFamily: Aether.mono,
-                    color: Aether.text,
-                  ),
+              Text(
+                ovidModelLabel(m.model),
+                style: TextStyle(
+                  fontSize: 12,
+                  fontFamily: Aether.mono,
+                  color: Aether.text,
                 ),
               ),
-              if (priceLabel.isNotEmpty)
-                Text(
-                  priceLabel,
-                  style: TextStyle(fontSize: 10, color: Aether.textFaint),
-                ),
-              const SizedBox(width: 8),
               Text(
-                '${(pct * 100).round()}%',
+                pct == null
+                    ? 'Usage unavailable'
+                    : '${(pct * 100).round()}% remaining',
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w700,
-                  color: pct < 0.15 ? Aether.danger : Aether.accent,
+                  color: pct != null && pct < 0.15
+                      ? Aether.danger
+                      : Aether.accent,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 4),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(5),
-            child: LinearProgressIndicator(
-              value: pct,
-              minHeight: 5,
-              backgroundColor: Aether.surfaceAlt,
-              valueColor: AlwaysStoppedAnimation(
-                pct < 0.15 ? Aether.danger : Aether.accent,
+          if (pct != null)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: LinearProgressIndicator(
+                value: pct,
+                minHeight: 5,
+                backgroundColor: Aether.surfaceAlt,
+                valueColor: AlwaysStoppedAnimation(
+                  pct < 0.15 ? Aether.danger : Aether.accent,
+                ),
               ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _cloudStat(String label, String value) {
-    return Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-              fontFamily: Aether.mono,
-              color: Aether.text,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-          ),
         ],
       ),
     );

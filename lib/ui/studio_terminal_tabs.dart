@@ -325,7 +325,8 @@ class _TerminalPaneState extends State<_TerminalPane> {
             final workDir = await SandboxService.I.workDirFor(sessionId);
             return SandboxService.I.spawn(['bash'], hostWorkDir: workDir);
           };
-      if (await shell.runPersistent(c, sid: sessionId, spawner: spawner)) {
+      if (await shell.runPersistent(c, sid: sessionId, spawner: spawner,
+          workspace: SandboxService.I.workDirForSync(sessionId).path)) {
         return;
       }
     } catch (_) {
@@ -474,4 +475,3 @@ class _TerminalPaneState extends State<_TerminalPane> {
     );
   }
 }
-

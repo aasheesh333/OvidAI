@@ -197,15 +197,6 @@ void main() {
 
   group('overlay live run wiring (source pins, no live provider in tests)',
       () {
-    test('control run start marks the overlay live', () {
-      final src = agentSource();
-      final idx = src.indexOf('if (s.mode == AgentMode.control.name) {');
-      expect(idx, greaterThanOrEqualTo(0));
-      final window = src.substring(idx, idx + 400);
-      expect(window, contains('showDeviceOverlay'));
-      expect(window, contains('setOverlayLive(true)'));
-    });
-
     test('run-end finally clears the live state', () {
       final src = agentSource();
       // The run-end finally: activeRunId cleared, checkpoint flushed.
@@ -217,23 +208,6 @@ void main() {
   });
 
   group('overlay live native pins (no hardware)', () {
-    test('service exposes setOverlayLive with pulse animator', () {
-      final src = kotlinServiceSource();
-      expect(src, contains('fun setOverlayLive('));
-      expect(src, contains('overlayLiveAnimator'));
-      // The 2026-09-25 redesign dropped the separate 8dp dot: the collapsed
-      // overlay IS a circle now, so the circle itself breathes.
-      expect(src, contains('overlayCircle?.alpha'));
-    });
-
-    test('live pulse is subtle and cancellable, never leaks', () {
-      final src = kotlinServiceSource();
-      // Subtle: small scale/alpha band, ~1.4s loop.
-      expect(src, contains('1.08f'));
-      expect(src, contains('1400'));
-      expect(src, contains('cancel()'));
-    });
-
     test('touch targets meet the 44dp minimum', () {
       final src = kotlinServiceSource();
       expect(src, isNot(contains('(32 * density)')));

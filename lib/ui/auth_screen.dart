@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import '../core/firebase_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import 'profile_avatar.dart';
+import 'account_deletion_panel.dart';
 
-/// Optional Firebase sign-in — email/password. Google sign-in is enabled in
-/// the console; its native flow can be layered on later without blocking BYOK.
+/// Existing Firebase Google and email/password flows. Provider enablement is
+/// managed by the project's Firebase configuration.
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
 
@@ -136,18 +138,7 @@ class _AuthScreenState extends State<AuthScreen> {
       children: [
         const SizedBox(height: 12),
         // ── Profile header (avatar + name + email + verified) ──
-        Center(
-          child: CircleAvatar(
-            radius: 40,
-            backgroundColor: Aether.surfaceRaised,
-            backgroundImage: (photo != null && photo.isNotEmpty)
-                ? NetworkImage(photo)
-                : null,
-            child: (photo == null || photo.isEmpty)
-                ? Icon(Icons.person, size: 42, color: Aether.textMuted)
-                : null,
-          ),
-        ),
+        Center(child: ProfileAvatar(photoUrl: photo, radius: 40)),
         const SizedBox(height: 14),
         Center(
           child: Row(
@@ -181,9 +172,11 @@ class _AuthScreenState extends State<AuthScreen> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  fb.email!,
-                  style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
+                Flexible(
+                  child: Text(
+                    fb.email!,
+                    style: TextStyle(fontSize: 12.5, color: Aether.textFaint),
+                  ),
                 ),
                 const SizedBox(width: 6),
                 Icon(
@@ -200,7 +193,10 @@ class _AuthScreenState extends State<AuthScreen> {
         _AccountCard(
           icon: Icons.auto_awesome,
           children: [
-            Row(
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 Text(
                   'Ovid Cloud plan',
@@ -210,7 +206,6 @@ class _AuthScreenState extends State<AuthScreen> {
                     color: Aether.text,
                   ),
                 ),
-                const Spacer(),
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
@@ -235,8 +230,8 @@ class _AuthScreenState extends State<AuthScreen> {
             const SizedBox(height: 6),
             Text(
               isPaid
-                  ? 'Higher daily limit active. See your usage below.'
-                  : 'Free plan — just chat. Upgrade for a higher daily limit.',
+                  ? 'Paid plan active. Check remaining usage in Usage.'
+                  : 'Free plan — just chat. Upgrade for more usage.',
               style: TextStyle(
                 fontSize: 12,
                 color: Aether.textMuted,
@@ -260,6 +255,14 @@ class _AuthScreenState extends State<AuthScreen> {
           ],
         ),
         const SizedBox(height: 28),
+
+        AccountDeletionPanel(
+          service: fb.accountService,
+          usesPassword: fb.usesPassword,
+          reauthenticate: (password) => fb.reauthenticate(password: password),
+          requestDeletion: fb.requestAccountDeletion,
+        ),
+        const SizedBox(height: 16),
 
         OutlinedButton.icon(
           style: OutlinedButton.styleFrom(
@@ -305,8 +308,12 @@ class _AuthScreenState extends State<AuthScreen> {
       padding: const EdgeInsets.all(24),
       children: [
         const SizedBox(height: 16),
+        if (FirebaseService.I.lastDeletionReceipt?.isPending == true)
+          Text(
+            'Deletion requested on the server. Scheduled after ${FirebaseService.I.lastDeletionReceipt!.deleteAfter!.toUtc().toIso8601String()} (UTC). Sign in before then to cancel.',
+          ),
         Text(
-          'Sign in to sync your workspace across devices. Optional — Ovid AI works fully offline with your own API keys.',
+          'Sign in to Ovid Cloud with Google or your email and password. Your email and profile image come from your account.',
           style: TextStyle(fontSize: 13, height: 1.5, color: Aether.textMuted),
         ),
         const SizedBox(height: 24),
@@ -375,8 +382,9 @@ class _AuthScreenState extends State<AuthScreen> {
           label: const Text('Continue with Google'),
         ),
         const SizedBox(height: 8),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
           children: [
             TextButton(
               onPressed: () => setState(() {

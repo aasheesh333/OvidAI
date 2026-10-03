@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'agent_service.dart';
 import 'state.dart';
@@ -10,12 +11,11 @@ import 'diag.dart';
 
 /// Foreground-service notification manager (the agent keep-alive "always-on assistant"
 /// parity): while an agent run is active, an ongoing low-importance
-/// notification keeps the process alive (Android won't kill a foreground
-/// service under normal memory pressure), so the agent keeps working
-/// with the screen off / app backgrounded until the task completes.
+/// notification improves process priority so work can continue with the screen
+/// off / app backgrounded. Android can still restrict or terminate the runtime.
 ///
 /// The notification carries a **Stop** action that cancels the active
-/// run — identical to tapping Stop in the chat UI.
+/// runs and pauses schedules until explicit background Resume.
 ///
 /// Pure MethodChannel — no new Dart dependencies.
 class AgentNotificationService {
@@ -30,6 +30,70 @@ class AgentNotificationService {
   int _failCount = 0; // 3 native failures → feature off until the cooldown
   DateTime? _disabledAt;
   int _lastEventHash = 0;
+  bool backgroundStopped = false;
+  String? backgroundConstraint;
+  int _backgroundGeneration = 0;
+  static const _stopKey = 'ovid_background_stopped';
+
+  Future<void> refreshBackgroundState() async {
+    final generation = _backgroundGeneration;
+    try {
+      final state = await _channel.invokeMapMethod<String, dynamic>('backgroundState');
+      if (generation != _backgroundGeneration) return;
+      if (state != null) {
+        backgroundStopped = state['stopped'] == true;
+        backgroundConstraint = state['constraint'] as String?;
+        return;
+      }
+    } on MissingPluginException {
+      backgroundConstraint = 'Background alarms require Android; keep the app running.';
+    } catch (e) {
+      backgroundConstraint = 'Background service unavailable: $e';
+    }
+    final prefs = await SharedPreferences.getInstance();
+    if (generation != _backgroundGeneration) return;
+    backgroundStopped = prefs.getBool(_stopKey) ?? false;
+  }
+
+  Future<void> resumeBackground() async {
+    final generation = ++_backgroundGeneration;
+    try {
+      await _channel.invokeMethod('backgroundResume');
+    } on MissingPluginException {
+      // Foreground-only desktop runtime.
+    }
+    final prefs = await SharedPreferences.getInstance();
+    if (generation != _backgroundGeneration) return;
+    await prefs.setBool(_stopKey, false);
+    if (generation != _backgroundGeneration) return;
+    backgroundStopped = false;
+    backgroundConstraint = null;
+    agentIdle();
+  }
+
+  Future<void> stopBackground() async {
+    ++_backgroundGeneration;
+    backgroundStopped = true;
+    _debounce?.cancel();
+    _committedGeneration = ++_issuedGeneration;
+    _active = false;
+    // Pause synchronously before awaiting native or session storage.
+    final paused = AgentService.I.stopScheduledBackground();
+    AgentService.I.cancelAllRuns();
+    await Future.wait([paused, _persistBackgroundStop()]);
+  }
+
+  Future<void> _persistBackgroundStop() async {
+    try {
+      await _channel.invokeMethod('backgroundStop');
+    } on MissingPluginException {
+      // Also persist for non-Android runtimes.
+    } catch (e) {
+      Diag.swallow('background.stop', e);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_stopKey, true);
+  }
 
   /// Cooldown before a failure-disabled notifier re-arms itself. A permanent
   /// session-long disable meant one bad burst (e.g. transient native errors)
@@ -118,6 +182,9 @@ class AgentNotificationService {
     _displayedStopTargetSessionId = null;
     _issuedGeneration = 0;
     _committedGeneration = 0;
+    backgroundStopped = false;
+    backgroundConstraint = null;
+    _backgroundGeneration = 0;
   }
 
   void Function()? _onExitCallback;
@@ -146,17 +213,17 @@ class AgentNotificationService {
         return null;
       }
       if (call.method == 'onAgentStop') {
-        final sessionId = AgentService.I.runningSessionIdForNotification(
-          _displayedStopTargetSessionId,
-        );
-        if (sessionId != null) {
-          AgentService.I.stopRequested(sessionId: sessionId);
-        }
+        await stopBackground();
       } else if (call.method == 'onAgentExit') {
-        AgentService.I.cancelAllRuns();
+        await stopBackground();
         if (_onExitCallback != null) {
           _onExitCallback!();
         }
+      } else if (call.method == 'onScheduleWake') {
+        await AgentService.I.wakeSchedules();
+      } else if (call.method == 'onBackgroundConstraint') {
+        backgroundConstraint = call.arguments as String?;
+        AppState.I.refresh();
       } else if (call.method == 'onSelectSession') {
         final sid = call.arguments as String?;
         if (sid != null && sid.isNotEmpty) {
@@ -197,6 +264,7 @@ class AgentNotificationService {
   /// are swallowed and after 3 consecutive native failures the feature
   /// disables itself for the session.
   Future<void> agentWorking(String text, {String? sessionId}) async {
+    if (backgroundStopped) return;
     if (!AppState.I.notificationsEnabled) return;
     if (!_maybeRearmSupport()) return;
     unawaited(_ensurePermission());
@@ -205,6 +273,7 @@ class AgentNotificationService {
     if (_active && h == _lastEventHash) return;
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 600), () {
+      if (backgroundStopped) return;
       final generation = ++_issuedGeneration;
       unawaited(
         _invoke(_active ? 'agentServiceUpdate' : 'agentServiceStart', {
@@ -228,6 +297,7 @@ class AgentNotificationService {
   /// Run finished / idle → notification either updates to Ready & Listening
   /// (if keep-alive enabled) or stops the foreground service.
   void agentIdle({String? sessionId}) {
+    if (backgroundStopped) return;
     if (!_maybeRearmSupport()) return;
     if (_isAnyRunActive()) {
       if (_active &&
@@ -319,7 +389,7 @@ class AgentNotificationService {
   /// 24/7: stop the foreground service completely — same effect as the
   /// notification's Exit action. Cancels any in-flight runs first.
   Future<void> agentExit() async {
-    AgentService.I.cancelAllRuns();
+    await stopBackground();
     _active = false;
     _displayedStopTargetSessionId = null;
     serviceStopRequestedForTestFlag = true;
@@ -327,6 +397,10 @@ class AgentNotificationService {
   }
 
   Future<bool> _invoke(String method, Map<String, String> args) async {
+    if (backgroundStopped &&
+        (method == 'agentServiceStart' || method == 'agentServiceUpdate')) {
+      return false;
+    }
     try {
       final r = await _channel.invokeMethod(method, args);
       if (r == true) {
@@ -338,6 +412,7 @@ class AgentNotificationService {
       _supported = false;
       return false;
     } on PlatformException catch (e) {
+      backgroundConstraint = e.message ?? e.code;
       // Native side refused (permission/service policy). The native
       // service ALSO catches startForeground failures and stops itself —
       // so a failure here must never repeat forever or touch the run.

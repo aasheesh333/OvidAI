@@ -30,7 +30,7 @@ import 'startup_progress_panel.dart';
 String? _toolGainsFor(PluginItem p) {
   final seed = switch (p.name) {
     'Web Search' => 'web_search',
-    'Image Studio' => 'generate_image',
+    'Image Studio' => 'resize_image · crop_image · cloud images when available',
     'File Reader' => 'read_attachment',
     'Web Fetch & Reader' => 'fetch_url',
     'Code Runner' => 'run_code',

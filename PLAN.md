@@ -58,7 +58,7 @@ specs in §2. Findings below are code-level defects, separate from the feature g
 |---|-----|-------|----------|--------|
 | B1 | P0 | Marketplace catalog never loaded: `fetchMarketplaceCatalog` was only reachable from the agent command, never from the Plugins screen, and `addMarketplace` just appended a name. Now: registry persists (`ovid_marketplaces_v1`), the screen merges catalogs on open, has a refresh action, and the add sheet fetches + reports. **PR15**: Claude Code (`.claude-plugin/marketplace.json`) + Codex/Claude Desktop (map-form `mcpServers`) formats both parse; jsdelivr/githack mirror fallbacks; actionable failure message. | `lib/core/state.dart` marketplaces block · `lib/ui/plugins_screen.dart` | DONE |
 | B2 | P1 | Copy button copied an empty string on tool/turn rows while still showing "Copied to clipboard". | `lib/ui/chat_screen.dart` `_copyText`/`_actionRow` | DONE |
-| B3 | P1 | ~~Image gen renders a dummy gradient placeholder~~ **FIXED** (PR17) — real Pollinations download saved to the session workspace, `imageGen` row renders the file (tap-to-open, size, offline-safe). | `chat_screen.dart` `_imageGen` · `agent_service.dart` `_generateImage` | DONE |
+| B3 | P1 | Image output uses validated local files and `imageGen` display. Cloud generate/edit are capability-gated; resize/crop run locally. See `server/images/README.md` for backend activation prerequisites. | `chat_screen.dart` `_imageGen` · `agent_service.dart` `_imageTool` | CLIENT DONE / CLOUD GATED |
 | B4 | P2 | Markdown tables overflowed (no horizontal scroll). Now `IntrinsicColumnWidth` + styled borders. | `chat_screen.dart` `_DshMarkdown` | DONE |
 | B5 | P2 | Reasoning text too large/heavy vs DSH. Now 12.5px muted body via `_DshMarkdown(fontSize:, color:)`. | `chat_screen.dart` `_ReasoningCard` | DONE |
 | B6 | P1 | Links not clickable, text not selectable. Now `selectable: true` + `onTapLink` (http(s) → in-app browser, others → `url_launcher`), user bubbles use `SelectableText`. | `pubspec.yaml` · `chat_screen.dart` | DONE |
@@ -432,7 +432,7 @@ What Ovid does **not** yet follow is DSH's **session-domain and presentation dep
 - **C7** one write path — `_writeWorkspaceFile`/`_mirrorToDisk`: `file_write`
   and `fs_edit create/str_replace/insert` now write disk AND repo cache
   together; `run_shell cat` after `file_write` sees the same bytes.
-- **B3 real image-gen** — Pollinations download → session workspace file →
+- **B3 real image-gen** — gateway image response → validated session workspace file →
   durable `MsgKind.imageGen` row with `imagePath`, rendered via `Image.file`
   (tap-to-open, size label, offline-safe); **C12** dead `MsgKind.code`/ordering
   cleaned (code branch removed; turnTail documented as reserved).

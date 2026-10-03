@@ -165,6 +165,7 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
       if (call.method == 'deviceServiceState') return 'connecting';
+      if (call.method == 'deviceCancelActions') return null;
       DeviceControlService.I.cancelDeviceActions();
       throw connecting();
     });

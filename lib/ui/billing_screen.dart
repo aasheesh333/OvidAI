@@ -8,9 +8,8 @@ import '../core/theme.dart';
 /// Billing / Plan screen — opencode/ChatGPT-style.
 ///
 /// Shows the user's current Ovid Cloud plan, what each plan offers, and
-/// (for paid plans) server-authoritative usage. Free tier is Zen: no numbers,
-/// just the plan + an upgrade call-to-action. Payment is not wired yet — the
-/// upgrade buttons explain pricing and that checkout is coming.
+/// server-authoritative remaining usage. Checkout currently offers the
+/// gateway's explicitly labelled test-mode activation flow.
 class BillingScreen extends StatefulWidget {
   const BillingScreen({super.key});
 
@@ -34,32 +33,14 @@ class _PlanOption {
 }
 
 const _plans = <_PlanOption>[
-  _PlanOption(
-    'free',
-    'Free',
-    '₹0',
-    'Daily free limit. Just chat — no card needed.',
-    '1x',
-  ),
-  _PlanOption(
-    '3x',
-    'Plus',
-    '₹499',
-    '3× the free limit, as a monthly pool — no daily cap.',
-    '3x',
-  ),
-  _PlanOption(
-    '7x',
-    'Pro',
-    '₹899',
-    '7× the free limit, as a monthly pool — no daily cap.',
-    '7x',
-  ),
+  _PlanOption('free', 'Free', '₹0', 'Just chat — no card needed.', '1x'),
+  _PlanOption('3x', 'Plus', '₹499', '3× the Free base usage allowance.', '3x'),
+  _PlanOption('7x', 'Pro', '₹899', '7× the Free base usage allowance.', '7x'),
   _PlanOption(
     '15x',
     'Max',
     '₹1699',
-    '15× the free limit, as a monthly pool — no daily cap.',
+    '15× the Free base usage allowance.',
     '15x',
   ),
 ];
@@ -115,8 +96,8 @@ class _BillingScreenState extends State<BillingScreen> {
               for (final p in _plans) _planTile(p, tier),
               const SizedBox(height: 16),
               Text(
-                'Prices shown for reference. In-app checkout is coming soon — '
-                'your plan and limits update automatically once you subscribe.',
+                'Subscription prices are in INR. Test-mode activation is '
+                'available when enabled by the server; real checkout is coming soon.',
                 style: TextStyle(
                   fontSize: 11.5,
                   height: 1.5,
@@ -149,13 +130,15 @@ class _BillingScreenState extends State<BillingScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Text(
                 'Current plan',
                 style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
               ),
-              const Spacer(),
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 12,
@@ -202,19 +185,23 @@ class _BillingScreenState extends State<BillingScreen> {
               width: 16,
               child: CircularProgressIndicator(strokeWidth: 2),
             ),
-          ] else if (isPaid && _usage != null) ...[
+          ] else ...[
             const SizedBox(height: 16),
-            _usageBar(_usage!),
+            _usageBar(_usage),
           ],
         ],
       ),
     );
   }
 
-  Widget _usageBar(OvidUsage u) {
-    final pct = u.dailyBudgetUsd <= 0
-        ? 0.0
-        : (u.dailySpentUsd / u.dailyBudgetUsd).clamp(0.0, 1.0);
+  Widget _usageBar(OvidUsage? u) {
+    final pct = u?.remainingFraction;
+    if (pct == null) {
+      return Text(
+        'Usage unavailable',
+        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -225,15 +212,13 @@ class _BillingScreenState extends State<BillingScreen> {
             minHeight: 8,
             backgroundColor: Aether.surfaceAlt,
             valueColor: AlwaysStoppedAnimation(
-              pct > 0.9 ? Aether.danger : Aether.accent,
+              pct < 0.1 ? Aether.danger : Aether.accent,
             ),
           ),
         ),
         const SizedBox(height: 8),
         Text(
-          '\$${u.dailySpentUsd.toStringAsFixed(2)} used of '
-          '\$${u.dailyBudgetUsd.toStringAsFixed(2)} today · '
-          '${u.requestsToday} requests · resets every 24h',
+          '${(pct * 100).round()}% remaining',
           style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
         ),
       ],
@@ -253,7 +238,8 @@ class _BillingScreenState extends State<BillingScreen> {
           width: current ? 1.5 : 1,
         ),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -296,9 +282,11 @@ class _BillingScreenState extends State<BillingScreen> {
               ),
             ],
           ),
-          const Spacer(),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 16,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Text(
                 p.price,
@@ -310,10 +298,9 @@ class _BillingScreenState extends State<BillingScreen> {
               ),
               if (p.tier != 'free')
                 Text(
-                  '/ 24h',
+                  '/ month',
                   style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                 ),
-              const SizedBox(height: 6),
               if (current)
                 Text(
                   'Current',
@@ -324,7 +311,18 @@ class _BillingScreenState extends State<BillingScreen> {
                   ),
                 )
               else if (p.tier != 'free')
-                _UpgradeButton(plan: p),
+                _UpgradeButton(
+                  plan: p,
+                  onUpgraded: () async {
+                    // Drop the old snapshot immediately; it describes the old
+                    // plan and must not override the confirmed server tier.
+                    setState(() {
+                      _usage = null;
+                      _loading = true;
+                    });
+                    await _load();
+                  },
+                ),
             ],
           ),
         ],
@@ -334,8 +332,9 @@ class _BillingScreenState extends State<BillingScreen> {
 }
 
 class _UpgradeButton extends StatefulWidget {
-  const _UpgradeButton({required this.plan});
+  const _UpgradeButton({required this.plan, required this.onUpgraded});
   final _PlanOption plan;
+  final Future<void> Function() onUpgraded;
 
   @override
   State<_UpgradeButton> createState() => _UpgradeButtonState();
@@ -344,11 +343,12 @@ class _UpgradeButton extends StatefulWidget {
 class _UpgradeButtonState extends State<_UpgradeButton> {
   bool _busy = false;
 
-  Future<void> _payNow(BuildContext sheetContext) async {
-    setState(() => _busy = true);
+  Future<void> _payNow(BuildContext sheetContext, StateSetter setSheet) async {
+    if (_busy) return;
+    setSheet(() => _busy = true);
     final newTier = await OvidCloudService.I.upgrade(widget.plan.tier);
     if (!mounted) return;
-    setState(() => _busy = false);
+    _busy = false;
     final messenger = ScaffoldMessenger.of(context);
     if (sheetContext.mounted) Navigator.of(sheetContext).pop();
     messenger.showSnackBar(
@@ -360,11 +360,13 @@ class _UpgradeButtonState extends State<_UpgradeButton> {
         ),
       ),
     );
+    if (newTier == widget.plan.tier) await widget.onUpgraded();
   }
 
   @override
   Widget build(BuildContext context) {
     return FilledButton(
+      key: ValueKey('upgrade-${widget.plan.tier}'),
       style: FilledButton.styleFrom(
         backgroundColor: Aether.accent,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -377,64 +379,72 @@ class _UpgradeButtonState extends State<_UpgradeButton> {
           backgroundColor: Aether.surface,
           isScrollControlled: true,
           builder: (sheetCtx) => StatefulBuilder(
-            builder: (sheetCtx, setSheet) => Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Upgrade to ${widget.plan.title}',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                      color: Aether.text,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '${widget.plan.price} / month · ${widget.plan.blurb}',
-                    style: TextStyle(fontSize: 13, color: Aether.textMuted),
-                  ),
-                  const SizedBox(height: 14),
-                  Text(
-                    'Test mode: tap Pay now to activate this plan instantly for '
-                    'testing. Real payment will be wired here before launch.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.5,
-                      color: Aether.textFaint,
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Aether.accent,
-                        minimumSize: const Size(0, 48),
+            builder: (sheetCtx, setSheet) => SafeArea(
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Upgrade to ${widget.plan.title}',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: Aether.text,
+                        ),
                       ),
-                      onPressed: _busy ? null : () => _payNow(sheetCtx),
-                      child: _busy
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : Text('Pay now · ${widget.plan.price}'),
-                    ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '${widget.plan.price} / month · ${widget.plan.blurb}',
+                        style: TextStyle(fontSize: 13, color: Aether.textMuted),
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        'Test mode: tap Pay now to activate this plan instantly for '
+                        'testing. Real payment will be wired here before launch.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.5,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Aether.accent,
+                            minimumSize: const Size(0, 48),
+                          ),
+                          onPressed: _busy
+                              ? null
+                              : () => _payNow(sheetCtx, setSheet),
+                          child: _busy
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : Text('Pay now · ${widget.plan.price}'),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Center(
+                        child: TextButton(
+                          onPressed: _busy
+                              ? null
+                              : () => Navigator.pop(sheetCtx),
+                          child: const Text('Cancel'),
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 8),
-                  Center(
-                    child: TextButton(
-                      onPressed: _busy ? null : () => Navigator.pop(sheetCtx),
-                      child: const Text('Cancel'),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           ),

@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry durable account deletion every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+RandomizedDelaySec=5
+Unit=ovid-account-worker.service
+
+[Install]
+WantedBy=timers.target

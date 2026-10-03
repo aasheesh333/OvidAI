@@ -12,8 +12,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- 24/7: restart the agent service after a reboot, and ask the user to
-         exempt Ovid from battery optimization so OEM killers leave it be. -->
+    <!-- Re-arm best-effort schedule alarms after reboot. Battery exemptions
+         are user-managed and do not guarantee process survival. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Device permissions the AI agent can request at runtime, each behind
@@ -109,8 +109,13 @@
         <receiver
             android:name=".AgentStopReceiver"
             android:exported="false"/>
-        <!-- Restart the agent foreground service after a reboot when
-             keep-alive is enabled (best-effort). -->
+        <receiver android:name=".ScheduleAlarmReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.TIMEZONE_CHANGED"/>
+                <action android:name="android.intent.action.TIME_SET"/>
+            </intent-filter>
+        </receiver>
+        <!-- Re-arm pending alarms after reboot; never auto-start a foreground service. -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true"

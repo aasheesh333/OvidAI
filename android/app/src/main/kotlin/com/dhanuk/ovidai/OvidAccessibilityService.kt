@@ -3,9 +3,6 @@ package com.dhanuk.ovidai
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
-import android.animation.Animator
-import android.animation.AnimatorSet
-import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.annotation.TargetApi
 import android.content.ComponentName
@@ -391,9 +388,8 @@ class OvidAccessibilityService : AccessibilityService() {
     //     position, and clamped inside the real display bounds on every move,
     //     on expand, and on configuration change — it can never be hidden
     //     off-device;
-    //   • tap expands the steering box (cross · text field · mic · green send);
-    //     cross collapses back to the circle; long-press is the hard stop;
-    //   • a separate NON-TOUCHABLE edge glow reports run state at a glance —
+    //   • tap expands the steering box (Stop · text field · mic · green send);
+    //   • four NON-TOUCHABLE corner glows report run state at a glance —
     //     green = running, amber = waiting on a permission, red = error.
     private var overlayView: View? = null
     private var overlayParams: WindowManager.LayoutParams? = null
@@ -401,20 +397,15 @@ class OvidAccessibilityService : AccessibilityService() {
     private var overlaySendButton: ImageButton? = null
     private var overlayMicButton: ImageButton? = null
     private var overlayCircle: View? = null
-    private var overlayCircleBg: GradientDrawable? = null
     private var overlayBox: View? = null
     private var overlayExpanded = false
-    private var overlayLiveAnimator: ValueAnimator? = null
-    private var overlayActionPulse: Animator? = null
-    private var overlayGlowTop: View? = null
-    private var overlayGlowBottom: View? = null
-    private var overlayGlowTopBg: GradientDrawable? = null
-    private var overlayGlowBottomBg: GradientDrawable? = null
+    private val cornerGlow by lazy { ControlGlowLifecycle(ControlCornerGlow(this)) }
     @Volatile
     private var overlayState: String = OVERLAY_IDLE
 
     @Synchronized
     internal fun showOverlay(): DeviceActionResult {
+        if (deviceActions.isStopped()) return DeviceActionResult(true)
         if (overlayView != null) return DeviceActionResult(true)
         val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
             ?: return DeviceActionResult(false, "UNAVAILABLE", "Window manager is unavailable.")
@@ -437,12 +428,12 @@ class OvidAccessibilityService : AccessibilityService() {
             overlayParams = params
             // Clamp once laid out: the window size is unknown until then.
             root.post { clampOverlayIntoDisplay() }
-            showEdgeGlow(windowManager, density)
             DeviceActionResult(true)
         } catch (error: WindowManager.BadTokenException) {
+            removeOverlayNow()
             DeviceActionResult(false, "UNAVAILABLE", "Overlay window was refused: " + error.message)
         } catch (error: Throwable) {
-            clearOverlayRefs()
+            removeOverlayNow()
             DeviceActionResult(false, "UNAVAILABLE", "Overlay could not be shown: " + error.message)
         }
     }
@@ -450,18 +441,16 @@ class OvidAccessibilityService : AccessibilityService() {
     @Synchronized
     internal fun hideOverlay(): DeviceActionResult {
         val view = overlayView ?: return DeviceActionResult(true)
-        // Stop the pulse first: no animator may outlive the window.
-        stopOverlayLivePulse()
+        (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(overlayInput?.windowToken, 0)
         clearOverlayRefs()
         return try {
             val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
             windowManager?.removeView(view)
-            hideEdgeGlow()
             DeviceActionResult(true)
         } catch (_: Throwable) {
             // Hidden state is what matters: refs are already cleared, so no
             // invisible touch target can survive. Never crash a hide.
-            hideEdgeGlow()
             DeviceActionResult(true)
         }
     }
@@ -475,7 +464,6 @@ class OvidAccessibilityService : AccessibilityService() {
         overlaySendButton = null
         overlayMicButton = null
         overlayCircle = null
-        overlayCircleBg = null
         overlayBox = null
         overlayExpanded = false
     }
@@ -544,7 +532,15 @@ class OvidAccessibilityService : AccessibilityService() {
 
     /// Overlay stop seam: a hard stop for the run (long-press on the circle).
     internal fun onOverlayStop() {
+        stopControlNow()
         overlayEventListener?.invoke("deviceOverlayStop", null)
+    }
+
+    internal fun stopControlNow() {
+        deviceActions.cancel()
+        overlayState = OVERLAY_IDLE
+        cornerGlow.close()
+        hideOverlay()
     }
 
     /// Overlay mic seam: ask Dart to toggle on-device dictation.
@@ -574,143 +570,33 @@ class OvidAccessibilityService : AccessibilityService() {
         overlayInput?.hint = prompt
     }
 
-    /// Run-state colour, pushed from Dart. Drives both the circle's ring and the
-    /// edge glow: green = running, amber = a permission card is waiting, red =
-    /// the run errored. Unknown values fall back to idle (no glow).
+    /// Only the screen corners report status; the floating circle stays plain.
     internal fun setOverlayState(state: String) {
+        if (state != OVERLAY_IDLE && deviceActions.isStopped()) return
         overlayState = state
-        val color = overlayColorFor(state)
-        overlayCircleBg?.setStroke((2 * resources.displayMetrics.density).toInt(), color)
-        updateEdgeGlow(color, state != OVERLAY_IDLE)
-        // The live pulse tracks "running" specifically.
-        setOverlayLive(state == OVERLAY_RUNNING)
+        cornerGlow.update(state, animationsEnabled())
+        overlayCircle?.contentDescription = "Ovid — $state. Tap to steer; long press to stop"
     }
 
-    private fun overlayColorFor(state: String): Int = when (state) {
-        OVERLAY_RUNNING -> 0xFF34C759.toInt()
-        OVERLAY_PERMISSION -> 0xFFFFB020.toInt()
-        OVERLAY_ERROR -> 0xFFFF453A.toInt()
-        else -> 0xFFB9B9B9.toInt()
+    private fun animationsEnabled(): Boolean {
+        val accessibility = getSystemService(ACCESSIBILITY_SERVICE) as? AccessibilityManager
+        if (accessibility?.isTouchExplorationEnabled == true) return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ValueAnimator.areAnimatorsEnabled()
+        } else {
+            Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
+        }
     }
 
-    /// Live indicator: while a Control run is active the circle breathes and the
-    /// send button gets a very light scale pop, so "Ovid is driving" is legible
-    /// at a glance. Safe with no window.
+    /// Compatibility with the existing Dart live flag. No bubble animation.
     internal fun setOverlayLive(live: Boolean) {
-        stopOverlayLivePulse()
-        if (!live) return
-        val circle = overlayCircle ?: return
-        overlayLiveAnimator = ValueAnimator.ofFloat(0.55f, 1f).apply {
-            duration = 1200
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-            addUpdateListener { anim ->
-                circle.alpha = anim.animatedValue as Float
-            }
-            start()
-        }
-        val button = overlaySendButton ?: return
-        val scaleX = ObjectAnimator.ofFloat(button, "scaleX", 1f, 1.08f).apply {
-            duration = 1400
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-        }
-        val scaleY = ObjectAnimator.ofFloat(button, "scaleY", 1f, 1.08f).apply {
-            duration = 1400
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-        }
-        overlayActionPulse = AnimatorSet().apply {
-            playTogether(scaleX, scaleY)
-            start()
-        }
-    }
-
-    private fun stopOverlayLivePulse() {
-        overlayLiveAnimator?.cancel()
-        overlayLiveAnimator = null
-        overlayActionPulse?.cancel()
-        overlayActionPulse = null
-        overlayCircle?.alpha = 1f
-        overlaySendButton?.let {
-            it.scaleX = 1f
-            it.scaleY = 1f
-        }
-    }
-
-    // ── Edge glow: a thin, mostly-transparent status line at the top and bottom
-    // of the screen. Non-touchable, so it can never eat a gesture meant for the
-    // app underneath; the gradient fades to nothing a short way in, exactly the
-    // "glow reaching a little way from the edge" the owner described.
-    private fun showEdgeGlow(windowManager: WindowManager, density: Float) {
-        if (overlayGlowTop != null) return
-        val thickness = (18 * density).toInt()
-        try {
-            val top = View(this).apply {
-                background = GradientDrawable(
-                    GradientDrawable.Orientation.TOP_BOTTOM,
-                    intArrayOf(overlayColorFor(overlayState), 0x00000000),
-                ).also { overlayGlowTopBg = it }
-            }
-            val bottom = View(this).apply {
-                background = GradientDrawable(
-                    GradientDrawable.Orientation.BOTTOM_TOP,
-                    intArrayOf(overlayColorFor(overlayState), 0x00000000),
-                ).also { overlayGlowBottomBg = it }
-            }
-            val mk = { v: View ->
-                WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    thickness,
-                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                    PixelFormat.TRANSLUCENT,
-                ).apply { gravity = if (v === top) Gravity.TOP else Gravity.BOTTOM }
-            }
-            windowManager.addView(top, mk(top))
-            windowManager.addView(bottom, mk(bottom))
-            overlayGlowTop = top
-            overlayGlowBottom = bottom
-            updateEdgeGlow(overlayColorFor(overlayState), overlayState != OVERLAY_IDLE)
-        } catch (_: Throwable) {
-            // The glow is cosmetic: never fail the overlay over it.
-            hideEdgeGlow()
-        }
-    }
-
-    private fun updateEdgeGlow(color: Int, visible: Boolean) {
-        val alpha = if (visible) 0x66 else 0x00  // ~40% at the very edge
-        val argb = (color and 0x00FFFFFF) or (alpha shl 24)
-        overlayGlowTopBg?.colors = intArrayOf(argb, 0x00000000)
-        overlayGlowBottomBg?.colors = intArrayOf(argb, 0x00000000)
-    }
-
-    private fun hideEdgeGlow() {
-        val wm = getSystemService(WINDOW_SERVICE) as? WindowManager
-        for (v in listOfNotNull(overlayGlowTop, overlayGlowBottom)) {
-            try {
-                wm?.removeView(v)
-            } catch (_: Throwable) { }
-        }
-        overlayGlowTop = null
-        overlayGlowBottom = null
-        overlayGlowTopBg = null
-        overlayGlowBottomBg = null
+        if (!live) cornerGlow.close()
+        else cornerGlow.update(overlayState, animationsEnabled())
     }
 
     private fun removeOverlayNow() {
-        val view = overlayView ?: return
-        stopOverlayLivePulse()
-        clearOverlayRefs()
-        try {
-            val windowManager = getSystemService(WINDOW_SERVICE) as? WindowManager
-            windowManager?.removeView(view)
-        } catch (_: Throwable) {
-            // Tearing down: nothing left to report to.
-        }
-        hideEdgeGlow()
+        cornerGlow.close()
+        hideOverlay()
     }
 
     /// Circle + box in one window; exactly one is visible at a time.
@@ -756,9 +642,7 @@ class OvidAccessibilityService : AccessibilityService() {
         val bg = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(0xFFFFFFFF.toInt())
-            setStroke((2 * density).toInt(), overlayColorFor(overlayState))
         }
-        overlayCircleBg = bg
         val circle = View(this).apply {
             background = bg
             elevation = 6 * density
@@ -859,16 +743,16 @@ class OvidAccessibilityService : AccessibilityService() {
             }
             elevation = 8 * density
         }
-        // Cross: collapse back to the circle.
+        // Stop is immediate, including when the text field contains a draft.
         val close = ImageButton(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 (44 * density).toInt(), (44 * density).toInt())
             scaleType = ImageView.ScaleType.CENTER_INSIDE
             background = null
-            contentDescription = "Collapse"
+            contentDescription = "Stop Control"
             setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
             imageTintList = ColorStateList.valueOf(0xFF6E6E6E.toInt())
-            setOnClickListener { setOverlayExpanded(false) }
+            setOnClickListener { onOverlayStop() }
         }
         box.addView(close)
 
@@ -1018,9 +902,10 @@ class OvidAccessibilityService : AccessibilityService() {
         }
     }
 
-    override fun onInterrupt() = Unit
+    override fun onInterrupt() { onOverlayStop() }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        onOverlayStop()
         removeOverlayNow()
         resetTree()
         if (instance === this) instance = null
@@ -1032,8 +917,10 @@ class OvidAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        onOverlayStop()
         removeOverlayNow()
         resetTree()
+        // Drain cancelled capture closures so their finally blocks recycle bitmaps.
         screenshotExecutor.shutdown()
         if (instance === this) instance = null
         super.onDestroy()
@@ -1339,6 +1226,10 @@ class OvidAccessibilityService : AccessibilityService() {
         notAcceptedMessage: String,
         dispatch: (AccessibilityService.GestureResultCallback, Handler) -> Boolean,
     ): DeviceActionResult {
+        val ticket = deviceActions.current.get()
+        if (ticket != null && !ticket.isCurrent()) {
+            return DeviceActionResult(false, "CANCELLED", "Control stopped.")
+        }
         // Serialize: a second stroke dispatched while the previous is still
         // animating is rejected by the platform (dispatchGesture returns false),
         // which surfaced as a bogus "did not accept" error for a valid gesture.
@@ -1359,6 +1250,7 @@ class OvidAccessibilityService : AccessibilityService() {
         }
         try {
             val latch = CountDownLatch(1)
+            ticket?.whenCancelled { latch.countDown() }
             val outcome = AtomicReference(GestureOutcome.TIMEOUT)
             val accepted = AtomicBoolean(false)
             val callback = object : AccessibilityService.GestureResultCallback() {
@@ -1376,6 +1268,10 @@ class OvidAccessibilityService : AccessibilityService() {
             // this background thread wait. A refused dispatch never fires the
             // callback, so release the latch there rather than burn the timeout.
             mainHandler.post {
+                if (ticket != null && !ticket.isCurrent()) {
+                    latch.countDown()
+                    return@post
+                }
                 val ok = try {
                     dispatch(callback, mainHandler)
                 } catch (_: Throwable) {
@@ -1385,6 +1281,9 @@ class OvidAccessibilityService : AccessibilityService() {
                 if (!ok) latch.countDown()
             }
             val signalled = latch.await(GESTURE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            if (ticket != null && !ticket.isCurrent()) {
+                return DeviceActionResult(false, "CANCELLED", "Control stopped.")
+            }
             if (!signalled) {
                 return DeviceActionResult(
                     false,
@@ -2098,6 +1997,10 @@ private object Api30Actions {
                 object : AccessibilityService.TakeScreenshotCallback {
                     override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
                         val buffer = screenshot.hardwareBuffer
+                        if ((result as? CancelableDeviceResult)?.ticket?.isCurrent() == false) {
+                            buffer.close()
+                            return
+                        }
                         var hardwareBitmap: Bitmap? = null
                         var writableBitmap: Bitmap? = null
                         try {
@@ -2116,6 +2019,9 @@ private object Api30Actions {
                         try {
                             screenshotExecutor.execute {
                                 try {
+                                    if ((result as? CancelableDeviceResult)?.ticket?.isCurrent() == false) {
+                                        return@execute
+                                    }
                                     val directory = File(service.cacheDir, "device-captures")
                                     if (!directory.exists() && !directory.mkdirs()) {
                                         throw IllegalStateException("Could not create screenshot cache")

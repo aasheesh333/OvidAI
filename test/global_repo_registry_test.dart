@@ -67,6 +67,46 @@ void main() {
   });
 
   group('ensureCloned', () {
+    test('reuses an unindexed matching clone and preserves local edits', () async {
+      final path = '${tmp.path}/global/repos/acme__app__main';
+      Directory('$path/.git').createSync(recursive: true);
+      File('$path/.git/HEAD').writeAsStringSync('ref: refs/heads/main\n');
+      File('$path/.git/config').writeAsStringSync(
+        '[remote "origin"]\n\turl = https://github.com/acme/app.git\n',
+      );
+      File('$path/local.txt').writeAsStringSync('keep my work');
+      final calls = <(String, String, String)>[];
+      final r = registryWith(calls: calls);
+      expect(await r.ensureCloned('acme/app', 'main'), path);
+      expect(calls, isEmpty);
+      expect(File('$path/local.txt').readAsStringSync(), 'keep my work');
+    });
+
+    test('explicit clone destination reuses matching checkout', () async {
+      final path = '${tmp.path}/chosen';
+      Directory('$path/.git').createSync(recursive: true);
+      File('$path/.git/HEAD').writeAsStringSync('ref: refs/heads/main\n');
+      File('$path/.git/config').writeAsStringSync(
+        '[remote "origin"]\n\turl = git@github.com:acme/app.git\n',
+      );
+      final calls = <(String, String, String)>[];
+      await registryWith(calls: calls).cloneRepo('acme/app', 'main', path);
+      expect(calls, isEmpty);
+    });
+
+    test('explicit clone refuses unrelated existing work without deleting it', () async {
+      final path = '${tmp.path}/chosen';
+      Directory(path).createSync();
+      final keep = File('$path/local.txt')..writeAsStringSync('keep');
+      final calls = <(String, String, String)>[];
+      await expectLater(
+        registryWith(calls: calls).cloneRepo('acme/app', 'main', path),
+        throwsStateError,
+      );
+      expect(keep.readAsStringSync(), 'keep');
+      expect(calls, isEmpty);
+    });
+
     test('registry hit returns the same path WITHOUT invoking git',
         () async {
       final calls = <(String, String, String)>[];
