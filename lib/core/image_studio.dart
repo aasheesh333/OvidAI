@@ -404,7 +404,6 @@ class ImageStudio {
         'type': 'object',
         'properties': properties,
         'required': required,
-        'additionalProperties': false,
       },
     },
   };
