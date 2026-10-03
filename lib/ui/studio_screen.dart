@@ -254,12 +254,12 @@ class _StudioScreenState extends State<StudioScreen> {
   /// The one sync path. Production wires [RepoCache.sync]'s `onLine` progress
   /// callback, which Studio used to drop — a serial fetch of up to 400 files
   /// could run for minutes behind an 11px spinner.
-  Future<void> _runSync() {
+  Future<void> _runSync(void Function(String) onLine) {
     final legacy = studioRepoSyncOverrideForTest;
     if (legacy != null) return legacy();
     final progress = studioRepoSyncProgressOverrideForTest;
-    if (progress != null) return progress(_onSyncLine);
-    return RepoCache.I.sync(onLine: _onSyncLine);
+    if (progress != null) return progress(onLine);
+    return RepoCache.I.sync(onLine: onLine);
   }
 
   void _onSyncLine(String line) {
@@ -290,6 +290,9 @@ class _StudioScreenState extends State<StudioScreen> {
       _syncFraction = null;
     });
     StudioFailure? failure;
+    int? binding;
+    int? syncOperation;
+    final workspaceKey = _workspaceKey;
     try {
       RepoCache.I.bind(
         repo ?? '',
@@ -298,7 +301,15 @@ class _StudioScreenState extends State<StudioScreen> {
         sessionId: AppState.I.activeSession?.id,
         workspaceFolder: folder,
       );
-      await _runSync();
+      binding = RepoCache.I.bindingGeneration;
+      final syncing = _runSync((line) {
+        if (binding == RepoCache.I.bindingGeneration && workspaceKey == _workspaceKey &&
+            (syncOperation == null || syncOperation == RepoCache.I.syncOperation)) {
+          _onSyncLine(line);
+        }
+      });
+      syncOperation = RepoCache.I.syncOperation;
+      await syncing;
     } catch (e) {
       failure = StudioFailure.of(e);
     }
@@ -308,7 +319,8 @@ class _StudioScreenState extends State<StudioScreen> {
       _syncProgress = null;
       _syncFraction = null;
     });
-    if (failure != null) {
+    if (failure != null && binding == RepoCache.I.bindingGeneration &&
+        syncOperation == RepoCache.I.syncOperation && workspaceKey == _workspaceKey) {
       // A missing branch/ref must surface, not be swallowed — and the previous
       // repo's files must not linger under the new binding.
       RepoCache.I.clearWorkingCopy();

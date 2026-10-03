@@ -1,5 +1,6 @@
 """InferHub's documented JSON image API, not multipart or chat emulation."""
 import json
+from decimal import Decimal
 
 import httpx
 
@@ -27,17 +28,19 @@ class InferHub:
         with self.client.stream('POST', f'https://api.inferhub.dev/v1/images/{endpoint}',
                                 headers={'Authorization': f'Bearer {self.key}'}, json=payload) as response:
             if response.status_code != 200:
-                if response.status_code in (502, 504):
-                    # A proxy may have timed out after the provider charged.
-                    # Outcome is unknown: preserve reservation, no fallback.
+                if response.status_code >= 500:
+                    # An HTTP server/proxy error is not proof of a refusal.
+                    # It may follow a charge, including 500 and 503 responses.
                     raise ImageError(409, 'image_request_pending')
+                # Includes bare 429: no documented/verifiable nonacceptance
+                # signal is wired, so a status must never authorize fallback.
                 raise UpstreamError(response.status_code)
             data = bytearray()
             for chunk in response.iter_bytes():
                 data.extend(chunk)
                 if len(data) > MAX_BYTES * 4 // 3 + 65536:
                     raise ImageError(502, 'invalid_image_response')
-            return json.loads(data)
+            return json.loads(data, parse_float=Decimal)
 
 
 def configured_service(config_path, ledger, transport, *, enforced_max_upstream_cost):

@@ -30,6 +30,13 @@ class VerifierAuth:
         self.client = client or httpx.Client(base_url=mint.LITELLM_BASE, timeout=15)
 
     def __call__(self, headers):
+        identity = self.verify_identity(headers)
+        if identity.tier == 'free' and self.mint.free_cap_remaining(identity.uid) <= 0:
+            raise ImageError(402, 'image_limit_reached')
+        return identity
+
+    def verify_identity(self, headers):
+        """Verify access/revocation without gating existing receipts on budget."""
         mint = self.mint
         authorization = headers.get('authorization', '')
         if not authorization.lower().startswith('bearer '):
@@ -69,8 +76,6 @@ class VerifierAuth:
             except (ValueError, TypeError):
                 raise ImageError(401, 'sign_in_required') from None
         tier = mint.effective_tier(uid)
-        if tier == 'free' and mint.free_cap_remaining(uid) <= 0:
-            raise ImageError(402, 'image_limit_reached')
         return Identity(uid, key_id, tier)
 
 
@@ -84,6 +89,9 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
     read/modify/write spend as a substitute for an atomic ledger.
     """
     authenticate = auth or VerifierAuth(mint)
+    # Custom auth may expose the same identity-only interface. A callable with
+    # no such method retains its own checks; never catch/ignore an auth denial.
+    receipt_authenticate = getattr(authenticate, 'verify_identity', authenticate)
     projection = PublicCatalog(service.backends if service else private_backends,
                                lambda: service is not None and admission is not None)
     original_models = getattr(mint, '_available_models', lambda: [])
@@ -118,8 +126,12 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
         try:
             if service is None or admission is None:
                 raise ImageError()
-            identity = await run_in_threadpool(authenticate, request.headers)
+            receipt_read = request.method == 'GET' and 'request_id' in request.path_params
+            identity = await run_in_threadpool(receipt_authenticate if receipt_read else authenticate, request.headers)
             if request.method == 'GET':
+                if 'request_id' in request.path_params:
+                    receipt = await run_in_threadpool(service.ledger.receipt, identity.uid, request.path_params['request_id'])
+                    return JSONResponse({'receipt': receipt}, headers={'Cache-Control': 'no-store'})
                 return JSONResponse(service.catalog(), headers={'Cache-Control': 'no-store'})
             if request.headers.get('content-type', '').split(';')[0].strip() != 'application/json':
                 raise ImageError(415, 'invalid_image_request')
@@ -136,14 +148,18 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
             result = await run_in_threadpool(execute, identity, request.headers.get('idempotency-key'), operation, body)
             return JSONResponse(result, headers={'Cache-Control': 'no-store'})
         except ImageError as error:
-            return JSONResponse({'error': {'code': error.code}}, status_code=error.status)
+            body = {'error': {'code': error.code}}
+            if error.receipt is not None:
+                body['receipt'] = error.receipt
+            return JSONResponse(body, status_code=error.status, headers={'Cache-Control': 'no-store'})
         except Exception as error:
             # Never echo JWT, HTTP, database or provider errors.
             status = getattr(error, 'status_code', 503)
             status = status if status in (401, 403) else 503
-            return JSONResponse({'error': {'code': 'image_access_denied' if status in (401, 403) else 'image_unavailable'}}, status_code=status)
+            return JSONResponse({'error': {'code': 'image_access_denied' if status in (401, 403) else 'image_unavailable'}}, status_code=status, headers={'Cache-Control': 'no-store'})
 
     mint.app.add_api_route('/v1/images/capabilities', handler, methods=['GET'])
+    mint.app.add_api_route('/v1/images/requests/{request_id}', handler, methods=['GET'])
     mint.app.add_api_route('/v1/images/generations', handler, methods=['POST'])
     mint.app.add_api_route('/v1/images/edits', handler, methods=['POST'])
     mint.app.add_api_route('/v1/models', models, methods=['GET'])

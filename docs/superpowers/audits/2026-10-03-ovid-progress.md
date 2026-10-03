@@ -6,12 +6,12 @@ Plan: `docs/superpowers/plans/2026-10-03-ovid-master-repair-plan.md`
 ## Current status and authorization
 
 - Documentation: current-tree reconciliation supersedes stale status/authorization statements in the explicitly historical evidence below; original acceptance scopes and run history are preserved.
-- Implementation: **77 canonical tasks: W12.01 verified; 76 remain open**. W06.01 and W14.02 have bounded implementations awaiting full acceptance; W16.02 native guards were reviewed and accepted but devices remain pending. Usage reactivity, hooks, fullscreen, hosted snapshots, worker fairness and overlay stop now have partial implementations. Grants/root/search/ledger and wider integration remain partial.
-- Current register counts: **1 verified, 37 partial/in progress, 2 implemented/awaiting review, 1 reviewed/device-pending, 1 architecture-blocked, 35 pending**. The 76 open tasks include every status except verified; DOC checkboxes are not part of the 77-task denominator.
-- Historical baseline: clean `/root/OvidAI` checkout, feature branch `hoplite/gortyn-77773150`, HEAD `afe3fc149dc774d999148c971397df45feb8e72c` (`afe3fc1`). Continue in that existing feature-branch checkout, now dirty with concurrent implementation/test edits. This update owns only the four documentation files below; implementation outcomes are attributed to the supplied handoff, not rerun by this author.
-- Authorization: **latest direct user instruction authorizes a checkpoint commit and push of completed work**, superseding the earlier no-commit/no-push restriction. Implementation, Firebase console and final Play work remain authorized. The controller owns backend/native verification and checkpoint commit/push; this reconciliation owns only the four documents. Exclusive file ownership and serialized shared-file integration apply. No worker-model selection is claimed.
+- Implementation: **77 canonical tasks: W12.01 verified; 76 remain open**. Ten-worker bounded implementations, per-task reviews and round fixes, and final bounded integration review are accepted per controller handoff. This does not close full task acceptance. W06.01/W14.02 remain awaiting full review; W16.02 remains device-pending.
+- Current register counts: **1 verified, 49 partial/in progress, 2 implemented/awaiting review, 1 reviewed/device-pending, 1 architecture-blocked, 23 pending**. Twelve previously pending tasks advance to partial. The 76 open tasks include every status except verified; DOC checkboxes are outside the denominator.
+- Current batch baseline: `29c14e4df6a819cfa3bd47598a92a7d4627a7abe` (`29c14e4`), existing `/root/OvidAI` feature checkout. The batch is **uncommitted**; no current clean-tree claim is made. The clean `afe3fc1` baseline and subsequent concurrent-edit/checkpoint observations below are dated history. Application outcomes here are attributed to worker reports and the controller, not rerun by this documentation author.
+- Authorization: **the user currently authorizes commit/push; the integration controller will perform the next checkpoint**. Approved implementation, real Firebase console and final Play goals remain in force. This documentation worker owns the four master docs and its report; its no-source/test-edit, no-subagent and no-Git-action scope does not restrict the controller's authorization. Preserve exclusive ownership and separately authorized shared-file integration. No worker-model selection is claimed.
 - Corrections retained: ignored bootstrap payloads are tracked; artifact data-URL 403 is an unreproduced hypothesis; previous static source statuses do not establish runtime success; target28 app-data execution needs architectural resolution before Play target uplift.
-- Latest integration checkpoint: see **Current-tree reconciliation** and **Review follow-up and integrated verification** below. Recorded full Flutter suite: **3,468 passed, 4 skipped**, raw log independently inspected; analyzer passed freshly in the controller's current turn. The earlier four auth expectation failures are resolved. Deployment, device and remaining W-task acceptance gates stay open.
+- Latest integration evidence (2026-10-04): **final full Flutter verified: 3,987 passed, 4 skipped**, terminal log independently inspected at `/tmp/opencode/parallel-integrated-flutter-complete.log:6448` (`22:19 +3987 ~4: All tests passed!`). Exact command: `/root/flutter/bin/flutter test --no-pub --concurrency=2 --reporter expanded`. Controller reports fresh full analyzer **No issues found (6.5s)** and `git diff --check` clean, plus backend **account56 +16 subtests, images35, shares30** passing. Earlier **3970/10fail/4skip**, then **3986/1fail/4skip** twice remain historical failed runs; completion fixtures were repaired. Historical3468/4skip is not the latest full result. Batch remains uncommitted; whitespace-clean does not mean a clean checkout.
 - Product decision: user explicitly requires retaining permission-based autonomous Control as Ovid's core differentiator. The proposed static-workflow redesign was not approved. Preserve Control while resolving distribution/runtime requirements; permission alone has not established Play eligibility.
 
 ## Ownership
@@ -22,7 +22,7 @@ Plan: `docs/superpowers/plans/2026-10-03-ovid-master-repair-plan.md`
 | Current documentation author | `docs/superpowers/plans/2026-10-03-ovid-master-repair-plan.md` | Canonical W00–W16 tasks and gates — documentation verified |
 | Current documentation author | `docs/superpowers/audits/2026-10-03-ovid-feature-matrix.md` | Feature-to-task coverage and required release matrix — documentation verified |
 | Current documentation author | `docs/superpowers/audits/2026-10-03-ovid-progress.md` | Durable status/ownership/evidence — documentation verified |
-| Implementation owners / integration controller | Existing source/test edits for B01–B09 in this feature-branch checkout | Preserve current checkout ownership; bounded handoffs below identify subsystem boundaries. Exact worker names/claim logs were not supplied; do not infer or reassign ownership. |
+| Ten implementation/inventory workers and integration controller | Ownership in `.superpowers/sdd/2026-10-03-ovid-master-repair-plan/parallel-batch-contract.md`, with separately authorized round integrations | Studio, MCP, search, packages, utilities, hooks, images, shares, account and read-only release inventory; reports identify actual files and residual gates. B01–B09 ownership below is historical. |
 
 Parallel rule: one writer per file. `state.dart`, `agent_service.dart`, `MainActivity.kt`, sandbox service and shared server authority require a named integration owner; subsystem workers submit bounded handoffs and tests instead of simultaneous edits to these files. Retain existing checkout claims and serialize integration. Read-only evidence collection can proceed independently. B01–B09 are evidence identifiers under existing tasks, not additional or replacement W tasks. Any genuinely new task gets an ID in the master plan and a row here before work starts.
 
@@ -39,14 +39,14 @@ Canonical deliverables and acceptance experiments live in the plan. These rows m
 
 | Task | Bounded deliverable | Status | Evidence / gate |
 |---|---|---|---|
-| W00.01 | Reproducible baseline/toolchain/suite inventory | In progress — partial | Historical clean baseline and current dirty checkout recorded; B01–B09 handoff evidence available, complete reproducible inventory pending |
-| W00.02 | Distribution inputs/payload provenance/signing inventory | Pending | Tracked payload observation recorded; artifact comparison not executed |
+| W00.01 | Reproducible baseline/toolchain/suite inventory | In progress — partial | Baseline29c14e4, uncommitted batch; release tool/device inventory and run history recorded; final full Flutter3987 passed/4 skipped, fresh controller analyzer and whitespace pass |
+| W00.02 | Distribution inputs/payload provenance/signing inventory | In progress — partial | Release report hashes all three tracked ZIP payloads and matches old universal APK; derivation/license/signing closure pending |
 | W00.03 | Exact model/provider IDs and source ownership | In progress — partial | Existing feature-branch ownership retained; B05 bounded routing evidence, full provider/model inventory and probes pending |
 | W01.01 | Hydration/live-edit generation safety | In progress — partial | Live identity and partial-history preservation reviewed; state follow-up136 passes. Account-generation acceptance remains open |
 | W01.02 | Complete failure-aware persistence | In progress — partial | Nested signatures, pending deletion/write reconciliation and bounded saves reviewed; state follow-up136 passes. Full ownership/device acceptance remains open |
 | W01.03 | Session deletion barrier/all owned stores | Pending | Late append/write/reconnect cleanup cases required |
 | W01.04 | Ledger sequence/replay/close/delete integrity | In progress — partial | B01: 66 combined tests passed; async serialization + isolate recovery fixed after review. Full ledger/integration acceptance remains pending |
-| W01.05 | Recoverable account-scoped FTS | In progress — partial | B01: included in 66 combined passes; full search/account/deletion integration pending |
+| W01.05 | Recoverable account-scoped FTS | In progress — partial | Standalone generation/tombstone/rebuild/MATCH bounds:31 passes, caller permission2. Agent/account/startup/deletion and generation-bearing pagination callers remain unwired |
 | W01.06 | Truthful startup timeout/retry/disable | Pending | Hung and late obsolete item fixtures required |
 | W02.01 | Immutable provider/model admission | In progress — partial | B05 agent 148 passes; full admission/provider identity acceptance pending |
 | W02.02 | Unified queue/run admission and row IDs | In progress — partial | B05 queue 38 passes and B09 chat 57; full concurrent admission/integration acceptance pending |
@@ -64,21 +64,21 @@ Canonical deliverables and acceptance experiments live in the plan. These rows m
 | W05.03 | Lifecycle-persistent global stop | In progress — partial | Overlay Stop now routes through persistent background stop; queued-run and idle regressions included in full Flutter suite. Complete boot/resume/service/schedule/owner and device acceptance pending |
 | W06.01 | Approved nonblocking Studio setup | Implemented — awaiting review | Initial B06 setup30 superseded by focused setup40 and full Flutter evidence; approval/navigation/retry/persistence fixes present. Full acceptance review pending; broader installer/runtime tasks remain open |
 | W06.02 | Single-flight staged installer | Pending | Multi-caller/cancel/restart/failure publication cases required |
-| W06.03 | Signed metadata/package integrity/exit code | In progress — partial | B02 pkg39 passed; all installation routes and supply-chain acceptance pending |
-| W06.04 | Complete bounded dependency graph | In progress — partial | B02 bounded package evidence; full graph/ABI/closure acceptance pending |
+| W06.03 | Signed metadata/package integrity/exit code | In progress — partial | Packages128 covering passes after three review rounds: hashes/identity/staging/combined-link checks and exact exits. Signed index, native/bootstrap/manual routes and atomic publication pending |
+| W06.04 | Complete bounded dependency graph | In progress — partial | Bounded version/alternative/virtual/ABI closure and cycle rejection, included in packages128; app health, broader compatibility, runtime/performance and atomic integration pending |
 | W06.05 | Runtime relocation/ARM/ABI proof | In progress — partial | B02 pkg39 includes relocation-failure fixes; actual supported split/runtime devices pending |
 | W07.01 | Transactional plugin generations | In progress — partial | B03 grant65/UI8 plus plugin persistence11 and full Flutter; immediate unregister/disable before fallible revoke and retry UI fixed. Full transactional generation acceptance pending |
-| W07.02 | Aggregated hook context and restart env | In progress — partial | Per-plugin context aggregation, encrypted explicit-context restart store, descriptor reconciliation and retryable session activation implemented; hook_w07/hook_context_restart/session lifecycle fixtures included in full Flutter suite. Complete lifecycle/environment acceptance pending |
-| W07.03 | [CC] event/input/output/env translation | In progress — partial | Hook event/tool translation, stdin/env/root execution scope and output-context handling repaired with hook_w07 fixtures in full Flutter suite. Full command/prompt/agent compatibility and secret-output audit remain open |
+| W07.02 | Aggregated hook context and restart env | In progress — partial | Epoch-owned context/env and repeated start/end review fixes; latest round67 and diagnostic+worker40 passes (overlap). Registry same-object ABA, immediate runtime invalidation, orphan GC and wider lifecycle pending |
+| W07.03 | [CC] event/input/output/env translation | In progress — partial | Actual post-tool failure dispatch, raw operational decisions/rewrites with separately redacted publication, bounded output/env and prompt contracts reviewed. Round2 broad109, later67/40 overlap; tool-capable agent hooks, global secrets and descendant cancellation pending |
 | W07.04 | Native dependency configuration/readiness | Pending | Denied/missing/configured/removed/restart cases required |
-| W08.01 | MCP reserve/connect/cancel/reconnect | Pending | Concurrent handshake/late transport/obsolete retry cases required |
+| W08.01 | MCP reserve/connect/cancel/reconnect | In progress — partial | Shared reservation/deadline, late transport cleanup, reconnect identity/backoff and auth refusal; MCP196 unfiltered passes. Process trees, durable status and real runtime/removal journeys pending |
 | W08.02 | SSE endpoint/redirect origin constraints | In progress — partial | Origin/redirect constraints and live policy-refusal propagation reviewed;86 focused passes. Canonical integration closure pending |
 | W08.03 | OAuth/PKCE/refresh/token removal | Pending | Cancel/wrong-state/late-refresh fixtures and real provider required |
-| W08.04 | MCP imports/resources/protocol pagination | Pending | All transport fixtures and real configured server checks required |
-| W09.01 | Per-file/binding Studio drafts | Pending | Multi-tab/external-write/conflict/save cases required |
+| W08.04 | MCP imports/resources/protocol pagination | In progress — partial | Atomic ambiguous-import rejection and bounded validated tools catalogs/refresh; MCP196 passes after review. Prompts/resources/templates/read, wire-memory bounds, native validation, SSE invalidation and real server checks pending |
+| W09.01 | Per-file/binding Studio drafts | In progress — partial | Mounted editor draft/caret/undo/conflict retention and paused-save fences; Studio247 covering tests across compatibility+corrected audit runs. Restart/screen-disposal retention and mutable-buffer ABA remain pending |
 | W09.02 | Immutable approved commit snapshot | In progress — partial | Frozen binding/base/bytes/message/selection plus explicit executable-mode and missing-checkout deletion staging reviewed;319 covering tests,90 fresh controller tests; full acceptance closure pending |
 | W09.03 | Upstream conflict/unknown result/fallback | In progress — partial | Single-send nonforce publication and mode-aware durable unknown recovery reviewed, including legacy intents and later-edit retention; full acceptance closure pending |
-| W09.04 | Sync/save/fetch ordering | Pending | Reversed responses/concurrent edit/cancel cases required |
+| W09.04 | Sync/save/fetch ordering | In progress — partial | Sync/fetch publication identities, failed-read retention and authorized AgentService save/reload fences reviewed; Studio247 covering tests. Explicit cancel UI, public mutable-buffer revision contract and full acceptance pending |
 | W09.05 | Clone collision and GitHub auth restore | Pending | Folder/auth races and real GitHub test repository required |
 | W10.01 | Artifact 403 reproduction/isolation | Pending | HYPOTHESIS; real failing WebView trace absent |
 | W10.02 | True fullscreen and standalone previews | In progress — partial | Real fullscreen route and generation/route/collapse cancellation implemented; artifact8 focused Flutter passes plus full suite. Standalone asset/encoding and actual renderer/device lifecycle acceptance pending |
@@ -86,23 +86,23 @@ Canonical deliverables and acceptance experiments live in the plan. These rows m
 | W10.04 | Browser controller/handler/capture/cookie ownership | In progress — partial | B04 native guards accepted; complete concurrent controller/cookie/device capture acceptance pending |
 | W11.01 | Verify three configured image fallbacks | Pending | Real provider operation/size/nonbillable refusal receipts required |
 | W11.02 | Attested shared text/image admission | Pending | External authority and production App Check required |
-| W11.03 | Durable request receipts/exact money | Pending | Decimal/replay/settlement/restart cases required |
-| W11.04 | No ambiguous paid resubmission | Pending | Accepted/lost/malformed/crash reconciliation cases required |
-| W11.05 | Image retention/replay/delete/account fences | Pending | Cross-account/expiry/pending cleanup and adapters required |
+| W11.03 | Durable request receipts/exact money | In progress — partial | Backend exact Decimal/string durable receipts and authenticated quota-independent status reads; controller images35 passes. Client durable IDs/UI/restart and shared spend authority pending |
+| W11.04 | No ambiguous paid resubmission | In progress — partial | Backend unknown reservations survive restart; only typed verified nonacceptance permits fallback, status-only429/5xx cannot. Images35 passes; production nonacceptance verifier, reconciliation and client integration pending |
+| W11.05 | Image retention/replay/delete/account fences | In progress — partial | Finite replay/receipt retention and UID deletion fence preserve dedup tombstones; images35 passes. Client/account adapters, scheduling, WAL/backups/provider erasure and live authority pending |
 | W12.01 | Remove chat-header share | Verified | Source/header review plus chat_screen_bounded/native_share checks in full Flutter run; Share Ovid and image/file dispatch preserved. See current-tree evidence for exact scope |
-| W12.02 | Approved immutable hosted snapshots | In progress — partial | Account-bound frozen text preview/service/sidebar and server API/repository implemented; sharing14 Flutter +10 Python and full Flutter evidence. Actual deployment/admission/privacy acceptance remains open; assets are explicitly excluded |
-| W12.03 | Safe viewer/revoke/expiry/account cleanup | In progress — partial | Escaped text viewer, owner revoke, no-store responses, expiry/quota and cleanup primitive implemented; sharing14 Flutter +10 Python. Live URL/cache behavior, cleanup wiring and expiry scheduling pending |
+| W12.02 | Approved immutable hosted snapshots | In progress — partial | Frozen text-only client/backend; snapshot revalidation and lock-time expiry/quota races covered; controller shares30 passes. Hosting/admission/privacy acceptance and asset scope remain open |
+| W12.03 | Safe viewer/revoke/expiry/account cleanup | In progress — partial | Terminal purged receipts, finite TTL, concurrent cleanup/revoke and hostile viewer/cache origin cases; controller shares30 passes. Actual hosting/cache behavior, worker adapters, expiry scheduling and backups pending |
 | W13.01 | Social/phone-only auth/linking/reauth | In progress — partial | Social/phone auth and same-UID flows implemented; full Flutter suite resolves all four earlier stale Forgot password expectations. Legacy console migration and real provider journeys pending |
 | W13.02 | Phone OTP callback/resend/expiry lifecycle | In progress — partial | B07 auth evidence; Phone enabled/saved in real console. Real SMS/lifecycle/release journeys pending |
 | W13.03 | All account-owned producer fences | In progress — partial | Auth/cloud/share account-bound response and key checks present; focused cloud58/sharing14 plus full Flutter evidence. Complete run/image/plugin/browser/store producer inventory and A→B acceptance pending |
 | W13.04 | Real Firebase/social/SMS console activation | In progress — partial | Chrome account/project verified; Google preenabled, Phone saved enabled. SMS10/day; no billing change. Email/password enabled pending migration; remaining provider/signing/App Check/live gates open |
-| W13.05 | Idempotent deletion and fair worker | In progress — partial | Durable request aliases, locked retry checkpoints/backoff and fair PostgreSQL due ordering implemented; poison-first100, concurrent-worker, restart/cancel and migration tests inspected. Controller verifying backend; production adapters/cleanup/deployment remain open |
+| W13.05 | Idempotent deletion and fair worker | In progress — partial | Durable gateway/SQL/Redis substage checkpoints preserve acknowledged cleanup across restart; controller56 +16 subtests pass. Image/share composition, actual PostgreSQL locks, deployed authority and unknown remote effects remain open |
 | W14.01 | Inventory 87 capabilities/19 prompt helpers | Pending | Explicit registry/per-tool reconciliation and evidence required |
 | W14.02 | Normalized helper response and exact model fanout | Implemented — awaiting review | B05: helper route implemented; agent148 + queue38 passed. Review and full integration/accounting/cancellation acceptance pending |
 | W14.03 | Transactional native config/secret outputs | In progress — partial | B03 masked-secret preservation/confirmed config fixed; grant65/UI8 and full Flutter evidence. Full native transactional config/output audit pending |
 | W14.04 | Per-tool real REST contracts | Pending | Descriptor fixtures plus actual provider credentials required |
-| W14.05 | CSV/SQL/cron/DDL correctness | Pending | Grammar/round-trip/DST/dialect execution corpus required |
-| W14.06 | Regex/utility resource bounds | Pending | Adversarial CPU/memory/output cancellation cases required |
+| W14.05 | CSV/SQL/cron/DDL correctness | In progress — partial | Multiline/CRLF/quote/header/column CSV scanner and roundtrips; utilities92 passes. SQL lexer/dialect, cron timezone/DST/horizon, DDL execution and CSV total quotas pending |
+| W14.06 | Regex/utility resource bounds | In progress — partial | Regex isolate deadline and input/match/capture/output bounds; utilities92 passes. Aggregate/heap quota, caller cancellation, device/AOT and other utility families pending |
 | W15.01 | Native telemetry default off/consent lifecycle | In progress — partial | B04 initial native evidence; merged release manifest and actual pre-Dart consent lifecycle verification pending |
 | W15.02 | All-store reset stop barrier | Pending | Seeded cleanup manifest/partial failure/late producer cases required |
 | W15.03 | Versioned portable export/restore | Pending | Round-trip/collision/secret/archive/atomic-failure cases required |
@@ -111,11 +111,11 @@ Canonical deliverables and acceptance experiments live in the plan. These rows m
 | W15.06 | Full UI polish/accessibility/token efficiency | In progress — partial | B03/B06/B09 bounded UI results; complete feature journeys/layout/device acceptance pending |
 | W16.01 | Minimized overlay and global stop | In progress — partial | Native overlay/voice/question routing and Dart persistent global-stop changes present; B08 scoped33 followed by full Flutter suite including queued/idle stop fixtures. Real home/recents/rotation/service-loss/permission/mic journeys pending |
 | W16.02 | API23 teardown/API24/26 capture guards | Reviewed/accepted — devices pending | B04: native guards reviewed and accepted with initial81 passes; required devices and integrated release acceptance still pending |
-| W16.03 | Process-ABI payload delivery | Pending | Actual APK-set splits/install/update/runtime evidence required |
-| W16.04 | Modern-target runtime architecture/current Play policy | In progress — architecture blocked | Play audit reports fetched API36 / August 31, 2026; official links and independent-confirmation gates below. Modern-target exec/dlopen architecture proof pending |
-| W16.05 | Signed APK/AAB/ELF/16 KB inspection | Pending | Real signing/Firebase inputs, builds and 16 KB device required |
+| W16.03 | Process-ABI payload delivery | In progress — partial | Three payloads match old universal APK; static306 ELF closure inventoried. Actual current APK-set splits/process ABI/install/update/runtime and devices pending |
+| W16.04 | Modern-target runtime architecture/current Play policy | In progress — architecture blocked | Release report fetched dated API36/page-size/accessibility policies; current script preflight does not test ELF exec. Modern-target exec/dlopen and autonomous Control distribution decision remain blocked |
+| W16.05 | Signed APK/AAB/ELF/16 KB inspection | In progress — partial | Old debug-signed target28 APK identified; ZIP/LOAD pass but64-bit bootstrap RELRO failures78 ARM64/75 x86_64 plus outer libs. Current signed artifacts and16KB device proof pending |
 | W16.06 | Production services/providers/console gates | Pending | Deployed auth/budget/deletion/share/provider journeys required |
-| W16.07 | Integrated release qualification | In progress — partial | Full Flutter3468 passed/4 skipped and fresh analyzer passed; controller owns current backend/native verification. Signed artifacts, complete device/provider matrix, Play internal results and remaining acceptance gates required |
+| W16.07 | Integrated release qualification | In progress — partial | Bounded integration review accepted; final full Flutter3987 passed/4 skipped, controller backend/fresh analyzer/whitespace pass. Earlier3970/10fail and3986/1fail twice retained as history. Release/device/provider/Play gates open |
 
 ## External gate register
 
@@ -253,7 +253,7 @@ git diff --check
   signed release, Firebase journeys and Play/runtime architecture gates remain
   open. No deploy, commit or push was performed in this follow-up.
 
-## Current-tree reconciliation — 2026-10-03
+## Historical current-tree reconciliation — 2026-10-03
 
 This section supersedes the historical no-full-suite, four-auth-failures, excluded-Flutter-compile and no-commit authorization statements. Source/tests/current diff were inspected without rerunning application tests for prose. The full-run log `/root/.local/share/opencode/tool-output/tool_102382fee001oEy10woyoMjN9N` ends at line 5855 with `08:56 +3468 ~4: All tests passed!`. The controller reports a fresh analyzer pass this turn. The earlier brace-only post-suite correction and focused plugin rerun remain documented above; later backend/native results belong to the controller's evidence record.
 
@@ -368,7 +368,7 @@ drafts remain in-process; unknown publication records remain restart-durable.
 
 ### Checkpoint pre-commit checks
 
-The user explicitly requested committing/pushing completed work, then continuing
+At this historical checkpoint, the user explicitly requested committing/pushing completed work, then continuing
 the remaining tasks. Controller review found 123 intended source/test/document
 files in this checkpoint; ignored Firebase/signing inputs remain outside it.
 Fresh checks: `flutter analyze --no-pub` and staged whitespace checks passed;
@@ -380,13 +380,45 @@ the suites use unittest and were run successfully with its native runner.
 An initial invocation excluding `processDebugGoogleServices` failed Gradle's
 generated-resource dependency check; the normal invocation above passed without
 source changes. These native host tests do not establish device/production
-Firebase behavior. The latest full Flutter result remains 3,468 passed / 4 skipped
+Firebase behavior. The then-latest full Flutter result was 3,468 passed / 4 skipped
 on the same production code (apart from the already rechecked brace-only lint fix).
 
 For every task transition record: date; task ID; owner; exact claimed files; baseline/revision and dirty-tree context; reproduction input; command/workdir/environment; expected and actual outcome/exit status; evidence path; remaining external/device conditions; next bounded action. Redact tokens, OTPs, private payloads and signing credentials. A failed test/build gets its actual failure, not a success summary from an older run.
 
 Status transitions: **Pending → In progress → Implemented/awaiting review → Reviewed/remaining gates → Verified**, or **In progress → Blocked** with explicit gate and next action. Partial implementation stays in progress; a local fixture pass with an outstanding required live check does not verify the task. Any reopened task must say which evidence invalidated the prior closure. Update canonical checkboxes and this ledger together.
 
+## Ten-worker bounded batch reconciliation — 2026-10-04
+
+Baseline **29c14e4**, batch **uncommitted**. Evidence: `.superpowers/sdd/2026-10-03-ovid-master-repair-plan/parallel-batch-contract.md` and `parallel-{studio,mcp,search,packages,utilities,hooks,images,shares,account,release}-report.md`, including latest review addenda (some are prepended), plus `parallel-package-fixture-report.md` and `parallel-integration-regressions-report.md`. Per-task reviews/round fixes and final integration review accepted the **bounded batch**, per controller handoff; no additional W task is fully accepted. All reported test counts overlap and are **not additive unique totals**.
+
+The current register records each subsystem's delivered boundary and residual gates. Twelve transitions from pending to partial are W00.02, W08.01, W08.04, W09.01, W09.04, W11.03, W11.04, W11.05, W14.05, W14.06, W16.03 and W16.05. Canonical acceptance paragraphs/checkboxes are unchanged: **77 tasks, 1 verified, 76 open**.
+
+### Integration and verification chronology
+
+| Evidence owner / scope | Actual recorded result | Boundary |
+|---|---|---|
+| Studio worker latest round | 247 covering tests across compatibility run and corrected32-test audit rerun;28 parallel regressions | Not a single247-pass invocation; initial245/2 audit failure was a misplaced expectation edit, corrected before final audit rerun |
+| MCP worker latest round | 196 passed, unfiltered | Supersedes171 with one excluded old expectation; required tools arrays and timeout-alias ambiguity fixed |
+| Packages worker latest round | 128 passed | Supersedes85/113/121; combined existing/incoming links and complete readlink output reviewed; signed metadata/native routes/atomic publication remain pending |
+| Hooks worker latest rounds | Broad109, then67 after repeated-start correction, then40 diagnostic+worker tests | Overlapping scopes; diagnostic empty catch corrected without secret-bearing output |
+| Search / utilities workers | Search31 plus2 caller-access tests; utilities92 | Standalone FTS integration and SQL/cron/DDL/other-family work remain open |
+| Controller fresh backend | Account56 +16 subtests; images35; shares30 — pass | Explicit worker filename discovery required; local fixtures are not deployed authority/device proof |
+| Controller full analyzer / whitespace | Fresh repeat: **No issues found (6.5s)**; `git diff --check` clean | Supplied controller results after final Flutter completion; batch still uncommitted |
+| First full Flutter | 3970 passed /10 failed /4 skipped; `/tmp/opencode/parallel-integrated-flutter.log` | Five MCP fixture/message mismatches, one hook diagnostic convention failure, four core cleanup/readiness fixture failures |
+| Core fixture integration | 573 passed in core+plugin-install | Real temporary memory/ledger cleanup and scoped persistence completion; four baseline failures reproduced on29c14e4 before correction |
+| Second full Flutter | 3986 passed /1 failed /4 skipped; `/tmp/opencode/parallel-integrated-flutter-final.log` | Session-end fixture observed too early; actual matching hook executor completion now awaited; core568 passes |
+| Third full Flutter | 3986 passed /1 failed /4 skipped; `/tmp/opencode/parallel-integrated-flutter-verified.log` | Composer approval readiness raced a fixed delay; controlled workspace prerequisite reproduced failure; matching approval listener replaces sleep/polling |
+| Composer follow-up | 55 composer/policy/allowlist and18 relevant core passes | Original behavior assertions retained; these focused runs are not a full-suite result |
+| Final full Flutter | **3987 passed /4 skipped**, `22:19 +3987 ~4: All tests passed!` | Independently inspected `/tmp/opencode/parallel-integrated-flutter-complete.log:6448`; exact command `/root/flutter/bin/flutter test --no-pub --concurrency=2 --reporter expanded`. Supersedes earlier failed runs as latest result; full release acceptance remains open |
+
+Exact worker invocations and red/green histories are in the reports above. Backend discovery must include worker-prefixed tests, e.g. the reported account command `PYTHONPATH=/tmp/opencode/account-test-deps /tmp/opencode/images-venv/bin/python -m pytest -q server/account/tests/parallel_account_cleanup_test.py server/account/tests`; images `.../python -m unittest discover -s server/images/tests -p '*test*.py' -v`; shares `.../python -m unittest discover -s server/shares/tests -p '*.py' -v`. These are worker-recorded invocations; controller fresh counts are separately supplied. Flutter worker checks used `flock /tmp/opencode/parallel-flutter.lock /root/flutter/bin/flutter test --no-pub --concurrency=1 ... --reporter expanded`. No application checks were rerun for this documentation pass.
+
+### Release inventory and policy follow-through
+
+The read-only release report inventories **three tracked ZIP-in-.so archives,306 contained ELFs**, and matching bytes in an **old universal debug-signed target28/min23 APK**, dated2026-09-18, SHA-256 `b9a758fe3d65c45e5a7e492cb6fe6d34f55af21c481936e1261011cd503fadfd`. No current AAB/APKS was found in the inspected build roots. This does not invalidate the separately recorded historical CI build/upload; neither identifies a current batch release. ARM32/x86_64 lack in-archive keyring/terminfo/dpkg state present on ARM64; separate key assets exist, so this alone does not prove runtime failure. Provenance/license closure remains missing. All204 64-bit bootstrap ELFs pass LOAD alignment, but78 ARM64 and75 x86_64 fail the report's official-guide RELRO end criterion; outer APK libraries also have static failures. No device crash or successful runtime was observed; adb had no devices. The `/system/bin/sh <data-script>` preflight proves script interpretation, not app-data ELF exec/dlopen.
+
+Dated official evidence and exact URLs are recorded in the [master audit's release reconciliation](2026-10-03-ovid-master-audit.md#release-inventory-and-official-policy-reconciliation--2026-10-04). Release report access date2026-10-03: API36 new/update deadline August31,2026; 16KB guide update September16,2026 reports update blocking February1,2027; autonomous general-assistant Accessibility planning/execution conflicts with observed guidance. These fetched findings require current release-owner applicability/console decisions, not guessed waivers. Billing Library8 timeline remains independently unconfirmed by this report. Preserve autonomous Control and obtain an owner-reviewed distribution/API/runtime decision; consent and runtime relocation alone do not establish Play eligibility.
+
 ## Immediate handoff
 
-Continue from the integrated Flutter3468/4skip and fresh analyzer checkpoint; the four stale auth expectations are resolved and W12.01 is verified. The controller is completing backend/native verification and owns the explicitly authorized checkpoint commit/push; record its actual results and revision when available. Review full W06.01/W14.02 acceptance, then advance remaining ownership/persistence/permission/installer/hooks/MCP/Studio/receipt/cleanup scopes using the current partial implementations. Deploy and wire shares before live acceptance; complete Firebase migration/provider/SMS journeys and device/release evidence. Preserve autonomous Control, resolve W16.04 modern-target runtime architecture and independently confirm policy timelines. Keep all 76 open acceptance scopes and external gates visible; production readiness remains unestablished.
+The final full Flutter run is **verified3987 passed/4 skipped**, with fresh controller analyzer and whitespace passes. The user authorizes commit/push; the controller owns that next checkpoint and must record its resulting revision. The batch is not yet committed. Continue from accepted bounded fixes with search caller/account/deletion wiring, signed package metadata/native routes/atomic publication, remaining hook/MCP contracts, durable Studio drafts, client image receipts/shared authority, hosted shares/account adapters, SQL/cron/DDL and full release/device/provider evidence. Retain W06.01/W14.02 full review, all76 open acceptance scopes and every external gate. Preserve permission-based autonomous Control and the social/phone/nonblocking Studio product instructions. Production readiness remains unestablished.

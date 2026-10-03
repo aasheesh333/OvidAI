@@ -54,7 +54,9 @@ class FileConverterCapability implements NativePluginCapability {
   List<NativePluginTool> get tools => const [
         NativePluginTool(
           name: 'csv_to_json',
-          description: 'Convert CSV data with headers to a JSON array.',
+          description: 'Convert comma-separated CSV to JSON string values. '
+              'Supports quoted multiline fields and LF/CRLF/CR records; '
+              'requires unique nonblank headers and exact column counts.',
           inputSchema: {
             'type': 'object',
             'properties': {
@@ -97,20 +99,23 @@ class FileConverterCapability implements NativePluginCapability {
     }
   }
 
-  List<String> _parseCsvLine(String line) {
-    final fields = <String>[];
+  Iterable<List<String>> _parseCsvRecords(String text) sync* {
+    var fields = <String>[];
     final current = StringBuffer();
     var inQuotes = false;
+    var closedQuote = false;
+    var recordStarted = false;
     var i = 0;
-    while (i < line.length) {
-      final c = line[i];
+    while (i < text.length) {
+      final c = text[i];
       if (inQuotes) {
         if (c == '"') {
-          if (i + 1 < line.length && line[i + 1] == '"') {
+          if (i + 1 < text.length && text[i + 1] == '"') {
             current.write('"');
             i += 2;
           } else {
             inQuotes = false;
+            closedQuote = true;
             i++;
           }
         } else {
@@ -118,55 +123,80 @@ class FileConverterCapability implements NativePluginCapability {
           i++;
         }
       } else {
-        if (c == '"') {
-          inQuotes = true;
-          i++;
-        } else if (c == ',') {
+        if (c == ',' || c == '\n' || c == '\r') {
           fields.add(current.toString());
           current.clear();
+          closedQuote = false;
+          i++;
+          if (c == ',') {
+            recordStarted = true;
+          } else {
+            if (c == '\r' && i < text.length && text[i] == '\n') i++;
+            yield fields;
+            fields = <String>[];
+            recordStarted = false;
+          }
+        } else if (closedQuote) {
+          throw FormatException('Unexpected text after CSV closing quote at offset $i.');
+        } else if (c == '"') {
+          if (current.isNotEmpty) {
+            throw FormatException('Unexpected quote in unquoted CSV field at offset $i.');
+          }
+          inQuotes = true;
+          recordStarted = true;
           i++;
         } else {
+          recordStarted = true;
           current.write(c);
           i++;
         }
       }
     }
-    fields.add(current.toString());
     if (inQuotes) {
-      throw FormatException('Unterminated quoted field in CSV: $line');
+      throw FormatException('Unterminated quoted field at end of CSV.');
     }
-    return fields;
+    if (recordStarted) {
+      fields.add(current.toString());
+      yield fields;
+    }
   }
 
   String _csvToJson(String csvText) {
-    final lines = csvText
-        .split(RegExp(r'\r?\n'))
-        .where((line) => line.trim().isNotEmpty)
-        .toList();
-    if (lines.isEmpty) {
+    final records = _parseCsvRecords(csvText).iterator;
+    if (!records.moveNext()) {
       throw FormatException(
         'Empty CSV input: expected a header row followed by data rows.',
       );
     }
-    final headers =
-        _parseCsvLine(lines.first).map((h) => h.trim()).toList();
-    if (headers.isEmpty || headers.every((h) => h.isEmpty)) {
-      throw FormatException('Empty CSV input: header row has no columns.');
-    }
+    final headers = records.current;
+    _validateCsvHeaders(headers);
     final rows = <Map<String, String>>[];
-    for (final line in lines.skip(1)) {
-      final fields = _parseCsvLine(line);
+    while (records.moveNext()) {
+      final fields = records.current;
+      if (fields.length != headers.length) {
+        throw FormatException('CSV record ${rows.length + 2} has '
+            '${fields.length} columns; expected ${headers.length}.');
+      }
       final row = <String, String>{};
       for (var i = 0; i < headers.length; i++) {
-        row[headers[i]] = i < fields.length ? fields[i] : '';
+        row[headers[i]] = fields[i];
       }
       rows.add(row);
     }
     return jsonEncode(rows);
   }
 
+  void _validateCsvHeaders(List<String> headers) {
+    if (headers.isEmpty || headers.any((h) => h.trim().isEmpty)) {
+      throw FormatException('CSV headers must contain nonblank column names.');
+    }
+    if (headers.toSet().length != headers.length) {
+      throw FormatException('Duplicate CSV header names are not supported.');
+    }
+  }
+
   String _csvCell(String value) {
-    if (value.contains(RegExp(r'[",\n\r]'))) {
+    if (value.isEmpty || value.contains(RegExp(r'[",\n\r]'))) {
       return '"${value.replaceAll('"', '""')}"';
     }
     return value;
@@ -204,6 +234,7 @@ class FileConverterCapability implements NativePluginCapability {
         if (!keys.contains(name)) keys.add(name);
       }
     }
+    _validateCsvHeaders(keys);
     final rows = <String>[_csvRow(keys)];
     for (final item in decoded) {
       final map = item as Map;

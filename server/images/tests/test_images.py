@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from server.images.service import Backend, ImageError, ImageService, Ledger, UpstreamError
+from server.images.service import Backend, ImageError, ImageService, Ledger, UpstreamError, UpstreamNotAccepted
 
 
 def png(w=8, h=8):
@@ -47,13 +47,14 @@ class ImagesTest(unittest.TestCase):
         self.assertEqual(self.run_job(service), result)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.ledger.spent('user'), Decimal('0.0370368'))
-        self.assertEqual(set(result), {'model', 'data'})
+        self.assertEqual(set(result), {'model', 'data', 'receipt'})
         self.assertEqual(result['model'], 'ovid-image')
         with self.assertRaises(ImageError):
             self.run_job(service, prompt='different')
 
     def test_transient_fallback_charges_once(self):
-        self.run_job(self.service(UpstreamError(503)))
+        # Synthetic adapter has verified rejection before submission/billing.
+        self.run_job(self.service(UpstreamNotAccepted(503)))
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(self.ledger.spent('user'), Decimal('0.0370368'))
 
@@ -68,7 +69,7 @@ class ImagesTest(unittest.TestCase):
 
     def test_edit_never_falls_back_to_generation(self):
         with self.assertRaises(ImageError):
-            self.service(UpstreamError(503)).execute('user', 'edit-request-1234', 'edit',
+            self.service(UpstreamNotAccepted(503)).execute('user', 'edit-request-1234', 'edit',
                 {'model': 'ovid-image', 'prompt': 'x', 'size': '1024x1024',
                  'image': 'data:image/png;base64,' + png()}, Decimal('10'))
         self.assertEqual(len(self.calls), 1)

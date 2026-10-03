@@ -70,14 +70,17 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late AppState app;
+  late Directory suiteRoot;
+  late Directory ledgerRoot;
 
   setUpAll(() async {
     HttpOverrides.global = null;
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
     // Ledger + FTS5 search roots: no path_provider channel in unit tests.
-    final tmp = Directory.systemTemp.createTempSync('ovid-pr19');
-    SessionLedger.rootOverrideForTest = tmp;
+    final tmp = suiteRoot = Directory.systemTemp.createTempSync('ovid-pr19');
+    ledgerRoot = Directory('${tmp.path}/ledgers')..createSync();
+    SessionLedger.rootOverrideForTest = ledgerRoot;
     SessionSearch.dbPathOverrideForTest = '${tmp.path}/search.db';
     CommandService.exportDirOverrideForTest = tmp.path;
     // sqlite3 needs the system lib on the host (the APK bundles its own
@@ -95,6 +98,22 @@ void main() {
       });
     }
     app = AppState.I;
+    // Session deletion also cleans personal memory. Open the real store under
+    // this suite's temp root so later persistence drains can finish cleanup.
+    // Keep the singleton: several groups temporarily replace AppState.I and
+    // reset it back to this instance.
+    const paths = MethodChannel('plugins.flutter.io/path_provider');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(paths, (call) async {
+      if (call.method == 'getApplicationDocumentsDirectory') return tmp.path;
+      return null;
+    });
+    try {
+      await app.prepareMemory();
+    } finally {
+      messenger.setMockMethodCallHandler(paths, null);
+    }
     await app.initialize();
   });
 
@@ -103,6 +122,17 @@ void main() {
     await GitHubService.I.signOut();
     app.sessions.clear();
     app.activeSessionId = null;
+  });
+
+  tearDownAll(() async {
+    for (final id in SessionLedger.I.sinkOpensForTest.keys.toList()) {
+      await SessionLedger.I.close(id);
+    }
+    await SessionSearch.I.close();
+    SessionLedger.rootOverrideForTest = null;
+    SessionSearch.dbPathOverrideForTest = null;
+    CommandService.exportDirOverrideForTest = null;
+    suiteRoot.deleteSync(recursive: true);
   });
 
   test(
@@ -7076,9 +7106,11 @@ block</pre>
       addTearDown(() => svc.executorForTest = null);
 
       final root = await Directory.systemTemp.createTemp('ovid-hook-led-');
+      final previousRoot = SessionLedger.rootOverrideForTest;
       SessionLedger.rootOverrideForTest = root;
-      addTearDown(() {
-        SessionLedger.rootOverrideForTest = null;
+      addTearDown(() async {
+        await SessionLedger.I.close('hook-sess-3');
+        SessionLedger.rootOverrideForTest = previousRoot;
         root.deleteSync(recursive: true);
       });
 
@@ -8409,6 +8441,13 @@ block</pre>
       app.newSession();
       app.sendMessage('hello there'); // mid-chat — the old refusal case
       final s = app.activeSession!;
+
+      // Session start and deletion cleanup use real filesystem I/O. Complete
+      // those lifecycles outside FakeAsync before exercising the picker.
+      await tester.runAsync(() async {
+        await SessionLifecycleService.I.drainForTest();
+        await app.awaitPendingSessionWritesForTest();
+      });
 
       await tester.pumpWidget(
         MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
@@ -9890,7 +9929,21 @@ block</pre>
             );
           }
           return http.Response(
-            jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              // Discovery requires a tools array, even for a call-focused test.
+              'result': body['method'] == 'tools/list'
+                  ? {
+                      'tools': [
+                        {
+                          'name': 'remote_tool',
+                          'inputSchema': {'type': 'object', 'properties': {}},
+                        },
+                      ],
+                    }
+                  : {},
+            }),
             200,
           );
         });
@@ -9904,7 +9957,8 @@ block</pre>
           url: 'https://example.com/mcp',
         );
         addTearDown(() => McpService.I.disconnect(server.name));
-        await McpService.I.connect(server);
+        expect(await McpService.I.connect(server), contains('connected (http)'));
+        expect(McpService.I.isConnected(server.canonicalId), isTrue);
 
         final result = await McpService.I.callTool(
           server.name,
@@ -9930,7 +9984,20 @@ block</pre>
           );
         }
         return http.Response(
-          jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
+          jsonEncode({
+            'jsonrpc': '2.0',
+            'id': body['id'],
+            'result': body['method'] == 'tools/list'
+                ? {
+                    'tools': [
+                      {
+                        'name': 'x',
+                        'inputSchema': {'type': 'object', 'properties': {}},
+                      },
+                    ],
+                  }
+                : {},
+          }),
           200,
         );
       });
@@ -9944,7 +10011,8 @@ block</pre>
         url: 'https://example.com/mcp',
       );
       addTearDown(() => McpService.I.disconnect(server.name));
-      await McpService.I.connect(server);
+      expect(await McpService.I.connect(server), contains('connected (http)'));
+      expect(McpService.I.isConnected(server.canonicalId), isTrue);
 
       final result = await McpService.I.callTool(server.name, 'x', {});
       expect(result, 'MCP error: tool not found');
@@ -9960,7 +10028,20 @@ block</pre>
           return http.Response('server error', 500);
         }
         return http.Response(
-          jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': {}}),
+          jsonEncode({
+            'jsonrpc': '2.0',
+            'id': body['id'],
+            'result': body['method'] == 'tools/list'
+                ? {
+                    'tools': [
+                      {
+                        'name': 'x',
+                        'inputSchema': {'type': 'object', 'properties': {}},
+                      },
+                    ],
+                  }
+                : {},
+          }),
           200,
         );
       });
@@ -9974,7 +10055,8 @@ block</pre>
         url: 'https://example.com/mcp',
       );
       addTearDown(() => McpService.I.disconnect(server.name));
-      await McpService.I.connect(server);
+      expect(await McpService.I.connect(server), contains('connected (http)'));
+      expect(McpService.I.isConnected(server.canonicalId), isTrue);
 
       final result = await McpService.I.callTool(server.name, 'x', {});
       expect(result, contains('MCP error'));
@@ -10865,9 +10947,11 @@ url = "https://api.example.com/mcp"
       () async {
         final app = AppState.I;
         final root = await Directory.systemTemp.createTemp('ovid-perm2-led-');
+        final previousRoot = SessionLedger.rootOverrideForTest;
         SessionLedger.rootOverrideForTest = root;
-        addTearDown(() {
-          SessionLedger.rootOverrideForTest = null;
+        addTearDown(() async {
+          await SessionLedger.I.close('perm2-sess');
+          SessionLedger.rootOverrideForTest = previousRoot;
           try {
             root.deleteSync(recursive: true);
           } catch (_) {}
@@ -18248,9 +18332,11 @@ cwd = 'tools'
         addTearDown(() => svc.executorForTest = null);
 
         final root = await Directory.systemTemp.createTemp('ovid-p8-led-');
+        final previousRoot = SessionLedger.rootOverrideForTest;
         SessionLedger.rootOverrideForTest = root;
-        addTearDown(() {
-          SessionLedger.rootOverrideForTest = null;
+        addTearDown(() async {
+          await SessionLedger.I.close('p8-sess-malformed');
+          SessionLedger.rootOverrideForTest = previousRoot;
           root.deleteSync(recursive: true);
         });
 
@@ -18857,8 +18943,14 @@ cwd = 'tools'
       ]);
       final svc = HookService.I;
       var fired = false;
+      final hookObserved = Completer<Map<String, String>>();
       svc.executorForTest = (cmd, env) async {
-        if (env['PLUGIN_EVENT'] == 'session_end') fired = true;
+        if (cmd == 'sess-end-cmd' &&
+            env['PLUGIN_EVENT'] == 'session_end' &&
+            env['PLUGIN_SESSION'] == 'p8-doomed') {
+          fired = true;
+          if (!hookObserved.isCompleted) hookObserved.complete(Map.of(env));
+        }
         return '';
       };
       addTearDown(() => svc.executorForTest = null);
@@ -18871,12 +18963,23 @@ cwd = 'tools'
       );
       app.sessions.insert(0, s);
       app.deleteSession(s.id);
-      await Future<void>.delayed(const Duration(milliseconds: 200));
+      // Deletion launches this hook unawaited. Context cleanup, environment
+      // setup and the ledger barrier precede the executor; elapsed time (or a
+      // session-start lifecycle drain) does not establish that it ran.
+      final env = await hookObserved.future.timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => throw TestFailure(
+          'Deleting ${s.id} did not execute its session_end hook',
+        ),
+      );
       expect(
         fired,
         isTrue,
         reason: 'deleting a session must fire session_end hooks',
       );
+      expect(app.sessionById(s.id), isNull);
+      expect(jsonDecode(env['PLUGIN_PAYLOAD']!), containsPair('deleted', true));
+      expect(jsonDecode(env['PLUGIN_PAYLOAD']!), containsPair('reason', 'clear'));
     });
 
     test('hooks never execute via dispatch (registry ledger only)', () async {
@@ -20319,9 +20422,11 @@ cwd = 'tools'
           reason: 'bundled seed is ownerless',
         );
         expect(github.envHint, 'GITHUB_TOKEN');
+        // connect() now uses the same preflight as startup: native GitHub
+        // names the supported login/token remedies instead of a generic label.
         expect(
           await McpService.I.connect(github),
-          contains('needs configuration'),
+          'Please log in to GitHub or set GITHUB_TOKEN',
           reason:
               'bundled credential server must refuse to connect unconfigured',
         );
@@ -20344,7 +20449,7 @@ cwd = 'tools'
         final st = a.serviceStatus['mcp:${github.canonicalId}'];
         expect(st, isNotNull);
         expect(st!.health, ServiceHealth.failed);
-        expect(st.detail, contains('needs configuration'));
+        expect(st.detail, 'Please log in to GitHub or set GITHUB_TOKEN');
       },
     );
 

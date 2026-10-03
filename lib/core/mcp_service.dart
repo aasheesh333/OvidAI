@@ -693,9 +693,8 @@ class McpService {
   static void Function(String phase, Duration timeout)?
   connectPhaseTimeoutRecorderForTest;
 
-  /// Test seam: awaited immediately before the handshake slot is reserved, so
-  /// a test can expire the deadline during the credential gate and prove no
-  /// slot/process is leaked.
+  /// Test seam: awaited after preflight but before transport creation, so a
+  /// test can expire the deadline and prove no slot/process is leaked.
   @visibleForTesting
   static Future<void> Function()? beforeReserveHookForTest;
 
@@ -722,50 +721,11 @@ class McpService {
   ///
   /// Returns a human-readable status string for the UI.
   Future<String> connect(McpServer server) async {
-    final key = _key(server);
-    final ownerReason = _ownerInactiveReason(server);
-    if (ownerReason != null) {
-      return '"${server.name}" not active: $ownerReason';
-    }
-    final existing = _running[key];
-    if (existing != null) {
-      // Someone else's connect may still be handshaking — don't spawn a
-      // second process for the same server (double-spawn race).
-      if (!existing.handshakeDone) return '"${server.name}" is connecting…';
-      return '"${server.name}" is already connected';
-    }
-    if (server.transport == 'sse' && (server.url ?? '').isEmpty) {
-      // Legacy SSE needs its event-stream URL — without one there is
-      // nothing to dial; say so instead of failing inside the handshake.
-      return 'SSE transport needs a url (the GET /sse event-stream endpoint).';
-    }
-    final missing = await _missingCredentials(server);
-    if (missing.isNotEmpty) {
-      return '"${server.name}" degraded: needs configuration '
-          '(${missing.join(', ')})';
-    }
-    final needRuntime = await missingRuntimeFor(server);
-    if (needRuntime != null) {
-      return '"${server.name}" needs runtime ($needRuntime) — install '
-          'runtimes, then reconnect';
-    }
-    if (server.ownerPluginId != null) {
-      server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
-    }
-    // Reserve the slot BEFORE spawning so a rapid second connect sees it.
-    final rs = _RunningServer(server: server);
-    _sseDestinationFailures.remove(key);
-    _running[key] = rs;
-    if (server.transport == 'http') {
-      return _connectHttp(server, rs);
-    }
-    if (server.transport == 'sse') {
-      return _connectSse(server, rs);
-    }
-    if (server.transport == 'native') {
-      return _connectNative(server, rs);
-    }
-    return _connectStdio(server, rs);
+    final outcome = await connectOutcome(
+      server,
+      handshakeBudget: Duration(seconds: server.startupTimeoutS),
+    );
+    return outcome.reason ?? '"${server.name}" connected';
   }
 
   /// Complete-handshake startup connect with ONE budget covering credential
@@ -774,7 +734,7 @@ class McpService {
   ///
   /// The budget is `min(server.startupTimeoutS, 30s)` at the call site. A
   /// timeout removes the exact reserved slot, marks the attempt user-aborted
-  /// BEFORE killing the process, cancels any scheduled reconnect, and never
+  /// BEFORE killing the process, closes owned transports, and never
   /// marks the handshake done — a detached late completion is ignored.
   Future<McpConnectOutcome> connectOutcome(
     McpServer server, {
@@ -782,24 +742,32 @@ class McpService {
   }) async {
     final key = _key(server);
     final deadline = _now().add(handshakeBudget);
-    _RunningServer? reserved;
+    final existing = _running[key];
+    if (existing != null) {
+      if (existing.handshakeDone) {
+        return McpConnectOutcome(
+          McpConnectOutcomeKind.ready, '"${server.name}" is already connected',
+        );
+      }
+      // A joiner's local wait budget never cancels the owner of the attempt.
+      return existing.connection.future.timeout(handshakeBudget,
+        onTimeout: () => const McpConnectOutcome(
+          McpConnectOutcomeKind.failed, 'MCP handshake timed out',
+        ),
+      );
+    }
+    // Reservation is synchronous and precedes EVERY credential/runtime wait.
+    final rs = _RunningServer(server: server);
+    _running[key] = rs;
+    _sseDestinationFailures.remove(key);
+    _reconnectTimers.remove(key)?.cancel();
 
     Future<McpConnectOutcome> runAttempt() async {
       final ownerReason = _ownerInactiveReason(server);
       if (ownerReason != null) {
         return McpConnectOutcome(
           McpConnectOutcomeKind.failed,
-          'Owning plugin is not active: $ownerReason',
-        );
-      }
-      final existing = _running[key];
-      if (existing != null) {
-        if (existing.handshakeDone) {
-          return const McpConnectOutcome(McpConnectOutcomeKind.ready);
-        }
-        return const McpConnectOutcome(
-          McpConnectOutcomeKind.failed,
-          'Connection is already in progress',
+          '"${server.name}" not active: $ownerReason',
         );
       }
       final unsupported = unsupportedTransportReason(server);
@@ -810,43 +778,39 @@ class McpService {
         );
       }
       final missing = await missingCredentialsFor(server);
+      _requireCurrent(rs);
       if (missing.isNotEmpty) {
         final reason =
             (server.transport == 'native' &&
                 (server.name.toLowerCase() == 'github' ||
                     server.canonicalId.toLowerCase() == 'github'))
             ? 'Please log in to GitHub or set GITHUB_TOKEN'
-            : 'Needs configuration (${missing.join(', ')})';
+             : '"${server.name}" degraded: needs configuration (${missing.join(', ')})';
         return McpConnectOutcome(McpConnectOutcomeKind.needsSetup, reason);
       }
       if (server.ownerPluginId != null) {
         server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
+        _requireCurrent(rs);
       }
-      // Runtime gate BEFORE the budget starts: installing node/python takes
-      // minutes, so letting it burn inside the 30s handshake budget
-      // guaranteed a first-enable timeout. Surface it as an actionable
-      // outcome instead.
+      // Probe only; this wait is covered by the same overall budget.
       final needRuntime = await missingRuntimeFor(server);
+      _requireCurrent(rs);
       if (needRuntime != null) {
         return McpConnectOutcome(
           McpConnectOutcomeKind.needsRuntime,
-          'Needs $needRuntime runtime — install it, then reconnect',
+          '"${server.name}" needs runtime ($needRuntime) — install runtimes, then reconnect',
         );
       }
-      // Close the pre-reservation timeout window: the credential gate may
-      // have consumed the whole budget, so never reserve a slot / spawn a
-      // process after the deadline has passed.
+      // Preflight may consume the whole budget; never create a transport
+      // after the deadline or after this reservation has been cancelled.
       await beforeReserveHookForTest?.call();
+      _requireCurrent(rs);
       if (!_now().isBefore(deadline)) {
         return const McpConnectOutcome(
           McpConnectOutcomeKind.failed,
           'MCP handshake timed out',
         );
       }
-      final rs = _RunningServer(server: server);
-      reserved = rs;
-      _sseDestinationFailures.remove(key);
-      _running[key] = rs;
       final message = server.transport == 'http'
           ? await _connectHttp(server, rs, deadline: deadline)
           : server.transport == 'sse'
@@ -854,39 +818,42 @@ class McpService {
           : server.transport == 'native'
           ? await _connectNative(server, rs, deadline: deadline)
           : await _connectStdio(server, rs, deadline: deadline);
-      if (isConnected(server.canonicalId)) {
-        return const McpConnectOutcome(McpConnectOutcomeKind.ready);
+      if (identical(_running[key], rs) && rs.handshakeDone) {
+        return McpConnectOutcome(McpConnectOutcomeKind.ready, message);
       }
-      return McpConnectOutcome(McpConnectOutcomeKind.failed, message);
+      return McpConnectOutcome(
+        rs.authenticationFailed
+            ? McpConnectOutcomeKind.needsSetup
+            : McpConnectOutcomeKind.failed,
+        message,
+      );
     }
 
     Future<McpConnectOutcome> attempt() async {
       try {
         return await runAttempt();
       } catch (error) {
-        final rs = reserved;
-        if (rs != null) _abortStartupAttempt(server, rs);
         return McpConnectOutcome(McpConnectOutcomeKind.failed, '$error');
       }
     }
 
-    final invocation = attempt();
-    try {
-      return await invocation.timeout(
-        handshakeBudget,
-        onTimeout: () {
-          final rs = reserved;
-          if (rs != null) _abortStartupAttempt(server, rs);
-          return const McpConnectOutcome(
-            McpConnectOutcomeKind.failed,
-            'MCP handshake timed out',
-          );
-        },
+    unawaited(attempt().then((outcome) {
+      if (!outcome.isReady) _abortStartupAttempt(server, rs);
+      if (!rs.connection.isCompleted) rs.connection.complete(outcome);
+    }));
+    return rs.connection.future.timeout(handshakeBudget, onTimeout: () {
+      _abortStartupAttempt(server, rs);
+      const outcome = McpConnectOutcome(
+        McpConnectOutcomeKind.failed, 'MCP handshake timed out',
       );
-    } catch (error) {
-      final rs = reserved;
-      if (rs != null) _abortStartupAttempt(server, rs);
-      return McpConnectOutcome(McpConnectOutcomeKind.failed, '$error');
+      if (!rs.connection.isCompleted) rs.connection.complete(outcome);
+      return outcome;
+    });
+  }
+
+  void _requireCurrent(_RunningServer rs) {
+    if (rs.userDisconnected || !identical(_running[_key(rs.server)], rs)) {
+      throw StateError('connect aborted');
     }
   }
 
@@ -896,7 +863,12 @@ class McpService {
     if (identical(_running[key], rs)) _running.remove(key);
     // Set BEFORE kill so the stdio death watcher never schedules a reconnect.
     rs.userDisconnected = true;
-    _cancelReconnect(key);
+    unawaited(rs.sseChannel?.close());
+    rs.sseChannel = null;
+    for (final client in rs.httpClients) {
+      client.close();
+    }
+    rs.httpClients.clear();
     try {
       rs.nativeHandler?.dispose();
     } catch (e) { Diag.swallow('mcp_service', e); }
@@ -1322,6 +1294,7 @@ class McpService {
     }
 
     Future<void> openChannel(Map<String, String> headers) async {
+      _requireCurrent(rs);
       late final _SseMcpChannel channel;
       channel = _SseMcpChannel(
         client: httpClientForTest,
@@ -1407,6 +1380,10 @@ class McpService {
     } catch (e) {
       if (identical(_running[key], rs)) _running.remove(key);
       final channel = rs.sseChannel;
+      if (e.toString().contains('SSE stream failed: HTTP 401') ||
+          e.toString().contains('SSE stream failed: HTTP 403')) {
+        rs.authenticationFailed = true;
+      }
       rs.sseChannel = null;
       try {
         await channel?.close();
@@ -1459,6 +1436,7 @@ class McpService {
       }
       final msg = e.toString();
       if (msg.contains('authentication failed')) {
+        rs.authenticationFailed = true;
         return McpRpcResult._error(msg);
       }
       _markSseFailure(rs);
@@ -1515,42 +1493,12 @@ class McpService {
   }
 
   /// `tools/list` over SSE, following `nextCursor` exactly like the HTTP
-  /// and stdio variants. Returns null when the first page isn't a JSON
-  /// object.
+  /// and stdio variants. Malformed/incomplete catalogs fail discovery.
   Future<List<McpToolDef>?> _listToolsSse(
     _RunningServer rs, {
     Duration? timeout,
-  }) async {
-    final tools = <McpToolDef>[];
-    var sawMap = false;
-    String? cursor;
-    for (var page = 0; page < _maxToolListPages; page++) {
-      final res = await _rpcSse(rs, 'tools/list', {
-        'cursor': ?cursor,
-      }, timeout: timeout);
-      if (res.isTimeout) {
-        throw TimeoutException('tools/list timed out', timeout);
-      }
-      if (res.isError) {
-        throw Exception('tools/list failed: ${res.error}');
-      }
-      final payload = res.value;
-      if (payload is! Map<String, dynamic>) break;
-      sawMap = true;
-      final pageTools = payload['tools'];
-      if (pageTools is List) {
-        tools.addAll(
-          pageTools.whereType<Map>().map(
-            (t) => McpToolDef.fromJson(t.cast<String, dynamic>()),
-          ),
-        );
-      }
-      final next = payload['nextCursor'];
-      if (next is! String || next.isEmpty) break;
-      cursor = next;
-    }
-    return sawMap ? tools : null;
-  }
+  }) => _listToolsPages(rs, (params, left) =>
+      _rpcSse(rs, 'tools/list', params, timeout: left), timeout: timeout);
 
   /// An SSE server whose stream dies unexpectedly gets the same treatment
   /// as a dead stdio process / failed HTTP call: drop it and schedule an
@@ -1721,6 +1669,7 @@ class McpService {
       }
       final handler = await _createNativeHandler(server);
       rs.nativeHandler = handler;
+      _requireCurrent(rs);
 
       await handler
           .initialize({
@@ -1905,19 +1854,32 @@ class McpService {
 
   /// `tools/list` over Streamable HTTP, following a non-empty `nextCursor`
   /// until the server stops paginating and merging every page. Throws on
-  /// timeout/error so the handshake keeps its existing error surfacing;
-  /// returns null when the first page isn't a JSON object.
+  /// timeout/error so the handshake keeps its existing error surfacing.
   Future<List<McpToolDef>?> _listToolsHttp(
     _RunningServer rs, {
     Duration? timeout,
+  }) => _listToolsPages(rs, (params, left) =>
+      _rpcHttp(rs, 'tools/list', params, timeout: left), timeout: timeout);
+
+  /// One aggregate time/size budget; an incomplete catalog is never published.
+  Future<List<McpToolDef>> _listToolsPages(
+    _RunningServer rs,
+    Future<McpRpcResult> Function(Map<String, dynamic>, Duration) request, {
+    Duration? timeout,
   }) async {
+    final deadline = _now().add(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
     final tools = <McpToolDef>[];
-    var sawMap = false;
+    final names = <String>{};
+    final cursors = <String>{};
+    var bytes = 0;
     String? cursor;
     for (var page = 0; page < _maxToolListPages; page++) {
-      final res = await _rpcHttp(rs, 'tools/list', {
+      _requireCurrent(rs);
+      final left = _remainingUntil(deadline);
+      if (left <= Duration.zero) throw TimeoutException('tools/list timed out');
+      final res = await request({
         'cursor': ?cursor,
-      }, timeout: timeout);
+      }, left);
       if (res.isTimeout) {
         throw TimeoutException('tools/list timed out', timeout);
       }
@@ -1925,21 +1887,41 @@ class McpService {
         throw Exception('tools/list failed: ${res.error}');
       }
       final payload = res.value;
-      if (payload is! Map<String, dynamic>) break;
-      sawMap = true;
+      if (payload is! Map<String, dynamic>) {
+        throw const FormatException('tools/list expected an object');
+      }
+      bytes += utf8.encode(jsonEncode(payload)).length;
+      if (bytes > 4 * 1024 * 1024) {
+        throw StateError('tools/list catalog exceeds byte limit');
+      }
       final pageTools = payload['tools'];
-      if (pageTools is List) {
-        tools.addAll(
-          pageTools.whereType<Map>().map(
-            (t) => McpToolDef.fromJson(t.cast<String, dynamic>()),
-          ),
-        );
+      if (pageTools is! List) {
+        throw const FormatException('tools/list expected a tools array');
+      }
+      if (tools.length + pageTools.length > 10000) {
+        throw StateError('tools/list catalog exceeds tool limit');
+      }
+      for (final tool in pageTools) {
+        if (tool is! Map<String, dynamic> || tool['name'] is! String ||
+            (tool['name'] as String).isEmpty || !names.add(tool['name'] as String)) {
+          throw const FormatException('tools/list invalid or duplicate tool');
+        }
+        tools.add(McpToolDef.fromJson(tool));
       }
       final next = payload['nextCursor'];
-      if (next is! String || next.isEmpty) break;
+      if (next == null || next == '') break;
+      if (next is! String) {
+        throw const FormatException('tools/list expected a string cursor');
+      }
+      if (next.length > 4096 || !cursors.add(next)) {
+        throw StateError('tools/list invalid or repeated cursor');
+      }
+      if (page + 1 == _maxToolListPages) {
+        throw StateError('tools/list exceeds page limit');
+      }
       cursor = next;
     }
-    return sawMap ? tools : null;
+    return tools;
   }
 
   /// `tools/list` over stdio, following a non-empty `nextCursor` exactly
@@ -1948,35 +1930,8 @@ class McpService {
   Future<List<McpToolDef>> _listToolsStdio(
     _RunningServer rs, {
     Duration? timeout,
-  }) async {
-    final tools = <McpToolDef>[];
-    String? cursor;
-    for (var page = 0; page < _maxToolListPages; page++) {
-      final res = await _rpc(rs, 'tools/list', {
-        'cursor': ?cursor,
-      }, timeout: timeout);
-      if (res.isTimeout) {
-        throw TimeoutException('tools/list timed out', timeout);
-      }
-      if (res.isError) {
-        throw Exception('tools/list failed: ${res.error}');
-      }
-      final payload = res.value;
-      if (payload is! Map<String, dynamic>) break;
-      final pageTools = payload['tools'];
-      if (pageTools is List) {
-        tools.addAll(
-          pageTools.whereType<Map>().map(
-            (t) => McpToolDef.fromJson(t.cast<String, dynamic>()),
-          ),
-        );
-      }
-      final next = payload['nextCursor'];
-      if (next is! String || next.isEmpty) break;
-      cursor = next;
-    }
-    return tools;
-  }
+  }) => _listToolsPages(rs, (params, left) =>
+      _rpc(rs, 'tools/list', params, timeout: left), timeout: timeout);
 
   Future<String> _connectStdio(
     McpServer server,
@@ -1994,7 +1949,6 @@ class McpService {
     }
 
     bool aborted() =>
-        deadline != null &&
         (!identical(_running[key], rs) || rs.userDisconnected);
     try {
       if (deadline != null && !_now().isBefore(deadline)) {
@@ -2055,6 +2009,7 @@ class McpService {
       // Optional working directory for the spawned server (best-effort:
       // only used when the resolved directory actually exists).
       final cwdDir = _resolveWorkingDirectory(server, sandbox.prefixPath);
+      _requireCurrent(rs);
       // Native exec — the server command runs through the sandbox env
       // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
       // A test spawn override runs the command directly on the host.
@@ -2095,7 +2050,9 @@ class McpService {
           if (identical(_running[key], rs)) {
             _running.remove(key);
             _lastDeath = (server: key, code: code, at: DateTime.now());
-            if (!rs.userDisconnected) _scheduleReconnect(server);
+            if (rs.handshakeDone && !rs.userDisconnected) {
+              _scheduleReconnect(server);
+            }
           }
         }),
       );
@@ -2145,7 +2102,8 @@ class McpService {
       try {
         final json = jsonDecode(line) as Map<String, dynamic>;
         if (!json.containsKey('id') &&
-            json['method'] == 'notifications/tools/list_changed') {
+            json['method'] == 'notifications/tools/list_changed' &&
+            identical(_running[key], rs)) {
           unawaited(_rediscoverTools(key));
         }
       } catch (e) { Diag.swallow('mcp_service', e); }
@@ -2193,6 +2151,7 @@ class McpService {
   /// repeated failures instead of resetting to attempt 1 each time. Reset
   /// to 0 on any successful handshake.
   final Map<String, int> _reconnectAttempts = {};
+  final Map<String, Object> _reconnectGenerations = {};
 
   /// Schedule an automatic reconnect for [server] after an UNEXPECTED
   /// disconnect (never called after a user-initiated `disconnect()`).
@@ -2203,6 +2162,7 @@ class McpService {
   /// today's behavior before this feature existed).
   void _scheduleReconnect(McpServer server) {
     final key = _key(server);
+    final generation = _reconnectGenerations.putIfAbsent(key, Object.new);
     _reconnectTimers.remove(key)?.cancel();
     final attempt = (_reconnectAttempts[key] ?? 0) + 1;
     if (attempt > reconnectMaxAttemptsForTest) return;
@@ -2210,7 +2170,8 @@ class McpService {
     final maxMs = reconnectMaxDelayForTest.inMilliseconds;
     final delayMs = (initialMs * (1 << (attempt - 1))).clamp(initialMs, maxMs);
     _reconnectAttempts[key] = attempt;
-    _reconnectTimers[key] = Timer(Duration(milliseconds: delayMs), () {
+    _reconnectTimers[key] = Timer(Duration(milliseconds: delayMs), () async {
+      if (!identical(_reconnectGenerations[key], generation)) return;
       _reconnectTimers.remove(key);
       // The user may have manually reconnected (or removed the server)
       // while this timer was pending — never race a live connection.
@@ -2223,7 +2184,14 @@ class McpService {
           .where((s) => s.canonicalId == key)
           .firstOrNull;
       if (fresh == null || !_ownerActive(fresh)) return;
-      unawaited(connect(fresh));
+      final outcome = await connectOutcome(fresh,
+        handshakeBudget: Duration(seconds: fresh.startupTimeoutS));
+      if (identical(_reconnectGenerations[key], generation) &&
+          outcome.kind == McpConnectOutcomeKind.failed &&
+          !_running.containsKey(key) &&
+          !_sseDestinationFailures.containsKey(key)) {
+        _scheduleReconnect(fresh);
+      }
     });
   }
 
@@ -2249,6 +2217,7 @@ class McpService {
   /// Cancel any pending reconnect for [serverName] (used by [disconnect]
   /// and available to tests for teardown).
   void _cancelReconnect(String serverName) {
+    _reconnectGenerations.remove(serverName);
     _reconnectTimers.remove(serverName)?.cancel();
     _reconnectAttempts.remove(serverName);
   }
@@ -2256,33 +2225,36 @@ class McpService {
   /// Re-run tools/list after a server says its catalog changed.
   Future<void> _rediscoverTools(String serverName) async {
     final rs = _running[serverName];
-    if (rs == null) return;
-    if (rs.server.transport == 'http') {
-      try {
-        final merged = await _listToolsHttp(rs);
-        if (merged != null) rs.tools = merged;
-      } catch (e) { Diag.swallow('mcp_service', e); }
+    if (rs == null || !rs.handshakeDone) return;
+    if (rs.rediscovering) {
+      rs.rediscoverAgain = true;
       return;
     }
-    if (rs.server.transport == 'sse') {
-      try {
-        final merged = await _listToolsSse(rs);
+    rs.rediscovering = true;
+    try {
+      do {
+        rs.rediscoverAgain = false;
+        final List<McpToolDef>? merged;
+        if (rs.server.transport == 'http') {
+          merged = await _listToolsHttp(rs);
+        } else if (rs.server.transport == 'sse') {
+          merged = await _listToolsSse(rs);
+        } else if (rs.server.transport == 'native') {
+          final result = await _listNativeTools(rs);
+          if (result.isError) return;
+          merged = (result.value['tools'] as List).map(
+            (t) => McpToolDef.fromJson(t as Map<String, dynamic>),
+          ).toList();
+        } else {
+          merged = await _listToolsStdio(rs);
+        }
+        _requireCurrent(rs);
         if (merged != null) rs.tools = merged;
-      } catch (e) { Diag.swallow('mcp_service', e); }
-      return;
-    }
-    final res = rs.server.transport == 'native'
-        ? await _listNativeTools(rs)
-        : await _rpc(rs, 'tools/list', {});
-    if (res.isError) return;
-    final payload = res.value;
-    if (payload is Map<String, dynamic>) {
-      rs.tools =
-          (payload['tools'] as List?)
-              ?.whereType<Map>()
-              .map((t) => McpToolDef.fromJson(t.cast<String, dynamic>()))
-              .toList() ??
-          rs.tools;
+      } while (rs.rediscoverAgain);
+    } catch (e) {
+      Diag.swallow('mcp_service', e);
+    } finally {
+      rs.rediscovering = false;
     }
   }
 
@@ -2311,6 +2283,15 @@ class McpService {
     _cancelReconnect(key);
     if (rs == null) return;
     rs.userDisconnected = true;
+    if (!rs.connection.isCompleted) {
+      rs.connection.complete(const McpConnectOutcome(
+        McpConnectOutcomeKind.failed, 'connect aborted',
+      ));
+    }
+    for (final client in rs.httpClients) {
+      client.close();
+    }
+    rs.httpClients.clear();
     // Start the DELETE before the first await so it captures the currently
     // configured HTTP client (a test may clear the injected client between
     // this synchronous call and the request below).
@@ -2528,8 +2509,11 @@ class McpService {
     final url = rs.server.url;
     if (url == null) return;
     final client = httpClientForTest ?? http.Client();
+    final ownsClient = httpClientForTest == null;
+    if (ownsClient) rs.httpClients.add(client);
     try {
       final authHeaders = await _authHeaders(rs);
+      _requireCurrent(rs);
       final res = await client
           .post(
             Uri.parse(url),
@@ -2553,7 +2537,8 @@ class McpService {
     } catch (_) {
       // Notifications are fire-and-forget by design.
     } finally {
-      if (httpClientForTest == null) client.close();
+      if (ownsClient) client.close();
+      rs.httpClients.remove(client);
     }
   }
 
@@ -2586,12 +2571,15 @@ class McpService {
     }
     final id = _nextId++;
     final client = httpClientForTest ?? http.Client();
+    final ownsClient = httpClientForTest == null;
+    if (ownsClient) rs.httpClients.add(client);
     try {
       var authHeaders = await _authHeaders(rs);
 
       // One POST attempt; factored out so a 401 can trigger a single
       // silent OAuth refresh + retry.
       Future<(http.Response, Map<String, dynamic>?)> doPost() async {
+        _requireCurrent(rs);
         final res = await client
             .post(
               Uri.parse(url),
@@ -2613,6 +2601,10 @@ class McpService {
             )
             .timeout(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
         _rememberSessionId(rs, res.headers);
+        if (rs.userDisconnected) {
+          if (rs.sessionId != null) unawaited(_deleteHttpSession(rs));
+          _requireCurrent(rs);
+        }
         // A single-object JSON response is the common case; a
         // "text/event-stream" response carries one or more SSE events
         // (`event:` + `data:` lines separated by blank lines). Take the
@@ -2642,6 +2634,7 @@ class McpService {
         j = retry.$2;
       }
       if (res.statusCode == 401 || res.statusCode == 403) {
+        rs.authenticationFailed = true;
         // Authentication failure is NOT a transient connection problem —
         // reconnecting would just loop forever. Re-prompt the user to fix
         // the credential; never schedule an automatic reconnect for it.
@@ -2684,7 +2677,8 @@ class McpService {
     } finally {
       // Task 4: don't leak a client/host connection pool per call — close
       // the client we created (never the caller-injected test mock).
-      if (httpClientForTest == null) client.close();
+      if (ownsClient) client.close();
+      rs.httpClients.remove(client);
     }
   }
 
@@ -2955,6 +2949,8 @@ class McpConnectedTool {
 
 class _RunningServer {
   final McpServer server;
+  final connection = Completer<McpConnectOutcome>();
+  final httpClients = <http.Client>{};
   Process? process;
   NativeMcpHandler? nativeHandler;
 
@@ -2963,6 +2959,9 @@ class _RunningServer {
   String? sseDestinationFailure;
 
   bool handshakeDone = false;
+  bool authenticationFailed = false;
+  bool rediscovering = false;
+  bool rediscoverAgain = false;
   List<McpToolDef> tools = [];
   final stdoutLines = _LineStream();
   final stderrLines = <String>[];

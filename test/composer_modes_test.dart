@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -12,6 +14,29 @@ import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/studio_screen.dart';
+
+Future<ApprovalRequest> waitForPlanExitApproval(AgentService agent) async {
+  final ready = Completer<ApprovalRequest>();
+  void observe() {
+    final request = agent.pendingApproval;
+    if (!ready.isCompleted &&
+        request != null &&
+        (request.questions?.any((q) => q.id == 'plan_exit') ?? false)) {
+      ready.complete(request);
+    }
+  }
+
+  agent.addListener(observe);
+  try {
+    observe(); // Also handle an approval published before subscription.
+    return await ready.future.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => throw TestFailure('Plan exit approval was not published'),
+    );
+  } finally {
+    agent.removeListener(observe);
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -265,13 +290,40 @@ void main() {
         expect(s.mode, 'safe');
         expect(s.planPreMode, 'auto');
 
+        final workspaceRequested = Completer<void>();
+        final releaseWorkspace = Completer<void>();
+        final root = Directory.systemTemp.createTempSync('composer-plan-');
+        const paths = MethodChannel('plugins.flutter.io/path_provider');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(paths, (call) async {
+          if (call.method == 'getApplicationSupportDirectory') {
+            if (!workspaceRequested.isCompleted) workspaceRequested.complete();
+            await releaseWorkspace.future;
+            return root.path;
+          }
+          return null;
+        });
+        addTearDown(() {
+          if (!releaseWorkspace.isCompleted) releaseWorkspace.complete();
+          messenger.setMockMethodCallHandler(paths, null);
+          root.deleteSync(recursive: true);
+        });
+
+        // The real plan gate must resolve the workspace before asking. Hold
+        // that platform prerequisite to prove readiness is observed, not timed.
         final planFuture = AgentService.I.dispatchForTest('exit_plan_mode', {
           'plan': 'Do the thing',
         });
-        await Future<void>.delayed(const Duration(milliseconds: 20));
+        await workspaceRequested.future.timeout(const Duration(seconds: 5));
+        expect(AgentService.I.pendingApproval, isNull);
+        expect(s.planMode, isTrue);
+        final approvalReady = waitForPlanExitApproval(AgentService.I);
+        releaseWorkspace.complete();
+        final approval = await approvalReady;
         expect(AgentService.I.pendingApproval, isNotNull);
         // exit_plan_mode now asks the opencode-style yes/no switch question.
-        AgentService.I.pendingApproval!.answers['plan_exit'] = 'Yes';
+        approval.answers['plan_exit'] = 'Yes';
         AgentService.I.approve(true);
         expect(await planFuture, contains('approved'));
 
@@ -385,16 +437,10 @@ void main() {
         final planFuture = AgentService.I.dispatchForTest('exit_plan_mode', {
           'plan': 'Do it',
         });
-        // The dispatch path traverses several async gates (ledger, plan-mode
-        // path/shell checks) before reaching _askQuestions; poll until the
-        // approval request lands rather than relying on a fixed delay.
-        for (var i = 0; i < 20; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 10));
-          if (AgentService.I.pendingApproval != null) break;
-        }
+        final approval = await waitForPlanExitApproval(AgentService.I);
         expect(AgentService.I.pendingApproval, isNotNull);
         // exit_plan_mode now asks the opencode-style yes/no switch question.
-        AgentService.I.pendingApproval!.answers['plan_exit'] = 'Yes';
+        approval.answers['plan_exit'] = 'Yes';
         AgentService.I.approve(true);
         expect(await planFuture, contains('approved'));
 

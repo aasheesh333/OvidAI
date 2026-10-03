@@ -292,7 +292,7 @@ void main() {
       );
       AppState.I.mcpServers.add(server);
       final msg = await McpService.I.connect(server);
-      expect(msg, contains('declares no command'));
+      expect(msg, 'stdio server has no command — set one or remove this entry');
       expect(McpService.I.isConnected(server.canonicalId), isFalse);
     },
   );

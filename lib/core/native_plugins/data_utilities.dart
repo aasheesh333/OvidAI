@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:ovid_ai/core/native_plugin.dart';
 
 /// Part A (NP2) pure-Dart utility capabilities: JSON Visualizer,
@@ -232,6 +235,11 @@ class JsonVisualizerCapability implements NativePluginCapability {
 // ---------------------------------------------------------------------------
 
 class RegexBuilderCapability implements NativePluginCapability {
+  static const _maxOutput = 1024 * 1024;
+  static const _limits = ' Limits: pattern 4096, text/replacement 65536 UTF-16 '
+      'code units, 1000 matches, 100 groups per match, output 1048576 code units; '
+      'timeout_ms 1..2000 (default 500). Runs in a killed-on-deadline native '
+      'isolate; web execution is unsupported.';
   @override
   String get pluginName => 'Regex Builder';
 
@@ -242,7 +250,8 @@ class RegexBuilderCapability implements NativePluginCapability {
   List<NativePluginTool> get tools => const [
         NativePluginTool(
           name: 'test',
-          description: 'Test a regex against text; return matches + indices.',
+          description:
+              'Test a regex against text; return matches + indices.$_limits',
           inputSchema: {
             'type': 'object',
             'properties': {
@@ -250,13 +259,14 @@ class RegexBuilderCapability implements NativePluginCapability {
               'text': {'type': 'string'},
               'multiline': {'type': 'boolean'},
               'case_sensitive': {'type': 'boolean'},
+              'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
             },
             'required': ['pattern', 'text'],
           },
         ),
         NativePluginTool(
           name: 'replace',
-          description: 'Regex search and replace over text.',
+          description: 'Regex search and literal replace over text.$_limits',
           inputSchema: {
             'type': 'object',
             'properties': {
@@ -265,17 +275,19 @@ class RegexBuilderCapability implements NativePluginCapability {
               'text': {'type': 'string'},
               'multiline': {'type': 'boolean'},
               'case_sensitive': {'type': 'boolean'},
+              'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
             },
             'required': ['pattern', 'replacement', 'text'],
           },
         ),
         NativePluginTool(
           name: 'explain',
-          description: 'Explain regex tokens in plain English.',
+          description: 'Explain regex tokens in plain English.$_limits',
           inputSchema: {
             'type': 'object',
             'properties': {
               'pattern': {'type': 'string'},
+              'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
             },
             'required': ['pattern'],
           },
@@ -293,6 +305,101 @@ class RegexBuilderCapability implements NativePluginCapability {
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+    if (!const {'test', 'replace', 'explain'}.contains(toolName)) {
+      throw ArgumentError('Unknown tool: $toolName');
+    }
+    final pattern = _requireString(args, 'pattern');
+    final text = toolName == 'explain' ? '' : _requireString(args, 'text');
+    final replacement =
+        toolName == 'replace' ? _requireString(args, 'replacement') : '';
+    for (final entry in {
+      'pattern': (pattern, 4096),
+      'text': (text, 65536),
+      'replacement': (replacement, 65536),
+    }.entries) {
+      if (entry.value.$1.length > entry.value.$2) {
+        throw FormatException(
+          'Regex ${entry.key} limit exceeded: ${entry.value.$2} code units.',
+        );
+      }
+    }
+    final rawTimeout = args['timeout_ms'] ?? 500;
+    final timeout = int.tryParse(rawTimeout.toString());
+    if (timeout == null || timeout < 1 || timeout > 2000) {
+      throw FormatException(
+        'Regex time limit must be an integer from 1 to 2000 ms.',
+      );
+    }
+    if (kIsWeb) {
+      throw UnsupportedError(
+        'Bounded regex execution requires native isolates; web is unsupported.',
+      );
+    }
+    final port = ReceivePort();
+    final result = Completer<String>();
+    Isolate? worker;
+    final subscription = port.listen((dynamic message) {
+      if (result.isCompleted) return;
+      if (message is List && message.length == 2 && message[0] == true) {
+        result.complete(message[1] as String);
+      } else if (message is List && message.length == 2 && message[0] == false) {
+        result.completeError(FormatException(message[1] as String));
+      } else {
+        result.completeError(StateError('Regex worker exited without a result.'));
+      }
+    });
+    final timer = Timer(Duration(milliseconds: timeout), () {
+      if (!result.isCompleted) {
+        worker?.kill(priority: Isolate.immediate);
+        result.completeError(FormatException(
+          'Regex time limit exceeded: $timeout ms; worker cancelled.',
+        ));
+      }
+    });
+    // Attach the late-spawn cleanup as well: a deadline may fire during spawn.
+    unawaited(Isolate.spawn(_runWorker, [
+      port.sendPort,
+      toolName,
+      {
+        'pattern': pattern,
+        'text': text,
+        'replacement': replacement,
+        'multiline': _optionalBool(args, 'multiline', false),
+        'case_sensitive': _optionalBool(args, 'case_sensitive', true),
+      },
+    ], onError: port.sendPort, onExit: port.sendPort).then((isolate) {
+      worker = isolate;
+      if (result.isCompleted) isolate.kill(priority: Isolate.immediate);
+    }, onError: (Object error, StackTrace stack) {
+      if (!result.isCompleted) result.completeError(error, stack);
+    }));
+    try {
+      return await result.future;
+    } finally {
+      timer.cancel();
+      worker?.kill(priority: Isolate.immediate);
+      await subscription.cancel();
+      port.close();
+    }
+  }
+
+  static void _runWorker(List<dynamic> message) {
+    final port = message[0] as SendPort;
+    try {
+      final output = RegexBuilderCapability()._execute(
+        message[1] as String,
+        message[2] as Map<String, dynamic>,
+      );
+      if (output.length > _maxOutput) {
+        throw FormatException('Regex output limit exceeded: $_maxOutput code units.');
+      }
+      port.send([true, output]);
+    } on FormatException catch (error) {
+      port.send([false, error.message]);
+    }
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'test':
         return _test(
@@ -335,18 +442,35 @@ class RegexBuilderCapability implements NativePluginCapability {
     bool caseSensitive,
   ) {
     final regExp = _compile(pattern, multiLine, caseSensitive);
-    final matches = <Map<String, dynamic>>[];
-    for (final m in regExp.allMatches(text)) {
-      matches.add({
-        'match': m.group(0),
-        'start': m.start,
-        'end': m.end,
-        'groups': [
-          for (var i = 1; i <= m.groupCount; i++) m.group(i),
-        ],
-      });
+    final output = StringBuffer('{"matches":[');
+    var count = 0;
+    void append(String value) {
+      if (output.length + value.length > _maxOutput) {
+        throw FormatException('Regex output limit exceeded: $_maxOutput code units.');
+      }
+      output.write(value);
     }
-    return jsonEncode({'matches': matches, 'count': matches.length});
+    for (final m in regExp.allMatches(text)) {
+      if (count >= 1000) {
+        throw FormatException('Regex match limit exceeded: 1000.');
+      }
+      if (m.groupCount > 100) {
+        throw FormatException('Regex group limit exceeded: 100.');
+      }
+      if (count > 0) append(',');
+      append('{"match":${jsonEncode(m.group(0))},'
+          '"start":${m.start},"end":${m.end},"groups":[');
+      // Encode one capture at a time so overlapping captures cannot allocate
+      // their entire expanded result before the output budget is checked.
+      for (var i = 1; i <= m.groupCount; i++) {
+        if (i > 1) append(',');
+        append(jsonEncode(m.group(i)));
+      }
+      append(']}');
+      count++;
+    }
+    append('],"count":$count}');
+    return output.toString();
   }
 
   String _replace(
@@ -357,7 +481,28 @@ class RegexBuilderCapability implements NativePluginCapability {
     bool caseSensitive,
   ) {
     final regExp = _compile(pattern, multiLine, caseSensitive);
-    return text.replaceAll(regExp, replacement);
+    final output = StringBuffer();
+    var end = 0;
+    var count = 0;
+    void append(String value) {
+      if (output.length + value.length > _maxOutput) {
+        throw FormatException('Regex output limit exceeded: $_maxOutput code units.');
+      }
+      output.write(value);
+    }
+    for (final match in regExp.allMatches(text)) {
+      if (++count > 1000) {
+        throw FormatException('Regex match limit exceeded: 1000.');
+      }
+      if (match.groupCount > 100) {
+        throw FormatException('Regex group limit exceeded: 100.');
+      }
+      append(text.substring(end, match.start));
+      append(replacement);
+      end = match.end;
+    }
+    append(text.substring(end));
+    return output.toString();
   }
 
   String _explain(String pattern) {

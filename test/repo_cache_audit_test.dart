@@ -765,7 +765,7 @@ void main() {
         client: gitClient(blobs: const [], bodyByPath: const {'d.md': 'remote'}),
       );
 
-      expect(result.content, 'remote');
+      expect(result.content, 'local');
       expect(RepoCache.I.files['d.md'], 'local');
       expect(RepoCache.I.hasPending, isTrue);
     });

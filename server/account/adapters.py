@@ -144,7 +144,21 @@ class GatewayData:
             response = self.client.post('/key/block', json={'key': token})
             response.raise_for_status()
 
+    def deletion_steps(self):
+        """Stable checkpoint names; each action must be retryable until saved.
+
+        Acknowledged gateway deletion must not be replayed merely because a
+        later SQL/Redis stage failed. Unknown outcomes still require the actual
+        deployed adapter's idempotency contract, not an assumed HTTP 404 success.
+        """
+        return (('gateway', self._delete_gateway_keys),
+                ('sql', self._delete_sql), ('redis', self._delete_redis))
+
     def delete_data(self, uid, context):
+        for _, action in self.deletion_steps():
+            action(uid, context)
+
+    def _delete_gateway_keys(self, uid, context):
         # Delete via LiteLLM as well to evict its key caches. The durable cleanup
         # context preserves token ownership across retries. Blocking plus
         # cache eviction MUST be verified for the deployed LiteLLM release.
@@ -152,5 +166,9 @@ class GatewayData:
         if tokens:
             response = self.client.post('/key/delete', json={'keys': tokens})
             response.raise_for_status()
-        self.sql.delete_data(uid, tokens)
+
+    def _delete_sql(self, uid, context):
+        self.sql.delete_data(uid, context['tokens'])
+
+    def _delete_redis(self, uid, context):
         self.redis.delete_data(uid)

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import secrets
 import sqlite3
 import time
@@ -17,8 +18,8 @@ class ShareError(Exception):
 
 class ShareRepository:
     def __init__(self, path, *, clock=time.time, ttl_seconds=30 * 86400):
-        if str(path) == ':memory:' or ttl_seconds <= 0:
-            raise ValueError('A durable database path and positive TTL are required')
+        if str(path) == ':memory:' or not math.isfinite(ttl_seconds) or ttl_seconds <= 0:
+            raise ValueError('A durable database path and finite positive TTL are required')
         self.path, self.clock, self.ttl = str(path), clock, ttl_seconds
         with self._connection() as db:
             db.executescript('''
@@ -69,17 +70,20 @@ class ShareRepository:
         snapshot = json.dumps({'messages': body['messages']}, ensure_ascii=False,
                               sort_keys=True, separators=(',', ':'))
         fingerprint = hashlib.sha256((body['session_id'] + '\n' + snapshot).encode()).hexdigest()
-        now = self.clock()
         with self._connection(write=True) as db:
+            # Lock acquisition can outlive a receipt's remaining TTL. Evaluate
+            # expiry and quota against transaction time, not pre-lock time.
+            now = self.clock()
             if db.execute('SELECT 1 FROM deleted_accounts WHERE uid=?', (uid,)).fetchone():
                 raise ShareError(403, 'account_deleted')
             previous = db.execute('SELECT * FROM shares WHERE owner_uid=? AND request_id=?',
                                   (uid, body['request_id'])).fetchone()
             if previous:
-                if previous['fingerprint'] != fingerprint or previous['revoked'] or previous['expires_at'] <= now:
+                if (previous['fingerprint'] != fingerprint or previous['revoked'] or
+                        previous['snapshot'] is None or previous['expires_at'] <= now):
                     raise ShareError(409, 'request_already_used')
                 return self._receipt(previous)
-            count = db.execute('SELECT count(*) FROM shares WHERE owner_uid=? AND revoked=0 AND expires_at>?',
+            count = db.execute('SELECT count(*) FROM shares WHERE owner_uid=? AND revoked=0 AND snapshot IS NOT NULL AND expires_at>?',
                                (uid, now)).fetchone()[0]
             if count >= 100:
                 raise ShareError(429, 'share_limit_reached')
@@ -100,7 +104,7 @@ class ShareRepository:
     def list(self, uid, session_id=None):
         with self._connection() as db:
             rows = db.execute('''SELECT * FROM shares WHERE owner_uid=? AND revoked=0
-                AND expires_at>? AND (? IS NULL OR session_id=?) ORDER BY created_at DESC, token''',
+                AND snapshot IS NOT NULL AND expires_at>? AND (? IS NULL OR session_id=?) ORDER BY created_at DESC, token''',
                               (uid, self.clock(), session_id, session_id)).fetchall()
             return [self._receipt(row) for row in rows]
 

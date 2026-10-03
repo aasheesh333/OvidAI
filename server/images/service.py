@@ -8,11 +8,13 @@ import base64
 import hashlib
 import io
 import json
+import math
 import re
 import sqlite3
+import time
 import warnings
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 
 from PIL import Image
 
@@ -20,12 +22,15 @@ ALIAS = 'ovid-image'
 MULTIPLIER = Decimal('0.30')
 MAX_BYTES = 16 * 1024 * 1024
 MAX_PIXELS = 4096 * 4096
+REPLAY_RETENTION = 24 * 60 * 60
+RECEIPT_RETENTION = 90 * 24 * 60 * 60
 SIZES = ('1024x1024', '1536x1024', '1024x1536', '2048x2048')
 
 
 class ImageError(Exception):
-    def __init__(self, status=503, code='image_unavailable'):
+    def __init__(self, status=503, code='image_unavailable', *, receipt=None):
         self.status, self.code = status, code
+        self.receipt = receipt
         super().__init__(code)
 
 
@@ -35,14 +40,44 @@ class UpstreamError(Exception):
         super().__init__('upstream request failed')
 
 
+class UpstreamNotAccepted(UpstreamError):
+    """Adapter-verified nonacceptance, not an inference from HTTP status.
+
+    Emit only with authoritative evidence that this attempt was not accepted
+    for execution/billing (for example, a verified pre-submission rejection).
+    No currently wired InferHub response supplies such evidence.
+    """
+
+
 def money(value):
     try:
+        if isinstance(value, (float, bool)) or not isinstance(value, (str, int, Decimal)):
+            raise ValueError()
         result = Decimal(str(value))
         if not result.is_finite() or result < 0:
+            raise ValueError()
+        # Bound untrusted exponents/precision before exact arithmetic or storage.
+        if len(result.as_tuple().digits) > 128 or not -128 <= result.as_tuple().exponent <= 128 or result.adjusted() > 128:
             raise ValueError()
         return result
     except (ValueError, InvalidOperation):
         raise ImageError(502, 'invalid_image_response') from None
+
+
+def discounted(value):
+    value = money(value)
+    with localcontext() as context:
+        context.prec = len(value.as_tuple().digits) + 2
+        return value * MULTIPLIER
+
+
+def exact_sum(values):
+    values = list(values)
+    if not values:
+        return Decimal(0)
+    with localcontext() as context:
+        context.prec = max(v.adjusted() for v in values) - min(v.as_tuple().exponent for v in values) + len(str(len(values))) + 2
+        return sum(values, Decimal(0))
 
 
 def validate_image(encoded, mime=None):
@@ -83,38 +118,113 @@ class Ledger:
     Account is a stable verified UID; idempotency survives budget-window resets.
     Reservations persist until settled/reconciled. Never expire a pending job.
     """
-    def __init__(self, path):
+    def __init__(self, path, *, clock=time.time, replay_retention=REPLAY_RETENTION,
+                 receipt_retention=RECEIPT_RETENTION):
         self.path = str(path)
+        durations = (replay_retention, receipt_retention)
+        if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) for value in durations)
+                or not 0 < replay_retention <= receipt_retention):
+            raise ValueError('Invalid image retention policy')
+        self.clock = clock
+        self.replay_retention = replay_retention
+        self.receipt_retention = receipt_retention
         with self.connect() as db:
             db.execute('PRAGMA journal_mode=WAL')
+            db.execute('BEGIN IMMEDIATE')
             db.execute('''CREATE TABLE IF NOT EXISTS image_jobs (
                 account TEXT NOT NULL, request TEXT NOT NULL, fingerprint TEXT NOT NULL,
                 state TEXT NOT NULL, reserved TEXT NOT NULL, charged TEXT NOT NULL DEFAULT '0',
                 actual TEXT, response TEXT, budget_window TEXT NOT NULL,
                 PRIMARY KEY(account, request))''')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(image_jobs)')}
+            if 'replay_until' not in columns:
+                db.execute('ALTER TABLE image_jobs ADD COLUMN replay_until INTEGER')
+                db.execute('ALTER TABLE image_jobs ADD COLUMN receipt_until INTEGER')
+                # Legacy blobs have no creation time: do not grant a new replay
+                # lease on every upgrade/restart. Preserve exact paid receipts.
+                db.execute("UPDATE image_jobs SET response=NULL, replay_until=0, receipt_until=? WHERE state IN ('done','failed')",
+                           (int(self.clock()) + receipt_retention,))
+            db.execute('''CREATE TABLE IF NOT EXISTS image_deleted_accounts (
+                account TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)''')
 
     def connect(self):
-        return sqlite3.connect(self.path, timeout=30)
+        db = sqlite3.connect(self.path, timeout=30)
+        db.row_factory = sqlite3.Row
+        return db
+
+    @staticmethod
+    def _receipt(row):
+        return {'account_id': row['account'], 'request_id': row['request'],
+                'fingerprint': row['fingerprint'],
+                'state': 'confirmed' if row['state'] == 'done' else row['state'],
+                'charged': row['charged'] if row['state'] in ('done', 'failed') else None}
+
+    def receipt(self, account, request):
+        with self.connect() as db:
+            self._require_account(db, account)
+            row = db.execute('SELECT * FROM image_jobs WHERE account=? AND request=?', (account, request)).fetchone()
+            if row is None:
+                raise ImageError(404, 'image_request_not_found')
+            if row['receipt_until'] is not None and self.clock() >= row['receipt_until']:
+                raise ImageError(410, 'image_receipt_expired')
+            return self._receipt(row)
+
+    def _response(self, row):
+        if row['response'] is None or row['replay_until'] is None or self.clock() >= row['replay_until']:
+            receipt = self._receipt(row) if row['receipt_until'] is None or self.clock() < row['receipt_until'] else None
+            raise ImageError(410, 'image_replay_expired', receipt=receipt)
+        return {**json.loads(row['response']), 'receipt': self._receipt(row)}
+
+    @staticmethod
+    def _deleted(db, account):
+        return db.execute('SELECT 1 FROM image_deleted_accounts WHERE account=?', (account,)).fetchone() is not None
+
+    def _require_account(self, db, account):
+        if self._deleted(db, account):
+            raise ImageError(410, 'image_account_deleted')
+
+    def purge_expired(self):
+        """Scheduled local cleanup; never removes dedup or unresolved charges."""
+        now = int(self.clock())
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('UPDATE image_jobs SET response=NULL WHERE replay_until<=?', (now,))
+            db.execute('UPDATE image_jobs SET actual=NULL WHERE receipt_until<=?', (now,))
+
+    def delete_account(self, account):
+        """Idempotent local deletion adapter; caller supplies verified stable UID.
+
+        Retain minimal billing/dedup tombstones, including unresolved reserves.
+        Settlement may still account for already-paid work, never republish it.
+        """
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT OR IGNORE INTO image_deleted_accounts VALUES (?,?)', (account, int(self.clock())))
+            db.execute('UPDATE image_jobs SET response=NULL, actual=NULL, replay_until=0, receipt_until=0 WHERE account=?', (account,))
 
     def spent(self, account, include_pending=False, budget_window=None):
         with self.connect() as db:
             rows = db.execute('SELECT state,reserved,charged FROM image_jobs WHERE account=? AND (? IS NULL OR budget_window=?)',
                               (account, budget_window, budget_window)).fetchall()
-        return sum((Decimal(r if include_pending and s == 'pending' else c) for s, r, c in rows), Decimal(0))
+        return exact_sum(Decimal(r if include_pending and s in ('pending', 'unknown') else c) for s, r, c in rows)
 
     def begin(self, account, request, fingerprint, reservation, budget, budget_window):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT fingerprint,state,response FROM image_jobs WHERE account=? AND request=?', (account, request)).fetchone()
+            self._require_account(db, account)
+            row = db.execute('SELECT * FROM image_jobs WHERE account=? AND request=?', (account, request)).fetchone()
             if row:
-                if row[0] != fingerprint:
+                if row['fingerprint'] != fingerprint:
                     raise ImageError(409, 'idempotency_conflict')
-                if row[1] == 'done':
-                    return json.loads(row[2])
-                raise ImageError(409, 'image_request_pending' if row[1] == 'pending' else 'image_request_failed')
-            rows = db.execute("SELECT state,reserved,charged FROM image_jobs WHERE account=? AND (budget_window=? OR state='pending')", (account, budget_window)).fetchall()
-            spent = sum((Decimal(r if s == 'pending' else c) for s, r, c in rows), Decimal(0))
-            if spent + reservation > money(budget):
+                if row['state'] == 'done':
+                    return self._response(row)
+                if row['receipt_until'] is not None and self.clock() >= row['receipt_until']:
+                    raise ImageError(410, 'image_receipt_expired')
+                raise ImageError(409, 'image_request_pending' if row['state'] in ('pending', 'unknown') else 'image_request_failed', receipt=self._receipt(row))
+            rows = db.execute("SELECT state,reserved,charged FROM image_jobs WHERE account=? AND (budget_window=? OR state IN ('pending','unknown'))", (account, budget_window)).fetchall()
+            spent = exact_sum(Decimal(r if s in ('pending', 'unknown') else c) for s, r, c in rows)
+            if exact_sum((spent, money(reservation))) > money(budget):
                 raise ImageError(402, 'image_limit_reached')
             db.execute('INSERT INTO image_jobs(account,request,fingerprint,state,reserved,budget_window) VALUES(?,?,?,?,?,?)',
                        (account, request, fingerprint, 'pending', str(reservation), budget_window))
@@ -123,12 +233,37 @@ class Ledger:
     def settle(self, account, request, actual, response):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            db.execute("UPDATE image_jobs SET state='done', actual=?, charged=?, response=? WHERE account=? AND request=? AND state='pending'",
-                       (str(actual), str(actual * MULTIPLIER), json.dumps(response), account, request))
+            deleted = self._deleted(db, account)
+            row = db.execute('SELECT * FROM image_jobs WHERE account=? AND request=?', (account, request)).fetchone()
+            if row is None:
+                raise ImageError(404, 'image_request_not_found')
+            if row['state'] == 'done':
+                self._require_account(db, account)
+                return self._response(row)
+            if row['state'] not in ('pending', 'unknown'):
+                raise ImageError(409, 'image_request_failed', receipt=self._receipt(row))
+            actual = money(actual)
+            now = int(self.clock())
+            db.execute("UPDATE image_jobs SET state='done', actual=?, charged=?, response=?, replay_until=?, receipt_until=? WHERE account=? AND request=?",
+                       (None if deleted else str(actual), str(discounted(actual)),
+                        None if deleted else json.dumps(response),
+                        0 if deleted else now + self.replay_retention,
+                        0 if deleted else now + self.receipt_retention, account, request))
+            row = db.execute('SELECT * FROM image_jobs WHERE account=? AND request=?', (account, request)).fetchone()
+            result = None if deleted else self._response(row)
+        if deleted:
+            # Raise after committing the charge for work accepted before deletion.
+            raise ImageError(410, 'image_account_deleted')
+        return result
+
+    def unknown(self, account, request):
+        with self.connect() as db:
+            db.execute("UPDATE image_jobs SET state='unknown' WHERE account=? AND request=? AND state='pending'", (account, request))
 
     def fail(self, account, request):
         with self.connect() as db:
-            db.execute("UPDATE image_jobs SET state='failed', reserved='0' WHERE account=? AND request=? AND state='pending'", (account, request))
+            db.execute("UPDATE image_jobs SET state='failed', reserved='0', receipt_until=? WHERE account=? AND request=? AND state='pending'",
+                       (int(self.clock()) + self.receipt_retention, account, request))
 
 
 class ImageService:
@@ -169,22 +304,30 @@ class ImageService:
         if not candidates:
             raise ImageError(422, 'unsupported_image_operation')
         fingerprint = hashlib.sha256(json.dumps([operation, body], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        replay = self.ledger.begin(account, request, fingerprint, self.max_upstream_cost * MULTIPLIER, budget, budget_window)
+        replay = self.ledger.begin(account, request, fingerprint, discounted(self.max_upstream_cost), budget, budget_window)
         if replay is not None:
             return replay
         for backend in candidates:
+            # A deletion committed during an explicit refusal must fence the
+            # next backend too, not just initial admission and late settlement.
+            self.ledger.receipt(account, request)
             payload = {**body, 'model': backend.model, 'size': size, 'n': 1, 'response_format': 'b64_json'}
             try:
                 response = self.send(backend, operation, payload)
             except UpstreamError as error:
-                # Explicit refusals only. A transport timeout after submission
-                # has an unknown outcome and must NOT start another paid job.
+                # Status alone cannot establish that execution/billing did not
+                # occur. Only an adapter's verified nonacceptance permits release
+                # or fallback; bare 429/503 are unknown too.
+                if not isinstance(error, UpstreamNotAccepted):
+                    raise self._unknown(account, request, fingerprint) from None
                 if error.status in (429, 503):
                     continue
+                if error.status not in (400, 401, 403, 404, 422):
+                    raise self._unknown(account, request, fingerprint) from None
                 self.ledger.fail(account, request)
-                raise ImageError(400 if error.status in (400, 422) else 503, 'image_request_failed') from None
+                raise ImageError(400 if error.status in (400, 422) else 503, 'image_request_failed', receipt=self.ledger.receipt(account, request)) from None
             except Exception:
-                raise ImageError(409, 'image_request_pending') from None
+                raise self._unknown(account, request, fingerprint) from None
             try:
                 actual = money(response['usage']['cost'])
                 rows = response['data']
@@ -196,8 +339,23 @@ class ImageService:
             except Exception:
                 # A successful upstream response may already have been billed.
                 # Keep its reservation for reconciliation; never retry it.
-                raise ImageError(502, 'invalid_image_response') from None
-            self.ledger.settle(account, request, actual, result)
-            return result
+                raise self._unknown(account, request, fingerprint) from None
+            try:
+                return self.ledger.settle(account, request, actual, result)
+            except ImageError:
+                raise
+            except Exception:
+                raise self._unknown(account, request, fingerprint) from None
         self.ledger.fail(account, request)
-        raise ImageError()
+        raise ImageError(receipt=self.ledger.receipt(account, request))
+
+    def _unknown(self, account, request, fingerprint):
+        receipt = {'account_id': account, 'request_id': request,
+                   'fingerprint': fingerprint, 'state': 'unknown', 'charged': None}
+        try:
+            self.ledger.unknown(account, request)
+            receipt = self.ledger.receipt(account, request)
+        except Exception:
+            # Even a failed status write cannot undo the durable admission.
+            pass
+        return ImageError(409, 'image_request_pending', receipt=receipt)

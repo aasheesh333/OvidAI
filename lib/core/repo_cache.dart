@@ -457,6 +457,13 @@ class RepoCache extends ChangeNotifier {
   String? get boundSessionId => _boundSessionId;
 
   int _bindingGeneration = 0;
+  int _operation = 0;
+  int _syncOperation = 0;
+  /// Identifies the refresh that owns progress, errors and publication.
+  int get syncOperation => _syncOperation;
+  final Map<String, int> _pathOperations = {};
+  // Read admission fences other reads, but is not a published edit/deletion.
+  final Map<String, int> _fetchOperations = {};
   /// UI actions opened under an older binding must not target the current one.
   int get bindingGeneration => _bindingGeneration;
   String? workspaceFolder;
@@ -470,6 +477,7 @@ class RepoCache extends ChangeNotifier {
   // Persistable edit identities distinguish a newer intent even when its bytes
   // and mode return to the approved values, including after process restart.
   void _edited(String path) {
+    _pathOperations[path] = ++_operation;
     _revisions[path] = base64Url.encode(List.generate(18, (_) => Random.secure().nextInt(256)));
     _dirty.add(path);
   }
@@ -533,6 +541,8 @@ class RepoCache extends ChangeNotifier {
       _lastCommit = null;
     }
     _bindingGeneration++;
+    _pathOperations.clear();
+    _fetchOperations.clear();
     repoFull = full;
     _token = token;
     defaultBranch = branch;
@@ -548,6 +558,8 @@ class RepoCache extends ChangeNotifier {
   /// Disconnect — clear everything so Studio shows the login state again.
   void unbind() {
     _bindingGeneration++;
+    _pathOperations.clear();
+    _fetchOperations.clear();
     repoFull = null;
     _token = null;
     defaultBranch = null;
@@ -589,8 +601,9 @@ class RepoCache extends ChangeNotifier {
     Duration deadline = defaultSyncDeadline,
     int concurrency = defaultSyncConcurrency,
   }) async {
+    final operation = _syncOperation = ++_operation;
     if (workspaceFolder != null) {
-      return _syncWorkspace(maxFiles: maxFiles, deadline: deadline);
+      return _syncWorkspace(maxFiles: maxFiles, deadline: deadline, operation: operation);
     }
     final repo = repoFull;
     final token = _token;
@@ -605,6 +618,7 @@ class RepoCache extends ChangeNotifier {
     try {
       onLine?.call('fetching tree of $repo …');
       final tree = await _getTree(repo, token, branch, c);
+      _ensureSync(generation, operation);
       final blobPaths = tree.entries
           .where((e) => e['type'] == 'blob')
           .map((e) => e['path'] as String)
@@ -627,7 +641,7 @@ class RepoCache extends ChangeNotifier {
       // and binding loss abort the whole sync.
       var done = 0;
       await _forEachConcurrent(take, concurrency, (p) async {
-        _ensureBinding(generation);
+        _ensureSync(generation, operation);
         if (DateTime.now().isAfter(deadlineAt)) {
           unattempted.add(p);
           return;
@@ -640,7 +654,7 @@ class RepoCache extends ChangeNotifier {
           c,
           deadlineAt: deadlineAt,
         );
-        _ensureBinding(generation);
+        _ensureSync(generation, operation);
         if (r.content != null) {
           syncedFiles[p] = r.content!;
         } else if (r.status == 401 || r.status == 403) {
@@ -659,7 +673,7 @@ class RepoCache extends ChangeNotifier {
           onLine?.call('synced $done / ${take.length} files');
         }
       });
-      _ensureBinding(generation);
+      _ensureSync(generation, operation);
 
       // Publish atomically: a failed sync never mutates the working copy.
       final previousFiles = Map<String, String>.of(files);
@@ -670,6 +684,29 @@ class RepoCache extends ChangeNotifier {
       files
         ..clear()
         ..addAll(syncedFiles);
+
+      // A partial read proves neither deletion nor an empty file. Retain the
+      // last usable bytes while the report still describes the failed refresh.
+      final incomplete = tree.truncated || droppedByCap > 0;
+      for (final p in previousFiles.keys) {
+        if (!syncedFiles.containsKey(p) &&
+            (incomplete || failedPaths.contains(p) || unattempted.contains(p))) {
+          files[p] = previousFiles[p]!;
+          if (!treePaths.contains(p)) treePaths.add(p);
+        }
+        // A save, fetch or confirmed commit after admission owns this path,
+        // even if it has since cleared its pending-commit flag.
+        if ((_pathOperations[p] ?? 0) > operation) {
+          files[p] = previousFiles[p]!;
+          if (!treePaths.contains(p)) treePaths.add(p);
+        }
+      }
+      for (final p in _pathOperations.keys) {
+        if (_pathOperations[p]! > operation && !previousFiles.containsKey(p)) {
+          files.remove(p);
+          treePaths.remove(p);
+        }
+      }
 
       // Audit 2026-09-25 §1: re-apply uncommitted edits over the refreshed
       // content. A dirty file whose local copy now EQUALS upstream has
@@ -686,7 +723,10 @@ class RepoCache extends ChangeNotifier {
           preserved.add(p);
           continue;
         }
-        if (syncedFiles[p] == local && !_stagedModes.containsKey(p)) continue;
+        if (syncedFiles[p] == local && !_stagedModes.containsKey(p) &&
+            (_pathOperations[p] ?? 0) <= operation) {
+          continue;
+        }
         if (local != null) files[p] = local;
         preserved.add(p);
         if (!treePaths.contains(p)) treePaths.add(p);
@@ -727,9 +767,15 @@ class RepoCache extends ChangeNotifier {
     }
   }
 
+  void _ensureSync(int generation, int operation) {
+    _ensureBinding(generation);
+    if (operation != _syncOperation) throw StateError('repository sync superseded');
+  }
+
   /// A selected on-disk checkout is authoritative, including untracked files
   /// and edits made by shell tools. Never replace it with GitHub API bytes.
-  Future<SyncReport> _syncWorkspace({required int maxFiles, required Duration deadline}) async {
+  Future<SyncReport> _syncWorkspace({required int maxFiles, required Duration deadline,
+      required int operation}) async {
     final root = Directory(workspaceFolder!);
     final generation = _bindingGeneration;
     final deadlineAt = DateTime.now().add(deadline);
@@ -743,7 +789,7 @@ class RepoCache extends ChangeNotifier {
     // Bound directory-only trees too, and avoid an unbounded recursion stack.
     final pending = <({Directory dir, String prefix})>[(dir: root, prefix: '')];
     bool stop() {
-      _ensureBinding(generation);
+      _ensureSync(generation, operation);
       if (!DateTime.now().isBefore(deadlineAt)) {
         timedOut = true;
         return true;
@@ -800,9 +846,15 @@ class RepoCache extends ChangeNotifier {
       }
       if (timedOut || truncated) break;
     }
-    _ensureBinding(generation);
+    _ensureSync(generation, operation);
     // Reapply drafts from the LIVE map: edits may have arrived during traversal.
     final drafts = {for (final p in _unsaved) if (files[p] != null) p: files[p]!};
+    for (final p in files.keys) {
+      if ((_pathOperations[p] ?? 0) > operation ||
+          (!contents.containsKey(p) && (truncated || timedOut || failed.contains(p)))) {
+        drafts[p] = files[p]!;
+      }
+    }
     files..clear()..addAll(contents);
     files.addAll(drafts);
     for (final path in _deletions.toList()) { _refreshDeletion(path); }
@@ -853,9 +905,10 @@ class RepoCache extends ChangeNotifier {
   /// sync fails so stale files from a previous repo/branch are never shown
   /// under the new binding.
   void clearWorkingCopy() {
+    _syncOperation = ++_operation;
     final staged = {..._deletions, ..._stagedModes.keys};
-    final drafts = workspaceFolder == null ? <String, String>{} : {
-      for (final path in _unsaved) if (files[path] != null) path: files[path]!,
+    final drafts = {
+      for (final path in {..._dirty, ..._unsaved}) if (files[path] != null) path: files[path]!,
     };
     for (final path in _stagedModes.keys) {
       if (files[path] != null) drafts[path] = files[path]!;
@@ -1129,7 +1182,10 @@ class RepoCache extends ChangeNotifier {
   Future<String?> fetchFile(String path, {http.Client? client}) async =>
       (await fetchFileResult(path, client: client)).content;
 
-  /// [fetchFile] with a distinguishable failure reason. The old version sent
+  /// [fetchFile] with a distinguishable failure reason. When a newer operation
+  /// or dirty draft owns the path, returns that working-copy content rather
+  /// than handing obsolete upstream bytes to the caller.
+  /// The old version sent
   /// `Bearer ` (empty token) and flattened no-token / 401 / 404 / network
   /// death into the same silent `null` (audit 2026-09-25 §6).
   Future<FetchResult> fetchFileResult(
@@ -1157,12 +1213,20 @@ class RepoCache extends ChangeNotifier {
     }
     final branch = defaultBranch ?? 'main';
     final generation = _bindingGeneration;
+    final operation = ++_operation;
+    _fetchOperations[path] = operation;
     final c = client ?? http.Client();
     try {
       final r = await _fetchRaw(repo, token, path, branch, c);
       _ensureBinding(generation);
+      if (_fetchOperations[path] != operation || (_pathOperations[path] ?? 0) > operation ||
+          _syncOperation > operation || _dirty.contains(path)) {
+        final current = files[path];
+        return FetchResult(current, current == null ? FetchFailure.unknown : FetchFailure.none);
+      }
       if (r.content != null) {
         if (!_dirty.contains(path)) {
+          _pathOperations[path] = operation;
           files[path] = r.content!;
           notifyListeners();
         }
@@ -1501,6 +1565,7 @@ class RepoCache extends ChangeNotifier {
 
   void _dropPushed(Map<String, String?> pending, {Map<String, String>? modes,
       Map<String, String?>? revisions}) {
+    for (final path in pending.keys) { _pathOperations[path] = ++_operation; }
     _accountPushed(pending, modes: modes, revisions: revisions, workspace: workspaceFolder,
         contents: files, dirty: _dirty, unsaved: _unsaved, deletions: _deletions,
         stagedModes: _stagedModes, edits: _revisions);

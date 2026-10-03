@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 
@@ -54,10 +55,7 @@ void main() {
 
       final mirrorsFile = File('${tmp.path}/etc/apt/ovid-mirrors');
       expect(mirrorsFile.existsSync(), isTrue);
-      expect(
-        mirrorsFile.readAsStringSync().trim().split('\n'),
-        mirrors,
-      );
+      expect(mirrorsFile.readAsStringSync().trim().split('\n'), mirrors);
 
       final mirrorIdx = content.indexOf(r'-r "$PREFIX/etc/apt/ovid-mirrors"');
       final sourcesIdx = content.indexOf(r'-r "$PREFIX/etc/apt/sources.list"');
@@ -74,18 +72,9 @@ void main() {
       expect(content, contains('not supported'));
     });
 
-    test('strips -y/--yes/-q/--quiet before the install loop', () {
-      expect(content, contains('-y|--yes'));
-      expect(content, contains('-q|--quiet'));
-      final stripIdx = content.indexOf('for _a in "\$@"');
-      final loopIdx = content.indexOf('for round in');
-      expect(stripIdx, greaterThan(0));
-      expect(stripIdx, lessThan(loopIdx));
-    });
-
-    test('extracts with dpkg-deb -x into PREFIX (never dpkg -i)', () {
+    test('extracts with dpkg-deb -x without masking its status', () {
       // dpkg's compiled-in Termux prefix makes `dpkg -i` fail on-device;
-      // dpkg-deb -x extracts the data archive into our own prefix with no
+      // dpkg-deb -x extracts the data archive into an owned stage with no
       // admindir. Behavior pinned by the runtime extraction-failure test.
       expect(content, contains(r'dpkg-deb -x'));
       expect(content, contains(r'> "$_dlog" 2>&1'));
@@ -150,12 +139,16 @@ void main() {
       env = {
         'PREFIX': tmp.path,
         'PATH': '${tmp.path}/stubs:${tmp.path}/bin:/usr/bin:/bin',
+        'LC_ALL': 'C',
       };
       final stubs = Directory('${tmp.path}/stubs')..createSync();
       // Every runtime test is offline, including recursive index updates.
       writeStub(stubs, 'curl', 'exit 1');
       writeStub(stubs, 'dpkg-deb', 'exit 99');
-      writeStub(stubs, 'dpkg', 'exit 99');
+      writeStub(stubs, 'dpkg', r'''
+[ "$1" = --compare-versions ] || exit 99
+exec /usr/bin/dpkg "$@"
+''');
     });
 
     tearDown(() => tmp.deleteSync(recursive: true));
@@ -165,14 +158,42 @@ void main() {
       'PATH': '${stubs.path}:${tmp.path}/bin:${env['PATH']}',
     };
 
-    void seedIndex(Map<String, String> packages) {
+    void seedIndex(Map<String, String> packages, {bool share = false}) {
       final idx = File('${tmp.path}/var/cache/ovid-pkg/Packages');
       idx.parent.createSync(recursive: true);
-      idx.writeAsStringSync(packages.entries.map((entry) {
-        return 'Package: ${entry.key}\nVersion: 1.0\n'
-            'Architecture: aarch64\nFilename: pool/${entry.key}_1.deb\n'
-            '${entry.value.isEmpty ? '' : 'Depends: ${entry.value}\n'}\n';
-      }).join());
+      Directory('${tmp.path}/repo/pool').createSync(recursive: true);
+      idx.writeAsStringSync(
+        packages.entries.map((entry) {
+          final build = '${tmp.path}/build/${entry.key}';
+          Directory('$build/DEBIAN').createSync(recursive: true);
+          File('$build/DEBIAN/control').writeAsStringSync(
+            'Package: ${entry.key}\nVersion: 1.0\nArchitecture: aarch64\n'
+            'Maintainer: Fixture <fixture@example.test>\n'
+            'Description: harmless offline fixture\n',
+          );
+          final payload = '$build/data/data/com.termux/files/usr';
+          Directory('$payload/bin').createSync(recursive: true);
+          File(
+            '$payload/bin/${entry.key}',
+          ).writeAsStringSync('${entry.key}_1.deb\n');
+          if (share) {
+            Directory('$payload/share').createSync();
+            File('$payload/share/fixture').writeAsStringSync('fixture\n');
+          }
+          final archive = File('${tmp.path}/repo/pool/${entry.key}_1.deb');
+          final built = Process.runSync('/usr/bin/dpkg-deb', [
+            '--build',
+            build,
+            archive.path,
+          ]);
+          expect(built.exitCode, 0, reason: '${built.stdout}${built.stderr}');
+          return 'Package: ${entry.key}\nVersion: 1.0\n'
+              'Architecture: aarch64\nFilename: pool/${entry.key}_1.deb\n'
+              'Size: ${archive.lengthSync()}\n'
+              'SHA256: ${sha256.convert(archive.readAsBytesSync())}\n'
+              '${entry.value.isEmpty ? '' : 'Depends: ${entry.value}\n'}\n';
+        }).join(),
+      );
     }
 
     void successfulInstallStubs() {
@@ -188,23 +209,24 @@ case "$url" in https://mirror-one.test/apt/termux-main/pool/*.deb) ;;
   *) echo "unexpected fixture URL: $url" >&2; exit 99;;
 esac
 printf '%s\n' "${url##*/}" >> "$PREFIX/downloads"
-: > "$out"
+exec /bin/cp "$PREFIX/repo/pool/${url##*/}" "$out"
 ''');
-      // Emulate only extraction. The generated script performs the real
-      // relocation/merge of this harmless payload inside the temporary prefix.
+      // Preserve real control inspection, tar validation and extraction. Record
+      // package identities, independent of operation-owned archive filenames.
       writeStub(stubs, 'dpkg-deb', r'''
-[ "$#" = 3 ] && [ "$1" = "-x" ] && [ "$3" = "$PREFIX" ] || exit 99
-[ -f "$2" ] || exit 98
-archive="${2##*/}"
-printf '%s\n' "$archive" >> "$PREFIX/extractions"
-payload="$PREFIX/data/data/com.termux/files/usr/bin"
-mkdir -p "$payload"
-printf '%s\n' "$archive" > "$payload/${archive%_1.deb}"
+if [ "$1" = -x ]; then
+  [ "$#" = 3 ] || exit 99
+  case "$3" in "$PREFIX"/var/cache/ovid-pkg/archives/install.*/stage) ;; *) exit 98;; esac
+  /usr/bin/dpkg-deb -f "$2" Package >> "$PREFIX/extractions" || exit 97
+fi
+exec /usr/bin/dpkg-deb "$@"
 ''');
     }
 
     Future<ProcessResult> install(List<String> packages) => Process.run(
-      '/bin/sh', [script, 'install', ...packages], environment: env,
+      '/bin/sh',
+      [script, 'install', ...packages],
+      environment: env,
     ).timeout(const Duration(seconds: 30));
 
     List<String> recorded(String name) {
@@ -216,103 +238,179 @@ printf '%s\n' "$archive" > "$payload/${archive%_1.deb}"
       seedIndex({'app': ''});
       successfulInstallStubs();
 
-      final res = await install(['-y', '--yes', '-q', '--quiet', 'app']);
+      final res = await install(['app']);
 
       expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
       expect(res.stderr, isEmpty);
       expect(recorded('downloads'), ['app_1.deb']);
-      expect(recorded('extractions'), ['app_1.deb']);
+      expect(recorded('extractions'), ['app']);
       expect(File('${tmp.path}/bin/app').readAsStringSync(), 'app_1.deb\n');
       expect(Directory('${tmp.path}/data').existsSync(), isFalse);
+      expect(
+        Directory('${tmp.path}/var/cache/ovid-pkg/archives').listSync(),
+        isEmpty,
+      );
+      expect(res.stdout, contains('[ovid-pkg] extracted 1 package(s)'));
+    });
+
+    test('strips -y/--yes/-q/--quiet before resolving packages', () async {
+      seedIndex({'app': '', 'other': ''});
+      successfulInstallStubs();
+
+      final res = await install([
+        '-y',
+        'app',
+        '--yes',
+        '-q',
+        'other',
+        '--quiet',
+      ]);
+
+      expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
+      expect(res.stderr, isEmpty);
+      expect(recorded('downloads'), ['app_1.deb', 'other_1.deb']);
+      expect(recorded('extractions'), ['app', 'other']);
+      expect(File('${tmp.path}/bin/app').readAsStringSync(), 'app_1.deb\n');
+      expect(File('${tmp.path}/bin/other').readAsStringSync(), 'other_1.deb\n');
     });
 
     for (final branch in ['merge', 'move']) {
       for (final failingCommand in ['cp', 'rm']) {
-        test('relocation $branch $failingCommand failure exits non-zero', () async {
-          seedIndex({'app': ''});
-          successfulInstallStubs();
-          final stubs = Directory('${tmp.path}/stubs');
-          final nested = '${tmp.path}/data/data/com.termux/files/usr';
-          // bin exercises the merge branch; share exercises move/copy fallback.
-          // A successful sibling must not erase the failed relocation status.
-          final share = File('$nested/share/fixture');
-          share.parent.createSync(recursive: true);
-          share.writeAsStringSync('fixture\n');
-          final directory = branch == 'merge' ? 'bin' : 'share';
-          if (branch == 'move') {
-            writeStub(stubs, 'mv', 'exit 7');
-          }
-          writeStub(stubs, failingCommand, '''
+        test(
+          'relocation $branch $failingCommand failure exits non-zero',
+          () async {
+            seedIndex({'app': ''}, share: true);
+            successfulInstallStubs();
+            final stubs = Directory('${tmp.path}/stubs');
+            final nested = '${tmp.path}/data/data/com.termux/files/usr';
+            // bin exercises the merge branch; share exercises move/copy fallback.
+            // A successful sibling must not erase the failed relocation status.
+            final directory = branch == 'merge' ? 'bin' : 'share';
+            if (branch == 'move') {
+              writeStub(stubs, 'mv', 'exit 7');
+            }
+            writeStub(stubs, failingCommand, '''
 case "\$2" in
   "\$PREFIX/data/data/com.termux/files/usr/$directory"|"\$PREFIX/data/data/com.termux/files/usr/$directory/.") exit 8;;
 esac
 exec /bin/$failingCommand "\$@"
 ''');
 
-          final res = await install(['app']);
+            final res = await install(['app']);
 
-          expect(recorded('extractions'), ['app_1.deb']);
-          final relative = branch == 'merge' ? 'bin/app' : 'share/fixture';
-          expect(File('$nested/$relative').existsSync(), isTrue);
-          expect(
-            File('${tmp.path}/$relative').existsSync(),
-            failingCommand == 'rm',
-          );
-          expect(res.exitCode, isNot(0), reason: '${res.stdout}${res.stderr}');
-          expect(res.stderr, contains('could not relocate $directory'));
-        });
+            expect(recorded('extractions'), ['app']);
+            final relative = branch == 'merge' ? 'bin/app' : 'share/fixture';
+            expect(File('$nested/$relative').existsSync(), isTrue);
+            expect(
+              File('${tmp.path}/$relative').existsSync(),
+              failingCommand == 'rm',
+            );
+            expect(
+              res.exitCode,
+              isNot(0),
+              reason: '${res.stdout}${res.stderr}',
+            );
+            expect(res.stderr, contains('could not relocate $directory'));
+            expect(res.stdout, isNot(contains('[ovid-pkg] extracted')));
+            final sibling = branch == 'merge' ? 'share/fixture' : 'bin/app';
+            expect(File('${tmp.path}/$sibling').existsSync(), isTrue);
+            expect(File('$nested/$sibling').existsSync(), isFalse);
+          },
+        );
       }
     }
 
-    test('relocation move failure with successful copy fallback exits zero', () async {
-      seedIndex({'app': ''});
-      successfulInstallStubs();
-      final nested = '${tmp.path}/data/data/com.termux/files/usr';
-      final share = File('$nested/share/fixture');
-      share.parent.createSync(recursive: true);
-      share.writeAsStringSync('fixture\n');
-      writeStub(Directory('${tmp.path}/stubs'), 'mv', 'exit 7');
-
-      final res = await install(['app']);
-
-      expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
-      expect(res.stderr, isEmpty);
-      expect(File('${tmp.path}/share/fixture').readAsStringSync(), 'fixture\n');
-      expect(File('${tmp.path}/bin/app').readAsStringSync(), 'app_1.deb\n');
-      expect(Directory('${tmp.path}/data').existsSync(), isFalse);
-    });
-
-    test('cycle and diamond download and extract each package once', () async {
-      seedIndex({
-        'app': 'left, right',
-        'left': 'shared',
-        'right': 'shared',
-        'shared': 'app',
-      });
-      successfulInstallStubs();
-
-      final res = await install(['app', 'app']);
-
-      const archives = ['app_1.deb', 'left_1.deb', 'right_1.deb', 'shared_1.deb'];
-      expect(recorded('downloads'), archives);
-      expect(recorded('extractions'), archives);
-      expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
-    });
-
-    for (final dependency in ['absent', 'absent (>= 1) | also-absent']) {
-      test('missing required dependency $dependency fails before extraction', () async {
-        seedIndex({'app': dependency});
+    test(
+      'relocation move failure with successful copy fallback exits zero',
+      () async {
+        seedIndex({'app': ''}, share: true);
         successfulInstallStubs();
+        writeStub(Directory('${tmp.path}/stubs'), 'mv', 'exit 7');
 
         final res = await install(['app']);
 
+        expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
+        expect(res.stderr, isEmpty);
+        expect(
+          File('${tmp.path}/share/fixture').readAsStringSync(),
+          'fixture\n',
+        );
+        expect(File('${tmp.path}/bin/app').readAsStringSync(), 'app_1.deb\n');
+        expect(Directory('${tmp.path}/data').existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'acyclic diamond downloads and extracts dependencies once before app',
+      () async {
+        seedIndex({
+          'app': 'left, right',
+          'left': 'shared',
+          'right': 'shared',
+          'shared': '',
+        });
+        successfulInstallStubs();
+
+        final res = await install(['app', 'app']);
+
+        const archives = [
+          'shared_1.deb',
+          'left_1.deb',
+          'right_1.deb',
+          'app_1.deb',
+        ];
+        expect(recorded('downloads'), archives);
+        expect(recorded('extractions'), ['shared', 'left', 'right', 'app']);
+        expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
+        for (final name in ['app', 'left', 'right', 'shared']) {
+          expect(
+            File('${tmp.path}/bin/$name').readAsStringSync(),
+            '${name}_1.deb\n',
+          );
+        }
+      },
+    );
+
+    test(
+      'cycle through a diamond fails before download or extraction',
+      () async {
+        seedIndex({
+          'app': 'left, right',
+          'left': 'shared',
+          'right': 'shared',
+          'shared': 'app',
+        });
+        successfulInstallStubs();
+
+        final res = await install(['app', 'app']);
+
         expect(res.exitCode, isNot(0));
-        expect(res.stderr, contains('dependency'));
-        expect(res.stderr, contains('absent'));
+        expect(res.stderr, contains('cycle'));
+        expect(recorded('downloads'), isEmpty);
         expect(recorded('extractions'), isEmpty);
-        expect(res.stdout, isNot(contains('[ovid-pkg] installing')));
+        expect(File('${tmp.path}/bin/app').existsSync(), isFalse);
         expect(res.stdout, isNot(contains('[ovid-pkg] extracted')));
-      });
+      },
+    );
+
+    for (final dependency in ['absent', 'absent (>= 1) | also-absent']) {
+      test(
+        'missing required dependency $dependency fails before extraction',
+        () async {
+          seedIndex({'app': dependency});
+          successfulInstallStubs();
+
+          final res = await install(['app']);
+
+          expect(res.exitCode, isNot(0));
+          expect(res.stderr, contains('dependency'));
+          expect(res.stderr, contains('absent'));
+          expect(recorded('downloads'), isEmpty);
+          expect(recorded('extractions'), isEmpty);
+          expect(res.stdout, isNot(contains('[ovid-pkg] installing')));
+          expect(res.stdout, isNot(contains('[ovid-pkg] extracted')));
+        },
+      );
     }
 
     for (final alternatives in [
@@ -330,10 +428,20 @@ exec /bin/$failingCommand "\$@"
 
         final res = await install(['app']);
 
-        expect(recorded('extractions'), [
-          'app_1.deb', 'available_1.deb', 'required_1.deb',
-        ]);
+        expect(recorded('extractions'), ['available', 'required', 'app']);
         expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
+        expect(recorded('downloads'), [
+          'available_1.deb',
+          'required_1.deb',
+          'app_1.deb',
+        ]);
+        for (final name in ['app', 'available', 'required']) {
+          expect(
+            File('${tmp.path}/bin/$name').readAsStringSync(),
+            '${name}_1.deb\n',
+          );
+        }
+        expect(File('${tmp.path}/bin/other').existsSync(), isFalse);
       });
     }
 
@@ -345,12 +453,13 @@ exec /bin/$failingCommand "\$@"
 
       expect(res.exitCode, isNot(0));
       expect(res.stderr, contains('absent'));
+      expect(recorded('downloads'), isEmpty);
       expect(recorded('extractions'), isEmpty);
     });
 
-    test('unfinished dependency closure fails at the traversal limit', () async {
+    test('dependency closure beyond 64 levels fails before download', () async {
       seedIndex({
-        for (var i = 1; i <= 17; i++) 'p$i': i == 17 ? '' : 'p${i + 1}',
+        for (var i = 1; i <= 65; i++) 'p$i': i == 65 ? '' : 'p${i + 1}',
       });
       successfulInstallStubs();
 
@@ -358,23 +467,55 @@ exec /bin/$failingCommand "\$@"
 
       expect(res.exitCode, isNot(0));
       expect(res.stderr, contains('dependency'));
-      expect(res.stderr, contains('limit'));
-      expect(res.stderr, contains('p17'));
+      expect(res.stderr, contains('depth limit'));
+      expect(res.stderr, contains('p65'));
+      expect(recorded('downloads'), isEmpty);
       expect(recorded('extractions'), isEmpty);
       expect(res.stdout, isNot(contains('[ovid-pkg] extracted')));
     });
 
-    test('closure completed on the last round succeeds despite back edges', () async {
-      seedIndex({
-        for (var i = 1; i <= 16; i++) 'p$i': i == 16 ? 'p1, p16' : 'p${i + 1}',
-      });
-      successfulInstallStubs();
+    test(
+      'complete 17-level acyclic closure installs every dependency',
+      () async {
+        seedIndex({
+          for (var i = 1; i <= 17; i++) 'p$i': i == 17 ? '' : 'p${i + 1}',
+        });
+        successfulInstallStubs();
 
-      final res = await install(['p1']);
+        final res = await install(['p1']);
 
-      expect(recorded('extractions'), hasLength(16));
-      expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
-    });
+        expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
+        expect(recorded('extractions'), [for (var i = 17; i >= 1; i--) 'p$i']);
+        expect(recorded('downloads'), [
+          for (var i = 17; i >= 1; i--) 'p${i}_1.deb',
+        ]);
+        for (var i = 1; i <= 17; i++) {
+          expect(
+            File('${tmp.path}/bin/p$i').readAsStringSync(),
+            'p${i}_1.deb\n',
+          );
+        }
+      },
+    );
+
+    test(
+      'long closure with back edges rejects the cycle before download',
+      () async {
+        seedIndex({
+          for (var i = 1; i <= 16; i++)
+            'p$i': i == 16 ? 'p1, p16' : 'p${i + 1}',
+        });
+        successfulInstallStubs();
+
+        final res = await install(['p1']);
+
+        expect(res.exitCode, isNot(0));
+        expect(res.stderr, contains('cycle'));
+        expect(recorded('downloads'), isEmpty);
+        expect(recorded('extractions'), isEmpty);
+        expect(res.stdout, isNot(contains('[ovid-pkg] extracted')));
+      },
+    );
 
     for (final arch in {
       'armv7l': 'arm',
@@ -383,11 +524,13 @@ exec /bin/$failingCommand "\$@"
       'arm64': 'aarch64',
       'aarch64': 'aarch64',
     }.entries) {
-      test('uname ${arch.key} successfully fetches the ${arch.value} index', () async {
-        OvidPkgInstaller.writeAll(tmp, mirrors: mirrors);
-        final stubs = Directory('${tmp.path}/stubs');
-        writeStub(stubs, 'uname', 'echo ${arch.key}');
-        writeStub(stubs, 'curl', r'''
+      test(
+        'uname ${arch.key} successfully fetches the ${arch.value} index',
+        () async {
+          OvidPkgInstaller.writeAll(tmp, mirrors: mirrors);
+          final stubs = Directory('${tmp.path}/stubs');
+          writeStub(stubs, 'uname', 'echo ${arch.key}');
+          writeStub(stubs, 'curl', r'''
 prev=""; out=""; url=""
 for a in "$@"; do
   [ "$prev" = "-o" ] && out="$a"
@@ -399,24 +542,24 @@ printf '%s\n' "$url" >> "$PREFIX/index-urls"
 printf 'Package: app\nFilename: pool/app_1.deb\n\n' > "$out"
 ''');
 
-        final res = await Process.run('/bin/sh', [script, 'update'], environment: env);
+          final res = await Process.run('/bin/sh', [
+            script,
+            'update',
+          ], environment: env);
 
-        expect(recorded('index-urls'), [
-          '${mirrors.first}/dists/stable/main/binary-${arch.value}/Packages',
-        ]);
-        expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
-        expect(res.stderr, isEmpty);
-      });
+          expect(recorded('index-urls'), [
+            '${mirrors.first}/dists/stable/main/binary-${arch.value}/Packages',
+          ]);
+          expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
+          expect(res.stderr, isEmpty);
+        },
+      );
     }
 
     test('apt install -y does not resolve -y as a package', () async {
       // Pre-seed an index so a non-stripped flag would be looked up
       // rather than triggering a network update.
-      final idx = File('${tmp.path}/var/cache/ovid-pkg/Packages');
-      idx.parent.createSync(recursive: true);
-      idx.writeAsStringSync(
-        'Package: ripgrep\nFilename: ripgrep_1.deb\nDepends: \n\n',
-      );
+      seedIndex({'ripgrep': ''});
 
       final res = await Process.run('/bin/sh', [
         script,
@@ -467,11 +610,10 @@ printf 'Package: app\nFilename: pool/app_1.deb\n\n' > "$out"
 
     test('update fails non-zero when the index is empty/stale', () async {
       // The default curl stub forces every fetch to fail without networking.
-      final res = await Process.run(
-        '/bin/sh',
-        [script, 'update'],
-        environment: env,
-      ).timeout(const Duration(seconds: 60));
+      final res = await Process.run('/bin/sh', [
+        script,
+        'update',
+      ], environment: env).timeout(const Duration(seconds: 60));
       expect(res.exitCode, isNot(0));
     });
 
@@ -492,11 +634,10 @@ printf 'Package: app\nFilename: pool/app_1.deb\n\n' > "$out"
             '${Platform.environment['PATH']}',
       };
 
-      final res = await Process.run(
-        '/bin/sh',
-        ['${fallback.path}/bin/ovid-pkg', 'update'],
-        environment: fallbackEnv,
-      ).timeout(const Duration(seconds: 30));
+      final res = await Process.run('/bin/sh', [
+        '${fallback.path}/bin/ovid-pkg',
+        'update',
+      ], environment: fallbackEnv).timeout(const Duration(seconds: 30));
       final out = '${res.stdout}${res.stderr}';
 
       expect(res.exitCode, isNot(0));
@@ -504,31 +645,48 @@ printf 'Package: app\nFilename: pool/app_1.deb\n\n' > "$out"
       expect(out, isNot(contains('binary-armv7l/Packages')));
     });
 
-    test('extraction failure is propagated non-zero', () async {
-      final idx = File('${tmp.path}/var/cache/ovid-pkg/Packages');
-      idx.parent.createSync(recursive: true);
-      idx.writeAsStringSync(
-        'Package: ripgrep\nFilename: ripgrep_1.deb\nDepends: \n\n',
-      );
-      final stubs = Directory('${tmp.path}/stubs');
-      // curl "downloads" (creates the -o target) and succeeds.
-      writeStub(
-        stubs,
-        'curl',
-        'prev=""; for a in "\$@"; do [ "\$prev" = "-o" ] && : > "\$a"; '
-            'prev="\$a"; done; exit 0',
-      );
-      writeStub(stubs, 'dpkg-deb', 'echo "extract exploded"; exit 7');
+    test(
+      'extraction failure preserves exit 7 and leaves prefix payload untouched',
+      () async {
+        seedIndex({'ripgrep': ''});
+        successfulInstallStubs();
+        final stubs = Directory('${tmp.path}/stubs');
+        // Inspection stays real. Simulate a tool that writes staged bytes then
+        // fails: neither its output nor its partial payload may imply success.
+        writeStub(stubs, 'dpkg-deb', r'''
+if [ "$1" = -x ]; then
+  /usr/bin/dpkg-deb -f "$2" Package >> "$PREFIX/extractions" || exit 97
+  /usr/bin/dpkg-deb "$@" || exit 98
+  echo 'extract exploded'
+  exit 7
+fi
+exec /usr/bin/dpkg-deb "$@"
+''');
+        File('${tmp.path}/bin/ripgrep').writeAsStringSync('existing payload\n');
 
-      final res = await Process.run('/bin/sh', [
-        script,
-        'install',
-        'ripgrep',
-      ], environment: envWith(stubs)).timeout(const Duration(seconds: 30));
+        final res = await Process.run('/bin/sh', [
+          script,
+          'install',
+          'ripgrep',
+        ], environment: envWith(stubs)).timeout(const Duration(seconds: 30));
 
-      expect(res.exitCode, isNot(0));
-      expect('${res.stdout}${res.stderr}', contains('extract failed'));
-    });
+        expect(res.exitCode, 7, reason: '${res.stdout}${res.stderr}');
+        expect(recorded('downloads'), ['ripgrep_1.deb']);
+        expect(recorded('extractions'), ['ripgrep']);
+        expect(res.stdout, contains('extract exploded'));
+        expect('${res.stdout}${res.stderr}', contains('extract failed'));
+        expect(res.stdout, isNot(contains('[ovid-pkg] extracted')));
+        expect(
+          File('${tmp.path}/bin/ripgrep').readAsStringSync(),
+          'existing payload\n',
+        );
+        expect(Directory('${tmp.path}/data').existsSync(), isFalse);
+        expect(
+          Directory('${tmp.path}/var/cache/ovid-pkg/archives').listSync(),
+          isEmpty,
+        );
+      },
+    );
 
     test('install rejects a stale/empty index', () async {
       final idx = File('${tmp.path}/var/cache/ovid-pkg/Packages');

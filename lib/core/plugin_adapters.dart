@@ -358,12 +358,32 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
     }
     for (final group in groups) {
       if (group is! Map) continue;
-      final matcher = (group['matcher'] as String?)?.trim();
+      final rawMatcher = group['matcher'];
+      if (rawMatcher != null && rawMatcher is! String) {
+        b.issues.add(CompatibilityIssue(
+          severity: CompatibilitySeverity.optional,
+          message: 'Hook matcher must be a string; group skipped.',
+          fields: ['hooks.$rawEvent'],
+        ));
+        continue;
+      }
+      final matcher = (rawMatcher as String?)?.trim();
       final inner = group['hooks'];
       if (inner is! List) continue;
       for (final hook in inner) {
         if (hook is! Map) continue;
         final map = hook.cast<String, dynamic>();
+        if ((map['type'] != null && map['type'] is! String) ||
+            (map['command'] != null && map['command'] is! String) ||
+            (map['prompt'] != null && map['prompt'] is! String) ||
+            (map['timeout'] != null && map['timeout'] is! num)) {
+          b.issues.add(CompatibilityIssue(
+            severity: CompatibilitySeverity.optional,
+            message: 'Malformed hook declaration skipped; type/payload must be strings and timeout numeric.',
+            fields: ['hooks.$rawEvent'],
+          ));
+          continue;
+        }
         final explicitType = (map['type'] as String?)?.trim();
         final command = map['command'] as String?;
         final prompt = map['prompt'] as String?;
@@ -378,7 +398,23 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
             : hasPrompt
             ? 'prompt'
             : 'command';
-        final payload = command ?? prompt ?? '';
+        if (type != 'command' && type != 'prompt') {
+          b.issues.add(CompatibilityIssue(
+            severity: CompatibilitySeverity.optional,
+            message: 'Unsupported hook type; only command and prompt hooks can execute. Agent hooks require a tool-capable evaluator.',
+            fields: ['hooks.$rawEvent'],
+          ));
+          continue;
+        }
+        final payload = (type == 'prompt' ? prompt : command) ?? '';
+        if (payload.trim().isEmpty) {
+          b.issues.add(CompatibilityIssue(
+            severity: CompatibilitySeverity.optional,
+            message: 'Hook has no payload for its declared type and was skipped.',
+            fields: ['hooks.$rawEvent'],
+          ));
+          continue;
+        }
         add(
           event: event,
           type: type,
@@ -395,6 +431,8 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
                 'timeout',
               }.contains(e.key))
                 e.key: e.value,
+            if (rawEvent == 'PostToolUse' || rawEvent == 'PostToolUseFailure')
+              'ovidSourceEvent': rawEvent,
           },
         );
       }

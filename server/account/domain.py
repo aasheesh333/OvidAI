@@ -201,6 +201,18 @@ class Lifecycle:
                                        if row['state'] == 'fenced' else 0)
                 db.save(row)
 
+    def _delete_data(self, db, row):
+        steps = getattr(self.data, 'deletion_steps', None)
+        if steps is None:
+            self.data.delete_data(row['uid'], row['cleanup_context'])
+            return
+        for name, action in steps():
+            checkpoint = 'data:' + name
+            if checkpoint not in row['completed']:
+                action(row['uid'], row['cleanup_context'])
+                row['completed'].append(checkpoint)
+                db.save(row)
+
     def finalize(self, uid, *, scheduled=False):
         with self._attempt(uid, scheduled) as (db, row, skipped):
             if row is None:
@@ -238,7 +250,7 @@ class Lifecycle:
                 row['cleanup_context'] = self.data.prepare(uid)
                 db.save(row)
             for name, action in (('keys', self.data.revoke_keys),
-                                 ('data', self.data.delete_data),
+                                 ('data', lambda uid, context: self._delete_data(db, row)),
                                  ('auth', lambda uid, context: self.admin.delete(uid))):
                 if name not in row['completed']:
                     action(uid, row['cleanup_context'])

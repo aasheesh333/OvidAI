@@ -20,7 +20,7 @@ PRIVATE_TEXT = re.compile(
 
 
 class ShareMessage(BaseModel):
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config = ConfigDict(extra='forbid', frozen=True, revalidate_instances='always')
     role: Literal['user', 'assistant']
     content: Annotated[str, Field(min_length=1, max_length=20000, strict=True)]
 
@@ -33,7 +33,9 @@ class ShareMessage(BaseModel):
 
 
 class CreateShare(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    # Internal callers can pass existing models; a mutable messages list or
+    # model_construct must not bypass the same approval boundary as HTTP JSON.
+    model_config = ConfigDict(extra='forbid', revalidate_instances='always')
     session_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')]
     request_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')]
     messages: Annotated[list[ShareMessage], Field(min_length=1, max_length=500)]

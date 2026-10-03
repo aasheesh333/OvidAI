@@ -186,9 +186,10 @@ void main() {
 
     final status = await McpService.I.connect(server);
 
-    expect(status, contains('connected'));
-    expect(pages, greaterThan(1));
-    expect(pages, lessThanOrEqualTo(50));
+    expect(status, contains('repeated cursor'));
+    expect(McpService.I.isConnected(server.canonicalId), isFalse);
+    expect(McpService.I.connectedTools[server.canonicalId], isNull);
+    expect(pages, 2);
   });
 
   test('an HTTP tool timeout sends notifications/cancelled for that id', () async {

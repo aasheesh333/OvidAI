@@ -4591,18 +4591,41 @@ if (!window.__ovidBlankHooked) {
   }
 
   /// Persist an editor save through the same cache/disk path as agent edits.
+  final _studioFileOperations = Expando<Map<String, Object>>();
+
   Future<void> saveStudioFile(String path, String content) async {
+    final st = _studio;
+    final session = _runSession;
+    final binding = RepoCache.I.bindingGeneration;
+    final before = st.fileBuffer[path];
+    final wasOpen = st.openFiles.contains(path);
+    final active = st.activeFilePath;
+    final operations = _studioFileOperations[st] ??= {};
+    final operation = operations[path] = Object();
     final repoOwns = _ownsRepoCache &&
         (RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null);
-    await _mirrorToDisk(path, content);
+    final cacheBefore = RepoCache.I.files[path];
+    final work = await _sessionWorkDir();
+    if (!identical(st, _studio) || !identical(session, _runSession) ||
+        binding != RepoCache.I.bindingGeneration || operations[path] != operation ||
+        st.fileBuffer[path] != before || (wasOpen && !st.openFiles.contains(path)) ||
+        (repoOwns && RepoCache.I.files[path] != cacheBefore)) {
+      throw StateError('Studio save superseded by an edit or workspace change');
+    }
+    final safe = workspaceFilePath(work, path);
+    if (safe == null) throw StateError('Path escapes workspace or uses a symlink: $path');
+    final file = File(safe);
+    file.parent.createSync(recursive: true);
+    if (workspaceFilePath(work, path) != safe) throw StateError('Workspace path changed while saving: $path');
+    file.writeAsStringSync(content);
+    st.fileBuffer[path] = content;
+    if (!st.openFiles.contains(path)) st.openFiles.add(path);
+    // A background save must not steal selection from a newer tab choice.
+    if (st.activeFilePath == active) st.activeFilePath = path;
     if (repoOwns) {
       RepoCache.I.write(path, content);
       RepoCache.I.didSaveWorkspaceFile(path, content);
     }
-    final st = _studio;
-    st.fileBuffer[path] = content;
-    if (!st.openFiles.contains(path)) st.openFiles.add(path);
-    st.activeFilePath = path;
     notifyListeners();
   }
 
@@ -4688,19 +4711,30 @@ if (!window.__ovidBlankHooked) {
   Future<void> syncOpenFilesFromDisk() async {
     final st = _studio;
     if (st.openFiles.isEmpty) return;
+    final session = _runSession;
+    final binding = RepoCache.I.bindingGeneration;
+    final before = Map<String, String>.of(st.fileBuffer);
+    final operations = _studioFileOperations[st] ??= {};
+    final admitted = {for (final path in st.openFiles) path: operations[path] = Object()};
+    bool owns(String path) => identical(st, _studio) && identical(session, _runSession) &&
+        binding == RepoCache.I.bindingGeneration && operations[path] == admitted[path] &&
+        st.openFiles.contains(path) && st.fileBuffer[path] == before[path];
     var changed = false;
-    for (final path in st.openFiles.toList()) {
+    for (final path in admitted.keys) {
       try {
+        if (!owns(path)) continue;
         final host = (await _resolveFsPath(path)).path;
+        if (!owns(path)) continue;
         if (host == null || host.startsWith('repo:')) continue;
         final f = File(host);
         if (!f.existsSync()) continue;
         final mtime = f.lastModifiedSync().millisecondsSinceEpoch;
         if ((st.syncedMtime[path] ?? -1) >= mtime) continue;
-        st.syncedMtime[path] = mtime;
         // Size guard: don't slurp huge binaries into the editor.
         if (f.lengthSync() > 2 * 1024 * 1024) continue;
         final content = await f.readAsString();
+        if (!owns(path) || f.lastModifiedSync().millisecondsSinceEpoch != mtime) continue;
+        st.syncedMtime[path] = mtime;
         if (content != st.fileBuffer[path]) {
           st.fileBuffer[path] = content;
           changed = true;
@@ -12746,7 +12780,8 @@ ${await _agentsMdBlock()}
             payload: {
               'tool': name,
               'ms': sw.elapsedMilliseconds,
-              'ok': !res.startsWith('DENIED'),
+              'ok': !res.startsWith('DENIED') && !_looksLikeToolError(res),
+              'is_error': res.startsWith('DENIED') || _looksLikeToolError(res),
               'result': cleanTruncate(res, 400),
               'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
             },
@@ -12764,6 +12799,27 @@ ${await _agentsMdBlock()}
             'ok': false,
             'error': '$e',
           }),
+        );
+      }
+      if (HookService.I.hasHookListeners(
+        'post_tool',
+        sessionId: ledgerSid ?? '',
+      )) {
+        unawaited(
+          HookService.I.fire(
+            'post_tool',
+            ledgerSid ?? '',
+            payload: {
+              'tool': name,
+              'ms': sw.elapsedMilliseconds,
+              'ok': false,
+              'is_error': true,
+              // Exceptions may embed credentials or operational arguments.
+              'error': 'Tool execution failed',
+              'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
+            },
+            model: _runSession?.model,
+          ),
         );
       }
       rethrow;

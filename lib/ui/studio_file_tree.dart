@@ -126,6 +126,27 @@ class _StudioFileTreeState extends State<StudioFileTree> {
   final Set<String> _expanded = <String>{};
   final Set<String> _failed = <String>{};
   final Set<String> _loading = <String>{};
+  int _generation = RepoCache.I.bindingGeneration;
+
+  @override
+  void initState() {
+    super.initState();
+    RepoCache.I.addListener(_bindingChanged);
+  }
+
+  void _bindingChanged() {
+    if (_generation == RepoCache.I.bindingGeneration) return;
+    _generation = RepoCache.I.bindingGeneration;
+    _expanded.clear();
+    _failed.clear();
+    _loading.clear();
+  }
+
+  @override
+  void dispose() {
+    RepoCache.I.removeListener(_bindingChanged);
+    super.dispose();
+  }
 
   /// Opens a file, or toggles a directory.
   ///
@@ -140,6 +161,8 @@ class _StudioFileTreeState extends State<StudioFileTree> {
       return;
     }
     final cache = RepoCache.I;
+    final generation = cache.bindingGeneration;
+    final buffers = AgentService.I.fileBuffer;
     final cached = cache.read(node.path);
     if (cached != null) {
       if (_failed.contains(node.path)) setState(() => _failed.remove(node.path));
@@ -150,9 +173,23 @@ class _StudioFileTreeState extends State<StudioFileTree> {
       _loading.add(node.path);
       _failed.remove(node.path);
     });
-    final result = await cache.fetchFileResult(node.path);
+    FetchResult result;
+    try {
+      result = await cache.fetchFileResult(node.path);
+    } catch (error) {
+      if (!mounted || generation != cache.bindingGeneration ||
+          !identical(buffers, AgentService.I.fileBuffer)) {
+        return;
+      }
+      setState(() { _loading.remove(node.path); _failed.add(node.path); });
+      showStudioToast(context, StudioFailure.of(error).message, error: true);
+      return;
+    }
     final content = result.content;
-    if (!mounted) return;
+    if (!mounted || generation != cache.bindingGeneration ||
+        !identical(buffers, AgentService.I.fileBuffer)) {
+      return;
+    }
     setState(() => _loading.remove(node.path));
     if (content == null) {
       setState(() => _failed.add(node.path));

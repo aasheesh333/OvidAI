@@ -76,6 +76,13 @@ unbounded storage growth. At that limit creation returns 429; reads, revocation
 and account cleanup remain available. Configure gateway request-rate limits
 before public deployment.
 
+Creation samples expiry/quota time after acquiring the write transaction, so a
+queued retry cannot receive an already-expired success receipt. A purged body is
+terminal even if the wall clock subsequently moves backward: it is excluded from
+active lists/quota and cannot be replayed. Internal Python callers passing model
+instances receive full schema/content revalidation, including nested messages.
+Configured TTL must be finite and positive.
+
 Defaults: 30-day expiry, 500 messages, 20,000 Unicode characters per message,
 200,000 UTF-8 content bytes, 1,500,000 raw request bytes. Schedule
 `repository.purge_expired()` to erase expired content; expiry is enforced on reads
@@ -116,6 +123,7 @@ lookup on each request. Already copied/downloaded text cannot be withdrawn.
 
 ```sh
 /tmp/opencode/images-venv/bin/python -m unittest discover -s server/shares/tests -v
+/tmp/opencode/images-venv/bin/python -m unittest discover -s server/shares/tests -p 'parallel_shares_*.py' -v
 /root/flutter/bin/flutter test --no-pub test/conversation_share_service_test.dart test/conversation_share_sheet_test.dart test/conversation_share_sidebar_test.dart
 ```
 

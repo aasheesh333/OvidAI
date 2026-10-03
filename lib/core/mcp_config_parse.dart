@@ -201,6 +201,22 @@ String normalizeMcpTransport(String raw) {
 }
 
 List<ImportedMcp> parseMcpConfig(String raw, {Map<String, String>? env}) {
+  try {
+    final entries = _parseMcpConfig(raw, env: env);
+    final names = <String>{};
+    for (final entry in entries) {
+      if (entry.name.trim().isEmpty || !names.add(entry.name.trim())) {
+        return const [];
+      }
+    }
+    return entries;
+  } on FormatException {
+    // Parsing is atomic: never import a subset of an ambiguous declaration.
+    return const [];
+  }
+}
+
+List<ImportedMcp> _parseMcpConfig(String raw, {Map<String, String>? env}) {
   final resolvedEnv = env ?? Platform.environment;
   final trimmed = raw.trim();
   if (trimmed.isEmpty) return const [];
@@ -225,6 +241,7 @@ List<ImportedMcp> _parseMcpJson(String raw, Map<String, String> env) {
   } catch (_) {
     return out;
   }
+  _rejectDuplicateJsonKeys(raw);
   if (decoded is List) {
     for (final e in decoded) {
       if (e is Map) {
@@ -240,6 +257,9 @@ List<ImportedMcp> _parseMcpJson(String raw, Map<String, String> env) {
   }
   if (decoded is! Map) return out;
   final j = decoded.cast<String, dynamic>();
+  if (['mcpServers', 'mcp_servers', 'servers'].where(j.containsKey).length > 1) {
+    throw const FormatException('Ambiguous MCP server wrappers');
+  }
   final servers = j['mcpServers'] ?? j['mcp_servers'] ?? j['servers'];
   if (servers is Map) {
     for (final e in servers.entries) {
@@ -290,6 +310,37 @@ List<ImportedMcp> _parseMcpJson(String raw, Map<String, String> env) {
   return out;
 }
 
+/// jsonDecode discards duplicate keys. Scan the already-validated JSON before
+/// consuming its map, comparing decoded keys (including Unicode escapes).
+void _rejectDuplicateJsonKeys(String raw) {
+  final objects = <Set<String>?>[];
+  for (var i = 0; i < raw.length; i++) {
+    final c = raw[i];
+    if (c == '{') objects.add(<String>{});
+    if (c == '[') objects.add(null);
+    if (c == '}' || c == ']') objects.removeLast();
+    if (c != '"') continue;
+    final start = i++;
+    while (i < raw.length) {
+      if (raw[i] == '\\') {
+        i += 2;
+      } else if (raw[i] == '"') {
+        break;
+      } else {
+        i++;
+      }
+    }
+    var next = i + 1;
+    while (next < raw.length && raw[next].trim().isEmpty) { next++; }
+    if (next < raw.length && raw[next] == ':') {
+      final key = jsonDecode(raw.substring(start, i + 1)) as String;
+      if (!objects.last!.add(key)) {
+        throw const FormatException('Duplicate JSON key');
+      }
+    }
+  }
+}
+
 /// Top-level `.mcp.json` keys that are never server entries when the
 /// wrapper-less shape is used (item 2).
 const _topLevelNonServerKeys = {
@@ -331,6 +382,19 @@ ImportedMcp importedMcpFromJson(
   Map<String, String>? env,
 }) {
   final resolvedEnv = env ?? Platform.environment;
+  if (v['command'] != null && v['cmd'] != null && v['command'] != v['cmd']) {
+    throw const FormatException('Conflicting MCP command aliases');
+  }
+  if (v['transport'] is String && v['type'] is String &&
+      normalizeMcpTransport(v['transport'] as String) !=
+          normalizeMcpTransport(v['type'] as String)) {
+    throw const FormatException('Conflicting MCP transport aliases');
+  }
+  final timeouts = ['timeout', 'startupTimeoutS', 'startup_timeout_s']
+      .map((key) => v[key]).where((value) => value != null).toSet();
+  if (timeouts.length > 1) {
+    throw const FormatException('Conflicting MCP timeout aliases');
+  }
   final rawUrl = (v['url'] as String?)?.trim();
   final url = rawUrl == null
       ? null
@@ -363,7 +427,8 @@ ImportedMcp importedMcpFromJson(
     type: type,
     startupTimeoutS:
         (v['timeout'] as num?)?.toInt() ??
-        (v['startupTimeoutS'] as num?)?.toInt(),
+        (v['startupTimeoutS'] as num?)?.toInt() ??
+        (v['startup_timeout_s'] as num?)?.toInt(),
     oauth: parseMcpOAuthConfig(v['oauth'], env: resolvedEnv),
     ignoredKeys: v.keys.where((k) => !_knownMcpJsonKeys.contains(k)).toList(),
     ignoredFields: {
@@ -403,6 +468,8 @@ class _TomlServerAgg {
 
 List<ImportedMcp> _parseMcpToml(String raw, Map<String, String> env) {
   final servers = <String, _TomlServerAgg>{};
+  final tables = <String>{};
+  final assignments = <String>{};
   _TomlServerAgg serverFor(String name) =>
       servers.putIfAbsent(name, () => _TomlServerAgg(name));
 
@@ -418,6 +485,9 @@ List<ImportedMcp> _parseMcpToml(String raw, Map<String, String> env) {
     }
     final sec = _tomlSection(line);
     if (sec != null) {
+      if (!tables.add('${sec.name}\u0000${sec.sub ?? ''}')) {
+        throw const FormatException('Duplicate MCP TOML table');
+      }
       current = serverFor(sec.name);
       currentSub = sec.sub;
       i++;
@@ -438,6 +508,14 @@ List<ImportedMcp> _parseMcpToml(String raw, Map<String, String> env) {
     }
     final key = line.substring(0, eq).trim();
     final valueRaw = line.substring(eq + 1).trim();
+    if (current != null) {
+      final field = currentSub == null
+          ? key
+          : '$currentSub.${unquoteToml(key)}';
+      if (!assignments.add('${current.name}\u0000$field')) {
+        throw const FormatException('Duplicate MCP TOML key');
+      }
+    }
 
     if (currentSub == 'env') {
       current?.env[unquoteToml(key)] = unquoteToml(valueRaw);
@@ -469,12 +547,22 @@ List<ImportedMcp> _parseMcpToml(String raw, Map<String, String> env) {
         break;
       case 'type':
       case 'transport':
+        if (current.type != null &&
+            normalizeMcpTransport(current.type!) !=
+                normalizeMcpTransport(unquoteToml(valueRaw))) {
+          throw const FormatException('Conflicting MCP transport aliases');
+        }
         current.type = unquoteToml(valueRaw).toLowerCase();
         i++;
         break;
       case 'timeout':
       case 'startuptimeouts':
-        current.timeout = int.tryParse(unquoteToml(valueRaw));
+      case 'startup_timeout_s':
+        final timeout = int.tryParse(unquoteToml(valueRaw));
+        if (current.timeout != null && current.timeout != timeout) {
+          throw const FormatException('Conflicting MCP timeout aliases');
+        }
+        current.timeout = timeout;
         i++;
         break;
       default:

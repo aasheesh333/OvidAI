@@ -91,6 +91,17 @@ commit, followed by key blocking, data/cache cleanup, and Auth/profile removal.
 Tokens needed for crash-safe cleanup are captured in the durable record before
 effects, retained through failures, and removed on completion.
 
+The gateway adapter exposes separately durable `data:gateway`, `data:sql`, and
+`data:redis` checkpoints, followed by the existing aggregate `data` checkpoint.
+A SQL/Redis failure or process exit after an acknowledged, saved key deletion no
+longer replays that gateway operation on restart. SQL cleanup remains one ordered
+transaction; Redis partial deletion remains retryable. Old aggregate `data`
+checkpoints are honored. No schema migration is needed for these JSON checkpoints.
+Upgrade API/worker together: older workers do not honor the new substage markers.
+An effect followed by a lost response or failed checkpoint is still an unknown
+outcome requiring the deployed adapter's retry contract. HTTP 404 is not silently
+treated as proof of successful key/cache cleanup.
+
 Firebase only provides **latest** sign-in metadata, not login history. A newer
 login even after the deadline conservatively cancels when the worker cannot rule
 out an earlier grace login. This may extend cancellation during worker downtime;
@@ -123,12 +134,14 @@ Implemented cleanup adapters:
    login timestamps) remains for idempotency and anti-resurrection. No email/photo
    or key tokens remain after completion. Decide retention before production.
 
-**Missing image cleanup adapter:** the account cleanup chain does not call an
-external image-service/object-store deletion adapter. SQL/Redis/key cleanup alone
-does not establish deletion of image assets or image-service metadata. End-to-end
-account image cleanup remains incomplete and an activation blocker; it requires an
-owned, idempotent external adapter and integration verification. The current
-`deleted` checkpoint describes only this module's implemented cleanup chain.
+**Missing image/share cleanup integration:** the account cleanup chain does not
+call an external image-service/object-store deletion adapter or the shares
+repository's `delete_account(uid)` hook. SQL/Redis/key cleanup alone does not
+establish deletion of image assets, image-service metadata, or share snapshots.
+End-to-end account cleanup remains incomplete and an activation blocker; it
+requires owned, idempotent adapters wired to the actual deployed stores and
+integration verification. The current `deleted` checkpoint describes only this
+module's implemented cleanup chain.
 
 `ACCOUNT_CLEANUP_MANIFEST` is a JSON file reviewed against the deployed schema:
 `{"scopes":[...]}`. Each scope has `table`, `column`, `kind` (`uid` or `token`) and
@@ -234,3 +247,10 @@ the store's due query/upserts and repeatable migration on in-memory SQLite with
 PostgreSQL-style JSON text extraction. They cover the original schema, preserved
 legacy rows, retry ordering and 100 poison rows ahead of healthy work; they do not
 validate PostgreSQL-specific locks, query plans or concurrent DDL.
+
+`tests/parallel_account_cleanup_test.py` also executes the real lifecycle,
+gateway, SQL-manifest and Redis adapters with disk-backed SQLite checkpoints and
+SQL transactions, controlled HTTP transport, and Firebase/Redis doubles. It covers
+SQL rollback, partial Redis deletion, process-exit recovery, unresolved gateway
+outcomes, exact fractional grace/settlement boundaries and cancellation aliases.
+These fixtures establish local behavior, not deployed backend acceptance.

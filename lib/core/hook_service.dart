@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -320,6 +321,23 @@ class HookService extends ChangeNotifier {
   final Map<String, Map<String, String>> _sessionContexts = {};
   final Map<String, int> _sessionContextEpochs = {};
   final HookContextStore _contextStore = HookContextStore();
+  // Environment files are ephemeral, plugin-owned and generation-scoped.
+  // Never reopen a prior process's plaintext environment on restart.
+  final String _envBoot = DateTime.now().microsecondsSinceEpoch.toString();
+  int _envSerial = 0;
+  final Map<String, Map<String, (String, NormalizedPluginManifest?)>> _envFiles = {};
+  final Map<String, (Object, int)> _endingSessions = {};
+
+  bool _hookCurrent(String sessionId, String pluginId, PluginHook hook, int epoch) {
+    if (!enabled || epoch != (_sessionContextEpochs[sessionId] ?? 0)) return false;
+    if (pluginId.startsWith('legacy:')) {
+      return _resolveHooks(hook.event, sessionId).any((e) =>
+        e.$1 == pluginId && e.$2.payload == hook.payload);
+    }
+    final registry = PluginContributionRegistry.I;
+    return registry.isPluginActiveForSession(pluginId, sessionId) &&
+        (registry.manifestFor(pluginId)?.hooks.any((h) => identical(h, hook)) ?? false);
+  }
 
   /// The `session_start` context a hook produced for [sessionId], or ''.
   String sessionContextFor(String sessionId) {
@@ -389,7 +407,7 @@ class HookService extends ChangeNotifier {
   static String extractHookContext(String stdout) {
     final t = stdout.trim();
     if (t.isEmpty) return '';
-    if (t.startsWith('{') && t.endsWith('}')) {
+    if (t.startsWith('{') || t.startsWith('[')) {
       try {
         final j = jsonDecode(t);
         if (j is Map) {
@@ -408,8 +426,9 @@ class HookService extends ChangeNotifier {
           return '';
         }
       } catch (_) {
-        // Not JSON after all — fall through to raw text.
+        return ''; // Malformed protocol output is never prompt context.
       }
+      return '';
     }
     return t;
   }
@@ -417,6 +436,11 @@ class HookService extends ChangeNotifier {
   /// Reset the per-session context map + test seams (isolated tests).
   @visibleForTesting
   void resetForTest() {
+    for (final files in _envFiles.values) {
+      for (final file in files.values) { _removeEnvFile(file.$1); }
+    }
+    _envFiles.clear();
+    _endingSessions.clear();
     _sessionContexts.clear();
     _sessionContextEpochs.clear();
     executorForTest = null;
@@ -443,6 +467,12 @@ class HookService extends ChangeNotifier {
 
   Future<void> setEnabled(bool v) async {
     enabled = v;
+    if (!v) {
+      for (final sid in {..._sessionContextEpochs.keys, ..._sessionContexts.keys, ..._envFiles.keys}) {
+        _sessionContextEpochs[sid] = (_sessionContextEpochs[sid] ?? 0) + 1;
+        await _deleteSessionEnv(sid);
+      }
+    }
     notifyListeners();
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -619,6 +649,40 @@ class HookService extends ChangeNotifier {
     return value;
   }
 
+  static Object? _decodedOutput(String text) {
+    try { return jsonDecode(text); } catch (_) { return null; }
+  }
+
+  static String _safeOutput(String text, Map<String, dynamic> known) {
+    final secrets = <String>{};
+    void collect(Object? value, [bool secret = false]) {
+      if (value is Map) {
+        for (final e in value.entries) {
+          collect(e.value, secret || _isSecretKey(e.key.toString()));
+        }
+      } else if (value is List) {
+        for (final item in value) { collect(item, secret); }
+      } else if (secret && value is String && value.isNotEmpty) {
+        secrets.add(value);
+      }
+    }
+    collect(known);
+    Object? decoded;
+    try { decoded = jsonDecode(text); } catch (_) {
+      Diag.swallow('hook_output', 'non-JSON output handled as text');
+    }
+    collect(decoded);
+    var safe = decoded is Map || decoded is List
+        ? jsonEncode(_redactValue(decoded)) : text;
+    final ordered = secrets.toList()..sort((a, b) => b.length.compareTo(a.length));
+    for (final secret in ordered) {
+      safe = safe.replaceAll(secret, '[redacted]');
+      final encoded = jsonEncode(secret);
+      safe = safe.replaceAll(encoded.substring(1, encoded.length - 1), '[redacted]');
+    }
+    return safe;
+  }
+
   /// One resolved hook invocation target.
   ///
   /// [CC] matchers are event-specific: tool events match the tool name, but
@@ -703,6 +767,12 @@ class HookService extends ChangeNotifier {
   }
 
   bool _hookMatches(String pluginId, PluginHook hook, String event, Map<String, dynamic> payload) {
+    final source = hook.unknownFields['ovidSourceEvent'];
+    if (event == 'post_tool' && source != null) {
+      final failure = payload['hook_event_name'] == 'PostToolUseFailure' ||
+          payload['is_error'] == true || payload['error'] != null;
+      if ((source == 'PostToolUseFailure') != failure) return false;
+    }
     final alias = _ccAliasPayload(pluginId, payload);
     final toolEvent = _isToolEvent(event) || event == 'permission_request';
     final isCc = PluginContributionRegistry.I.manifestFor(pluginId)?.format == PluginFormat.claudeCode;
@@ -732,7 +802,7 @@ class HookService extends ChangeNotifier {
     Map<String, dynamic> payload,
   ) {
     if (canonicalEvent == 'session_start' || canonicalEvent == 'session_end') {
-      final reason = payload['reason']?.toString() ?? '';
+      final reason = (canonicalEvent == 'session_start' ? payload['source'] ?? payload['reason'] : payload['reason'])?.toString() ?? '';
       return _ccSessionSource(reason);
     }
     if (canonicalEvent == 'pre_compact' || canonicalEvent == 'post_compact') {
@@ -1004,12 +1074,69 @@ class HookService extends ChangeNotifier {
   /// SessionStart hook appends `KEY=VALUE` lines to it (via
   /// `hookSpecificOutput.envFileAppend`); subsequent hooks in the same
   /// session inherit those vars. Empty when no dir is available.
-  Future<String> _sessionEnvFilePath(String sessionId) async {
+  Future<String> _sessionEnvFilePath(String sessionId, String pluginId) async {
     if (sessionId.isEmpty) return '';
+    final epoch = _sessionContextEpochs.putIfAbsent(sessionId, () => 0);
     final dir = await _hookEnvDir();
-    if (dir == null) return '';
-    final safe = sessionId.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-    return '${dir.path}/$safe.env';
+    if (dir == null || epoch != _sessionContextEpochs[sessionId]) return '';
+    _reconcileSessionEnv(sessionId);
+    final files = _envFiles.putIfAbsent(sessionId, () => {});
+    return files.putIfAbsent(pluginId, () {
+      final digest = sha256.convert(utf8.encode(jsonEncode([sessionId, pluginId, epoch])));
+      return ('${dir.path}/$_envBoot-${_envSerial++}-$digest.env',
+        PluginContributionRegistry.I.manifestFor(pluginId));
+    }).$1;
+  }
+
+  void _removeEnvFile(String path) {
+    try {
+      if (FileSystemEntity.typeSync(path, followLinks: false) != FileSystemEntityType.notFound) {
+        File(path).deleteSync();
+      }
+    } catch (_) { Diag.swallow('hook_env', 'environment cleanup unavailable'); }
+  }
+
+  void _reconcileSessionEnv(String sessionId) {
+    _envFiles[sessionId]?.removeWhere((pid, entry) {
+      final registry = PluginContributionRegistry.I;
+      final valid = pid.startsWith('legacy:')
+          ? _resolveHooks('session_start', sessionId).any((e) => e.$1 == pid)
+          : registry.isPluginActiveForSession(pid, sessionId) &&
+            identical(entry.$2, registry.manifestFor(pid));
+      if (!valid) _removeEnvFile(entry.$1);
+      return !valid;
+    });
+  }
+
+  static bool _safeEnvName(String name) =>
+      RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(name) &&
+      !name.startsWith('PLUGIN_') && !name.startsWith('OVID_') &&
+      !name.startsWith('CLAUDE_') && !name.startsWith('CODEX_') &&
+      !name.startsWith('LD_') && !name.startsWith('DYLD_') &&
+      !const {'BASH_ENV', 'ENV', 'SHELLOPTS', 'BASHOPTS', 'IFS', 'NODE_OPTIONS',
+        'PYTHONSTARTUP'}.contains(name);
+
+  // A data-only subset of shell exports: no expansion, substitution or source.
+  static MapEntry<String, String>? _envAssignment(String raw) {
+    var line = raw.trim();
+    if (line.contains('\n') || line.contains('\r') || line.contains('\u0000')) return null;
+    if (line.startsWith('export ')) line = line.substring(7).trimLeft();
+    final eq = line.indexOf('=');
+    if (eq <= 0) return null;
+    final name = line.substring(0, eq).trim();
+    if (!_safeEnvName(name)) return null;
+    var value = line.substring(eq + 1);
+    if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+      value = value.substring(1, value.length - 1);
+      if (value.contains("'")) return null;
+    } else {
+      if (value.contains(RegExp(r'[\$`;|&<>\\]'))) return null;
+      if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+        value = value.substring(1, value.length - 1);
+      }
+      if (value.contains('"') || value.contains("'")) return null;
+    }
+    return MapEntry(name, value);
   }
 
   /// Load the session env file into a map (item 8). Malformed lines are
@@ -1019,7 +1146,10 @@ class HookService extends ChangeNotifier {
     if (path.isEmpty) return const {};
     try {
       final f = File(path);
-      if (!f.existsSync()) return const {};
+      if (FileSystemEntity.typeSync(path, followLinks: false) != FileSystemEntityType.file ||
+          f.lengthSync() > 65536) {
+        return const {};
+      }
       final text = f.readAsStringSync();
       final capped = text.length > 65536
           ? text.substring(0, 65536)
@@ -1028,11 +1158,12 @@ class HookService extends ChangeNotifier {
       for (final rawLine in capped.split('\n')) {
         final line = rawLine.trim();
         if (line.isEmpty || line.startsWith('#')) continue;
-        final eq = line.indexOf('=');
-        if (eq <= 0) continue;
-        final name = line.substring(0, eq).trim();
-        if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(name)) continue;
-        out[name] = line.substring(eq + 1);
+        final assignment = _envAssignment(line);
+        if (assignment != null) {
+          out[assignment.key] = assignment.value;
+        } else {
+          Diag.swallow('hook_env', 'unsupported environment assignment skipped');
+        }
       }
       return out;
     } catch (_) {
@@ -1042,35 +1173,25 @@ class HookService extends ChangeNotifier {
 
   /// Append validated `KEY=VALUE` lines to the session env file (called
   /// for SessionStart hook output). Best-effort — never throws.
-  Future<void> _appendSessionEnv(String sessionId, List<String> lines) async {
+  void _appendSessionEnv(String path, List<String> lines) {
     if (lines.isEmpty) return;
     try {
-      final path = await _sessionEnvFilePath(sessionId);
       if (path.isEmpty) return;
       final f = File(path);
-      if (f.existsSync() && f.lengthSync() > 65536) return;
-      final sink = f.openWrite(mode: FileMode.append);
-      try {
-        for (final line in lines) {
-          sink.writeln(line);
-        }
-        await sink.close();
-      } catch (_) {
-        try {
-          await sink.close();
-        } catch (e) { Diag.swallow('hook_service', e); }
-      }
-    } catch (e) { Diag.swallow('hook_service', e); }
+      final type = FileSystemEntity.typeSync(path, followLinks: false);
+      if (type != FileSystemEntityType.file && type != FileSystemEntityType.notFound) return;
+      final bytes = utf8.encode('${lines.join('\n')}\n');
+      if ((f.existsSync() ? f.lengthSync() : 0) + bytes.length > 65536) return;
+      f.writeAsBytesSync(bytes, mode: FileMode.append);
+    } catch (_) { Diag.swallow('hook_env', 'environment update unavailable'); }
   }
 
   /// Delete the session env file (session_end cleanup).
   Future<void> _deleteSessionEnv(String sessionId) async {
-    try {
-      final path = await _sessionEnvFilePath(sessionId);
-      if (path.isEmpty) return;
-      final f = File(path);
-      if (f.existsSync()) f.deleteSync();
-    } catch (e) { Diag.swallow('hook_service', e); }
+    final files = _envFiles.remove(sessionId);
+    if (files != null) {
+      for (final entry in files.values) { _removeEnvFile(entry.$1); }
+    }
   }
 
   Future<Map<String, String>> _envFor({
@@ -1089,8 +1210,11 @@ class HookService extends ChangeNotifier {
     // Per-session env vars a SessionStart hook persisted via
     // `hookSpecificOutput.envFileAppend` (item 8). Spread FIRST so the
     // built-in contract below always wins on collision.
-    final envFilePath = await _sessionEnvFilePath(sessionId);
-    final sessionEnv = _loadSessionEnv(envFilePath);
+    final envFilePath = await _sessionEnvFilePath(sessionId, pluginId);
+    final sessionEnv = <String, String>{};
+    for (final entry in _envFiles[sessionId]?.values ?? <(String, NormalizedPluginManifest?)>[]) {
+      sessionEnv.addAll(_loadSessionEnv(entry.$1));
+    }
     final runtime = HookExecutionScope.dependencyRoot(
       PluginContributionRegistry.I.manifestFor(pluginId),
     );
@@ -1305,20 +1429,33 @@ class HookService extends ChangeNotifier {
     );
     // Subscribe to stdout/stderr BEFORE touching stdin so a chatty hook
     // can never deadlock on a full pipe while we write.
-    final stdoutFuture = proc.stdout.transform(utf8.decoder).join();
-    final stderrFuture = proc.stderr.transform(utf8.decoder).join();
-    try {
-      if (stdinPayload.isNotEmpty) {
-        proc.stdin.add(utf8.encode(stdinPayload));
+    var oversized = false;
+    Future<String> readBounded(Stream<List<int>> stream) async {
+      final bytes = <int>[];
+      await for (final chunk in stream) {
+        if (bytes.length + chunk.length > 65536) {
+          oversized = true;
+          proc.kill(ProcessSignal.sigkill);
+        } else if (!oversized) {
+          bytes.addAll(chunk);
+        }
       }
-      await proc.stdin.close();
-    } catch (_) {
-      // A hook that exits before reading stdin (closed pipe) must not fail
-      // the invocation — its exit code/output still decide.
+      return utf8.decode(bytes, allowMalformed: true);
     }
-    int code;
+    final stdoutFuture = readBounded(proc.stdout);
+    final stderrFuture = readBounded(proc.stderr);
     try {
-      code = await proc.exitCode.timeout(timeout);
+      return await (() async {
+        try {
+          if (stdinPayload.isNotEmpty) proc.stdin.add(utf8.encode(stdinPayload));
+          await proc.stdin.close();
+        } catch (_) { /* Early exit can close stdin before we finish writing. */ }
+        final code = await proc.exitCode;
+        final out = await stdoutFuture;
+        final err = await stderrFuture;
+        if (oversized) throw StateError('hook output exceeds limit');
+        return (code, out, err);
+      })().timeout(timeout);
     } on TimeoutException {
       // The old execChecked path leaked the timed-out process; kill it so
       // a hung hook cannot outlive its timeout (Stop can also reach it via
@@ -1328,9 +1465,6 @@ class HookService extends ChangeNotifier {
       } catch (e) { Diag.swallow('hook_service', e); }
       rethrow;
     }
-    final out = await stdoutFuture;
-    final err = await stderrFuture;
-    return (code, out, err);
   }
 
   Future<void> _ledger(String sessionId, String kind, Map<String, dynamic> d) {
@@ -1374,17 +1508,57 @@ class HookService extends ChangeNotifier {
     Set<String>? completedStartHooks,
   }) async {
     final canonical = canonicalHookEvent(event) ?? event;
-    if (canonical == 'session_end') {
+    // Admission must precede any start-generation mutation. A rejected nested
+    // or overlapping start cannot invalidate the start already publishing.
+    if (canonical == 'session_start') {
+      if (!enabled) return const HookFireResult(output: '');
+      if (_firingEvents.contains('$sessionId|$canonical') || _chainDepth() >= maxDepth) {
+        return const HookFireResult(output: '', retryableFailure: true);
+      }
+    }
+    if (event == 'PostToolUseFailure') {
+      payload = {...payload, 'hook_event_name': 'PostToolUseFailure'};
+    }
+    Map<String, (String, NormalizedPluginManifest?)>? endingEnv;
+    Object? endToken;
+    void cleanEndingEnv() {
+      if (endToken != null && identical(_endingSessions[sessionId]?.$1, endToken)) {
+        _endingSessions.remove(sessionId);
+      }
+      final files = endingEnv;
+      if (files == null) return;
+      if (identical(_envFiles[sessionId], files)) _envFiles.remove(sessionId);
+      for (final entry in files.values) { _removeEnvFile(entry.$1); }
+    }
+    if (canonical == 'session_start' && _endingSessions.containsKey(sessionId) &&
+        _endingSessions[sessionId]!.$2 == (_sessionContextEpochs[sessionId] ?? 0)) {
+      // A new start owns a new epoch/map while the old end retains only its
+      // captured files. Detach once: later targeted starts share the fresh map.
       _sessionContextEpochs[sessionId] = (_sessionContextEpochs[sessionId] ?? 0) + 1;
+      _envFiles.remove(sessionId);
+    }
+    if (canonical == 'session_end') {
+      if (_endingSessions.containsKey(sessionId)) {
+        return const HookFireResult(output: '', retryableFailure: true);
+      }
+      endToken = Object();
+      endingEnv = _envFiles.putIfAbsent(sessionId, () => {});
+      _sessionContextEpochs[sessionId] = (_sessionContextEpochs[sessionId] ?? 0) + 1;
+      _endingSessions[sessionId] = (endToken, _sessionContextEpochs[sessionId]!);
+      final endEpoch = _sessionContextEpochs[sessionId];
       _sessionContexts.remove(sessionId);
       try {
         await _contextStore.deleteSession(sessionId);
       } catch (_) {
         Diag.swallow('hook_context', 'encrypted context deletion unavailable');
       }
+      if (endEpoch != _sessionContextEpochs[sessionId]) {
+        cleanEndingEnv();
+        return const HookFireResult(output: '');
+      }
     }
     if (!enabled) {
-      if (canonical == 'session_end') await _deleteSessionEnv(sessionId);
+      cleanEndingEnv();
       return const HookFireResult(output: '');
     }
     // Recursion prevention: never re-fire the SAME event for the SAME session
@@ -1392,13 +1566,17 @@ class HookService extends ChangeNotifier {
     // must both run (workflow child fan-out).
     final guardKey = '$sessionId|$canonical';
     if (_firingEvents.contains(guardKey)) {
+      cleanEndingEnv();
       return const HookFireResult(output: '', retryableFailure: true);
     }
     final chainDepth = _chainDepth();
-    if (chainDepth >= maxDepth) return const HookFireResult(output: '', retryableFailure: true);
+    if (chainDepth >= maxDepth) {
+      cleanEndingEnv();
+      return const HookFireResult(output: '', retryableFailure: true);
+    }
     final hooks = _resolveHooks(event, sessionId, onlyPluginId: onlyPluginId);
     if (hooks.isEmpty && canonical != 'session_start') {
-      if (canonical == 'session_end') await _deleteSessionEnv(sessionId);
+      cleanEndingEnv();
       return const HookFireResult(output: '');
     }
 
@@ -1425,7 +1603,7 @@ class HookService extends ChangeNotifier {
       return result;
     } finally {
       _firingEvents.remove(guardKey);
-      if (canonical == 'session_end') await _deleteSessionEnv(sessionId);
+      cleanEndingEnv();
     }
   }
 
@@ -1442,6 +1620,7 @@ class HookService extends ChangeNotifier {
     required String? model,
     required String stdinJson,
   }) async {
+    final epoch = _sessionContextEpochs[sessionId] ?? 0;
     final record = {
       'plugin': pluginId,
       'event': canonical,
@@ -1482,21 +1661,25 @@ class HookService extends ChangeNotifier {
         'plugin': _displayName(pluginId),
         'hook': hook.canonicalId,
         'model': ?model,
-      }).timeout(const Duration(seconds: 120));
+      }).timeout(Duration(seconds: hook.timeoutS <= 0 ? 120 : hook.timeoutS.clamp(1, maxTimeoutS)));
     } catch (e) {
+      if (!_hookCurrent(sessionId, pluginId, hook, epoch)) return null;
       failed++;
       _recordFailure(pluginId, sessionId);
       try {
         await _ledger(sessionId, 'hook/result', {
           ...record,
           'ok': false,
-          'error': e.toString(),
+          'error': 'prompt-hook evaluation failed',
           'warning': 'prompt-hook evaluation failed (fail-open)',
         });
       } catch (e) { Diag.swallow('hook_service', e); }
       return null;
     }
-    final verdict = parsePromptHookDecision(response ?? '');
+    if (!_hookCurrent(sessionId, pluginId, hook, epoch)) return null;
+    final parsed = parsePromptHookDecision(response ?? '');
+    final verdict = parsed == null ? null : PromptHookVerdict(parsed.decision,
+        parsed.reason == null ? null : _safeOutput(parsed.reason!, payload));
     if (verdict == null) {
       _recordSuccess(pluginId, sessionId);
       try {
@@ -1531,7 +1714,7 @@ class HookService extends ChangeNotifier {
     final eventName = ccHookEventNames[canonical] ?? canonical;
     return 'You are evaluating a plugin hook rule for the "$eventName" '
         'event (session "$sessionId"). The plugin registered this rule:\n\n'
-        '${hook.payload}\n\n'
+        '${hook.payload.replaceAll(r'$ARGUMENTS', stdinJson)}\n\n'
         'The current event context (JSON):\n$stdinJson\n\n'
         'Decide whether this event violates the rule. Reply with exactly '
         'one word — "block" or "approve" — or with JSON '
@@ -1572,13 +1755,14 @@ class HookService extends ChangeNotifier {
       cwd: cwd?.path ?? '',
       transcriptPath: _transcriptPathFrom(payload),
     );
-    final collected = <String>[];
-    final systemMessages = <String>[];
+    final collected = <(String, PluginHook, String)>[];
+    final systemMessages = <(String, PluginHook, String)>[];
+    final promptBlocks = <(String, PluginHook, String)>[];
     var halted = false;
     var retryableFailure = false;
-    String? promptBlockReason;
     String? blockedReason;
     for (final (pluginId, hook, declaredEvent) in hooks) {
+      if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
       if (!_hookMatches(pluginId, hook, canonical, payload)) continue;
       final startKey = _contextKey(pluginId, hook);
       if (canonical == 'session_start' && completedStartHooks?.contains(startKey) == true) {
@@ -1605,9 +1789,10 @@ class HookService extends ChangeNotifier {
             model: model,
             stdinJson: stdinJson,
           );
+          if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
           if (verdict != null && verdict.decision == 'block') {
-            promptBlockReason ??=
-                verdict.reason ?? 'blocked by prompt hook ($pluginId)';
+            promptBlocks.add((pluginId, hook,
+                verdict.reason ?? 'blocked by prompt hook ($pluginId)'));
           }
           continue;
         }
@@ -1639,8 +1824,9 @@ class HookService extends ChangeNotifier {
       final record = {
         'plugin': pluginId,
         'event': canonical,
-        'command': hook.payload,
+        'hook': hook.canonicalId,
       };
+      if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
       fired++;
       try {
         await _ledger(
@@ -1662,6 +1848,10 @@ class HookService extends ChangeNotifier {
         unawaited(
           _exec(hook, env, cwd, stdinPayload: stdinJson)
               .then((result) async {
+                if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) {
+                  _removeEnvFile(env['CLAUDE_ENV_FILE'] ?? '');
+                  return;
+                }
                 final (code, out, err) = result;
                 if (code == 0) {
                   _recordSuccess(pluginId, sessionId);
@@ -1685,13 +1875,26 @@ class HookService extends ChangeNotifier {
                 } catch (e) { Diag.swallow('hook_service', e); }
               })
               .catchError((Object error) {
+                if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) return;
                 if (error is! HookRuntimeUnavailable) _recordFailure(pluginId, sessionId);
               }),
         );
         continue;
       }
       try {
-        final (code, out, err) = await _exec(hook, env, cwd, stdinPayload: stdinJson);
+        if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
+        final (code, rawOut, rawErr) = await _exec(hook, env, cwd, stdinPayload: stdinJson);
+        if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) {
+          _removeEnvFile(env['CLAUDE_ENV_FILE'] ?? '');
+          continue;
+        }
+        if (code == 0 && canonical == 'session_start') {
+          _appendSessionEnv(env['CLAUDE_ENV_FILE'] ?? '', extractEnvFileAppend(rawOut));
+        }
+        final known = <String, dynamic>{...payload, ...env,
+          ..._loadSessionEnv(env['CLAUDE_ENV_FILE'] ?? '')};
+        final out = _safeOutput(rawOut, known);
+        final err = _safeOutput(rawErr, known);
         if (code != 0) {
           // CLAUDE CODE PARITY (audit 2026-09-25): on the two events Claude
           // Code lets a command hook block — `user_prompt_submit` (block the
@@ -1741,13 +1944,8 @@ class HookService extends ChangeNotifier {
         }
         // A SessionStart hook may persist vars for the session via
         // `hookSpecificOutput.envFileAppend` (item 8).
-        if (canonical == 'session_start') {
-          final appends = extractEnvFileAppend(out);
-          if (appends.isNotEmpty) {
-            await _appendSessionEnv(sessionId, appends);
-          }
-        }
-        final contract = HookOutputContract.parse(out);
+        final contract = HookOutputContract.parse(rawOut);
+        final published = HookOutputContract.parse(out);
         final trimmed = out.trim();
         final context = contract.suppressOutput ? '' : extractHookContext(out);
         if (canonical == 'session_start') {
@@ -1775,10 +1973,10 @@ class HookService extends ChangeNotifier {
         }
         if (trimmed.isNotEmpty && !contract.suppressOutput) {
           final isContextEvent = canonical == 'pre_request' || canonical == 'user_prompt_submit';
-          collected.add(isContextEvent ? context : trimmed);
+          collected.add((pluginId, hook, isContextEvent ? context : trimmed));
         }
-        if (contract.systemMessage != null) {
-          systemMessages.add(contract.systemMessage!);
+        if (published.systemMessage != null) {
+          systemMessages.add((pluginId, hook, published.systemMessage!));
         }
         try {
           await _ledger(sessionId, 'hook/result', {
@@ -1788,8 +1986,8 @@ class HookService extends ChangeNotifier {
             'stderrChars': err.length,
             if (!contract.continueHooks) 'halted': true,
             if (contract.suppressOutput) 'suppressOutput': true,
-            if (contract.systemMessage != null)
-              'systemMessage': contract.systemMessage,
+            if (published.systemMessage != null)
+              'systemMessage': published.systemMessage,
           });
         } catch (e) { Diag.swallow('hook_service', e); }
         // `continue:false` halts further hooks for this event (item 9).
@@ -1798,6 +1996,7 @@ class HookService extends ChangeNotifier {
           break;
         }
       } catch (e) {
+        if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
         failed++;
         retryableFailure = true;
         if (e is! HookRuntimeUnavailable && canonical != 'session_start') {
@@ -1813,16 +2012,23 @@ class HookService extends ChangeNotifier {
         } catch (e) { Diag.swallow('hook_service', e); }
       }
     }
-    final joined = collected.join('\n');
+    if (!enabled || contextEpoch != (_sessionContextEpochs[sessionId] ?? 0)) {
+      return const HookFireResult(output: '');
+    }
+    List<String> activeText(List<(String, PluginHook, String)> values) => [
+      for (final entry in values)
+        if (_hookCurrent(sessionId, entry.$1, entry.$2, contextEpoch)) entry.$3,
+    ];
+    final joined = activeText(collected).join('\n');
     // SessionStart's public output retains its legacy stdout shape. Standing
     // context is already parsed per hook above; never truncate a JSON envelope.
     final output = canonical == 'pre_request' || canonical == 'user_prompt_submit'
         ? _capContext(joined, 2048) : joined;
     return HookFireResult(
       output: output,
-      systemMessages: systemMessages,
+      systemMessages: activeText(systemMessages),
       halted: halted,
-      promptBlockReason: promptBlockReason,
+      promptBlockReason: activeText(promptBlocks).firstOrNull,
       blockedReason: blockedReason,
       retryableFailure: retryableFailure,
     );
@@ -1909,7 +2115,10 @@ class HookService extends ChangeNotifier {
           : _transcriptPathFrom(redacted),
       'cwd': cwd,
       'permission_mode': redacted['permission_mode']?.toString() ?? '',
-      'hook_event_name': ccHookEventNames[canonicalEvent] ?? canonicalEvent,
+      'hook_event_name': canonicalEvent == 'post_tool' &&
+          (redacted['hook_event_name'] == 'PostToolUseFailure' ||
+           redacted['is_error'] == true || redacted['error'] != null)
+          ? 'PostToolUseFailure' : ccHookEventNames[canonicalEvent] ?? canonicalEvent,
     };
     final tool = redacted['tool'] ?? redacted['tool_name'];
     if (tool != null) m['tool_name'] = tool.toString();
@@ -1925,6 +2134,9 @@ class HookService extends ChangeNotifier {
     if (prompt != null) m['prompt'] = prompt;
     final reason = redacted['reason'];
     if (reason != null) m['reason'] = reason.toString();
+    if (canonicalEvent == 'session_start') {
+      m['source'] = redacted['source'] ?? _ccSessionSource(reason?.toString() ?? '');
+    }
     // Event-specific extras real hooks read.
     if (canonicalEvent == 'notification' && redacted['message'] != null) {
       m['message'] = redacted['message'];
@@ -2000,6 +2212,11 @@ class HookService extends ChangeNotifier {
       try {
         final j = jsonDecode(t);
         if (j is Map) {
+          if (j['ok'] is bool) {
+            final reason = j['reason'];
+            return PromptHookVerdict(j['ok'] == true ? 'approve' : 'block',
+              reason is String ? reason : null);
+          }
           final d = j['decision']?.toString().toLowerCase().trim();
           if (d == 'block' || d == 'approve') {
             final r = j['reason'];
@@ -2076,11 +2293,14 @@ class HookService extends ChangeNotifier {
         for (final e in envMap.entries) '${e.key}=${e.value}',
       ];
     }
-    final nameRe = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*=');
-    return [
+    final accepted = [
       for (final line in raw)
-        if (nameRe.hasMatch(line.trim())) line.trim(),
+        if (_envAssignment(line) != null) line.trim(),
     ];
+    if (accepted.length != raw.length) {
+      Diag.swallow('hook_env', 'unsupported environment assignment skipped');
+    }
+    return accepted;
   }
 
   // ── fireGate: blocking events (pre_tool, permission_request) ────────
@@ -2198,6 +2418,9 @@ class HookService extends ChangeNotifier {
         ),
         zoneValues: {_depthKey: chainDepth + 1},
       );
+      if (userStopChecker?.call(sessionId) == true) {
+        return const HookStopResult.allow(userInitiated: true);
+      }
       if (gate.decision == HookDecision.deny) {
         return HookStopResult.veto(
           gate.decidedByPlugin,
@@ -2221,6 +2444,7 @@ class HookService extends ChangeNotifier {
     required Map<String, dynamic> payload,
     required String? model,
   }) async {
+    final epoch = _sessionContextEpochs[sessionId] ?? 0;
     final payloadJson = jsonEncode({
       'event': canonical,
       'session': sessionId,
@@ -2235,10 +2459,20 @@ class HookService extends ChangeNotifier {
       transcriptPath: _transcriptPathFrom(payload),
     );
     Map<String, dynamic>? updatedInput;
+    final rewrites = <(String, PluginHook, Map<String, dynamic>)>[];
+    final allows = <(String, PluginHook)>[];
+    void reconcileContributions() {
+      rewrites.removeWhere((e) => !_hookCurrent(sessionId, e.$1, e.$2, epoch));
+      allows.removeWhere((e) => !_hookCurrent(sessionId, e.$1, e.$2, epoch));
+      updatedInput = rewrites.lastOrNull?.$3;
+    }
     // Set when any hook returns permissionDecision:"allow" — the caller then
     // skips the ordinary user approval prompt for this call (audit 2026-09-25).
     var bypassPermission = false;
     for (final (pluginId, hook, declaredEvent) in hooks) {
+      reconcileContributions();
+      bypassPermission = allows.isNotEmpty;
+      if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
       if (!_hookMatches(pluginId, hook, canonical, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
       final displayName = _displayName(pluginId);
@@ -2255,6 +2489,8 @@ class HookService extends ChangeNotifier {
           model: model,
           stdinJson: stdinJson,
         );
+        if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
+        reconcileContributions();
         if (verdict != null && verdict.decision == 'block') {
           failed++;
           final reason =
@@ -2293,8 +2529,9 @@ class HookService extends ChangeNotifier {
       final record = {
         'plugin': pluginId,
         'event': canonical,
-        'command': hook.payload,
+        'hook': hook.canonicalId,
       };
+      if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
       fired++;
       try {
         await _ledger(
@@ -2304,13 +2541,19 @@ class HookService extends ChangeNotifier {
         );
       } catch (e) { Diag.swallow('hook_service', e); }
       try {
-        final (code, out, err) = await _exec(
+        if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
+        final (code, rawOut, rawErr) = await _exec(
           hook,
           env,
           cwd,
           gate: true,
           stdinPayload: stdinJson,
         );
+        if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
+        final known = <String, dynamic>{'payload': payload, 'env': env,
+          'output': _decodedOutput(rawOut)};
+        final out = _safeOutput(rawOut, known);
+        final err = _safeOutput(rawErr, known);
         if (code != 0 && code != 2) {
           failed++;
           if (code == 126 || code == 127) {
@@ -2324,13 +2567,17 @@ class HookService extends ChangeNotifier {
           });
           continue;
         }
-        final contract = HookOutputContract.parse(out);
+        // Decisions and executable arguments are operational data. Never parse
+        // them from a publication copy: a credential can equal "deny".
+        final contract = HookOutputContract.parse(rawOut);
         // Rewritten tool args (item 5) — collected even from hooks that
         // allow, so the caller can apply them pre-execution.
         if (contract.updatedInput != null) {
-          updatedInput = contract.updatedInput;
+          rewrites.add((pluginId, hook, contract.updatedInput!));
         }
-        final blockReason = jsonBlockReason(out);
+        reconcileContributions();
+        final rawBlockReason = jsonBlockReason(rawOut);
+        final blockReason = rawBlockReason == null ? null : _safeOutput(rawBlockReason, known);
         final decision = contract.decision;
         final permDecision = contract.permissionDecision;
         final denies =
@@ -2342,18 +2589,19 @@ class HookService extends ChangeNotifier {
         final asks = !denies &&
             (decision == 'ask' || permDecision == 'ask');
         if (!denies && !asks && permDecision == 'allow') {
+          allows.add((pluginId, hook));
           bypassPermission = true;
         }
         if (denies || asks) {
           failed++;
-          final reason =
+          final reason = _safeOutput(
               (code == 2 && err.trim().isNotEmpty ? cleanHookJson(err.trim()) : null) ??
               blockReason ??
               contract.reason ??
               contract.permissionDecisionReason ??
               (out.trim().isEmpty
                   ? '$displayName denied this action'
-                  : cleanHookJson(out.trim()));
+                  : cleanHookJson(out.trim())), known);
           try {
             await _ledger(sessionId, 'hook/result', {
               ...record,
@@ -2363,7 +2611,7 @@ class HookService extends ChangeNotifier {
               'blockReason': ?blockReason,
               'reason': reason,
               if (contract.updatedInput != null)
-                'updatedInput': contract.updatedInput,
+                'updatedInput': _decodedOutput(_safeOutput(jsonEncode(contract.updatedInput), known)),
             });
           } catch (e) { Diag.swallow('hook_service', e); }
           return asks
@@ -2387,7 +2635,7 @@ class HookService extends ChangeNotifier {
             'stdoutChars': out.length,
             'stderrChars': err.length,
             if (contract.updatedInput != null)
-              'updatedInput': contract.updatedInput,
+              'updatedInput': _decodedOutput(_safeOutput(jsonEncode(contract.updatedInput), known)),
             if (!contract.continueHooks) 'halted': true,
           });
         } catch (e) { Diag.swallow('hook_service', e); }
@@ -2395,6 +2643,7 @@ class HookService extends ChangeNotifier {
       } catch (e) {
         // Exec error/timeout/missing sandbox — fail-open, but count
         // toward the breaker and record the visible warning.
+        if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
         failed++;
         if (e is! HookRuntimeUnavailable) _recordFailure(pluginId, sessionId);
         try {
@@ -2407,6 +2656,11 @@ class HookService extends ChangeNotifier {
         } catch (e) { Diag.swallow('hook_service', e); }
       }
     }
+    if (!enabled || epoch != (_sessionContextEpochs[sessionId] ?? 0)) {
+      return const HookGateResult.allow();
+    }
+    reconcileContributions();
+    bypassPermission = allows.isNotEmpty;
     return HookGateResult.allow(
       updatedInput: updatedInput,
       bypassPermission: bypassPermission,

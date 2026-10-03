@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,9 @@ import 'package:flutter/services.dart';
 
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
+import '../core/sandbox_service.dart';
+import '../core/state.dart';
+import '../core/workspace_files.dart';
 import '../core/theme.dart';
 import 'studio_layout.dart';
 import 'studio_errors.dart';
@@ -209,15 +213,25 @@ class _EditorPosition {
   final int lines;
 }
 
+typedef _BufferKey = (Map<String, String>, String);
+
 class _StudioEditorState extends State<StudioEditor> {
   /// One controller per open file, so a tab switch preserves that file's text,
   /// caret and scroll position instead of re-deriving them from the buffer.
-  final Map<String, TextEditingController> _buffers = {};
+  final Map<_BufferKey, TextEditingController> _buffers = {};
+  final Map<_BufferKey, String> _baselines = {};
+  final Map<_BufferKey, String?> _cacheContents = {};
+  final Map<_BufferKey, String> _conflicts = {};
+  final Set<_BufferKey> _dirtyBuffers = {};
+  final Map<_BufferKey, int> _edits = {};
+  final Map<_BufferKey, UndoHistoryController> _undoControllers = {};
+  final Map<_BufferKey, VoidCallback> _bufferListeners = {};
+  _BufferKey? _boundKey;
   final TextEditingController _findCtrl = TextEditingController();
-  final UndoHistoryController _undoCtrl = UndoHistoryController();
+  UndoHistoryController get _undoCtrl => _undoControllers[_boundKey]!;
 
   String? _boundPath;
-  bool _dirty = false;
+  bool get _dirty => _dirtyBuffers.contains(_boundKey);
   bool _applyingExternal = false;
   bool _initializing = true;
 
@@ -226,14 +240,14 @@ class _StudioEditorState extends State<StudioEditor> {
   int _matchIndex = 0;
   String _lastQuery = '';
 
-  TextEditingController? get _ctrl => _buffers[_boundPath];
+  TextEditingController? get _ctrl => _buffers[_boundKey];
 
   @override
   void initState() {
     super.initState();
     AgentService.I.addListener(_onServiceChanged);
     RepoCache.I.addListener(_onServiceChanged);
-    _undoCtrl.addListener(_onUndoChanged);
+    AppState.I.addListener(_onServiceChanged);
     _findCtrl.addListener(_onQueryChanged);
     _bind(notify: false);
     _initializing = false;
@@ -243,14 +257,16 @@ class _StudioEditorState extends State<StudioEditor> {
   void dispose() {
     AgentService.I.removeListener(_onServiceChanged);
     RepoCache.I.removeListener(_onServiceChanged);
-    _undoCtrl.removeListener(_onUndoChanged);
+    AppState.I.removeListener(_onServiceChanged);
     _findCtrl.removeListener(_onQueryChanged);
-    for (final c in _buffers.values) {
-      c
-        ..removeListener(_onControllerChanged)
+    for (final entry in _buffers.entries) {
+      entry.value
+        ..removeListener(_bufferListeners[entry.key]!)
         ..dispose();
     }
-    _undoCtrl.dispose();
+    for (final undo in _undoControllers.values) {
+      undo..removeListener(_onUndoChanged)..dispose();
+    }
     _findCtrl.dispose();
     super.dispose();
   }
@@ -276,14 +292,16 @@ class _StudioEditorState extends State<StudioEditor> {
 
   void _onUndoChanged() => _refresh();
 
-  void _onControllerChanged() {
-    final path = _boundPath;
-    final ctrl = _buffers[path];
-    if (path != null && ctrl != null && !_applyingExternal) {
-      final a = AgentService.I;
-      if (a.fileBuffer[path] != ctrl.text) {
-        a.fileBuffer[path] = ctrl.text;
-        _dirty = true;
+  void _onControllerChanged(_BufferKey key) {
+    final ctrl = _buffers[key];
+    if (ctrl != null && !_applyingExternal) {
+      if (key.$1[key.$2] != ctrl.text && !_conflicts.containsKey(key)) {
+        key.$1[key.$2] = ctrl.text;
+        _dirtyBuffers.add(key);
+        _edits[key] = (_edits[key] ?? 0) + 1;
+      } else if (_conflicts.containsKey(key)) {
+        _dirtyBuffers.add(key);
+        _edits[key] = (_edits[key] ?? 0) + 1;
       }
     }
     if (_findOpen) _recomputeMatches();
@@ -298,51 +316,73 @@ class _StudioEditorState extends State<StudioEditor> {
     final a = AgentService.I;
     final path = a.activeFilePath;
 
-    // Drop buffers whose tab was closed elsewhere (chat, agent, another tab).
-    final open = a.studioOpenFiles.toSet();
-    for (final p in _buffers.keys.toList()) {
-      if (!open.contains(p) && p != path) {
-        _buffers.remove(p)!
-          ..removeListener(_onControllerChanged)
-          ..dispose();
-      }
-    }
-
     if (path == null) {
       _boundPath = null;
+      _boundKey = null;
       if (notify) _refresh();
       return;
     }
 
-    final content = a.fileBuffer[path] ?? RepoCache.I.read(path) ?? '';
-    final switched = _boundPath != path;
+    var content = a.fileBuffer[path] ?? RepoCache.I.read(path) ?? '';
+    final key = (a.fileBuffer, path);
+    final switched = _boundKey != key;
     _boundPath = path;
+    _boundKey = key;
 
-    final ctrl = _bufferFor(path, content);
+    final ctrl = _bufferFor(key, content);
+    final cache = RepoCache.I;
+    final session = AppState.I.activeSession;
+    if (cache.boundSessionId == session?.id &&
+        cache.workspaceFolder == session?.workspaceFolder &&
+        (session?.repo == null || cache.repoFull == session?.repo) &&
+        (session?.branch == null || cache.defaultBranch == session?.branch)) {
+      final cached = cache.files[path];
+      if (cached != _cacheContents[key]) {
+        _cacheContents[key] = cached;
+        if (cached != null && cached != ctrl.text) {
+          content = cached;
+          if (!_dirtyBuffers.contains(key)) key.$1[path] = cached;
+        }
+      }
+    }
     if (switched) {
       // A freshly opened file starts at the TOP. Caret-at-EOF made every open
       // look like the file had been scrolled to the end by someone else.
-      _dirty = false;
       _matchIndex = 0;
+    }
+    if (ctrl.text != content && _dirtyBuffers.contains(key)) {
+      // A reopen at the known baseline is not a new external edit.
+      if (content != _baselines[key] && _conflicts[key] != content) {
+        _conflicts[key] = content;
+        _edits[key] = (_edits[key] ?? 0) + 1;
+      }
+      key.$1[path] = ctrl.text;
     } else if (ctrl.text != content) {
       // Something else rewrote the bound file (agent file_write, live reload).
       // Keep the caret where the user put it, clamped into the new range.
       final previous = ctrl.selection.isValid ? ctrl.selection.start : 0;
       _applyText(ctrl, content, math.min(previous, content.length));
+      _edits[key] = (_edits[key] ?? 0) + 1;
+      _baselines[key] = content;
     }
     _recomputeMatches();
     if (notify) _refresh();
   }
 
-  TextEditingController _bufferFor(String path, String content) {
-    final existing = _buffers[path];
+  TextEditingController _bufferFor(_BufferKey key, String content) {
+    final existing = _buffers[key];
     if (existing != null) return existing;
     final ctrl = TextEditingController(text: content);
     // An invalid selection (-1) makes EditableText park the caret at EOF once
     // the field gains focus — set a real offset before it is ever attached.
     ctrl.selection = const TextSelection.collapsed(offset: 0);
-    ctrl.addListener(_onControllerChanged);
-    _buffers[path] = ctrl;
+    void listener() => _onControllerChanged(key);
+    ctrl.addListener(listener);
+    _bufferListeners[key] = listener;
+    _undoControllers[key] = UndoHistoryController()..addListener(_onUndoChanged);
+    _buffers[key] = ctrl;
+    _baselines[key] = content;
+    _cacheContents[key] = RepoCache.I.files[key.$2];
     return ctrl;
   }
 
@@ -441,10 +481,44 @@ class _StudioEditorState extends State<StudioEditor> {
   // ── save / undo ─────────────────────────────────────────────────────────
   Future<void> _save() async {
     final path = _boundPath;
-    final ctrl = _buffers[path];
-    if (path == null || ctrl == null) return;
+    final key = _boundKey;
+    final ctrl = _ctrl;
+    if (path == null || ctrl == null || key == null || _conflicts.containsKey(key)) return;
+    final text = ctrl.text;
+    final edit = _edits[key];
+    final binding = RepoCache.I.bindingGeneration;
     try {
-      await AgentService.I.saveStudioFile(path, ctrl.text);
+      // Freeze ownership before resolving the root. Disk write and publication
+      // then share one turn; an obsolete resolver cannot target another owner.
+      final session = AppState.I.activeSession;
+      if (session == null || !identical(key.$1, AgentService.I.fileBuffer)) return;
+      final pinned = session.workspaceFolder;
+      final root = pinned != null && Directory(pinned).existsSync()
+          ? Directory(pinned)
+          : await SandboxService.I.workDirFor(session.sandboxId ?? session.id);
+      if (!mounted || binding != RepoCache.I.bindingGeneration ||
+          key != _boundKey || edit != _edits[key] ||
+          _conflicts.containsKey(key) || ctrl.text != text ||
+          !identical(key.$1, AgentService.I.fileBuffer)) {
+        return;
+      }
+      final safe = workspaceFilePath(root, path);
+      if (safe == null) throw StateError('Path escapes workspace or uses a symlink: $path');
+      final file = File(safe);
+      file.parent.createSync(recursive: true);
+      if (workspaceFilePath(root, path) != safe) throw StateError('Workspace path changed while saving');
+      file.writeAsStringSync(text);
+      final cache = RepoCache.I;
+      if (binding == cache.bindingGeneration &&
+          (cache.boundSessionId == null || cache.boundSessionId == session.id) &&
+          (session.repo == null || cache.repoFull == session.repo) &&
+          (session.branch == null || cache.defaultBranch == session.branch) &&
+          (cache.workspaceFolder == null || cache.workspaceFolder == session.workspaceFolder) &&
+          (cache.repoFull != null || cache.files.containsKey(path))) {
+        cache.write(path, text);
+        cache.didSaveWorkspaceFile(path, text);
+      }
+      key.$1[path] = text;
     } catch (error) {
       if (mounted) {
         showStudioToast(context, StudioFailure.of(error).message, error: true);
@@ -452,7 +526,8 @@ class _StudioEditorState extends State<StudioEditor> {
       return;
     }
     if (!mounted) return;
-    setState(() => _dirty = false);
+    if (binding != RepoCache.I.bindingGeneration || key != _boundKey || edit != _edits[key]) return;
+    setState(() { _dirtyBuffers.remove(key); _baselines[key] = text; });
     showStudioToast(context, 'Saved ${path.split('/').last} to the workspace');
   }
 
@@ -463,7 +538,7 @@ class _StudioEditorState extends State<StudioEditor> {
       animation: AgentService.I,
       builder: (context, _) {
         final path = _boundPath;
-        final ctrl = _buffers[path];
+        final ctrl = _ctrl;
         if (path == null || ctrl == null) return const _NoFileView();
         return CallbackShortcuts(
           // Escape is only bound while the find bar is open — swallowing it
@@ -486,8 +561,15 @@ class _StudioEditorState extends State<StudioEditor> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   _header(path, ctrl),
+                  if (_conflicts.containsKey(_boundKey)) _conflictBar(),
                   if (_findOpen) _findBar(ctrl),
-                  Expanded(child: _field(path, ctrl)),
+                  Expanded(child: IndexedStack(
+                    index: _buffers.keys.toList().indexOf(_boundKey!),
+                    children: [for (final entry in _buffers.entries)
+                      KeyedSubtree(key: ValueKey(entry.key),
+                        child: _field(entry.key.$2, entry.value, _undoControllers[entry.key]!)),
+                    ],
+                  )),
                 ],
               ),
             ),
@@ -496,6 +578,25 @@ class _StudioEditorState extends State<StudioEditor> {
       },
     );
   }
+
+  Widget _conflictBar() => MaterialBanner(
+    content: const Text('This file changed externally. Your draft has been kept.'),
+    actions: [
+      TextButton(onPressed: () {
+        final key = _boundKey!;
+        _edits[key] = (_edits[key] ?? 0) + 1;
+        setState(() { _baselines[key] = _conflicts.remove(key)!; });
+      }, child: const Text('Keep draft')),
+      TextButton(onPressed: () {
+        final key = _boundKey!;
+        _edits[key] = (_edits[key] ?? 0) + 1;
+        final text = _conflicts.remove(key)!;
+        _applyText(_ctrl!, text, _ctrl!.selection.start);
+        key.$1[key.$2] = text;
+        setState(() { _baselines[key] = text; _dirtyBuffers.remove(key); });
+      }, child: const Text('Use external')),
+    ],
+  );
 
   Widget _header(String path, TextEditingController ctrl) {
     final pos = _positionOf(ctrl);
@@ -568,7 +669,7 @@ class _StudioEditorState extends State<StudioEditor> {
                 tooltip: 'Save changes',
                 iconSize: 18,
                 color: _dirty ? Aether.accent : null,
-                onPressed: _dirty ? _save : null,
+                onPressed: _dirty && !_conflicts.containsKey(_boundKey) ? _save : null,
               ),
             ],
           );
@@ -666,14 +767,14 @@ class _StudioEditorState extends State<StudioEditor> {
     );
   }
 
-  Widget _field(String path, TextEditingController ctrl) {
+  Widget _field(String path, TextEditingController ctrl, UndoHistoryController undo) {
     return Semantics(
       label: 'Code editor for $path',
       textField: true,
       child: TextField(
         key: studioEditorFieldKey,
         controller: ctrl,
-        undoController: _undoCtrl,
+        undoController: undo,
         maxLines: null,
         expands: true,
         textAlignVertical: TextAlignVertical.top,
