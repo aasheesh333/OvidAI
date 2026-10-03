@@ -7974,7 +7974,6 @@ user which one instead of assuming this one.''';
             'the current memory_read revision. Keep MEMORY.md concise; use extra .md files for detail.',
         'parameters': {
           'type': 'object',
-          'additionalProperties': false,
           'properties': {
             'scope': {'type': 'string', 'enum': ['global', 'session']},
             'file': {'type': 'string', 'description': 'Plain .md filename; default MEMORY.md. No paths.'},
@@ -8075,7 +8074,7 @@ user which one instead of assuming this one.''';
       'function': {
         'name': 'git_clone',
         'description':
-            'Clone a repository. Studio GitHub URLs (HTTPS or SSH) reuse the '
+            'SHARED CLONE-ONCE: Studio GitHub URLs reuse the '
             'global clone per repo/branch across sessions; never re-clone per chat. '
             'branch selects a branch/tag, defaulting to the Studio selection. '
             'Non-GitHub URLs or an explicit path clone into the session workspace.',
@@ -9096,7 +9095,6 @@ user which one instead of assuming this one.''';
               'checkpoint.\n\n<compacted-summary>\n${s.compactedSummary}\n'
                '</compacted-summary>',
          },
-      if (memory.isNotEmpty) {'role': 'user', 'content': memory},
       // Staged attachments note — the files are in the session workspace.
       if (atts.isNotEmpty)
         {
@@ -9104,6 +9102,7 @@ user which one instead of assuming this one.''';
           'content': _attachmentContext(_attachmentMetadata(atts)),
         },
       ..._replayHistory(s, fullTextMessages: fullTextMessages),
+      if (memory.isNotEmpty) {'role': 'user', 'content': memory},
       if (volatile.trim().isNotEmpty)
         {'role': 'system', 'content': volatile.trim()},
     ];

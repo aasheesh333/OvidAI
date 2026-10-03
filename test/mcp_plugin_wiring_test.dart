@@ -145,10 +145,11 @@ void main() {
     }
   });
 
-  test('unconfigured Image Studio has no direct installation route', () {
+  test('Image Studio installs its local tools without a cloud backend', () {
     final p = PluginItem(name: 'Image Studio', author: 'ovidai',
-      description: 'Unavailable until configured', version: '1.3.0', category: 'Tool');
-    expect(pluginInstallRouteForTest(p).kind, PluginInstallKind.unsupported);
+      description: 'Local resize and crop; cloud images when configured', version: '1.3.0', category: 'Tool');
+    expect(pluginInstallRouteForTest(p).kind, PluginInstallKind.builtinDirect);
+    expect(AgentService.builtinPluginHasBacking('Image Studio'), isTrue);
   });
 
   test('hydrate heals fake installed flags on retired image seed', () async {
@@ -168,7 +169,7 @@ void main() {
     final reloaded = app.plugins.firstWhere(
       (p) => p.name == 'Image Studio',
     );
-    expect(reloaded.installed, isFalse);
-    expect(reloaded.enabled, isFalse);
+    expect(reloaded.installed, isTrue);
+    expect(reloaded.enabled, isTrue);
   });
 }

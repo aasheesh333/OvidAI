@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/session_lifecycle_service.dart';
 import 'package:ovid_ai/core/memory_store.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
@@ -44,6 +45,7 @@ void main() {
     AgentService.setRunSessionForTest('');
     agent.clearRunCtxForTest();
     AgentService.llmOnceForTest = null;
+    SessionLifecycleService.skipActivationWaitForTest = false;
     for (final id in ['a', 'b', 'child']) {
       await SessionLedger.I.close(id);
     }
@@ -214,6 +216,7 @@ void main() {
         ..addAll(restored);
       app.activeSessionId = 'b';
       AgentService.setRunSessionForTest('');
+      SessionLifecycleService.skipActivationWaitForTest = true;
       agent.restoreSubagentHandles();
       final provider = app.providerById('ollama-local')!;
       provider

@@ -181,10 +181,10 @@ void main() {
         // FULL history (no 12-message slice) — that's what this asserts.
         // The last row is the volatile context block (time/todos), appended
         // separately so the system+tools prefix stays cacheable.
-        expect(sentMessages, hasLength(17));
+        expect(sentMessages, hasLength(18));
         expect(sentMessages.first['role'], 'system');
         expect(sentMessages[1]['content'], 'message-0');
-        expect(sentMessages[sentMessages.length - 2]['content'], 'message-14');
+        expect(sentMessages[15]['content'], 'message-14');
         expect(sentMessages.last['role'], 'system');
         expect(sentMessages.last['content'], contains('Current time:'));
         expect(original.messages.last.content, 'response for original');

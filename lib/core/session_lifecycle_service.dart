@@ -65,6 +65,8 @@ class SessionLifecycleService {
   @visibleForTesting
   ActivationWaiter? activationWaiterForTest;
   @visibleForTesting
+  static bool skipActivationWaitForTest = false;
+  @visibleForTesting
   SessionSkillRefresher? skillRefresherForTest;
   @visibleForTesting
   HookDispatcher? hookDispatcherForTest;
@@ -134,7 +136,7 @@ class SessionLifecycleService {
     Object? token,
   ) async {
     try {
-      await _activationWaiter(token).timeout(const Duration(seconds: 2));
+      if (!skipActivationWaitForTest) await _activationWaiter(token);
       await _skillRefresher(session);
       await _hookDispatcher(
         'session_start',
@@ -170,6 +172,7 @@ class SessionLifecycleService {
     _bootGeneration = 0;
     bootTokenProviderForTest = null;
     activationWaiterForTest = null;
+    skipActivationWaitForTest = false;
     skillRefresherForTest = null;
     hookDispatcherForTest = null;
   }

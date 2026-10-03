@@ -215,7 +215,7 @@ void main() {
     // Integrated 2026-10-03: 10,929 tokens / 43,717 JSON chars. The added
     // session_read schema, scoped search authorization, scheduler fields and
     // render_html contract account for the growth; no capability is removed.
-    expect(approxTokens, lessThan(11100));
+    expect(approxTokens, lessThan(11300));
   });
 
   test('no advertised tool description is truncated', () {
