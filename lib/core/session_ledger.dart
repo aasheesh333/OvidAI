@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'diag.dart';
@@ -13,7 +14,7 @@ import 'diag.dart';
 /// remains the chat-rendering source. The ledger records STRUCTURED events
 /// (user turn, assistant turn, tool call/result incl. duration, subagent
 /// lifecycle, checkpoint barriers) as one JSON line each in
-/// `<docs>/session-ledgers/<sessionId>.jsonl`.
+/// `<docs>/session-ledgers/<safe-id-or-digest>.jsonl`.
 ///
 /// Consumers:
 ///   • trajectory view — the event-ledger tab (records + inspector)
@@ -33,7 +34,6 @@ class SessionLedger {
   final Map<String, Future<RandomAccessFile>> _sinks = {};
   final Map<String, Future<void>> _operations = {};
   final Map<String, int> _seqs = {};
-  final Map<String, List<Map<String, dynamic>>> _replayCache = {};
 
   /// Test seam: how many append sinks have been OPENED for a session in its
   /// current lifetime. Must be exactly 1 no matter how many appends race —
@@ -42,11 +42,40 @@ class SessionLedger {
   @visibleForTesting
   final Map<String, int> sinkOpensForTest = {};
 
-  /// Test seam: fixed ledger root (no path_provider channel). Also used
-  /// when the platform channel is unavailable — the ledger degrades to
-  /// memory-only rather than throwing into live runs.
+  /// Test seam: fixed ledger root (no path_provider channel). Without a
+  /// usable root, best-effort writes are dropped and reads return no records.
   @visibleForTesting
-  static Directory? rootOverrideForTest;
+  static Directory? get rootOverrideForTest => _rootOverrideForTest;
+  static Directory? _rootOverrideForTest;
+
+  @visibleForTesting
+  static set rootOverrideForTest(Directory? value) {
+    _rootOverrideForTest = value;
+    I._transcriptGeneration++;
+    I._transcriptSessionGenerations.clear();
+  }
+
+  int _transcriptGeneration = 0;
+  final Map<String, int> _transcriptSessionGenerations = {};
+
+  /// Invalidates cached paths synchronously on deletion, close or store change.
+  (int, int) transcriptGeneration(String sessionId) =>
+      (_transcriptGeneration, _transcriptSessionGenerations[sessionId] ?? 0);
+
+  void _invalidateTranscript(String sessionId) {
+    _transcriptSessionGenerations[sessionId] =
+        (_transcriptSessionGenerations[sessionId] ?? 0) + 1;
+  }
+
+  /// Authoritative hook transcript location, including conservative migration.
+  /// A fresh session may not have written the file yet. Deleted lifetimes have
+  /// no transcript. Resolution errors propagate; consumers may omit the path.
+  Future<String?> transcriptPath(String sessionId) =>
+      _enqueue(sessionId, () async {
+        final file = await _fileFor(sessionId);
+        if (await _deletionMarker(file).exists()) return null;
+        return file.path;
+      });
 
   Future<Directory> _dir() async {
     if (rootOverrideForTest != null) return rootOverrideForTest!;
@@ -59,11 +88,35 @@ class SessionLedger {
     return d;
   }
 
-  Future<File> _fileFor(String sessionId) async =>
-      File('${(await _dir()).path}/${_sessionIdSafe(sessionId)}.jsonl');
+  Future<File> _fileFor(String sessionId) async {
+    final root = await _dir();
+    final name = _sessionIdSafe(sessionId);
+    final file = File('${root.path}/$name.jsonl');
+    // Empty and very long alphanumeric legacy names are also unambiguous,
+    // but need the digest layout to leave room for the deletion marker.
+    // Common filesystems allow at most 255 bytes per filename component.
+    if (name != sessionId &&
+        sessionId.length <= 249 &&
+        RegExp(r'^[A-Za-z0-9-]*$').hasMatch(sessionId) &&
+        !await file.exists()) {
+      final legacy = File('${root.path}/$sessionId.jsonl');
+      if (await legacy.exists()) await legacy.rename(file.path);
+    }
+    return file;
+  }
 
-  static String _sessionIdSafe(String id) =>
-      id.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+  static File _deletionMarker(File file) => File('${file.path}.deleted');
+
+  static String _sessionIdSafe(String id) {
+    // A legacy name without underscores has only one possible original ID.
+    // Keep those paths stable (including existing UUIDs and hook transcripts).
+    // An underscore could represent ANY replaced character: never read, move
+    // or delete that ambiguous history on behalf of one candidate owner.
+    if (RegExp(r'^[A-Za-z0-9-]{1,240}$').hasMatch(id)) return id;
+    // The dot separates this namespace from every legacy sanitized filename.
+    // Hash JSON to preserve even distinct unpaired UTF-16 surrogate IDs.
+    return 'v2.${sha256.convert(utf8.encode(jsonEncode(id)))}';
+  }
 
   // Enqueue synchronously, before any file/path await. Reads and lifecycle
   // barriers participate too, so close separates the old and new lifetimes.
@@ -97,19 +150,28 @@ class SessionLedger {
   /// unlike an IOSink whose asynchronous error can outlive append and close.
   Future<RandomAccessFile> _sinkFor(String sessionId) {
     final existing = _sinks[sessionId];
-    if (existing != null) return existing;
-    sinkOpensForTest[sessionId] = (sinkOpensForTest[sessionId] ?? 0) + 1;
+    if (existing != null) {
+      return () async {
+        // A failed deletion close retains its handle for retry, but the durable
+        // tombstone must fence writes through that handle as well as new opens.
+        if (await _deletionMarker(await _fileFor(sessionId)).exists()) {
+          throw StateError('Session ledger lifetime was deleted');
+        }
+        return await existing;
+      }();
+    }
     final future = () async {
       final f = await _fileFor(sessionId);
+      if (await _deletionMarker(f).exists()) {
+        throw StateError('Session ledger lifetime was deleted');
+      }
+      sinkOpensForTest[sessionId] = (sinkOpensForTest[sessionId] ?? 0) + 1;
       final path = f.path;
       final recovery = await _scanInIsolate(path);
       final previousSeq = _seqs[sessionId] ?? 0;
       _seqs[sessionId] = recovery.seq > previousSeq
           ? recovery.seq
           : previousSeq;
-      // Recovery deliberately retains no decoded history. An explicit read
-      // populates the replay cache, if requested by a consumer.
-      _replayCache.remove(sessionId);
       final sink = await f.open(mode: FileMode.append);
       try {
         // Preserve the original bytes, but isolate an unterminated (possibly
@@ -143,6 +205,7 @@ class SessionLedger {
 
   /// Append one event. [kind] is one of: turn_start, turn_end, tool_start,
   /// tool_end, subagent_start, subagent_end, checkpoint, note.
+  /// Ledger-owned seq/t/kind take precedence over conflicting payload keys.
   Future<void> append(
     String sessionId,
     String kind,
@@ -153,10 +216,9 @@ class SessionLedger {
       final seq = (_seqs[sessionId] ?? 0) + 1;
       _seqs[sessionId] = seq;
       final t = DateTime.now().toIso8601String();
-      final event = {'seq': seq, 't': t, 'kind': kind, ...data};
+      final event = {...data, 'seq': seq, 't': t, 'kind': kind};
       final line = jsonEncode(event);
       await sink.writeString('$line\n');
-      _replayCache[sessionId]?.add(event);
     } catch (_) {
       // Best-effort durability — a ledger write failure must never break a
       // live run. The trajectory view degrades to "no records" per session.
@@ -166,30 +228,55 @@ class SessionLedger {
   /// Read every event of a session (trajectory view / stats projection).
   /// Open sinks are flushed first so a just-written line is visible.
   /// Empty when the ledger does not exist yet (fresh sessions).
-  Future<List<Map<String, dynamic>>> read(String sessionId) =>
-      _enqueue(sessionId, () async {
-        try {
-          await _flush(sessionId);
-          final cached = _replayCache[sessionId];
-          if (cached != null && cached.isNotEmpty) return List.of(cached);
-          final f = await _fileFor(sessionId);
-          final path = f.path;
-          final scan = await _scanInIsolate(path, collect: true);
-          final events = scan.events!;
-          _replayCache[sessionId] = events;
-          return List.of(events);
-        } catch (_) {
-          return const [];
-        }
-      });
+  ///
+  /// Optional [offset] counts valid JSON object records in file order (not
+  /// sequence numbers, which can be sparse or out of order in legacy files).
+  /// [limit] bounds the number retained and stops scanning once filled. Each
+  /// page rescans the prefix with one-record working memory; offsets remain
+  /// stable for append-only histories. Defaults preserve full export/stats.
+  Future<List<Map<String, dynamic>>> read(
+    String sessionId, {
+    int offset = 0,
+    int? limit,
+  }) {
+    RangeError.checkNotNegative(offset, 'offset');
+    if (limit != null) RangeError.checkNotNegative(limit, 'limit');
+    return _enqueue(sessionId, () async {
+      try {
+        if (limit == 0) return <Map<String, dynamic>>[];
+        await _flush(sessionId);
+        final f = await _fileFor(sessionId);
+        if (await _deletionMarker(f).exists()) return <Map<String, dynamic>>[];
+        final path = f.path;
+        final scan = await _scanInIsolate(
+          path,
+          collect: true,
+          offset: offset,
+          limit: limit,
+        );
+        final events = scan.events!;
+        // Do not retain or share mutable decoded history across callers.
+        // Replay always reflects the durable bytes, including after writes.
+        return List.of(events);
+      } catch (_) {
+        return const [];
+      }
+    });
+  }
 
   // Keep the isolate closure out of instance/queue scopes: those contexts can
   // capture unsendable pending futures or open handles in addition to the path.
   static Future<
     ({int seq, bool unterminated, List<Map<String, dynamic>>? events})
   >
-  _scanInIsolate(String path, {bool collect = false}) =>
-      Isolate.run(() => _scanFile(path, collect: collect));
+  _scanInIsolate(
+    String path, {
+    bool collect = false,
+    int offset = 0,
+    int? limit,
+  }) => Isolate.run(
+    () => _scanFile(path, collect: collect, offset: offset, limit: limit),
+  );
 
   // Runs in a worker isolate. Recovery holds only one record plus an input
   // chunk, and returns scalar metadata rather than a full decoded-event list.
@@ -197,8 +284,14 @@ class SessionLedger {
   static Future<
     ({int seq, bool unterminated, List<Map<String, dynamic>>? events})
   >
-  _scanFile(String path, {bool collect = false}) async {
+  _scanFile(
+    String path, {
+    bool collect = false,
+    int offset = 0,
+    int? limit,
+  }) async {
     final events = collect ? <Map<String, dynamic>>[] : null;
+    var skipped = 0;
     var seq = 0;
     var unterminated = false;
     final file = File(path);
@@ -213,7 +306,13 @@ class SessionLedger {
           final event = jsonDecode(line) as Map<String, dynamic>;
           final savedSeq = event['seq'];
           if (savedSeq is int && savedSeq > seq) seq = savedSeq;
-          events?.add(event);
+          if (events != null) {
+            if (skipped < offset) {
+              skipped++;
+            } else {
+              events.add(event);
+            }
+          }
         }
       } catch (_) {
         // Skip damaged records independently, including a partial UTF-8 tail.
@@ -226,6 +325,9 @@ class SessionLedger {
         if (chunk[end] != 10) continue;
         record.add(chunk.sublist(start, end));
         decodeRecord();
+        if (events != null && limit != null && events.length >= limit) {
+          return (seq: seq, unterminated: false, events: events);
+        }
         start = end + 1;
       }
       record.add(chunk.sublist(start));
@@ -280,27 +382,50 @@ class SessionLedger {
     );
   }
 
-  /// Close (and forget) a session's sink — call on session delete.
-  Future<void> close(String sessionId) => _enqueue(sessionId, () async {
-    final pending = _sinks.remove(sessionId);
-    if (pending != null) {
+  /// Permanently delete this session ID's lifetime in this storage root.
+  /// Queued/later appends are ignored, including after a process restart. A
+  /// flushed tombstone precedes unlinking so interrupted deletion cannot expose
+  /// old records or resurrect the lifetime. Reusing an ID requires a new store
+  /// (normal sessions should use a new ID). Errors propagate so owners can retry.
+  /// The session owner must call this when deleting a session/descendant.
+  Future<void> delete(String sessionId) {
+    _invalidateTranscript(sessionId);
+    return _enqueue(sessionId, () async {
+      final file = await _fileFor(sessionId);
+      await _deletionMarker(file).writeAsString('', flush: true);
+      await _closeSink(sessionId);
+      if (await file.exists()) await file.delete();
+    });
+  }
+
+  /// Legacy close-and-remove operation; a later append may start fresh.
+  /// Retained for existing callers/fixtures. Use [delete] for explicit session
+  /// deletion; close never removes its durable tombstone.
+  Future<void> close(String sessionId) {
+    _invalidateTranscript(sessionId);
+    return _enqueue(sessionId, () async {
       try {
-        // All earlier writes/flushes finished before this operation started.
-        await (await pending).close();
+        await _closeSink(sessionId);
+        final f = await _fileFor(sessionId);
+        if (await f.exists()) await f.delete();
       } catch (e) {
         Diag.swallow('session_ledger', e);
       }
+    });
+  }
+
+  Future<void> _closeSink(String sessionId) async {
+    final pending = _sinks[sessionId];
+    if (pending != null) {
+      // All earlier writes/flushes finished before this operation started.
+      // Retain ownership on failure so explicit deletion can report the error
+      // and retry the same descriptor rather than silently leaking it.
+      await (await pending).close();
+      _sinks.remove(sessionId);
     }
     _seqs.remove(sessionId);
-    _replayCache.remove(sessionId);
     sinkOpensForTest.remove(sessionId);
-    try {
-      final f = await _fileFor(sessionId);
-      if (await f.exists()) await f.delete();
-    } catch (e) {
-      Diag.swallow('session_ledger', e);
-    }
-  });
+  }
 
   /// Flush a session's sink (checkpoint durability barrier).
   Future<void> flush(String sessionId) =>

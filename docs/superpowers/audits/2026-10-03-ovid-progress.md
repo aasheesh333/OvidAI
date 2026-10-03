@@ -7,7 +7,7 @@ Plan: `docs/superpowers/plans/2026-10-03-ovid-master-repair-plan.md`
 
 - Documentation: current-tree reconciliation supersedes stale status/authorization statements in the explicitly historical evidence below; original acceptance scopes and run history are preserved.
 - Implementation: **77 canonical tasks: W12.01 verified; 76 remain open**. W06.01 and W14.02 have bounded implementations awaiting full acceptance; W16.02 native guards were reviewed and accepted but devices remain pending. Usage reactivity, hooks, fullscreen, hosted snapshots, worker fairness and overlay stop now have partial implementations. Grants/root/search/ledger and wider integration remain partial.
-- Current register counts: **1 verified, 32 partial/in progress, 2 implemented/awaiting review, 1 reviewed/device-pending, 1 architecture-blocked, 40 pending**. The 76 open tasks include every status except verified; DOC checkboxes are not part of the 77-task denominator.
+- Current register counts: **1 verified, 37 partial/in progress, 2 implemented/awaiting review, 1 reviewed/device-pending, 1 architecture-blocked, 35 pending**. The 76 open tasks include every status except verified; DOC checkboxes are not part of the 77-task denominator.
 - Historical baseline: clean `/root/OvidAI` checkout, feature branch `hoplite/gortyn-77773150`, HEAD `afe3fc149dc774d999148c971397df45feb8e72c` (`afe3fc1`). Continue in that existing feature-branch checkout, now dirty with concurrent implementation/test edits. This update owns only the four documentation files below; implementation outcomes are attributed to the supplied handoff, not rerun by this author.
 - Authorization: **latest direct user instruction authorizes a checkpoint commit and push of completed work**, superseding the earlier no-commit/no-push restriction. Implementation, Firebase console and final Play work remain authorized. The controller owns backend/native verification and checkpoint commit/push; this reconciliation owns only the four documents. Exclusive file ownership and serialized shared-file integration apply. No worker-model selection is claimed.
 - Corrections retained: ignored bootstrap payloads are tracked; artifact data-URL 403 is an unreproduced hypothesis; previous static source statuses do not establish runtime success; target28 app-data execution needs architectural resolution before Play target uplift.
@@ -42,8 +42,8 @@ Canonical deliverables and acceptance experiments live in the plan. These rows m
 | W00.01 | Reproducible baseline/toolchain/suite inventory | In progress — partial | Historical clean baseline and current dirty checkout recorded; B01–B09 handoff evidence available, complete reproducible inventory pending |
 | W00.02 | Distribution inputs/payload provenance/signing inventory | Pending | Tracked payload observation recorded; artifact comparison not executed |
 | W00.03 | Exact model/provider IDs and source ownership | In progress — partial | Existing feature-branch ownership retained; B05 bounded routing evidence, full provider/model inventory and probes pending |
-| W01.01 | Hydration/live-edit generation safety | Pending | Delayed-load/edit/delete/account fixtures required |
-| W01.02 | Complete failure-aware persistence | Pending | Restart, write-failure/retry and dirty-field coverage required |
+| W01.01 | Hydration/live-edit generation safety | In progress — partial | Live identity and partial-history preservation reviewed; state follow-up136 passes. Account-generation acceptance remains open |
+| W01.02 | Complete failure-aware persistence | In progress — partial | Nested signatures, pending deletion/write reconciliation and bounded saves reviewed; state follow-up136 passes. Full ownership/device acceptance remains open |
 | W01.03 | Session deletion barrier/all owned stores | Pending | Late append/write/reconnect cleanup cases required |
 | W01.04 | Ledger sequence/replay/close/delete integrity | In progress — partial | B01: 66 combined tests passed; async serialization + isolate recovery fixed after review. Full ledger/integration acceptance remains pending |
 | W01.05 | Recoverable account-scoped FTS | In progress — partial | B01: included in 66 combined passes; full search/account/deletion integration pending |
@@ -72,12 +72,12 @@ Canonical deliverables and acceptance experiments live in the plan. These rows m
 | W07.03 | [CC] event/input/output/env translation | In progress — partial | Hook event/tool translation, stdin/env/root execution scope and output-context handling repaired with hook_w07 fixtures in full Flutter suite. Full command/prompt/agent compatibility and secret-output audit remain open |
 | W07.04 | Native dependency configuration/readiness | Pending | Denied/missing/configured/removed/restart cases required |
 | W08.01 | MCP reserve/connect/cancel/reconnect | Pending | Concurrent handshake/late transport/obsolete retry cases required |
-| W08.02 | SSE endpoint/redirect origin constraints | Pending | Relative/cross-origin/downgrade credential fixtures required |
+| W08.02 | SSE endpoint/redirect origin constraints | In progress — partial | Origin/redirect constraints and live policy-refusal propagation reviewed;86 focused passes. Canonical integration closure pending |
 | W08.03 | OAuth/PKCE/refresh/token removal | Pending | Cancel/wrong-state/late-refresh fixtures and real provider required |
 | W08.04 | MCP imports/resources/protocol pagination | Pending | All transport fixtures and real configured server checks required |
 | W09.01 | Per-file/binding Studio drafts | Pending | Multi-tab/external-write/conflict/save cases required |
-| W09.02 | Immutable approved commit snapshot | Pending | Preview-change/rebind/cancel/selected-path cases required |
-| W09.03 | Upstream conflict/unknown result/fallback | Pending | Accepted ref update/lost response and partial-write cases required |
+| W09.02 | Immutable approved commit snapshot | In progress — partial | Frozen binding/base/bytes/message/selection and Studio/agent review implemented and reviewed; mode-only and checkout-deletion staging remain open |
+| W09.03 | Upstream conflict/unknown result/fallback | In progress — partial | Single-send mutations, nonforce publication, approved-base validation and durable unknown recovery reviewed;198 worker passes,44 fresh controller approval passes; wider staged-operation acceptance remains open |
 | W09.04 | Sync/save/fetch ordering | Pending | Reversed responses/concurrent edit/cancel cases required |
 | W09.05 | Clone collision and GitHub auth restore | Pending | Folder/auth races and real GitHub test repository required |
 | W10.01 | Artifact 403 reproduction/isolation | Pending | HYPOTHESIS; real failing WebView trace absent |
@@ -276,6 +276,65 @@ Counts above are overlapping run results, not additive unique totals. Only W12.0
 Read-only validation confirmed 77 unique canonical tasks, identical ordered task register, 17 workstreams, complete matrix task coverage, one checked/verified W12.01, 76 open scopes and the status totals above. All local Markdown links exist; all four documents passed no-index whitespace checks, including these untracked files. An initial checker incorrectly included later evidence-table rows as task-register rows; restricting it to the canonical register corrected the checker and the validation passed. Application tests were not rerun for this prose update.
 
 ## Recording future execution
+
+### Post-push continuation
+
+Checkpoint **9b5f78dcc30052521bda0b316e59896715471862** was pushed to
+`origin/hoplite/gortyn-77773150`; remote SHA matched and checkout was clean.
+[GitHub run 37134798715](https://github.com/aasheesh333/OvidAI/actions/runs/37134798715)
+completed successfully, including analysis/tests, debug APK, signed release
+APK/AAB, and all three artifact uploads. This proves build/upload, not Play
+acceptance or device behavior. Follow-up source work is continuing under the
+user's instruction; the next checkpoint will include its separate evidence.
+
+W01.04 follow-up now has protected envelope fields, collision-resistant paths,
+conservative legacy migration, optional bounded replay and durable deletion
+tombstones. AppState schedules ledger cleanup for root/deferred children before
+callbacks, retains failures for explicit retry, and agent hooks resolve the
+authoritative transcript path. Final close-failure review finding was fixed and
+re-reviewed successfully; **38 focused ledger/integration tests passed** after
+the fix, with scoped analysis clean. Full all-store deletion and a durable failed
+cleanup journal remain W01.03 work. Controller integration verification and
+canonical status update follow this review; changes are currently uncommitted.
+
+### Recovered Studio/Git follow-up
+
+The interrupted approval integration was resumed from the existing working tree.
+`RepoCache` now freezes the approved repository/branch/base, selected bytes and
+message; Studio presents the artifact before publication, and agent commits use
+the existing permission policy with a fully scrollable review. Durable pending
+intent blocks fresh mutations after an unknown result and supports read-only
+restart reconciliation. Repository casing aliases share the same admission and
+recovery identity; BOM bytes are preserved and corrupt intent errors omit payloads.
+
+Independent task review identified four issues above; all were corrected and
+scoped re-review found no new important regressions. The worker records **198
+passing covering tests**. Controller verification on the final source:
+
+```sh
+/root/flutter/bin/flutter test --no-pub test/repo_cache_approval_test.dart test/studio_commit_approval_test.dart test/agent_commit_approval_test.dart test/chat_commit_approval_test.dart --reporter expanded
+/root/flutter/bin/dart analyze lib/core/repo_cache.dart lib/ui/studio_screen.dart lib/ui/chat_screen.dart lib/core/agent_service.dart test/repo_cache_approval_test.dart test/studio_commit_approval_test.dart test/agent_commit_approval_test.dart test/chat_commit_approval_test.dart
+git diff --check
+```
+
+Results: **44 passed**, analyzer **No issues found**, whitespace clean. Counts
+overlap the worker suite. HEAD remains `9b5f78d`; follow-up changes are uncommitted.
+W09.02/.03 remain partial: mode-only changes and checkout deletions need explicit
+staging and review. Recovery proves exact tip only; an advanced/unmatched ref
+remains durably unknown. No live GitHub or device acceptance is claimed.
+
+### Follow-up checkpoint verification
+
+The attempted full Flutter run exceeded the 10-minute command limit. Its log
+identified two plan-policy regressions: empty, unbound commit calls tried to
+reconcile a nonexistent repository. Both were reproduced in isolation and fixed
+with an unbound-empty guard; bound sessions still reconcile without local drafts.
+
+Fresh verification before checkpoint: **312 tests passed** across the plan-policy,
+agent/chat/Studio approval, repository safety/audit/branch, session ledger/state
+acceptance and MCP SSE origin suites. `flutter analyze --no-pub` reported **No
+issues found**; `git diff --check` passed. The interrupted full run is not counted
+as a passing suite.
 
 ### Checkpoint pre-commit checks
 

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/repo_cache.dart';
 
 /// Regression tests for the repo-cache audit 2026-09-25 (data-loss findings).
@@ -21,6 +22,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
+    SharedPreferences.setMockInitialValues({});
     RepoCache.I.unbind();
     // Zero backoff keeps the retry tests fast; restored in tearDown.
     RepoCache.I.retryBaseDelay = Duration.zero;
@@ -266,6 +268,8 @@ void main() {
         if (p == '/repos/owner/repo/git/trees/base-commit') {
           return http.Response(
             jsonEncode({
+              'sha': 'base-tree',
+              'truncated': false,
               'tree': [
                 {'path': 'README.md', 'mode': '100644', 'type': 'blob', 'sha': 'b0'},
                 {'path': 'tool.sh', 'mode': '100755', 'type': 'blob', 'sha': 'b1'},
@@ -276,6 +280,9 @@ void main() {
         }
         if (p == '/repos/owner/repo/git/blobs') {
           return http.Response(jsonEncode({'sha': 'blob-${calls.length}'}), 201);
+        }
+        if (request.method == 'GET' && p.startsWith('/repos/owner/repo/git/blobs/')) {
+          return http.Response(jsonEncode({'encoding': 'base64', 'content': base64Encode(utf8.encode('original'))}), 200);
         }
         if (p == '/repos/owner/repo/git/trees' && request.method == 'POST') {
           return http.Response(jsonEncode({'sha': 'new-tree'}), 201);
@@ -317,7 +324,7 @@ void main() {
       final treeCall = calls.firstWhere(
         (c) => c.method == 'POST' && c.path == '/repos/owner/repo/git/trees',
       );
-      expect(treeCall.body!['base_tree'], 'base-commit');
+      expect(treeCall.body!['base_tree'], 'base-tree');
       final entries = (treeCall.body!['tree'] as List).cast<Map<String, dynamic>>();
       expect(entries.length, 3);
       final byPath = {for (final e in entries) e['path'] as String: e};
@@ -350,7 +357,7 @@ void main() {
       expect(patch.body!['force'], isNot(equals(true)));
     });
 
-    test('falls back to per-file commits when the Git Data API fails', () async {
+    test('Git Data permission failure never authorizes per-file commits', () async {
       final reqs = <String>[];
       final client = MockClient((request) async {
         reqs.add('${request.method} ${request.url.path}');
@@ -372,14 +379,17 @@ void main() {
       RepoCache.I.write('a.md', '1');
       RepoCache.I.write('b.md', '2');
 
-      final n = await RepoCache.I.commitAll('msg', client: client);
+      await expectLater(
+        RepoCache.I.commitAll('msg', client: client),
+        throwsA(predicate((Object e) => '$e'.contains('403'))),
+      );
 
-      expect(n, 2);
-      expect(RepoCache.I.hasPending, isFalse);
+      expect(RepoCache.I.dirtyCount, 2);
+      expect(RepoCache.I.lastCommit, isNull);
       expect(
-        reqs.where((s) => s.startsWith('PUT ')).length,
-        2,
-        reason: 'both files still land via the contents API',
+        reqs.where((s) => s.contains('/contents/')),
+        isEmpty,
+        reason: 'an atomic error cannot authorize non-atomic writes',
       );
       expect(
         reqs.any((s) => s.contains('/git/')),
@@ -388,11 +398,11 @@ void main() {
       );
     });
 
-    test('a mid-fallback failure reports the partial push honestly', () async {
+    test('unsupported atomic API cannot start a partially failing fallback', () async {
       var puts = 0;
       final client = MockClient((request) async {
         final p = request.url.path;
-        if (p.contains('/git/')) return http.Response('nope', 403);
+        if (p.contains('/git/')) return http.Response('unsupported', 405);
         if (request.method == 'GET') {
           return http.Response(jsonEncode({'sha': 's'}), 200);
         }
@@ -410,16 +420,18 @@ void main() {
         RepoCache.I.commitAll('msg', client: client),
         throwsA(
           predicate(
-            (Object e) => '$e'.contains('partial') && '$e'.contains('1/2'),
-            'error names the partial push count',
+            (Object e) => '$e'.contains('405') && '$e'.contains('approval'),
+            'unsupported API requires explicit non-atomic approval',
           ),
         ),
       );
       expect(
         RepoCache.I.dirtyCount,
-        1,
-        reason: 'the file that never landed stays pending',
+        2,
+        reason: 'neither file may land without non-atomic approval',
       );
+      expect(puts, 0);
+      expect(RepoCache.I.lastCommit, isNull);
       expect(RepoCache.I.hasPending, isTrue);
     });
   });
@@ -846,7 +858,7 @@ void main() {
           );
         }
         if (request.method == 'GET' && p.contains('/git/trees/')) {
-          return http.Response(jsonEncode({'tree': []}), 200);
+          return http.Response(jsonEncode({'sha': 'base-tree', 'truncated': false, 'tree': []}), 200);
         }
         if (p.endsWith('/git/blobs')) {
           return http.Response(jsonEncode({'sha': 'blob-1'}), 201);
@@ -891,4 +903,3 @@ void main() {
 
 MockClient _statusClient(int status) =>
     MockClient((request) async => http.Response('x', status));
-

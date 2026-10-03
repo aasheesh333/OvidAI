@@ -148,6 +148,7 @@ void main() {
       final entered = Completer<void>();
       final release = Completer<void>();
       final calls = <String>[];
+      final marker = File('${file.path}.deleted');
       // Delegate to real disk I/O, pausing only the first asynchronous write.
       // Sync file methods are intentionally unsupported by these wrappers.
       await IOOverrides.runZoned(
@@ -186,6 +187,7 @@ void main() {
           }
         },
         createFile: (path) {
+          if (path == marker.path) return marker;
           expect(path, file.path);
           return _AsyncFile(file, entered, release, calls);
         },

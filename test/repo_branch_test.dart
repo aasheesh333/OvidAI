@@ -248,7 +248,7 @@ void main() {
           );
         }
         if (request.method == 'GET' && p.contains('/git/trees/')) {
-          return http.Response(jsonEncode({'tree': []}), 200);
+          return http.Response(jsonEncode({'sha': 'base-tree', 'truncated': false, 'tree': []}), 200);
         }
         if (p.endsWith('/git/blobs')) {
           return http.Response(jsonEncode({'sha': 'blob-sha'}), 201);

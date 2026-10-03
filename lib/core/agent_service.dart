@@ -11222,30 +11222,42 @@ ${await _agentsMdBlock()}
 
   /// Warmed per-session transcript paths for hook payloads.
   ///
-  /// `transcript_path` in the hook stdin JSON points at the session's
-  /// ledger JSONL — the on-disk event transcript. The path convention
-  /// (documents dir + `session-ledgers/<safe-id>.jsonl`) mirrors
-  /// SessionLedger's private layout; if that ever changes, this degrades
-  /// to '' (HookService treats empty as absent) rather than breaking.
-  final Map<String, String> _transcriptPathCache = {};
+  /// Only the ledger resolves filenames and invalidates their lifetime.
+  final Map<String, ({String path, (int, int) generation})>
+      _transcriptPathCache = {};
 
   /// Synchronous best-effort lookup for hook payloads; '' when unknown.
-  String _transcriptPathFor(String sessionId) =>
-      _transcriptPathCache[sessionId] ?? '';
+  String _transcriptPathFor(String sessionId) {
+    final cached = _transcriptPathCache[sessionId];
+    if (cached?.generation != SessionLedger.I.transcriptGeneration(sessionId)) {
+      _transcriptPathCache.remove(sessionId);
+      return '';
+    }
+    return cached?.path ?? '';
+  }
 
   /// Warm [_transcriptPathFor] for [sessionId] (fire-and-forget at run
   /// start — hook payloads are built synchronously).
-  void _warmTranscriptPath(String sessionId) {
-    if (_transcriptPathCache.containsKey(sessionId)) return;
-    unawaited(() async {
+  Future<void> _warmTranscriptPath(String sessionId) {
+    if (_transcriptPathFor(sessionId).isNotEmpty) return Future.value();
+    final generation = SessionLedger.I.transcriptGeneration(sessionId);
+    return () async {
       try {
-        final base =
-            '${(await getApplicationDocumentsDirectory()).path}/session-ledgers';
-        final safe = sessionId.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
-        _transcriptPathCache[sessionId] = '$base/$safe.jsonl';
+        final path = await SessionLedger.I.transcriptPath(sessionId);
+        if (generation == SessionLedger.I.transcriptGeneration(sessionId) &&
+            path != null) {
+          _transcriptPathCache[sessionId] = (path: path, generation: generation);
+        }
       } catch (e) { Diag.swallow('agent_service', e); }
-    }());
+    }();
   }
+
+  @visibleForTesting
+  Future<void> warmTranscriptPathForTest(String sessionId) =>
+      _warmTranscriptPath(sessionId);
+
+  @visibleForTesting
+  String transcriptPathForTest(String sessionId) => _transcriptPathFor(sessionId);
 
   /// Execute a prompt-backed capability tool through a live model (NP5).
   ///
@@ -15416,22 +15428,38 @@ ${await _agentsMdBlock()}
       case 'commit':
         final message = (args['message'] ?? 'Ovid agent update') as String;
         if (!_ownsRepoCache) return 'repo binding changed. call repo_sync first.';
+        // An unbound, empty session has no remote identity to reconcile.
+        // Bound sessions still recover durable intents even without drafts.
+        if (RepoCache.I.repoFull == null && !RepoCache.I.hasPending) {
+          return 'no pending changes';
+        }
+        // Recovery is read-only and must run even after restart without drafts.
+        try {
+          final recovered = await RepoCache.I.reconcilePending();
+          if (recovered != null) return 'confirmed prior atomic commit ${RepoCache.I.lastCommit?.commitSha} ($recovered files); no new mutation';
+        } catch (e) {
+          return 'commit reconciliation required: $e';
+        }
         if (!RepoCache.I.hasPending) return 'no pending changes';
+        final CommitApproval approval;
+        try {
+          approval = await RepoCache.I.prepareCommit(message);
+        } catch (e) {
+          return 'commit preview failed: $e';
+        }
         final ok = await _maybeApprove(
           'commit',
           message,
-          'PUSH TO GITHUB\n"${RepoCache.I.repoFull}"\n'
-              '${RepoCache.I.dirtyCount} files · "$message"',
+          'PUSH TO GITHUB\n${approval.repo}\nBranch: ${approval.branch}\n'
+              'Base: ${approval.baseCommit}\nMessage: ${approval.message}\n'
+              'Selected paths: ${approval.paths.join(', ')}\n${approval.diff}',
         );
         if (!ok) return 'DENIED by user';
         _emit('file', 'committing ${RepoCache.I.dirtyCount} files…');
         try {
-          final n = await RepoCache.I.commitAll(message);
-          // HONEST COMMIT RESULT (audit 2026-09-25): commitAll now creates ONE
-          // atomic commit via the Git Data API, but falls back to the old
-          // per-file contents-API path if that fails — which means N separate
-          // commits on the branch. Reporting "committed N files ✓" for the
-          // fallback hides that the history was spammed, so say which happened.
+          final n = await RepoCache.I.commitApproved(approval);
+          // Report confirmed publication only. Legacy mode metadata remains
+          // readable, but RepoCache never starts a per-file fallback.
           final info = RepoCache.I.lastCommit;
           final perFile = info?.mode == CommitMode.perFile;
           _emit(
@@ -15449,8 +15477,8 @@ ${await _agentsMdBlock()}
           return 'committed $n files ✓ as a single atomic commit'
               '${sha == null || sha.isEmpty ? '' : ' (${sha.substring(0, sha.length.clamp(0, 7))})'}.';
         } catch (e) {
-          // commitAll throws (never returns success) on a partial push, and the
-          // message already names how many files landed before the failure.
+          // Includes stale approval, upstream rejection and durable unknown
+          // outcomes; none authorizes a fresh publication retry.
           return 'commit failed: $e';
         }
 

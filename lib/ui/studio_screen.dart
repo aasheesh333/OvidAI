@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -756,13 +757,15 @@ class _StudioScreenState extends State<StudioScreen> {
   }
 
   Future<void> _commitPending() async {
-    if (_committing || !RepoCache.I.hasPending) return;
+    if (_committing) return;
     setState(() => _committing = true);
     try {
-      final count = await RepoCache.I.commitAll(
-        'Update files from Ovid Studio',
+      final count = await showDialog<int>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const StudioCommitDialog(),
       );
-      if (!mounted) return;
+      if (!mounted || count == null) return;
       final mode = RepoCache.I.lastCommit?.mode == CommitMode.atomic
           ? 'one atomic commit'
           : 'separate commits';
@@ -889,7 +892,7 @@ class _StudioScreenState extends State<StudioScreen> {
             color: Aether.accent,
             onPressed: _syncing ? null : _autoSync,
           ),
-        if (!compactActions && repo != null && RepoCache.I.hasPending)
+        if (!compactActions && repo != null)
           StudioIconButton(
             icon: Icons.cloud_upload_outlined,
             tooltip: _committing
@@ -921,7 +924,7 @@ class _StudioScreenState extends State<StudioScreen> {
                     label: _syncing ? 'Syncing…' : 'Sync repo',
                    ),
                  ),
-               if (repo != null && RepoCache.I.hasPending)
+               if (repo != null)
                  PopupMenuItem(
                    value: 'commit',
                    enabled: !_committing,
@@ -1064,6 +1067,138 @@ class _StudioScreenState extends State<StudioScreen> {
         ),
       ],
     );
+  }
+}
+
+/// Selection and message stay editable, but each edit discards the review.
+/// HTTP injection exercises the real RepoCache approval/publication contract.
+class StudioCommitDialog extends StatefulWidget {
+  const StudioCommitDialog({super.key, this.client});
+  final http.Client? client;
+  @override
+  State<StudioCommitDialog> createState() => _StudioCommitDialogState();
+}
+
+class _StudioCommitDialogState extends State<StudioCommitDialog> {
+  final _message = TextEditingController(text: 'Update files from Ovid Studio');
+  late final List<String> _paths = RepoCache.I.pendingPaths;
+  late final Set<String> _selected = _paths.toSet();
+  CommitApproval? _approval;
+  String? _error;
+  bool _busy = false;
+  int _revision = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _message.addListener(_invalidate);
+    RepoCache.I.addListener(_cacheChanged);
+  }
+
+  void _invalidate() {
+    if (!mounted) return;
+    setState(() { _revision++; _approval = null; });
+  }
+
+  void _cacheChanged() {
+    if (_approval == null) { _invalidate(); return; }
+    try {
+      RepoCache.I.validateApproval(_approval!);
+    } catch (e) {
+      _invalidate();
+      setState(() => _error = '$e');
+    }
+  }
+
+  Future<void> _review() async {
+    final revision = _revision;
+    setState(() { _busy = true; _error = null; _approval = null; });
+    try {
+      final approval = await RepoCache.I.prepareCommit(_message.text,
+          paths: _selected, client: widget.client);
+      if (mounted && revision == _revision) setState(() => _approval = approval);
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _publish() async {
+    final approval = _approval;
+    if (approval == null) return;
+    setState(() { _busy = true; _error = null; });
+    try {
+      final count = await RepoCache.I.commitApproved(approval, client: widget.client);
+      if (mounted) Navigator.of(context).pop(count);
+    } catch (e) {
+      if (mounted) setState(() { _error = '$e'; _approval = null; });
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _reconcile() async {
+    setState(() { _busy = true; _error = null; });
+    try {
+      final count = await RepoCache.I.reconcilePending(client: widget.client);
+      if (!mounted) return;
+      if (count != null) {
+        Navigator.of(context).pop(count);
+      } else {
+        setState(() => _error = 'No unresolved commit intent');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    RepoCache.I.removeListener(_cacheChanged);
+    _message.removeListener(_invalidate);
+    _message.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final approval = _approval;
+    return PopScope(canPop: !_busy, child: AlertDialog(
+      title: const Text('Review commit'),
+      content: SizedBox(width: 640, child: SingleChildScrollView(child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('${RepoCache.I.repoFull} · ${RepoCache.I.defaultBranch}'),
+          TextField(controller: _message, enabled: !_busy,
+              decoration: const InputDecoration(labelText: 'Commit message')),
+          for (final path in _paths) CheckboxListTile(
+            title: Text(path), value: _selected.contains(path),
+            onChanged: _busy ? null : (value) {
+              _invalidate();
+              setState(() { if (value == true) { _selected.add(path); } else { _selected.remove(path); } });
+            },
+          ),
+          if (approval != null) ...[
+            Text('Repository: ${approval.repo}\nBranch: ${approval.branch}\nBase: ${approval.baseCommit}\nMessage: ${approval.message}\nSelected paths: ${approval.paths.join(', ')}'),
+            SelectableText(approval.diff, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+          ],
+          if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+          if (_busy) const LinearProgressIndicator(),
+        ],
+      ))),
+      actions: [
+        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
+        TextButton(onPressed: _busy ? null : _reconcile, child: const Text('Reconcile pending commit')),
+        if (approval == null)
+          FilledButton(onPressed: _busy || _selected.isEmpty ? null : _review, child: const Text('Review changes'))
+        else
+          FilledButton(onPressed: _busy ? null : _publish, child: const Text('Approve and commit')),
+      ],
+    ));
   }
 }
 

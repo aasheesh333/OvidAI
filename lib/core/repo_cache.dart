@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'diag.dart';
 import 'workspace_files.dart';
 
@@ -104,6 +105,13 @@ String _fmtPaths(List<String> paths) {
   return paths.length > 3 ? '$shown, … +${paths.length - 3} more' : shown;
 }
 
+// Dart's UTF-8 decoder consumes a leading BOM. Working-copy text must retain
+// it so re-encoding and approval comparisons represent the actual file bytes.
+String _decodeFileBytes(List<int> bytes, {bool allowMalformed = false}) {
+  final bom = bytes.length >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf;
+  return '${bom ? '\uFEFF' : ''}${utf8.decode(bytes, allowMalformed: allowMalformed)}';
+}
+
 /// Why a [RepoCache.fetchFileResult] call did not return content.
 /// `none` means success (audit 2026-09-25 §6: no-token, 401 and 404 all used
 /// to collapse into the same silent `null`).
@@ -135,8 +143,68 @@ enum CommitMode {
   /// ONE commit + ONE ref update via the Git Data API.
   atomic,
 
-  /// The contents-API fallback: N files = N separate GitHub commits.
+  /// Legacy contents-API mode, retained for API compatibility.
   perFile,
+}
+
+enum CommitFailureKind { staleApproval, upstreamConflict, unknown, persistence, busy, unsupported }
+
+class CommitFailure implements Exception {
+  const CommitFailure(this.kind, this.message, {this.intendedSha});
+  final CommitFailureKind kind;
+  final String message;
+  final String? intendedSha;
+  @override
+  String toString() => message;
+}
+
+/// A read-only review artifact. Only RepoCache can construct one; publication
+/// takes this artifact rather than a mutable message/path selection.
+@immutable
+class CommitApproval {
+  CommitApproval._({required this.repo, required this.branch,
+    required this.baseCommit, required this.baseTree, required this.message,
+    required this.binding, required this.generation,
+    required Map<String, String?> contents, required Map<String, String?> originals,
+    required Map<String, String> modes})
+      : contents = Map.unmodifiable(contents), originals = Map.unmodifiable(originals),
+        modes = Map.unmodifiable(modes);
+  final String repo, branch, baseCommit, baseTree, message, binding;
+  final int generation;
+  final Map<String, String?> contents, originals;
+  final Map<String, String> modes;
+  List<String> get paths => List.unmodifiable(contents.keys);
+
+  /// Full-file unified hunks avoid a misleading truncated/summary-only diff.
+  /// Missing trailing newlines are explicit, including for empty files.
+  String get diff {
+    final out = StringBuffer();
+    List<String> lines(String? text) {
+      if (text == null || text.isEmpty) return [];
+      final parts = text.split('\n');
+      if (parts.last.isEmpty) parts.removeLast();
+      return parts;
+    }
+    void body(String? text, String prefix) {
+      for (final line in lines(text)) { out.writeln('$prefix$line'); }
+      if (text != null && text.isNotEmpty && !text.endsWith('\n')) {
+        out.writeln(r'\ No newline at end of file');
+      }
+    }
+    for (final path in paths) {
+      final before = originals[path], after = contents[path];
+      final quoted = jsonEncode(path);
+      out.writeln('diff --git $quoted $quoted');
+      out.writeln(before == null ? 'new file mode ${modes[path]}' :
+          after == null ? 'deleted file mode ${modes[path]}' : 'file mode ${modes[path]} (unchanged)');
+      out.writeln('--- ${before == null ? '/dev/null' : 'a/$quoted'}');
+      out.writeln('+++ ${after == null ? '/dev/null' : 'b/$quoted'}');
+      out.writeln('@@ -${lines(before).isEmpty ? 0 : 1},${lines(before).length} +${lines(after).isEmpty ? 0 : 1},${lines(after).length} @@');
+      body(before, '-');
+      body(after, '+');
+    }
+    return out.toString();
+  }
 }
 
 /// What the last successful [RepoCache.commitAll] actually did.
@@ -169,6 +237,166 @@ class CommitInfo {
 class RepoCache extends ChangeNotifier {
   RepoCache._();
   static final RepoCache I = RepoCache._();
+
+  // Admission is keyed by the remote ref, not session: two sessions may target
+  // the same ref. An admitted call owns it through persistence and publication.
+  static final Set<String> _commitAdmissions = {};
+  static final _retainedIntents = Expando<Map<String, Map<String, dynamic>>>();
+  static final _intentStorageKeys = Expando<Map<String, Set<String>>>();
+  static const _intentPrefix = 'ovid.repo.pending.v1.';
+  String _intentKey(String repo, String branch) =>
+      '$_intentPrefix${base64Url.encode(utf8.encode(jsonEncode([repo.toLowerCase(), branch])))}';
+
+  // v1 used the display spelling. Discover all legacy aliases without deleting
+  // or overwriting an unresolved intent. They retire only after exact proof.
+  String? _canonicalIntentKey(String storedKey) {
+    if (!storedKey.startsWith(_intentPrefix)) return null;
+    try {
+      final parts = jsonDecode(utf8.decode(base64Url.decode(storedKey.substring(_intentPrefix.length)))) as List;
+      if (parts.length != 2 || parts.any((p) => p is! String)) return null;
+      return _intentKey(parts[0] as String, parts[1] as String);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _canonicalCopyKey(String key) {
+    final parts = jsonDecode(key) as List;
+    if (parts.length != 4) throw const FormatException('invalid owner binding');
+    if (parts[1] is String) parts[1] = (parts[1] as String).toLowerCase();
+    return jsonEncode(parts);
+  }
+
+  Future<Map<String, dynamic>?> _loadIntent(String key) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final retained = _retainedIntents[prefs] ??= {};
+      if (retained.containsKey(key)) return retained[key];
+      final storageKeys = prefs.getKeys().where((k) => _canonicalIntentKey(k) == key).toSet();
+      if (storageKeys.isEmpty) return null;
+      Map<String, dynamic>? found;
+      for (final storedKey in storageKeys) {
+        final record = jsonDecode(prefs.getString(storedKey)!) as Map<String, dynamic>;
+        if (record['sha'] is! String || (record['sha'] as String).isEmpty ||
+            record['pending'] is! Map || record['owner'] is! String ||
+            record['repo'] is! String || record['branch'] is! String ||
+            key != _intentKey(record['repo'] as String, record['branch'] as String) ||
+            (record['pending'] as Map).isEmpty ||
+            (record['pending'] as Map).entries.any((e) => e.key is! String || (e.value != null && e.value is! String))) {
+          throw const FormatException('invalid pending commit');
+        }
+        record['owner'] = _canonicalCopyKey(record['owner'] as String);
+        if (found != null && (found['sha'] != record['sha'] || found['owner'] != record['owner'] ||
+            !mapEquals(found['pending'] as Map, record['pending'] as Map))) {
+          throw const FormatException('conflicting legacy intents');
+        }
+        found = record;
+      }
+      (_intentStorageKeys[prefs] ??= {})[key] = storageKeys;
+      retained[key] = found!;
+      return found;
+    } catch (_) {
+      // Decoder/platform errors can embed persisted source bytes. Never copy
+      // them into a tool result or diagnostic; retain the fence and record.
+      throw const CommitFailure(CommitFailureKind.persistence,
+          'Cannot read pending commit intent; stored recovery data is invalid or unavailable');
+    }
+  }
+
+  Future<void> _saveIntent(String key, Map<String, dynamic> record) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!await prefs.setString(key, jsonEncode(record))) {
+        throw StateError('preferences write rejected');
+      }
+      (_retainedIntents[prefs] ??= {})[key] = record;
+      (_intentStorageKeys[prefs] ??= {})[key] = {key};
+    } catch (_) {
+      throw const CommitFailure(CommitFailureKind.persistence,
+          'Cannot persist pending commit intent; ref update not sent');
+    }
+  }
+
+  Future<void> _clearIntent(String key) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      // A failed removal must not make the optimistic preferences cache authorize
+      // another mutation. Keep the retained record until removal is acknowledged.
+      for (final storedKey in _intentStorageKeys[prefs]?[key] ?? {key}) {
+        if (!await prefs.remove(storedKey)) {
+          throw const CommitFailure(CommitFailureKind.persistence, 'Cannot clear reconciled commit intent; retry reconciliation');
+        }
+      }
+      _retainedIntents[prefs]?.remove(key);
+      _intentStorageKeys[prefs]?.remove(key);
+    } catch (_) {
+      throw const CommitFailure(CommitFailureKind.persistence,
+          'Cannot clear reconciled commit intent; retry reconciliation');
+    }
+  }
+
+  Future<int?> _recoverIntent(String repo, String branch, String token,
+      http.Client client, int generation) async {
+    final key = _intentKey(repo, branch);
+    final record = await _loadIntent(key);
+    _ensureBinding(generation);
+    if (record == null) return null;
+    final sha = record['sha'] as String;
+    String? observed;
+    try {
+      final response = await _sendRetried(() {
+        _ensureBinding(generation);
+        return client.get(_apiUri('repos/$repo/git/ref/heads/$branch'),
+            headers: {'Authorization': 'Bearer $token', 'Accept': 'application/vnd.github+json'});
+      });
+      _ensureBinding(generation);
+      if (response.statusCode == 200) {
+        observed = (jsonDecode(response.body)['object'] as Map?)?['sha'] as String?;
+      }
+    } on StateError {
+      rethrow;
+    } catch (_) {
+      // No proof of publication: retain the intent even if the base is unchanged.
+    }
+    _ensureBinding(generation);
+    if (observed != sha) {
+      throw CommitFailure(CommitFailureKind.unknown,
+          'commit outcome unknown for $repo "$branch": intended commit $sha; observed ref ${observed ?? 'unavailable'} — pending intent retained; read-only reconciliation required',
+          intendedSha: sha);
+    }
+    final pending = Map<String, String?>.from(record['pending'] as Map);
+    if (record['owner'] == _copyKey) {
+      _dropPushed(pending);
+    } else {
+      final owner = record['owner'] as String;
+      final saved = _workingCopies[owner];
+      final workspace = (jsonDecode(owner) as List)[3] as String?;
+      if (saved != null) {
+        for (final entry in pending.entries) {
+          String? current = saved.files[entry.key];
+          if (workspace != null && !saved.unsaved.contains(entry.key)) {
+            try {
+              final safe = workspaceFilePath(Directory(workspace), entry.key);
+              if (safe == null) continue;
+              current = _decodeFileBytes(File(safe).readAsBytesSync());
+            } catch (_) {
+              continue; // An unreadable checkout is not proof of matching bytes.
+            }
+          }
+          if (current == entry.value) saved.dirty.remove(entry.key);
+        }
+      }
+    }
+    // Account for confirmed bytes before asynchronous storage cleanup: a bind
+    // during remove must save the already-reconciled working copy, not drafts
+    // which could be blindly replayed after the durable fence disappears.
+    await _clearIntent(key);
+    _ensureBinding(generation);
+    _lastCommit = CommitInfo(mode: CommitMode.atomic, files: pending.length,
+        branch: branch, commitSha: sha);
+    notifyListeners();
+    return pending.length;
+  }
 
   static const _api = 'https://api.github.com';
 
@@ -219,7 +447,7 @@ class RepoCache extends ChangeNotifier {
   final Map<String, ({Map<String, String> files, Set<String> dirty, Set<String> unsaved,
     List<String> tree})> _workingCopies = {};
   String get _copyKey => jsonEncode([
-    _boundSessionId, repoFull, defaultBranch, workspaceFolder,
+    _boundSessionId, repoFull?.toLowerCase(), defaultBranch, workspaceFolder,
   ]);
 
   /// path → content (working copy)
@@ -237,12 +465,12 @@ class RepoCache extends ChangeNotifier {
 
   CommitInfo? _lastCommit;
 
-  /// What the most recent successful [commitAll] did (audit 2026-09-25 §4):
-  /// `CommitMode.atomic` (one commit) or the per-file contents-API fallback.
+  /// What the most recent successful [commitAll] did (audit 2026-09-25 §4).
   CommitInfo? get lastCommit => _lastCommit;
 
   bool get isReady => repoFull != null && files.isNotEmpty;
   bool get hasPending => _dirty.isNotEmpty;
+  List<String> get pendingPaths => List.unmodifiable(_dirty.toList()..sort());
   int get dirtyCount => _dirty.length;
 
   @override
@@ -257,7 +485,7 @@ class RepoCache extends ChangeNotifier {
     String? workspaceFolder,
   }) {
     final oldKey = _copyKey;
-    final newKey = jsonEncode([sessionId, full, branch, workspaceFolder]);
+    final newKey = jsonEncode([sessionId, full.toLowerCase(), branch, workspaceFolder]);
     if (oldKey != newKey) {
       _workingCopies[oldKey] = (
         files: Map.of(files), dirty: Set.of(_dirty), unsaved: Set.of(_unsaved), tree: List.of(treePaths),
@@ -415,7 +643,13 @@ class RepoCache extends ChangeNotifier {
       final preserved = <String>[];
       for (final p in previousDirty) {
         final local = previousFiles[p];
-        if (local == null) continue;
+        if (local == null) {
+          // Absence in a dirty entry is an explicit staged deletion.
+          files.remove(p);
+          treePaths.remove(p);
+          preserved.add(p);
+          continue;
+        }
         if (syncedFiles[p] == local) continue;
         files[p] = local;
         preserved.add(p);
@@ -518,7 +752,7 @@ class RepoCache extends ChangeNotifier {
             if (bytes.length > 2 * 1024 * 1024) {
               failed.add(path);
             } else {
-              contents[path] = utf8.decode(bytes);
+              contents[path] = _decodeFileBytes(bytes);
             }
           } catch (error, stack) {
             Diag.swallow('repo_cache.syncWorkspace', error, stack);
@@ -728,7 +962,7 @@ class RepoCache extends ChangeNotifier {
       }
       return (
         status: 200,
-        content: utf8.decode(res.bodyBytes, allowMalformed: true),
+        content: _decodeFileBytes(res.bodyBytes, allowMalformed: true),
         error: null,
       );
     } on StateError {
@@ -821,7 +1055,7 @@ class RepoCache extends ChangeNotifier {
         if (_unsaved.contains(path)) return files[path];
         final file = File(safe);
         if (!file.existsSync()) return null;
-        return file.readAsStringSync();
+        return _decodeFileBytes(file.readAsBytesSync());
       } catch (error, stack) {
         Diag.swallow('repo_cache.readWorkspace', error, stack);
         return null;
@@ -930,6 +1164,19 @@ class RepoCache extends ChangeNotifier {
     treePaths.remove(path);
   }
 
+  /// Explicit remote deletion. `remove` remains cache eviction for existing
+  /// callers. Disk-backed deletions need the checkout's Git workflow.
+  void stageDeletion(String path) {
+    if (workspaceFolder != null) {
+      throw const CommitFailure(CommitFailureKind.unsupported,
+          'Stage checkout deletions with the workspace Git tools');
+    }
+    files.remove(path);
+    _dirty.add(path);
+    treePaths.remove(path);
+    notifyListeners();
+  }
+
   /// List files of a folder (children names) for the Studio tree UI.
   List<(String name, bool isDir)> listDir(String dir) {
     final prefix = dir.isEmpty ? '' : '$dir/';
@@ -947,19 +1194,125 @@ class RepoCache extends ChangeNotifier {
   }
 
   // ── commit pending ───────────────────────────────────────────────────
+  void validateApproval(CommitApproval approval) {
+    if (approval.generation != _bindingGeneration || approval.binding != _copyKey ||
+        approval.contents.entries.any((e) => !_dirty.contains(e.key) || read(e.key) != e.value)) {
+      throw const CommitFailure(CommitFailureKind.staleApproval,
+          'Commit preview is stale; repository binding or selected bytes changed. Review again.');
+    }
+  }
+
+  Future<CommitApproval> prepareCommit(String message, {
+    Iterable<String>? paths, http.Client? client,
+  }) async {
+    final repo = repoFull, token = _token;
+    final branch = defaultBranch ?? 'main';
+    final generation = _bindingGeneration, binding = _copyKey;
+    if (repo == null || token == null || token.isEmpty) throw StateError('repo not bound');
+    if (message.trim().isEmpty) {
+      throw const CommitFailure(CommitFailureKind.staleApproval, 'Commit message is empty');
+    }
+    final selected = (paths ?? pendingPaths).toSet().toList()..sort();
+    if (selected.isEmpty || selected.any((p) => !_dirty.contains(p))) {
+      throw const CommitFailure(CommitFailureKind.staleApproval, 'Select pending paths to review');
+    }
+    final contents = {for (final p in selected) p: read(p)};
+    if (workspaceFolder != null && contents.values.any((value) => value == null)) {
+      throw const CommitFailure(CommitFailureKind.unsupported,
+          'Selected workspace bytes are missing or unreadable; use workspace Git tools for checkout deletions');
+    }
+    final c = client ?? http.Client();
+    Future<Map<String, dynamic>> get(String path, {Map<String, String>? query}) async {
+      final response = await _sendRetried(() {
+        _ensureBinding(generation);
+        return c.get(_apiUri(path, query: query), headers: {
+          'Authorization': 'Bearer $token', 'Accept': 'application/vnd.github+json',
+        });
+      });
+      _ensureBinding(generation);
+      if (response.statusCode != 200) {
+        throw Exception('commit preview fetch failed: ${response.statusCode} — no non-atomic fallback; per-file commits require explicit approval');
+      }
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    try {
+      final ref = await get('repos/$repo/git/ref/heads/$branch');
+      final base = (ref['object'] as Map?)?['sha'] as String?;
+      if (base == null || base.isEmpty) throw const FormatException('Missing base commit');
+      final tree = await get('repos/$repo/git/trees/$base', query: {'recursive': '1'});
+      if (tree['truncated'] == true || tree['tree'] is! List || tree['sha'] is! String) {
+        throw const CommitFailure(CommitFailureKind.unsupported,
+            'Cannot review incomplete tree or missing base tree revision');
+      }
+      final entries = {for (final e in tree['tree'] as List) (e as Map)['path'] as String: e};
+      final originals = <String, String?>{};
+      final modes = <String, String>{};
+      for (final p in selected) {
+        final entry = entries[p];
+        if (entry == null) {
+          if (contents[p] == null) throw CommitFailure(CommitFailureKind.staleApproval, 'Deletion target is absent upstream: $p');
+          originals[p] = null;
+          modes[p] = '100644';
+          continue;
+        }
+        if (entry['type'] != 'blob' || !['100644', '100755'].contains(entry['mode']) || entry['sha'] is! String) {
+          throw CommitFailure(CommitFailureKind.unsupported, 'Cannot safely review non-regular file or unknown mode: $p');
+        }
+        modes[p] = entry['mode'] as String;
+        final blob = await get('repos/$repo/git/blobs/${entry['sha']}');
+        if (blob['encoding'] != 'base64' || blob['content'] is! String) {
+          throw CommitFailure(CommitFailureKind.unsupported, 'Cannot decode original bytes: $p');
+        }
+        originals[p] = _decodeFileBytes(base64Decode((blob['content'] as String).replaceAll(RegExp(r'\s'), '')));
+      }
+      final approval = CommitApproval._(repo: repo, branch: branch, baseCommit: base,
+          baseTree: tree['sha'] as String, message: message, binding: binding,
+          generation: generation, contents: contents, originals: originals, modes: modes);
+      validateApproval(approval);
+      return approval;
+    } finally {
+      if (client == null) c.close();
+    }
+  }
+
+  /// Existing admitted automated callers get the same snapshot/validation
+  /// contract. Interactive callers must prepare BEFORE asking for approval.
+  Future<int> commitAll(String message, {http.Client? client}) =>
+      _commit(message: message, client: client);
+
+  Future<int> commitApproved(CommitApproval approval, {http.Client? client}) =>
+      _commit(approval: approval, client: client);
+
+  /// Read-only even when there is no intent. Available without local drafts so
+  /// a restarted application can recover a prior publication.
+  Future<int?> reconcilePending({http.Client? client}) async {
+    final repo = repoFull, token = _token;
+    final branch = defaultBranch ?? 'main', generation = _bindingGeneration;
+    if (repo == null || token == null || token.isEmpty) throw StateError('repo not bound');
+    final key = _intentKey(repo, branch);
+    if (!_commitAdmissions.add(key)) {
+      throw const CommitFailure(CommitFailureKind.busy, 'Commit already in progress for this repository branch');
+    }
+    final c = client ?? http.Client();
+    try {
+      return await _recoverIntent(repo, branch, token, c, generation);
+    } finally {
+      _commitAdmissions.remove(key);
+      if (client == null) c.close();
+    }
+  }
+
   /// Pushes every dirty file as ONE atomic commit via the Git Data API
   /// (create blobs → create tree on the branch tip → create commit → update
-  /// ref) — audit 2026-09-25 §4. The old per-file contents PUT made N files
-  /// = N GitHub commits: non-atomic, and a mid-loop failure left a partial
-  /// push. Here nothing is visible upstream until the final ref update
-  /// succeeds, so a failure before it changes NOTHING.
+  /// ref). Objects created before the ref update are not published on the
+  /// branch. Mutation requests are never automatically replayed.
   ///
-  /// If the atomic path is unavailable (e.g. the token lacks Git Data
-  /// access), it falls back to per-file commits; a failure THERE throws an
-  /// exception naming exactly how many files already landed — success is
-  /// never reported for a partial write. [lastCommit] tells callers which
-  /// mode ran. Returns the number of committed files.
-  Future<int> commitAll(String message, {http.Client? client}) async {
+  /// A lost ref-update response is reconciled against the intended commit SHA.
+  /// If publication cannot be confirmed, throws an actionable unknown outcome
+  /// and keeps pending edits. There is no non-atomic approval contract, so even
+  /// an unsupported atomic API must fail rather than fall back to contents PUTs.
+  /// Returns the number of committed files; [lastCommit] describes success only.
+  Future<int> _commit({String? message, CommitApproval? approval, http.Client? client}) async {
     final repo = repoFull;
     final token = _token;
     final branch = defaultBranch ?? 'main';
@@ -967,62 +1320,48 @@ class RepoCache extends ChangeNotifier {
     if (repo == null || token == null || token.isEmpty) {
       throw StateError('repo not bound');
     }
-    final pending = {
-      for (final path in _dirty)
-        if (files[path] case final String content) path: content,
-    };
-    if (pending.isEmpty) return 0;
+    final key = _intentKey(repo, branch);
+    if (!_commitAdmissions.add(key)) {
+      throw const CommitFailure(CommitFailureKind.busy, 'Commit already in progress for this repository branch');
+    }
     final c = client ?? http.Client();
     try {
-      try {
-        final commitSha = await _commitAtomic(
-          repo,
-          token,
-          branch,
-          message,
-          pending,
-          c,
-          generation,
-        );
-        _dropPushed(pending);
-        _lastCommit = CommitInfo(
-          mode: CommitMode.atomic,
-          commitSha: commitSha,
-          files: pending.length,
-          branch: branch,
-        );
-        notifyListeners();
-        return pending.length;
-      } on StateError {
-        rethrow; // a rebind mid-commit must surface, not fall back
-      } catch (atomicError, stack) {
-        Diag.swallow('repo_cache.commitAtomic', atomicError, stack);
-        final pushed = await _commitPerFile(
-          repo,
-          token,
-          branch,
-          message,
-          pending,
-          c,
-          generation,
-          atomicError,
-        );
-        _lastCommit = CommitInfo(
-          mode: CommitMode.perFile,
-          files: pushed,
-          branch: branch,
-        );
-        notifyListeners();
-        return pushed;
-      }
+      if (approval != null) validateApproval(approval);
+      final recovered = await _recoverIntent(repo, branch, token, c, generation);
+      if (recovered != null) return recovered;
+      if (approval == null && _dirty.isEmpty) return 0;
+      final snapshot = approval ?? await prepareCommit(message!, client: c);
+      validateApproval(snapshot);
+      final pending = snapshot.contents;
+      final commitSha = await _commitAtomic(
+        repo,
+        token,
+        branch,
+        snapshot.message,
+        pending,
+        c,
+        generation,
+        snapshot,
+      );
+      _ensureBinding(generation);
+      _dropPushed(pending);
+      _lastCommit = CommitInfo(
+        mode: CommitMode.atomic,
+        commitSha: commitSha,
+        files: pending.length,
+        branch: branch,
+      );
+      notifyListeners();
+      return pending.length;
     } finally {
+      _commitAdmissions.remove(key);
       if (client == null) c.close();
     }
   }
 
-  void _dropPushed(Map<String, String> pending) {
+  void _dropPushed(Map<String, String?> pending) {
     for (final entry in pending.entries) {
-      if (files[entry.key] == entry.value) _dirty.remove(entry.key);
+      if (read(entry.key) == entry.value) _dirty.remove(entry.key);
     }
   }
 
@@ -1034,9 +1373,10 @@ class RepoCache extends ChangeNotifier {
     String token,
     String branch,
     String message,
-    Map<String, String> pending,
+    Map<String, String?> pending,
     http.Client c,
     int generation,
+    CommitApproval approval,
   ) async {
     final headers = {
       'Authorization': 'Bearer $token',
@@ -1044,15 +1384,36 @@ class RepoCache extends ChangeNotifier {
     };
     final jsonHeaders = {...headers, 'Content-Type': 'application/json'};
 
-    // 1. Branch tip.
-    final refRes = await _sendRetried(
-      () => c.get(_apiUri('repos/$repo/git/ref/heads/$branch'), headers: headers),
+    // Fence every read attempt, including retries after a lost response.
+    Future<http.Response> get(Uri uri) => _sendRetried(() {
+      _ensureBinding(generation);
+      return c.get(uri, headers: headers);
+    });
+
+    // POSTs may have been accepted even if their response was lost. Do not
+    // create duplicate objects/commits by feeding writes through read retries.
+    Future<http.Response> post(String path, String body) async {
+      _ensureBinding(generation);
+      try {
+        return await c
+            .post(_apiUri(path), headers: jsonHeaders, body: body)
+            .timeout(requestTimeout);
+      } finally {
+        _ensureBinding(generation);
+      }
+    }
+
+    Exception failed(String operation, int status) => Exception(
+      '$operation failed: $status — '
+      'no non-atomic fallback; per-file commits require explicit approval',
     );
+
+    // 1. Branch tip.
+    final refUri = _apiUri('repos/$repo/git/ref/heads/$branch');
+    final refRes = await get(refUri);
     _ensureBinding(generation);
     if (refRes.statusCode != 200) {
-      throw Exception(
-        'ref fetch for branch "$branch" failed: ${refRes.statusCode}',
-      );
+      throw failed('ref fetch for branch "$branch"', refRes.statusCode);
     }
     final refObject =
         (jsonDecode(refRes.body) as Map<String, dynamic>)['object'];
@@ -1060,52 +1421,27 @@ class RepoCache extends ChangeNotifier {
     if (baseCommit == null) {
       throw Exception('ref fetch for branch "$branch" returned no commit sha');
     }
-
-    // 2. Best-effort mode lookup so an existing 100755 (executable) or
-    //    120000 (symlink) blob keeps its mode; new/unknown paths default to
-    //    a regular 100644 blob.
-    final modes = <String, String>{};
-    try {
-      final modeRes = await _sendRetried(
-        () => c.get(
-          _apiUri('repos/$repo/git/trees/$baseCommit', query: {'recursive': '1'}),
-          headers: headers,
-        ),
-      );
-      _ensureBinding(generation);
-      if (modeRes.statusCode == 200) {
-        final tj = jsonDecode(modeRes.body) as Map<String, dynamic>;
-        for (final e in (tj['tree'] as List? ?? const []).cast<Map<String, dynamic>>()) {
-          if (e['path'] case final String p when e['mode'] is String) {
-            modes[p] = e['mode'] as String;
-          }
-        }
-      }
-    } on StateError {
-      rethrow;
-    } catch (e) {
-      Diag.swallow('repo_cache.commitModeLookup', e);
+    if (baseCommit != approval.baseCommit) {
+      throw CommitFailure(CommitFailureKind.upstreamConflict,
+          'Upstream conflict: approved base ${approval.baseCommit} changed to $baseCommit. Refresh and review again.');
     }
+    validateApproval(approval);
+    final modes = approval.modes;
 
     // 3. One blob per dirty file (bounded concurrency).
     final paths = pending.keys.toList()..sort();
     final blobShas = <String, String>{};
     await _forEachConcurrent(paths, _blobConcurrency, (p) async {
       _ensureBinding(generation);
+      if (pending[p] == null) return;
       final body = jsonEncode({
         'content': base64Encode(utf8.encode(pending[p]!)),
         'encoding': 'base64',
       });
-      final res = await _sendRetried(
-        () => c.post(
-          _apiUri('repos/$repo/git/blobs'),
-          headers: jsonHeaders,
-          body: body,
-        ),
-      );
+      final res = await post('repos/$repo/git/blobs', body);
       _ensureBinding(generation);
       if (res.statusCode != 201 && res.statusCode != 200) {
-        throw Exception('blob create for "$p" failed: ${res.statusCode}');
+        throw failed('blob create for "$p"', res.statusCode);
       }
       final sha = (jsonDecode(res.body) as Map<String, dynamic>)['sha']
           as String?;
@@ -1115,7 +1451,7 @@ class RepoCache extends ChangeNotifier {
 
     // 4. New tree on top of the branch tip.
     final treeBody = jsonEncode({
-      'base_tree': baseCommit,
+      'base_tree': approval.baseTree,
       'tree': [
         for (final p in paths)
           {
@@ -1126,16 +1462,10 @@ class RepoCache extends ChangeNotifier {
           },
       ],
     });
-    final treeRes = await _sendRetried(
-      () => c.post(
-        _apiUri('repos/$repo/git/trees'),
-        headers: jsonHeaders,
-        body: treeBody,
-      ),
-    );
+    final treeRes = await post('repos/$repo/git/trees', treeBody);
     _ensureBinding(generation);
     if (treeRes.statusCode != 201 && treeRes.statusCode != 200) {
-      throw Exception('tree create failed: ${treeRes.statusCode}');
+      throw failed('tree create', treeRes.statusCode);
     }
     final treeSha = (jsonDecode(treeRes.body) as Map<String, dynamic>)['sha']
         as String?;
@@ -1147,144 +1477,91 @@ class RepoCache extends ChangeNotifier {
       'tree': treeSha,
       'parents': [baseCommit],
     });
-    final commitRes = await _sendRetried(
-      () => c.post(
-        _apiUri('repos/$repo/git/commits'),
-        headers: jsonHeaders,
-        body: commitBody,
-      ),
-    );
+    final commitRes = await post('repos/$repo/git/commits', commitBody);
     _ensureBinding(generation);
     if (commitRes.statusCode != 201 && commitRes.statusCode != 200) {
-      throw Exception('commit create failed: ${commitRes.statusCode}');
+      throw failed('commit create', commitRes.statusCode);
     }
     final commitSha =
         (jsonDecode(commitRes.body) as Map<String, dynamic>)['sha'] as String?;
     if (commitSha == null) throw Exception('commit create returned no sha');
 
-    // 6. Move the branch. Until this succeeds, upstream is untouched — a
-    //    failure anywhere above changes NOTHING. Retrying the PATCH is safe:
-    //    re-sending the same sha is a no-op on GitHub's side.
+    // 6. Publish once, non-force. A transport/server failure does not tell us
+    // whether GitHub accepted the update. Reconcile by reading, never by
+    // retrying PATCH or switching to per-file writes.
     final patchBody = jsonEncode({'sha': commitSha, 'force': false});
-    final patchRes = await _sendRetried(
-      () => c.patch(
-        _apiUri('repos/$repo/git/refs/heads/$branch'),
-        headers: jsonHeaders,
-        body: patchBody,
-      ),
-    );
+    http.Response? patchRes;
+    final intentKey = _intentKey(repo, branch);
+    await _saveIntent(intentKey, {
+      'sha': commitSha, 'repo': repo, 'branch': branch, 'base': baseCommit,
+      'message': message, 'pending': pending, 'owner': _copyKey,
+    });
     _ensureBinding(generation);
-    if (patchRes.statusCode != 200) {
-      throw Exception(
-        'ref update for "$branch" failed: ${patchRes.statusCode} — nothing was pushed',
-      );
-    }
-    return commitSha;
-  }
-
-  /// The pre-audit contents-API path, kept ONLY as a fallback when the Git
-  /// Data API is unavailable. Non-atomic by nature: a mid-loop failure throws
-  /// an exception naming the partial count (audit 2026-09-25 §4 — the raw
-  /// error used to imply nothing landed when some files already had).
-  Future<int> _commitPerFile(
-    String repo,
-    String token,
-    String branch,
-    String message,
-    Map<String, String> pending,
-    http.Client c,
-    int generation,
-    Object atomicError,
-  ) async {
-    var pushed = 0;
-    for (final entry in pending.entries) {
-      _ensureBinding(generation);
-      final sha = await _shaOf(repo, token, entry.key, branch, c);
-      _ensureBinding(generation);
-      try {
-        await _putFile(
-          repo,
-          token,
-          entry.key,
-          entry.value,
-          message,
-          sha,
-          branch,
-          c,
-        );
-      } catch (e) {
-        throw Exception(
-          'partial push: $pushed/${pending.length} files committed before '
-          '"${entry.key}" failed: $e (atomic commit also failed: $atomicError)',
-        );
-      }
-      _ensureBinding(generation);
-      if (files[entry.key] == entry.value) _dirty.remove(entry.key);
-      pushed++;
-    }
-    return pushed;
-  }
-
-  Future<String?> _shaOf(
-    String repo,
-    String token,
-    String path,
-    String branch,
-    http.Client client,
-  ) async {
     try {
-      final res = await _sendRetried(
-        () => client.get(
-          _apiUri('repos/$repo/contents/$path', query: {'ref': branch}),
-          headers: {
-            'Authorization': 'Bearer $token',
-            'Accept': 'application/vnd.github+json',
-          },
-        ),
+      patchRes = await c
+          .patch(
+            _apiUri('repos/$repo/git/refs/heads/$branch'),
+            headers: jsonHeaders,
+            body: patchBody,
+          )
+          .timeout(requestTimeout);
+    } on StateError {
+      rethrow;
+    } catch (_) {
+      // The request may have reached GitHub. Only an exact ref match below
+      // can turn a lost response into a confirmed success.
+    }
+    _ensureBinding(generation);
+    if (patchRes?.statusCode == 200) {
+      _dropPushed(pending);
+      await _clearIntent(intentKey);
+      _ensureBinding(generation);
+      return commitSha;
+    }
+    final status = patchRes?.statusCode;
+    if (status == 409 || status == 422) {
+      await _clearIntent(intentKey);
+      _ensureBinding(generation);
+      throw CommitFailure(CommitFailureKind.upstreamConflict,
+        'ref update conflict/rejection ($status) for $repo "$branch" '
+        'at intended commit $commitSha — refresh upstream and review pending '
+        'edits before retrying',
       );
-      if (res.statusCode == 200) {
-        return (jsonDecode(res.body))['sha'] as String?;
-      }
-    } catch (e) {
-      Diag.swallow('repo_cache.shaOf', e);
     }
-    return null;
-  }
+    if (status != null && status >= 400 && status < 500 && status != 408) {
+      await _clearIntent(intentKey);
+      _ensureBinding(generation);
+      throw failed('ref update for "$branch"', status);
+    }
 
-  Future<void> _putFile(
-    String repo,
-    String token,
-    String path,
-    String content,
-    String message,
-    String? sha,
-    String branch,
-    http.Client client,
-  ) async {
-    // GitHub's contents API commits to `branch` via the body; `?ref=` is not
-    // accepted for PUT (the SHA read above carries `?ref=` instead).
-    // Deliberately NOT retried: a PUT that timed out may still have
-    // committed, and a blind retry with the now-stale `sha` would 409.
-    final res = await client
-        .put(
-          _apiUri('repos/$repo/contents/$path'),
-          headers: {
-            'Authorization': 'Bearer $token',
-            'Accept': 'application/vnd.github+json',
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode({
-            'message': message,
-            'content': base64Encode(utf8.encode(content)),
-            'branch': branch,
-            'sha': ?sha,
-          }),
-        )
-        .timeout(requestTimeout);
-    // A vanished branch/ref must surface as a failure, never a silent no-op.
-    if (res.statusCode != 200 && res.statusCode != 201) {
-      throw Exception('contents PUT $path failed: ${res.statusCode}');
+    String? observed;
+    try {
+      final res = await get(refUri);
+      _ensureBinding(generation);
+      if (res.statusCode == 200) {
+        final object = (jsonDecode(res.body) as Map<String, dynamic>)['object'];
+        if (object is Map) observed = object['sha'] as String?;
+      }
+    } on StateError {
+      rethrow;
+    } catch (_) {
+      // An unreadable ref leaves publication unknown, not failed or successful.
     }
+    _ensureBinding(generation);
+    if (observed == commitSha) {
+      _dropPushed(pending);
+      await _clearIntent(intentKey);
+      _ensureBinding(generation);
+      return commitSha;
+    }
+    throw CommitFailure(CommitFailureKind.unknown,
+      'commit outcome unknown for $repo "$branch": intended commit $commitSha; '
+      'observed ref ${observed ?? 'unavailable'}'
+      '${status == null ? '' : '; ref update HTTP $status'} — '
+      'pending edits retained. Inspect the upstream ref and intended commit '
+      'before retrying; no mutation was retried or sent via per-file fallback',
+      intendedSha: commitSha,
+    );
   }
 
   // ── live preview (vibe-coding) ───────────────────────────────────────

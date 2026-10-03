@@ -36,6 +36,7 @@ import 'theme.dart';
 import 'sandbox_service.dart';
 import 'session_data_sharing.dart';
 import 'session_lifecycle_service.dart';
+import 'session_ledger.dart';
 import 'presets.dart';
 import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
@@ -1429,6 +1430,35 @@ typedef PluginBootActivator =
 typedef PersistedSessionDecoder = ChatSession Function(String encoded);
 typedef SessionBootstrapDecoder = Map<String, dynamic> Function(String encoded);
 typedef WorkspaceDeleter = Future<void> Function(String sandboxId);
+
+/// Observe failures immediately while retaining the operation for explicit
+/// retries. A fire-and-forget deletion must never lose its failure to a drain.
+class _SessionCleanup {
+  _SessionCleanup(this.operation) {
+    retry();
+  }
+
+  final Future<void> Function() operation;
+  late Future<void> pending;
+  Object? error;
+  bool running = false;
+
+  void retry() {
+    if (running) return;
+    running = true;
+    pending = Future<void>.sync(operation).then<void>(
+      (_) {
+        error = null;
+        running = false;
+      },
+      onError: (Object failure) {
+        error = failure;
+        running = false;
+      },
+    );
+  }
+}
+
 const _sessionBootstrapTailSize = 50;
 
 ChatSession _decodePersistedSession(String encoded) =>
@@ -2372,8 +2402,12 @@ class AppState extends ChangeNotifier {
   final List<String> _unparsedSessionJson = [];
   final Set<String> _deferredDeletedSessionIds = {};
   final Set<String> _notifiedDeletedSessionIds = {};
-  final List<Future<void>> _pendingWorkspaceDeletions = [];
+  final List<_SessionCleanup> _pendingWorkspaceDeletions = [];
+  final Map<String, _SessionCleanup> _ledgerDeletions = {};
   String? _deferredActiveSessionId;
+  ChatSession? _deferredActiveSession;
+  final Map<String, ({ChatSession owner, int? prefixLength})>
+      _deferredProjections = {};
   int _deferredActiveTailLength = 0;
   var _deferredSessionGeneration = 0;
 
@@ -2392,6 +2426,10 @@ class AppState extends ChangeNotifier {
   /// Content signature captured with [_persistedSessionRaw]; a mismatch means
   /// the session changed in place without an explicit dirty mark.
   final Map<String, Object?> _persistedSessionSignature = {};
+  List<String> _persistedSessionIds = [];
+  String? _persistedActiveSessionId;
+  int _persistedDeferredGeneration = 0;
+  Set<String> _persistedDeferredDeletedIds = {};
 
   var _persistScheduled = false;
   Completer<void>? _persistCompleter;
@@ -2415,6 +2453,7 @@ class AppState extends ChangeNotifier {
   static const _productionSessionPersistDebounce = Duration(milliseconds: 200);
   Duration _sessionPersistDebounce = Duration.zero;
   Timer? _persistDebounceTimer;
+  Timer? _persistMaxWaitTimer;
 
   /// Test seam: count of full-session encodes performed, keyed by session id.
   @visibleForTesting
@@ -3745,6 +3784,7 @@ class AppState extends ChangeNotifier {
       ..add(active);
     activeSessionId = active.id;
     _deferredActiveSessionId = active.id;
+    _deferredActiveSession = active;
     _deferredActiveTailLength = active.messages.length;
     // A persisted root replaces the provisional constructor session: capture
     // its id so restore dispatches THAT session (not a later active switch)
@@ -3803,22 +3843,81 @@ class AppState extends ChangeNotifier {
 
   void _scheduleSessionDeletion(String id, String? sandboxId) {
     if (!_notifiedDeletedSessionIds.add(id)) return;
-    onSessionDeleted?.call(id);
-    _pendingWorkspaceDeletions.add(() async {
-      final store = await _openMemoryStore();
-      store.deleteSession(id);
-    }().catchError((Object e) { Diag.swallow('memory.deleteSession', e); }));
+    // Enqueue the ledger fence synchronously BEFORE lifecycle callbacks can
+    // schedule late hook/run events, including for deferred descendants.
+    final ledger = _SessionCleanup(() => SessionLedger.I.delete(id));
+    _ledgerDeletions[id] = ledger;
+    _pendingWorkspaceDeletions.add(ledger);
+    _pendingWorkspaceDeletions.add(
+      _SessionCleanup(() async {
+        final store = await _openMemoryStore();
+        store.deleteSession(id);
+      }),
+    );
     if (sandboxId != null) {
-      _pendingWorkspaceDeletions.add(_workspaceDeleter(sandboxId));
+      _pendingWorkspaceDeletions.add(
+        _SessionCleanup(() => _workspaceDeleter(sandboxId)),
+      );
     }
+    onSessionDeleted?.call(id);
   }
 
   Future<void> _awaitWorkspaceDeletions() async {
-    while (_pendingWorkspaceDeletions.isNotEmpty) {
-      final pending = List<Future<void>>.of(_pendingWorkspaceDeletions);
-      _pendingWorkspaceDeletions.removeRange(0, pending.length);
-      await Future.wait(pending);
+    final observed = <_SessionCleanup>{};
+    while (true) {
+      final pending = _pendingWorkspaceDeletions.where(
+        (task) => !observed.contains(task),
+      ).toList();
+      if (pending.isEmpty) break;
+      observed.addAll(pending);
+      await Future.wait(pending.map((task) => task.pending));
+      _pendingWorkspaceDeletions.removeWhere(
+        (task) => observed.contains(task) && !task.running && task.error == null,
+      );
     }
+    _ledgerDeletions.removeWhere(
+      (_, task) => observed.contains(task) && !task.running && task.error == null,
+    );
+    if (_pendingWorkspaceDeletions.any(
+      (task) => task.running || task.error != null,
+    )) {
+      throw StateError('Session cleanup incomplete');
+    }
+  }
+
+  /// Await ledger cleanup, including descendants discovered in deferred state.
+  /// Failed IDs/errors remain available across persistence drains. Explicit
+  /// retry affects only failed ledger deletions, never lifecycle callbacks or
+  /// other stores. An empty result is ledger cleanup success, not all-store
+  /// deletion success. Errors are for the caller; do not log raw paths/data.
+  Future<Map<String, Object>> awaitSessionLedgerDeletions({
+    bool retryFailed = false,
+  }) async {
+    await _loadDeferredSessionSnapshot();
+    final observed = <String>{};
+    while (true) {
+      final entries = _ledgerDeletions.entries.where(
+        (entry) => !observed.contains(entry.key),
+      ).toList();
+      if (entries.isEmpty) break;
+      for (final entry in entries) {
+        observed.add(entry.key);
+        final task = entry.value;
+        await task.pending;
+        if (retryFailed && task.error != null) {
+          task.retry();
+          await task.pending;
+        }
+        if (task.error == null) {
+          _ledgerDeletions.remove(entry.key);
+          _pendingWorkspaceDeletions.remove(task);
+        }
+      }
+    }
+    return Map.unmodifiable({
+      for (final entry in _ledgerDeletions.entries)
+        if (entry.value.error != null) entry.key: entry.value.error!,
+    });
   }
 
   Future<void> _hydrateDeferredSessions() async {
@@ -3826,7 +3925,6 @@ class AppState extends ChangeNotifier {
     final raw = _deferredSessionJson;
     if (raw == null) return;
     final generation = _deferredSessionGeneration;
-    final current = {for (final session in sessions) session.id: session};
     final loaded = <ChatSession>[];
     final unparsed = <String>[];
     for (var index = 0; index < raw.length; index++) {
@@ -3835,13 +3933,16 @@ class AppState extends ChangeNotifier {
       try {
         final fullJson = jsonDecode(encoded) as Map<String, dynamic>;
         final id = fullJson['id'] as String?;
-        if (id == null || _deferredDeletedSessionIds.contains(id)) continue;
-        final partial = current.remove(id);
-        if (partial != null && id == _deferredActiveSessionId) {
-          loaded.add(_mergeDeferredActiveSession(fullJson, partial));
-        } else {
-          loaded.add(ChatSession.fromJson(fullJson));
+        if (id == null || id.isEmpty) {
+          throw const FormatException('Missing session identity');
         }
+        if (_deferredDeletedSessionIds.contains(id)) continue;
+        final full = ChatSession.fromJson(fullJson);
+        final live = sessionById(id);
+        if (live != null && id != _deferredActiveSessionId) {
+          _deferredProjectionPrefix(full, live);
+        }
+        loaded.add(full);
       } catch (_) {
         unparsed.add(encoded);
         _startupStageRecorder?.call('local.hydrate.corrupt');
@@ -3851,19 +3952,44 @@ class AppState extends ChangeNotifier {
       }
     }
     if (generation != _deferredSessionGeneration) return;
-    loaded.removeWhere(
-      (session) => _deferredDeletedSessionIds.contains(session.id),
-    );
+    // Resolve membership only after the last yield. Live objects (including
+    // nonactive sessions and sessions created during decoding) own all edits.
+    // Known projections receive their saved prefix in place; replacing an
+    // observed object creates a new owner that must not inherit that prefix.
+    final current = {for (final session in sessions) session.id: session};
     current.removeWhere((id, _) => _deferredDeletedSessionIds.contains(id));
-    loaded.addAll(current.values);
+    final reconciled = <ChatSession>[];
+    for (final full in loaded) {
+      if (_deferredDeletedSessionIds.contains(full.id)) continue;
+      final live = current.remove(full.id);
+      if (live == null) {
+        reconciled.add(full);
+        continue;
+      }
+      if (identical(live, _deferredActiveSession)) {
+        final prefixLength = (full.messages.length - _deferredActiveTailLength)
+            .clamp(0, full.messages.length);
+        live.messages.insertAll(0, full.messages.take(prefixLength));
+      } else if (live.id != _deferredActiveSessionId) {
+        final prefixLength = _deferredProjectionPrefix(full, live) ?? 0;
+        live.messages.insertAll(0, full.messages.take(prefixLength));
+      }
+      reconciled.add(live);
+    }
+    reconciled.addAll(current.values);
     sessions
       ..clear()
-      ..addAll(loaded);
+      ..addAll(reconciled);
     _unparsedSessionJson
       ..clear()
       ..addAll(unparsed);
+    // A completed merge consumes this snapshot. Other callers decoding the
+    // same generation must not publish after its deletion fences are cleared.
+    _deferredSessionGeneration++;
     _deferredSessionJson = null;
     _deferredActiveSessionId = null;
+    _deferredActiveSession = null;
+    _deferredProjections.clear();
     _deferredActiveTailLength = 0;
     _deferredDeletedSessionIds.clear();
     _invalidateSessionPersistenceCache();
@@ -3889,13 +4015,55 @@ class AppState extends ChangeNotifier {
       0,
       oldMessages.length,
     );
-    final merged = Map<String, dynamic>.from(fullJson)
-      ..addAll(partial.toJson())
+    // Live metadata is authoritative, including absent optional keys (a
+    // cleared grant/branch must not be restored by a map overlay).
+    final merged = partial.toJson()
       ..['messages'] = [
         ...oldMessages.take(prefixLength),
         ...partial.messages.map((message) => message.toJson()),
       ];
     return ChatSession.fromJson(merged);
+  }
+
+  int? _deferredProjectionPrefix(ChatSession full, ChatSession live) {
+    final known = _deferredProjections[live.id];
+    if (known != null) {
+      // Replacement of an observed object is an explicit new transcript owner.
+      return identical(known.owner, live) ? known.prefixLength : 0;
+    }
+    // Zero is a recognized complete transcript; null is unknown provenance.
+    int? prefixLength = full.messages.isEmpty ? 0 : null;
+    if (live.messages.isNotEmpty) {
+      // Capture an exact saved suffix before yielding; later edits/appends on
+      // this very object must not change its provenance. This runs once per
+      // deferred owner, never in the streamed-token enqueue/fingerprint path.
+      final first = jsonEncode(live.messages.first.toJson());
+      for (var start = 0; start < full.messages.length; start++) {
+        if (jsonEncode(full.messages[start].toJson()) != first) continue;
+        final count = full.messages.length - start;
+        if (live.messages.length < count) continue;
+        var matches = true;
+        for (var i = 1; i < count; i++) {
+          if (jsonEncode(full.messages[start + i].toJson()) !=
+              jsonEncode(live.messages[i].toJson())) {
+            matches = false;
+            break;
+          }
+        }
+        if (matches) {
+          prefixLength = start;
+          break;
+        }
+      }
+    }
+    // Same persisted creation identity but no provable overlap: retain all
+    // saved history rather than silently truncate an already-edited projection.
+    if (prefixLength == null && live.createdAt == full.createdAt &&
+        live.messages.length < full.messages.length) {
+      prefixLength = full.messages.length;
+    }
+    _deferredProjections[live.id] = (owner: live, prefixLength: prefixLength);
+    return prefixLength;
   }
 
   /// Mark [id]'s in-memory content as changed. A null [id] forces a full
@@ -3937,15 +4105,13 @@ class AppState extends ChangeNotifier {
         message.toolSessionId,
         message.feedback,
         message.feedbackNote,
-        message.attachments
-            .map(
-              (attachment) =>
-                  '${attachment.name}:${attachment.size}:${attachment.path}',
-            )
-            .join('|'),
+        Object.hashAll(message.attachments),
       );
     }
     return Object.hashAll([
+      // Final fields (including createdAt and immutable message artifacts)
+      // can change only by object replacement, which identity captures.
+      identityHashCode(session),
       session.messages.length,
       messageHash,
       session.title,
@@ -3954,12 +4120,19 @@ class AppState extends ChangeNotifier {
       session.mode,
       session.presetId,
       session.workspaceFolder,
+      session.workspaceFolderPinned,
       session.repo,
+      session.branch,
       session.parentId,
       session.agentLabel,
       session.agentState,
       session.agentResult,
       session.agentId,
+      session.agentContinuable,
+      session.agentPersona,
+      session.agentOutputHint,
+      Object.hashAll(session.agentAllowedTools),
+      Object.hashAll(session.grants),
       Object.hashAll(session.referencedSessionIds),
       Object.hashAll(session.pendingAgentNotices),
       session.compactedSummary,
@@ -3968,10 +4141,28 @@ class AppState extends ChangeNotifier {
       session.planModePending,
       session.planPreMode,
       session.sandboxId,
-      session.goal?.toString(),
-      session.todos.map((t) => t.toString()).join('|'),
-      session.schedules.map((t) => t.toString()).join('|'),
+      session.systemPromptSnapshot,
+      session.titleGenerated,
+      _sessionNestedSignature(session.analytics.toJson()),
+      _sessionNestedSignature(session.goal),
+      _sessionNestedSignature(session.todos),
+      _sessionNestedSignature(session.schedules),
     ]);
+  }
+
+  // Preserve collection boundaries and scalar types; toString() can give the
+  // same text for distinct persisted structures. Run only at write boundaries,
+  // never while enqueueing streamed tokens. No transcript JSON is allocated.
+  Object? _sessionNestedSignature(Object? value) {
+    if (value is Map) {
+      return Object.hash('map', Object.hashAll(value.entries.map(
+        (entry) => Object.hash(entry.key, _sessionNestedSignature(entry.value)),
+      )));
+    }
+    if (value is Iterable) {
+      return Object.hash('list', Object.hashAll(value.map(_sessionNestedSignature)));
+    }
+    return Object.hash(value.runtimeType, value);
   }
 
   /// Coalesce rapid writes with a trailing debounce. The first call in a burst
@@ -3996,7 +4187,7 @@ class AppState extends ChangeNotifier {
   /// (the test default) so no wall-clock Timer is left pending in widget tests.
   void _armPersistDebounce() {
     if (suspendCoalescedPersistenceForTest) return;
-    _cancelPersistDebounce();
+    _persistDebounceTimer?.cancel();
     if (_sessionPersistDebounce <= Duration.zero) {
       scheduleMicrotask(_flushScheduledPersistence);
       return;
@@ -4005,11 +4196,18 @@ class AppState extends ChangeNotifier {
       _persistDebounceTimer = null;
       unawaited(_flushScheduledPersistence());
     });
+    // A continuously streaming turn must still become durable. Later tokens
+    // may move the trailing timer, but cannot move this burst's deadline.
+    _persistMaxWaitTimer ??= Timer(const Duration(seconds: 1), () {
+      unawaited(_flushScheduledPersistence());
+    });
   }
 
   void _cancelPersistDebounce() {
     _persistDebounceTimer?.cancel();
     _persistDebounceTimer = null;
+    _persistMaxWaitTimer?.cancel();
+    _persistMaxWaitTimer = null;
   }
 
   Future<void> _flushScheduledPersistence() async {
@@ -4082,6 +4280,14 @@ class AppState extends ChangeNotifier {
 
   bool _hasUnpersistedSessionChanges() {
     if (_persistFullRewrite || _dirtySessionIds.isNotEmpty) return true;
+    if (_persistedDeferredGeneration != _deferredSessionGeneration ||
+        !setEquals(_persistedDeferredDeletedIds, _deferredDeletedSessionIds)) {
+      return true;
+    }
+    if (_persistedActiveSessionId != activeSessionId ||
+        !listEquals(_persistedSessionIds, sessions.map((s) => s.id).toList())) {
+      return true;
+    }
     for (final session in sessions) {
       final raw = _persistedSessionRaw[session.id];
       if (raw == null ||
@@ -4102,8 +4308,11 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       await _loadDeferredSessionSnapshot();
       final dirtySnapshot = Set<String>.of(_dirtySessionIds);
+      final deferredGeneration = _deferredSessionGeneration;
+      final deletedSnapshot = Set<String>.of(_deferredDeletedSessionIds);
       final encoded = _sessionJsonForPersistence();
       final active = activeSession;
+      final activeIdWritten = activeSessionId;
       final activeRaw = _activeRawSession(encoded, active?.id);
       // The cache is a derivative of exact session-list truth. Either interrupted
       // write order produces a fingerprint mismatch and a safe fallback.
@@ -4115,14 +4324,23 @@ class AppState extends ChangeNotifier {
       if (!await prefs.setStringList(_kSessions, encoded)) {
         throw StateError('Session storage rejected write');
       }
-      if (activeSessionId != null) {
-        await prefs.setString(_kActive, activeSessionId!);
-      } else {
-        await prefs.remove(_kActive);
+      final activeSaved = activeIdWritten != null
+          ? await prefs.setString(_kActive, activeIdWritten)
+          : await prefs.remove(_kActive);
+      if (!activeSaved) {
+        throw StateError('Active session storage rejected write');
       }
+      _persistedActiveSessionId = activeIdWritten;
+      // A delete can affect only opaque/deferred rows, leaving live membership
+      // unchanged. Acknowledge precisely the fences included in this write.
+      _persistedDeferredGeneration = deferredGeneration;
+      _persistedDeferredDeletedIds = deletedSnapshot;
       _dirtySessionIds.removeAll(dirtySnapshot);
       await _awaitWorkspaceDeletions();
-      lastSessionPersistFailed = false;
+      if (lastSessionPersistFailed) {
+        lastSessionPersistFailed = false;
+        notifyListeners();
+      }
       return true;
     } catch (_) {
       // A failed write must not leave the derivative caches claiming the
@@ -4196,6 +4414,31 @@ class AppState extends ChangeNotifier {
       return raw;
     }
 
+    String encodeDeferredMetadata(
+      ChatSession session,
+      Map<String, dynamic> fullJson,
+    ) {
+      // Recognize saved tails before persisting metadata. Keep the owner and
+      // prefix for hydration so a later flush cannot truncate the saved history.
+      final known = _deferredProjections[session.id];
+      if (known != null && !identical(known.owner, session)) {
+        return encode(session);
+      }
+      final full = ChatSession.fromJson(fullJson);
+      final prefix = _deferredProjectionPrefix(full, session);
+      final raw = jsonEncode(session.toJson()..['messages'] = prefix != null
+          ? [
+              ...((fullJson['messages'] as List?) ?? const []).take(prefix),
+              ...session.messages.map((m) => m.toJson()),
+            ]
+          : fullJson['messages'] ?? const []);
+      rawById[session.id] = raw;
+      signatureById[session.id] = _sessionContentSignature(session);
+      sessionEncodeCountsForTest[session.id] =
+          (sessionEncodeCountsForTest[session.id] ?? 0) + 1;
+      return raw;
+    }
+
     String reuse(ChatSession session) {
       final raw = _persistedSessionRaw[session.id]!;
       rawById[session.id] = raw;
@@ -4220,20 +4463,18 @@ class AppState extends ChangeNotifier {
           if (partial != null && id == _deferredActiveSessionId) {
             encoded.add(
               needsEncode(partial)
-                  ? encodeMerged(partial, fullJson)
+                  ? identical(partial, _deferredActiveSession)
+                      ? encodeMerged(partial, fullJson)
+                      : encode(partial)
+                  : reuse(partial),
+            );
+          } else if (partial != null) {
+            encoded.add(
+              needsEncode(partial)
+                  ? encodeDeferredMetadata(partial, fullJson)
                   : reuse(partial),
             );
           } else {
-            // Invariant: during the deferred window only the boot-active
-            // session is materialized as a tail-only partial; every other row
-            // is authoritative on disk. If a non-active in-memory session
-            // appears here (unexpected), keep the persisted original — never
-            // write its possibly-truncated projection — and register the
-            // derivative so the dirty tracker settles instead of re-flushing.
-            if (partial != null) {
-              rawById[partial.id] = original;
-              signatureById[partial.id] = _sessionContentSignature(partial);
-            }
             encoded.add(original);
           }
         } catch (_) {
@@ -4254,6 +4495,7 @@ class AppState extends ChangeNotifier {
       ..clear()
       ..addAll(signatureById);
     _persistFullRewrite = false;
+    _persistedSessionIds = sessions.map((s) => s.id).toList();
     return encoded;
   }
 
@@ -4262,6 +4504,8 @@ class AppState extends ChangeNotifier {
     _deferredSessionJson = null;
     _deferredSessionsPending = false;
     _deferredActiveSessionId = null;
+    _deferredActiveSession = null;
+    _deferredProjections.clear();
     _deferredActiveTailLength = 0;
     _deferredDeletedSessionIds.clear();
     _unparsedSessionJson.clear();

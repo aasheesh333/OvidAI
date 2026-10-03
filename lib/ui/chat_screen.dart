@@ -6984,7 +6984,29 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: Text(
+                    child: req.tool == 'commit'
+                        ? SizedBox(
+                            key: const ValueKey('commit-approval-detail'),
+                            height: 180,
+                            child: Scrollbar(
+                              child: SingleChildScrollView(
+                                key: ObjectKey(req),
+                                child: SelectionArea(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      for (final line in req.detail.split('\n'))
+                                        Text(line, style: TextStyle(
+                                          fontSize: 12, height: 1.4,
+                                          color: Aether.text, fontFamily: Aether.mono,
+                                        )),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          )
+                        : Text(
                       req.detail.isNotEmpty && req.detail != req.summary
                           ? req.detail
                           : req.summary,

@@ -86,18 +86,26 @@ class McpOAuthToken {
 /// The GET stream stays open for the channel's lifetime; [close] tears it
 /// down. All waits are bounded by caller-supplied timeouts.
 class _SseMcpChannel {
-  _SseMcpChannel._(this._client, this._ownsClient);
+  _SseMcpChannel._(this._client, this._ownsClient, this._onDestinationRejected);
 
-  factory _SseMcpChannel({http.Client? client}) =>
-      _SseMcpChannel._(client ?? http.Client(), client == null);
+  factory _SseMcpChannel({
+    http.Client? client,
+    required void Function(String) onDestinationRejected,
+  }) => _SseMcpChannel._(
+    client ?? http.Client(), client == null, onDestinationRejected,
+  );
 
   final http.Client _client;
   final bool _ownsClient;
+  final void Function(String) _onDestinationRejected;
   StreamSubscription<String>? _sub;
 
   Uri? messageEndpoint;
   bool get isOpen => messageEndpoint != null && !_closed;
   bool _closed = false;
+  Uri? _configuredUrl;
+  String? _destinationFailure;
+  final _responseWaiters = <Completer<void>>{};
 
   final List<Map<String, dynamic>> _pending = [];
   Completer<void>? _waiter;
@@ -107,20 +115,18 @@ class _SseMcpChannel {
   /// non-200, on timeout waiting for the `endpoint` event, or when the
   /// stream closes early.
   Future<void> open(
-    Uri sseUrl,
+    String sseUrl,
     Map<String, String> headers, {
     Duration? timeout,
   }) async {
-    final req = http.Request('GET', sseUrl);
-    req.headers.addAll({
+    _configuredUrl = _parseDestination(sseUrl);
+    final res = await _send('GET', _configuredUrl!, {
       'Accept': 'text/event-stream',
       'Cache-Control': 'no-cache',
       ...headers,
-    });
-    final res = await _client
-        .send(req)
-        .timeout(timeout ?? const Duration(seconds: 30));
+    }, timeout: timeout ?? const Duration(seconds: 30));
     if (res.statusCode < 200 || res.statusCode >= 300) {
+      unawaited(res.stream.listen(null).cancel());
       _closeClient();
       throw Exception('SSE stream failed: HTTP ${res.statusCode}');
     }
@@ -147,6 +153,9 @@ class _SseMcpChannel {
         _waiter = null;
       }
     }
+    if (_destinationFailure != null) {
+      throw StateError(_destinationFailure!);
+    }
     if (messageEndpoint == null) {
       await close();
       throw TimeoutException(
@@ -157,6 +166,7 @@ class _SseMcpChannel {
   }
 
   void _onChunk(String chunk) {
+    if (_closed) return;
     _buf.write(chunk);
     var text = _buf.toString();
     // SSE framing: events are separated by a blank line.
@@ -175,6 +185,7 @@ class _SseMcpChannel {
       final rawEvent = text.substring(0, sep);
       text = text.substring(sep + sepLen);
       _onEvent(rawEvent);
+      if (_closed) break;
     }
     _buf.clear();
     _buf.write(text);
@@ -195,7 +206,12 @@ class _SseMcpChannel {
     if (dataParts.isEmpty) return;
     final data = dataParts.join('\n');
     if (eventType == 'endpoint') {
-      messageEndpoint = _resolveEndpoint(data);
+      try {
+        // Always use the configured stream URL, even after a GET redirect.
+        messageEndpoint = _resolveDestination(_configuredUrl!, data);
+      } on StateError {
+        // Refusal already closes the channel and wakes the opening waiter.
+      }
       _wake();
       return;
     }
@@ -210,12 +226,117 @@ class _SseMcpChannel {
     }
   }
 
-  Uri? _resolveEndpoint(String data) {
+  Never _rejectDestination(String reason) {
+    // Do not echo server-supplied URLs: userinfo/query strings can be secrets.
+    _destinationFailure = 'SSE destination rejected: $reason';
+    messageEndpoint = null;
+    _pending.clear();
+    for (final waiter in _responseWaiters) {
+      if (!waiter.isCompleted) waiter.complete();
+    }
+    unawaited(close());
+    _onDestinationRejected(_destinationFailure!);
+    throw StateError(_destinationFailure!);
+  }
+
+  Uri _validateDestination(Uri uri) {
+    final origin = _configuredUrl!;
+    if ((uri.scheme != 'http' && uri.scheme != 'https') ||
+        !uri.hasAuthority ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment ||
+        uri.port <= 0 ||
+        uri.port > 65535) {
+      _rejectDestination('invalid HTTP(S) URL');
+    }
+    if (uri.scheme != origin.scheme ||
+        uri.host != origin.host ||
+        uri.port != origin.port) {
+      _rejectDestination('origin must match the configured stream');
+    }
+    return uri;
+  }
+
+  Uri _parseDestination(String value) {
+    final text = value.trim();
+    if (text.isEmpty) _rejectDestination('empty URL');
+    // Uri normalizes an empty userinfo away. Reject it before normalization,
+    // as well as nonempty userinfo checked on the resolved URI below.
+    final authority = RegExp(
+      r'^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)?//([^/?#]*)',
+    ).firstMatch(text)?.group(1);
+    if (authority?.contains('@') ?? false) {
+      _rejectDestination('userinfo is not allowed');
+    }
     try {
-      final uri = Uri.parse(data.trim());
-      return uri.hasScheme ? uri : null;
-    } catch (_) {
-      return null;
+      return Uri.parse(text);
+    } on FormatException {
+      _rejectDestination('malformed URL');
+    }
+  }
+
+  Uri _resolveDestination(Uri base, String value) =>
+      _validateDestination(base.resolveUri(_parseDestination(value)));
+
+  /// Own redirect handling rather than relying on IOClient's automatic
+  /// forwarding (which cannot know which custom headers contain credentials).
+  /// An unapproved transition sends nothing, including credentials or body.
+  Future<http.StreamedResponse> _send(
+    String method,
+    Uri uri,
+    Map<String, String> headers, {
+    String? body,
+    required Duration timeout,
+  }) async {
+    final clock = Stopwatch()..start();
+    for (var redirects = 0; ; redirects++) {
+      if (_closed) {
+        throw StateError(_destinationFailure ?? 'SSE channel is not open');
+      }
+      _validateDestination(uri);
+      final left = timeout - clock.elapsed;
+      if (left <= Duration.zero) throw TimeoutException('SSE request timed out');
+      final req = http.Request(method, uri)..followRedirects = false;
+      req.headers.addAll(headers);
+      if (body != null) req.body = body;
+      final http.StreamedResponse res;
+      try {
+        res = await _client.send(req).timeout(left);
+      } catch (_) {
+        // An endpoint event can reject/close the channel while this request
+        // is in flight. Preserve the policy error instead of a socket error.
+        if (_destinationFailure != null) {
+          throw StateError(_destinationFailure!);
+        }
+        rethrow;
+      }
+      if (_closed) {
+        unawaited(res.stream.listen(null).cancel());
+        throw StateError(_destinationFailure ?? 'SSE channel is not open');
+      }
+      if (!const {301, 302, 303, 307, 308}.contains(res.statusCode)) {
+        return res;
+      }
+      // Cancel rather than drain an attacker-controlled, potentially endless
+      // redirect body. Do not close an injected/shared client.
+      unawaited(res.stream.listen(null).cancel());
+      final location = res.headers['location'];
+      if (location == null) _rejectDestination('redirect has no location');
+      final next = _resolveDestination(uri, location);
+      if (redirects >= 5) _rejectDestination('too many redirects');
+      if (method == 'POST') {
+        if (res.statusCode == 303) {
+          // Match HTTP's See Other semantics; never replay a POST as a GET body.
+          method = 'GET';
+          body = null;
+          headers = Map.of(headers)
+            ..removeWhere((key, _) => key.toLowerCase() == 'content-type');
+        } else if (res.statusCode != 307 && res.statusCode != 308) {
+          _rejectDestination('ambiguous POST redirect');
+        }
+      }
+      uri = next;
     }
   }
 
@@ -237,15 +358,17 @@ class _SseMcpChannel {
   }) async {
     final endpoint = messageEndpoint;
     if (endpoint == null || _closed) {
-      throw StateError('SSE channel is not open');
+      throw StateError(_destinationFailure ?? 'SSE channel is not open');
     }
-    final res = await _client
-        .post(
-          endpoint,
-          headers: {'Content-Type': 'application/json', ...headers},
-          body: jsonEncode(message),
-        )
-        .timeout(timeout ?? const Duration(seconds: 60));
+    final res = await _send(
+      'POST',
+      endpoint,
+      {'Content-Type': 'application/json', ...headers},
+      body: jsonEncode(message),
+      timeout: timeout ?? const Duration(seconds: 60),
+    );
+    // Only the status matters; responses themselves arrive on the SSE stream.
+    unawaited(res.stream.listen(null).cancel());
     if (res.statusCode == 401 || res.statusCode == 403) {
       throw Exception(
         'authentication failed (HTTP ${res.statusCode}) — check the '
@@ -265,6 +388,7 @@ class _SseMcpChannel {
   }) async {
     final deadline = DateTime.now().add(timeout ?? const Duration(seconds: 60));
     while (true) {
+      if (_destinationFailure != null) throw StateError(_destinationFailure!);
       for (var i = 0; i < _pending.length; i++) {
         if (_pending[i]['id']?.toString() == id.toString()) {
           return _pending.removeAt(i);
@@ -273,12 +397,17 @@ class _SseMcpChannel {
       if (_closed) return null;
       final left = deadline.difference(DateTime.now());
       if (left.isNegative) return null;
-      _waiter = Completer<void>();
+      final waiter = Completer<void>();
+      _waiter = waiter;
+      _responseWaiters.add(waiter);
       try {
-        await _waiter!.future.timeout(left);
+        // Policy refusal wakes every outstanding response wait, including
+        // callers whose normal response waiter has since been replaced.
+        await waiter.future.timeout(left);
       } on TimeoutException {
         return null;
       } finally {
+        _responseWaiters.remove(waiter);
         _waiter = null;
       }
     }
@@ -347,6 +476,9 @@ class McpService {
   static final McpService I = McpService._();
 
   final Map<String, _RunningServer> _running = {};
+  // Sanitized terminal policy reasons, retained until explicit disconnect or
+  // a new reserved attempt. Closed channels/tools are never kept advertised.
+  final Map<String, String> _sseDestinationFailures = {};
 
   /// Connected servers and the tools they advertise.
   Map<String, List<McpToolDef>> get connectedTools => {
@@ -622,6 +754,7 @@ class McpService {
     }
     // Reserve the slot BEFORE spawning so a rapid second connect sees it.
     final rs = _RunningServer(server: server);
+    _sseDestinationFailures.remove(key);
     _running[key] = rs;
     if (server.transport == 'http') {
       return _connectHttp(server, rs);
@@ -712,6 +845,7 @@ class McpService {
       }
       final rs = _RunningServer(server: server);
       reserved = rs;
+      _sseDestinationFailures.remove(key);
       _running[key] = rs;
       final message = server.transport == 'http'
           ? await _connectHttp(server, rs, deadline: deadline)
@@ -1188,16 +1322,31 @@ class McpService {
     }
 
     Future<void> openChannel(Map<String, String> headers) async {
-      final channel = _SseMcpChannel(client: httpClientForTest);
+      late final _SseMcpChannel channel;
+      channel = _SseMcpChannel(
+        client: httpClientForTest,
+        onDestinationRejected: (reason) {
+          if (!identical(rs.sseChannel, channel)) return;
+          rs.sseDestinationFailure = reason;
+          rs.handshakeDone = false;
+          if (!identical(_running[key], rs)) return;
+          _running.remove(key);
+          _sseDestinationFailures[key] = reason;
+          // Policy refusal is terminal for this attempt, not a transient
+          // network failure that should automatically reconnect.
+          _cancelReconnect(key);
+        },
+      );
       rs.sseChannel = channel;
       try {
         await channel.open(
-          Uri.parse(server.url!),
+          server.url!,
           headers,
           timeout: phaseTimeout('sse/open'),
         );
       } catch (_) {
-        rs.sseChannel = null;
+        await channel.close();
+        if (identical(rs.sseChannel, channel)) rs.sseChannel = null;
         rethrow;
       }
     }
@@ -1246,6 +1395,9 @@ class McpService {
       rs.tools =
           await _listToolsSse(rs, timeout: phaseTimeout('tools/list')) ??
           <McpToolDef>[];
+      if (rs.sseDestinationFailure != null) {
+        throw StateError(rs.sseDestinationFailure!);
+      }
       if (!identical(_running[key], rs) || rs.userDisconnected) {
         return 'connect aborted';
       }
@@ -1272,6 +1424,9 @@ class McpService {
     Duration? timeout,
   }) async {
     final channel = rs.sseChannel;
+    if (rs.sseDestinationFailure != null) {
+      return McpRpcResult._error(rs.sseDestinationFailure!);
+    }
     if (channel == null || !channel.isOpen) {
       return McpRpcResult._error('SSE channel is not open');
     }
@@ -1299,6 +1454,9 @@ class McpService {
         }
       }
     } catch (e) {
+      if (rs.sseDestinationFailure != null) {
+        return McpRpcResult._error(rs.sseDestinationFailure!);
+      }
       final msg = e.toString();
       if (msg.contains('authentication failed')) {
         return McpRpcResult._error(msg);
@@ -1306,7 +1464,18 @@ class McpService {
       _markSseFailure(rs);
       return McpRpcResult._error('$e');
     }
-    final j = await channel.nextResponse(id, timeout: effectiveTimeout);
+    final Map<String, dynamic>? j;
+    try {
+      j = await channel.nextResponse(id, timeout: effectiveTimeout);
+    } on StateError {
+      if (rs.sseDestinationFailure != null) {
+        return McpRpcResult._error(rs.sseDestinationFailure!);
+      }
+      rethrow;
+    }
+    if (rs.sseDestinationFailure != null) {
+      return McpRpcResult._error(rs.sseDestinationFailure!);
+    }
     if (j == null) {
       if (!channel.isOpen) {
         // The stream died mid-call — same treatment as a dead stdio pipe.
@@ -2137,6 +2306,7 @@ class McpService {
   /// endpoint so the server can terminate that session.
   Future<void> disconnect(String serverName) async {
     final key = _keyForName(serverName);
+    _sseDestinationFailures.remove(key);
     final rs = _running.remove(key);
     _cancelReconnect(key);
     if (rs == null) return;
@@ -2175,6 +2345,8 @@ class McpService {
     final key = _keyForName(serverName);
     final rs = _running[key];
     if (rs == null) {
+      final refusal = _sseDestinationFailures[key];
+      if (refusal != null) return 'MCP error: $refusal';
       return 'MCP error: server "$serverName" is not connected'
           '${_lastDeathOf(key)}';
     }
@@ -2200,6 +2372,9 @@ class McpService {
             'name': toolName,
             'arguments': args,
           }, timeout: effectiveTimeout);
+    if (rs.sseDestinationFailure != null) {
+      return 'MCP error: ${rs.sseDestinationFailure}';
+    }
     if (res.isTimeout) {
       return 'MCP error: "$toolName" on "$serverName" timed out after '
           '${effectiveTimeout.inSeconds} s (server may be busy or dead).';
@@ -2259,6 +2434,7 @@ class McpService {
 
   /// Tear everything down (app exit / settings reset).
   Future<void> disconnectAll() async {
+    _sseDestinationFailures.clear();
     for (final name in _running.keys.toList()) {
       await disconnect(name);
     }
@@ -2784,6 +2960,7 @@ class _RunningServer {
 
   /// Legacy-SSE channel (`sse` transport); non-null while connected.
   _SseMcpChannel? sseChannel;
+  String? sseDestinationFailure;
 
   bool handshakeDone = false;
   List<McpToolDef> tools = [];
