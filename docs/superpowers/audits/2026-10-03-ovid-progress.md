@@ -76,8 +76,8 @@ Canonical deliverables and acceptance experiments live in the plan. These rows m
 | W08.03 | OAuth/PKCE/refresh/token removal | Pending | Cancel/wrong-state/late-refresh fixtures and real provider required |
 | W08.04 | MCP imports/resources/protocol pagination | Pending | All transport fixtures and real configured server checks required |
 | W09.01 | Per-file/binding Studio drafts | Pending | Multi-tab/external-write/conflict/save cases required |
-| W09.02 | Immutable approved commit snapshot | In progress — partial | Frozen binding/base/bytes/message/selection and Studio/agent review implemented and reviewed; mode-only and checkout-deletion staging remain open |
-| W09.03 | Upstream conflict/unknown result/fallback | In progress — partial | Single-send mutations, nonforce publication, approved-base validation and durable unknown recovery reviewed;198 worker passes,44 fresh controller approval passes; wider staged-operation acceptance remains open |
+| W09.02 | Immutable approved commit snapshot | In progress — partial | Frozen binding/base/bytes/message/selection plus explicit executable-mode and missing-checkout deletion staging reviewed;319 covering tests,90 fresh controller tests; full acceptance closure pending |
+| W09.03 | Upstream conflict/unknown result/fallback | In progress — partial | Single-send nonforce publication and mode-aware durable unknown recovery reviewed, including legacy intents and later-edit retention; full acceptance closure pending |
 | W09.04 | Sync/save/fetch ordering | Pending | Reversed responses/concurrent edit/cancel cases required |
 | W09.05 | Clone collision and GitHub auth restore | Pending | Folder/auth races and real GitHub test repository required |
 | W10.01 | Artifact 403 reproduction/isolation | Pending | HYPOTHESIS; real failing WebView trace absent |
@@ -335,6 +335,36 @@ agent/chat/Studio approval, repository safety/audit/branch, session ledger/state
 acceptance and MCP SSE origin suites. `flutter analyze --no-pub` reported **No
 issues found**; `git diff --check` passed. The interrupted full run is not counted
 as a passing suite.
+
+### Explicit Studio staging follow-up
+
+Checkpoint `a9caf70` was committed and pushed to
+`origin/hoplite/gortyn-77773150`. The subsequent W09 staging implementation adds
+real Studio actions for executable/regular Git modes and explicit deletion of an
+already-missing checkout path. Staging changes neither disk contents nor disk
+permissions. Review includes mode transitions and deleted content, and operation
+identities preserve later edits across publication and reconciliation. Legacy
+pending intents remain recoverable.
+
+Task review found that Dart filesystem type lookup conflates absence with lookup
+errors. The correction requires confirmed ENOENT and rejects access/lookup failures
+in staging, review validation and active/saved-owner accounting. Five access-denial
+regressions failed before the fix. Scoped re-review accepted the correction with
+no new important findings.
+
+Worker verification: **319 tests passed** across 19 repo/Studio/workspace suites.
+Fresh controller verification: **90 tests passed** via:
+
+```sh
+/root/flutter/bin/flutter test --no-pub test/repo_cache_staging_test.dart test/studio_staging_test.dart test/repo_cache_approval_test.dart test/agent_commit_approval_test.dart --reporter expanded
+/root/flutter/bin/flutter analyze --no-pub
+git diff --check
+```
+
+Full analyzer reported **No issues found**; whitespace passed. The previous
+mode/deletion implementation gaps are closed for this bounded deliverable. Full
+W09 acceptance and live/device evidence remain separate. Ordinary working-copy
+drafts remain in-process; unknown publication records remain restart-durable.
 
 ### Checkpoint pre-commit checks
 

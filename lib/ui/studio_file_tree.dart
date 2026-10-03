@@ -185,7 +185,7 @@ class _StudioFileTreeState extends State<StudioFileTree> {
         final cache = RepoCache.I;
         // Union of the tree and the live working copy: an agent-written file
         // that was never in the git tree still has to be reachable.
-        final paths = <String>{...cache.treePaths, ...cache.files.keys};
+        final paths = <String>{...cache.treePaths, ...cache.files.keys, ...cache.pendingPaths};
         final nodes = buildStudioTree(paths, _expanded);
         final active = AgentService.I.activeFilePath;
 
@@ -281,11 +281,61 @@ class _StudioFileTreeState extends State<StudioFileTree> {
                 size: 15,
                 color: Aether.textFaint,
               ),
+            if (!node.isDirectory) StudioStagingMenu(path: node.path),
           ],
         ),
       ),
     );
   }
+}
+
+/// Shared by the actual explorer and commit selection. These actions stage Git
+/// metadata only; checkout deletion requires a path already removed on disk.
+class StudioStagingMenu extends StatefulWidget {
+  const StudioStagingMenu({super.key, required this.path, this.enabled = true});
+  final String path;
+  final bool enabled;
+
+  @override
+  State<StudioStagingMenu> createState() => _StudioStagingMenuState();
+}
+
+class _StudioStagingMenuState extends State<StudioStagingMenu> {
+  int? _openedBinding;
+  String? _openedPath;
+  @override
+  Widget build(BuildContext context) => PopupMenuButton<String>(
+    tooltip: 'Stage ${widget.path}',
+    enabled: widget.enabled,
+    icon: const Icon(Icons.more_vert, size: 18),
+    onOpened: () {
+      _openedBinding = RepoCache.I.bindingGeneration;
+      _openedPath = widget.path;
+    },
+    onSelected: (operation) {
+      final path = _openedPath!;
+      try {
+        if (_openedBinding != RepoCache.I.bindingGeneration) {
+          throw StateError('Repository binding changed; reopen staging');
+        }
+        if (operation == 'delete') {
+          RepoCache.I.stageDeletion(path);
+        } else {
+          RepoCache.I.stageMode(path, operation);
+        }
+        showStudioToast(context, 'Staged $path',
+            detail: 'Git ${operation == 'delete' ? 'deletion' : 'mode $operation'} staged. No disk files or permissions changed.');
+      } catch (e) {
+        showStudioToast(context, 'Could not stage $path', detail: '$e', error: true);
+      }
+    },
+    itemBuilder: (_) => [
+      const PopupMenuItem(value: '100755', child: Text('Stage executable (100755)')),
+      const PopupMenuItem(value: '100644', child: Text('Stage regular (100644)')),
+      PopupMenuItem(value: 'delete', child: Text(RepoCache.I.workspaceFolder == null
+          ? 'Stage deletion' : 'Stage deletion (already missing)')),
+    ],
+  );
 }
 
 class _TreeHeader extends StatelessWidget {

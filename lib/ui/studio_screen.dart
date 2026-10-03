@@ -1081,7 +1081,7 @@ class StudioCommitDialog extends StatefulWidget {
 
 class _StudioCommitDialogState extends State<StudioCommitDialog> {
   final _message = TextEditingController(text: 'Update files from Ovid Studio');
-  late final List<String> _paths = RepoCache.I.pendingPaths;
+  late final List<String> _paths = RepoCache.I.pendingPaths.toList();
   late final Set<String> _selected = _paths.toSet();
   CommitApproval? _approval;
   String? _error;
@@ -1101,6 +1101,17 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
   }
 
   void _cacheChanged() {
+    final previousSelection = Set.of(_selected);
+    final pending = RepoCache.I.pendingPaths;
+    for (final path in pending) {
+      if (!_paths.contains(path)) { _paths.add(path); _selected.add(path); }
+    }
+    _paths.removeWhere((path) => !pending.contains(path));
+    _selected.removeWhere((path) => !pending.contains(path));
+    if (previousSelection.length != _selected.length || !previousSelection.containsAll(_selected)) {
+      _invalidate();
+      return;
+    }
     if (_approval == null) { _invalidate(); return; }
     try {
       RepoCache.I.validateApproval(_approval!);
@@ -1155,6 +1166,38 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
     }
   }
 
+  Future<void> _stageMissingDeletion() async {
+    var path = '';
+    String? error;
+    // Capture the binding: typing in this dialog must not target a new session.
+    final cache = RepoCache.I;
+    final binding = cache.bindingGeneration;
+    await showDialog<void>(context: context, builder: (dialogContext) => StatefulBuilder(
+      builder: (context, update) => AlertDialog(
+        scrollable: true,
+        title: const Text('Stage missing file deletion'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Stages deletion from the repository at commit review. The checkout path must already be missing. This action does not delete any disk file.'),
+          TextField(onChanged: (value) => path = value,
+              decoration: const InputDecoration(labelText: 'Repository-relative path')),
+          if (error != null) Text(error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
+          FilledButton(onPressed: () {
+            try {
+              if (binding != cache.bindingGeneration) {
+                throw StateError('Repository binding changed; reopen staging');
+              }
+              cache.stageDeletion(path);
+              Navigator.of(dialogContext).pop();
+            } catch (e) { update(() => error = '$e'); }
+          }, child: const Text('Stage deletion')),
+        ],
+      ),
+    ));
+  }
+
   @override
   void dispose() {
     RepoCache.I.removeListener(_cacheChanged);
@@ -1167,6 +1210,7 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
   Widget build(BuildContext context) {
     final approval = _approval;
     return PopScope(canPop: !_busy, child: AlertDialog(
+      scrollable: true,
       title: const Text('Review commit'),
       content: SizedBox(width: 640, child: SingleChildScrollView(child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1177,11 +1221,21 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
               decoration: const InputDecoration(labelText: 'Commit message')),
           for (final path in _paths) CheckboxListTile(
             title: Text(path), value: _selected.contains(path),
+            subtitle: Text(RepoCache.I.isStagedDeletion(path)
+                ? 'Staged deletion · disk unchanged'
+                : RepoCache.I.stagedMode(path) == null
+                ? 'Content · review exact diff'
+                : 'Staged Git mode ${RepoCache.I.stagedMode(path)}'),
+            secondary: StudioStagingMenu(path: path, enabled: !_busy),
             onChanged: _busy ? null : (value) {
               _invalidate();
               setState(() { if (value == true) { _selected.add(path); } else { _selected.remove(path); } });
             },
           ),
+          if (RepoCache.I.workspaceFolder != null)
+            TextButton(onPressed: _busy ? null : _stageMissingDeletion,
+                child: const Text('Stage missing file deletion')),
+          const Text('Staging does not change disk files or permissions.'),
           if (approval != null) ...[
             Text('Repository: ${approval.repo}\nBranch: ${approval.branch}\nBase: ${approval.baseCommit}\nMessage: ${approval.message}\nSelected paths: ${approval.paths.join(', ')}'),
             SelectableText(approval.diff, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),

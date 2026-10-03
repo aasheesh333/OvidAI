@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -166,13 +167,17 @@ class CommitApproval {
     required this.baseCommit, required this.baseTree, required this.message,
     required this.binding, required this.generation,
     required Map<String, String?> contents, required Map<String, String?> originals,
-    required Map<String, String> modes})
-      : contents = Map.unmodifiable(contents), originals = Map.unmodifiable(originals),
-        modes = Map.unmodifiable(modes);
+    required Map<String, String> modes, required Map<String, String?> originalModes,
+    required Map<String, String?> stagedModes, required Map<String, String?> revisions})
+       : contents = Map.unmodifiable(contents), originals = Map.unmodifiable(originals),
+         modes = Map.unmodifiable(modes), originalModes = Map.unmodifiable(originalModes),
+         _stagedModes = Map.unmodifiable(stagedModes), _revisions = Map.unmodifiable(revisions);
   final String repo, branch, baseCommit, baseTree, message, binding;
   final int generation;
   final Map<String, String?> contents, originals;
   final Map<String, String> modes;
+  final Map<String, String?> originalModes;
+  final Map<String, String?> _stagedModes, _revisions;
   List<String> get paths => List.unmodifiable(contents.keys);
 
   /// Full-file unified hunks avoid a misleading truncated/summary-only diff.
@@ -196,7 +201,10 @@ class CommitApproval {
       final quoted = jsonEncode(path);
       out.writeln('diff --git $quoted $quoted');
       out.writeln(before == null ? 'new file mode ${modes[path]}' :
-          after == null ? 'deleted file mode ${modes[path]}' : 'file mode ${modes[path]} (unchanged)');
+          after == null ? 'deleted file mode ${originalModes[path]}' :
+          originalModes[path] != modes[path] ? 'old mode ${originalModes[path]}\nnew mode ${modes[path]}' :
+          'file mode ${modes[path]} (unchanged)');
+      if (before == after) continue;
       out.writeln('--- ${before == null ? '/dev/null' : 'a/$quoted'}');
       out.writeln('+++ ${after == null ? '/dev/null' : 'b/$quoted'}');
       out.writeln('@@ -${lines(before).isEmpty ? 0 : 1},${lines(before).length} +${lines(after).isEmpty ? 0 : 1},${lines(after).length} @@');
@@ -286,8 +294,23 @@ class RepoCache extends ChangeNotifier {
           throw const FormatException('invalid pending commit');
         }
         record['owner'] = _canonicalCopyKey(record['owner'] as String);
+        if (record.containsKey('version') && record['version'] != 2) {
+          throw const FormatException('unsupported intent version');
+        }
+        if (record['version'] == 2) {
+          for (final field in ['modes', 'revisions']) {
+            final values = record[field];
+            if (values is! Map || !setEquals(values.keys.toSet(), (record['pending'] as Map).keys.toSet()) ||
+                values.values.any((v) => field == 'modes' ? !['100644', '100755'].contains(v) : v is! String)) {
+              throw const FormatException('invalid staging intent');
+            }
+          }
+        }
         if (found != null && (found['sha'] != record['sha'] || found['owner'] != record['owner'] ||
-            !mapEquals(found['pending'] as Map, record['pending'] as Map))) {
+            !mapEquals(found['pending'] as Map, record['pending'] as Map) ||
+            found['version'] != record['version'] ||
+            !mapEquals(found['modes'] as Map?, record['modes'] as Map?) ||
+            !mapEquals(found['revisions'] as Map?, record['revisions'] as Map?))) {
           throw const FormatException('conflicting legacy intents');
         }
         found = record;
@@ -365,26 +388,18 @@ class RepoCache extends ChangeNotifier {
           intendedSha: sha);
     }
     final pending = Map<String, String?>.from(record['pending'] as Map);
+    final modes = record['version'] == 2 ? Map<String, String>.from(record['modes'] as Map) : null;
+    final revisions = record['version'] == 2 ? Map<String, String>.from(record['revisions'] as Map) : null;
     if (record['owner'] == _copyKey) {
-      _dropPushed(pending);
+      _dropPushed(pending, modes: modes, revisions: revisions);
     } else {
       final owner = record['owner'] as String;
       final saved = _workingCopies[owner];
       final workspace = (jsonDecode(owner) as List)[3] as String?;
       if (saved != null) {
-        for (final entry in pending.entries) {
-          String? current = saved.files[entry.key];
-          if (workspace != null && !saved.unsaved.contains(entry.key)) {
-            try {
-              final safe = workspaceFilePath(Directory(workspace), entry.key);
-              if (safe == null) continue;
-              current = _decodeFileBytes(File(safe).readAsBytesSync());
-            } catch (_) {
-              continue; // An unreadable checkout is not proof of matching bytes.
-            }
-          }
-          if (current == entry.value) saved.dirty.remove(entry.key);
-        }
+        _accountPushed(pending, modes: modes, revisions: revisions, workspace: workspace,
+            contents: saved.files, dirty: saved.dirty, unsaved: saved.unsaved,
+            deletions: saved.deletions, stagedModes: saved.modes, edits: saved.revisions);
       }
     }
     // Account for confirmed bytes before asynchronous storage cleanup: a bind
@@ -442,10 +457,24 @@ class RepoCache extends ChangeNotifier {
   String? get boundSessionId => _boundSessionId;
 
   int _bindingGeneration = 0;
+  /// UI actions opened under an older binding must not target the current one.
+  int get bindingGeneration => _bindingGeneration;
   String? workspaceFolder;
   final Set<String> _unsaved = {};
   final Map<String, ({Map<String, String> files, Set<String> dirty, Set<String> unsaved,
-    List<String> tree})> _workingCopies = {};
+    List<String> tree, Set<String> deletions, Map<String, String> modes,
+    Map<String, String> revisions})> _workingCopies = {};
+  final Set<String> _deletions = {};
+  final Map<String, String> _stagedModes = {};
+  final Map<String, String> _revisions = {};
+  // Persistable edit identities distinguish a newer intent even when its bytes
+  // and mode return to the approved values, including after process restart.
+  void _edited(String path) {
+    _revisions[path] = base64Url.encode(List.generate(18, (_) => Random.secure().nextInt(256)));
+    _dirty.add(path);
+  }
+  String? stagedMode(String path) => _stagedModes[path];
+  bool isStagedDeletion(String path) => _deletions.contains(path);
   String get _copyKey => jsonEncode([
     _boundSessionId, repoFull?.toLowerCase(), defaultBranch, workspaceFolder,
   ]);
@@ -489,11 +518,15 @@ class RepoCache extends ChangeNotifier {
     if (oldKey != newKey) {
       _workingCopies[oldKey] = (
         files: Map.of(files), dirty: Set.of(_dirty), unsaved: Set.of(_unsaved), tree: List.of(treePaths),
+        deletions: Set.of(_deletions), modes: Map.of(_stagedModes), revisions: Map.of(_revisions),
       );
       final saved = _workingCopies.remove(newKey);
       files..clear()..addAll(saved?.files ?? {});
       _dirty..clear()..addAll(saved?.dirty ?? {});
       _unsaved..clear()..addAll(saved?.unsaved ?? {});
+      _deletions..clear()..addAll(saved?.deletions ?? {});
+      _stagedModes..clear()..addAll(saved?.modes ?? {});
+      _revisions..clear()..addAll(saved?.revisions ?? {});
       treePaths..clear()..addAll(saved?.tree ?? []);
       lastSync = null;
       _lastSyncReport = null;
@@ -522,6 +555,9 @@ class RepoCache extends ChangeNotifier {
     workspaceFolder = null;
     _workingCopies.clear();
     _unsaved.clear();
+    _deletions.clear();
+    _stagedModes.clear();
+    _revisions.clear();
     files.clear();
     treePaths.clear();
     _dirty.clear();
@@ -643,15 +679,15 @@ class RepoCache extends ChangeNotifier {
       final preserved = <String>[];
       for (final p in previousDirty) {
         final local = previousFiles[p];
-        if (local == null) {
+        if (_deletions.contains(p)) {
           // Absence in a dirty entry is an explicit staged deletion.
           files.remove(p);
           treePaths.remove(p);
           preserved.add(p);
           continue;
         }
-        if (syncedFiles[p] == local) continue;
-        files[p] = local;
+        if (syncedFiles[p] == local && !_stagedModes.containsKey(p)) continue;
+        if (local != null) files[p] = local;
         preserved.add(p);
         if (!treePaths.contains(p)) treePaths.add(p);
       }
@@ -769,11 +805,12 @@ class RepoCache extends ChangeNotifier {
     final drafts = {for (final p in _unsaved) if (files[p] != null) p: files[p]!};
     files..clear()..addAll(contents);
     files.addAll(drafts);
-    treePaths..clear()..addAll({...paths, ...drafts.keys});
+    for (final path in _deletions.toList()) { _refreshDeletion(path); }
+    treePaths..clear()..addAll({...paths, ...drafts.keys, ..._dirty});
     final report = SyncReport(requested: paths.length, fetched: contents.length,
       skippedByFilter: skipped, treeTruncated: truncated, droppedByCap: 0,
       failedPaths: failed, localWorkspace: true, traversalDeadlineExceeded: timedOut,
-      unattemptedPaths: [], preservedPaths: drafts.keys.toList());
+      unattemptedPaths: [], preservedPaths: {...drafts.keys, ..._dirty}.toList());
     lastSync = DateTime.now();
     _lastSyncReport = report;
     notifyListeners();
@@ -816,17 +853,23 @@ class RepoCache extends ChangeNotifier {
   /// sync fails so stale files from a previous repo/branch are never shown
   /// under the new binding.
   void clearWorkingCopy() {
+    final staged = {..._deletions, ..._stagedModes.keys};
     final drafts = workspaceFolder == null ? <String, String>{} : {
       for (final path in _unsaved) if (files[path] != null) path: files[path]!,
     };
+    for (final path in _stagedModes.keys) {
+      if (files[path] != null) drafts[path] = files[path]!;
+    }
+    final unsaved = _unsaved.intersection(drafts.keys.toSet());
     files.clear();
     treePaths.clear();
     _dirty.clear();
     _unsaved.clear();
     files.addAll(drafts);
     treePaths.addAll(drafts.keys);
-    _dirty.addAll(drafts.keys);
-    _unsaved.addAll(drafts.keys);
+    _dirty.addAll({...drafts.keys, ...staged});
+    _unsaved.addAll(unsaved);
+    _revisions.removeWhere((path, _) => !_dirty.contains(path));
     lastSync = null;
     _lastSyncReport = null;
     notifyListeners();
@@ -1040,8 +1083,9 @@ class RepoCache extends ChangeNotifier {
   // ── working copy ops (agent edits land here first) ───────────────────
   void write(String path, String content) {
     _validateWorkspacePath(path);
+    _deletions.remove(path);
     files[path] = content;
-    _dirty.add(path);
+    _edited(path);
     if (workspaceFolder != null) _unsaved.add(path);
     notifyListeners();
   }
@@ -1054,7 +1098,7 @@ class RepoCache extends ChangeNotifier {
         if (safe == null) return null;
         if (_unsaved.contains(path)) return files[path];
         final file = File(safe);
-        if (!file.existsSync()) return null;
+        if (FileSystemEntity.typeSync(safe, followLinks: false) != FileSystemEntityType.file) return null;
         return _decodeFileBytes(file.readAsBytesSync());
       } catch (error, stack) {
         Diag.swallow('repo_cache.readWorkspace', error, stack);
@@ -1151,30 +1195,122 @@ class RepoCache extends ChangeNotifier {
 
   void create(String path, String content) {
     _validateWorkspacePath(path);
+    _deletions.remove(path);
     files[path] = content;
-    _dirty.add(path);
+    _edited(path);
     if (workspaceFolder != null) _unsaved.add(path);
     if (!treePaths.contains(path)) treePaths.add(path);
+    notifyListeners();
   }
 
   void remove(String path) {
     files.remove(path);
     _dirty.remove(path);
     _unsaved.remove(path);
+    _deletions.remove(path);
+    _stagedModes.remove(path);
+    _revisions.remove(path);
     treePaths.remove(path);
   }
 
-  /// Explicit remote deletion. `remove` remains cache eviction for existing
-  /// callers. Disk-backed deletions need the checkout's Git workflow.
+  /// Stages only an already-missing checkout path; never deletes disk bytes.
+  /// Remote-cache deletion is likewise an explicit operation, not read failure.
   void stageDeletion(String path) {
-    if (workspaceFolder != null) {
+    final safe = _stagingPath(path);
+    if (safe != null && _checkedType(safe) != FileSystemEntityType.notFound) {
       throw const CommitFailure(CommitFailureKind.unsupported,
-          'Stage checkout deletions with the workspace Git tools');
+          'Only an already-missing checkout file can be staged for deletion. No disk files were changed.');
     }
     files.remove(path);
-    _dirty.add(path);
+    _unsaved.remove(path);
+    _stagedModes.remove(path);
+    _deletions.add(path);
+    _edited(path);
     treePaths.remove(path);
     notifyListeners();
+  }
+
+  /// Proposes a Git executable bit without changing checkout permissions.
+  void stageMode(String path, String mode) {
+    if (!['100644', '100755'].contains(mode)) {
+      throw const CommitFailure(CommitFailureKind.unsupported, 'Only regular Git modes 100644 and 100755 are supported');
+    }
+    if (_commitContent(path) == null) {
+      throw const CommitFailure(CommitFailureKind.unsupported, 'Cannot stage a mode for a deleted file');
+    }
+    _stagedModes[path] = mode;
+    _edited(path);
+    notifyListeners();
+  }
+
+  String? _stagingPath(String path) {
+    if (path.isEmpty || path.contains('\\') || path.contains('\u0000') ||
+        path.split('/').any((p) => p.isEmpty || p == '.' || p == '..')) {
+      throw const CommitFailure(CommitFailureKind.unsupported, 'Staging requires a repository-relative canonical file path');
+    }
+    if (workspaceFolder == null) return null;
+    final safe = workspaceFilePath(Directory(workspaceFolder!), path);
+    if (safe == null) {
+      throw const CommitFailure(CommitFailureKind.unsupported, 'Staging path escapes the workspace or uses a symlink');
+    }
+    var parent = File(safe).parent;
+    final root = Directory(workspaceFolder!).resolveSymbolicLinksSync();
+    while (parent.path != root) {
+      final type = _checkedType(parent.path);
+      if (type != FileSystemEntityType.directory && type != FileSystemEntityType.notFound) {
+        throw const CommitFailure(CommitFailureKind.unsupported, 'Staging path has a non-directory parent');
+      }
+      parent = parent.parent;
+    }
+    return safe;
+  }
+
+  /// dart:io's typeSync/statSync hide *all* lookup errors as notFound. Only
+  /// an error-preserving lookup reporting ENOENT proves absence. EACCES,
+  /// ENOTDIR, I/O errors and unclassified failures must never approve a delete.
+  FileSystemEntityType _checkedType(String path) {
+    final type = FileSystemEntity.typeSync(path, followLinks: false);
+    if (type != FileSystemEntityType.notFound) return type;
+    try {
+      File(path).resolveSymbolicLinksSync();
+    } on FileSystemException catch (e) {
+      final code = e.osError?.errorCode;
+      // POSIX ENOENT; Windows ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND.
+      if (code == 2 || (Platform.isWindows && code == 3)) {
+        return FileSystemEntityType.notFound;
+      }
+    }
+    // Successful resolution after notFound is a racing/inconsistent lookup,
+    // not proof of absence either. Keep diagnostics free of local file bytes.
+    throw const CommitFailure(CommitFailureKind.unsupported,
+        'Cannot confirm workspace path state; lookup failed or changed. Retry when accessible.');
+  }
+
+  void _refreshDeletion(String path) {
+    if (!_deletions.contains(path) || workspaceFolder == null) return;
+    final safe = _stagingPath(path);
+    if (_checkedType(safe!) == FileSystemEntityType.file) {
+      _deletions.remove(path);
+      _edited(path);
+    }
+  }
+
+  String? _commitContent(String path) {
+    final safe = _stagingPath(path);
+    _refreshDeletion(path);
+    if (safe != null) {
+      final type = _checkedType(safe);
+      if (type != FileSystemEntityType.file && type != FileSystemEntityType.notFound) {
+        throw const CommitFailure(CommitFailureKind.unsupported, 'Cannot stage a non-regular workspace file');
+      }
+    }
+    if (_deletions.contains(path)) return null;
+    final content = read(path);
+    if (content == null) {
+      throw const CommitFailure(CommitFailureKind.unsupported,
+          'Selected bytes are missing or unreadable; deletion requires explicit staging');
+    }
+    return content;
   }
 
   /// List files of a folder (children names) for the Studio tree UI.
@@ -1196,9 +1332,11 @@ class RepoCache extends ChangeNotifier {
   // ── commit pending ───────────────────────────────────────────────────
   void validateApproval(CommitApproval approval) {
     if (approval.generation != _bindingGeneration || approval.binding != _copyKey ||
-        approval.contents.entries.any((e) => !_dirty.contains(e.key) || read(e.key) != e.value)) {
+        approval.contents.entries.any((e) => !_dirty.contains(e.key) ||
+            _commitContent(e.key) != e.value || _revisions[e.key] != approval._revisions[e.key] ||
+            _stagedModes[e.key] != approval._stagedModes[e.key])) {
       throw const CommitFailure(CommitFailureKind.staleApproval,
-          'Commit preview is stale; repository binding or selected bytes changed. Review again.');
+          'Commit preview is stale; repository binding, selected bytes, operation or mode changed. Review again.');
     }
   }
 
@@ -1216,11 +1354,9 @@ class RepoCache extends ChangeNotifier {
     if (selected.isEmpty || selected.any((p) => !_dirty.contains(p))) {
       throw const CommitFailure(CommitFailureKind.staleApproval, 'Select pending paths to review');
     }
-    final contents = {for (final p in selected) p: read(p)};
-    if (workspaceFolder != null && contents.values.any((value) => value == null)) {
-      throw const CommitFailure(CommitFailureKind.unsupported,
-          'Selected workspace bytes are missing or unreadable; use workspace Git tools for checkout deletions');
-    }
+    final contents = {for (final p in selected) p: _commitContent(p)};
+    final stagedModes = {for (final p in selected) p: _stagedModes[p]};
+    final revisions = {for (final p in selected) p: _revisions[p]};
     final c = client ?? http.Client();
     Future<Map<String, dynamic>> get(String path, {Map<String, String>? query}) async {
       final response = await _sendRetried(() {
@@ -1247,18 +1383,21 @@ class RepoCache extends ChangeNotifier {
       final entries = {for (final e in tree['tree'] as List) (e as Map)['path'] as String: e};
       final originals = <String, String?>{};
       final modes = <String, String>{};
+      final originalModes = <String, String?>{};
       for (final p in selected) {
         final entry = entries[p];
         if (entry == null) {
           if (contents[p] == null) throw CommitFailure(CommitFailureKind.staleApproval, 'Deletion target is absent upstream: $p');
           originals[p] = null;
-          modes[p] = '100644';
+          originalModes[p] = null;
+          modes[p] = stagedModes[p] ?? '100644';
           continue;
         }
         if (entry['type'] != 'blob' || !['100644', '100755'].contains(entry['mode']) || entry['sha'] is! String) {
           throw CommitFailure(CommitFailureKind.unsupported, 'Cannot safely review non-regular file or unknown mode: $p');
         }
-        modes[p] = entry['mode'] as String;
+        originalModes[p] = entry['mode'] as String;
+        modes[p] = contents[p] == null ? entry['mode'] as String : stagedModes[p] ?? entry['mode'] as String;
         final blob = await get('repos/$repo/git/blobs/${entry['sha']}');
         if (blob['encoding'] != 'base64' || blob['content'] is! String) {
           throw CommitFailure(CommitFailureKind.unsupported, 'Cannot decode original bytes: $p');
@@ -1267,7 +1406,8 @@ class RepoCache extends ChangeNotifier {
       }
       final approval = CommitApproval._(repo: repo, branch: branch, baseCommit: base,
           baseTree: tree['sha'] as String, message: message, binding: binding,
-          generation: generation, contents: contents, originals: originals, modes: modes);
+          generation: generation, contents: contents, originals: originals, modes: modes,
+          originalModes: originalModes, stagedModes: stagedModes, revisions: revisions);
       validateApproval(approval);
       return approval;
     } finally {
@@ -1344,7 +1484,7 @@ class RepoCache extends ChangeNotifier {
         snapshot,
       );
       _ensureBinding(generation);
-      _dropPushed(pending);
+      _dropPushed(pending, modes: snapshot.modes, revisions: snapshot._revisions);
       _lastCommit = CommitInfo(
         mode: CommitMode.atomic,
         commitSha: commitSha,
@@ -1359,9 +1499,45 @@ class RepoCache extends ChangeNotifier {
     }
   }
 
-  void _dropPushed(Map<String, String?> pending) {
+  void _dropPushed(Map<String, String?> pending, {Map<String, String>? modes,
+      Map<String, String?>? revisions}) {
+    _accountPushed(pending, modes: modes, revisions: revisions, workspace: workspaceFolder,
+        contents: files, dirty: _dirty, unsaved: _unsaved, deletions: _deletions,
+        stagedModes: _stagedModes, edits: _revisions);
+  }
+
+  void _accountPushed(Map<String, String?> pending, {required Map<String, String>? modes,
+      required Map<String, String?>? revisions, required String? workspace,
+      required Map<String, String> contents, required Set<String> dirty,
+      required Set<String> unsaved, required Set<String> deletions,
+      required Map<String, String> stagedModes, required Map<String, String> edits}) {
     for (final entry in pending.entries) {
-      if (read(entry.key) == entry.value) _dirty.remove(entry.key);
+      final path = entry.key;
+      if (revisions != null && edits[path] != revisions[path]) continue;
+      if (stagedModes.containsKey(path) && stagedModes[path] != modes?[path]) continue;
+      if ((entry.value == null) != deletions.contains(path)) continue;
+      String? current = deletions.contains(path) ? null : contents[path];
+      if (workspace != null) {
+        try {
+          final safe = workspaceFilePath(Directory(workspace), path);
+          if (safe == null) continue;
+          final type = _checkedType(safe);
+          if (entry.value == null) {
+            if (type != FileSystemEntityType.notFound) continue;
+          } else {
+            if (type != FileSystemEntityType.file && type != FileSystemEntityType.notFound) continue;
+            if (!unsaved.contains(path)) current = _decodeFileBytes(File(safe).readAsBytesSync());
+          }
+        } catch (_) {
+          continue; // Missing/unreadable bytes never prove an approved operation.
+        }
+      }
+      if (current == entry.value) {
+        dirty.remove(path);
+        deletions.remove(path);
+        stagedModes.remove(path);
+        edits.remove(path);
+      }
     }
   }
 
@@ -1495,6 +1671,7 @@ class RepoCache extends ChangeNotifier {
     await _saveIntent(intentKey, {
       'sha': commitSha, 'repo': repo, 'branch': branch, 'base': baseCommit,
       'message': message, 'pending': pending, 'owner': _copyKey,
+      'version': 2, 'modes': approval.modes, 'revisions': approval._revisions,
     });
     _ensureBinding(generation);
     try {
@@ -1513,7 +1690,7 @@ class RepoCache extends ChangeNotifier {
     }
     _ensureBinding(generation);
     if (patchRes?.statusCode == 200) {
-      _dropPushed(pending);
+      _dropPushed(pending, modes: approval.modes, revisions: approval._revisions);
       await _clearIntent(intentKey);
       _ensureBinding(generation);
       return commitSha;
@@ -1549,7 +1726,7 @@ class RepoCache extends ChangeNotifier {
     }
     _ensureBinding(generation);
     if (observed == commitSha) {
-      _dropPushed(pending);
+      _dropPushed(pending, modes: approval.modes, revisions: approval._revisions);
       await _clearIntent(intentKey);
       _ensureBinding(generation);
       return commitSha;
