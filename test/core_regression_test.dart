@@ -16309,7 +16309,11 @@ cwd = 'tools'
         expect(raw, isNot(contains(secretValue)));
 
         // Corrupted stored JSON tolerates load (returns null, never throws).
-        await prefs.setString('ovid_plugin_grants_v1', '{not json');
+        // Corruption is observed on a fresh preferences lifecycle, not by
+        // bypassing the live store's confirmed-commit snapshot.
+        SharedPreferences.setMockInitialValues({
+          'ovid_plugin_grants_v1': '{not json',
+        });
         expect(
           await PluginPermissionStore().load('acme/grant-kit', digest),
           isNull,
@@ -19686,7 +19690,7 @@ cwd = 'tools'
 
       final source = File('lib/ui/plugins_screen.dart').readAsStringSync();
       expect(source, contains('durableMcpStatus'));
-      expect(source, contains('setMcpEnv(s.canonicalId, env)'));
+      expect(source, contains('setMcpEnv(s.canonicalId, mergedEnv, strict: true)'));
       expect(source, isNot(contains('McpService.I.isConnected(server.name)')));
     });
 

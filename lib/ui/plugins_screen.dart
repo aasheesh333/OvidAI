@@ -335,10 +335,13 @@ class PluginRuntimeCallRecorderForTest {
 /// dependency installer. [sourceProgress] receives the resolver's raw
 /// byte progress for the fetch stage (a UI typically wraps it into
 /// readable labels with [fetchProgressLabel]).
+/// [approvalContext] belongs to this install only; without it, an install
+/// needing fresh approval fails closed.
 Future<PluginInstallResult?> startPluginInstallForTest(
   AppState app,
   PluginItem? plugin, {
   required PluginSource source,
+  BuildContext? approvalContext,
   void Function(String line)? onProgress,
   PluginSourceProgress? sourceProgress,
 }) async {
@@ -365,7 +368,7 @@ Future<PluginInstallResult?> startPluginInstallForTest(
     pluginId: inspection.manifest.id,
     manifest: inspection.manifest,
   );
-  final scaffoldContext = _pluginInstallSheetContext;
+  final scaffoldContext = approvalContext;
   if (grant == null) {
     if (scaffoldContext == null) {
       // No UI context (agent/test path): fail closed, never auto-approve.
@@ -414,11 +417,6 @@ Future<PluginInstallResult?> startPluginInstallForTest(
   }
   return result;
 }
-
-/// The BuildContext hosting the install flow's approval sheet. Assigned
-/// by the detail-screen install button before starting the flow (the
-/// sheet needs a context that outlives the button's onPressed frame).
-BuildContext? _pluginInstallSheetContext;
 
 /// Find (or create) the catalog row for an inspected manifest so the
 /// runtime install is visible in the Plugins list.
@@ -716,7 +714,6 @@ Future<void> _runSourceInstall(
   PluginItem? row,
 ) async {
   final messenger = ScaffoldMessenger.of(context);
-  _pluginInstallSheetContext = context;
 
   // WS2 live progress: created before the install starts so no line is
   // lost; the sheet reads the controller's current state on build.
@@ -747,6 +744,7 @@ Future<void> _runSourceInstall(
       AppState.I,
       row,
       source: source,
+      approvalContext: context,
       sourceProgress: (received, total) {
         final value = total == null || total <= 0
             ? null
@@ -770,7 +768,6 @@ Future<void> _runSourceInstall(
   } catch (e) {
     crash = '$e';
   }
-  _pluginInstallSheetContext = null;
   final msg = crash != null
       ? 'Install crashed: $crash'
       : result == null
@@ -916,31 +913,6 @@ class _PluginsScreenState extends State<PluginsScreen> {
   Widget build(BuildContext context) {
     final app = AppState.I;
     const cats = ['All', 'Agent', 'MCP', 'Tool', 'Runtime'];
-    // Stable per-row focus ids: canonical runtime id, or the synthetic legacy
-    // id (same ordinal scheme reconcile uses) so a same-name legacy row is
-    // never confused with its sibling.
-    final focusIds = <PluginItem, String>{};
-    var legacyOrdinal = 0;
-    for (final p in app.plugins) {
-      if (p.runtimeId != null) {
-        focusIds[p] = p.runtimeId!;
-      } else if (p.migrationRequired) {
-        focusIds[p] = legacyPluginFocusId(p, legacyOrdinal++);
-      }
-    }
-    final migrationOnly = widget.focusCanonicalId == kMigrationRequiredFocusId;
-    final items = app.plugins
-        .where(
-          (p) =>
-              (!migrationOnly ||
-                  durablePluginStatus(p)?.state ==
-                      StartupItemState.migrationRequired) &&
-              (_cat == 'All' || p.category == _cat) &&
-              (p.name.toLowerCase().contains(_query.toLowerCase()) ||
-                  p.description.toLowerCase().contains(_query.toLowerCase())),
-        )
-        .toList();
-
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
@@ -980,6 +952,53 @@ class _PluginsScreenState extends State<PluginsScreen> {
       body: AnimatedBuilder(
         animation: app,
         builder: (_, _) {
+          // Recompute on every notification, including installs and catalog
+          // changes. Generate legacy ids before grouping to keep them stable.
+          final focusIds = <PluginItem, String>{};
+          var legacyOrdinal = 0;
+          for (final p in app.plugins) {
+            if (p.runtimeId != null) {
+              focusIds[p] = p.runtimeId!;
+            } else if (p.migrationRequired) {
+              focusIds[p] = legacyPluginFocusId(p, legacyOrdinal++);
+            }
+          }
+          final migrationOnly =
+              widget.focusCanonicalId == kMigrationRequiredFocusId;
+          final filtered = app.plugins
+              .where(
+                (p) =>
+                    (!migrationOnly ||
+                        durablePluginStatus(p)?.state ==
+                            StartupItemState.migrationRequired) &&
+                    (_cat == 'All' || p.category == _cat) &&
+                    (p.name.toLowerCase().contains(_query.toLowerCase()) ||
+                        p.description.toLowerCase().contains(
+                          _query.toLowerCase(),
+                        )),
+              )
+              .toList();
+          // Stable partition: disabled installations still come first, and
+          // catalog order within each group is preserved without mutating it.
+          final items = [
+            ...filtered.where((p) => p.installed),
+            ...filtered.where((p) => !p.installed),
+          ];
+          final installedMcpIds = {
+            for (final p in app.plugins.where(
+              (p) => p.installed && p.category == 'MCP',
+            ))
+              if (AgentService.mcpServerForPlugin(p) case final server?)
+                server.canonicalId,
+          };
+          bool configured(McpServer s) =>
+              s.custom ||
+              (s.ownerPluginId?.isNotEmpty ?? false) ||
+              installedMcpIds.contains(s.canonicalId);
+          final servers = [
+            ...app.mcpServers.where(configured),
+            ...app.mcpServers.where((s) => !configured(s)),
+          ];
           _scheduleFocusReveal(items, focusIds);
           return CustomScrollView(
             controller: _scroll,
@@ -1041,7 +1060,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
               if (!migrationOnly)
                 SliverToBoxAdapter(
                   child: _McpSection(
-                    app: app,
+                    servers: servers,
                     focusCanonicalId: widget.focusCanonicalId,
                     cardKeys: _mcpCardKeys,
                   ),
@@ -2236,38 +2255,58 @@ class _EffectiveGrantRow extends StatelessWidget {
     final app = AppState.I;
     final grant = await app.effectivePluginGrant(plugin);
     if (!context.mounted) return;
+    var busy = false;
+    String? revokeError;
     await showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Plugin permissions', style: TextStyle(fontSize: 15)),
-        content: Text(
-          grant == null
-              ? 'No grant is currently effective for this plugin. It will '
-                    'request approval on the next install or update.'
-              : 'Granted capabilities:\n'
-                    '${grant.capabilities.map((c) => c.name).join(', ')}\n\n'
-                    'Approved ${grant.approvedAt.toIso8601String().substring(0, 10)} '
-                    'for digest ${_EffectiveGrantRow.digestSnippetForTest(grant.manifestDigest)}…',
-          style: const TextStyle(fontSize: 12.5, height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, update) => AlertDialog(
+          title: const Text(
+            'Plugin permissions',
+            style: TextStyle(fontSize: 15),
           ),
-          if (grant != null)
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: Aether.danger),
-              onPressed: () async {
-                Navigator.pop(ctx);
-                // Revoke: grant + owned secrets removed, plugin
-                // disabled immediately (Task 5 semantics).
-                await app.revokePluginGrant(plugin);
-                app.refresh();
-              },
-              child: const Text('Revoke permissions'),
+          content: Text(
+            revokeError ??
+                (grant == null
+                    ? 'No grant is currently effective for this plugin. It will '
+                          'request approval on the next install or update.'
+                    : 'Granted capabilities:\n'
+                          '${grant.capabilities.map((c) => c.name).join(', ')}\n\n'
+                          'Approved ${grant.approvedAt.toIso8601String().substring(0, 10)} '
+                          'for digest ${_EffectiveGrantRow.digestSnippetForTest(grant.manifestDigest)}…'),
+            style: const TextStyle(fontSize: 12.5, height: 1.5),
+          ),
+          actions: [
+            TextButton(
+              onPressed: busy ? null : () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
             ),
-        ],
+            if (grant != null)
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: Aether.danger),
+                onPressed: busy
+                    ? null
+                    : () async {
+                        update(() => busy = true);
+                        try {
+                          await app.revokePluginGrant(plugin);
+                          if (ctx.mounted) Navigator.pop(ctx);
+                        } catch (_) {
+                          if (ctx.mounted) {
+                            update(() {
+                              busy = false;
+                              revokeError =
+                                  'Plugin disabled. Could not save revocation. Retry to finish removing permissions.';
+                            });
+                          }
+                        }
+                      },
+                child: Text(
+                  revokeError == null ? 'Revoke permissions' : 'Retry',
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -2367,10 +2406,14 @@ class _Perm extends StatelessWidget {
 /// MCP servers section — separate from plugins because lifecycle is different
 /// (running process + JSON-RPC, not a downloaded package).
 class _McpSection extends StatelessWidget {
-  final AppState app;
+  final List<McpServer> servers;
   final String? focusCanonicalId;
   final Map<String, GlobalKey>? cardKeys;
-  const _McpSection({required this.app, this.focusCanonicalId, this.cardKeys});
+  const _McpSection({
+    required this.servers,
+    this.focusCanonicalId,
+    this.cardKeys,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -2401,7 +2444,7 @@ class _McpSection extends StatelessWidget {
         ),
         // Task 2 (contraction spec §5.2): no add-tile — the single "+"
         // opens the add sheet. An empty list hints at it instead.
-        if (app.mcpServers.isEmpty)
+        if (servers.isEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
             child: Text(
@@ -2415,10 +2458,10 @@ class _McpSection extends StatelessWidget {
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              itemCount: app.mcpServers.length,
+              itemCount: servers.length,
               separatorBuilder: (_, _) => const SizedBox(width: 10),
               itemBuilder: (_, i) {
-                final s = app.mcpServers[i];
+                final s = servers[i];
                 return McpCard(
                   key: cardKeys?.putIfAbsent(s.canonicalId, () => GlobalKey()),
                   server: s,
@@ -3049,19 +3092,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
   Widget build(BuildContext context) {
     final s = widget.server;
     final app = AppState.I;
-    final argsJson = s.args.isEmpty
-        ? '[]'
-        : '[${s.args.map((a) => '"$a"').join(', ')}]';
-    final configJson =
-        '{\n'
-        '  "mcpServers": {\n'
-        '    "${s.name.toLowerCase()}": {\n'
-        '      "command": "${s.command}",\n'
-        '      "args": $argsJson'
-        '${s.envHint != null ? ',\n      "env": { "${s.envHint!}": "••••••••" }' : ''}\n'
-        '    }\n'
-        '  }\n'
-        '}';
+    final configJson = _configJsonFor(s);
 
     return Scaffold(
       backgroundColor: Aether.bg,
@@ -3447,10 +3478,26 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
 
   /// Opens the mcp.json editor sheet — validates JSON, parses the
   /// mcpServers entry, and updates the server command/args on save.
-  void _editConfigJson(BuildContext context, McpServer s) {
+  Future<void> _editConfigJson(BuildContext context, McpServer s) async {
     final app = AppState.I;
-    final ctrl = TextEditingController(text: _configJsonFor(s));
-    showModalBottomSheet<void>(
+    Map<String, String> existingEnv;
+    try {
+      existingEnv = await app.getMcpEnv(s.canonicalId, strict: true);
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not load credentials. Try again.'),
+          ),
+        );
+      }
+      return;
+    }
+    if (!context.mounted) return;
+    final ctrl = TextEditingController(
+      text: _configJsonFor(s, environmentNames: existingEnv.keys),
+    );
+    await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Aether.surface,
@@ -3468,7 +3515,24 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
           height: MediaQuery.of(ctx).size.height * 0.62,
           child: _McpJsonEditorSheet(
             controller: ctrl,
-            onSave: (command, args, env, url, transport, headers, cwd) {
+            onSave: (command, args, env, url, transport, headers, cwd) async {
+              // The mask means preserve, never a credential value. Read again
+              // at save so a credential updated while editing is not reverted.
+              final currentEnv = await app.getMcpEnv(
+                s.canonicalId,
+                strict: true,
+              );
+              final mergedEnv = <String, String>{
+                for (final entry in env.entries)
+                  if (entry.value != _credentialMask)
+                    entry.key: entry.value
+                  else if (currentEnv[entry.key] case final value?
+                      when value != _credentialMask)
+                    entry.key: value,
+              };
+              // Omitted keys are explicit removals; all existing names were
+              // included in the editor, including ones absent from envHint.
+              await app.setMcpEnv(s.canonicalId, mergedEnv, strict: true);
               app.updateCustomMcpServer(
                 s,
                 command: command,
@@ -3478,9 +3542,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                 headers: headers,
                 cwd: cwd,
               );
-              // Env values (API keys) → secure storage, passed to the
-              // server process at connect time.
-              unawaited(app.setMcpEnv(s.canonicalId, env));
+              if (!ctx.mounted || !context.mounted) return;
               Navigator.pop(ctx);
               ScaffoldMessenger.of(
                 context,
@@ -3492,29 +3554,31 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
     );
   }
 
-  String _configJsonFor(McpServer s) {
-    final argsJson = s.args.isEmpty
-        ? '[]'
-        : '[${s.args.map((a) => '"$a"').join(', ')}]';
-    final envJson = s.envHint != null
-        ? ',\n      "env": { "${s.envHint!}": "••••••••" }'
-        : '';
-    final isHttp = s.transport == 'http';
-    final urlJson = s.url != null ? ',\n      "url": "${s.url}"' : '';
-    final cwdJson = s.cwd != null ? ',\n      "cwd": "${s.cwd}"' : '';
-    final transportJson = ',\n      "transport": "${s.transport}"';
-    return '{\n'
-        '  "mcpServers": {\n'
-        '    "${s.name.toLowerCase()}": {\n'
-        '      "command": "${s.command}",\n'
-        '      "args": $argsJson'
-        '$urlJson'
-        '$cwdJson'
-        '${isHttp ? transportJson : ''}'
-        '$envJson\n'
-        '    }\n'
-        '  }\n'
-        '}';
+  static const _credentialMask = '••••••••';
+
+  String _configJsonFor(
+    McpServer s, {
+    Iterable<String> environmentNames = const [],
+  }) {
+    final names = {
+      ...environmentNames,
+      ...s.requiredEnvNames,
+      for (final name in (s.envHint ?? '').split(','))
+        if (name.trim().isNotEmpty) name.trim(),
+    };
+    return jsonEncode({
+      'mcpServers': {
+        s.name: {
+          'command': s.command,
+          'args': s.args,
+          'transport': s.transport,
+          if (s.url != null) 'url': s.url,
+          if (s.cwd != null) 'cwd': s.cwd,
+          if (names.isNotEmpty)
+            'env': {for (final name in names) name: _credentialMask},
+        },
+      },
+    });
   }
 }
 
@@ -3523,7 +3587,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
 /// env (values stored in secure storage, passed to the server process).
 class _McpJsonEditorSheet extends StatefulWidget {
   final TextEditingController controller;
-  final void Function(
+  final Future<void> Function(
     String command,
     List<String> args,
     Map<String, String> env,
@@ -3541,6 +3605,7 @@ class _McpJsonEditorSheet extends StatefulWidget {
 
 class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
   String? _error;
+  bool _saving = false;
 
   void _validate() {
     setState(() {
@@ -3601,7 +3666,7 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    final sheet = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
@@ -3615,19 +3680,21 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
             const Spacer(),
             IconButton(
               icon: const Icon(Icons.close, size: 18),
-              onPressed: () => Navigator.pop(context),
+              onPressed: _saving ? null : () => Navigator.pop(context),
             ),
           ],
         ),
         const SizedBox(height: 4),
         Text(
-          'Edit the server command, args, or env. Saved config is used when the server connects.',
+          'Edit command, args, or env. Keep masked values to preserve credentials; '
+          'replace a value to update it, or remove its key to delete it.',
           style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
         ),
         const SizedBox(height: 12),
         Expanded(
           child: TextField(
             controller: widget.controller,
+            readOnly: _saving,
             maxLines: null,
             expands: true,
             textAlignVertical: TextAlignVertical.top,
@@ -3658,27 +3725,41 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
           ),
           icon: const Icon(Icons.check, size: 16),
           label: const Text('Save config'),
-          onPressed: () {
-            final parsed = _parse(widget.controller.text);
-            if (parsed == null) {
-              setState(
-                () => _error =
-                    'Invalid mcp.json — check the JSON syntax and try again.',
-              );
-              return;
-            }
-            widget.onSave(
-              parsed.command,
-              parsed.args,
-              parsed.env,
-              parsed.url,
-              parsed.transport,
-              parsed.headers,
-              parsed.cwd,
-            );
-          },
+          onPressed: _saving
+              ? null
+              : () async {
+                  final parsed = _parse(widget.controller.text);
+                  if (parsed == null) {
+                    setState(
+                      () => _error =
+                          'Invalid mcp.json — check the JSON syntax and try again.',
+                    );
+                    return;
+                  }
+                  setState(() => _saving = true);
+                  try {
+                    await widget.onSave(
+                      parsed.command,
+                      parsed.args,
+                      parsed.env,
+                      parsed.url,
+                      parsed.transport,
+                      parsed.headers,
+                      parsed.cwd,
+                    );
+                  } catch (_) {
+                    if (mounted) {
+                      setState(
+                        () => _error = 'Could not save config. Try again.',
+                      );
+                    }
+                  } finally {
+                    if (mounted) setState(() => _saving = false);
+                  }
+                },
         ),
       ],
     );
+    return PopScope(canPop: !_saving, child: sheet);
   }
 }

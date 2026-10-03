@@ -23,9 +23,14 @@ class MemoryStore:
         self.rows[row['uid']] = copy.deepcopy(row)
 
     def due(self, now):
-        return [uid for uid, r in self.rows.items()
-                if r['state'] in ('pending', 'fenced', 'deleting')
-                and r['delete_after'] <= now]
+        rows = [r for r in self.rows.values()
+                if r.get('next_attempt', 0) <= now and (
+                    (r['state'] in ('pending', 'fenced', 'deleting')
+                     and r['delete_after'] <= now) or
+                    (r['state'] == 'cancelled' and r['fence_owned']))]
+        rows.sort(key=lambda r: (r.get('next_attempt', 0), r.get('attempts', 0),
+                                 r['delete_after'], r['uid']))
+        return [r['uid'] for r in rows[:100]]
 
 
 class Admin:
@@ -72,7 +77,7 @@ class LifecycleTests(unittest.TestCase):
         self.store, self.admin, self.data = MemoryStore(), Admin(), Data()
         self.service = Lifecycle(self.store, self.admin, self.data, lambda: self.now)
         self.claims = {'uid': 'alice', 'auth_time': 1000,
-                       'firebase': {'sign_in_provider': 'password'}}
+                       'firebase': {'sign_in_provider': 'google.com'}}
 
     def request(self, request_id='request-0001'):
         return self.service.request(self.claims, request_id)
@@ -93,7 +98,11 @@ class LifecycleTests(unittest.TestCase):
 
     def test_reauth_and_nonanonymous_identity_are_required(self):
         for update in ({'auth_time': 600}, {'auth_time': 2000},
-                       {'firebase': {'sign_in_provider': 'anonymous'}},
+                        {'firebase': {'sign_in_provider': 'anonymous'}},
+                        {'firebase': {'sign_in_provider': 'custom'}},
+                        {'firebase': {'sign_in_provider': 'oidc.example'}},
+                        {'firebase': {'sign_in_provider': ['google.com']}},
+                        {'firebase': None},
                        {'uid': ''}):
             with self.subTest(update=update), self.assertRaises(AccountError):
                 self.service.request({**self.claims, **update}, 'request-0001')
@@ -209,6 +218,145 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(AccountError):
             self.request('request-0001')
         self.assertEqual(self.store.get('alice')['request_id'], second['request_id'])
+
+    def test_coalesced_request_b_cannot_resurrect_cancelled_a_after_restart(self):
+        first = self.request('request-aaaa')
+        self.assertEqual(self.request('request-bbbb'), first)
+        self.now = 1001
+        self.claims['auth_time'] = 1001
+        self.service.login(self.claims)
+        self.service = Lifecycle(self.store, self.admin, self.data, lambda: self.now)
+        self.assertEqual(self.request('request-bbbb')['state'], 'cancelled')
+        self.request('request-cccc')
+        with self.assertRaisesRegex(AccountError, 'request_already_completed'):
+            self.request('request-bbbb')
+        self.assertEqual(self.store.get('alice')['request_id'], 'request-cccc')
+
+    def test_request_rechecks_recent_auth_after_lock_wait(self):
+        locked = self.store.locked
+        @contextmanager
+        def delayed(uid):
+            with locked(uid) as db:
+                self.now = 1301
+                yield db
+        self.store.locked = delayed
+        with self.assertRaisesRegex(AccountError, 'reauthentication_required'):
+            self.request()
+        self.assertEqual(self.store.rows, {})
+
+    def test_request_rechecks_recent_auth_after_admin_wait(self):
+        user = self.admin.user
+        def delayed(uid):
+            self.now = 1301
+            return user(uid)
+        self.admin.user = delayed
+        with self.assertRaisesRegex(AccountError, 'reauthentication_required'):
+            self.request()
+        self.assertEqual(self.store.rows, {})
+
+    def test_deadline_uses_acceptance_time_after_lock_and_admin_wait(self):
+        locked, user = self.store.locked, self.admin.user
+        @contextmanager
+        def delayed_lock(uid):
+            with locked(uid) as db:
+                self.now += 20
+                yield db
+        def delayed_admin(uid):
+            self.now += 30
+            return user(uid)
+        self.store.locked, self.admin.user = delayed_lock, delayed_admin
+        self.assertEqual(self.request()['delete_after'], 87450)
+        self.assertEqual(self.store.rows['alice']['requested_at'], 1050)
+
+    def test_supported_social_and_phone_providers(self):
+        for provider in ('google.com', 'github.com', 'apple.com', 'microsoft.com',
+                         'facebook.com', 'twitter.com', 'yahoo.com', 'phone'):
+            with self.subTest(provider=provider):
+                self.store.rows.clear()
+                claims = {**self.claims, 'firebase': {'sign_in_provider': provider}}
+                self.assertEqual(self.service.request(claims, 'request-social')['state'], 'pending')
+
+    def test_password_cannot_start_new_request_or_gain_normal_access(self):
+        claims = {**self.claims, 'firebase': {'sign_in_provider': 'password'}}
+        for action in (lambda: self.service.request(claims, 'request-password'),
+                       lambda: self.service.login(claims),
+                       lambda: self.service.status(claims)):
+            with self.assertRaisesRegex(AccountError, 'unsupported_identity'):
+                action()
+        with self.assertRaisesRegex(AccountError, 'unsupported_identity'), self.service.access(claims):
+            self.fail('password identity must not gain ordinary access')
+
+    def test_legacy_password_keeps_existing_deletion_and_fence_recovery(self):
+        self.request()
+        self.now = 87400
+        self.service.finalize('alice')
+        claims = {**self.claims, 'auth_time': 87399, '_account_disabled': True,
+                  'firebase': {'sign_in_provider': 'password'}}
+        enable = self.admin.enable
+        self.admin.enable = lambda uid: (_ for _ in ()).throw(RuntimeError('offline'))
+        with self.assertRaises(RuntimeError):
+            self.service.login(claims)
+        self.admin.enable = enable
+        self.assertEqual(self.service.login(claims)['state'], 'cancelled')
+        self.assertFalse(self.admin.users['alice']['disabled'])
+        self.assertEqual(self.service.status(claims)['state'], 'cancelled')
+        self.assertEqual(self.service.request(claims, 'request-0001')['state'], 'cancelled')
+        with self.assertRaisesRegex(AccountError, 'unsupported_identity'):
+            self.service.request(claims, 'request-newpassword')
+
+    def test_fence_settlement_uses_clock_after_admin_wait(self):
+        self.request()
+        self.now = 87400
+        self.service.finalize('alice')
+        self.now = 87459
+        user = self.admin.user
+        def delayed(uid):
+            self.now += 2
+            return user(uid)
+        self.admin.user = delayed
+        self.assertEqual(self.service.finalize('alice')['state'], 'deleted')
+
+    def test_scheduled_retry_rechecks_due_time_under_lock(self):
+        self.request()
+        self.now = 87400
+        self.service.finalize('alice', scheduled=True)
+        self.assertEqual(self.store.get('alice')['attempts'], 1)
+        self.now = 87459
+        self.assertEqual(self.service.finalize('alice', scheduled=True)['state'], 'fenced')
+        self.assertEqual(self.store.get('alice')['attempts'], 1)
+        self.now = 87460
+        self.assertEqual(self.service.finalize('alice', scheduled=True)['state'], 'deleted')
+
+    def test_retry_backoff_from_end_of_slow_failure_is_capped(self):
+        self.request()
+        self.now = 87400
+        self.service.finalize('alice')
+        self.now = 87461
+        def fail(uid, context):
+            self.now += 500
+            raise RuntimeError('slow failure')
+        self.data.delete_data = fail
+        for delay in (120, 240, 480, 960, 1920, 3600, 3600):
+            with self.assertRaises(RuntimeError):
+                self.service.finalize('alice', scheduled=True)
+            row = self.store.get('alice')
+            self.assertEqual(row['next_attempt'], self.now + delay)
+            self.assertEqual(row['completed'], ['keys'])
+            self.now = row['next_attempt']
+
+    def test_crash_retry_intent_is_saved_before_external_effect(self):
+        self.request()
+        self.now = 87400
+        def crash(uid):
+            raise SystemExit('simulated process crash')
+        self.admin.disable = crash
+        with self.assertRaises(SystemExit):
+            self.service.finalize('alice', scheduled=True)
+        row = self.store.get('alice')
+        self.assertEqual(row['attempts'], 1)
+        self.assertEqual(row['next_attempt'], 87460)
+        self.assertEqual(row['state'], 'fenced')
+        self.assertIsNone(row['fence_at'])
 
     def test_disabled_account_without_worker_owned_fence_cannot_login(self):
         with self.assertRaises(AccountError):

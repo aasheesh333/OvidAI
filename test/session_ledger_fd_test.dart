@@ -33,6 +33,9 @@ void main() {
   });
 
   tearDown(() async {
+    for (final sid in SessionLedger.I.sinkOpensForTest.keys.toList()) {
+      await SessionLedger.I.close(sid);
+    }
     SessionLedger.rootOverrideForTest = null;
     if (root.existsSync()) root.deleteSync(recursive: true);
   });
@@ -67,7 +70,7 @@ void main() {
 
       final events = await SessionLedger.I.read(sid);
       expect(events.length, n, reason: 'all appended events must survive');
-      // seq is assigned synchronously before the await, so ordering is exact.
+      // Concurrent appends share initialization and retain arrival order.
       expect(events.map((e) => e['seq']).toList(), [
         for (var i = 1; i <= n; i++) i,
       ]);

@@ -81,6 +81,7 @@ class PermissionGrant {
 
   bool coversPath(String path) =>
       kind == kindPath &&
+      path.trim().isNotEmpty &&
       (recursive
           ? pathCoveredBy(value, path)
           : value == normalizeGrantPath(path));
@@ -94,16 +95,21 @@ class PermissionGrant {
     String decision = decisionAlways,
     bool recursive = false,
     DateTime? at,
-  }) => PermissionGrant(
-    kind: kindPath,
-    value: normalizeGrantPath(rawPath),
-    scope: global ? scopeGlobal : scopeSession,
-    sessionId: global ? null : sessionId,
-    mode: mode,
-    decision: decision,
-    recursive: recursive,
-    grantedAt: at ?? DateTime.now(),
-  );
+  }) {
+    if (rawPath.trim().isEmpty) {
+      throw ArgumentError.value(rawPath, 'rawPath', 'must not be blank');
+    }
+    return PermissionGrant(
+      kind: kindPath,
+      value: normalizeGrantPath(rawPath),
+      scope: global ? scopeGlobal : scopeSession,
+      sessionId: global ? null : sessionId,
+      mode: mode,
+      decision: decision,
+      recursive: recursive,
+      grantedAt: at ?? DateTime.now(),
+    );
+  }
 
   /// Creates a host grant; [rawHost] is normalized (lower-case, port
   /// stripped, IPv6 brackets stripped).
@@ -149,11 +155,14 @@ class PermissionGrant {
     if (scope != scopeSession && scope != scopeGlobal) {
       throw FormatException('unknown grant scope: $scope');
     }
+    if (rawValue == null || rawValue.trim().isEmpty) {
+      throw const FormatException('grant value is empty');
+    }
     final validKind = kind as String;
     final validScope = scope as String;
     final value = validKind == kindPath
-        ? normalizeGrantPath(rawValue ?? '')
-        : normalizeGrantHost(rawValue ?? '');
+        ? normalizeGrantPath(rawValue)
+        : normalizeGrantHost(rawValue);
     if (value.isEmpty) {
       throw const FormatException('grant value is empty');
     }
@@ -245,6 +254,7 @@ String normalizeGrantHost(String raw) {
 /// segment-boundary check, so `/a/b` covers `/a/b/c` but NOT `/a/bc`.
 /// A grant on the filesystem root `/` covers every absolute path.
 bool pathCoveredBy(String grantPath, String candidate) {
+  if (grantPath.trim().isEmpty || candidate.trim().isEmpty) return false;
   final g = normalizeGrantPath(grantPath);
   final c = normalizeGrantPath(candidate);
   if (c == g) return true;
@@ -354,6 +364,7 @@ class GrantStore {
     String rawPath, {
     String mode = legacyModeFallback,
   }) {
+    if (rawPath.trim().isEmpty) return false;
     final c = normalizeGrantPath(rawPath);
     if (_coversPath(sessionId, c, mode: mode, deny: true)) return false;
     return _coversPath(sessionId, c, mode: mode);
@@ -364,7 +375,7 @@ class GrantStore {
     String? sessionId,
     String rawPath, {
     String mode = legacyModeFallback,
-  }) => _coversPath(
+  }) => rawPath.trim().isNotEmpty && _coversPath(
     sessionId,
     normalizeGrantPath(rawPath),
     mode: mode,
@@ -408,6 +419,7 @@ class GrantStore {
     String decision = PermissionGrant.decisionAlways,
     bool recursive = false,
   }) {
+    if (rawPath.trim().isEmpty) return;
     if (!global && (sessionId == null || sessionId.isEmpty)) return;
     final g = PermissionGrant.path(
       rawPath,
@@ -460,7 +472,7 @@ class GrantStore {
     String? sessionId,
     String rawPath, {
     bool global = false,
-  }) => _revoke(
+  }) => rawPath.trim().isNotEmpty && _revoke(
     sessionId,
     PermissionGrant.kindPath,
     normalizeGrantPath(rawPath),
@@ -513,6 +525,7 @@ class GrantStore {
     String mode = '',
     bool recursive = false,
   }) {
+    if (rawPath.trim().isEmpty) return;
     _removeMatching(sessionId, rawPath, PermissionGrant.kindPath, mode);
     addPathGrant(
       sessionId,

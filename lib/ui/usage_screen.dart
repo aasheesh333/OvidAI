@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../core/format.dart';
+import '../core/cloud_usage_store.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
+import 'cloud_usage_status.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
 /// PROVIDER-WISE usage tracking — "kisne kitna khaya" view.
@@ -193,6 +195,7 @@ class UsageScreen extends StatelessWidget {
           final tokensIn = providers.fold<int>(0, (s, p) => s + p.tokensIn);
           final tokensOut = providers.fold<int>(0, (s, p) => s + p.tokensOut);
           final todayEntries = app.usageLog.where((e) {
+            if (e.providerId == AppState.ovidCloudProviderId) return false;
             final d = e.time;
             final now = DateTime.now();
             return d.year == now.year &&
@@ -219,7 +222,7 @@ class UsageScreen extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    _stat('Today', _fmtTok(todayTokens)),
+                    _stat('Today’s tokens', _fmtTok(todayTokens)),
                     _stat('Requests', '$reqs'),
                     _stat('Providers', '${providers.length}'),
                   ],
@@ -269,7 +272,7 @@ class UsageScreen extends StatelessWidget {
               Padding(
                 padding: EdgeInsets.fromLTRB(18, 18, 18, 6),
                 child: Text(
-                  'BY PROVIDER',
+                  'LOCAL MEASURED USAGE · OTHER PROVIDERS',
                   style: TextStyle(
                     fontSize: 10.5,
                     fontWeight: FontWeight.w700,
@@ -380,13 +383,63 @@ class _ProviderTile extends StatelessWidget {
 }
 
 /// Detailed per-provider usage screen.
-class ProviderUsageScreen extends StatelessWidget {
+class ProviderUsageScreen extends StatefulWidget {
   final ProviderUsage provider;
   const ProviderUsageScreen({super.key, required this.provider});
 
   @override
+  State<ProviderUsageScreen> createState() => _ProviderUsageScreenState();
+}
+
+class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
+  ProviderUsage get provider => widget.provider;
+  late final Object _initialRevision;
+  late final Object _initialIdentity;
+
+  @override
+  void initState() {
+    super.initState();
+    // A caller-supplied snapshot remains a valid initial seed, but can never
+    // resurrect counts after the live log has changed or been cleared.
+    _initialRevision = (
+      AppState.I.usageLog.length,
+      AppState.I.usageLog.lastOrNull,
+    );
+    _initialIdentity = OvidCloudService.I.accountIdentity;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final p = provider;
+    return AnimatedBuilder(
+      animation: Listenable.merge([AppState.I, OvidCloudService.I]),
+      builder: (context, _) => _buildDetail(context),
+    );
+  }
+
+  Widget _buildDetail(BuildContext context) {
+    final p =
+        const UsageScreen()
+            ._aggregate(AppState.I)
+            .where((p) => p.providerId == provider.providerId)
+            .firstOrNull ??
+        ((_initialRevision ==
+                    (
+                      AppState.I.usageLog.length,
+                      AppState.I.usageLog.lastOrNull,
+                    ) &&
+                _initialIdentity == OvidCloudService.I.accountIdentity)
+            ? provider
+            : ProviderUsage(
+                providerId: provider.providerId,
+                providerName: provider.providerName,
+                tier: provider.tier,
+                icon: provider.icon,
+                color: provider.color,
+                requests: 0,
+                tokensIn: 0,
+                tokensOut: 0,
+                models: [],
+              ));
     final daily = AppState.I.dailyActivityFor(p.providerId, days: 14);
     return Scaffold(
       backgroundColor: Aether.bg,
@@ -636,29 +689,32 @@ class _OvidCloudUsageCard extends StatefulWidget {
 }
 
 class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
-  OvidUsage? _usage;
-  bool _loading = true;
+  late final CloudUsageStore _store;
+  OvidUsage? get _usage => _store.usage;
+  bool get _loading => _store.loading && _usage == null;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _store = CloudUsageStore.acquire(AppState.I);
+    _store.addListener(_changed);
   }
 
-  Future<void> _load() async {
-    final u = await OvidCloudService.I.fetchUsage();
-    if (!mounted) return;
-    setState(() {
-      _usage = u;
-      _loading = false;
-    });
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _store.removeListener(_changed);
+    _store.release();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final app = AppState.I;
-    final tier = _usage?.tier ?? app.ovidCloudTier;
-    final isPaid = _usage?.isPaid ?? app.ovidCloudIsPaid;
+    final tier = _usage?.tier ?? OvidCloudService.I.confirmedTier ?? '';
+    final isPaid = _usage?.isPaid ?? (tier.isNotEmpty && tier != 'free');
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 14, 16, 2),
@@ -700,7 +756,11 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Text(
-                  isPaid ? '${tier.toUpperCase()} PLAN' : 'FREE',
+                  tier.isEmpty
+                      ? 'PLAN UNAVAILABLE'
+                      : isPaid
+                      ? '${tier.toUpperCase()} PLAN'
+                      : 'FREE',
                   style: TextStyle(
                     fontSize: 10.5,
                     fontWeight: FontWeight.w700,
@@ -723,6 +783,7 @@ class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
             )
           else
             _remainingUsage(_usage),
+          CloudUsageStatus(store: _store),
         ],
       ),
     );

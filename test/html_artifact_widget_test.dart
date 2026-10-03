@@ -84,12 +84,14 @@ void main() {
       await tester.tap(find.byTooltip('Show preview'));
       await tester.pump();
       await tester.tap(find.byTooltip('Expand preview'));
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Collapse artifact'));
       await tester.pumpAndSettle();
       expect(find.byType(AndroidView), findsNothing);
-      expect(calls.where((c) => c.method == 'dispose'), hasLength(2));
+      expect(calls.where((c) => c.method == 'dispose'), hasLength(4));
       await tester.pumpWidget(const SizedBox());
       await tester.pumpAndSettle();
       debugDefaultTargetPlatformOverride = null;

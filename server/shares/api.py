@@ -1,0 +1,121 @@
+"""Router factory: verified UID callback and real deployment origin are required."""
+
+import html
+import re
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.routing import APIRoute
+
+from .repository import ShareError
+from .snapshot import CreateShare
+
+HEADERS = {
+    'Cache-Control': 'no-store, private, max-age=0',
+    'Pragma': 'no-cache',
+    'X-Robots-Tag': 'noindex, nofollow, noarchive',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; "
+                               "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; sandbox",
+}
+
+
+class ShareRoute(APIRoute):
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handle(request):
+            try:
+                if request.method == 'POST':
+                    # Bound the raw body before JSON decoding, including chunked
+                    # requests and JSON whitespace/escape expansion overhead.
+                    length = request.headers.get('content-length')
+                    if length and (not length.isdigit() or int(length) > 1500000):
+                        raise HTTPException(413, 'snapshot_too_large')
+                    body = bytearray()
+                    async for chunk in request.stream():
+                        if len(body) + len(chunk) > 1500000:
+                            raise HTTPException(413, 'snapshot_too_large')
+                        body.extend(chunk)
+                    request._body = bytes(body)
+                response = await original(request)
+            except RequestValidationError:
+                # Don't echo rejected secret fields/bytes in validation errors.
+                response = JSONResponse({'detail': 'invalid_snapshot'}, status_code=422)
+            except ShareError as error:
+                response = JSONResponse({'detail': error.code}, status_code=error.status)
+            except HTTPException as error:
+                response = JSONResponse({'detail': error.detail}, status_code=error.status_code)
+            except Exception:
+                response = JSONResponse({'detail': 'shares_unavailable'}, status_code=503)
+            response.headers.update(HEADERS)
+            return response
+        return handle
+
+
+def router(repository, verify_uid, base_url):
+    """verify_uid(token, attestation) -> verified nonanonymous UID or raises.
+
+    Inject a synchronous adapter using the account architecture's verifier and
+    identity policy. It must check revocation, disabled users and account fence.
+    This module never accepts owner IDs or trusts claims sent by the client.
+    """
+    base_url = base_url.rstrip('/')
+    parsed = urlsplit(base_url)
+    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
+            parsed.password or parsed.query or parsed.fragment or
+            (parsed.path and not re.fullmatch(r'(?:/[A-Za-z0-9_-]+)+', parsed.path))):
+        raise ValueError('A configured HTTPS deployment base URL is required')
+    routes = APIRouter(tags=['shares'], route_class=ShareRoute)
+
+    def owner(authorization: str = Header(default=''),
+              x_firebase_appcheck: str = Header(default='')):
+        if not authorization.startswith('Bearer ') or not authorization[7:].strip():
+            raise HTTPException(401, 'authentication_required')
+        try:
+            uid = verify_uid(authorization[7:], x_firebase_appcheck)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(401, 'invalid_authentication') from None
+        if not isinstance(uid, str) or not uid.strip():
+            raise HTTPException(401, 'invalid_identity')
+        return uid
+
+    def receipt(value):
+        return value | {'url': base_url + '/s/' + value['id']}
+
+    @routes.post('/shares', status_code=201)
+    def create(body: CreateShare, uid=Depends(owner)):
+        return receipt(repository.create(uid, body.model_dump()))
+
+    @routes.get('/shares')
+    def list_shares(session_id: str | None = Query(default=None, max_length=128), uid=Depends(owner)):
+        return {'shares': [receipt(row) for row in repository.list(uid, session_id)]}
+
+    @routes.delete('/shares/{token}', status_code=204)
+    def revoke(token: str, uid=Depends(owner)):
+        repository.revoke(uid, token)
+        return Response(status_code=204)
+
+    @routes.get('/s/{token}', response_class=HTMLResponse)
+    def viewer(token: str):
+        snapshot = repository.public(token) if re.fullmatch(r'[A-Za-z0-9_-]{43}', token) else None
+        if snapshot is None:
+            return HTMLResponse('<!doctype html><title>Link unavailable</title><h1>Link unavailable</h1>', status_code=404)
+        rows = ''.join('<section><h2>' + ('You' if m['role'] == 'user' else 'Assistant') +
+                       '</h2><pre>' + html.escape(m['content'], quote=True) + '</pre></section>'
+                       for m in snapshot['messages'])
+        return HTMLResponse('''<!doctype html><html lang="en"><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <meta name="robots" content="noindex,nofollow,noarchive"><title>Shared conversation · Ovid</title>
+            <style>body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 20px;color:#202124}
+            section{border-top:1px solid #ddd;padding:16px 0}h2{font-size:15px}
+            pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.6}</style>
+            </head><body><h1>Shared conversation</h1><p>Immutable snapshot shared by an Ovid user.</p>'''
+                            + rows + '</body></html>')
+
+    return routes

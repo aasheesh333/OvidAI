@@ -84,7 +84,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
   Widget build(BuildContext context) {
     final explanations = explainCapabilities(widget.manifest);
     final deps = widget.manifest.dependencies.packages;
-    return SafeArea(
+    final sheet = SafeArea(
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           20,
@@ -248,7 +248,9 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                           borderRadius: BorderRadius.circular(12),
                         ),
                       ),
-                      onPressed: () => Navigator.pop(context, false),
+                      onPressed: _saving
+                          ? null
+                          : () => Navigator.pop(context, false),
                       child: const Text(
                         'Cancel',
                         style: TextStyle(fontSize: 13.5),
@@ -296,6 +298,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
         ),
       ),
     );
+    return PopScope(canPop: !_saving, child: sheet);
   }
 }
 

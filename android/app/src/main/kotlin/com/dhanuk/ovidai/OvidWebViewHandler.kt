@@ -14,6 +14,7 @@ import android.os.Looper
 import android.util.Base64
 import android.view.PixelCopy
 import android.view.View
+import android.view.WindowManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.webkit.ScriptHandler
@@ -343,6 +344,14 @@ class OvidWebViewHandler(
         maxEdge: Int,
         result: MethodChannel.Result
     ) {
+        // Software drawing must not bypass a secure window's capture policy.
+        val win = activity?.window
+        if (win != null &&
+            win.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0
+        ) {
+            result.success(mapOf("captured" to false, "reason" to "secure window"))
+            return
+        }
         // A DETACHED WebView has no composited pixels at all. Its platform view
         // is mounted only while the Browser panel is open (BrowserScreen's
         // IndexedStack), but the controller deliberately outlives that route —
@@ -398,16 +407,15 @@ class OvidWebViewHandler(
             // overloads are Surface, SurfaceView, Window and Request -- so the
             // View-source call that used to live here could never compile, at
             // any compileSdk. A WebView's pixels are still
-            // reachable through the Window overload (API 24+): copy the whole
+            // reachable through the Window overload (API 26+): copy the whole
             // window, then crop the WebView's own on-screen rect out of it.
             //
             // `draw(Canvas)` is NOT an equivalent substitute: an accelerated
             // WebView renders through the compositor, so a software draw comes
             // back blank while still looking like a successful capture.
-            val win = activity?.window
             val winW = webView.rootView.width
             val winH = webView.rootView.height
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
                 win != null && winW > 0 && winH > 0
             ) {
                 val loc = IntArray(2)
@@ -456,7 +464,7 @@ class OvidWebViewHandler(
                     Handler(Looper.getMainLooper())
                 )
             } else {
-                // API 23, or no window attached (headless engine / unit test):
+                // API 23–25, or no window attached (headless engine / unit test):
                 // a software draw is all that is left. Force the software layer
                 // first, then restore it immediately so the on-screen tab is not
                 // left re-rendering in software.
@@ -469,7 +477,12 @@ class OvidWebViewHandler(
                 val previousLayer = webView.layerType
                 webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 try {
-                    webView.draw(Canvas(target))
+                    val canvas = Canvas(target)
+                    canvas.scale(
+                        size.first.toFloat() / sourceW,
+                        size.second.toFloat() / sourceH
+                    )
+                    webView.draw(canvas)
                 } finally {
                     webView.setLayerType(previousLayer, null)
                 }
@@ -1037,4 +1050,3 @@ internal object GeoFix {
         return best
     }
 }
-

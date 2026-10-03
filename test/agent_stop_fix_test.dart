@@ -188,8 +188,8 @@ void main() {
       final runA = AgentService.I.runTask('first', sessionId: s.id);
       // Wait until run A is admitted and blocked in the LLM call.
       await pollUntil(
-        () => AgentService.I.activeRunId != null,
-        'run A to be admitted',
+        () => attempt == 1,
+        'run A to enter the model call',
       );
 
       // User sends while busy → queued; then hits Stop.
@@ -251,8 +251,8 @@ void main() {
 
       final runA = AgentService.I.runTask('first', sessionId: s.id);
       await pollUntil(
-        () => AgentService.I.activeRunId != null,
-        'run A to be admitted',
+        () => attempt == 1,
+        'run A to enter the model call',
       );
       final runAId = AgentService.I.activeRunId!;
 

@@ -6,7 +6,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
-import 'auth_screen.dart';
+import '../core/auth_identity.dart';
+import 'auth_methods.dart';
 
 /// Mandatory Firebase sign-in gate with server account acknowledgement.
 ///
@@ -15,7 +16,7 @@ import 'auth_screen.dart';
 ///  2. **unauthenticated** — Firebase ready, no user; show the login screen.
 ///  3. **authenticated** — signed in; show the child (app).
 ///
-/// Ovid Cloud assigns a per-user key only after a verified Google sign-in, so
+/// Ovid Cloud assigns a per-user key after authenticated account checks, so
 /// the app requires login before use. On the first signed-in frame the gate
 /// binds the user's Ovid Cloud key in the background (mint → secure storage →
 /// Auto mode).
@@ -23,8 +24,15 @@ import 'auth_screen.dart';
 /// Missing Firebase configuration fails closed. Tests explicitly use
 /// [disabledForTest] when exercising unrelated app features.
 class LoginGate extends StatefulWidget {
-  const LoginGate({super.key, required this.child});
+  const LoginGate({
+    super.key,
+    required this.child,
+    this.service,
+    this.bindCloud,
+  });
   final Widget child;
+  final FirebaseService? service;
+  final Future<void> Function()? bindCloud;
 
   /// Test seam: skip the gate entirely (host widget tests pump the shell).
   @visibleForTesting
@@ -35,6 +43,7 @@ class LoginGate extends StatefulWidget {
 }
 
 class _LoginGateState extends State<LoginGate> {
+  late final _firebase = widget.service ?? FirebaseService.I;
   bool _bindStarted = false;
 
   /// True while Firebase.initializeApp is in flight. The splash screen is
@@ -44,13 +53,13 @@ class _LoginGateState extends State<LoginGate> {
   @override
   void initState() {
     super.initState();
-    FirebaseService.I.addListener(_onAuth);
+    _firebase.addListener(_onAuth);
     _kickFirebaseInit();
   }
 
   Future<void> _kickFirebaseInit() async {
     try {
-      await FirebaseService.I.initialize();
+      await _firebase.initialize();
     } catch (_) {
       // Missing configuration is shown below; no anonymous bypass.
     }
@@ -61,19 +70,19 @@ class _LoginGateState extends State<LoginGate> {
 
   @override
   void dispose() {
-    FirebaseService.I.removeListener(_onAuth);
+    _firebase.removeListener(_onAuth);
     super.dispose();
   }
 
   void _onAuth() {
     if (!mounted) return;
-    final fb = FirebaseService.I;
+    final fb = _firebase;
     if (!fb.accountReady) _bindStarted = false;
     if (fb.isAvailable && fb.accountReady && !_bindStarted) {
       _bindStarted = true;
       // Bind the Ovid Cloud key in the background; a failure leaves the app
       // usable with the user's own custom providers.
-      unawaited(OvidCloudService.I.bindOvidCloud());
+      unawaited(widget.bindCloud?.call() ?? OvidCloudService.I.bindOvidCloud());
     }
     setState(() {});
   }
@@ -86,9 +95,9 @@ class _LoginGateState extends State<LoginGate> {
     if (_initializing) return const _SplashScreen();
 
     return AnimatedBuilder(
-      animation: FirebaseService.I,
+      animation: _firebase,
       builder: (_, _) {
-        final fb = FirebaseService.I;
+        final fb = _firebase;
         // Firebase not configured in this build → no anonymous bypass.
         if (!fb.isAvailable) {
           return Scaffold(
@@ -140,7 +149,7 @@ class _LoginGateState extends State<LoginGate> {
           return _PostLoginWelcomeGate(child: widget.child);
         }
         // ── State 2: unauthenticated ──
-        return const _LoginScreen();
+        return _LoginScreen(service: fb);
       },
     );
   }
@@ -348,35 +357,9 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
 // Login screen — shown when Firebase is available but user is not signed in.
 // ---------------------------------------------------------------------------
 
-class _LoginScreen extends StatefulWidget {
-  const _LoginScreen();
-
-  @override
-  State<_LoginScreen> createState() => _LoginScreenState();
-}
-
-class _LoginScreenState extends State<_LoginScreen> {
-  bool _busy = false;
-  String? _error;
-
-  Future<void> _google() async {
-    if (_busy) return;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    final error = await FirebaseService.I.signInWithGoogle();
-    if (!mounted) return;
-    if (error == 'cancelled') {
-      setState(() => _busy = false);
-      return;
-    }
-    setState(() {
-      _busy = false;
-      _error = error;
-    });
-    // On success the FirebaseService auth listener flips the gate to the app.
-  }
+class _LoginScreen extends StatelessWidget {
+  const _LoginScreen({required this.service});
+  final FirebaseService service;
 
   @override
   Widget build(BuildContext context) {
@@ -391,9 +374,9 @@ class _LoginScreenState extends State<_LoginScreen> {
               padding: const EdgeInsets.all(28),
               children: [
                 const SizedBox(height: 8),
-                if (FirebaseService.I.lastDeletionReceipt?.isPending == true)
+                if (service.lastDeletionReceipt?.isPending == true)
                   Text(
-                    'Deletion requested on the server. Scheduled after ${FirebaseService.I.lastDeletionReceipt!.deleteAfter!.toUtc().toIso8601String()} (UTC). Sign in before then to cancel.',
+                    'Deletion requested on the server. Scheduled after ${service.lastDeletionReceipt!.deleteAfter!.toUtc().toIso8601String()} (UTC). Sign in before then to cancel.',
                     textAlign: TextAlign.center,
                   ),
                 Icon(Icons.auto_awesome, size: 48, color: Aether.accent),
@@ -420,47 +403,13 @@ class _LoginScreenState extends State<_LoginScreen> {
                   ),
                 ),
                 const SizedBox(height: 28),
-                FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Aether.accent,
-                    minimumSize: const Size(double.infinity, 52),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  onPressed: _busy ? null : _google,
-                  icon: _busy
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Icon(Icons.g_mobiledata, size: 26),
-                  label: Text(_busy ? 'Signing in…' : 'Continue with Google'),
+                AuthMethods(
+                  providers: service.authProviders,
+                  intent: AuthIntent.signIn,
+                  social: (id) =>
+                      service.authenticateSocial(id, AuthIntent.signIn),
+                  phone: () => service.createPhoneFlow(AuthIntent.signIn),
                 ),
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const AuthScreen()),
-                        ),
-                  child: const Text('Sign in with email'),
-                ),
-                if (_error != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 16),
-                    child: Text(
-                      _error!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 12.5,
-                        color: Aether.danger,
-                      ),
-                    ),
-                  ),
                 const SizedBox(height: 20),
                 Text(
                   'By continuing you agree to use Ovid responsibly. Abuse, '

@@ -19,6 +19,14 @@ void main() {
   late ChatSession session;
   final agent = AgentService.I;
 
+  Future<void> until(bool Function() condition) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 20));
+    while (!condition()) {
+      if (DateTime.now().isAfter(deadline)) fail('attachment continuation did not settle');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+  }
+
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     root = Directory.systemTemp.createTempSync('composer-attachments-');
@@ -42,13 +50,16 @@ void main() {
   });
 
   tearDown(() async {
+    await until(() => !agent.busyFor(session.id));
     agent.clearAttachment();
+    agent.dropSessionRun(session.id);
+    await app.drainSessionLifecycleForTest();
+    await app.flushSessionPersistenceForTest();
+    await SessionLedger.I.close(session.id);
     AgentService.llmOnceForTest = null;
     AgentNotificationService.I.resetForTest();
     SessionLedger.rootOverrideForTest = null;
     AppState.resetTestInstance();
-    // Run finalizers may still be flushing their ledger.
-    await Future<void>.delayed(const Duration(milliseconds: 30));
     if (root.existsSync()) root.deleteSync(recursive: true);
   });
 
@@ -299,6 +310,20 @@ void main() {
     final referenced = ChatSession(id: 'reference', title: 'Reference', model: 'm',
         messages: [Message(role: 'assistant', content: 'REFERENCE CONTENT')]);
     app.sessions.add(referenced);
+    app.sendMessage('first');
+    final entered = Completer<void>();
+    final release = Completer<Map<String, dynamic>?>();
+    final requests = <String>[];
+    AgentService.llmOnceForTest = (p, msgs, s, tools) async {
+      requests.add(jsonEncode(msgs));
+      if (requests.length == 1) {
+        entered.complete();
+        return release.future;
+      }
+      return {'role': 'assistant', 'content': 'Done.', 'finish_reason': 'stop'};
+    };
+    final run = agent.runTask('first', sessionId: session.id);
+    await entered.future;
     await attach('first.txt');
     final firstPath = agent.pendingAttachments.single.path;
     agent.enqueueMessage('use @session:reference', sessionId: session.id);
@@ -310,15 +335,21 @@ void main() {
         messages: [Message(role: 'assistant', content: 'PRIVATE CONTENT')]);
     app.sessions.add(unreferenced);
     agent.runBucketForTest(session.id).queue.add('delegate @session:private');
-    final requests = <Map<String, dynamic>>[];
-    await agent.drainQueueIntoMsgsForTest(requests, forSessionId: session.id);
-    expect(requests.first['content'], contains('REFERENCE CONTENT'));
-    expect(requests.first['content'], contains(firstPath));
+    release.complete({'role': 'assistant', 'content': 'First.', 'finish_reason': 'stop'});
+    await run;
+    // The internal notice joins the first run; the composer row is admitted
+    // separately and expands its reference with its own attachment snapshot.
+    await until(() => requests.length == 3 && !agent.busyFor(session.id));
+    expect(requests[1], contains('delegate @session:private'));
+    expect(requests[1], isNot(contains('REFERENCE CONTENT')));
+    expect(requests.last, contains('REFERENCE CONTENT'));
+    expect(requests.last, contains(firstPath));
     expect(jsonEncode(requests), isNot(contains(secondPath)));
-    expect(requests.last['content'], 'delegate @session:private');
+    expect(jsonEncode(requests), isNot(contains('PRIVATE CONTENT')));
     expect(session.referencedSessionIds, {'reference'});
-    expect(session.messages.last.attachments, isEmpty);
-    expect(agent.pendingAttachments, hasLength(2));
+    expect(session.messages.singleWhere((m) => m.content == 'delegate @session:private').attachments, isEmpty);
+    expect(session.messages.singleWhere((m) => m.content == 'use @session:reference').attachments.single.path, firstPath);
+    expect(agent.pendingAttachments.single.path, secondPath);
   });
 
   test('scheduled artifact stays in its workspace and leaves composer draft unsent', () async {
@@ -445,6 +476,8 @@ void main() {
           'finish_reason': 'stop',
         });
         await run;
+        await until(() => calls >= 2 && !agent.busyFor(session.id));
+        expect(calls, 2);
         expect(queuedRequest, contains(path));
         expect(
           session.messages

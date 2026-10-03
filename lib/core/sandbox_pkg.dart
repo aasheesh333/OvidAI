@@ -104,8 +104,8 @@ PKG_IDX="$PREFIX/var/cache/ovid-pkg"
 mkdir -p "$PKG_IDX/archives"
 ARCH="$(uname -m 2>/dev/null || echo aarch64)"
 case "$ARCH" in
-  armv7l|armv8l|armv7*) ARCH=arm ;;
-  arm64|aarch64) ARCH=aarch64 ;;
+  armv7l|armv8l|armv7*) ARCH="arm" ;;
+  arm64|aarch64) ARCH="aarch64" ;;
 esac
 
 # Mirror order: the app-written list first, then the generated
@@ -175,12 +175,12 @@ case "$cmd" in
     [ "$#" -lt 1 ] && { echo "usage: ovid-pkg install <pkg>..." >&2; exit 1; }
     if ! _index_ok; then ovid-pkg update || exit 1; fi
     _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
-    work="$PKG_IDX/archives"; targets=""; pending="$*"; missing=""
+    work="$PKG_IDX/archives"; targets=""; pending="$*"; visited=""
     for round in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
       [ -z "$pending" ] && break
       next=""
       for name in $pending; do
-        case " $targets " in *" $name "*) continue;; esac
+        case " $visited " in *" $name "*) continue;; esac
         fn="$(awk -v n="$name" '
           /^Package: /    { name=$2 }
           name==n && /^Filename: / { f=$2 }
@@ -190,23 +190,49 @@ case "$cmd" in
         ' "$PKG_IDX/Packages")"
         [ -z "$fn" ] && {
           echo "[ovid-pkg] not found: $name" >&2
-          missing="$missing $name"
-          continue
+          exit 1
         }
         path="$(printf '%s\n' "$fn" | head -1)"
-        deps="$(printf '%s\n' "$fn" | tail -1 | sed 's/^Depends: //')"
+        deps="$(printf '%s\n' "$fn" | sed -n 's/^Depends: //p')"
         out="$work/$(basename "$path")"
         curl -fsSL --retry 2 --connect-timeout 25 "$MIRROR/$path" -o "$out" \
           || { echo "[ovid-pkg] download failed: $name" >&2; exit 1; }
         targets="$targets $out"
-        for d in $(printf '%s\n' "$deps" | tr ',' '\n' | sed 's/(.*//; s/|.*//; s/ //g'); do
-          [ -n "$d" ] && grep -q "^Package: $d$" "$PKG_IDX/Packages" && next="$next $d"
+        visited="$visited $name"
+        # Resolve each comma-separated requirement independently. Keep all
+        # alternatives after removing version constraints, then choose the
+        # first package with an archive in this index. Never drop a requirement.
+        for requirement in $(printf '%s\n' "$deps" | sed 's/([^)]*)//g; s/[[:space:]]//g' | tr ',' ' '); do
+          chosen=""
+          for d in $(printf '%s\n' "$requirement" | tr '|' ' '); do
+            if awk -v n="$d" '
+              /^Package: / { name=$2 }
+              name==n && /^Filename: / && NF>1 { found=1 }
+              END { exit !found }
+            ' "$PKG_IDX/Packages"; then
+              chosen="$d"
+              break
+            fi
+          done
+          [ -n "$chosen" ] || {
+            echo "[ovid-pkg] required dependency not available for $name: $requirement" >&2
+            exit 1
+          }
+          case " $visited $next " in *" $chosen "*) ;; *) next="$next $chosen";; esac
         done
       done
-      pending="$next"
+      # A package queued earlier in this round may have since been visited.
+      # Filter again so back edges on round 16 do not look like unfinished work.
+      pending=""
+      for name in $next; do
+        case " $visited " in *" $name "*) ;; *) pending="$pending $name";; esac
+      done
     done
+    [ -n "$pending" ] && {
+      echo "[ovid-pkg] dependency traversal limit (16 rounds) exceeded; unresolved:$pending" >&2
+      exit 1
+    }
     if [ -z "$targets" ]; then
-      [ -n "$missing" ] && { echo "[ovid-pkg] not available:$missing" >&2; exit 1; }
       echo "[ovid-pkg] nothing to install"
       exit 0
     fi
@@ -239,23 +265,31 @@ case "$cmd" in
     _tp="$PREFIX/data/data/com.termux/files/usr"
     if [ -d "$_tp" ]; then
       _moved=0
+      _relocation_failed=0
       for _e in "$_tp"/*; do
         [ -e "$_e" ] || continue
         _b="$(basename "$_e")"
         if [ -d "$_e" ] && [ -d "$PREFIX/$_b" ]; then
-          cp -a "$_e/." "$PREFIX/$_b/" && rm -rf "$_e" && _moved=$((_moved+1))
+          if cp -a "$_e/." "$PREFIX/$_b/" && rm -rf "$_e"; then
+            _moved=$((_moved+1))
+          else
+            echo "[ovid-pkg] could not relocate $_b (copy or cleanup failed)" >&2
+            _relocation_failed=1
+          fi
         elif mv "$_e" "$PREFIX/$_b"; then
           _moved=$((_moved+1))
         elif cp -a "$_e" "$PREFIX/" && rm -rf "$_e"; then
           _moved=$((_moved+1))
         else
-          echo "[ovid-pkg] could not relocate $_b (left in place)" >&2
+          echo "[ovid-pkg] could not relocate $_b (move, copy or cleanup failed)" >&2
+          _relocation_failed=1
         fi
       done
       rmdir -p "$_tp" 2>/dev/null
       [ "$_moved" -gt 0 ] && echo "[ovid-pkg] relocated $_moved path(s) into \$PREFIX"
+      [ "$_relocation_failed" -ne 0 ] && exit 1
     fi
-    [ -n "$missing" ] && { echo "[ovid-pkg] not available:$missing" >&2; exit 1; }
+    exit 0
     ;;
   upgrade|full-upgrade)
     echo "[ovid-pkg] upgrade is not supported by ovid-pkg; use 'ovid-pkg install <pkg>...' to (re)install packages" >&2

@@ -11,11 +11,14 @@ import 'diag.dart';
 import 'account_service.dart';
 import 'account_session.dart';
 import 'image_studio.dart';
+import 'auth_identity.dart';
+import 'auth_phone_flow.dart';
+import 'auth_providers.dart';
 
 /// Firebase bootstrap + auth + consent-gated telemetry.
 ///
 /// Design:
-///  • Google/email identity; LoginGate requires a nonanonymous account.
+///  • Configured social/phone identity; LoginGate requires a nonanonymous account.
 ///  • Analytics & Crashlytics are OFF until the user explicitly opts in
 ///    (Play-policy: data collection requires consent). Consent is persisted.
 ///  • google-services.json is injected at build time via the
@@ -23,8 +26,16 @@ import 'image_studio.dart';
 ///  • If Firebase is not configured (debug/local without the file), readiness
 ///    reports initialization failure while all feature methods stay safe.
 class FirebaseService extends ChangeNotifier {
-  FirebaseService._({this._initializeApp, Future<void> Function()? configure})
-    : _configureForTest = configure;
+  FirebaseService._({
+    this._initializeApp,
+    Future<void> Function()? configure,
+    AuthIdentity? identity,
+    User? initialUser,
+  }) : _configureForTest = configure,
+       _authIdentity = identity,
+       _user = initialUser {
+    identity?.observeUser(initialUser);
+  }
 
   static final FirebaseService I = FirebaseService._();
 
@@ -32,7 +43,14 @@ class FirebaseService extends ChangeNotifier {
   FirebaseService.forTest({
     required Future<void> Function() initializeApp,
     required Future<void> Function() configure,
-  }) : this._(initializeApp: initializeApp, configure: configure);
+    AuthIdentity? identity,
+    User? initialUser,
+  }) : this._(
+         initializeApp: initializeApp,
+         configure: configure,
+         identity: identity,
+         initialUser: initialUser,
+       );
 
   static const _consentKey = 'ovid_telemetry_consent'; // 'yes' | 'no' | null
 
@@ -61,6 +79,28 @@ class FirebaseService extends ChangeNotifier {
   String? get photoUrl => _user?.photoURL;
   String? get uid => _user?.uid;
   bool get emailVerified => _user?.emailVerified ?? false;
+  String? get phoneNumber => _user?.phoneNumber;
+  final authProviders = AuthProviders();
+  AuthIdentity? _authIdentity;
+  AuthIdentity get _identity => _authIdentity ??= AuthIdentity(
+    auth: () => FirebaseAuth.instance,
+    providers: authProviders,
+    googleCredential: () async {
+      final google = await GoogleSignIn().signIn();
+      if (google == null) return null;
+      final tokens = await google.authentication;
+      return GoogleAuthProvider.credential(
+        accessToken: tokens.accessToken,
+        idToken: tokens.idToken,
+      );
+    },
+  );
+  Set<String> get linkedProviderIds =>
+      _user?.providerData.map((p) => p.providerId).toSet() ?? {};
+  List<AuthProviderCapability> get reauthProviders => authProviders.enabled
+      .where((p) => linkedProviderIds.contains(p.id))
+      .toList();
+  int _authRevision = 0;
 
   StreamSubscription<User?>? _authSub;
   Future<void>? _initialization;
@@ -113,8 +153,8 @@ class FirebaseService extends ChangeNotifier {
           androidProvider: AndroidProvider.playIntegrity,
         );
       }
-      _authSub ??= FirebaseAuth.instance.authStateChanges().listen(_onUser);
-      _onUser(FirebaseAuth.instance.currentUser);
+      _authSub ??= FirebaseAuth.instance.userChanges().listen(_onUser);
+      _onUser(_identity.currentUser);
 
       // Route Flutter + platform errors to Crashlytics only when consented.
       if (_consentGiven) _attachCrashHandlers();
@@ -126,7 +166,11 @@ class FirebaseService extends ChangeNotifier {
   }
 
   void _onUser(User? user) {
+    _identity.observeUser(user);
     final changed = _user?.uid != user?.uid;
+    if (changed) {
+      _authRevision++;
+    }
     if (changed) ImageStudio.I.clearCapabilities();
     _user = user;
     if (changed || user == null) _accountSession.clear();
@@ -146,45 +190,62 @@ class FirebaseService extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool get usesPassword =>
-      _user?.providerData.any((p) => p.providerId == 'password') ?? false;
-
-  /// Reauthenticate the current UID, never sign in as a replacement account.
-  Future<String?> reauthenticate({String? password}) async {
-    final u = _user;
-    if (u == null || u.isAnonymous) return 'Please sign in first.';
-    try {
-      AuthCredential credential;
-      if (usesPassword) {
-        if (password == null || password.isEmpty || u.email == null) {
-          return 'Enter your password.';
-        }
-        credential = EmailAuthProvider.credential(
-          email: u.email!,
-          password: password,
-        );
-      } else if (u.providerData.any((p) => p.providerId == 'google.com')) {
-        final google = await GoogleSignIn().signIn();
-        if (google == null) return 'cancelled';
-        final tokens = await google.authentication;
-        credential = GoogleAuthProvider.credential(
-          accessToken: tokens.accessToken,
-          idToken: tokens.idToken,
-        );
-      } else {
-        return 'This sign-in provider does not support account deletion in this build.';
-      }
-      await u.reauthenticateWithCredential(credential);
-      await u.getIdToken(true);
-      return null;
-    } on FirebaseAuthException catch (e) {
-      return e.message ?? 'Could not verify your identity.';
-    } catch (_) {
-      return 'Could not verify your identity. Please retry.';
+  Future<String?> authenticateSocial(
+    String providerId,
+    AuthIntent intent,
+  ) async {
+    if (!_available) return 'Sign-in is not configured in this build.';
+    if (intent == AuthIntent.reauthenticate) _identity.invalidateProof();
+    final error = await _identity.social(providerId, intent);
+    if (error == null) {
+      _onUser(_identity.currentUser);
     }
+    return error;
+  }
+
+  PhoneAuthFlow createPhoneFlow(AuthIntent intent) {
+    final expectedUid = FirebaseAuth.instance.currentUser?.uid;
+    if (intent == AuthIntent.reauthenticate) _identity.invalidateProof();
+    return PhoneAuthFlow(
+      currentUid: () => FirebaseAuth.instance.currentUser?.uid,
+      currentSession: () => _authRevision,
+      verify: (number, token, callbacks) async {
+        if (!_available || !authProviders.isEnabled('phone')) {
+          throw FirebaseAuthException(code: 'provider-not-configured');
+        }
+        if (FirebaseAuth.instance.currentUser?.uid != expectedUid) {
+          throw FirebaseAuthException(code: 'account-changed');
+        }
+        if (intent == AuthIntent.link) _identity.requireLinkProof();
+        if (intent == AuthIntent.reauthenticate && number != phoneNumber) {
+          throw FirebaseAuthException(code: 'user-mismatch');
+        }
+        await FirebaseAuth.instance.verifyPhoneNumber(
+          phoneNumber: number,
+          timeout: const Duration(seconds: 60),
+          forceResendingToken: token,
+          verificationCompleted: callbacks.completed,
+          verificationFailed: callbacks.failed,
+          codeSent: callbacks.codeSent,
+          codeAutoRetrievalTimeout: callbacks.timedOut,
+        );
+      },
+      apply: (credential) async {
+        await _identity.phone(credential, intent, expectedUid);
+        _onUser(_identity.currentUser);
+      },
+    );
   }
 
   Future<AccountDeletion> requestAccountDeletion(String requestId) async {
+    if (uid == null ||
+        uid != _identity.currentUser?.uid ||
+        !_identity.deletionAuthorized) {
+      throw const AccountException(
+        'Verify the current account before requesting deletion.',
+      );
+    }
+    _identity.consumeDeletionProof();
     final result = await accountService.requestDeletion(requestId);
     if (result.isPending) {
       lastDeletionReceipt = result;
@@ -246,22 +307,6 @@ class FirebaseService extends ChangeNotifier {
     };
   }
 
-  /// Email/password sign-in. Returns null on success, else an error message.
-  Future<String?> signInWithEmail(String email, String password) async {
-    if (!_available) return 'Sign-in is not configured in this build.';
-    try {
-      await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email: email.trim(),
-        password: password,
-      );
-      return null;
-    } on FirebaseAuthException catch (e) {
-      return e.message ?? 'Sign-in failed (${e.code}).';
-    } catch (e) {
-      return 'Sign-in failed: $e';
-    }
-  }
-
   /// The current user's Firebase ID token (JWT), or null when signed out.
   /// Used to authenticate to the Ovid Cloud mint endpoint, which verifies it
   /// against Google's public keys. [forceRefresh] re-mints a near-expiry token.
@@ -296,53 +341,14 @@ class FirebaseService extends ChangeNotifier {
   /// Returns null on success, else an error message; 'cancelled' means the
   /// user closed the picker (not an error to surface loudly).
   Future<String?> signInWithGoogle() async {
-    if (!_available) return 'Sign-in is not configured in this build.';
-    try {
-      final google = await GoogleSignIn().signIn();
-      if (google == null) return 'cancelled';
-      final auth = await google.authentication;
-      final credential = GoogleAuthProvider.credential(
-        accessToken: auth.accessToken,
-        idToken: auth.idToken,
-      );
-      await FirebaseAuth.instance.signInWithCredential(credential);
-      return null;
-    } on FirebaseAuthException catch (e) {
-      return e.message ?? 'Google sign-in failed (${e.code}).';
-    } catch (e) {
-      return 'Google sign-in failed: $e';
-    }
-  }
-
-  /// Email/password account creation. Returns null on success, else error.
-  Future<String?> signUpWithEmail(String email, String password) async {
-    if (!_available) return 'Sign-in is not configured in this build.';
-    try {
-      await FirebaseAuth.instance.createUserWithEmailAndPassword(
-        email: email.trim(),
-        password: password,
-      );
-      return null;
-    } on FirebaseAuthException catch (e) {
-      return e.message ?? 'Sign-up failed (${e.code}).';
-    } catch (e) {
-      return 'Sign-up failed: $e';
-    }
-  }
-
-  Future<String?> sendPasswordReset(String email) async {
-    if (!_available) return 'Sign-in is not configured in this build.';
-    try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: email.trim());
-      return null;
-    } on FirebaseAuthException catch (e) {
-      return e.message ?? 'Could not send reset email.';
-    } catch (e) {
-      return 'Could not send reset email: $e';
-    }
+    return authenticateSocial('google.com', AuthIntent.signIn);
   }
 
   Future<void> signOut() async {
+    // SDK credential submission cannot be aborted. Do not race it with signout.
+    if (_identity.busy) return;
+    _identity.cancelPending();
+    _authRevision++;
     ImageStudio.I.clearCapabilities();
     if (!_available) return;
     _accountSession.clear();

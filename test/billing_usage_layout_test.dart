@@ -122,7 +122,7 @@ void main() {
     testWidgets('account actions fit ${width}dp at 1.3x', (tester) async {
       await pump(tester, const AuthScreen(), width);
       await tester.scrollUntilVisible(
-        find.text('Forgot password'),
+        find.text('Existing account help'),
         150,
         scrollable: find
             .descendant(
@@ -130,6 +130,17 @@ void main() {
               matching: find.byType(Scrollable),
             )
             .first,
+      );
+      expect(find.text('Continue with Google'), findsOneWidget);
+      expect(find.text('Continue with Phone'), findsOneWidget);
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('Forgot password'), findsNothing);
+      expect(find.text('Sign in with email'), findsNothing);
+      await tester.tap(find.text('Existing account help'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('identity-verified account recovery'),
+        findsOneWidget,
       );
       expect(tester.takeException(), isNull);
     });

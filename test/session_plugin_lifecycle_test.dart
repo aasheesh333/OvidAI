@@ -392,45 +392,103 @@ void main() {
       expect(reasons, ['created']);
     });
 
-    test('refresh and hook failures stay fail-open and reserved', () async {
+    test('refresh failure retries, then reserves the successful start', () async {
       SessionLifecycleService.I.bootTokenProviderForTest = () => 'boot';
       SessionLifecycleService.I.activationWaiterForTest = (_) async {};
 
       var refreshes = 0;
       SessionLifecycleService.I.skillRefresherForTest = (_) async {
         refreshes++;
-        throw StateError('refresh boom');
+        if (refreshes == 1) throw StateError('refresh boom');
       };
+      final reasons = <String>[];
       SessionLifecycleService.I.hookDispatcherForTest =
           (event, sessionId, {payload = const {}, model}) async {
-            throw StateError('should not dispatch');
+            reasons.add(payload['reason'] as String);
+            return '';
           };
       await SessionLifecycleService.I.sessionStarted(
         _session('refresh-fail'),
-        reason: SessionStartReason.created,
+        reason: SessionStartReason.restored,
       );
+      expect(reasons, isEmpty, reason: 'failed refresh cannot dispatch hooks');
       await SessionLifecycleService.I.sessionStarted(
         _session('refresh-fail'),
         reason: SessionStartReason.created,
       );
-      expect(refreshes, 1, reason: 'reservation survives a refresh failure');
+      await SessionLifecycleService.I.sessionStarted(
+        _session('refresh-fail'),
+        reason: SessionStartReason.implicit,
+      );
+      expect(refreshes, 2, reason: 'failure retries; success stays reserved');
+      expect(reasons, ['restored'], reason: 'retry preserves the first reason');
+    });
 
+    test('hook dispatcher failure retries, then reserves success', () async {
+      SessionLifecycleService.I.bootTokenProviderForTest = () => 'boot';
+      SessionLifecycleService.I.activationWaiterForTest = (_) async {};
       SessionLifecycleService.I.skillRefresherForTest = (_) async {};
-      var dispatches = 0;
+      final reasons = <String>[];
       SessionLifecycleService.I.hookDispatcherForTest =
           (event, sessionId, {payload = const {}, model}) async {
-            dispatches++;
-            throw StateError('hook boom');
+            reasons.add(payload['reason'] as String);
+            if (reasons.length == 1) throw StateError('hook boom');
+            return '';
           };
       await SessionLifecycleService.I.sessionStarted(
         _session('hook-fail'),
-        reason: SessionStartReason.created,
+        reason: SessionStartReason.restored,
       );
       await SessionLifecycleService.I.sessionStarted(
         _session('hook-fail'),
         reason: SessionStartReason.created,
       );
-      expect(dispatches, 1, reason: 'reservation survives a hook failure');
+      await SessionLifecycleService.I.sessionStarted(
+        _session('hook-fail'),
+        reason: SessionStartReason.implicit,
+      );
+      expect(reasons, ['restored', 'restored']);
+    });
+
+    test('partial execution retries only failed hooks and reserves success', () async {
+      SessionLifecycleService.I.bootTokenProviderForTest = () => 'boot';
+      _noOpLifecycleWaits();
+      _registerHooks('lifecycle/success');
+      _registerHooks('lifecycle/retry');
+      final calls = <String>[];
+      final reasons = <String>[];
+      var ready = false;
+      HookService.I.stdinExecutorForTest = (command, env, input) async {
+        final plugin = env['PLUGIN_ID']!;
+        calls.add(plugin);
+        reasons.add((jsonDecode(input) as Map)['reason'] as String);
+        return (plugin == 'lifecycle/retry' && !ready ? 1 : 0, plugin);
+      };
+      addTearDown(() => HookService.I.stdinExecutorForTest = null);
+      final session = _session('partial-retry');
+      await SessionLifecycleService.I.sessionStarted(
+        session,
+        reason: SessionStartReason.restored,
+      );
+      ready = true;
+      await SessionLifecycleService.I.sessionStarted(
+        session,
+        reason: SessionStartReason.created,
+      );
+      await SessionLifecycleService.I.sessionStarted(
+        session,
+        reason: SessionStartReason.implicit,
+      );
+      expect(calls, [
+        'lifecycle/success',
+        'lifecycle/retry',
+        'lifecycle/retry',
+      ]);
+      expect(reasons, ['restored', 'restored', 'restored']);
+      expect(
+        HookService.I.sessionContextFor(session.id),
+        'lifecycle/success\nlifecycle/retry',
+      );
     });
 
     test('no listeners completes idempotently', () async {

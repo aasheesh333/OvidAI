@@ -7,6 +7,7 @@ import '../core/agent_service.dart';
 import 'settings_screen.dart';
 import 'trajectory_screen.dart';
 import 'schedule_screen.dart';
+import 'conversation_share_sheet.dart';
 
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
@@ -470,6 +471,12 @@ class _SessionTile extends StatelessWidget {
                   ),
                 ),
                 IconButton(
+                  tooltip: 'Session actions',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.more_horiz, size: 18),
+                  onPressed: () => _showActions(context),
+                ),
+                IconButton(
                   tooltip: 'Delete chat',
                   visualDensity: VisualDensity.compact,
                   icon: const Icon(
@@ -536,6 +543,18 @@ class _SessionTile extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.ios_share_outlined, size: 19),
+              title: const Text(
+                'Share conversation',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                showConversationShareSheet(context, session);
+              },
+            ),
             ListTile(
               dense: true,
               leading: Icon(

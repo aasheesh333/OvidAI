@@ -20,7 +20,8 @@ typedef ActivationWaiter = Future<void> Function(Object? token);
 /// Test seam: refreshes the session-visible skill catalog before firing.
 typedef SessionSkillRefresher = Future<void> Function(ChatSession session);
 
-/// Test seam: fires one canonical hook. Defaults to [HookService.fire].
+/// Test seam: fires one canonical hook. Production uses [HookService.fireDetailed]
+/// to distinguish a successful start from a fail-open execution failure.
 typedef HookDispatcher =
     Future<String> Function(
       String event,
@@ -29,13 +30,13 @@ typedef HookDispatcher =
       String? model,
     });
 
-/// Exactly-once `session_start` dispatcher (design §5.6).
+/// Successful-once `session_start` dispatcher per boot.
 ///
 /// A session start is idempotent per `(boot token, session id)` regardless of
 /// the supplied [SessionStartReason]; the first reason wins and duplicate
-/// concurrent callers share the original in-flight future. Reservations are
-/// never removed after a failure, so a fail-open hook or skill-refresh error
-/// cannot cause a second firing inside the same boot.
+/// concurrent callers share the original in-flight future. Failed readiness or
+/// execution releases the reservation; retries retain the original reason and
+/// skip successful synchronous hooks from earlier attempts.
 ///
 /// Ordering per session:
 ///   1. await runtime activation readiness for the captured boot token
@@ -52,6 +53,8 @@ class SessionLifecycleService {
 
   /// Reserved starts, keyed by `bootGeneration:sessionId`.
   final Map<String, Future<void>> _starts = {};
+  final Map<String, SessionStartReason> _reasons = {};
+  final Map<String, Set<String>> _completedHooks = {};
 
   /// In-flight starts (drain seam).
   final Set<Future<void>> _inFlight = {};
@@ -75,26 +78,11 @@ class SessionLifecycleService {
       bootTokenProviderForTest ?? () => AppState.I.bootToken;
 
   ActivationWaiter get _activationWaiter =>
-      activationWaiterForTest ??
-      (token) => AppState.I.bootActivationSettled;
+      activationWaiterForTest ?? (token) => AppState.I.bootActivationSettled;
 
   SessionSkillRefresher get _skillRefresher =>
       skillRefresherForTest ??
       (session) => AgentService.I.refreshSkills(sessionId: session.id);
-
-  HookDispatcher get _hookDispatcher =>
-      hookDispatcherForTest ??
-      (
-        event,
-        sessionId, {
-        Map<String, dynamic> payload = const {},
-        String? model,
-      }) => HookService.I.fire(
-        event,
-        sessionId,
-        payload: payload,
-        model: model,
-      );
 
   /// The current boot generation (advances only when the boot token changes).
   @visibleForTesting
@@ -110,11 +98,14 @@ class SessionLifecycleService {
       // Evict reservations from prior boots so the map cannot grow unbounded
       // across resumes/restarts (M1).
       _starts.removeWhere((key, _) => !key.startsWith('$_bootGeneration:'));
+      _reasons.clear();
+      _completedHooks.clear();
     }
     return _bootGeneration;
   }
 
-  /// Fire `session_start` for [session] exactly once per boot.
+  /// Fire `session_start` successfully once per boot. Failed attempts retry on
+  /// the next call; this service does not schedule a provisioning callback.
   Future<void> sessionStarted(
     ChatSession session, {
     required SessionStartReason reason,
@@ -123,34 +114,52 @@ class SessionLifecycleService {
     final key = '${_generationFor(token)}:${session.id}';
     final existing = _starts[key];
     if (existing != null) return existing;
-    final future = _runStart(session, reason, token);
+    final firstReason = _reasons.putIfAbsent(key, () => reason);
+    final completed = _completedHooks.putIfAbsent(key, () => {});
+    late final Future<void> future;
+    future = _runStart(session, firstReason, token, completed).then((success) {
+      if (!success && identical(_starts[key], future)) _starts.remove(key);
+    });
     _starts[key] = future;
     _inFlight.add(future);
     future.whenComplete(() => _inFlight.remove(future));
     return future;
   }
 
-  Future<void> _runStart(
+  Future<bool> _runStart(
     ChatSession session,
     SessionStartReason reason,
     Object? token,
+    Set<String> completed,
   ) async {
     try {
       if (!skipActivationWaitForTest) await _activationWaiter(token);
       await _skillRefresher(session);
-      await _hookDispatcher(
+      final payload = <String, dynamic>{
+        'reason': reason.name,
+        'parentSessionId': session.parentId,
+        'isSubagent': session.parentId != null,
+      };
+      final dispatcher = hookDispatcherForTest;
+      if (dispatcher != null) {
+        await dispatcher(
+          'session_start',
+          session.id,
+          payload: payload,
+          model: session.model,
+        );
+        return true;
+      }
+      final result = await HookService.I.fireDetailed(
         'session_start',
         session.id,
-        payload: {
-          'reason': reason.name,
-          'parentSessionId': session.parentId,
-          'isSubagent': session.parentId != null,
-        },
+        payload: payload,
         model: session.model,
+        completedStartHooks: completed,
       );
+      return !result.retryableFailure;
     } catch (_) {
-      // Fail-open: a broken refresh/hook must never block session usability,
-      // and the reservation above still guarantees exactly-once dispatch.
+      return false;
     }
   }
 
@@ -167,6 +176,8 @@ class SessionLifecycleService {
   @visibleForTesting
   void resetForTest() {
     _starts.clear();
+    _reasons.clear();
+    _completedHooks.clear();
     _inFlight.clear();
     _bootToken = null;
     _bootGeneration = 0;

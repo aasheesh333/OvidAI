@@ -16,6 +16,7 @@ import '../core/theme.dart';
 import '../core/format.dart';
 import '../core/voice_input_service.dart';
 import '../core/state.dart';
+import '../core/studio_setup_coordinator.dart';
 import '../core/native_share.dart';
 import 'share_actions.dart';
 import 'sandbox_setup.dart';
@@ -54,6 +55,19 @@ import '../core/diag.dart';
 /// a larger page, so a long child run is not re-folded in full on every
 /// rebuild.
 const int _subagentTranscriptPage = 200;
+
+/// Keep the platform's nonlinear accessibility curve, then apply chat zoom.
+class _ChatTextScaler extends TextScaler {
+  final TextScaler inherited;
+  final double zoom;
+  const _ChatTextScaler(this.inherited, this.zoom);
+
+  @override
+  double scale(double fontSize) => inherited.scale(fontSize) * zoom;
+
+  @override
+  double get textScaleFactor => scale(14) / 14;
+}
 
 class ChatTranscript extends StatelessWidget {
   final ChatSession session;
@@ -99,22 +113,16 @@ class ChatTranscript extends StatelessWidget {
               items[li],
               session,
               onAction: () {},
-              input: TextEditingController(),
+              input: null,
               layout: layout,
             );
           },
         );
         return MediaQuery(
-          // A11Y (U2): COMPOSE the OS text scale with the in-app chat size
-          // instead of replacing it. This previously assigned
-          // `TextScaler.linear(AppState.I.chatFontScale)` outright, so a
-          // user who set Android font size to 200% saw no change at all in
-          // the transcript. Multiplying the resolved OS factor keeps the
-          // default case (OS scale 1.0) behaviourally identical.
           data: MediaQuery.of(context).copyWith(
-            textScaler: TextScaler.linear(
-              MediaQuery.textScalerOf(context).scale(1) *
-                  AppState.I.chatFontScale,
+            textScaler: _ChatTextScaler(
+              MediaQuery.textScalerOf(context),
+              AppState.I.chatFontScale,
             ),
           ),
           child: Center(
@@ -293,7 +301,7 @@ Widget _buildItem(
   ChatItem item,
   dynamic s, {
   required VoidCallback onAction,
-  required TextEditingController input,
+  required TextEditingController? input,
   required ChatLayout layout,
 }) {
   if (item is SingleItem) {
@@ -818,6 +826,30 @@ class _ChatScreenState extends State<ChatScreen>
   // restore the target session's draft (like DeepSeek web / ChatGPT web).
   final Map<String, String> _drafts = {};
   String? _boundSessionId;
+  final Map<String, int> _draftVersions = {};
+  bool _restoringDraft = false;
+  String _observedDraftText = '';
+  final Map<String, ({int id, String original})> _queueEdits = {};
+
+  void _recordDraftEdit() {
+    if (_observedDraftText == _input.text) return;
+    _observedDraftText = _input.text;
+    final sid = _boundSessionId;
+    if (sid != null && !_restoringDraft) {
+      _draftVersions[sid] = (_draftVersions[sid] ?? 0) + 1;
+    }
+  }
+
+  void _clearSubmittedDraft(String sid, String text, int version) {
+    if (!mounted || (_draftVersions[sid] ?? 0) != version) return;
+    if (_boundSessionId == sid) {
+      if (_input.text != text) return;
+      _input.clear();
+    } else if (_drafts[sid] != text) {
+      return;
+    }
+    _drafts.remove(sid);
+  }
 
   // ── Lazy message paging (ChatGPT/Claude style) ──
   // Long threads render ONLY the last [_visibleCount] folded items; a
@@ -868,6 +900,7 @@ class _ChatScreenState extends State<ChatScreen>
   // is cached above; the cheap list rebuild is left to Flutter.
 
   void _bindDraft(String sessionId) {
+    if (!mounted || AppState.I.activeSessionId != sessionId) return;
     if (_boundSessionId == sessionId) return;
     // Save outgoing session's draft.
     if (_boundSessionId != null && _input.text.isNotEmpty) {
@@ -877,6 +910,7 @@ class _ChatScreenState extends State<ChatScreen>
     }
     // Restore incoming session's draft.
     final draft = _drafts[sessionId] ?? '';
+    _restoringDraft = true;
     if (_input.text != draft) {
       _input.value = TextEditingValue(
         text: draft,
@@ -884,6 +918,7 @@ class _ChatScreenState extends State<ChatScreen>
       );
     }
     _boundSessionId = sessionId;
+    _restoringDraft = false;
     // Reset scroll-follow state per session so a fresh session starts at
     // the bottom, not mid-stream.
     _atBottom = true;
@@ -909,6 +944,7 @@ class _ChatScreenState extends State<ChatScreen>
     // can run before the outgoing one's dispose, and a plain flag would be
     // cleared by that dispose while a visible UI is still here to answer.
     AgentService.markApprovalUiMounted();
+    _input.addListener(_recordDraftEdit);
     _scroll.addListener(_onScroll);
   }
 
@@ -1188,7 +1224,6 @@ class _ChatScreenState extends State<ChatScreen>
               ),
             ),
             actions: [
-              ChatShareButton(session: s),
               // PR27/B1: the subagents + trajectory icons moved OFF the
               // header (user ask) — subagents live on the subagent screen
               // (chat "Open" links + the catalog sheet from a chat row),
@@ -1329,8 +1364,25 @@ class _ChatScreenState extends State<ChatScreen>
                     _QueueDock(
                       sessionId: AppState.I.activeSessionId,
                       onEdited: () => setState(() {}),
-                      onEditToComposer: (text) {
+                      onEditToComposer: (id, text) {
+                        if (s == null ||
+                            _boundSessionId != s.id ||
+                            AppState.I.activeSessionId != s.id) {
+                          return;
+                        }
+                        if (_input.text.isNotEmpty ||
+                            AgentService.I.pendingAttachments.isNotEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Finish the current draft before editing a queued message.',
+                              ),
+                            ),
+                          );
+                          return;
+                        }
                         setState(() {
+                          _queueEdits[s.id] = (id: id, original: text);
                           _input.value = TextEditingValue(
                             text: text,
                             selection: TextSelection.collapsed(
@@ -1393,7 +1445,8 @@ class _ChatScreenState extends State<ChatScreen>
                                     // _InputBar (composer chatbox) are outside
                                     // this MediaQuery, so they stay fixed.
                                     data: MediaQuery.of(context).copyWith(
-                                      textScaler: TextScaler.linear(
+                                      textScaler: _ChatTextScaler(
+                                        MediaQuery.textScalerOf(context),
                                         app.chatFontScale,
                                       ),
                                     ),
@@ -1630,17 +1683,69 @@ class _ChatScreenState extends State<ChatScreen>
                       // approval takeover parity: a pending approval LOCKS
                       // the composer — the user answers the card, not the box.
                       locked: AgentService.I.pendingApproval != null,
+                      editingQueue: _queueEdits.containsKey(s?.id),
+                      onCancelQueueEdit: () => setState(() {
+                        _queueEdits.remove(s?.id);
+                      }),
                       onSend: () async {
-                        final t = _input.text.trim();
+                        if (s == null ||
+                            _boundSessionId != s.id ||
+                            AppState.I.activeSessionId != s.id ||
+                            AgentService.I.pendingApproval != null) {
+                          return;
+                        }
+                        final submitted = _input.text;
+                        final version = _draftVersions[s.id] ?? 0;
+                        void clearSubmitted() =>
+                            _clearSubmittedDraft(s.id, submitted, version);
+                        final t = submitted.trim();
                         if (t.isEmpty) return;
+                        final edit = _queueEdits[s.id];
+                        if (edit != null) {
+                          final agent = AgentService.I;
+                          final index = agent
+                              .queuedMessageIdsFor(s.id)
+                              .indexOf(edit.id);
+                          final queue = agent.queuedMessagesFor(s.id);
+                          if (index < 0 ||
+                              index >= queue.length ||
+                              queue[index] != edit.original) {
+                            setState(() => _queueEdits.remove(s.id));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'The queued message changed or already started. Your draft has been kept.',
+                                ),
+                              ),
+                            );
+                            return;
+                          }
+                          if (agent.pendingAttachments.isNotEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Remove newly staged files before saving. The queued message keeps its original attachments.',
+                                ),
+                              ),
+                            );
+                            return;
+                          }
+                          agent.editQueuedMessageById(edit.id, t);
+                          setState(() => _queueEdits.remove(s.id));
+                          clearSubmitted();
+                          return;
+                        }
 
                         // ── Composer command system ───────────────────────
                         if (t.startsWith('/')) {
                           final result = await CommandService.I.execute(t);
+                          if (!mounted || !context.mounted) return;
                           if (result != null) {
-                            _input.clear();
+                            if (result.clearInput && result.prompt == null) {
+                              clearSubmitted();
+                            }
                             // popupSelect (the command picker parity): open the overlay picker.
-                            if (!context.mounted) return;
+                            if (AppState.I.activeSessionId != s.id) return;
                             if (result.popup == 'model') {
                               _modelPicker(context);
                               return;
@@ -1671,13 +1776,21 @@ class _ChatScreenState extends State<ChatScreen>
                             if (prompt != null &&
                                 prompt.isNotEmpty &&
                                 context.mounted) {
-                              _sendPrompt(context, s, prompt);
+                              _sendPrompt(
+                                context,
+                                s,
+                                prompt,
+                                onAccepted: result.clearInput
+                                    ? clearSubmitted
+                                    : null,
+                              );
                             }
                             return;
                           }
+                          if (AppState.I.activeSessionId != s.id) return;
                           // Skill direct invocation: /skill-name [args].
                           final parsed = parseSkillInvocation(t);
-                          if (parsed != null && s != null) {
+                          if (parsed != null) {
                             final resolved = SkillService.I.resolveForSession(
                               s.id,
                               parsed.token,
@@ -1704,7 +1817,6 @@ class _ChatScreenState extends State<ChatScreen>
                               )) {
                                 return;
                               }
-                              _input.clear();
                               final content =
                                   AgentService.substituteCommandArguments(
                                     skill.content,
@@ -1722,6 +1834,7 @@ class _ChatScreenState extends State<ChatScreen>
                                   s,
                                   '<skill_content>\n$content\n</skill_content>'
                                   '$argsText',
+                                  onAccepted: clearSubmitted,
                                 );
                               }
                               return;
@@ -1733,18 +1846,26 @@ class _ChatScreenState extends State<ChatScreen>
                         // ── web-IDE busy behavior: typing while running either
                         // queues the message (default) or interrupts the current
                         // run and sends immediately, per the user's setting. ──
-                        if (s != null && AgentService.I.busyFor(s.id)) {
+                        if (AgentService.I.busyFor(s.id)) {
                           if (AppState.I.sendWhileBusyInterrupt) {
                             AgentService.I.stopRequested(sessionId: s.id);
                             // fall through to send
                           } else {
                             AgentService.I.enqueueMessage(t, sessionId: s.id);
-                            _input.clear();
+                            AgentService.I.clearAttachment();
+                            clearSubmitted();
                             return;
                           }
                         }
 
-                        if (context.mounted) _sendPrompt(context, s, t);
+                        if (context.mounted) {
+                          _sendPrompt(
+                            context,
+                            s,
+                            t,
+                            onAccepted: clearSubmitted,
+                          );
+                        }
                       },
                     ),
                   ],
@@ -1861,13 +1982,21 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
-  void _sendPrompt(BuildContext context, ChatSession? s, String t) {
+  void _sendPrompt(
+    BuildContext context,
+    ChatSession? s,
+    String t, {
+    VoidCallback? onAccepted,
+  }) {
     final app = AppState.I;
-    final session = app.activeSession;
+    final session = s;
+    if (session == null ||
+        app.activeSessionId != session.id ||
+        !identical(app.sessionById(session.id), session)) {
+      return;
+    }
     final provider = app.providerForSession(session);
-    if (provider == null ||
-        session == null ||
-        session.model == 'Select a provider') {
+    if (provider == null || session.model == 'Select a provider') {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: const Text('Select a provider and model before sending.'),
@@ -1895,9 +2024,15 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
 
+    final agent = AgentService.I;
+    if (agent.busyFor(session.id)) {
+      agent.enqueueMessage(t, sessionId: session.id);
+      agent.clearAttachment();
+      onAccepted?.call();
+      return;
+    }
     app.sendMessage(t);
-    _input.clear();
-    _drafts.remove(session.id);
+    onAccepted?.call();
     // New user message → snap to bottom so the user sees the answer start.
     _atBottom = true;
     Future.delayed(const Duration(milliseconds: 80), () {
@@ -1907,7 +2042,7 @@ class _ChatScreenState extends State<ChatScreen>
     });
     // @file/@session references expand into model-visible context blocks
     // (the composer mention expander file-reference parity) before the run starts.
-    AgentService.I.runTask(t, expandRefsFor: session);
+    AgentService.I.runTask(t, sessionId: session.id, expandRefsFor: session);
   }
 
   /// Background jobs popover (the jobs panel ui-jobs): one row per job with label,
@@ -4071,7 +4206,7 @@ class _MessageView extends StatelessWidget {
   final dynamic session; // ChatSession
   final int msgIndex;
   final VoidCallback onAction;
-  final TextEditingController input;
+  final TextEditingController? input;
   final ChatLayout layout;
   const _MessageView({
     required this.m,
@@ -4188,19 +4323,24 @@ class _MessageView extends StatelessWidget {
         }
       });
     }
-    if (isUser && isLast) {
+    final canEdit =
+        input != null &&
+        !session.isSubagent &&
+        !AgentService.I.busyFor(session.id);
+    if (canEdit && isUser && isLast) {
       add(Icons.edit_outlined, 'Edit & resend', () {
-        input.text = m.content;
+        if (!_stageEdit(context, m.content)) return;
         AppState.I.deleteMessagesFrom(session.id, msgIndex);
         onAction();
       });
       add(Icons.replay_outlined, 'Revert', () {
+        if (!_canChangeHistory) return;
         AppState.I.deleteMessagesFrom(session.id, msgIndex);
         onAction();
       });
     }
     // Earlier user messages: edit & resend (truncates conversation).
-    if (isUser && !isLast) {
+    if (canEdit && isUser && !isLast) {
       add(Icons.edit_outlined, 'Edit & resend', () {
         _showEditResendDialog(context);
       });
@@ -4279,22 +4419,40 @@ class _MessageView extends StatelessWidget {
       });
     }
     // Regenerate: re-send the last user message to get a new response.
-    if (!isUser && isLast && m.kind == MsgKind.text && !m.thinking) {
+    if (canEdit && !isUser && isLast && m.kind == MsgKind.text && !m.thinking) {
       add(Icons.refresh, 'Regenerate', () {
+        if (!_canChangeHistory) return;
         // Find the last user message content.
         final msgs = session.messages as List<Message>;
-        String? lastUserText;
+        Message? lastUser;
         for (var i = msgs.length - 1; i >= 0; i--) {
           if (msgs[i].role == 'user') {
-            lastUserText = msgs[i].content;
+            lastUser = msgs[i];
             break;
           }
         }
-        if (lastUserText == null || lastUserText.isEmpty) return;
+        if (lastUser == null || lastUser.content.isEmpty) return;
+        final provider = AppState.I.providerForSession(session);
+        if (provider == null ||
+            !provider.isConfigured ||
+            !provider.models.contains(session.model.split('·').first.trim())) {
+          return;
+        }
+        if (lastUser.attachments.any((a) => a.path == null || a.path!.isEmpty)) {
+          return;
+        }
         // Delete from the current assistant message onward and resend.
         AppState.I.deleteMessagesFrom(session.id, msgIndex);
         onAction();
-        AgentService.I.runTask(lastUserText);
+        AgentService.I.runTask(
+          lastUser.content,
+          sessionId: session.id,
+          expandRefsFor: session,
+          attachments: [
+            for (final a in lastUser.attachments)
+              (name: a.name, path: a.path!, size: a.size),
+          ],
+        );
       });
     }
     return Padding(
@@ -4325,6 +4483,45 @@ class _MessageView extends StatelessWidget {
 
   String _formatTime(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  bool get _canChangeHistory =>
+      input != null &&
+      !session.isSubagent &&
+      AppState.I.activeSessionId == session.id &&
+      identical(AppState.I.sessionById(session.id), session) &&
+      !AgentService.I.busyFor(session.id) &&
+      msgIndex < session.messages.length &&
+      identical(session.messages[msgIndex], m);
+
+  bool _stageEdit(BuildContext context, String text) {
+    if (!_canChangeHistory) return false;
+    final pending = AgentService.I.pendingAttachments;
+    String? error;
+    if (input!.text.isNotEmpty || pending.isNotEmpty) {
+      error = 'Finish the current draft before editing a message.';
+    } else if (m.attachments.length > AgentService.maxAttachments ||
+        m.attachments.any((a) => a.path == null || a.path!.isEmpty)) {
+      error =
+          'The original attachments cannot be restored. The message has been kept.';
+    }
+    if (error != null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
+      return false;
+    }
+    // Existing workspace copies remain owned by the session. Transfer all
+    // metadata before removing any transcript history; no asynchronous gap.
+    pending.addAll([
+      for (final a in m.attachments)
+        (name: a.name, path: a.path!, size: a.size),
+    ]);
+    input!.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    return true;
+  }
 
   /// Optional note attached to a down-vote (the feedback collector feedback note popover).
   void _askFeedbackNote(BuildContext context) {
@@ -4391,23 +4588,23 @@ class _MessageView extends StatelessWidget {
     );
   }
 
-  /// Edit & resend dialog for earlier user messages: pre-filled with the
-  /// message text, truncates the conversation to this point, and resends.
+  /// Earlier-message edits transfer to the composer before truncating history.
   void _showEditResendDialog(BuildContext context) {
     final c = TextEditingController(text: m.content);
+    final navigator = Navigator.of(context, rootNavigator: true);
     void send(String value) {
       final text = value.trim();
       if (text.isEmpty) {
-        Navigator.pop(context);
+        navigator.pop();
         return;
       }
-      Navigator.pop(context);
+      navigator.pop();
+      if (!_stageEdit(context, text)) return;
       AppState.I.deleteMessagesFrom(session.id, msgIndex);
-      AppState.I.sendMessage(text);
       onAction();
-      AgentService.I.runTask(text);
     }
-    showDialog(
+
+    final route = DialogRoute<void>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text(
@@ -4425,16 +4622,22 @@ class _MessageView extends StatelessWidget {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: navigator.pop,
             child: const Text('Cancel'),
           ),
           TextButton(
             onPressed: () => send(c.text),
-            child: const Text('Send', style: TextStyle(color: Aether.accent)),
+            child: const Text(
+              'Edit in composer',
+              style: TextStyle(color: Aether.accent),
+            ),
           ),
         ],
       ),
-    ).whenComplete(c.dispose);
+    );
+    navigator.push(route);
+    // The pop result resolves before the reverse animation removes the field.
+    route.completed.whenComplete(c.dispose);
   }
 
   Widget _text(bool isUser) => Container(
@@ -4780,6 +4983,7 @@ class _AttachmentChip extends StatelessWidget {
       animation: Listenable.merge([AgentService.I, AppState.I]),
       builder: (_, _) {
         final atts = AgentService.I.pendingAttachments;
+        final sessionId = AppState.I.activeSessionId;
         if (atts.isEmpty) return const SizedBox.shrink();
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -4818,7 +5022,11 @@ class _AttachmentChip extends StatelessWidget {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(_iconFor(att.name), size: 16, color: Aether.accent),
+                            Icon(
+                              _iconFor(att.name),
+                              size: 16,
+                              color: Aether.accent,
+                            ),
                             const SizedBox(width: 7),
                             Flexible(
                               child: Text(
@@ -4834,12 +5042,24 @@ class _AttachmentChip extends StatelessWidget {
                             const SizedBox(width: 6),
                             Text(
                               _fmtSize(att.size),
-                              style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Aether.textFaint,
+                              ),
                             ),
                             const SizedBox(width: 4),
-                            GestureDetector(
-                              onTap: () => AgentService.I.removeAttachment(att.path),
-                              child: Icon(
+                            IconButton(
+                              tooltip: 'Remove attachment ${att.name}',
+                              constraints: const BoxConstraints(
+                                minWidth: 48,
+                                minHeight: 48,
+                              ),
+                              onPressed: () {
+                                if (AppState.I.activeSessionId == sessionId) {
+                                  AgentService.I.removeAttachment(att.path);
+                                }
+                              },
+                              icon: Icon(
                                 Icons.close,
                                 size: 15,
                                 color: Aether.textMuted,
@@ -4954,6 +5174,8 @@ class _InputBar extends StatefulWidget {
   /// Approval takeover: when an approval/question card is pending, the
   /// composer is disabled until the user answers it (the approval takeover parity).
   final bool locked;
+  final bool editingQueue;
+  final VoidCallback onCancelQueueEdit;
 
   /// Shared width axis: the composer card is capped to [ChatLayout.composerWidth]
   /// and centered within the chat pane.
@@ -4967,6 +5189,8 @@ class _InputBar extends StatefulWidget {
     required this.layout,
     this.coordinator,
     this.locked = false,
+    this.editingQueue = false,
+    required this.onCancelQueueEdit,
     required this.onSend,
   });
 
@@ -4992,11 +5216,28 @@ class _InputBarState extends State<_InputBar> {
     super.initState();
     _skillMountState = _currentSkillMountState();
     _coordinator.addListener(_onStartupChanged);
+    controller.addListener(_onTextChanged);
+    _onTextChanged();
   }
 
   @override
   void didUpdateWidget(_InputBar oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != controller) {
+      oldWidget.controller.removeListener(_onTextChanged);
+      controller.addListener(_onTextChanged);
+    }
+    if (oldWidget.controller != controller ||
+        oldWidget.sessionId != widget.sessionId) {
+      _slashActive = false;
+      _slashQuery = '';
+      _mentionActive = false;
+      _mentionQuery = '';
+      _mentionStart = -1;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _onTextChanged();
+      });
+    }
     if (oldWidget.coordinator != widget.coordinator) {
       (oldWidget.coordinator ?? StartupCoordinator.I).removeListener(
         _onStartupChanged,
@@ -5009,6 +5250,7 @@ class _InputBarState extends State<_InputBar> {
   @override
   void dispose() {
     _coordinator.removeListener(_onStartupChanged);
+    controller.removeListener(_onTextChanged);
     super.dispose();
   }
 
@@ -5176,7 +5418,7 @@ class _InputBarState extends State<_InputBar> {
   /// at a specific child ("@sub-2 stop and summarise").
   List<_SlashSuggestion> get _mentionSuggestions {
     final app = AppState.I;
-    final parent = app.activeSession;
+    final parent = app.sessionById(widget.sessionId);
     if (parent == null) return const [];
     final agent = AgentService.I;
     final query = _mentionQuery.toLowerCase();
@@ -5353,17 +5595,26 @@ class _InputBarState extends State<_InputBar> {
   }
 
   void _applySuggestion(_SlashSuggestion s) {
+    if (AppState.I.activeSessionId != widget.sessionId) return;
+    _onTextChanged();
+    if (!_mentionActive && !_slashActive) return;
     if (_mentionActive && _mentionStart >= 0) {
       // Replace just the `@token` under the caret, keeping the rest intact.
       final text = controller.text;
       final sel = controller.selection;
       final caret = sel.isValid ? sel.baseOffset : text.length;
+      final start = _mentionStart;
+      if (start >= text.length ||
+          caret < start ||
+          caret > text.length ||
+          text[start] != '@') {
+        return;
+      }
       final insert = s.insert ?? '@${s.name} ';
-      final next =
-          text.substring(0, _mentionStart) + insert + text.substring(caret);
-      controller.text = next;
-      controller.selection = TextSelection.collapsed(
-        offset: _mentionStart + insert.length,
+      final next = text.substring(0, start) + insert + text.substring(caret);
+      controller.value = TextEditingValue(
+        text: next,
+        selection: TextSelection.collapsed(offset: start + insert.length),
       );
       setState(() {
         _mentionActive = false;
@@ -5748,12 +5999,25 @@ class _InputBarState extends State<_InputBar> {
                   disabledBorder: InputBorder.none,
                   contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
                 ),
-                onChanged: (_) => _onTextChanged(),
                 onSubmitted: (_) {
                   if (!locked) onSend();
                 },
               ),
               const _ControlServiceNotice(),
+              if (widget.editingQueue)
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Editing queued message · original files retained',
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: widget.onCancelQueueEdit,
+                      child: const Text('Keep as new draft'),
+                    ),
+                  ],
+                ),
               // ── Toolbar row ──
               Row(
                 children: [
@@ -5813,7 +6077,11 @@ class _InputBarState extends State<_InputBar> {
                               .isNotEmpty;
                       final Color bg;
                       final String tip;
-                      if (runningNow && !hasDraft) {
+                      if (widget.editingQueue) {
+                        icon = Icons.check;
+                        bg = Aether.accent;
+                        tip = 'Save queued message';
+                      } else if (runningNow && !hasDraft) {
                         // Running + empty → STOP (red). Stop only the current
                         // session so other sessions remain isolated; queued
                         // messages still send next.
@@ -5842,7 +6110,9 @@ class _InputBarState extends State<_InputBar> {
                           tooltip: tip,
                           icon: Icon(icon, size: 18, color: Colors.white),
                           onPressed: () {
-                            if (runningNow && !hasDraft) {
+                            if (!widget.editingQueue &&
+                                runningNow &&
+                                !hasDraft) {
                               if (hasSession) {
                                 AgentService.I.stopRequested(
                                   sessionId: sessionId,
@@ -6268,9 +6538,8 @@ class _QueueDock extends StatelessWidget {
   final String? sessionId;
   final VoidCallback onEdited;
 
-  /// Moves a queued message's text into the composer for editing. Wired
-  /// from the screen that owns the composer's TextEditingController.
-  final ValueChanged<String> onEditToComposer;
+  /// Edits queued text in the composer while the service retains its files.
+  final void Function(int id, String text) onEditToComposer;
   const _QueueDock({
     this.sessionId,
     required this.onEdited,
@@ -6372,9 +6641,10 @@ class _QueueDock extends StatelessWidget {
                           children: [
                             for (var i = 0; i < queue.length; i++)
                               _QueueRow(
-                                key: ValueKey(
+                                key: ValueKey((
+                                  sid,
                                   ids.length == queue.length ? ids[i] : 'q-$i',
-                                ),
+                                )),
                                 id: ids.length == queue.length ? ids[i] : null,
                                 index: i,
                                 text: queue[i],
@@ -6402,9 +6672,8 @@ class _QueueRow extends StatefulWidget {
   final String text;
   final VoidCallback onEdited;
 
-  /// Moves this row's text into the composer for editing (the row itself
-  /// is removed from the queue first).
-  final ValueChanged<String> onEditToComposer;
+  /// Copies this row's text into the composer; saving updates the queue in place.
+  final void Function(int id, String text) onEditToComposer;
   const _QueueRow({
     super.key,
     this.id,
@@ -6471,18 +6740,12 @@ class _QueueRowState extends State<_QueueRow> {
     widget.onEdited();
   }
 
-  /// Edit in composer: remove this row from the queue and hand its text
-  /// to the composer's TextEditingController (via the dock callback) so
-  /// the user can edit and resend.
+  /// Retain the original until the composer can save an edit by stable id.
   void _editToComposer() {
     final text = widget.text;
     final id = widget.id;
-    if (id != null) {
-      AgentService.I.removeQueuedMessageById(id);
-    } else {
-      AgentService.I.removeQueuedMessage(widget.index);
-    }
-    widget.onEditToComposer(text);
+    if (id == null) return;
+    widget.onEditToComposer(id, text);
     widget.onEdited();
   }
 
@@ -6507,8 +6770,7 @@ class _QueueRowState extends State<_QueueRow> {
             tooltip: queueRowActions[0].tooltip,
             onTap: _quickSend,
           ),
-          // Move this row's text into the composer for a fuller edit; the
-          // row leaves the queue so a resend doesn't duplicate it.
+          // The composer saves by stable id, preserving queued attachments.
           _QueueAction(
             icon: queueRowActions[1].icon,
             color: Aether.textMuted,
@@ -6678,7 +6940,7 @@ class _ApprovalDockState extends State<_ApprovalDock> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: AgentService.I,
+      animation: Listenable.merge([AgentService.I, AppState.I]),
       builder: (_, _) {
         final req = AgentService.I.pendingApproval;
         if (req == null) {
@@ -6691,14 +6953,14 @@ class _ApprovalDockState extends State<_ApprovalDock> {
         }
         // ── ask_user_question mode — structured Q&A card ──
         if (req.questions != null && req.questions!.isNotEmpty) {
-          return _QuestionsCard(req);
+          return _QuestionsCard(req, key: ObjectKey(req));
         }
         // ── Plan exit (exit_plan_mode) — opencode-style switch prompt ──
         // The plan itself lives in the model's message; this asks the single
         // yes/no "switch to the build agent?" question, exactly like
         // opencode's plan_exit tool. There is no plan-review card.
         if (req.tool == 'exit_plan_mode') {
-          return _QuestionsCard(req);
+          return _QuestionsCard(req, key: ObjectKey(req));
         }
         // ── Standard approve/deny card: exactly three actions ──
         return Container(
@@ -6791,7 +7053,7 @@ class _ApprovalDockState extends State<_ApprovalDock> {
 /// tappable option chips per question and a submit button.
 class _QuestionsCard extends StatefulWidget {
   final ApprovalRequest req;
-  const _QuestionsCard(this.req);
+  const _QuestionsCard(this.req, {super.key});
 
   @override
   State<_QuestionsCard> createState() => _QuestionsCardState();
@@ -6918,7 +7180,11 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                   minimumSize: Size.zero,
                 ),
                 child: const Text('Skip', style: TextStyle(fontSize: 12)),
-                onPressed: () => AgentService.I.approve(false),
+                onPressed: () {
+                  if (identical(AgentService.I.pendingApproval, widget.req)) {
+                    AgentService.I.approve(false);
+                  }
+                },
               ),
               const SizedBox(width: 4),
               FilledButton(
@@ -6933,6 +7199,12 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                 ),
                 onPressed: _allAnswered
                     ? () {
+                        if (!identical(
+                          AgentService.I.pendingApproval,
+                          widget.req,
+                        )) {
+                          return;
+                        }
                         for (final q in widget.req.questions!) {
                           final a = _answerFor(q);
                           if (a != null) widget.req.answers[q.id] = a;
@@ -6984,6 +7256,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
     return GestureDetector(
       onTap: () {
         setState(() {
+          _custom[q.id]?.clear();
           if (q.multi) {
             if (isSel) {
               sel.remove(opt.label);
@@ -7187,7 +7460,8 @@ class _StudioFolderChip extends StatelessWidget {
 
     if (choice == null || !context.mounted) return;
     if (choice == 'sandbox') {
-      AppState.I.setSessionWorkspaceFolder(null);
+      if (!identical(AppState.I.sessionById(s.id), s)) return;
+      AppState.I.setSessionWorkspaceFolder(null, sessionId: s.id);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Working in the session sandbox.'),
@@ -7218,26 +7492,32 @@ class _StudioFolderChip extends StatelessWidget {
     }
 
     var writable = false;
-    try {
-      final probe = File('$path/.ovid_probe');
-      probe.writeAsStringSync('ok');
-      probe.deleteSync();
-      writable = true;
-    } catch (e) {
-      Diag.swallow('chat_screen', e);
+    bool probeWritable() {
+      Directory? probe;
+      try {
+        probe = Directory(path!).createTempSync('.ovid_probe-');
+        File('${probe.path}/write').writeAsStringSync('ok');
+        return true;
+      } catch (e) {
+        Diag.swallow('chat_screen', e);
+        return false;
+      } finally {
+        if (probe != null) {
+          try {
+            probe.deleteSync(recursive: true);
+          } catch (e) {
+            Diag.swallow('chat_screen.probeCleanup', e);
+          }
+        }
+      }
     }
+
+    writable = probeWritable();
 
     if (!writable) {
       final granted = await AgentService.I.requestAllFilesAccess();
       if (granted) {
-        try {
-          final probe = File('$path/.ovid_probe');
-          probe.writeAsStringSync('ok');
-          probe.deleteSync();
-          writable = true;
-        } catch (e) {
-          Diag.swallow('chat_screen', e);
-        }
+        writable = probeWritable();
       }
     }
 
@@ -7254,7 +7534,8 @@ class _StudioFolderChip extends StatelessWidget {
       return;
     }
 
-    AppState.I.setSessionWorkspaceFolder(path);
+    if (!identical(AppState.I.sessionById(s.id), s)) return;
+    AppState.I.setSessionWorkspaceFolder(path, sessionId: s.id);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('Working folder: ${path.split('/').last}'),
@@ -8063,33 +8344,34 @@ class _DiffLines extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final lines = code.split('\n');
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final l in lines)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1.5),
-            color: l.startsWith('+')
-                ? Aether.successLight.withValues(alpha: 0.10)
-                : l.startsWith('-')
-                ? Aether.danger.withValues(alpha: 0.10)
-                : Colors.transparent,
-            child: Text(
-              l,
-              style: TextStyle(
-                fontFamily: Aether.mono,
-                fontSize: 12,
-                height: 1.5,
-                color: l.startsWith('+')
-                    ? Aether.successLight
-                    : l.startsWith('-')
-                    ? Aether.danger
-                    : Aether.textMuted,
+    return IntrinsicWidth(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final l in lines)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1.5),
+              color: l.startsWith('+')
+                  ? Aether.successLight.withValues(alpha: 0.10)
+                  : l.startsWith('-')
+                  ? Aether.danger.withValues(alpha: 0.10)
+                  : Colors.transparent,
+              child: Text(
+                l,
+                style: TextStyle(
+                  fontFamily: Aether.mono,
+                  fontSize: 12,
+                  height: 1.5,
+                  color: l.startsWith('+')
+                      ? Aether.successLight
+                      : l.startsWith('-')
+                      ? Aether.danger
+                      : Aether.textMuted,
+                ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -8187,8 +8469,9 @@ class _RuntimeInstallBanner extends StatelessWidget {
                   ),
                   if (failed)
                     TextButton(
-                      onPressed: () =>
-                          unawaited(app.retryBackgroundRuntimeInstall()),
+                      onPressed: () => unawaited(
+                        StudioSetupCoordinator.I.retryFromRuntimeBanner(),
+                      ),
                       style: TextButton.styleFrom(
                         visualDensity: VisualDensity.compact,
                         padding: const EdgeInsets.symmetric(horizontal: 8),

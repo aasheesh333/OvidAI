@@ -2333,10 +2333,17 @@ class AppState extends ChangeNotifier {
   /// "removing a grant immediately disables affected contributions").
   Future<void> revokePluginGrant(PluginItem plugin) async {
     final runtimeId = plugin.runtimeId;
+    // Execution authority must disappear before any fallible storage or MCP
+    // teardown await. Runtime disable also persists the disabled install.
+    plugin.enabled = false;
+    plugin.activation = PluginActivation.disabled;
     if (runtimeId != null) {
-      await pluginPermissions.revoke(runtimeId);
+      PluginContributionRegistry.I.unregisterPlugin(runtimeId);
     }
-    if (plugin.enabled) {
+    refresh();
+    try {
+      if (runtimeId != null) await pluginPermissions.revoke(runtimeId);
+    } finally {
       await disablePlugin(plugin);
     }
   }
@@ -8209,24 +8216,34 @@ class AppState extends ChangeNotifier {
   // ── MCP server env vars (secure storage) ────────────────────────────
   static const _kMcpHeadersPrefix = 'ovid_mcp_headers_';
 
-  Future<void> setMcpEnv(String serverName, Map<String, String> env) async {
+  /// Strict callers must observe storage failure before committing config.
+  Future<void> setMcpEnv(
+    String serverName,
+    Map<String, String> env, {
+    bool strict = false,
+  }) async {
     try {
       await _secureStorage.write(
         key: '$_kMcpEnvPrefix$serverName',
         value: jsonEncode(env),
       );
     } catch (e) {
+      if (strict) rethrow;
       Diag.swallow('state', e);
     }
   }
 
-  Future<Map<String, String>> getMcpEnv(String serverName) async {
+  Future<Map<String, String>> getMcpEnv(
+    String serverName, {
+    bool strict = false,
+  }) async {
     try {
       final raw = await _secureStorage.read(key: '$_kMcpEnvPrefix$serverName');
       if (raw == null || raw.isEmpty) return {};
       final m = jsonDecode(raw) as Map<String, dynamic>;
       return m.map((k, v) => MapEntry(k, v.toString()));
     } catch (_) {
+      if (strict) rethrow;
       return {};
     }
   }

@@ -25,12 +25,13 @@ class SessionSearch {
 
   Future<Database> _open() async {
     if (_db != null) return _db!;
-    return _opening ??= () async {
+    final opening = _opening ??= () async {
       final path =
           dbPathOverrideForTest ??
           '${(await getApplicationDocumentsDirectory()).path}/session-search.db';
       final db = sqlite3.open(path);
-      db.execute('''
+      try {
+        db.execute('''
         CREATE VIRTUAL TABLE IF NOT EXISTS msgs USING fts5(
           sessionId UNINDEXED,
           model UNINDEXED,
@@ -39,9 +40,31 @@ class SessionSearch {
           tokenize = 'unicode61'
         );
       ''');
-      _db = db;
-      return db;
+        _db = db;
+        return db;
+      } catch (_) {
+        db.dispose();
+        rethrow;
+      }
     }();
+    try {
+      return await opening;
+    } finally {
+      if (identical(_opening, opening)) _opening = null;
+    }
+  }
+
+  /// Releases the index handle without deleting its data. The next operation
+  /// reopens it; callers should await outstanding operations before closing.
+  Future<void> close() async {
+    try {
+      await _opening;
+    } finally {
+      final db = _db;
+      _db = null;
+      _opening = null;
+      db?.dispose();
+    }
   }
 
   /// Rows have changed → drop and rebuild. Cheap (thousands of rows).
@@ -53,20 +76,27 @@ class SessionSearch {
   ) async {
     final db = await _open();
     db.execute('BEGIN');
-    db.execute('DELETE FROM msgs');
-    final stmt = db.prepare(
-      'INSERT INTO msgs (sessionId, model, role, body) VALUES (?, ?, ?, ?)',
-    );
     try {
-      for (final s in sessions) {
-        for (final m in s.rows) {
-          stmt.execute([s.id, s.model, m.role, m.content]);
+      db.execute('DELETE FROM msgs');
+      final stmt = db.prepare(
+        'INSERT INTO msgs (sessionId, model, role, body) VALUES (?, ?, ?, ?)',
+      );
+      try {
+        for (final s in sessions) {
+          for (final m in s.rows) {
+            stmt.execute([s.id, s.model, m.role, m.content]);
+          }
         }
+      } finally {
+        stmt.dispose();
       }
-    } finally {
-      stmt.dispose();
+      db.execute('COMMIT');
+    } catch (_) {
+      // SQLite can roll back automatically on some errors. Otherwise restore
+      // the previous index and release the writer lock before propagating.
+      if (!db.autocommit) db.execute('ROLLBACK');
+      rethrow;
     }
-    db.execute('COMMIT');
   }
 
   /// Literal-phrase search with bm25 ranking and snippet excerpts.
@@ -78,9 +108,11 @@ class SessionSearch {
     String? sessionId,
     String? model,
   }) async {
+    RangeError.checkNotNegative(limit, 'limit');
+    RangeError.checkNotNegative(cursor, 'cursor');
+    final literalQuery = _literalQuery(query);
+    if (limit == 0 || literalQuery.isEmpty) return [];
     final db = await _open();
-    // FTS5 treats bare words as implicit AND; quoted phrases match
-    // literally — same literal-phrase semantics as the query service.
     final where = [
       'msgs MATCH ?',
       if (sessionId != null) 'sessionId = ?',
@@ -91,7 +123,7 @@ class SessionSearch {
       'bm25(msgs) AS rank '
       'FROM msgs WHERE $where '
       'ORDER BY rank LIMIT ? OFFSET ?',
-      [query, ?sessionId, ?model, limit, cursor],
+      [literalQuery, ?sessionId, ?model, limit, cursor],
     );
     return [
       for (final r in rows)
@@ -103,6 +135,15 @@ class SessionSearch {
         ),
     ];
   }
+
+  // Retain implicit AND between terms and explicit quoted phrases, but never
+  // interpret user punctuation or words such as OR/NOT as FTS operators.
+  static String _literalQuery(String query) => RegExp(r'"([^"]*)"|([^\s"]+)')
+      .allMatches(query)
+      .map((m) => m.group(1) ?? m.group(2)!)
+      .where((term) => term.trim().isNotEmpty)
+      .map((term) => '"${term.replaceAll('"', '""')}"')
+      .join(' AND ');
 }
 
 class SessionSearchHit {

@@ -38,6 +38,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -352,7 +353,7 @@ class OvidAccessibilityService : AccessibilityService() {
 
         /// Native→Dart bridge for overlay events. Set by MainActivity, which
         /// owns the FlutterEngine: ("deviceOverlayText", text) on send,
-        /// ("deviceOverlayStop", null) on X with an empty field.
+        /// ("deviceOverlayStop", null) on Stop Ovid or circle long-press.
         var overlayEventListener: ((method: String, argument: String?) -> Unit)? = null
     }
 
@@ -458,6 +459,8 @@ class OvidAccessibilityService : AccessibilityService() {
     internal fun isOverlayVisible(): Boolean = overlayView != null
 
     private fun clearOverlayRefs() {
+        cancelOverlayTouch?.invoke()
+        cancelOverlayTouch = null
         overlayView = null
         overlayParams = null
         overlayInput = null
@@ -516,9 +519,18 @@ class OvidAccessibilityService : AccessibilityService() {
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
+        val wm = getSystemService(WINDOW_SERVICE) as? WindowManager
+        if (wm != null) {
+            overlayBox?.let { box ->
+                box.layoutParams = box.layoutParams.apply {
+                    width = minOf((340 * resources.displayMetrics.density).toInt(), displaySize(wm).x)
+                }
+            }
+        }
         // Rotation/resplit changes the display bounds: re-clamp so a circle that
         // was legitimately at the bottom-right is not left off-screen.
         clampOverlayIntoDisplay()
+        overlayView?.post { clampOverlayIntoDisplay() }
     }
 
     /// Overlay send seam: non-blank text goes to Dart as deviceOverlayText,
@@ -609,24 +621,36 @@ class OvidAccessibilityService : AccessibilityService() {
         root.addView(circle, FrameLayout.LayoutParams(
             (48 * density).toInt(), (48 * density).toInt()))
         overlayCircle = circle
-        val box = overlayBoxView(windowManager, root, density)
+        val box = overlayBoxView(density)
         box.visibility = View.GONE
         root.addView(box, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            minOf((340 * density).toInt(), displaySize(windowManager).x),
+            ViewGroup.LayoutParams.WRAP_CONTENT))
         overlayBox = box
         return root
     }
 
     private fun setOverlayExpanded(expand: Boolean) {
         if (overlayExpanded == expand) return
+        cancelOverlayTouch?.invoke()
         overlayExpanded = expand
-        overlayCircle?.visibility = if (expand) View.GONE else View.VISIBLE
-        overlayBox?.visibility = if (expand) View.VISIBLE else View.GONE
         if (!expand) {
+            // Clear focus while the input is still visible. A hidden focused
+            // child can otherwise leave this window intercepting keys.
             overlayInput?.clearFocus()
             val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
             imm?.hideSoftInputFromWindow(overlayInput?.windowToken, 0)
+            overlayParams?.let { params ->
+                params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                overlayView?.let { view ->
+                    try {
+                        (getSystemService(WINDOW_SERVICE) as? WindowManager)?.updateViewLayout(view, params)
+                    } catch (_: Throwable) { }
+                }
+            }
         }
+        overlayCircle?.visibility = if (expand) View.GONE else View.VISIBLE
+        overlayBox?.visibility = if (expand) View.VISIBLE else View.GONE
         // The window is a different size now, so the old position may be
         // off-display: re-clamp once the new size is measured.
         overlayView?.post { clampOverlayIntoDisplay() }
@@ -646,12 +670,11 @@ class OvidAccessibilityService : AccessibilityService() {
         val circle = View(this).apply {
             background = bg
             elevation = 6 * density
-            contentDescription = "Ovid — drag to move, tap to steer"
+            contentDescription = "Ovid — drag to move, tap to steer; long press to stop"
+            isFocusable = true
+            setOnClickListener { setOverlayExpanded(true) }
         }
-        // A small mark so it reads as Ovid rather than a stray dot.
-        circle.setOnTouchListener(overlayDragTouchListener(windowManager, root, density) {
-            setOverlayExpanded(true)
-        })
+        circle.setOnTouchListener(overlayDragTouchListener(windowManager, root, density))
         circle.setOnLongClickListener {
             onOverlayStop()
             true
@@ -661,33 +684,65 @@ class OvidAccessibilityService : AccessibilityService() {
 
     /// Touch handler that both drags the window and recognises a tap.
     ///
-    /// Coordinates are clamped as they are written, so the window follows the
-    /// finger but can never be parked off-display. A tap is a DOWN/UP pair that
-    /// never moved more than the touch slop and never exceeded the tap timeout —
-    /// that distinction is what lets the same surface be both handle and button.
+    /// This listener consumes touches, so it must dispatch click/long-click
+    /// itself. Movement is measured from DOWN, never from the moving window.
     private fun overlayDragTouchListener(
         windowManager: WindowManager,
         root: View,
         density: Float,
-        onTap: () -> Unit,
     ): View.OnTouchListener {
-        val slop = (10 * density)
-        val tapTimeout = ViewConfiguration.getLongPressTimeout()
-        return View.OnTouchListener { _, event ->
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
+        var downX = 0f
+        var downY = 0f
+        var windowX = 0
+        var windowY = 0
+        var downAt = 0L
+        var active = false
+        var moved = false
+        var longPressed = false
+        var pressedView: View? = null
+        val longPress = Runnable {
+            if (active && !moved) {
+                longPressed = true
+                pressedView?.performLongClick()
+            }
+        }
+        fun cancel() {
+            mainHandler.removeCallbacks(longPress)
+            active = false
+            pressedView?.isPressed = false
+            pressedView = null
+        }
+        cancelOverlayTouch = { cancel() }
+        return View.OnTouchListener { view, event ->
             val params = overlayParams ?: return@OnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    dragOrigin = intArrayOf(
-                        params.x - event.rawX.toInt(),
-                        params.y - event.rawY.toInt(),
-                        event.eventTime.toInt(),
-                    )
+                    cancel()
+                    downX = event.rawX
+                    downY = event.rawY
+                    windowX = params.x
+                    windowY = params.y
+                    downAt = event.eventTime
+                    active = true
+                    moved = false
+                    longPressed = false
+                    pressedView = view
+                    view.isPressed = true
+                    mainHandler.postDelayed(longPress, longPressTimeout)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val origin = dragOrigin ?: return@OnTouchListener true
-                    var nx = event.rawX.toInt() + origin[0]
-                    var ny = event.rawY.toInt() + origin[1]
+                    if (!active || longPressed) return@OnTouchListener true
+                    val dx = event.rawX - downX
+                    val dy = event.rawY - downY
+                    if (Math.hypot(dx.toDouble(), dy.toDouble()) > slop) moved = true
+                    if (!moved) return@OnTouchListener true
+                    mainHandler.removeCallbacks(longPress)
+                    view.isPressed = false
+                    var nx = windowX + dx.toInt()
+                    var ny = windowY + dy.toInt()
                     val size = displaySize(windowManager)
                     val w = if (root.width > 0) root.width else (48 * density).toInt()
                     val h = if (root.height > 0) root.height else (48 * density).toInt()
@@ -701,20 +756,16 @@ class OvidAccessibilityService : AccessibilityService() {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    val origin = dragOrigin
-                    dragOrigin = null
-                    if (origin != null) {
-                        val moved = Math.hypot(
-                            (event.rawX.toInt() + origin[0] - params.x).toDouble(),
-                            (event.rawY.toInt() + origin[1] - params.y).toDouble(),
-                        )
-                        val quick = event.eventTime - origin[2].toLong() < tapTimeout
-                        if (moved <= slop && quick) onTap()
-                    }
+                    val displacement = Math.hypot(
+                        (event.rawX - downX).toDouble(), (event.rawY - downY).toDouble())
+                    val tap = active && !moved && !longPressed && displacement <= slop &&
+                        event.eventTime - downAt < longPressTimeout
+                    cancel()
+                    if (tap) view.performClick()
                     true
                 }
-                MotionEvent.ACTION_CANCEL -> {
-                    dragOrigin = null
+                MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> {
+                    cancel()
                     true
                 }
                 else -> false
@@ -722,16 +773,14 @@ class OvidAccessibilityService : AccessibilityService() {
         }
     }
 
-    private var dragOrigin: IntArray? = null
+    private var cancelOverlayTouch: (() -> Unit)? = null
 
-    /// The expanded steering box: simple white, cross · text · mic · green send.
+    /// Separate, explicit minimize and stop controls above text · mic · send.
     private fun overlayBoxView(
-        windowManager: WindowManager,
-        root: View,
         density: Float,
     ): LinearLayout {
         val box = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
             val pad = (10 * density).toInt()
             setPadding(pad, (8 * density).toInt(), pad, (8 * density).toInt())
@@ -743,18 +792,24 @@ class OvidAccessibilityService : AccessibilityService() {
             }
             elevation = 8 * density
         }
-        // Stop is immediate, including when the text field contains a draft.
-        val close = ImageButton(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                (44 * density).toInt(), (44 * density).toInt())
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            background = null
-            contentDescription = "Stop Control"
-            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-            imageTintList = ColorStateList.valueOf(0xFF6E6E6E.toInt())
-            setOnClickListener { onOverlayStop() }
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
         }
-        box.addView(close)
+        fun control(label: String, action: () -> Unit) = Button(this).apply {
+            text = label
+            isAllCaps = false
+            setTextColor(0xFF1A1A1A.toInt())
+            layoutParams = LinearLayout.LayoutParams(0, (48 * density).toInt(), 1f)
+            setOnClickListener { action() }
+        }
+        controls.addView(control("Minimize") { setOverlayExpanded(false) })
+        controls.addView(control("Stop Ovid") { onOverlayStop() })
+        box.addView(controls)
+        val steering = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        box.addView(steering)
 
         val input = EditText(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -762,7 +817,7 @@ class OvidAccessibilityService : AccessibilityService() {
                 leftMargin = (6 * density).toInt()
                 rightMargin = (6 * density).toInt()
             }
-            minEms = 7
+            minEms = 0
             maxLines = 1
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT
@@ -802,7 +857,7 @@ class OvidAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        box.addView(input)
+        steering.addView(input)
         overlayInput = input
 
         val mic = ImageButton(this).apply {
@@ -815,7 +870,7 @@ class OvidAccessibilityService : AccessibilityService() {
             imageTintList = ColorStateList.valueOf(0xFF6E6E6E.toInt())
             setOnClickListener { onOverlayMic() }
         }
-        box.addView(mic)
+        steering.addView(mic)
         overlayMicButton = mic
 
         // Green send: only armed while there is text, so an accidental tap can
@@ -843,7 +898,7 @@ class OvidAccessibilityService : AccessibilityService() {
                 imm?.hideSoftInputFromWindow(overlayInput?.windowToken, 0)
             }
         }
-        box.addView(send)
+        steering.addView(send)
         overlaySendButton = send
 
         input.addTextChangedListener(object : TextWatcher {
@@ -1111,8 +1166,9 @@ class OvidAccessibilityService : AccessibilityService() {
             if (node.isVisibleToUser && bounds.width() > 0 && bounds.height() > 0) {
                 val viewId = node.viewIdResourceName.orEmpty()
                 val fullClassName = node.className?.toString().orEmpty()
-                val text = node.text?.toString().orEmpty()
-                val description = node.contentDescription?.toString().orEmpty()
+                // Redact before constructing either channel rows or cache keys.
+                val text = if (node.isPassword) "" else node.text?.toString().orEmpty()
+                val description = if (node.isPassword) "" else node.contentDescription?.toString().orEmpty()
                 val boundsList = listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)
                 val stableKey = stableNodeKey(
                     viewId = viewId,

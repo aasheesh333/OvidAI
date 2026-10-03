@@ -24,6 +24,15 @@ void main() {
   late AppState app;
   late List<MethodCall> deviceCalls;
   late List<MethodCall> overlayCalls;
+  final ownedSessionIds = <String>{};
+
+  Future<void> until(bool Function() condition) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 20));
+    while (!condition()) {
+      if (DateTime.now().isAfter(deadline)) fail('Control fixture did not settle');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+  }
 
   setUpAll(() async {
     HttpOverrides.global = null;
@@ -68,19 +77,37 @@ void main() {
           return null;
         });
     AgentService.setOverlayChannelForTest(overlayChannel);
-    addTearDown(() {
-      DeviceControlService.setMethodChannelForTest(null);
-      AgentService.setOverlayChannelForTest(null);
-    });
+    await AgentService.I.setAppForegrounded(true);
   });
 
-  tearDown(() {
+  tearDown(() async {
+    await until(() => ownedSessionIds.every((id) => !AgentService.I.busyFor(id)));
+    for (final id in ownedSessionIds) {
+      AgentService.I.dropSessionRun(id);
+      await SessionLedger.I.close(id);
+    }
+    ownedSessionIds.clear();
     AgentService.I.onControlTaskCompleted = null;
     AgentService.llmOnceForTest = null;
     AgentService.setRunSessionForTest('');
+    // Keep the fixture channels installed until owned runs and their cleanup
+    // have drained. addTearDown runs before this tearDown and resets too early.
+    await AgentService.I.setAppForegrounded(true);
+    await AgentService.I.setOverlayLive(false);
+    await AgentService.I.setOverlayState(AgentService.overlayStateIdle);
+    DeviceControlService.setMethodChannelForTest(null);
+    AgentService.setOverlayChannelForTest(null);
+    for (final name in [
+      'ovid/device-return-test', 'ovid/overlay-return-test',
+      'ovid/overlapping-return', 'ovid/device-blocked-test',
+    ]) {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(MethodChannel(name), null);
+    }
   });
 
   ChatSession controlSession(String id) {
+    ownedSessionIds.add(id);
     final provider = app.providerById('ollama-local')!;
     provider
       ..baseUrl = 'http://127.0.0.1:1/v1'
@@ -247,6 +274,7 @@ void main() {
       return {'role': 'assistant', 'content': 'done'};
     };
     await AgentService.I.runTask('hi', sessionId: origin.id);
+    await until(() => turn >= 2 && !AgentService.I.busyFor(origin.id));
     expect(queued, ['use the next button']);
     expect(other.messages, isEmpty);
     expect(overlayCalls.any((c) => c.method == 'deviceOverlayShow'), isTrue);
@@ -262,6 +290,35 @@ void main() {
       await AgentService.I.runTask('hi', sessionId: origin.id);
       expect(overlayCalls.any((c) => c.method == 'deviceOverlayShow'), isTrue);
     } finally {
+      await AgentService.I.setAppForegrounded(true);
+    }
+  });
+
+  test('removed Control owner cannot mask the next live session', () async {
+    final removed = controlSession('removed-control');
+    final stale = AgentService.I.runBucketForTest(removed.id)
+      ..controlRun = true
+      ..activeRunId = 'removed-run';
+    app.sessions.remove(removed);
+    final origin = controlSession('surviving-control');
+    final other = controlSession('selected-non-control')..mode = 'auto';
+    final question = ApprovalRequest(
+      tool: 'ask_user_question', summary: 'Which item?', detail: '',
+      questions: [UserQuestion(id: 'item', question: 'Which item?')],
+    );
+    AgentService.llmOnceForTest = (p, msgs, session, includeTools) async {
+      AgentService.I.pendingApproval = question;
+      await AgentService.I.handleDeviceOverlayText('surviving answer');
+      return {'role': 'assistant', 'content': 'done'};
+    };
+    try {
+      await AgentService.I.setAppForegrounded(false);
+      await AgentService.I.runTask('hi', sessionId: origin.id);
+      expect(overlayCalls.any((c) => c.method == 'deviceOverlayShow'), isTrue);
+      expect(question.answers, {'item': 'surviving answer'});
+      expect(other.messages, isEmpty);
+    } finally {
+      stale.activeRunId = null;
       await AgentService.I.setAppForegrounded(true);
     }
   });

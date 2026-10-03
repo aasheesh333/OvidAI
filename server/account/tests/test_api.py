@@ -16,7 +16,7 @@ class ApiTests(unittest.TestCase):
             if token != 'valid' or app_check != 'attested':
                 raise AccountError('invalid_token', 401)
             return {'uid': 'alice', 'auth_time': self.now,
-                    'firebase': {'sign_in_provider': 'password'}}
+                    'firebase': {'sign_in_provider': 'google.com'}}
 
         app = FastAPI()
         app.include_router(router(service, verify))

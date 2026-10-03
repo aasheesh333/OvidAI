@@ -19,6 +19,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
@@ -32,6 +33,68 @@ import java.io.FileOutputStream
 import java.net.URLConnection
 import java.util.concurrent.Executors
 import java.util.zip.ZipFile
+
+internal data class InstalledBootstrap(
+    val bytes: ByteArray? = null,
+    val abi: String? = null,
+    val availableAbis: List<String> = emptyList(),
+)
+
+/** Inspect installed archives, not split filenames or device ABI preference. */
+internal fun readInstalledBootstrap(
+    sourceDir: String,
+    splitSourceDirs: Array<String>?,
+    processAbi: String?,
+): InstalledBootstrap {
+    val payloadAbi = when (processAbi) {
+        "armeabi", "armeabi-v7a" -> "armeabi-v7a"
+        "arm64-v8a", "x86_64", "x86" -> processAbi
+        else -> null
+    }
+    val available = linkedSetOf<String>()
+    val archives = (listOf(sourceDir) + splitSourceDirs.orEmpty()).distinct()
+    for (path in archives) {
+        ZipFile(path).use { zip ->
+            val entry = payloadAbi?.let { zip.getEntry("lib/$it/libovid_bootstrap.so") }
+            if (entry != null) {
+                val bytes = zip.getInputStream(entry).use { it.readBytes() }
+                return InstalledBootstrap(bytes, payloadAbi)
+            }
+            zip.entries().asSequence().forEach { candidate ->
+                val parts = candidate.name.split('/')
+                if (parts.size == 3 && parts[0] == "lib" && parts[2] == "libovid_bootstrap.so") {
+                    available.add(parts[1])
+                }
+            }
+        }
+    }
+    return InstalledBootstrap(availableAbis = available.toList())
+}
+
+/** Rebind on every host attachment: a retained Dart engine need not re-register. */
+internal fun bindNotificationHostCallbacks(emit: (String) -> Unit, exitHost: () -> Unit) {
+    fun stopDeviceActions() {
+        deviceActions.cancel()
+        OvidAccessibilityService.instance?.stopControlNow()
+    }
+    AgentNotificationBridge.stopHandler = {
+        stopDeviceActions()
+        emit("onAgentStop")
+    }
+    AgentNotificationBridge.exitHandler = {
+        stopDeviceActions()
+        emit("onAgentExit")
+        exitHost()
+    }
+}
+
+/** Consume a routed launch extra so host recreation cannot replay selection. */
+internal fun routeSessionIntent(intent: Intent?, selectSession: (String) -> Unit) {
+    val sessionId = intent?.getStringExtra("sessionId") ?: return
+    if (sessionId.isBlank()) return
+    selectSession(sessionId)
+    intent.removeExtra("sessionId")
+}
 
 class MainActivity : FlutterActivity() {
     // The foreground service keeps the process eligible for background work;
@@ -477,25 +540,27 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /// Payload entry name for a process ABI.
-    private fun payloadNameFor(abi: String?): String? = when (abi) {
-        "arm64-v8a" -> "arm64-v8a"
-        "armeabi-v7a", "armeabi" -> "armeabi-v7a"
-        "x86_64" -> "x86_64"
-        "x86" -> "x86"
-        else -> null
-    }
-
-    /// ISA family — payload fallback never crosses families.
-    private fun abiFamily(abi: String): String = when {
-        abi.startsWith("arm64") -> "arm64"
-        abi.startsWith("armeabi") || abi.startsWith("armv7") || abi == "arm" -> "arm32"
-        abi.startsWith("x86_64") -> "x64"
-        abi.startsWith("x86") -> "x32"
-        else -> "unknown"
-    }
-
     private var webViewHandler: OvidWebViewHandler? = null
+
+    private fun refreshNotificationCallbacks(flutterEngine: FlutterEngine) {
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        // The engine is retained; the Activity is not. Exit resolves only the
+        // current host and does not keep a destroyed Activity alive.
+        val host = java.lang.ref.WeakReference(this)
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        bindNotificationHostCallbacks(
+            emit = { method -> handler.post { channel.invokeMethod(method, null) } },
+            exitHost = {
+                handler.post {
+                    host.get()?.let { activity ->
+                        if (!activity.isDestroyed) {
+                            try { activity.finishAndRemoveTask() } catch (_: Exception) { }
+                        }
+                    }
+                }
+            },
+        )
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -503,6 +568,7 @@ class MainActivity : FlutterActivity() {
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
         FlutterEngineCache.getInstance().put("ovid-background", flutterEngine)
+        refreshNotificationCallbacks(flutterEngine)
         val backgroundChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
         AgentNotificationBridge.scheduleHandler = {
             backgroundChannel.invokeMethod("onScheduleWake", null)
@@ -1313,35 +1379,11 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "agentStopHandler" -> {
-                        // Dart registers the notification-Stop callback.
-                        AgentNotificationBridge.stopHandler = {
-                            // Invoke back into Dart on the same channel.
-                            runOnUiThread {
-                                MethodChannel(
-                                    flutterEngine.dartExecutor.binaryMessenger,
-                                    channelName
-                                ).invokeMethod("onAgentStop", null)
-                            }
-                        }
+                        refreshNotificationCallbacks(flutterEngine)
                         result.success(true)
                     }
                     "agentExitHandler" -> {
-                        // Dart registers the notification-Exit callback.
-                        AgentNotificationBridge.exitHandler = {
-                            runOnUiThread {
-                                MethodChannel(
-                                    flutterEngine.dartExecutor.binaryMessenger,
-                                    channelName
-                                ).invokeMethod("onAgentExit", null)
-                                try {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                                        finishAndRemoveTask()
-                                    } else {
-                                        finish()
-                                    }
-                                } catch (_: Exception) {}
-                            }
-                        }
+                        refreshNotificationCallbacks(flutterEngine)
                         result.success(true)
                     }
                     "readBootstrapPayload" -> {
@@ -1365,41 +1407,23 @@ class MainActivity : FlutterActivity() {
                         // the exec with EACCES and the sanity check dies
                         // with "Permission denied" AFTER a full extraction.
                         try {
-                            val apkPath = applicationInfo.sourceDir
-                            val zip = ZipFile(apkPath)
                             val processAbi = processAbi()
-                            // Exact match for the process ABI first…
-                            var entry = payloadNameFor(processAbi)
-                                ?.let { zip.getEntry("lib/$it/libovid_bootstrap.so") }
-                            // …then same-ISA-family fallback ONLY. Never
-                            // cross families: a 32-bit process cannot run
-                            // an arm64 payload and vice versa.
-                            if (entry == null) {
-                                entry = Build.SUPPORTED_ABIS
-                                    .filter { abiFamily(it) == abiFamily(processAbi ?: "") }
-                                    .map { zip.getEntry("lib/$it/libovid_bootstrap.so") }
-                                    .firstOrNull { it != null }
-                            }
-                            if (entry == null) {
-                                val available = zip.entries().asSequence()
-                                    .filter { it.name.startsWith("lib/") && it.name.endsWith("/libovid_bootstrap.so") }
-                                    .map { it.name.split('/')[1] }
-                                    .toList()
-                                    .joinToString()
-                                zip.close()
+                            val payload = readInstalledBootstrap(
+                                applicationInfo.sourceDir,
+                                applicationInfo.splitSourceDirs,
+                                processAbi,
+                            )
+                            if (payload.bytes == null) {
                                 result.error(
                                     "MISSING",
                                     "No sandbox payload for this install's ABI " +
                                         "(process: ${processAbi ?: "unknown"}; " +
-                                        "APK has payloads for: $available). " +
-                                        "Install the APK build that matches this device.",
+                                        "installed base/splits have payloads for: ${payload.availableAbis.joinToString().ifEmpty { "none" }}). " +
+                                        "The installed APK set needs a payload matching the process ABI.",
                                     null
                                 )
                             } else {
-                                val bytes = zip.getInputStream(entry).readBytes()
-                                val abi = entry.name.split('/')[1]
-                                zip.close()
-                                result.success(mapOf("bytes" to bytes, "abi" to abi))
+                                result.success(mapOf("bytes" to payload.bytes, "abi" to payload.abi))
                             }
                         } catch (e: Exception) {
                             result.error("READ_FAIL", "bootstrap read failed: ${e.message}", null)
@@ -1473,15 +1497,23 @@ class MainActivity : FlutterActivity() {
         }.start()
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        val sid = intent.getStringExtra("sessionId")
-        if (!sid.isNullOrBlank()) {
-            flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
+    private fun routeSessionSelection(intent: Intent?) {
+        flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
+            routeSessionIntent(intent) { sid ->
                 MethodChannel(messenger, channelName).invokeMethod("onSelectSession", sid)
             }
         }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        routeSessionSelection(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        routeSessionSelection(intent)
     }
 
     override fun onDestroy() {

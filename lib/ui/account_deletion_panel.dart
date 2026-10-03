@@ -6,13 +6,15 @@ class AccountDeletionPanel extends StatefulWidget {
   const AccountDeletionPanel({
     super.key,
     required this.service,
-    required this.usesPassword,
+    this.usesPassword = false,
     required this.reauthenticate,
     required this.requestDeletion,
   });
   final AccountService service;
+  // Kept as an ignored source-compatibility parameter for existing consumers.
+  // Password entry is never rendered or passed to reauthentication.
   final bool usesPassword;
-  final Future<String?> Function(String? password) reauthenticate;
+  final Future<String?> Function(String? unused) reauthenticate;
   final Future<AccountDeletion> Function(String requestId) requestDeletion;
 
   @override
@@ -54,7 +56,6 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
   }
 
   Future<void> _delete() async {
-    final password = TextEditingController();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialog) => AlertDialog(
@@ -66,15 +67,9 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
               const Text(
                 'The server will retain your request for 24 hours. Signing in again during that time cancels deletion. After the deadline, your Ovid identity, profile, cloud data and cloud keys will be removed.\n\nLocal workspaces and data held by third-party providers are not erased by this action.',
               ),
-              if (widget.usesPassword)
-                TextField(
-                  controller: password,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Confirm password',
-                  ),
-                  autofillHints: const [AutofillHints.password],
-                ),
+              const Text(
+                'Next, verify with a social provider or phone linked to this account.',
+              ),
             ],
           ),
         ),
@@ -90,23 +85,18 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
         ],
       ),
     );
-    final secret = password.text;
-    // Dialog's reverse transition may still reference the controller.
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    password.dispose();
     if (confirmed != true || !mounted) return;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      final error = await widget.reauthenticate(
-        widget.usesPassword ? secret : null,
-      );
+      final error = await widget.reauthenticate(null);
       if (error != null) {
         if (error != 'cancelled') throw AccountException(error);
         return;
       }
+      if (!mounted) return;
       final status = await widget.requestDeletion(_requestId);
       if (!mounted) return;
       setState(() => _status = status);

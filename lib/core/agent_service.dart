@@ -557,34 +557,104 @@ class SubagentInfo {
   Duration get elapsed => (finishedAt ?? DateTime.now()).difference(startedAt);
 }
 
-/// Per-session agent run state — one per ChatSession so many sessions run
-/// in parallel without interfering (the parallel session executor multi-session parity).  Switching
-/// sessions NEVER stops another session's run.
-/// Async execution context for ONE agent run. Stored as a Zone value so
-/// every `await` continuation inside the run (SSE stream handlers, tool
-/// dispatch, subagent loops) resolves run state to THIS run's bucket —
-/// never another session's, no matter how many sessions run in parallel.
+/// An admitted request's route. Only immutable values cross async boundaries;
+/// the provider adapter gets a private copy, never the settings object.
+class _RequestRoute {
+  final String providerId, name, description, baseUrl, apiKey, model;
+  final bool isFree, custom, connected, requiresApiKey;
+  final ApiFormat apiFormat;
+  final List<String> models;
+  final Map<String, bool> visionOverrides;
+  final double? temperature;
+
+  _RequestRoute(ProviderConfig p, this.model, {this.temperature})
+    : providerId = p.id,
+      name = p.name,
+      description = p.description,
+      baseUrl = p.baseUrl,
+      apiKey = p.apiKey,
+      isFree = p.isFree,
+      custom = p.custom,
+      connected = p.connected,
+      requiresApiKey = p.requiresApiKey,
+      apiFormat = p.effectiveApiFormat,
+      models = List.unmodifiable(p.models),
+      visionOverrides = Map.unmodifiable(p.visionOverrides);
+
+  ProviderConfig providerCopy() {
+    final p = ProviderConfig(
+      id: providerId, name: name, description: description, baseUrl: baseUrl,
+      apiKey: apiKey, isFree: isFree, custom: custom, connected: connected,
+      requiresApiKey: requiresApiKey, apiFormat: apiFormat,
+      models: List.of(models), selectedModel: model,
+    );
+    for (final e in visionOverrides.entries) {
+      p.setModelVisionSupport(e.key, e.value);
+    }
+    return p;
+  }
+}
+
+/// Async execution context for one admitted run. Every continuation inherits
+/// this zone value, independently of the session selected in the UI.
 class _RunCtx {
   final AgentRun run;
   final ChatSession session;
   final ProviderConfig provider;
+  final _RequestRoute route;
 
   /// The run generation this chain belongs to (see [AgentRun.runEpoch]):
   /// Stop and newer runs bump the bucket's epoch, so a stale chain can be
   /// told apart from the live one and its late events/tokens dropped.
-  /// Mutable: [runTask] seeds it with the bucket's current epoch and
-  /// [_runTaskBody] bumps it once the run is admitted (after the
-  /// re-entry guard, so a refused re-entry never invalidates the live run).
-  int epoch;
+  /// Captured by [runTask] at synchronous admission, before any hooks.
+  final int epoch;
 
-  /// The runId this chain admitted itself under (set in [_runTaskBody]
+  /// The runId this chain admitted itself under (set in [runTask]
   /// right after the re-entry guard). The run-end finally only clears
   /// [AgentRun.activeRunId]/`cancelRequested` when the bucket still carries
   /// THIS id — an old run unwinding late (e.g. after a Stop+queue
   /// promotion) must never wipe the promoted run's id, or the Stop button
   /// hides mid-stream and a second concurrent run can slip in.
   String? ownedRunId;
-  _RunCtx(this.run, this.session, this.provider, this.epoch);
+  _RunCtx(this.run, this.session, this.provider, this.epoch,
+      {_RequestRoute? route})
+    : route = route ?? _RequestRoute(provider, run.modelSnapshot ?? session.model,
+          temperature: run.temperatureSnapshot);
+}
+
+/// One transport attempt owns only its captured generation and resources.
+/// In particular, a late postUrl completion/finally cannot touch a replacement.
+class _TransportOwner {
+  final AgentRun run;
+  final int epoch;
+  HttpClient? client;
+  HttpClientRequest? request;
+  _TransportOwner(this.run, this.epoch);
+
+  bool get current => run.runEpoch == epoch && !run.cancelRequested;
+
+  bool registerClient(HttpClient value) {
+    client = value;
+    if (!current) return false;
+    run.activeClient = value;
+    return true;
+  }
+
+  bool registerRequest(HttpClientRequest value) {
+    request = value;
+    if (!current) {
+      value.abort();
+      return false;
+    }
+    run.activeRequest = value;
+    return true;
+  }
+
+  void release() {
+    if (run.runEpoch != epoch) return;
+    if (identical(run.activeRequest, request)) run.activeRequest = null;
+    if (identical(run.activeClient, client)) run.activeClient = null;
+  }
 }
 
 class AgentRun {
@@ -614,6 +684,9 @@ class AgentRun {
   final List<int> queueIds = [];
   /// Only composer-originated queue entries may authorize @session reads.
   final Set<int> userReferenceQueueIds = {};
+  /// Ordinary composer messages start a fresh dispatch. Explicit steering
+  /// removes this marker; internal agent notices may still join the live run.
+  final Set<int> nextDispatchQueueIds = {};
   int nextQueueId = 0;
   ApprovalRequest? pendingApproval;
 
@@ -1265,7 +1338,6 @@ class AgentService extends ChangeNotifier {
     return z.epoch != z.run.runEpoch || z.run.cancelRequested;
   }
 
-  set _activeRequest(HttpClientRequest? v) => _runResolved.activeRequest = v;
   List<String> get _queue => _runResolved.queue;
 
   /// Keep [AgentRun.queueIds] index-aligned with [AgentRun.queue]. Entries
@@ -1296,6 +1368,7 @@ class AgentService extends ChangeNotifier {
     _syncQueueIds(run);
     final id = run.queueIds.removeAt(index);
     run.userReferenceQueueIds.remove(id);
+    run.nextDispatchQueueIds.remove(id);
     _queuedAttachments.remove((run.runKey ?? '', id));
     return run.queue.removeAt(index);
   }
@@ -1305,6 +1378,7 @@ class AgentService extends ChangeNotifier {
     run.queue.clear();
     run.queueIds.clear();
     run.userReferenceQueueIds.clear();
+    run.nextDispatchQueueIds.clear();
   }
 
   /// UI view: the ACTIVE session's queue (per-session isolation test).
@@ -1355,7 +1429,9 @@ class AgentService extends ChangeNotifier {
   int? get lastPromptTokens => _runResolved.lastPromptTokens;
   set lastPromptTokens(int? v) => _runResolved.lastPromptTokens = v;
   String? get lastError => _runResolved.lastError;
-  set lastError(String? v) => _runResolved.lastError = v;
+  set lastError(String? v) {
+    if (!_runChainStale) _runResolved.lastError = v;
+  }
   bool get todoNudgeSent => _runResolved.todoNudgeSent;
   set todoNudgeSent(bool v) => _runResolved.todoNudgeSent = v;
 
@@ -1546,8 +1622,7 @@ class AgentService extends ChangeNotifier {
   // deviceOverlayShow/deviceOverlayHide; native->Dart
   // deviceOverlayText(text) on send, deviceOverlayStop() on X.
   // Send is EXACTLY the composer send (idle starts a run, busy joins the
-  // per-session queue); X is EXACTLY the composer Stop (stopRequested, the
-  // BUMPED two-branch path — never the legacy unbumped cancelRun).
+  // per-session queue); X uses the persistent global background-stop contract.
   static const String deviceOverlayShowMethod = 'deviceOverlayShow';
   static const String deviceOverlayHideMethod = 'deviceOverlayHide';
   static const String deviceOverlayTextMethod = 'deviceOverlayText';
@@ -1637,7 +1712,8 @@ class AgentService extends ChangeNotifier {
   ChatSession? get _controlOverlaySession {
     for (final entry in _runs.entries) {
       if (entry.value.controlRun && entry.value.activeRunId != null) {
-        return AppState.I.sessionById(entry.key);
+        final session = AppState.I.sessionById(entry.key);
+        if (session != null) return session;
       }
     }
     return null;
@@ -1736,23 +1812,15 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-  /// Overlay X: the composer Stop, wherever the agent runs. Routes through
-  /// [hardStopAll] so every session stops right where it is (with the
-  /// device generation bump that cancels in-flight device work), while
-  /// Control queues are cleared. Returns whether
-  /// any queued continuation was preserved. With nothing running and
-  /// nothing queued, stops nothing (no stray generation bump).
+  /// Overlay X persists global background stop, including while idle, and
+  /// cancels all runs, queued continuations, schedules and device actions.
+  /// Returns false because global Stop never preserves a continuation.
   Future<bool> handleDeviceOverlayStop() async {
-    final anythingActive =
-        _runs.values.any((r) => r.activeRunId != null) ||
-        AppState.I.activeSession != null;
-    if (!anythingActive &&
-        _queue.isEmpty &&
-        !_runs.values.any((r) => r.queue.isNotEmpty)) {
-      return false;
-    }
-    hardStopAll();
-    return _runs.values.any((r) => r.queue.isNotEmpty);
+    // stopBackground pauses schedules and calls cancelAllRuns synchronously
+    // before persisting the native/Dart latch. cancelAllRuns never calls back
+    // here, so overlay and notification Stop share one non-recursive path.
+    await AgentNotificationService.I.stopBackground();
+    return false; // Global Stop never promotes queued work.
   }
 
   /// Native->Dart dispatcher for overlay events. Chainable: returns true
@@ -2091,6 +2159,7 @@ class AgentService extends ChangeNotifier {
     if (text.trim().isEmpty) return;
     final run = sessionId != null ? _runFor(sessionId) : _runResolved;
     _queueAdd(run, text, userReferences: true);
+    run.nextDispatchQueueIds.add(run.queueIds.last);
     final sid = sessionId ?? _runSession?.id ?? '';
     _queuedAttachments[(sid, run.queueIds.last)] = List.of(_attachmentsFor(sid));
     _emitToRun(
@@ -2110,7 +2179,7 @@ class AgentService extends ChangeNotifier {
   /// and start when the new run ends. Idempotent per session while in flight.
   void _scheduleQueuedContinuation(String sessionId) {
     final run = _runs[sessionId];
-    if (run == null || run.queue.isEmpty) return;
+    if (run == null || run.queue.isEmpty || run.activeRunId != null) return;
     if (!_continuationScheduled.add(sessionId)) return;
     _syncQueueIds(run);
     final userReferences = run.userReferenceQueueIds.contains(run.queueIds.first);
@@ -2214,6 +2283,7 @@ class AgentService extends ChangeNotifier {
     _syncQueueIds(run);
     final msg = run.queue.removeAt(index);
     final msgId = run.queueIds.removeAt(index);
+    run.nextDispatchQueueIds.remove(msgId);
     run.queue.insert(0, msg);
     run.queueIds.insert(0, msgId);
     notifyListeners();
@@ -2277,6 +2347,7 @@ class AgentService extends ChangeNotifier {
     if (index < 0 || index >= run.queue.length) return;
     final msg = run.queue.removeAt(index);
     final msgId = run.queueIds.removeAt(index);
+    run.nextDispatchQueueIds.remove(msgId);
     run.queue.insert(0, msg);
     run.queueIds.insert(0, msgId);
     notifyListeners();
@@ -3454,6 +3525,7 @@ class AgentService extends ChangeNotifier {
     // (setProfile cannot be re-applied to the same WebView, but a brand-new
     // one has no profile yet).
     tab.controller = null;
+    tab.fileSelectorRegistration = null;
     tab.loadedOnce = false;
     tab.profileBound = false;
     notifyListeners();
@@ -8733,9 +8805,15 @@ user which one instead of assuming this one.''';
 
   // ── MAIN LOOP ─────────────────────────────────────────────────────────
 
-  /// Message queue behavior: messages queued while a run is active
-  /// join the NEXT LLM request of the CURRENT run — not a separate run
-  /// after full completion. Drains the queue into [msgs] as user turns
+  bool get _hasInRunQueueMessages {
+    _syncQueueIds(_runResolved);
+    return _runResolved.queueIds.any(
+        (id) => !_runResolved.nextDispatchQueueIds.contains(id));
+  }
+
+  /// Explicit steering and internal notices join the current run. Ordinary
+  /// composer messages wait for a fresh dispatch with the then-selected route.
+  /// Drains eligible entries into [msgs] as user turns
   /// and records them in the session so the chat bubble shows immediately.
   /// PR23/M6: queued text gets the SAME @reference expansion as a direct
   /// send — a queued "@notes.txt summarize" must not reach the model raw.
@@ -8743,14 +8821,16 @@ user which one instead of assuming this one.''';
     List<Map<String, dynamic>> msgs, {
     List<({String name, String path, int size})>? attachmentsToAcknowledge,
   }) async {
-    if (_queue.isEmpty) return;
-    while (_queue.isNotEmpty) {
+    if (!_hasInRunQueueMessages) return;
+    while (_hasInRunQueueMessages) {
       _syncQueueIds(_runResolved);
+      final index = _runResolved.queueIds.indexWhere(
+          (id) => !_runResolved.nextDispatchQueueIds.contains(id));
       final userReferences = _runResolved.userReferenceQueueIds
-          .contains(_runResolved.queueIds.first);
-      final attachments = _attachmentsForQueuedMessage(_runResolved, 0);
+          .contains(_runResolved.queueIds[index]);
+      final attachments = _attachmentsForQueuedMessage(_runResolved, index);
       attachmentsToAcknowledge?.addAll(attachments);
-      final queued = _queueRemoveAt(_runResolved, 0);
+      final queued = _queueRemoveAt(_runResolved, index);
       // Record in the RUNNING session — never the active one (the user
       // may have switched chats since the message was queued).
       final target = _runSession;
@@ -8869,15 +8949,8 @@ user which one instead of assuming this one.''';
     return requested > cap ? cap : requested;
   }
 
-  /// FIX 3 (g): the model a run is ACTUALLY billed and budgeted under — the
-  /// run's snapshotted preset pin when there is one, else the session's model.
-  /// Before this, the request body already used the pin (both `_callLlm`
-  /// builders read `modelSnapshot`) while cost accounting, the Usage entry and
-  /// every context-window decision still used `s.model` — so a pin to a cheap
-  /// fast model was priced as the chat model and measured against the chat
-  /// model's window (compaction fired late for a small pin, early for a large
-  /// one). The snapshot is null outside a live run, so a session with no run
-  /// (the UI's `contextUsageFraction`) keeps the old session-model behaviour.
+  /// Model captured from the session chip at admission. Budgeting/accounting
+  /// follows that snapshot while the user chooses a model for the next turn.
   static String effectiveModelForSession(ChatSession s) {
     final r = AgentService.I._runs[s.id];
     return r?.modelSnapshot ?? s.model;
@@ -9618,6 +9691,69 @@ user which one instead of assuming this one.''';
           userReferences: expandRefsFor?.id == s.id);
       return;
     }
+    // Reserve synchronously, before reference expansion or plugin hooks. A
+    // refused re-entry must not overwrite the live run's snapshots.
+    final bucket = _runFor(s.id);
+    if (bucket.activeRunId != null) {
+      _emitToRun(bucket, 'think',
+          'run already active for this session — refusing re-entry',
+          sessionId: s.id);
+      if (scheduledTask != null) throw StateError('Session is already busy');
+      return;
+    }
+    final provider = AppState.I.providerForSession(s);
+    if (provider == null || !provider.isConfigured || s.model.isEmpty ||
+        s.model == 'Select a provider') {
+      final error = provider == null
+          ? 'Select a provider and model before sending a message.'
+          : provider.requiresApiKey && !provider.hasKey
+          ? 'Add an API key for ${provider.name} before sending a message.'
+          : 'The selected provider is not configured correctly.';
+      _appendAssistant('Provider setup required: $error', session: s);
+      if (scheduledTask != null) throw StateError(error);
+      return;
+    }
+    if (scheduledTask != null &&
+        (schedules.stopped || scheduledTask['status'] != 'running')) {
+      throw StateError('Scheduled execution stopped before admission');
+    }
+    final preset = PresetRegistry.byId(s.presetId);
+    final route = _RequestRoute(provider, s.model, temperature: preset.temperature);
+    bucket.modelSnapshot = route.model;
+    bucket.temperatureSnapshot = route.temperature;
+    bucket.controlRun = s.mode == AgentMode.control.name;
+    bucket.stoppedByUser = false;
+    bucket.cancelRequested = false;
+    final epoch = ++bucket.runEpoch;
+    final ctx = _RunCtx(bucket, s, route.providerCopy(), epoch, route: route);
+    ctx.ownedRunId = '${s.id}:$epoch';
+    bucket.activeRunId = ctx.ownedRunId;
+    return runZoned(() async {
+      try {
+        await _prepareRunTask(originalPrompt, ctx, freshTurn: freshTurn,
+            expandRefsFor: expandRefsFor, attachments: attachments,
+            scheduledTask: scheduledTask);
+      } finally {
+        // Preparation may block/fail/stop before the body owns cleanup.
+        if (bucket.activeRunId == ctx.ownedRunId) {
+          bucket.activeRunId = null;
+          notifyListeners();
+          _scheduleQueuedContinuation(s.id);
+        }
+      }
+    }, zoneValues: {_runCtxKey: ctx, #ovidRunKey: s.id});
+  }
+
+  Future<void> _prepareRunTask(
+    String originalPrompt,
+    _RunCtx ctx, {
+    required bool freshTurn,
+    ChatSession? expandRefsFor,
+    List<({String name, String path, int size})>? attachments,
+    Map<String, dynamic>? scheduledTask,
+  }) async {
+    final s = ctx.session;
+    final bucket = ctx.run;
     // @file/@session expansion: the transcript row keeps the raw text the
     // user typed; the MODEL receives the expanded blocks. Runs after the
     // row was appended by sendMessage, so the chat UI stays clean.
@@ -9636,21 +9772,7 @@ user which one instead of assuming this one.''';
     if (expandRefsFor != null && originalPrompt.contains('@')) {
       prompt = await expandReferences(originalPrompt, expandRefsFor);
     }
-    final p = AppState.I.providerForSession(s);
-    if (p == null ||
-        !p.isConfigured ||
-        s.model.isEmpty ||
-        s.model == 'Select a provider') {
-      final error = p == null
-          ? 'Select a provider and model before sending a message.'
-          : p.requiresApiKey && !p.hasKey
-          ? 'Add an API key for ${p.name} before sending a message.'
-          : 'The selected provider is not configured correctly.';
-      _emit('err', error);
-      _appendAssistant('Provider setup required: $error', session: s);
-      if (scheduledTask != null) throw StateError(error);
-      return;
-    }
+    if (_runChainStale) return;
 
     if (attachmentMessage != null && atts.isNotEmpty) {
       attachmentMessage.attachments = [
@@ -9679,10 +9801,11 @@ user which one instead of assuming this one.''';
             'prompt': cleanTruncate(originalPrompt, 400),
             'transcript_path': _transcriptPathFor(s.id),
           },
-          model: s.model,
+          model: ctx.route.model,
         );
-        final ctx = HookService.extractHookContext(res.output);
-        if (ctx.isNotEmpty) _userPromptContext[s.id] = ctx;
+        if (_runChainStale) return;
+        final hookContext = HookService.extractHookContext(res.output);
+        if (hookContext.isNotEmpty) _userPromptContext[s.id] = hookContext;
         // CLAUDE CODE PARITY (audit 2026-09-25): a UserPromptSubmit hook that
         // exits 2 BLOCKS the prompt — the run must not reach the model. The
         // hook's stderr is the reason, so surface it verbatim instead of a
@@ -9698,65 +9821,40 @@ user which one instead of assuming this one.''';
       }
     }
 
-    // Stop during child initialization/hooks must not be cleared by admitting
-    // a fresh run generation below.
+    // Stop during initialization/hooks invalidates this admitted generation.
     final childOwner = Zone.current[#subagentRunOwner];
     if (childOwner is SubagentInfo && childOwner.interrupted) return;
+    if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) return;
 
     // Parallel-session safety: the ENTIRE run body runs inside a Zone
     // carrying this run's context (bucket + session + provider). Every
     // async continuation — SSE stream handlers, tool dispatch, subagent
     // loops — inherits it, so two runs never see each other's state.
     if (scheduledTask != null &&
-        (schedules.stopped || scheduledTask['status'] != 'running' || busyFor(s.id))) {
-      throw StateError('Scheduled execution stopped or session became busy before admission');
+        (schedules.stopped || scheduledTask['status'] != 'running')) {
+      throw StateError('Scheduled execution stopped during preparation');
     }
-    final bucket = _runFor(s.id);
     // Stop during reference expansion or a submit hook must not re-arm Control.
     if (controlAdmissionGeneration != null &&
-        (controlAdmissionGeneration != DeviceControlService.I.generation ||
-            busyFor(s.id))) {
+        controlAdmissionGeneration != DeviceControlService.I.generation) {
       return;
     }
-    // PR23/Q1: snapshot the model at run start — every LLM call of this
-    // run uses it; a mid-run picker switch only affects the next run.
-    // G3: the session's PRESET may pin a model and/or a sampling temperature
-    // for its runs, so a planning run can research on a cheap fast model and a
-    // cold temperature without touching the user's chat model. Snapshotted here
-    // for the same run-scoped reason as the model itself.
-    final runPreset = PresetRegistry.byId(s.presetId);
-    bucket.modelSnapshot = runPreset.model ?? s.model;
-    // FIX 3 (g): the bucket IS the snapshot the accessors read, but at this
-    // instant `_runResolved` may not yet resolve to it (a background run on a
-    // non-active session), so register it under its own key too — the same
-    // `_runFor(s.id)` bucket `effectiveModelForSession` looks up.
-    _runs[s.id] = bucket;
-    bucket.temperatureSnapshot = runPreset.temperature;
-    if (runPreset.model != null || runPreset.temperature != null) {
+    if (ctx.route.temperature != null) {
       _emitToRun(
         bucket,
         'think',
-        'preset "${runPreset.id}" run settings — '
-            '${runPreset.model ?? s.model}'
-            '${runPreset.temperature == null ? '' : ' · temp ${runPreset.temperature}'}',
+        'run settings — ${ctx.route.model} · temp ${ctx.route.temperature}',
         sessionId: s.id,
       );
     }
-    // Snapshot Control mode too: the run-end return to Ovid is owed to
-    // Control work even if the mode flips mid-run.
-    bucket.controlRun = s.mode == AgentMode.control.name;
     // PR32: start the foreground service IMMEDIATELY at run start — the
     // event-driven path (first `think` + 600ms debounce) left a window
     // where the user could background the app before the service ever
     // started, and Android froze the Dart isolate mid-run (the reported
     // "agent stops if I mistakenly open the app again").
     AgentNotificationService.I.agentWorking('starting task…', sessionId: s.id);
-    final ctx = _RunCtx(bucket, s, p, bucket.runEpoch);
-    return runZoned(
-      () => _runTaskBody(prompt, ctx, freshTurn: freshTurn, atts: atts,
-          submittedPrompt: originalPrompt, submittedMessage: attachmentMessage),
-      zoneValues: {_runCtxKey: ctx, #ovidRunKey: s.id},
-    );
+    return _runTaskBody(prompt, ctx, freshTurn: freshTurn, atts: atts,
+        submittedPrompt: originalPrompt, submittedMessage: attachmentMessage);
   }
 
   /// Persona block for the session's preset (empty for standard).
@@ -9899,27 +9997,8 @@ can drive there yourself with the device_* tools):
   }) async {
     final s = ctx.session;
     final p = ctx.provider;
-    final runId = DateTime.now().millisecondsSinceEpoch.toString();
-    if (ctx.run.activeRunId != null) {
-      _emit('think', 'run already active for this session — refusing re-entry');
-      return;
-    }
-    // This generation is live now: bump the run epoch (stale chains from a
-    // previous generation drop their events/tokens instead of rendering
-    // late) and clear the stopped-by-user marker — a new run is fresh user
-    // intent, so later settlement notices treat the parent as alive again.
-    // The cancel flag is likewise owned by the live generation: a Stop
-    // that aborted the OLD run must not keep killing the newly admitted
-    // one (the old run's finally only clears the flag when it still owns
-    // the bucket).
-    ctx.run.stoppedByUser = false;
-    ctx.run.cancelRequested = false;
-    ctx.epoch = ++ctx.run.runEpoch;
-    // This run's bucket state — resolve nothing through the active session.
-    activeRunId = runId;
-    // Own this runId (see [_RunCtx.ownedRunId]): the run-end finally only
-    // clears the bucket while it still carries this id.
-    ctx.ownedRunId = runId;
+    if (_runChainStale || ctx.run.activeRunId != ctx.ownedRunId) return;
+    final runId = ctx.ownedRunId!;
     ctx.run.runKey = s.id;
     // Admit the owner before showing steering: the selected chat may differ.
     // Keep its device generation through the asynchronous return-to-Ovid path.
@@ -10216,6 +10295,7 @@ ${await _agentsMdBlock()}
       // unrecoverable provider error stops the loop.
       var turnsWithoutProgress = 0;
       for (var turn = 0; ; turn++) {
+        if (_runChainStale) break;
         if (_cancelRequested) {
           _emit('done', 'stopped by user');
           break;
@@ -10239,6 +10319,7 @@ ${await _agentsMdBlock()}
         // `planSectionToken` are in scope from the enclosing body. A no-op when
         // no transition landed (`newSys == sys`).
         final newSys = await buildSys();
+        if (_runChainStale) break;
         if (newSys != sys) {
           final sysIdx = msgs.indexWhere(
             (m) => m['role'] == 'system' && m['content'] == sys,
@@ -10290,6 +10371,7 @@ ${await _agentsMdBlock()}
             },
             model: s.model,
           );
+          if (_runChainStale) break;
           // Surface hook systemMessages as system notes on this request.
           for (final sm in hookRes.systemMessages) {
             msgs.insert(0, {'role': 'system', 'content': '[plugin hook]\n$sm'});
@@ -10329,6 +10411,7 @@ ${await _agentsMdBlock()}
           msgs.insert(0, {'role': 'system', 'content': sessionCtx});
         }
         var msg = await _callLlm(p, msgs, s);
+        if (_runChainStale) break;
         // Task 8 (spec §8.1): post_request — observe-only hook after every
         // LLM response (fire-and-forget; output is never injected).
         if (msg != null &&
@@ -10355,6 +10438,7 @@ ${await _agentsMdBlock()}
           if (!overflowRecovered) {
             overflowRecovered = true;
             await forceCompact(s, p);
+            if (_runChainStale) break;
             // PR29: rebuild from the compacted history using the SAME
             // assembly as the initial request (the checkpoint framer checkpoint framing) —
             // genuinely smaller than the rejected request, and the
@@ -10368,6 +10452,7 @@ ${await _agentsMdBlock()}
                   '(${msgs.length} rows)',
             );
             msg = await _callLlm(p, msgs, s);
+            if (_runChainStale) break;
           }
           if (msg == null) {
             _emit(
@@ -10528,6 +10613,7 @@ ${await _agentsMdBlock()}
             // retry, so it can never sit beside the retry's fresh answer.
             _discardLiveAttempt(s);
             await Future.delayed(wait);
+            if (_runChainStale) break;
             // Un-cancel any accidental flag? No — user cancel is sacred.
             continue;
           }
@@ -10562,11 +10648,9 @@ ${await _agentsMdBlock()}
 
         final toolCalls = msg['tool_calls'] as List?;
         if (toolCalls == null || toolCalls.isEmpty) {
-          // FINAL answer — already streamed to the bubble live.  But if the
-          // user queued messages mid-run (opencode behavior), fold them in
-          // here so the model answers them in the NEXT request of THIS run
-          // instead of the user waiting for a whole new run to spin up.
-          if (_queue.isNotEmpty) {
+          // Explicit steering/internal notices join the next request of this
+          // run. Ordinary queued messages get a new admission after settlement.
+          if (_hasInRunQueueMessages) {
             msgs.add({'role': 'assistant', 'content': msg['content'] ?? ''});
             _finalizeLive();
             await _drainQueueIntoMsgs(
@@ -10855,12 +10939,17 @@ ${await _agentsMdBlock()}
         }
         _appendPendingVisionMessages(msgs);
       }
-      _finalizeLive();
+      if (!_runChainStale) _finalizeLive();
     } catch (e) {
+      if (_runChainStale) return;
       lastError = '$e';
       _emit('err', '$e');
       _appendAssistant('Agent error: $e', session: s);
     } finally {
+      Future<void> settleRun() async {
+      // A replacement (even one already finished) owns the bucket's final
+      // bookkeeping. Stop without replacement still lands pending plan mode.
+      if (ctx.epoch != ctx.run.runEpoch && !ctx.run.stoppedByUser) return;
       // Stop/output ownership: only the run that still OWNS the bucket may
       // clear it. An old run unwinding after a Stop+queue promotion (the
       // promoted run already admitted and streaming) must NOT null out
@@ -10885,6 +10974,7 @@ ${await _agentsMdBlock()}
         // turn boundary, so re-derive `sys` and refresh the snapshot — else the
         // transcript would record a briefing the run had already outgrown.
         sys = await buildSys();
+        if (ctx.epoch != ctx.run.runEpoch && !ctx.run.stoppedByUser) return;
         s.systemPromptSnapshot = volatileCtx.trim().isEmpty
             ? sys
             : '$sys\n\n$volatileCtx';
@@ -10984,6 +11074,8 @@ ${await _agentsMdBlock()}
       // next message (idempotent, so this is a no-op then); on a normal
       // completion this starts it now. Either way the queue can never stall.
       _scheduleQueuedContinuation(pinnedSessionId);
+      }
+      await settleRun();
     }
   }
 
@@ -11166,7 +11258,7 @@ ${await _agentsMdBlock()}
     Map<String, dynamic> args,
   ) async {
     final session = _runSession ?? AppState.I.activeSession;
-    final p = AppState.I.providerForSession(session);
+    final p = _runCtx?.provider ?? AppState.I.providerForSession(session);
     if (session == null || p == null || !p.isConfigured) {
       return 'No provider configured for this session.';
     }
@@ -11185,7 +11277,7 @@ ${await _agentsMdBlock()}
     ];
     final override = promptLlmForTest;
     final r = override != null
-        ? await override(p, msgs, session)
+        ? _normalizePromptFixture(await override(p, msgs, session))
         : await _callLlm(
             p,
             msgs,
@@ -11197,11 +11289,26 @@ ${await _agentsMdBlock()}
     if (r == null) {
       return 'Model call failed: ${lastError ?? 'unknown'}.';
     }
-    final choices = (r['choices'] as List?)?.whereType<Map>().toList() ?? [];
-    final raw = choices.isEmpty ? null : choices.first['message']?['content'];
-    final text = (raw as String? ?? '').trim();
+    final text = (r['content'] as String? ?? '').trim();
     if (text.isEmpty) return 'The model returned no text.';
     return text;
+  }
+
+  // Older test callers supplied wire envelopes. Keep that seam compatible;
+  // production transports already return normalized assistant messages.
+  Map<String, dynamic>? _normalizePromptFixture(Map<String, dynamic>? r) {
+    if (r == null || r.containsKey('content')) return r;
+    final choices = r['choices'] as List?;
+    return {...r, 'content': choices?.firstOrNull?['message']?['content']};
+  }
+
+  _RequestRoute _requestRoute(ProviderConfig p, ChatSession session) {
+    final ctx = _runCtx;
+    if (ctx != null && identical(ctx.session, session) &&
+        ctx.route.providerId == p.id) {
+      return ctx.route;
+    }
+    return _RequestRoute(p, session.model);
   }
 
   /// Multi-model fan-out for the `FANOUT:` envelope (NP5 Task 3).
@@ -11241,34 +11348,54 @@ ${await _agentsMdBlock()}
           '(got ${requested.length}).';
     }
 
-    final targets = <({String label, ProviderConfig provider})>[];
+    final targets = <({String label, _RequestRoute route})>[];
     final shortfall = <String>[];
     if (requested.isEmpty) {
-      targets.add((label: sessionProvider.id, provider: sessionProvider));
+      targets.add((label: sessionProvider.id,
+          route: _requestRoute(sessionProvider, session)));
       for (final recent in AppState.I.recentModels) {
         if (targets.length >= 3) break;
         if (recent.providerId == sessionProvider.id) continue;
-        if (targets.any((t) => t.provider.id == recent.providerId)) continue;
+        if (targets.any((t) => t.route.providerId == recent.providerId)) continue;
         final rp = AppState.I.providerById(recent.providerId);
         if (rp == null || !rp.isConfigured) continue;
-        targets.add((label: rp.id, provider: rp));
+        targets.add((label: rp.id, route: _RequestRoute(rp, recent.model)));
       }
     } else {
       for (final id in requested) {
-        final direct = AppState.I.providerById(id);
-        if (direct != null && direct.isConfigured) {
-          targets.add((label: id, provider: direct));
+        // A qualified target preserves provider identity even when several
+        // providers advertise the same bare model ID.
+        final separator = id.indexOf('::');
+        if (separator > 0) {
+          final providerId = id.substring(0, separator);
+          final model = id.substring(separator + 2).trim();
+          final target = AppState.I.providerById(providerId);
+          if (target != null && target.isConfigured && model.isNotEmpty &&
+              target.models.contains(model)) {
+            targets.add((label: id, route: _RequestRoute(target, model)));
+          } else {
+            shortfall.add(id);
+          }
           continue;
         }
-        ProviderConfig? match;
-        for (final prov in AppState.I.providers) {
-          if (prov.isConfigured && prov.models.contains(id)) {
-            match = prov;
-            break;
+        final direct = AppState.I.providerById(id);
+        if (direct != null && direct.isConfigured) {
+          final model = direct.id == sessionProvider.id
+              ? _requestRoute(sessionProvider, session).model
+              : direct.selectedModel ?? direct.models.firstOrNull ?? '';
+          if (model.isEmpty) {
+            shortfall.add(id);
+          } else {
+            targets.add((label: id, route: _RequestRoute(direct, model)));
           }
+          continue;
         }
-        if (match != null) {
-          targets.add((label: id, provider: match));
+        final matches = AppState.I.providers.where(
+            (prov) => prov.isConfigured && prov.models.contains(id)).toList();
+        if (matches.length == 1) {
+          targets.add((label: id, route: _RequestRoute(matches.single, id)));
+        } else if (matches.length > 1) {
+          shortfall.add('$id (ambiguous model; use provider-id::model-id)');
         } else {
           shortfall.add(id);
         }
@@ -11276,7 +11403,8 @@ ${await _agentsMdBlock()}
     }
 
     final override = promptLlmForTest;
-    Future<String> answerFor(ProviderConfig target, String label) async {
+    Future<String> answerFor(_RequestRoute route, String label) async {
+      final target = route.providerCopy();
       final subMsgs = [
         {'role': 'system', 'content': cap.taskSystemPrompt},
         {'role': 'user', 'content': prompt},
@@ -11284,7 +11412,7 @@ ${await _agentsMdBlock()}
       Map<String, dynamic>? r;
       try {
         r = override != null
-            ? await override(target, subMsgs, session)
+            ? _normalizePromptFixture(await override(target, subMsgs, session))
             : await _callLlm(
                 target,
                 subMsgs,
@@ -11293,6 +11421,7 @@ ${await _agentsMdBlock()}
                 // Invisible helper call — must never stream into the
                 // transcript.
                 streamToTranscript: false,
+                route: route,
               );
       } catch (e) {
         return '## $label\nModel call failed: $e.';
@@ -11300,16 +11429,18 @@ ${await _agentsMdBlock()}
       if (r == null) {
         return '## $label\nModel call failed: ${lastError ?? 'unknown'}.';
       }
-      final choices = (r['choices'] as List?)?.whereType<Map>().toList() ?? [];
-      final raw = choices.isEmpty ? null : choices.first['message']?['content'];
-      final text = (raw as String? ?? '').trim();
+      final text = (r['content'] as String? ?? '').trim();
       if (text.isEmpty) return '## $label\nThe model returned no text.';
       return '## $label\n$text';
     }
 
     final sections = <String>[];
     for (final t in targets) {
-      sections.add(await answerFor(t.provider, t.label));
+      if (_cancelRequested) {
+        sections.add('## ${t.label}\nModel call cancelled.');
+        break;
+      }
+      sections.add(await answerFor(t.route, t.label));
     }
     for (final miss in shortfall) {
       sections.add('## $miss\nNo configured provider found for "$miss".');
@@ -11563,21 +11694,27 @@ ${await _agentsMdBlock()}
     // bubble is created, so a helper call can never leave a stray bubble
     // under the real answer.
     bool streamToTranscript = true,
+    _RequestRoute? route,
   }) async {
+    route ??= _requestRoute(p, session);
+    p = route.providerCopy();
+    final owner = _TransportOwner(_runResolved, _runCtx?.epoch ?? _runResolved.runEpoch);
     var lastErr = 'unknown';
     for (var attempt = 0; attempt <= 4; attempt++) {
-      if (_cancelRequested) return null;
+      if (!owner.current) return null;
       // A failed attempt may have streamed a partial answer into the live
       // bubble. Discard it before retrying so the next attempt's text is
       // never appended to the failed attempt's leftovers.
-      if (attempt > 0) _discardLiveAttempt(session);
+      if (attempt > 0 && streamToTranscript) _discardLiveAttempt(session);
       final r = await _callLlmOnce(
         p,
         msgs,
         session,
         includeTools: includeTools,
         streamToTranscript: streamToTranscript,
+        route: route,
       );
+      if (!owner.current) return null;
       if (r != null) {
         // Surface recovery so a slow turn reads as "retried and recovered"
         // instead of an unexplained hang.
@@ -11607,6 +11744,7 @@ ${await _agentsMdBlock()}
               '(attempt ${attempt + 2}/5, ~${kb}KB request)…',
         );
         await Future.delayed(wait);
+        if (!owner.current) return null;
       }
     }
     lastError = lastErr;
@@ -11623,7 +11761,12 @@ ${await _agentsMdBlock()}
     // field, the first attempt retries with it dropped (tools intact).
     // True only on that single retry — never set by callers.
     bool dropReasoningEffort = false,
+    _RequestRoute? route,
   }) async {
+    final owner = _TransportOwner(_runResolved, _runCtx?.epoch ?? _runResolved.runEpoch);
+    if (!owner.current) return null;
+    route ??= _requestRoute(p, session);
+    p = route.providerCopy();
     final onceOverride = llmOnceForTest;
     // Every attempt owns its failure. A previous timeout must never become
     // the diagnosis for a later, successfully closed but empty response.
@@ -11641,6 +11784,7 @@ ${await _agentsMdBlock()}
         session,
         includeTools: includeTools,
         streamToTranscript: streamToTranscript,
+        route: route,
       );
     }
     HttpClient? client;
@@ -11649,20 +11793,14 @@ ${await _agentsMdBlock()}
     try {
       client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 20);
-      _runResolved.activeClient = client;
+      if (!owner.registerClient(client)) return null;
       final req = await client
           .postUrl(_endpoint(p))
           .timeout(
             const Duration(seconds: 20),
             onTimeout: () => throw Exception('connect timeout'),
           );
-      _activeRequest = req;
-      if (_cancelRequested) {
-        client.close(force: true);
-        _runResolved.activeClient = null;
-        _activeRequest = null;
-        return null;
-      }
+      if (!owner.registerRequest(req)) return null;
       final key = p.cleanApiKey;
       if (key.isNotEmpty) {
         req.headers.set('Authorization', 'Bearer $key');
@@ -11677,7 +11815,7 @@ ${await _agentsMdBlock()}
       // to the live session model only for runs started before the field
       // existed. Never the shared provider.selectedModel (parallel
       // sessions on the same provider used to cross-wire their models).
-      final raw = _runResolved.modelSnapshot ?? session.model;
+      final raw = route.model;
       final effMatch = RegExp(
         r'·\s*(low|medium|high)$',
         caseSensitive: false,
@@ -11702,7 +11840,7 @@ ${await _agentsMdBlock()}
         body['reasoning_effort'] = effort;
       }
       // G3: a preset may pin a sampling temperature for its runs.
-      final presetTemp = _runResolved.temperatureSnapshot;
+      final presetTemp = route.temperature;
       if (presetTemp != null) body['temperature'] = presetTemp;
       // User-set output cap (Settings → Context & output); 0 = let the
       // provider default decide — never a synthetic default injected.
@@ -11730,13 +11868,16 @@ ${await _agentsMdBlock()}
           throw TimeoutException(lastError ?? 'first-byte timeout');
         },
       );
+      if (!owner.current) return null;
       if (res.statusCode != 200) {
         final data = <int>[];
         await for (final c in res) {
+          if (!owner.current) return null;
           data.addAll(c);
           if (data.length > 65536) break; // bounded error read
         }
         final txt = utf8.decode(data, allowMalformed: true);
+        if (!owner.current) return null;
         client.close(force: true);
         // ── Issue 8: reasoning_effort rejections are NOT tool rejections ──
         // A model label like "deepseek-v4.1-flash · High" injects
@@ -11766,6 +11907,7 @@ ${await _agentsMdBlock()}
             includeTools: includeTools,
             streamToTranscript: streamToTranscript,
             dropReasoningEffort: true,
+            route: route,
           );
         }
         // ── Auto-fallback for providers that reject tool schemas ──
@@ -11800,7 +11942,8 @@ ${await _agentsMdBlock()}
             '(e.g. DeepSeek, GPT-4o, Claude, Gemini) to use them.',
             session: session,
           );
-          return await _callLlm(p, msgs, session, includeTools: false);
+          return await _callLlm(p, msgs, session, includeTools: false,
+              streamToTranscript: streamToTranscript, route: route);
         }
         lastError = ModelFailure.httpError(res.statusCode, p.name, modelId, txt);
         _emit(
@@ -11835,9 +11978,7 @@ ${await _agentsMdBlock()}
         if (payload == '[DONE]') break;
         // Per-chunk cancel check — stop button kills the stream mid-flight,
         // not just between turns.  Keeps whatever streamed so far.
-        if (_cancelRequested) {
-          break;
-        }
+        if (!owner.current) return null;
 
         Map<String, dynamic>? j;
         try {
@@ -11904,9 +12045,8 @@ ${await _agentsMdBlock()}
         }
       }
 
+      if (!owner.current) return null;
       client.close();
-      client = null;
-      _activeRequest = null;
 
       if (contentBuf.isEmpty && reasoningBuf.isEmpty && tcAcc.isEmpty) {
         lastError = malformedChunks > 0
@@ -11931,15 +12071,14 @@ ${await _agentsMdBlock()}
     } catch (e) {
       // A user-initiated cancel aborts the request — surface it as stopped,
       // not as an error.
-      if (_cancelRequested) {
+      if (!owner.current) {
         return null;
       }
       lastError = 'stream error: $e';
       _emit('err', lastError!);
       return null;
     } finally {
-      _activeRequest = null;
-      _runResolved.activeClient = null;
+      owner.release();
       client?.close(force: true);
     }
   }
@@ -12224,34 +12363,31 @@ ${await _agentsMdBlock()}
     bool includeTools = true,
     // See [_callLlm]: false keeps helper calls out of the transcript.
     bool streamToTranscript = true,
+    required _RequestRoute route,
   }) async {
+    final owner = _TransportOwner(_runResolved, _runCtx?.epoch ?? _runResolved.runEpoch);
+    if (!owner.current) return null;
     HttpClient? client;
     final ttftWatch = Stopwatch()..start();
     int? ttftMs;
     try {
       client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 20);
-      _runResolved.activeClient = client;
+      if (!owner.registerClient(client)) return null;
       final req = await client
           .postUrl(_anthropicEndpoint(p))
           .timeout(
             const Duration(seconds: 20),
             onTimeout: () => throw Exception('connect timeout'),
           );
-      _activeRequest = req;
-      if (_cancelRequested) {
-        client.close(force: true);
-        _runResolved.activeClient = null;
-        _activeRequest = null;
-        return null;
-      }
+      if (!owner.registerRequest(req)) return null;
       final key = p.cleanApiKey;
       if (key.isNotEmpty) req.headers.set('x-api-key', key);
       req.headers.set('anthropic-version', '2023-06-01');
       req.headers.set('Content-Type', 'application/json');
       req.headers.set('Accept', 'text/event-stream');
 
-      final raw = _runResolved.modelSnapshot ?? session.model;
+      final raw = route.model;
       final effMatch = RegExp(
         r'·\s*(low|medium|high)$',
         caseSensitive: false,
@@ -12281,7 +12417,7 @@ ${await _agentsMdBlock()}
       }
       // G3: a preset-pinned temperature. Skipped when extended thinking is on —
       // the Anthropic API rejects `temperature` alongside a thinking budget.
-      final presetTemp = _runResolved.temperatureSnapshot;
+      final presetTemp = route.temperature;
       if (presetTemp != null && effort != 'high') {
         body['temperature'] = presetTemp;
       }
@@ -12300,13 +12436,16 @@ ${await _agentsMdBlock()}
           throw TimeoutException(lastError ?? 'first-byte timeout');
         },
       );
+      if (!owner.current) return null;
       if (res.statusCode != 200) {
         final data = <int>[];
         await for (final c in res) {
+          if (!owner.current) return null;
           data.addAll(c);
           if (data.length > 65536) break;
         }
         final txt = utf8.decode(data, allowMalformed: true);
+        if (!owner.current) return null;
         client.close(force: true);
         lastError = ModelFailure.httpError(res.statusCode, p.name, modelId, txt);
         _emit(
@@ -12340,7 +12479,7 @@ ${await _agentsMdBlock()}
         if (line.isEmpty || !line.startsWith('data:')) continue;
         final payload = line.substring(5).trim();
         if (payload.isEmpty || payload == '[DONE]') continue;
-        if (_cancelRequested) break;
+        if (!owner.current) return null;
 
         Map<String, dynamic>? j;
         try {
@@ -12422,9 +12561,8 @@ ${await _agentsMdBlock()}
         }
       }
 
+      if (!owner.current) return null;
       client.close();
-      client = null;
-      _activeRequest = null;
 
       if (contentBuf.isEmpty && reasoningBuf.isEmpty && toolBlocks.isEmpty) {
         lastError = malformedChunks > 0
@@ -12447,13 +12585,12 @@ ${await _agentsMdBlock()}
         'ttftMs': ?ttftMs,
       };
     } catch (e) {
-      if (_cancelRequested) return null;
+      if (!owner.current) return null;
       lastError = 'stream error: $e';
       _emit('err', lastError!);
       return null;
     } finally {
-      _activeRequest = null;
-      _runResolved.activeClient = null;
+      owner.release();
       client?.close(force: true);
     }
   }
@@ -13253,6 +13390,9 @@ ${await _agentsMdBlock()}
       case 'run_code':
         final code = args['code'] as String;
         final lang = args['lang'] as String? ?? 'python';
+        if (lang != 'python' && lang != 'javascript') {
+          return 'Unsupported language: $lang. Use python or javascript.';
+        }
         // Strict permission model: absolute paths referenced by the code
         // that fall outside the session workspace need a grant — one
         // combined approval card, pre-execution.
@@ -13270,7 +13410,7 @@ ${await _agentsMdBlock()}
           final out = await SandboxService.I
               .exec([
                 lang == 'python' ? 'python3' : 'node',
-                '-e',
+                lang == 'python' ? '-c' : '-e',
                 code,
               ], hostWorkDir: work)
               .timeout(const Duration(seconds: 60));
@@ -14347,14 +14487,16 @@ ${await _agentsMdBlock()}
             : '''
 (() => {
   const el = document.querySelector(${jsonEncode(target)});
-  if (!el) return 'no element: $target';
+  if (!el) return ${jsonEncode('no element: $target')};
   el.scrollIntoView({block:'center', behavior:'instant'});
-  el.scrollBy({top:${dir == 'up'
-                  ? '-$amount'
-                  : dir == 'down'
-                  ? '$amount'
-                  : '0'}, behavior:'smooth'});
-  return 'scrolled element $target $dir';
+  ${switch (dir) {
+                  'up' => 'el.scrollBy({top:-$amount,behavior:"smooth"});',
+                  'down' => 'el.scrollBy({top:$amount,behavior:"smooth"});',
+                  'top' => 'el.scrollTo({top:0,behavior:"smooth"});',
+                  'bottom' => 'el.scrollTo({top:el.scrollHeight,behavior:"smooth"});',
+                  _ => 'return "unknown direction";',
+                }}
+  return ${jsonEncode('scrolled element $target $dir')};
 })()''';
         try {
           final r = await tab.controller!.runJavaScriptReturningResult(js);
@@ -14374,7 +14516,7 @@ ${await _agentsMdBlock()}
             '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
-  if (!el) return 'no element: $sel';
+  if (!el) return ${jsonEncode('no element: $sel')};
   el.focus();
   el.value = ${jsonEncode(text)};
   el.dispatchEvent(new Event('input', {bubbles:true}));
@@ -14386,7 +14528,7 @@ ${await _agentsMdBlock()}
     el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
     el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
   }''' : ''}
-  return 'typed ${text.length} chars into $sel';
+  return ${jsonEncode('typed ${text.length} chars into $sel')};
 })()''';
         try {
           final r = await tab.controller!.runJavaScriptReturningResult(js);
@@ -14512,7 +14654,7 @@ ${await _agentsMdBlock()}
             '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
-  if (!el) return 'no element: $sel';
+  if (!el) return ${jsonEncode('no element: $sel')};
   el.scrollIntoView({block:'center', behavior:'instant'});
   const r = el.getBoundingClientRect();
   const x = r.x + r.width/2, y = r.y + r.height/2;
@@ -14521,7 +14663,7 @@ ${await _agentsMdBlock()}
   el.dispatchEvent(new MouseEvent('mouseover', opts));
   el.dispatchEvent(new MouseEvent('mouseenter', {...opts, bubbles:false}));
   el.dispatchEvent(new MouseEvent('mousemove', opts));
-  return 'hovered $sel at \${Math.round(x)},\${Math.round(y)}';
+  return ${jsonEncode('hovered $sel at ')} + Math.round(x) + ',' + Math.round(y);
 })()''';
         try {
           final r = await tab.controller!.runJavaScriptReturningResult(js);
@@ -14542,8 +14684,8 @@ ${await _agentsMdBlock()}
 (() => {
   const from = document.querySelector(${jsonEncode(fromSel)});
   const to = document.querySelector(${jsonEncode(toSel)});
-  if (!from) return 'no source: $fromSel';
-  if (!to) return 'no target: $toSel';
+  if (!from) return ${jsonEncode('no source: $fromSel')};
+  if (!to) return ${jsonEncode('no target: $toSel')};
   from.scrollIntoView({block:'center', behavior:'instant'});
   const fr = from.getBoundingClientRect();
   const tr = to.getBoundingClientRect();
@@ -14571,7 +14713,7 @@ ${await _agentsMdBlock()}
   to.dispatchEvent(new DragEvent('dragover', {bubbles:true, dataTransfer:dt}));
   to.dispatchEvent(new DragEvent('drop', {bubbles:true, dataTransfer:dt}));
   from.dispatchEvent(new DragEvent('dragend', {bubbles:true, dataTransfer:dt}));
-  return 'dragged $fromSel → $toSel';
+  return ${jsonEncode('dragged $fromSel → $toSel')};
 })()''';
         try {
           final r = await tab.controller!.runJavaScriptReturningResult(js);
@@ -14595,7 +14737,7 @@ ${await _agentsMdBlock()}
         final dcJs = '''
 (() => {
   const el = document.querySelector(${jsonEncode(dcSel)});
-  if (!el) return 'no element: $dcSel';
+  if (!el) return ${jsonEncode('no element: $dcSel')};
   el.scrollIntoView({block:'center', behavior:'instant'});
   const r = el.getBoundingClientRect();
   const x = r.x + r.width/2, y = r.y + r.height/2;
@@ -14612,7 +14754,7 @@ ${await _agentsMdBlock()}
     el.dispatchEvent(new MouseEvent('click', o));
     if (i === 2) el.dispatchEvent(new MouseEvent('dblclick', o));
   }
-  return (N === 2 ? 'double' : 'triple') + '-clicked $dcSel at ' +
+  return (N === 2 ? 'double' : 'triple') + ${jsonEncode('-clicked $dcSel at ')} +
     Math.round(x) + ',' + Math.round(y);
 })()''';
         try {
@@ -14785,13 +14927,13 @@ ${await _agentsMdBlock()}
             '''
 (() => {
   const el = document.querySelector(${jsonEncode(sel)});
-  if (!el) return 'no element: $sel';
-  if (el.tagName.toLowerCase() !== 'select') return 'not a <select>: $sel';
+  if (!el) return ${jsonEncode('no element: $sel')};
+  if (el.tagName.toLowerCase() !== 'select') return ${jsonEncode('not a <select>: $sel')};
   el.scrollIntoView({block:'center', behavior:'instant'});
   el.value = ${jsonEncode(value)};
   el.dispatchEvent(new Event('input', {bubbles:true}));
   el.dispatchEvent(new Event('change', {bubbles:true}));
-  return 'selected \${el.value} in $sel';
+  return 'selected ' + el.value + ${jsonEncode(' in $sel')};
 })()''';
         try {
           final r = await tab.controller!.runJavaScriptReturningResult(js);
@@ -14833,9 +14975,10 @@ ${await _agentsMdBlock()}
         }
 
       case 'browser_find':
+        final text = args['text'] as String;
+        if (text.isEmpty) return 'browser_find requires non-empty text.';
         final tab = _activeTab;
         tab.controller ??= controllerForTab(tab);
-        final text = args['text'] as String;
         final js =
             '''
 (() => {

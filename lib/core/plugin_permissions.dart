@@ -326,6 +326,44 @@ class PluginPermissionStore {
   /// null while idle, so no cross-operation future is retained.
   static Future<void>? _writeLock;
 
+  // Shared across short-lived stores, tied to the preferences instance so a
+  // fresh preferences lifecycle hydrates once. Neither Dart's optimistic cache
+  // nor Android getAll() proves a commit: Android mutates memory before disk.
+  static final _confirmed = Expando<Map<String, String>>();
+  static final _revoked = Expando<Map<String, Object>>();
+
+  Map<String, Object> _tombstones(SharedPreferences prefs) =>
+      _revoked[prefs] ??= {};
+
+  Map<String, String> _confirmedMap(SharedPreferences prefs) {
+    final map = _confirmed[prefs] ??= _readMap(prefs);
+    map.removeWhere((id, _) => _tombstones(prefs).containsKey(id));
+    return map;
+  }
+
+  Future<void> _commitMap(
+    SharedPreferences prefs,
+    Map<String, String> next,
+  ) async {
+    final previous = _confirmedMap(prefs);
+    try {
+      if (!await prefs.setString(kPluginGrantsPrefKey, jsonEncode(next))) {
+        throw StateError('Could not persist plugin permission grant');
+      }
+      _confirmed[prefs] = next;
+    } catch (_) {
+      // Restore both caches even if disk is still failing. Never promote the
+      // attempted snapshot based on reload, or merge it into a later write.
+      // The confirmed snapshot remains authoritative if restoration also fails.
+      try {
+        await prefs.setString(kPluginGrantsPrefKey, jsonEncode(previous));
+      } catch (error) {
+        Diag.swallow('plugin_permissions.restore', error);
+      }
+      rethrow;
+    }
+  }
+
   static Future<void> _withWriteLock(Future<void> Function() action) async {
     while (_writeLock != null) {
       await _writeLock;
@@ -345,12 +383,8 @@ class PluginPermissionStore {
   Future<PluginPermissionGrant?> load(String pluginId, String digest) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(kPluginGrantsPrefKey);
-      if (raw == null || raw.isEmpty) return null;
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return null;
-      final entry = decoded[pluginId];
-      if (entry is! String) return null;
+      final entry = _confirmedMap(prefs)[pluginId];
+      if (entry == null) return null;
       final grant = PluginPermissionGrant.fromJson(
         jsonDecode(entry) as Map<String, dynamic>,
       );
@@ -371,7 +405,7 @@ class PluginPermissionStore {
   Future<PluginPermissionGrant?> loadAny(String pluginId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final entry = _readMap(prefs)[pluginId];
+      final entry = _confirmedMap(prefs)[pluginId];
       if (entry == null) return null;
       return PluginPermissionGrant.fromJson(
         jsonDecode(entry) as Map<String, dynamic>,
@@ -473,14 +507,17 @@ class PluginPermissionStore {
   }
 
   /// Persists [grant] (replacing any previous record for its plugin id).
-  Future<void> save(PluginPermissionGrant grant) {
+  Future<void> save(PluginPermissionGrant grant) async {
+    final prefs = await SharedPreferences.getInstance();
+    final revokedAtStart = _tombstones(prefs)[grant.pluginId];
     return _withWriteLock(() async {
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        final map = _readMap(prefs);
-        map[grant.pluginId] = jsonEncode(grant.toJson());
-        await prefs.setString(kPluginGrantsPrefKey, jsonEncode(map));
-      } catch (e) { Diag.swallow('plugin_permissions', e); }
+      final map = Map<String, String>.of(_confirmedMap(prefs));
+      map[grant.pluginId] = jsonEncode(grant.toJson());
+      await _commitMap(prefs, map);
+      // Only an explicit approval begun after the revoke may lift its denial.
+      if (identical(_tombstones(prefs)[grant.pluginId], revokedAtStart)) {
+        _tombstones(prefs).remove(grant.pluginId);
+      }
     });
   }
 
@@ -489,23 +526,35 @@ class PluginPermissionStore {
   /// immediately disables affected contributions (spec §5.1) — the
   /// runtime reacts to the missing grant; sibling plugins' secrets are
   /// untouched.
-  Future<void> revoke(String pluginId) {
+  Future<void> revoke(String pluginId) async {
+    final prefs = await SharedPreferences.getInstance();
+    _tombstones(prefs)[pluginId] = Object();
+    _confirmedMap(prefs); // deny before waiting for any pending write
     return _withWriteLock(() async {
+      Object? persistenceError;
+      StackTrace? persistenceStack;
       try {
-        final prefs = await SharedPreferences.getInstance();
-        final map = _readMap(prefs);
+        final map = Map<String, String>.of(_confirmedMap(prefs));
         map.remove(pluginId);
-        await prefs.setString(kPluginGrantsPrefKey, jsonEncode(map));
-      } catch (e) { Diag.swallow('plugin_permissions', e); }
+        await _commitMap(prefs, map);
+      } catch (error, stack) {
+        persistenceError = error;
+        persistenceStack = stack;
+      }
       try {
         final owned = await _secureStorage.readAll();
         final prefix = '$_kPluginSecretPrefix$pluginId/';
-        for (final key in owned.keys) {
+        for (final key in owned.keys.toList()) {
           if (key.startsWith(prefix)) {
             await _secureStorage.delete(key: key);
           }
         }
-      } catch (e) { Diag.swallow('plugin_permissions', e); }
+      } catch (e) {
+        Diag.swallow('plugin_permissions', e);
+      }
+      if (persistenceError != null) {
+        Error.throwWithStackTrace(persistenceError, persistenceStack!);
+      }
     });
   }
 

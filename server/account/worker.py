@@ -8,7 +8,7 @@ def sweep(service):
     failed = 0
     for uid in service.store.due(service.clock()):
         try:
-            service.finalize(uid)
+            service.finalize(uid, scheduled=True)
         except Exception:
             # No UID/token/credential/SQL exception contents in worker logs.
             logging.error('Account cleanup failed; durable record will be retried')

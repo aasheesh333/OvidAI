@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../core/firebase_service.dart';
+import '../core/cloud_usage_store.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import 'cloud_usage_status.dart';
 
 /// Billing / Plan screen — opencode/ChatGPT-style.
 ///
@@ -46,22 +48,20 @@ const _plans = <_PlanOption>[
 ];
 
 class _BillingScreenState extends State<BillingScreen> {
-  OvidUsage? _usage;
-  bool _loading = true;
+  late final CloudUsageStore _store;
+  OvidUsage? get _usage => _store.usage;
+  bool get _loading => _store.loading && _usage == null;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _store = CloudUsageStore.acquire(AppState.I);
   }
 
-  Future<void> _load() async {
-    final u = await OvidCloudService.I.fetchUsage();
-    if (!mounted) return;
-    setState(() {
-      _usage = u;
-      _loading = false;
-    });
+  @override
+  void dispose() {
+    _store.release();
+    super.dispose();
   }
 
   @override
@@ -74,10 +74,10 @@ class _BillingScreenState extends State<BillingScreen> {
         title: const Text('Plan & Billing'),
       ),
       body: AnimatedBuilder(
-        animation: Listenable.merge([app, FirebaseService.I]),
+        animation: Listenable.merge([app, FirebaseService.I, _store]),
         builder: (_, _) {
-          final tier = _usage?.tier ?? app.ovidCloudTier;
-          final isPaid = _usage?.isPaid ?? app.ovidCloudIsPaid;
+          final tier = _usage?.tier ?? OvidCloudService.I.confirmedTier ?? '';
+          final isPaid = _usage?.isPaid ?? (tier.isNotEmpty && tier != 'free');
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
             children: [
@@ -149,7 +149,7 @@ class _BillingScreenState extends State<BillingScreen> {
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Text(
-                  plan.title.toUpperCase(),
+                  tier.isEmpty ? 'UNKNOWN' : plan.title.toUpperCase(),
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -162,7 +162,7 @@ class _BillingScreenState extends State<BillingScreen> {
           ),
           const SizedBox(height: 10),
           Text(
-            plan.title,
+            tier.isEmpty ? 'Plan unavailable' : plan.title,
             style: TextStyle(
               fontSize: 22,
               fontWeight: FontWeight.w700,
@@ -171,7 +171,9 @@ class _BillingScreenState extends State<BillingScreen> {
           ),
           const SizedBox(height: 4),
           Text(
-            plan.blurb,
+            tier.isEmpty
+                ? 'Refresh to verify this account’s cloud plan.'
+                : plan.blurb,
             style: TextStyle(
               fontSize: 12.5,
               height: 1.4,
@@ -189,6 +191,7 @@ class _BillingScreenState extends State<BillingScreen> {
             const SizedBox(height: 16),
             _usageBar(_usage),
           ],
+          CloudUsageStatus(store: _store),
         ],
       ),
     );
@@ -311,18 +314,7 @@ class _BillingScreenState extends State<BillingScreen> {
                   ),
                 )
               else if (p.tier != 'free')
-                _UpgradeButton(
-                  plan: p,
-                  onUpgraded: () async {
-                    // Drop the old snapshot immediately; it describes the old
-                    // plan and must not override the confirmed server tier.
-                    setState(() {
-                      _usage = null;
-                      _loading = true;
-                    });
-                    await _load();
-                  },
-                ),
+                _UpgradeButton(plan: p),
             ],
           ),
         ],
@@ -332,9 +324,8 @@ class _BillingScreenState extends State<BillingScreen> {
 }
 
 class _UpgradeButton extends StatefulWidget {
-  const _UpgradeButton({required this.plan, required this.onUpgraded});
+  const _UpgradeButton({required this.plan});
   final _PlanOption plan;
-  final Future<void> Function() onUpgraded;
 
   @override
   State<_UpgradeButton> createState() => _UpgradeButtonState();
@@ -360,7 +351,6 @@ class _UpgradeButtonState extends State<_UpgradeButton> {
         ),
       ),
     );
-    if (newTier == widget.plan.tier) await widget.onUpgraded();
   }
 
   @override

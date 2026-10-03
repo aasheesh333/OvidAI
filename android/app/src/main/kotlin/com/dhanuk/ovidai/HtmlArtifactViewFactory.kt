@@ -14,6 +14,7 @@ import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -49,21 +50,36 @@ internal class HtmlArtifactPlatformView(context: Context, document: String?, pri
     private var webView: WebView? = null
     private var profileName: String? = null
     private var networkGuard: ScriptHandler? = null
+    private var pendingDocument = document
+    private var started = false
+    private var disposed = false
+    private var failure: Map<String, Any>? = null
+    private var bootstrap: HtmlArtifactPolicy.Bootstrap? = null
 
     init {
         // Flutter-host-only lifecycle control; never injected into JavaScript.
-        // No load/evaluate/permission methods are exposed by this channel.
+        // startDocument starts only the immutable creation parameter, once.
+        // Subscription precedes startup, so synchronous failure cannot be lost.
         lifecycle?.setMethodCallHandler { call, result ->
-            if (call.method == "disposeDocument") {
-                disposeWebView()
-                result.success(null)
-            } else result.notImplemented()
+            when (call.method) {
+                "startDocument" -> { startDocument(); result.success(failure) }
+                "disposeDocument" -> { disposeDocument(); result.success(null) }
+                else -> result.notImplemented()
+            }
         }
+        if (lifecycle == null) startDocument()
+    }
+
+    private fun startDocument() {
+        if (started || disposed) return
+        started = true
+        val document = pendingDocument
+        pendingDocument = null
         if (document == null) {
-            fallback("Artifact preview unavailable: invalid document.")
+            fail(mapOf("code" to "invalid_document"))
         } else {
             try {
-                val view = WebView(context)
+                val view = WebView(root.context)
                 webView = view
                 // WebRTC can use sockets outside CSP's connect-src. Install a
                 // non-replaceable guard in EVERY frame before any page script.
@@ -83,19 +99,33 @@ internal class HtmlArtifactPlatformView(context: Context, document: String?, pri
                         });
                     }
                 """.trimIndent(), setOf("*"))
-                configure(view)
-                root.addView(view, FrameLayout.LayoutParams(-1, -1))
                 // loadData uses an opaque data: origin, not an HTTPS base URL.
                 // Base64 also prevents fragment/%/encoding truncation.
                 val encoded = android.util.Base64.encodeToString(
                     document.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP,
                 )
+                bootstrap = HtmlArtifactPolicy.Bootstrap("data:text/html;base64,$encoded")
+                configure(view)
+                root.addView(view, FrameLayout.LayoutParams(-1, -1))
                 view.loadData(encoded, "text/html", "base64")
             } catch (_: Exception) {
-                disposeWebView()
-                fallback("Artifact preview unavailable on this device. Use View source.")
+                fail(mapOf("code" to "unsupported_renderer"))
             }
         }
+    }
+
+    private fun fail(error: Map<String, Any>) {
+        if (disposed || failure != null) return
+        failure = error
+        disposeWebView()
+        fallback("Artifact preview unavailable. Retry or use View source.")
+        lifecycle?.invokeMethod("loadError", error)
+    }
+
+    private fun disposeDocument() {
+        disposed = true
+        pendingDocument = null
+        disposeWebView()
     }
 
     private fun fallback(message: String) {
@@ -135,23 +165,7 @@ internal class HtmlArtifactPlatformView(context: Context, document: String?, pri
         view.setDownloadListener { _, _, _, _, _ -> /* downloads denied */ }
         view.isLongClickable = false
         view.setOnLongClickListener { true } // no link/image external-open menu
-        view.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
-            override fun shouldOverrideUrlLoading(view: WebView, url: String) = true
-
-            // Deny ALL resource fetches, including file/content/custom schemes.
-            // srcdoc and inline data images are resolved by the engine, not I/O.
-            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest) = denied()
-            override fun shouldInterceptRequest(view: WebView, url: String) = denied()
-            override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
-                handler.cancel()
-            }
-            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
-                disposeWebView()
-                fallback("Artifact renderer stopped. Use View source or reopen the preview.")
-                return true
-            }
-        }
+        view.webViewClient = HtmlArtifactWebViewClient(checkNotNull(bootstrap), ::fail)
         view.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) = request.deny()
             override fun onGeolocationPermissionsShowPrompt(origin: String, callback: GeolocationPermissions.Callback) {
@@ -177,11 +191,8 @@ internal class HtmlArtifactPlatformView(context: Context, document: String?, pri
         }
     }
 
-    private fun denied() = WebResourceResponse(
-        "text/plain", "UTF-8", 403, "Blocked", emptyMap(), ByteArrayInputStream(ByteArray(0)),
-    )
-
     private fun disposeWebView() {
+        bootstrap?.finish()
         val view = webView ?: return
         webView = null
         (view.parent as? ViewGroup)?.removeView(view)
@@ -203,6 +214,41 @@ internal class HtmlArtifactPlatformView(context: Context, document: String?, pri
     override fun getView(): View = root
     override fun dispose() {
         lifecycle?.setMethodCallHandler(null)
-        disposeWebView()
+        disposeDocument()
     }
+}
+
+/** WebViewClient documents that data: may reach interception. This conditional
+ * compatibility gate is not evidence that a particular engine intercepts the
+ * root loadData URL. All network/file/content requests and navigations fail closed.
+ */
+@Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+internal class HtmlArtifactWebViewClient(
+    private val bootstrap: HtmlArtifactPolicy.Bootstrap,
+    private val failure: (Map<String, Any>) -> Unit,
+) : WebViewClient() {
+    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
+    override fun shouldOverrideUrlLoading(view: WebView, url: String) = true
+    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+        if (bootstrap.allow(request.url.toString(), request.isForMainFrame, request.method)) null else denied()
+    // No frame identity on the legacy callback: never grant a document exception.
+    override fun shouldInterceptRequest(view: WebView, url: String) = denied()
+    override fun onPageFinished(view: WebView, url: String) { bootstrap.finish() }
+    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+        if (request.isForMainFrame) failure(mapOf("code" to "main_frame_load", "errorCode" to error.errorCode))
+    }
+    override fun onReceivedError(view: WebView, errorCode: Int, description: String, failingUrl: String) {
+        failure(mapOf("code" to "main_frame_load", "errorCode" to errorCode))
+    }
+    override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+        if (request.isForMainFrame) failure(mapOf("code" to "main_frame_http", "status" to response.statusCode))
+    }
+    override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) { handler.cancel() }
+    override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+        failure(mapOf("code" to "renderer_gone"))
+        return true
+    }
+    private fun denied() = WebResourceResponse(
+        "text/plain", "UTF-8", 403, "Blocked", emptyMap(), ByteArrayInputStream(ByteArray(0)),
+    )
 }

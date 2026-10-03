@@ -47,7 +47,10 @@ class PostgresStore:
         with psycopg.connect(self.dsn) as connection:
             return [row[0] for row in connection.execute('''
                 SELECT uid FROM account_deletions
-                WHERE (state IN ('pending', 'fenced', 'deleting') AND delete_after <= %s)
-                   OR (state = 'cancelled' AND record->>'fence_owned' = 'true')
-                ORDER BY delete_after LIMIT 100
-            ''', (now,)).fetchall()]
+                WHERE COALESCE(CAST(record->>'next_attempt' AS double precision), 0) <= %s
+                  AND ((state IN ('pending', 'fenced', 'deleting') AND delete_after <= %s)
+                   OR (state = 'cancelled' AND record->>'fence_owned' = 'true'))
+                ORDER BY COALESCE(CAST(record->>'next_attempt' AS double precision), 0),
+                         COALESCE(CAST(record->>'attempts' AS bigint), 0), delete_after, uid
+                LIMIT 100
+            ''', (now, now)).fetchall()]

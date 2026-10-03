@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -28,7 +30,8 @@ class SessionLedger {
 
   /// Session → the (single) append sink, memoised as a FUTURE so the
   /// check-and-insert is atomic — see [_sinkFor].
-  final Map<String, Future<IOSink>> _sinks = {};
+  final Map<String, Future<RandomAccessFile>> _sinks = {};
+  final Map<String, Future<void>> _operations = {};
   final Map<String, int> _seqs = {};
   final Map<String, List<Map<String, dynamic>>> _replayCache = {};
 
@@ -51,19 +54,32 @@ class SessionLedger {
     final d = Directory(
       '${(await getApplicationDocumentsDirectory()).path}/session-ledgers',
     );
-    d.createSync(recursive: true);
+    await d.create(recursive: true);
     _root = d;
     return d;
   }
 
-  Future<File> _fileFor(String sessionId) async => File(
-        '${(await _dir()).path}/${_sessionIdSafe(sessionId)}.jsonl',
-      );
+  Future<File> _fileFor(String sessionId) async =>
+      File('${(await _dir()).path}/${_sessionIdSafe(sessionId)}.jsonl');
 
-  static String _sessionIdSafe(String id) => id.replaceAll(
-        RegExp(r'[^A-Za-z0-9_\-]'),
-        '_',
-      );
+  static String _sessionIdSafe(String id) =>
+      id.replaceAll(RegExp(r'[^A-Za-z0-9_\-]'), '_');
+
+  // Enqueue synchronously, before any file/path await. Reads and lifecycle
+  // barriers participate too, so close separates the old and new lifetimes.
+  Future<T> _enqueue<T>(String sessionId, Future<T> Function() operation) {
+    final result = (_operations[sessionId] ?? Future<void>.value()).then(
+      (_) => operation(),
+    );
+    final done = result.then<void>((_) {}, onError: (Object _) {});
+    _operations[sessionId] = done;
+    done.then((_) {
+      if (identical(_operations[sessionId], done)) {
+        _operations.remove(sessionId);
+      }
+    });
+    return result;
+  }
 
   /// The session's append sink, opened at most once per lifetime.
   ///
@@ -77,13 +93,37 @@ class SessionLedger {
   /// leaked file descriptor per fresh session, plus any line still buffered in
   /// it. The check and the insert below are both synchronous, so in this single
   /// isolate they are atomic and late callers share one future.
-  Future<IOSink> _sinkFor(String sessionId) {
+  /// A directly opened file makes open/write errors observable to the caller,
+  /// unlike an IOSink whose asynchronous error can outlive append and close.
+  Future<RandomAccessFile> _sinkFor(String sessionId) {
     final existing = _sinks[sessionId];
     if (existing != null) return existing;
     sinkOpensForTest[sessionId] = (sinkOpensForTest[sessionId] ?? 0) + 1;
     final future = () async {
       final f = await _fileFor(sessionId);
-      return f.openWrite(mode: FileMode.append);
+      final path = f.path;
+      final recovery = await _scanInIsolate(path);
+      final previousSeq = _seqs[sessionId] ?? 0;
+      _seqs[sessionId] = recovery.seq > previousSeq
+          ? recovery.seq
+          : previousSeq;
+      // Recovery deliberately retains no decoded history. An explicit read
+      // populates the replay cache, if requested by a consumer.
+      _replayCache.remove(sessionId);
+      final sink = await f.open(mode: FileMode.append);
+      try {
+        // Preserve the original bytes, but isolate an unterminated (possibly
+        // torn) last record from the first new event after recovery.
+        if (recovery.unterminated) await sink.writeString('\n');
+        return sink;
+      } catch (_) {
+        try {
+          await sink.close();
+        } catch (e) {
+          Diag.swallow('session_ledger.open', e);
+        }
+        rethrow;
+      }
     }();
     _sinks[sessionId] = future;
     // If the open FAILS (path_provider unavailable, disk full) do not leave the
@@ -103,51 +143,96 @@ class SessionLedger {
 
   /// Append one event. [kind] is one of: turn_start, turn_end, tool_start,
   /// tool_end, subagent_start, subagent_end, checkpoint, note.
-  Future<void> append(String sessionId, String kind, Map<String, dynamic> data) async {
+  Future<void> append(
+    String sessionId,
+    String kind,
+    Map<String, dynamic> data,
+  ) => _enqueue(sessionId, () async {
     try {
+      final sink = await _sinkFor(sessionId);
       final seq = (_seqs[sessionId] ?? 0) + 1;
       _seqs[sessionId] = seq;
       final t = DateTime.now().toIso8601String();
-      final event = {
-        'seq': seq,
-        't': t,
-        'kind': kind,
-        ...data,
-      };
+      final event = {'seq': seq, 't': t, 'kind': kind, ...data};
       final line = jsonEncode(event);
-      final sink = await _sinkFor(sessionId);
-      sink.writeln(line);
+      await sink.writeString('$line\n');
       _replayCache[sessionId]?.add(event);
     } catch (_) {
       // Best-effort durability — a ledger write failure must never break a
       // live run. The trajectory view degrades to "no records" per session.
     }
-  }
+  });
 
   /// Read every event of a session (trajectory view / stats projection).
   /// Open sinks are flushed first so a just-written line is visible.
   /// Empty when the ledger does not exist yet (fresh sessions).
-  Future<List<Map<String, dynamic>>> read(String sessionId) async {
-    try {
-      await flush(sessionId);
-      final cached = _replayCache[sessionId];
-      if (cached != null && cached.isNotEmpty) return List.of(cached);
-      final f = await _fileFor(sessionId);
-      if (!f.existsSync()) return const [];
-      final events = <Map<String, dynamic>>[];
-      for (final line in f.readAsLinesSync()) {
-        if (line.trim().isEmpty) continue;
+  Future<List<Map<String, dynamic>>> read(String sessionId) =>
+      _enqueue(sessionId, () async {
         try {
-          events.add(jsonDecode(line) as Map<String, dynamic>);
+          await _flush(sessionId);
+          final cached = _replayCache[sessionId];
+          if (cached != null && cached.isNotEmpty) return List.of(cached);
+          final f = await _fileFor(sessionId);
+          final path = f.path;
+          final scan = await _scanInIsolate(path, collect: true);
+          final events = scan.events!;
+          _replayCache[sessionId] = events;
+          return List.of(events);
         } catch (_) {
-          // A torn tail line (crash mid-write) is skipped, not fatal.
+          return const [];
         }
-      }
-      _replayCache[sessionId] = events;
-      return List.of(events);
-    } catch (_) {
-      return const [];
+      });
+
+  // Keep the isolate closure out of instance/queue scopes: those contexts can
+  // capture unsendable pending futures or open handles in addition to the path.
+  static Future<
+    ({int seq, bool unterminated, List<Map<String, dynamic>>? events})
+  >
+  _scanInIsolate(String path, {bool collect = false}) =>
+      Isolate.run(() => _scanFile(path, collect: collect));
+
+  // Runs in a worker isolate. Recovery holds only one record plus an input
+  // chunk, and returns scalar metadata rather than a full decoded-event list.
+  // Only explicit read() calls opt into allocating the complete history.
+  static Future<
+    ({int seq, bool unterminated, List<Map<String, dynamic>>? events})
+  >
+  _scanFile(String path, {bool collect = false}) async {
+    final events = collect ? <Map<String, dynamic>>[] : null;
+    var seq = 0;
+    var unterminated = false;
+    final file = File(path);
+    if (!await file.exists()) {
+      return (seq: seq, unterminated: false, events: events);
     }
+    final record = BytesBuilder(copy: false);
+    void decodeRecord() {
+      try {
+        final line = utf8.decode(record.takeBytes());
+        if (line.trim().isNotEmpty) {
+          final event = jsonDecode(line) as Map<String, dynamic>;
+          final savedSeq = event['seq'];
+          if (savedSeq is int && savedSeq > seq) seq = savedSeq;
+          events?.add(event);
+        }
+      } catch (_) {
+        // Skip damaged records independently, including a partial UTF-8 tail.
+      }
+    }
+
+    await for (final chunk in file.openRead()) {
+      var start = 0;
+      for (var end = 0; end < chunk.length; end++) {
+        if (chunk[end] != 10) continue;
+        record.add(chunk.sublist(start, end));
+        decodeRecord();
+        start = end + 1;
+      }
+      record.add(chunk.sublist(start));
+      if (chunk.isNotEmpty) unterminated = chunk.last != 10;
+    }
+    if (record.isNotEmpty) decodeRecord();
+    return (seq: seq, unterminated: unterminated, events: events);
   }
 
   /// The seq of the last CHECKPOINT barrier in the ledger — recovery reads
@@ -196,34 +281,39 @@ class SessionLedger {
   }
 
   /// Close (and forget) a session's sink — call on session delete.
-  Future<void> close(String sessionId) async {
+  Future<void> close(String sessionId) => _enqueue(sessionId, () async {
     final pending = _sinks.remove(sessionId);
     if (pending != null) {
       try {
-        // LEAK FIX (2026-09-24): `close()` implies `flush()` AND releases the
-        // descriptor. This used to call `flush()` only and then delete the file
-        // underneath the still-open handle, so *every* session deletion leaked
-        // one descriptor pointing at an unlinked inode for the rest of the
-        // process's life.
+        // All earlier writes/flushes finished before this operation started.
         await (await pending).close();
-      } catch (e) { Diag.swallow('session_ledger', e); }
+      } catch (e) {
+        Diag.swallow('session_ledger', e);
+      }
     }
     _seqs.remove(sessionId);
     _replayCache.remove(sessionId);
     sinkOpensForTest.remove(sessionId);
     try {
       final f = await _fileFor(sessionId);
-      f.deleteSync();
-    } catch (e) { Diag.swallow('session_ledger', e); }
-  }
+      if (await f.exists()) await f.delete();
+    } catch (e) {
+      Diag.swallow('session_ledger', e);
+    }
+  });
 
   /// Flush a session's sink (checkpoint durability barrier).
-  Future<void> flush(String sessionId) async {
+  Future<void> flush(String sessionId) =>
+      _enqueue(sessionId, () => _flush(sessionId));
+
+  Future<void> _flush(String sessionId) async {
     final pending = _sinks[sessionId];
     if (pending == null) return;
     try {
       await (await pending).flush();
-    } catch (e) { Diag.swallow('session_ledger', e); }
+    } catch (e) {
+      Diag.swallow('session_ledger', e);
+    }
   }
 }
 

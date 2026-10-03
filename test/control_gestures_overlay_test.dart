@@ -5,6 +5,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/ui/browser_screen.dart';
 
+// Kotlin service members end at their declaration indentation. Select the
+// declaration (not a call site) and its complete body, never a character budget.
+String kotlinServiceMethod(String source, String name) {
+  final declaration = RegExp(
+    r'^    (?:private |internal |override )?fun ' + name + r'\(',
+    multiLine: true,
+  ).firstMatch(source);
+  expect(declaration, isNotNull, reason: 'missing Kotlin method $name');
+  final end = RegExp(r'^    \}', multiLine: true)
+      .firstMatch(source.substring(declaration!.start));
+  expect(end, isNotNull, reason: 'missing end of Kotlin method $name');
+  return source.substring(declaration.start, declaration.start + end!.end);
+}
+
 /// Owner-reported control/browser/overlay work (2026-09-25).
 ///
 /// Four complaints, each traced to a concrete cause:
@@ -193,53 +207,39 @@ void main() {
     });
   });
 
-  group('overlay: draggable circle, clamped inside the display', () {
-    test('drag coordinates are clamped, never written raw', () {
-      final i = kotlinSrc.indexOf('overlayDragTouchListener');
-      expect(i, greaterThan(-1));
-      final body = kotlinSrc.substring(i, i + 3000);
-      expect(body, contains('coerceIn'), reason: 'clamp on every move');
-      expect(body, contains('displaySize('));
-      // Raw coordinates must not reach the layout params unchecked.
-      expect(
-        body,
-        isNot(contains('params.x = event.rawX.toInt() + origin[0]\n')),
-      );
-    });
-
+  // Wiring checks only. OverlayInteractionTest executes touch/accessibility
+  // events, minimize/restore, cancellation and display-bound clamping in Android.
+  group('overlay: native method wiring (backed by Robolectric)', () {
     test('the window is re-clamped on expand and on rotation', () {
-      expect(kotlinSrc, contains('clampOverlayIntoDisplay()'));
-      expect(kotlinSrc, contains('override fun onConfigurationChanged'));
-      final expand = kotlinSrc.indexOf('private fun setOverlayExpanded');
-      final body = kotlinSrc.substring(expand, expand + 900);
+      for (final method in ['setOverlayExpanded', 'onConfigurationChanged']) {
+        expect(
+          kotlinServiceMethod(kotlinSrc, method),
+          contains('post { clampOverlayIntoDisplay() }'),
+          reason: '$method must clamp after the new size is measured',
+        );
+      }
+    });
+
+    test('consumed touches use the accessible click and long-click handlers', () {
+      final drag = kotlinServiceMethod(kotlinSrc, 'overlayDragTouchListener');
+      expect(drag, contains('if (tap) view.performClick()'));
+      expect(drag, contains('pressedView?.performLongClick()'));
+      final circle = kotlinServiceMethod(kotlinSrc, 'overlayCircleView');
+      expect(circle, contains('setOnClickListener { setOverlayExpanded(true) }'));
+      expect(circle, contains('setOnLongClickListener {\n            onOverlayStop()'));
+    });
+
+    test('expanded controls route minimize separately from Stop Ovid', () {
+      final box = kotlinServiceMethod(kotlinSrc, 'overlayBoxView');
       expect(
-        body,
-        contains('clampOverlayIntoDisplay'),
-        reason: 'the box is a different size than the circle',
+        box,
+        contains('control("Minimize") { setOverlayExpanded(false) }'),
       );
-    });
-
-    test('a tap is distinguished from a drag', () {
-      final i = kotlinSrc.indexOf('overlayDragTouchListener');
-      final body = kotlinSrc.substring(i, i + 3000);
-      expect(body, contains('getLongPressTimeout'));
-      expect(body, contains('Math.hypot'), reason: 'movement threshold');
-      expect(body, contains('onTap()'));
-    });
-
-    test('the box is white with cross, text, mic and a green send', () {
-      final i = kotlinSrc.indexOf('private fun overlayBoxView');
-      expect(i, greaterThan(-1));
-      final body = kotlinSrc.substring(i, i + 9000);
-      expect(body, contains('0xFFFFFFFF'), reason: 'simple white surface');
-      expect(body, contains('ic_menu_close_clear_cancel'), reason: 'cross');
-      expect(body, contains('ic_btn_speak_now'), reason: 'mic');
-      expect(body, contains('ic_menu_send'), reason: 'send');
-      expect(body, contains('0xFF1FA05F'), reason: 'green when armed');
+      expect(box, contains('control("Stop Ovid") { onOverlayStop() }'));
       expect(
-        body,
-        contains('isEnabled = armed'),
-        reason: 'an empty field must never send',
+        kotlinServiceMethod(kotlinSrc, 'setOverlayExpanded'),
+        isNot(contains('onOverlayStop()')),
+        reason: 'minimize preserves the active work',
       );
     });
   });

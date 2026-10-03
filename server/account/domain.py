@@ -12,6 +12,12 @@ from contextlib import contextmanager
 GRACE_SECONDS = 24 * 60 * 60
 RECENT_AUTH_SECONDS = 5 * 60
 FENCE_SETTLE_SECONDS = 60
+RETRY_SECONDS = 60
+MAX_RETRY_SECONDS = 60 * 60
+IDENTITY_PROVIDERS = frozenset({
+    'google.com', 'github.com', 'apple.com', 'microsoft.com',
+    'facebook.com', 'twitter.com', 'yahoo.com', 'phone',
+})
 
 
 class AccountError(Exception):
@@ -20,13 +26,17 @@ class AccountError(Exception):
         super().__init__(code)
 
 
-def identity(claims):
+def identity(claims, *, allow_legacy_password=False):
     uid = claims.get('uid') or claims.get('sub')
     # Current Firebase-generated UIDs. Reject delimiters/globs before any
     # legacy Redis key operations; custom UID migrations need an explicit map.
     if not isinstance(uid, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', uid):
         raise AccountError('invalid_identity', 401)
-    if claims.get('firebase', {}).get('sign_in_provider') not in ('google.com', 'password'):
+    firebase = claims.get('firebase')
+    provider = firebase.get('sign_in_provider') if isinstance(firebase, dict) else None
+    if not isinstance(provider, str) or not (
+            provider in IDENTITY_PROVIDERS or
+            (allow_legacy_password and provider == 'password')):
         raise AccountError('unsupported_identity', 403)
     return uid
 
@@ -49,36 +59,53 @@ class Lifecycle:
         self.store, self.admin, self.data, self.clock = store, admin, data, clock
 
     def request(self, claims, request_id):
-        uid = identity(claims)
-        now = self.clock()
-        if not 0 <= now - auth_time(claims) <= RECENT_AUTH_SECONDS:
-            raise AccountError('reauthentication_required', 401)
+        uid = identity(claims, allow_legacy_password=True)
         if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', request_id):
             raise AccountError('invalid_request_id', 400)
         with self.store.locked(uid) as db:
+            self._recent_auth(claims)
             old = db.get(uid)
             if old and request_id in old.get('previous_requests', []):
                 raise AccountError('request_already_completed')
-            if old and (old['request_id'] == request_id or old['state'] == 'pending'):
+            if old and request_id in [old['request_id'], *old.get('request_aliases', [])]:
+                return public(old)
+            # Password is retained only for existing receipts/status/cancellation.
+            # Removing it at verification would strand legacy worker-fenced users.
+            identity(claims)
+            if old and old['state'] == 'pending':
+                old.setdefault('request_aliases', []).append(request_id)
+                db.save(old)
                 return public(old)
             if old and old['state'] in ('fenced', 'deleting', 'deleted'):
                 raise AccountError('deletion_in_progress')
             user = self.admin.user(uid)
             if user is None or user['disabled']:
                 raise AccountError('account_unavailable', 403)
+            now = self._recent_auth(claims)
             row = dict(uid=uid, request_id=request_id, state='pending',
                        requested_at=now, delete_after=now + GRACE_SECONDS,
                        baseline_login_ms=user['last_login_ms'],
                        fence_at=None, fence_owned=False, completed=[],
+                       request_aliases=[], attempts=0, next_attempt=0,
                        previous_requests=(old.get('previous_requests', []) +
-                                          [old['request_id']] if old else []))
+                                          [old['request_id']] + old.get('request_aliases', [])
+                                          if old else []))
             db.save(row)
             return public(row)
 
+    def _recent_auth(self, claims):
+        now = self.clock()
+        if not 0 <= now - auth_time(claims) <= RECENT_AUTH_SECONDS:
+            raise AccountError('reauthentication_required', 401)
+        return now
+
     def status(self, claims):
-        uid = identity(claims)
+        uid = identity(claims, allow_legacy_password=True)
         with self.store.locked(uid) as db:
-            return public(db.get(uid))
+            row = db.get(uid)
+            if row is None:
+                identity(claims)
+            return public(row)
 
     def _cancel(self, db, row):
         # Persist cancellation intent before undoing the fence. A crash while
@@ -93,17 +120,17 @@ class Lifecycle:
         return public(row)
 
     def login(self, claims):
-        uid = identity(claims)
-        now = self.clock()
+        uid = identity(claims, allow_legacy_password=True)
         signed_at = auth_time(claims)
-        if signed_at > now:
-            raise AccountError('invalid_auth_time', 401)
         with self.store.locked(uid) as db:
+            if signed_at > self.clock():
+                raise AccountError('invalid_auth_time', 401)
             row = db.get(uid)
             if claims.get('_account_disabled') and not (
                     row and row['fence_owned'] and row['state'] in ('fenced', 'cancelled')):
                 raise AccountError('account_unavailable', 403)
             if row is None:
+                identity(claims)
                 return public(None)
             if row['state'] == 'cancelled':
                 return self._cancel(db, row)
@@ -139,11 +166,45 @@ class Lifecycle:
         # during grace when the worker was offline. Never delete on ambiguity.
         return user is not None and row['baseline_login_ms'] < user['last_login_ms']
 
-    def finalize(self, uid):
+    @contextmanager
+    def _attempt(self, uid, scheduled):
+        """Checkpoint retry intent before effects, under the same UID lock.
+
+        A crash also backs off. An exception updates the deadline from the end
+        of the attempt so slow failing dependencies cannot monopolize a sweep.
+        """
         with self.store.locked(uid) as db:
             row = db.get(uid)
-            if row is None or row['state'] == 'deleted':
-                return public(row)
+            now = self.clock()
+            eligible = row is not None and (
+                (row['state'] in ('pending', 'fenced', 'deleting') and
+                 row['delete_after'] <= now) or
+                (row['state'] == 'cancelled' and row['fence_owned']))
+            if not eligible or (scheduled and row.get('next_attempt', 0) > now):
+                yield db, None, public(row)
+                return
+            row['attempts'] = row.get('attempts', 0) + 1
+            delay = min(MAX_RETRY_SECONDS, RETRY_SECONDS * 2 ** min(row['attempts'] - 1, 6))
+            row['next_attempt'] = now + delay
+            db.save(row)
+            try:
+                yield db, row, None
+            except Exception:
+                # Read committed checkpoints, not potentially mutated local data.
+                row = db.get(uid)
+                row['next_attempt'] = self.clock() + delay
+                db.save(row)
+                raise
+            else:
+                row = db.get(uid)
+                row['next_attempt'] = (row['fence_at'] + FENCE_SETTLE_SECONDS
+                                       if row['state'] == 'fenced' else 0)
+                db.save(row)
+
+    def finalize(self, uid, *, scheduled=False):
+        with self._attempt(uid, scheduled) as (db, row, skipped):
+            if row is None:
+                return skipped
             if row['state'] == 'cancelled':
                 return self._cancel(db, row)
             now = self.clock()
@@ -169,7 +230,7 @@ class Lifecycle:
                 # the client never delivered its login acknowledgement.
                 if self._grace_login(row, self.admin.user(uid)):
                     return self._cancel(db, row)
-                if now < row['fence_at'] + FENCE_SETTLE_SECONDS:
+                if self.clock() < row['fence_at'] + FENCE_SETTLE_SECONDS:
                     return public(row)
                 row['state'] = 'deleting'
                 db.save(row)

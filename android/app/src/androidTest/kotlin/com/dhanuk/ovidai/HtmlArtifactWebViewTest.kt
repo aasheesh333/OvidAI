@@ -13,12 +13,109 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.PermissionRequest
 import android.widget.FrameLayout
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.os.SystemClock
+import android.view.ViewGroup
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import org.json.JSONObject
+import org.json.JSONTokener
 
 /** Device checks for the actual Android boundary, separate from host fakes and
  * Chromium document tests. Run with a connected emulator/device. */
 @Suppress("DEPRECATION")
 @RunWith(AndroidJUnit4::class)
 class HtmlArtifactWebViewTest {
+    /** Executes the Dart-generated srcdoc/CSP wrapper in the production native
+     * platform view. Never replace its clients/settings to make this pass.
+     * The only observer is test-side evaluateJavascript, not a native JS bridge.
+     */
+    @Test fun productionViewRendersSandboxedJavascriptCounter() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val activity = instrumentation.startActivitySync(
+            Intent(instrumentation.targetContext, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        val document = instrumentation.context.assets.open("html_artifact_counter.html")
+            .bufferedReader().use { it.readText().trim() }
+        var platform: HtmlArtifactPlatformView? = null
+        lateinit var view: WebView
+        try {
+            instrumentation.runOnMainSync {
+                // A modern supported engine must render; no assumption/skip here.
+                assertTrue("DOCUMENT_START_SCRIPT is required for the offline sandbox",
+                    WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT))
+                platform = HtmlArtifactPlatformView(instrumentation.targetContext, document)
+                val root = platform!!.view as FrameLayout
+                assertTrue("Production view fell back instead of creating its renderer", root.getChildAt(0) is WebView)
+                view = root.getChildAt(0) as WebView
+                activity.addContentView(root, ViewGroup.LayoutParams(-1, -1))
+            }
+            fun evaluate(script: String): String {
+                val done = CountDownLatch(1)
+                val result = AtomicReference<String>()
+                instrumentation.runOnMainSync {
+                    view.evaluateJavascript(script) { result.set(it); done.countDown() }
+                }
+                assertTrue("JS evaluation timed out", done.await(5, TimeUnit.SECONDS))
+                return result.get()
+            }
+            val deadline = SystemClock.uptimeMillis() + 15000
+            var report: JSONObject? = null
+            while (SystemClock.uptimeMillis() < deadline && report == null) {
+                // Opaque srcdoc cannot be read from its parent; receive only this
+                // test fixture's report. Install repeatedly across initial load.
+                val result = evaluate("""
+                    (() => {
+                      if (!window.__artifactTestObserver) {
+                        window.__artifactTestObserver = true;
+                        addEventListener('message', e => window.__artifactTestResult = e.data);
+                      }
+                      return window.__artifactTestResult ? JSON.stringify(window.__artifactTestResult) : null;
+                    })()
+                """.trimIndent())
+                if (result != "null") report = JSONObject(JSONTokener(result).nextValue() as String)
+                else SystemClock.sleep(50)
+            }
+            assertNotNull("Production loadData/srcdoc never executed the counter", report)
+            assertEquals("1", report!!.getString("counter"))
+            assertEquals("rgb(255, 0, 0)", report!!.getString("css"))
+            assertEquals("undefined", report!!.getString("bridge"))
+            assertEquals("undefined", report!!.getString("rtc"))
+            val visible = CountDownLatch(1)
+            instrumentation.runOnMainSync {
+                view.postVisualStateCallback(1, object : WebView.VisualStateCallback() {
+                    override fun onComplete(requestId: Long) { visible.countDown() }
+                })
+            }
+            assertTrue("Counter DOM was never ready to draw", visible.await(5, TimeUnit.SECONDS))
+            instrumentation.runOnMainSync {
+                assertTrue(view.width > 0 && view.height > 0)
+                val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+                view.draw(Canvas(bitmap))
+                var redPixels = 0
+                for (y in 0 until bitmap.height) for (x in 0 until bitmap.width) {
+                    val pixel = bitmap.getPixel(x, y)
+                    if (android.graphics.Color.red(pixel) > 150 &&
+                        android.graphics.Color.green(pixel) < 120 && android.graphics.Color.blue(pixel) < 120) redPixels++
+                }
+                bitmap.recycle()
+                assertTrue("Counter text did not render red pixels", redPixels > 0)
+            }
+        } finally {
+            instrumentation.runOnMainSync {
+                platform?.let {
+                    (it.view.parent as? ViewGroup)?.removeView(it.view)
+                    it.dispose()
+                }
+                activity.finish()
+            }
+        }
+    }
+
     @Test fun nativeSettingsAndDeniedRoutes() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.runOnMainSync {

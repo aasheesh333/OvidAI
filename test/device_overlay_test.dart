@@ -16,13 +16,12 @@ import 'package:sqlite3/open.dart' show open, OperatingSystem;
 // - Channel contract: Dart->native deviceOverlayShow/deviceOverlayHide;
 //   native->Dart deviceOverlayText(text) + deviceOverlayStop().
 // - Send == composer send: idle starts a run, busy joins the per-session
-//   queue. X == composer Stop: hardStopAll (stops every session right where
-//   it is, with the device bump), never the legacy unbumped cancelRun.
+//   queue. Stop Ovid globally stops background work and invalidates device work,
+//   including when no session is selected.
 // - Show-guard: Dart shows only with an active control session.
-// - Native window behavior is source-pinned (no hardware): the window type
-//   MUST be TYPE_ACCESSIBILITY_OVERLAY (no new manifest permission), hidden
-//   removes the window, drag goes through updateViewLayout, the X/send swap
-//   goes through a TextWatcher.
+// - Native gestures, minimize/restore, send-state and window removal run in
+//   OverlayInteractionTest (Robolectric). The checks here cover channel behavior
+//   and method-scoped native wiring, not Android touch behavior.
 //
 // No hardware here: fake channel + seams + source pins only.
 
@@ -314,7 +313,7 @@ void main() {
     });
   });
 
-  group('Task 4: overlay X == composer Stop', () {
+  group('Task 4: overlay Stop Ovid globally stops background work', () {
     late ChatSession s;
     late List<MethodCall> calls;
 
@@ -358,7 +357,7 @@ void main() {
       });
     });
 
-    test('X aborts in-flight device work (queue-empty branch)', () async {
+    test('Stop Ovid aborts in-flight device work (queue-empty branch)', () async {
       _gate = Completer<Object?>();
       final future = DeviceControlService.I.tap(node: 7);
       await waitForChannelCall(calls, 'deviceTap');
@@ -368,7 +367,7 @@ void main() {
       expect(await future, kCancelledCopy);
     });
 
-    test('X aborts device work and clears queued Control instructions', () async {
+    test('Stop Ovid aborts device work and clears queued Control instructions', () async {
       AgentService.I.queueMessageForTest('follow-up correction');
       _gate = Completer<Object?>();
       final future = DeviceControlService.I.tap(node: 7);
@@ -394,47 +393,31 @@ void main() {
       expect(await future, kCancelledCopy);
     });
 
-    test('X with no session stops nothing (no stray generation bump)',
+    test('Stop Ovid with no session invalidates device work',
         () async {
       app.activeSessionId = null;
       app.sessions.removeWhere((x) => x.id == s.id);
       final before = DeviceControlService.I.deviceGenerationForTest;
       expect(await AgentService.I.handleDeviceOverlayStop(), isFalse);
-      expect(DeviceControlService.I.deviceGenerationForTest, before);
+      expect(DeviceControlService.I.deviceGenerationForTest, greaterThan(before));
     });
 
-    test('X-routing proof: hardStopAll path, never legacy cancelRun', () {
-      final src = readAgentServiceSource();
-      final window = methodWindow(src, 'handleDeviceOverlayStop(');
-      expect(
-        window,
-        contains('hardStopAll'),
-        reason:
-            'overlay X must route through hardStopAll (stops every session '
-            'right where it is, with the device bump)',
-      );
-      expect(
-        window.contains('cancelRun'),
-        isFalse,
-        reason: 'overlay X must NEVER call legacy cancelRun (unbumped)',
-      );
-      expect(
-        window.contains('cancelDeviceActions'),
-        isFalse,
-        reason: 'the bump comes from hardStopAll itself; no direct call',
-      );
-      final stopWindow = methodWindow(src, 'bool stopRequested(');
-      expect(
-        stopWindow,
-        contains('cancelDeviceActions'),
-        reason: 'stopRequested must carry the generation bump X relies on',
-      );
+    test('Stop Ovid cancels an in-flight device action without an active session', () async {
+      app.activeSessionId = null;
+      app.sessions.removeWhere((x) => x.id == s.id);
+      _gate = Completer<Object?>();
+      final future = DeviceControlService.I.tap(node: 7);
+      await waitForChannelCall(calls, 'deviceTap');
+      await AgentService.I.handleDeviceOverlayStop();
+      _gate!.complete(true);
+      expect(await future, kCancelledCopy);
     });
   });
 
-  group('Task 4: native overlay source pins (no hardware)', () {
+  group('Task 4: native overlay method wiring (backed by Robolectric)', () {
     test('window type is TYPE_ACCESSIBILITY_OVERLAY', () {
-      expect(readOverlayServiceSource(), contains('TYPE_ACCESSIBILITY_OVERLAY'));
+      final show = methodWindow(readOverlayServiceSource(), 'fun showOverlay(');
+      expect(show, contains('WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY'));
     });
 
     test('no SYSTEM_ALERT_WINDOW permission anywhere', () {
@@ -443,48 +426,27 @@ void main() {
       expect(readMainActivitySource(), isNot(contains('SYSTEM_ALERT_WINDOW')));
     });
 
-    test('service exposes show/hide entry points', () {
-      final src = readOverlayServiceSource();
-      expect(src, contains('fun showOverlay('));
-      expect(src, contains('fun hideOverlay('));
-    });
-
     test('hidden removes the window (no invisible touch target)', () {
-      final src = readOverlayServiceSource();
-      expect(src, contains('removeView'));
+      final hide = methodWindow(readOverlayServiceSource(), 'fun hideOverlay(');
+      expect(hide, contains('removeView(view)'));
+      expect(hide, contains('clearOverlayRefs()'));
     });
 
-    test('2x3 dot handle drags via updateViewLayout', () {
+    test('native stop cancels device work before emitting the Dart event', () {
       final src = readOverlayServiceSource();
-      expect(src, contains('2×3'));
-      expect(src, contains('setOnTouchListener'));
-      expect(src, contains('ACTION_MOVE'));
-      expect(src, contains('updateViewLayout'));
+      final stop = methodWindow(src, 'fun onOverlayStop(');
+      expect(stop, contains('stopControlNow()'));
+      expect(stop, contains('overlayEventListener?.invoke("deviceOverlayStop", null)'));
+      expect(stop.indexOf('stopControlNow()'), lessThan(stop.indexOf('overlayEventListener')));
+      final cancel = methodWindow(src, 'fun stopControlNow(');
+      expect(cancel, contains('deviceActions.cancel()'));
+      expect(cancel, contains('hideOverlay()'));
     });
 
-    test('X/send morph goes through a TextWatcher on blank threshold', () {
-      final src = readOverlayServiceSource();
-      expect(src, contains('TextWatcher'));
-      expect(src, contains('addTextChangedListener'));
-      expect(src, contains('afterTextChanged'));
-      expect(src, contains('isNullOrBlank'));
-    });
-
-    test('send clears the field; empty-field X hard-stops', () {
-      final src = readOverlayServiceSource();
-      expect(src, contains('deviceOverlayText'));
-      expect(src, contains('deviceOverlayStop'));
-      expect(src, contains('.clear()'));
-    });
-
-    test('rounded field container', () {
-      final src = readOverlayServiceSource();
-      expect(src, contains('cornerRadius'));
-    });
-
-    test('overlay window add/remove failures stay honest, never crash', () {
-      final src = readOverlayServiceSource();
-      expect(src, contains('BadTokenException'));
+    test('refused overlay attachment returns an unavailable result', () {
+      final show = methodWindow(readOverlayServiceSource(), 'fun showOverlay(');
+      expect(show, contains('catch (error: WindowManager.BadTokenException)'));
+      expect(show, contains('DeviceActionResult(false, "UNAVAILABLE"'));
     });
   });
 

@@ -20,8 +20,9 @@ Do not enable that flag before the server and gateway integration below are read
   secure storage own workspace/BYOK/plugin state. No Ovid Firestore/Storage sync
   implementation was found. Firebase plugin tools access users' external projects;
   those projects are not Ovid account storage.
-- Google native sign-in and email/password already exist. Apple/GitHub account
-  providers were not added. GitHub workspace login is a separate integration.
+- The account protocol now supports social + phone identities listed below.
+  This allowlist does not enable providers in Firebase or implement client flows.
+  GitHub workspace login is a separate integration.
 - Firebase JSON is injected by CI. No local config, Firebase/GCloud CLI or logged-in
   console was available to verify provider enablement. No secrets were read/output.
 
@@ -30,12 +31,27 @@ Do not enable that flag before the server and gateway integration below are read
 All routes require Firebase bearer identity and an App Check token for an explicitly
 allowed app ID. Admin SDK validates project issuer/audience/expiry, revocation and
 disabled users. UID is derived from the token; request payload UID is rejected.
-Only `password` and `google.com` identities are accepted, never anonymous.
+New requests and ordinary gateway access accept only `google.com`, `github.com`,
+`apple.com`, `microsoft.com`, `facebook.com`, `twitter.com`, `yahoo.com`, and `phone`.
+Anonymous, custom, and unlisted providers are rejected.
+
+**Password migration:** verified `password` credentials may read an existing
+deletion receipt, replay a recorded request ID, or cancel/recover an existing
+deletion under the same grace/fence rules. They cannot start a new deletion,
+enter via login without a deletion record, or pass the ordinary access guard.
+Keep password verification for this narrow recovery path: rejecting it globally
+would strand legacy users whose account the worker disabled, including a persisted
+cancellation whose re-enable failed. A cancellation response is not permission to
+use gateway resources; those still require a supported social/phone sign-in.
+This module neither creates Firebase users nor changes project provider settings.
 
 - `POST /account/deletion {"request_id":"client-random-id"}`: auth_time no older
-  than 5 minutes, checked on the server. Returns pending + Unix `delete_after`
+  than 5 minutes, checked after the UID lock and again after the Admin lookup.
+  Returns pending + Unix `delete_after`
   exactly 86,400 seconds after server acceptance. Duplicate/pending requests cannot
-  extend the deadline. Completed request IDs cannot resurrect deletion.
+  extend the deadline. Coalesced IDs are persisted before returning the original
+  receipt and remain bound to it after cancellation/restart. Completed request IDs
+  cannot resurrect deletion, including after a later request supersedes the receipt.
 - `GET /account/deletion`: active/pending/cancelled/fenced/deleting/deleted status.
 - `POST /account/login` or `/account/deletion/cancel`: a new login during grace
   cancels. A restored requesting session cannot cancel itself. Current client calls
@@ -54,6 +70,18 @@ transaction is claimed. Due lists are advisory: every worker re-reads under lock
 Multiple processes/restarts safely repeat idempotent effects. No expiry TTL drops
 pending work. A cancellation intent is persisted before re-enabling a worker-fenced
 Firebase account, so re-enable failures cannot turn into deletion.
+
+Worker selection is limited to 100 due records, ordered by `next_attempt`, then
+`attempts`, deadline and UID. Both retry fields are durable JSON checkpoint fields
+(missing fields default to zero for old rows). Every eligible attempt persists a
+retry deadline before external effects, including cancellation re-enable recovery.
+Failures back off 60 seconds exponentially to one hour, measured again from the
+end of a failed call; crashes retain the pre-effect deadline. Attempt counts include
+successful fencing passes. Successful fencing schedules the settlement boundary.
+Workers recheck eligibility and retry time under the UID lock, so a stale due list
+cannot bypass backoff. Unattempted work sorts ahead of retried poison rows even
+when another timer tick happens after their backoff expires. There is no permanent
+attempt cutoff. Explicit cancellation can still recover immediately during backoff.
 
 At expiry the worker checks Firebase last sign-in metadata, durably marks fencing,
 disables sign-in, and re-reads metadata. A successful disable starts a 60-second
@@ -95,6 +123,13 @@ Implemented cleanup adapters:
    login timestamps) remains for idempotency and anti-resurrection. No email/photo
    or key tokens remain after completion. Decide retention before production.
 
+**Missing image cleanup adapter:** the account cleanup chain does not call an
+external image-service/object-store deletion adapter. SQL/Redis/key cleanup alone
+does not establish deletion of image assets or image-service metadata. End-to-end
+account image cleanup remains incomplete and an activation blocker; it requires an
+owned, idempotent external adapter and integration verification. The current
+`deleted` checkpoint describes only this module's implemented cleanup chain.
+
 `ACCOUNT_CLEANUP_MANIFEST` is a JSON file reviewed against the deployed schema:
 `{"scopes":[...]}`. Each scope has `table`, `column`, `kind` (`uid` or `token`) and
 `role`. The one `keys` scope also supplies `token_column` and uses `kind: uid`.
@@ -135,17 +170,20 @@ not modify a nonexistent tracked mint module or the live `/opt` implementation.
 
 ## Activation requirements (all currently blocked/unperformed)
 
-1. Confirm Google + password enablement in the actual Firebase project, Android
-   signing fingerprints, OAuth client/platform configuration; validate real login
-   and reauth. No Apple/GitHub button should be exposed absent a complete flow.
+1. Confirm the intended social/phone provider enablement in the actual Firebase
+   project, Android signing fingerprints, OAuth client/platform configuration;
+   validate real login and reauth. Coordinate password retirement with existing
+   deletion/fence recovery; this allowlist does not configure Firebase.
 2. Supply Firebase Admin application-default credentials with Auth read/update/
    delete permissions, never client credentials. Register Play Integrity App Check
    for the signed Android build. Client now includes the App Check SDK; server
    allowlist requires `ACCOUNT_FIREBASE_APP_IDS`.
-3. Provision durable PostgreSQL storage/backups and run `schema.sql` explicitly.
+3. Provision durable PostgreSQL storage/backups and run `schema.sql` explicitly
+   (existing installations: see migration notes below).
    Complete and review the LiteLLM/app cleanup manifest; validate key block/delete,
    cache eviction, missing-key retry semantics and foreign-key ordering for the
-   deployed LiteLLM release (`main-latest` is not a pinned contract).
+   deployed LiteLLM release (`main-latest` is not a pinned contract). Supply and
+   verify the missing external image cleanup adapter before activation.
 4. Integrate all gateway/quota/write fences above, validate cancellation races
    against staging Firebase and SQL, and define backup/telemetry retention.
 5. Install dependencies from `requirements.txt` in a dedicated runtime. Configure
@@ -162,15 +200,37 @@ not modify a nonexistent tracked mint module or the live `/opt` implementation.
 8. Build with `OVID_ACCOUNT_ENABLED=true` only when the above is active. Missing
    server/attestation then blocks account entry; no fake cancellation fallback.
 
+## Migration notes (artifacts only; not applied to a live database)
+
+- Fresh database: `schema.sql` includes the original table and both due indexes.
+- Existing database: explicitly apply `migrations/002_retry_schedule.sql`. It adds
+  only a repeatable expression index, keeps the old index, and changes no records,
+  columns, states, deadlines, recovery flags or cleanup context. Standard index
+  creation can block writers; schedule it in an appropriate maintenance window.
+- The application also operates correctly on the original four-column schema
+  before the index is installed. JSON `attempts`/`next_attempt` default to zero;
+  `request_aliases` defaults to an empty list. No destructive backfill is needed.
+- Upgrade API and worker together after draining older processes. An old binary
+  ignores backoff and may discard new JSON fields when replacing a request; mixed
+  versions or rollback lose the repaired fairness/idempotency guarantees. Preserve
+  records and indexes on rollback; upgrade again before relying on those guarantees.
+- Previously coalesced IDs were never recorded by the old binary, so they cannot be
+  reconstructed by a migration. The alias guarantee applies to IDs accepted by the
+  repaired code; existing canonical IDs and `previous_requests` remain honored.
+
 ## Local verification
 
 ```sh
-python -m unittest discover -s server/account/tests -v
-/root/flutter/bin/flutter test --concurrency=2 test/account_service_test.dart test/account_session_test.dart test/profile_avatar_test.dart test/account_deletion_panel_test.dart test/ovid_cloud_service_test.dart
-/root/flutter/bin/flutter analyze --no-pub
+python -m pytest -q server/account/tests
 ```
 
 Tests fake Firebase, storage and clock; API tests inject verified claims rather than
 contacting Firebase. They do not prove live IAM, provider enablement, PostgreSQL
 failover, LiteLLM cache semantics, or external Auth consistency. No live deletion
 or deployment was used for verification.
+
+Install `requirements.txt` plus pytest in a local test environment. SQL tests execute
+the store's due query/upserts and repeatable migration on in-memory SQLite with
+PostgreSQL-style JSON text extraction. They cover the original schema, preserved
+legacy rows, retry ordering and 100 poison rows ahead of healthy work; they do not
+validate PostgreSQL-specific locks, query plans or concurrent DDL.

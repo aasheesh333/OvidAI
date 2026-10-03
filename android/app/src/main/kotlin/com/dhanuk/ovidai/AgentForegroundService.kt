@@ -87,7 +87,7 @@ class AgentForegroundService : Service() {
             BackgroundScheduleState.stop(this)
             // ACTION_EXIT: stops foreground service completely, releases wake-lock, triggers exit bridge.
             releaseWakeLock()
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            removeForegroundNotification()
             stopSelf()
             AgentNotificationBridge.exitHandler?.invoke()
             return START_NOT_STICKY
@@ -96,7 +96,7 @@ class AgentForegroundService : Service() {
             BackgroundScheduleState.stop(this)
             wantWakeLock = false
             releaseWakeLock()
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            removeForegroundNotification()
             stopSelf()
             AgentNotificationBridge.stopHandler?.invoke()
             return START_NOT_STICKY
@@ -158,9 +158,18 @@ class AgentForegroundService : Service() {
     override fun onDestroy() {
         releaseWakeLock()
         try {
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            removeForegroundNotification()
         } catch (_: Exception) {}
         super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun removeForegroundNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            stopForeground(true)
+        }
     }
 
     private fun buildNotification(title: String, text: String): Notification {

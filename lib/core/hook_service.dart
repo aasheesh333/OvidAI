@@ -7,6 +7,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'plugin_adapters.dart';
+import 'hook_execution_scope.dart';
+import 'hook_context_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
 import 'sandbox_service.dart';
@@ -109,8 +111,9 @@ class HookStopResult {
 /// Detailed outcome of [HookService.fireDetailed] — [HookService.fire]
 /// returns just [output].
 class HookFireResult {
-  /// Combined hook stdout after the output contract was applied
-  /// (`suppressOutput` entries removed, `continue:false` honored).
+  /// For pre_request/user_prompt_submit, independently extracted and bounded
+  /// context. Other events retain stdout after suppressOutput/continue handling;
+  /// session_start injection uses [HookService.sessionContextFor], not this JSON.
   final String output;
 
   /// `systemMessage` values surfaced by hooks, in firing order.
@@ -130,12 +133,17 @@ class HookFireResult {
   /// nothing blocked (audit 2026-09-25).
   final String? blockedReason;
 
+  /// At least one eligible hook could not execute. Session lifecycle callers
+  /// can retry without replaying already-successful hooks.
+  final bool retryableFailure;
+
   const HookFireResult({
     required this.output,
     this.systemMessages = const [],
     this.halted = false,
     this.promptBlockReason,
     this.blockedReason,
+    this.retryableFailure = false,
   });
 }
 
@@ -248,8 +256,9 @@ class PromptHookVerdict {
 /// Recursion prevention (§8.2): a hook cannot re-fire its own event
 /// while that event is executing, and nesting depth is capped.
 ///
-/// Circuit breaker (§8.2): 3 consecutive failures of one plugin in one
-/// session disable that plugin's hooks for the rest of the session.
+  /// Circuit breaker (§8.2): 3 consecutive execution failures of one plugin in
+  /// one session disable its hooks. Synchronous session_start and unavailable
+  /// runtimes remain retryable, without consuming the breaker.
 class HookService extends ChangeNotifier {
   HookService._();
   static final HookService I = HookService._();
@@ -296,7 +305,8 @@ class HookService extends ChangeNotifier {
   /// id. A [CC] plugin's SessionStart hook returns the text that becomes the
   /// session's standing context (e.g. `superpowers` injects its intro skill);
   /// the run loop reads this to prepend it. Bounded so a hostile hook cannot
-  /// blow up the prompt.
+  /// blow up the prompt. Explicit additionalContext fields are encrypted for
+  /// restart restore; plain stdout context remains process-local.
   static const int maxSessionContextChars = 8192;
 
   /// Observe events where a COMMAND hook exiting 2 is a blocking decision
@@ -307,11 +317,67 @@ class HookService extends ChangeNotifier {
     'user_prompt_submit',
     'subagent_end',
   };
-  final Map<String, String> _sessionContexts = {};
+  final Map<String, Map<String, String>> _sessionContexts = {};
+  final Map<String, int> _sessionContextEpochs = {};
+  final HookContextStore _contextStore = HookContextStore();
 
   /// The `session_start` context a hook produced for [sessionId], or ''.
-  String sessionContextFor(String sessionId) =>
-      _sessionContexts[sessionId] ?? '';
+  String sessionContextFor(String sessionId) {
+    if (!enabled) return '';
+    final contributions = _sessionContexts[sessionId];
+    if (contributions == null) return '';
+    // Resolve at read time: disabled/uninstalled plugins cannot retain prompt
+    // influence. Registry/manifest order is stable even after targeted installs.
+    final hooks = _resolveHooks('session_start', sessionId);
+    final valid = hooks.map((entry) => _contextKey(entry.$1, entry.$2)).toSet();
+    final removed = contributions.keys.where((key) => !valid.contains(key)).toList();
+    for (final key in removed) {
+      contributions.remove(key);
+    }
+    // The synchronous model-context reader can filter immediately. Queue the
+    // durable removal before any subsequent start can restore these entries.
+    if (removed.isNotEmpty) {
+      unawaited(_contextStore.reconcile(sessionId, valid).then<void>((_) {},
+        onError: (Object _, StackTrace _) {
+          Diag.swallow('hook_context', 'encrypted context invalidation unavailable');
+        }));
+    }
+    final text = hooks
+        .map((entry) => contributions[_contextKey(entry.$1, entry.$2)] ?? '')
+        .where((text) => text.isNotEmpty).join('\n');
+    return _capContext(text, maxSessionContextChars);
+  }
+
+  String _contextKey(String pluginId, PluginHook hook) {
+    final manifest = PluginContributionRegistry.I.manifestFor(pluginId);
+    if (manifest != null) return HookContextStore.descriptor(manifest, hook);
+    return jsonEncode([pluginId, manifest?.rootPath, manifest?.version, hook.toJson()]);
+  }
+
+  Future<void> _restoreSessionContext(String sessionId) async {
+    final epoch = _sessionContextEpochs[sessionId] ?? 0;
+    final valid = _resolveHooks('session_start', sessionId)
+        .where((entry) => !entry.$1.startsWith('legacy:'))
+        .map((entry) => _contextKey(entry.$1, entry.$2)).toSet();
+    try {
+      final restored = await _contextStore.reconcile(sessionId, valid);
+      if (epoch != (_sessionContextEpochs[sessionId] ?? 0)) return;
+      final contexts = _sessionContexts.putIfAbsent(sessionId, () => {});
+      // Fresh in-process results win over persisted results on targeted installs.
+      for (final entry in restored.entries) {
+        contexts.putIfAbsent(entry.key, () => entry.value);
+      }
+      contexts.removeWhere((key, _) => RegExp(r'^[a-f0-9]{64}$').hasMatch(key) && !valid.contains(key));
+    } catch (_) {
+      // Fail open without logging decrypted values or platform exception data.
+      Diag.swallow('hook_context', 'encrypted context restore unavailable');
+    }
+  }
+
+  static String _capContext(String text, int cap) {
+    const suffix = '\n[hook output truncated]';
+    return text.length <= cap ? text : '${text.substring(0, cap - suffix.length)}$suffix';
+  }
 
   /// Extract the injectable context from a hook's stdout, honoring the three
   /// output shapes real plugins use:
@@ -352,6 +418,7 @@ class HookService extends ChangeNotifier {
   @visibleForTesting
   void resetForTest() {
     _sessionContexts.clear();
+    _sessionContextEpochs.clear();
     executorForTest = null;
     gateExecutorForTest = null;
     stdinExecutorForTest = null;
@@ -612,6 +679,43 @@ class HookService extends ChangeNotifier {
   static bool _isToolEvent(String canonicalEvent) =>
       canonicalEvent == 'pre_tool' || canonicalEvent == 'post_tool';
 
+  /// Compatibility aliases apply only to manifests inspected by the [CC]
+  /// adapter. The native name stays available to matchers and on stdin.
+  Map<String, dynamic>? _ccAliasPayload(String pluginId, Map<String, dynamic> payload) {
+    if (PluginContributionRegistry.I.manifestFor(pluginId)?.format != PluginFormat.claudeCode) {
+      return null;
+    }
+    final tool = payload['tool'] ?? payload['tool_name'];
+    final input = payload['tool_input'] ?? payload['args'] ?? payload['input'];
+    final operation = input is Map ? input['command'] : null;
+    final alias = switch (tool) {
+      'run_shell' => 'Bash',
+      'file_read' => 'Read',
+      'file_write' => 'Write',
+      'fs_edit' => switch (operation) {
+        'view' => 'Read',
+        'create' => 'Write',
+        _ => 'Edit',
+      },
+      _ => null,
+    };
+    return alias == null ? null : {...payload, 'tool': alias, 'tool_name': alias};
+  }
+
+  bool _hookMatches(String pluginId, PluginHook hook, String event, Map<String, dynamic> payload) {
+    final alias = _ccAliasPayload(pluginId, payload);
+    final toolEvent = _isToolEvent(event) || event == 'permission_request';
+    final isCc = PluginContributionRegistry.I.manifestFor(pluginId)?.format == PluginFormat.claudeCode;
+    final matchEvent = event == 'permission_request' && isCc ? 'pre_tool' : event;
+    if (!_matcherApplies(matchEvent, hook.matcher, payload) &&
+        !(toolEvent && alias != null && _matcherApplies(matchEvent, hook.matcher, alias))) {
+      return false;
+    }
+    final predicate = _hookIfPredicate(hook);
+    return predicate == null || ifPredicateMatches(predicate, payload) ||
+        (toolEvent && alias != null && ifPredicateMatches(predicate, alias));
+  }
+
   static bool _hasRegexMeta(String s) =>
       RegExp(r'[\\.\\+*?\[\](){}^$|]').hasMatch(s);
 
@@ -635,7 +739,7 @@ class HookService extends ChangeNotifier {
       return payload['trigger']?.toString() ?? '';
     }
     if (_isToolEvent(canonicalEvent)) {
-      return payload['tool']?.toString() ?? '';
+      return (payload['tool'] ?? payload['tool_name'])?.toString() ?? '';
     }
     // No matcher vocabulary exists for this event.
     return _kSubjectMatchesEverything;
@@ -987,7 +1091,18 @@ class HookService extends ChangeNotifier {
     // built-in contract below always wins on collision.
     final envFilePath = await _sessionEnvFilePath(sessionId);
     final sessionEnv = _loadSessionEnv(envFilePath);
+    final runtime = HookExecutionScope.dependencyRoot(
+      PluginContributionRegistry.I.manifestFor(pluginId),
+    );
+    // pluginRuntimeEnv includes the installed shell directory in PATH. Resolve
+    // an existing prefix before building it, including on a cold process boot.
+    if (runtime != null && SandboxService.I.prefixPath == null) {
+      await SandboxService.I.checkExisting();
+    }
     return {
+      if (runtime != null) ...SandboxService.pluginRuntimeEnv(runtime),
+      if (runtime != null) 'NODE_PATH': '$runtime/node/node_modules',
+      if (runtime != null) 'PYTHONPATH': '$runtime/python',
       ...sessionEnv,
       // Legacy env contract: the DECLARED name (a hook that registered
       // on_turn_start sees "on_turn_start"), never the internal prefix.
@@ -1063,7 +1178,7 @@ class HookService extends ChangeNotifier {
     return payload.replaceRange(match.start, match.end, '"$sibling"');
   }
 
-  /// Execute one hook. Returns (exitCode, stdout) — throws on
+  /// Execute one hook. Returns (exitCode, stdout, stderr) — throws on
   /// exec error/timeout. Failures bubble to the caller's fail-open
   /// handling. [gate] selects the test seam matching the calling context
   /// (gate vs observe) so a test executor for one never intercepts the
@@ -1086,7 +1201,7 @@ class HookService extends ChangeNotifier {
     return 'bash';
   }
 
-  Future<(int, String)> _exec(
+  Future<(int, String, String)> _exec(
     PluginHook hook,
     Map<String, String> env,
     Directory? cwd, {
@@ -1107,15 +1222,21 @@ class HookService extends ChangeNotifier {
     }
     if (gate) {
       final g = gateExecutorForTest;
-      if (g != null) return g(command, env);
+      if (g != null) {
+        final (code, out) = await g(command, env);
+        return (code, out, '');
+      }
     }
     // Stdin-aware test seam (item 1) — consulted before the legacy seams.
     final se = stdinExecutorForTest;
-    if (se != null) return se(command, env, stdinPayload);
+    if (se != null) {
+      final (code, out) = await se(command, env, stdinPayload);
+      return (code, out, '');
+    }
     final custom = executorForTest;
-    if (custom != null) return (0, await custom(command, env));
+    if (custom != null) return (0, await custom(command, env), '');
     final t = execTimeoutForTest;
-    if (t != null) return (0, await t(timeout.inSeconds));
+    if (t != null) return (0, await t(timeout.inSeconds), '');
     // The sandbox exec boundary — the hook env contract (CLAUDE_PLUGIN_ROOT,
     // PLUGIN_ROOT, PLUGIN_SESSION, ...). When a test override stands in for
     // the installed sandbox, route through `execChecked`, which consults it:
@@ -1125,30 +1246,33 @@ class HookService extends ChangeNotifier {
     // spawn path below. Without this, the spawn path bypassed the boundary
     // the contract tests pin, so hooks never reached it.
     if (SandboxService.hasExecOverride) {
-      return SandboxService.I
+      final (code, out) = await SandboxService.I
           .execChecked(
             [_hookShell(hook), '-c', command],
             hostWorkDir: cwd,
             env: env,
           )
           .timeout(timeout);
+      return (code, out, '');
     }
-    // `execChecked` throws its own (more helpful) error when no sandbox is
-    // installed; this guard exists only to fail early with the historical
-    // message. A test override stands in for the installed sandbox, so it
-    // must not be pre-empted here -- that boundary is exactly where the hook
-    // env bug slipped through.
-    if (!SandboxService.sandboxReady) {
+    // Probe the existing sandbox, then verify the actual shell on disk. A stale
+    // installed flag must not claim that a missing interpreter is usable.
+    if (SandboxService.I.prefixPath == null) {
+      await SandboxService.I.checkExisting();
+    }
+    final prefix = SandboxService.I.prefixPath;
+    if (prefix == null || !File('$prefix/bin/${_hookShell(hook)}').existsSync()) {
       // The single most common real reason "hooks don't work": hook commands
       // execute inside the Studio sandbox, which only installs on first Studio
       // open. Record the reason instead of failing invisibly three times and
       // then tripping the circuit breaker with nothing to show for it.
       _noteBlocker(
         hook.pluginId,
-        'hook commands need the on-device sandbox, which is not installed yet '
-            '— open Studio once to install it',
+        prefix == null
+            ? 'hook commands need the on-device sandbox, which is not installed yet — open Studio once to install it'
+            : 'sandbox hook shell is missing — repair the Studio runtime and retry',
       );
-      throw StateError('sandbox not installed');
+      throw const HookRuntimeUnavailable();
     }
     // Spawn (not execChecked): the hook child MUST receive the full JSON
     // payload on stdin — `SandboxService.spawn` (Process.start) is the only
@@ -1166,10 +1290,18 @@ class HookService extends ChangeNotifier {
     // sandbox policy (destructive-command denylist) — a denied hook fails
     // open through the callers' normal error handling, same as any exec
     // failure.
-    final proc = await SandboxService.I.spawn(
-      [_hookShell(hook), '-c', command],
-      hostWorkDir: cwd,
+    if (cwd == null) throw StateError('hook session workspace unavailable');
+    final scope = HookExecutionScope.roots(
+      manifest: PluginContributionRegistry.I.manifestFor(hook.pluginId),
+      workspace: cwd,
       env: env,
+      inherited: Zone.current[SandboxService.allowedRootsZoneKey],
+    );
+    final proc = await runZoned(
+      () => SandboxService.I.spawn(
+        [_hookShell(hook), '-c', command], hostWorkDir: cwd, env: env,
+      ),
+      zoneValues: {SandboxService.allowedRootsZoneKey: scope},
     );
     // Subscribe to stdout/stderr BEFORE touching stdin so a chatty hook
     // can never deadlock on a full pipe while we write.
@@ -1198,7 +1330,7 @@ class HookService extends ChangeNotifier {
     }
     final out = await stdoutFuture;
     final err = await stderrFuture;
-    return (code, '$out$err');
+    return (code, out, err);
   }
 
   Future<void> _ledger(String sessionId, String kind, Map<String, dynamic> d) {
@@ -1207,8 +1339,8 @@ class HookService extends ChangeNotifier {
 
   // ── fire: observe events (fire-and-forget semantics at call sites) ──
 
-  /// Fire [event] for [sessionId]. Returns the combined stdout of all
-  /// listener commands (≤2 KB — `pre_request` context injection) — empty
+  /// Fire [event] for [sessionId]. Context-injection events return extracted
+  /// context (≤2 KB); other events return stdout — empty
   /// when no listener or hooks are disabled. Observe events NEVER block
   /// the run: failures are ledgered and skipped. See [fireDetailed] for
   /// the output contract (`continue:false`, `suppressOutput`,
@@ -1231,29 +1363,54 @@ class HookService extends ChangeNotifier {
   /// `suppressOutput` filtering, surfaced `systemMessage`s, and
   /// prompt-hook block verdicts. Blocking stop semantics live in
   /// [fireStop] — call exactly one of the two for the `stop` event.
+  /// [completedStartHooks] is a lifecycle-owned retry receipt set: successful
+  /// synchronous starts (including intentional halts) are not replayed.
   Future<HookFireResult> fireDetailed(
     String event,
     String sessionId, {
     Map<String, dynamic> payload = const {},
     String? model,
     String? onlyPluginId,
+    Set<String>? completedStartHooks,
   }) async {
-    if (!enabled) return const HookFireResult(output: '');
     final canonical = canonicalHookEvent(event) ?? event;
+    if (canonical == 'session_end') {
+      _sessionContextEpochs[sessionId] = (_sessionContextEpochs[sessionId] ?? 0) + 1;
+      _sessionContexts.remove(sessionId);
+      try {
+        await _contextStore.deleteSession(sessionId);
+      } catch (_) {
+        Diag.swallow('hook_context', 'encrypted context deletion unavailable');
+      }
+    }
+    if (!enabled) {
+      if (canonical == 'session_end') await _deleteSessionEnv(sessionId);
+      return const HookFireResult(output: '');
+    }
     // Recursion prevention: never re-fire the SAME event for the SAME session
     // while it is executing. Concurrent DISTINCT sessions are independent and
     // must both run (workflow child fan-out).
     final guardKey = '$sessionId|$canonical';
     if (_firingEvents.contains(guardKey)) {
-      return const HookFireResult(output: '');
+      return const HookFireResult(output: '', retryableFailure: true);
     }
     final chainDepth = _chainDepth();
-    if (chainDepth >= maxDepth) return const HookFireResult(output: '');
+    if (chainDepth >= maxDepth) return const HookFireResult(output: '', retryableFailure: true);
     final hooks = _resolveHooks(event, sessionId, onlyPluginId: onlyPluginId);
-    if (hooks.isEmpty) return const HookFireResult(output: '');
+    if (hooks.isEmpty && canonical != 'session_start') {
+      if (canonical == 'session_end') await _deleteSessionEnv(sessionId);
+      return const HookFireResult(output: '');
+    }
 
     _firingEvents.add(guardKey);
+    final startEpoch = _sessionContextEpochs[sessionId] ?? 0;
     try {
+      if (canonical == 'session_start') await _restoreSessionContext(sessionId);
+      if (canonical == 'session_start' &&
+          startEpoch != (_sessionContextEpochs[sessionId] ?? 0)) {
+        return const HookFireResult(output: '');
+      }
+      if (hooks.isEmpty) return const HookFireResult(output: '');
       final result = await runZoned(
         () => _runHooks(
           sessionId: sessionId,
@@ -1261,26 +1418,14 @@ class HookService extends ChangeNotifier {
           hooks: hooks,
           payload: payload,
           model: model,
+          completedStartHooks: completedStartHooks,
         ),
         zoneValues: {_depthKey: chainDepth + 1},
       );
-      // A SessionStart hook's output is the session's standing context
-      // (real [CC] plugins inject a skill here). Extract it once and hold it
-      // for the run loop, which prepends it to the request.
-      if (canonical == 'session_start' && result.output.isNotEmpty) {
-        final ctx = extractHookContext(result.output);
-        if (ctx.isNotEmpty) _sessionContexts[sessionId] = ctx;
-      }
-      if (canonical == 'session_end') {
-        // The per-session env file dies with the session (item 8), and so
-        // does the cached session_start context — a new session re-fires
-        // session_start and rebuilds it.
-        _sessionContexts.remove(sessionId);
-        await _deleteSessionEnv(sessionId);
-      }
       return result;
     } finally {
       _firingEvents.remove(guardKey);
+      if (canonical == 'session_end') await _deleteSessionEnv(sessionId);
     }
   }
 
@@ -1410,7 +1555,9 @@ class HookService extends ChangeNotifier {
     required List<(String, PluginHook, String)> hooks,
     required Map<String, dynamic> payload,
     required String? model,
+    Set<String>? completedStartHooks,
   }) async {
+    final contextEpoch = _sessionContextEpochs[sessionId] ?? 0;
     final payloadJson = jsonEncode({
       'event': canonical,
       'session': sessionId,
@@ -1428,15 +1575,21 @@ class HookService extends ChangeNotifier {
     final collected = <String>[];
     final systemMessages = <String>[];
     var halted = false;
+    var retryableFailure = false;
     String? promptBlockReason;
     String? blockedReason;
     for (final (pluginId, hook, declaredEvent) in hooks) {
-      if (!_matcherApplies(canonical, hook.matcher, payload)) continue;
-      if (_tripped.contains('$pluginId|$sessionId')) continue;
-      // `"if"` predicate (item 7): a non-matching hook is skipped — it is
-      // a filter, not a failure, so no breaker/ledger noise.
-      final ifPredicate = _hookIfPredicate(hook);
-      if (ifPredicate != null && !ifPredicateMatches(ifPredicate, payload)) {
+      if (!_hookMatches(pluginId, hook, canonical, payload)) continue;
+      final startKey = _contextKey(pluginId, hook);
+      if (canonical == 'session_start' && completedStartHooks?.contains(startKey) == true) {
+        if (completedStartHooks!.contains('halt:$startKey')) {
+          halted = true;
+          break;
+        }
+        continue;
+      }
+      if (_tripped.contains('$pluginId|$sessionId')) {
+        retryableFailure = true;
         continue;
       }
       if (hook.type == 'prompt') {
@@ -1509,12 +1662,16 @@ class HookService extends ChangeNotifier {
         unawaited(
           _exec(hook, env, cwd, stdinPayload: stdinJson)
               .then((result) async {
-                final (code, out) = result;
+                final (code, out, err) = result;
                 if (code == 0) {
                   _recordSuccess(pluginId, sessionId);
                   return;
                 }
-                _recordFailure(pluginId, sessionId);
+                if (code == 126 || code == 127) {
+                  _noteBlocker(pluginId, 'hook executable or dependency unavailable (exit $code) — repair runtime and retry');
+                } else {
+                  _recordFailure(pluginId, sessionId);
+                }
                 try {
                   await _ledger(sessionId, 'hook/result', {
                     ...record,
@@ -1522,18 +1679,19 @@ class HookService extends ChangeNotifier {
                     'exit': code,
                     'async': true,
                     'warning': 'async hook failed (fail-open) — output ignored',
-                    'stdout': cleanHookJson(out),
+                    'stdoutChars': out.length,
+                    'stderrChars': err.length,
                   });
                 } catch (e) { Diag.swallow('hook_service', e); }
               })
-              .catchError((Object _) {
-                _recordFailure(pluginId, sessionId);
+              .catchError((Object error) {
+                if (error is! HookRuntimeUnavailable) _recordFailure(pluginId, sessionId);
               }),
         );
         continue;
       }
       try {
-        final (code, out) = await _exec(hook, env, cwd, stdinPayload: stdinJson);
+        final (code, out, err) = await _exec(hook, env, cwd, stdinPayload: stdinJson);
         if (code != 0) {
           // CLAUDE CODE PARITY (audit 2026-09-25): on the two events Claude
           // Code lets a command hook block — `user_prompt_submit` (block the
@@ -1542,9 +1700,10 @@ class HookService extends ChangeNotifier {
           // every other observe event exit 2 stays fail-open, because a broken
           // hook must never brick a run.
           if (code == 2 && kExit2BlockingEvents.contains(canonical)) {
-            blockedReason = out.trim().isEmpty
+            final diagnostic = err.isNotEmpty ? err : out;
+            blockedReason = diagnostic.trim().isEmpty
                 ? 'plugin $pluginId blocked this prompt'
-                : cleanHookJson(out.trim());
+                : cleanHookJson(diagnostic.trim());
             try {
               await _ledger(sessionId, 'hook/result', {
                 ...record,
@@ -1557,19 +1716,29 @@ class HookService extends ChangeNotifier {
             break;
           }
           failed++;
-          _recordFailure(pluginId, sessionId);
+          retryableFailure = true;
+          if (code == 126 || code == 127) {
+            _noteBlocker(pluginId, 'hook executable or dependency unavailable (exit $code) — repair runtime and retry');
+          } else if (canonical != 'session_start') {
+            _recordFailure(pluginId, sessionId);
+          }
           try {
             await _ledger(sessionId, 'hook/result', {
               ...record,
               'ok': false,
               'exit': code,
               'warning': 'hook failed (fail-open) — output ignored',
-              'stdout': cleanHookJson(out),
+              'stdoutChars': out.length,
+              'stderrChars': err.length,
             });
           } catch (e) { Diag.swallow('hook_service', e); }
           continue;
         }
         _recordSuccess(pluginId, sessionId);
+        if (canonical == 'session_start' &&
+            contextEpoch != (_sessionContextEpochs[sessionId] ?? 0)) {
+          break;
+        }
         // A SessionStart hook may persist vars for the session via
         // `hookSpecificOutput.envFileAppend` (item 8).
         if (canonical == 'session_start') {
@@ -1580,8 +1749,33 @@ class HookService extends ChangeNotifier {
         }
         final contract = HookOutputContract.parse(out);
         final trimmed = out.trim();
+        final context = contract.suppressOutput ? '' : extractHookContext(out);
+        if (canonical == 'session_start') {
+          // Appending the env file above awaits I/O; a session end or plugin
+          // update in that interval must fence both in-memory and disk writes.
+          if (contextEpoch != (_sessionContextEpochs[sessionId] ?? 0)) break;
+          if (!pluginId.startsWith('legacy:') &&
+              (!PluginContributionRegistry.I.isPluginActiveForSession(pluginId, sessionId) ||
+               startKey != _contextKey(pluginId, hook))) {
+            continue;
+          }
+          final contexts = _sessionContexts.putIfAbsent(sessionId, () => {});
+          contexts[startKey] = _capContext(context, maxSessionContextChars);
+          if (!pluginId.startsWith('legacy:')) {
+            final explicit = HookContextStore.explicitContext(out);
+            try {
+              await _contextStore.put(sessionId, startKey,
+                explicit == null ? null : _capContext(explicit, maxSessionContextChars));
+            } catch (_) {
+              Diag.swallow('hook_context', 'encrypted context persistence unavailable');
+            }
+          }
+          completedStartHooks?.add(startKey);
+          if (!contract.continueHooks) completedStartHooks?.add('halt:$startKey');
+        }
         if (trimmed.isNotEmpty && !contract.suppressOutput) {
-          collected.add(trimmed);
+          final isContextEvent = canonical == 'pre_request' || canonical == 'user_prompt_submit';
+          collected.add(isContextEvent ? context : trimmed);
         }
         if (contract.systemMessage != null) {
           systemMessages.add(contract.systemMessage!);
@@ -1590,7 +1784,8 @@ class HookService extends ChangeNotifier {
           await _ledger(sessionId, 'hook/result', {
             ...record,
             'ok': true,
-            if (trimmed.isNotEmpty) 'stdout': cleanHookJson(out),
+            'stdoutChars': out.length,
+            'stderrChars': err.length,
             if (!contract.continueHooks) 'halted': true,
             if (contract.suppressOutput) 'suppressOutput': true,
             if (contract.systemMessage != null)
@@ -1604,30 +1799,32 @@ class HookService extends ChangeNotifier {
         }
       } catch (e) {
         failed++;
-        _recordFailure(pluginId, sessionId);
+        retryableFailure = true;
+        if (e is! HookRuntimeUnavailable && canonical != 'session_start') {
+          _recordFailure(pluginId, sessionId);
+        }
         try {
           await _ledger(sessionId, 'hook/result', {
             ...record,
             'ok': false,
-            'error': e.toString(),
+            'error': e is HookRuntimeUnavailable ? e.toString() : 'hook execution failed',
             'warning': 'hook failed (fail-open) — run continues',
           });
         } catch (e) { Diag.swallow('hook_service', e); }
       }
     }
     final joined = collected.join('\n');
-    // session_start output becomes standing session context, so it gets the
-    // larger context cap; other events are short injections (≤2 KB).
-    final cap = canonical == 'session_start' ? maxSessionContextChars : 2048;
-    final output = joined.length > cap
-        ? '${joined.substring(0, cap)}\n[hook output truncated]'
-        : joined;
+    // SessionStart's public output retains its legacy stdout shape. Standing
+    // context is already parsed per hook above; never truncate a JSON envelope.
+    final output = canonical == 'pre_request' || canonical == 'user_prompt_submit'
+        ? _capContext(joined, 2048) : joined;
     return HookFireResult(
       output: output,
       systemMessages: systemMessages,
       halted: halted,
       promptBlockReason: promptBlockReason,
       blockedReason: blockedReason,
+      retryableFailure: retryableFailure,
     );
   }
 
@@ -2042,12 +2239,8 @@ class HookService extends ChangeNotifier {
     // skips the ordinary user approval prompt for this call (audit 2026-09-25).
     var bypassPermission = false;
     for (final (pluginId, hook, declaredEvent) in hooks) {
-      if (!_matcherApplies(canonical, hook.matcher, payload)) continue;
+      if (!_hookMatches(pluginId, hook, canonical, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
-      final ifPredicate = _hookIfPredicate(hook);
-      if (ifPredicate != null && !ifPredicateMatches(ifPredicate, payload)) {
-        continue;
-      }
       final displayName = _displayName(pluginId);
       if (hook.type == 'prompt') {
         // Prompt-type hooks on gate events are LLM-evaluated (item 3); a
@@ -2111,13 +2304,26 @@ class HookService extends ChangeNotifier {
         );
       } catch (e) { Diag.swallow('hook_service', e); }
       try {
-        final (code, out) = await _exec(
+        final (code, out, err) = await _exec(
           hook,
           env,
           cwd,
           gate: true,
           stdinPayload: stdinJson,
         );
+        if (code != 0 && code != 2) {
+          failed++;
+          if (code == 126 || code == 127) {
+            _noteBlocker(pluginId, 'hook executable or dependency unavailable (exit $code) — repair runtime and retry');
+          } else {
+            _recordFailure(pluginId, sessionId);
+          }
+          await _ledger(sessionId, 'hook/result', {
+            ...record, 'ok': false, 'exit': code,
+            'stdoutChars': out.length, 'stderrChars': err.length,
+          });
+          continue;
+        }
         final contract = HookOutputContract.parse(out);
         // Rewritten tool args (item 5) — collected even from hooks that
         // allow, so the caller can apply them pre-execution.
@@ -2141,6 +2347,7 @@ class HookService extends ChangeNotifier {
         if (denies || asks) {
           failed++;
           final reason =
+              (code == 2 && err.trim().isNotEmpty ? cleanHookJson(err.trim()) : null) ??
               blockReason ??
               contract.reason ??
               contract.permissionDecisionReason ??
@@ -2177,7 +2384,8 @@ class HookService extends ChangeNotifier {
             ...record,
             'ok': true,
             'decision': 'allow',
-            if (out.trim().isNotEmpty) 'stdout': cleanHookJson(out),
+            'stdoutChars': out.length,
+            'stderrChars': err.length,
             if (contract.updatedInput != null)
               'updatedInput': contract.updatedInput,
             if (!contract.continueHooks) 'halted': true,
@@ -2188,12 +2396,12 @@ class HookService extends ChangeNotifier {
         // Exec error/timeout/missing sandbox — fail-open, but count
         // toward the breaker and record the visible warning.
         failed++;
-        _recordFailure(pluginId, sessionId);
+        if (e is! HookRuntimeUnavailable) _recordFailure(pluginId, sessionId);
         try {
           await _ledger(sessionId, 'hook/result', {
             ...record,
             'ok': false,
-            'error': e.toString(),
+            'error': e is HookRuntimeUnavailable ? e.toString() : 'hook execution failed',
             'reason': 'gate fails open on error',
           });
         } catch (e) { Diag.swallow('hook_service', e); }

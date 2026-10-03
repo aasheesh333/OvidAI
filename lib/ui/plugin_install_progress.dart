@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
@@ -114,17 +115,16 @@ class _ProgressLogViewState extends State<ProgressLogView> {
   @override
   void didUpdateWidget(ProgressLogView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.lines.length != oldWidget.lines.length) _followBottom();
+    if (!listEquals(widget.lines, oldWidget.lines)) _followBottom();
   }
 
   void _followBottom() {
+    // Capture intent before layout grows the scroll extent. A burst can add
+    // much more than 48px, including when the capped buffer length is unchanged.
+    if (_scroll.hasClients && _scroll.position.extentAfter > 48) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       final pos = _scroll.position;
-      // Follow-mode: only auto-scroll when the user is already near the
-      // bottom — scrolling up to read earlier output must not be yanked
-      // back down by every new line.
-      if (pos.maxScrollExtent - pos.pixels > 48) return;
       _scroll.jumpTo(pos.maxScrollExtent);
     });
   }
@@ -210,7 +210,7 @@ class _PluginInstallProgressSheetState
   Widget build(BuildContext context) {
     final p = widget.progress;
     return SafeArea(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: EdgeInsets.fromLTRB(
           18,
           10,
@@ -304,10 +304,9 @@ class _PluginInstallProgressSheetState
                 ),
               )
             else
-              Text(
-                'You can close this sheet — the install keeps running.',
-                style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
-                textAlign: TextAlign.center,
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Close — install continues'),
               ),
           ],
         ),

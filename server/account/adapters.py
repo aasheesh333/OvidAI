@@ -29,7 +29,9 @@ class FirebaseAdmin:
                 if claims.get('auth_time', 0) * 1000 < user.tokens_valid_after_timestamp:
                     raise AccountError('revoked_token', 401)
                 claims['_account_disabled'] = True
-            identity(claims)
+            # Verify legacy credentials, but let the lifecycle authorize only
+            # existing deletion recovery. Ordinary access rejects password.
+            identity(claims, allow_legacy_password=True)
             return claims
         except AccountError:
             raise

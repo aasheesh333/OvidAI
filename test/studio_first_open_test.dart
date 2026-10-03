@@ -8,13 +8,12 @@ import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/sandbox_setup.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// WS1 — startup on-demand install.
+/// W06.01 — approval-led, on-demand Studio setup.
 ///
 /// Covers the removal of the first-launch setup gate and the Studio
-/// first-open mandatory install:
+/// first-open install:
 ///  1. first launch goes straight to the shell (no gate in main.dart),
-///  2. the `studio_first_open_done` flag: mandatory full install screen is
-///     shown once, skipped afterwards,
+///  2. the `studio_first_open_done` flag and dismissible approval screen,
 ///  3. the background runtime job and the boot self-heal never apt-update
 ///     at startup — the apt path only runs from the Studio first-open
 ///     install or an explicit user retry.
@@ -117,14 +116,15 @@ void main() {
       const channel = MethodChannel('plugins.flutter.io/path_provider');
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (call) async {
-        if (call.method == 'getApplicationSupportDirectory') {
-          return Directory.systemTemp.path;
-        }
-        throw MissingPluginException('no handler for ${call.method}');
-      });
-      addTearDown(() =>
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-              .setMockMethodCallHandler(channel, null));
+            if (call.method == 'getApplicationSupportDirectory') {
+              return Directory.systemTemp.path;
+            }
+            throw MissingPluginException('no handler for ${call.method}');
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
     }
 
     Future<void> pumpLauncher(WidgetTester tester) async {
@@ -145,25 +145,32 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
     }
 
-    testWidgets('flag unset → mandatory full install screen (non-dismissible)',
-        (tester) async {
+    testWidgets('flag unset → approval before install, Back is available', (
+      tester,
+    ) async {
       expect(AppState.I.studioFirstOpenDone, isFalse);
 
       await pumpLauncher(tester);
 
-      final screen =
-          tester.widget<SandboxSetupScreen>(find.byType(SandboxSetupScreen));
+      final screen = tester.widget<SandboxSetupScreen>(
+        find.byType(SandboxSetupScreen),
+      );
       expect(screen.studioFirstOpen, isTrue);
       expect(screen.gateMode, isFalse);
-      // Non-dismissible while installing: no close affordance.
-      expect(find.byIcon(Icons.close), findsNothing);
+      expect(find.text('Install sandbox'), findsOneWidget);
+      expect(find.byIcon(Icons.close), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pumpAndSettle();
+      expect(find.byType(SandboxSetupScreen), findsNothing);
 
       // Tear down the route so the screen's ticker/install future can't leak.
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('flag set → mandatory install skipped (manual setup instead)',
-        (tester) async {
+    testWidgets('flag set but core missing → dismissible install approval', (
+      tester,
+    ) async {
       await AppState.I.setStudioFirstOpenDone(true);
       // Nothing installed on disk in the test env: the disk check decides.
       SandboxService.I.resetCheckExistingForTest();
@@ -172,10 +179,13 @@ void main() {
       // Let the async checkExisting().then(...) push its route.
       await tester.pump(const Duration(milliseconds: 500));
 
-      // Manual (dismissible) setup screen — NOT the mandatory first-open one.
-      final screen =
-          tester.widget<SandboxSetupScreen>(find.byType(SandboxSetupScreen));
+      // A missing sandbox still requires approval before installation.
+      final screen = tester.widget<SandboxSetupScreen>(
+        find.byType(SandboxSetupScreen),
+      );
       expect(screen.studioFirstOpen, isFalse);
+      expect(find.text('Install sandbox'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -196,49 +206,54 @@ void main() {
       expect(SandboxService.I.runtimesRequested, isFalse);
     });
 
-    test('never apt-updates at startup once the first-open install is done',
-        () async {
-      final app = AppState.I;
-      app.sandboxInstalled = true;
-      await app.setStudioFirstOpenDone(true);
-      // Runtimes are missing: nothing on disk, and the probe fails.
-      SandboxService.execCheckedOverrideForTest =
-          (args, env) async => (1, '');
+    test(
+      'never apt-updates at startup once the first-open install is done',
+      () async {
+        final app = AppState.I;
+        app.sandboxInstalled = true;
+        await app.setStudioFirstOpenDone(true);
+        // Runtimes are missing: nothing on disk, and the probe fails.
+        SandboxService.execCheckedOverrideForTest = (args, env) async =>
+            (1, '');
 
-      await app.maybeStartBackgroundRuntimeInstall();
+        await app.maybeStartBackgroundRuntimeInstall();
 
-      // Reports failed with a retry affordance instead of apt-installing.
-      expect(app.runtimeInstallState, RuntimeInstallState.failed);
-      expect(app.runtimeInstallLine, contains('Retry'));
-      expect(
-        SandboxService.I.runtimesRequested,
-        isFalse,
-        reason: 'the apt path (installCoreRuntimes) must not run '
-            'from a startup trigger',
-      );
-    });
+        // Reports failed with a retry affordance instead of apt-installing.
+        expect(app.runtimeInstallState, RuntimeInstallState.failed);
+        expect(app.runtimeInstallLine, contains('Retry'));
+        expect(
+          SandboxService.I.runtimesRequested,
+          isFalse,
+          reason:
+              'the apt path (installCoreRuntimes) must not run '
+              'from a startup trigger',
+        );
+      },
+    );
 
-    test('quiet when first-open has not run yet (Studio owns the retry)',
-        () async {
-      final app = AppState.I;
-      app.sandboxInstalled = true;
-      // Flag unset: the mandatory Studio install hasn't happened.
-      SandboxService.execCheckedOverrideForTest =
-          (args, env) async => (1, '');
+    test(
+      'quiet when first-open has not run yet (Studio owns the retry)',
+      () async {
+        final app = AppState.I;
+        app.sandboxInstalled = true;
+        // Flag unset: approved Studio setup hasn't completed.
+        SandboxService.execCheckedOverrideForTest = (args, env) async =>
+            (1, '');
 
-      await app.maybeStartBackgroundRuntimeInstall();
+        await app.maybeStartBackgroundRuntimeInstall();
 
-      // No banner noise, no apt — opening Studio runs the full install.
-      expect(app.runtimeInstallState, RuntimeInstallState.idle);
-      expect(SandboxService.I.runtimesRequested, isFalse);
-    });
+        // No banner noise, no apt — Studio asks for approval first.
+        expect(app.runtimeInstallState, RuntimeInstallState.idle);
+        expect(SandboxService.I.runtimesRequested, isFalse);
+      },
+    );
 
     test('cheap path still marks done when runtimes are present', () async {
       final app = AppState.I;
       app.sandboxInstalled = true;
       await app.setStudioFirstOpenDone(true);
-      SandboxService.execCheckedOverrideForTest =
-          (args, env) async => (0, ''); // probe succeeds
+      SandboxService.execCheckedOverrideForTest = (args, env) async =>
+          (0, ''); // probe succeeds
 
       await app.maybeStartBackgroundRuntimeInstall();
 
@@ -249,8 +264,7 @@ void main() {
 
   group('sandbox.selfHeal wiring', () {
     test('verifies only — never apt-updates at boot', () async {
-      SandboxService.execCheckedOverrideForTest =
-          (args, env) async => (1, '');
+      SandboxService.execCheckedOverrideForTest = (args, env) async => (1, '');
 
       expect(await AppState.I.verifyRuntimesForStartupSelfHeal(), isFalse);
       expect(
@@ -262,12 +276,12 @@ void main() {
 
     test('waits out a Studio install in flight, then verifies', () async {
       SandboxService.I.setInstallInFlightForTest(true);
-      SandboxService.execCheckedOverrideForTest =
-          (args, env) async => (1, '');
+      SandboxService.execCheckedOverrideForTest = (args, env) async => (1, '');
 
       var finished = false;
-      final future =
-          AppState.I.verifyRuntimesForStartupSelfHeal().then((value) {
+      final future = AppState.I.verifyRuntimesForStartupSelfHeal().then((
+        value,
+      ) {
         finished = true;
         return value;
       });
