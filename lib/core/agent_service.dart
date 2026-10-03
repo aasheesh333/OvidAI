@@ -6116,7 +6116,8 @@ user which one instead of assuming this one.''';
   }
 
   static Map<String, dynamic> _compactParams(Map<dynamic, dynamic> params) {
-    final out = Map<String, dynamic>.from(params);
+    final out = Map<String, dynamic>.from(params)
+      ..remove('additionalProperties');
     final props = params['properties'];
     if (props is Map) {
       // Issue 8: zero-arg tools ('properties': {}) normalize to
@@ -7997,7 +7998,6 @@ user which one instead of assuming this one.''';
             'No arbitrary session IDs or filesystem paths. Default file MEMORY.md.',
         'parameters': {
           'type': 'object',
-          'additionalProperties': false,
           'properties': {
             'scope': {'type': 'string', 'enum': ['global', 'session']},
             'file': {'type': 'string'},
