@@ -19,16 +19,28 @@ class StagedSettingsBackup {
   final Directory directory;
   final List<Map<String, dynamic>> sessions;
   final Map<String, File> attachments;
-  StagedSettingsBackup._(this.directory, this.sessions, this.attachments);
+
+  /// Allowlisted, bounded preference values from the archive, or empty when the
+  /// archive carried no settings section. Never contains credentials, grants,
+  /// provider configuration, memory, MCP headers/env or plugin state.
+  final Map<String, Object> settings;
+  StagedSettingsBackup._(
+    this.directory,
+    this.sessions,
+    this.attachments,
+    this.settings,
+  );
   Future<void> dispose() async {
     if (await directory.exists()) await directory.delete(recursive: true);
   }
 }
 
-/// Version 1 is a portable TRANSCRIPT archive, not a full settings snapshot.
-/// Explicit allowlists exclude keys, config, grants, schedules, executable
-/// artifacts, tool output, local paths, and live agent state. User-written text
-/// and attachment content may themselves contain secrets; no redaction claimed.
+/// Version 1 is a portable TRANSCRIPT archive with an OPTIONAL allowlisted
+/// settings snapshot. Explicit allowlists exclude keys, config, grants,
+/// schedules, executable artifacts, tool output, local paths, and live agent
+/// state. The settings section carries its own schema version and is limited to
+/// bounded primitive preference values. User-written text and attachment
+/// content may themselves contain secrets; no redaction claimed.
 /// Stored ZIP entries only: bounded input is also a bound on decoded memory.
 class SettingsBackupService {
   static const maxArchiveBytes = 64 * 1024 * 1024;
@@ -37,15 +49,152 @@ class SettingsBackupService {
   static const maxAttachments = 256;
   static const maxSessions = 1000;
   static const maxMessages = 20000;
+
+  /// Schema version of the optional `settings` manifest section.
+  static const settingsSchemaVersion = 1;
+  static const maxSettingsKeys = 64;
+  static const maxSettingStringLength = 4096;
+  static const maxSettingsBytes = 256 * 1024;
+
+  /// Pure preference keys that may travel in a backup, with the only value
+  /// type each key may carry. Deliberately excludes sessions, active/session
+  /// bootstrap, provider configs and credentials, permission grants, MCP
+  /// headers/env, memories, plugins, presets, usage and any device-local path,
+  /// repo, branch or model selection.
+  static const Map<String, Type> _settingTypes = {
+    'ovid_light_theme': bool,
+    'ovid_theme_mode': String,
+    'ovid_memory_enabled': bool,
+    'ovid_show_reasoning': bool,
+    'ovid_github_sync': bool,
+    'ovid_workflow_enabled': bool,
+    'ovid_browser_desktop_mode': bool,
+    'ovid_auto_run_safe': bool,
+    'ovid_send_while_busy': String,
+    'ovid_conversation_display': String,
+    'ovid_notifications_enabled': bool,
+    'ovid_keep_alive': bool,
+    'ovid_locale': String,
+    'ovid_welcome': String,
+    'ovid_chat_font_scale': double,
+    'ovid_response_timeout_sec': int,
+    'ovid_context_window_override': int,
+    'ovid_max_output_tokens': int,
+    'ovid_sandbox_skipped': bool,
+    'ovid_share_session_memory': bool,
+    'ovid_share_studio_on_restart': bool,
+    'ovid_share_browser_on_restart': bool,
+    'ovid_control_disclosure_accepted': bool,
+    'ovid_control_battery_prompt_shown': bool,
+  };
+
+  /// The allowlisted preference keys, derived from the typed schema.
+  static final Set<String> settingsAllowlist = _settingTypes.keys.toSet();
+
   final List<Directory> attachmentRoots;
   final SettingsRestorePublisher? publisher;
   SettingsBackupService({this.attachmentRoots = const [], this.publisher});
   bool get canRestore => publisher != null;
 
-  Future<Uint8List> export(List<ChatSession> sessions) async {
+  /// Picks only allowlisted, correctly typed, in-bounds values out of a raw
+  /// preference map. Non-allowlisted keys are dropped rather than rejected so
+  /// callers can safely pass a full preference snapshot; an allowlisted key
+  /// with an invalid value still fails closed.
+  static Map<String, Object> captureSettings(Map<String, Object?> source) {
+    final picked = <String, Object?>{};
+    for (final key in settingsAllowlist) {
+      final value = source[key];
+      if (value != null) picked[key] = value;
+    }
+    return Map.unmodifiable(_validatedSettings(picked));
+  }
+
+  /// Applies a staged [snapshot] through [write] and restores every touched key
+  /// to its [previous] value if any write fails. A null write value removes the
+  /// key. The owner must invoke this inside its stop/write barrier so the
+  /// settings commit shares the transcript publication's rollback boundary.
+  static Future<void> applySettingsAtomically({
+    required Map<String, Object?> snapshot,
+    required Map<String, Object?> previous,
+    required Future<void> Function(String key, Object? value) write,
+  }) async {
+    final desired = _validatedSettings(snapshot);
+    for (final key in previous.keys) {
+      if (!settingsAllowlist.contains(key)) {
+        throw const FormatException('Previous setting key is not allowlisted.');
+      }
+    }
+    final keys = <String>{...desired.keys, ...previous.keys};
+    try {
+      for (final key in keys) {
+        await write(key, desired[key]);
+      }
+    } catch (error) {
+      Object? rollbackError;
+      for (final key in keys) {
+        try {
+          await write(key, previous[key]);
+        } catch (failure) {
+          rollbackError ??= failure;
+        }
+      }
+      if (rollbackError != null) {
+        throw StateError(
+          'Settings restore failed: $error. Rollback failed: $rollbackError',
+        );
+      }
+      rethrow;
+    }
+  }
+
+  static Object _settingValue(String key, Object? value) {
+    final expected = _settingTypes[key];
+    if (expected == bool && value is bool) return value;
+    if (expected == int && value is int) return value;
+    if (expected == double && value is num) {
+      final number = value.toDouble();
+      if (!number.isFinite) {
+        throw const FormatException('Invalid numeric setting.');
+      }
+      return number;
+    }
+    if (expected == String && value is String) {
+      if (value.length > maxSettingStringLength) {
+        throw const FormatException('Setting string exceeds limit.');
+      }
+      return value;
+    }
+    throw const FormatException('Unsupported setting value type.');
+  }
+
+  static Map<String, Object> _validatedSettings(Map<String, Object?> values) {
+    if (values.length > maxSettingsKeys) {
+      throw const FormatException('Too many settings.');
+    }
+    final result = <String, Object>{};
+    var bytes = 0;
+    for (final entry in values.entries) {
+      if (!settingsAllowlist.contains(entry.key)) {
+        throw const FormatException('Setting key is not allowlisted.');
+      }
+      final value = _settingValue(entry.key, entry.value);
+      result[entry.key] = value;
+      bytes += utf8.encode(entry.key).length + jsonEncode(value).length;
+      if (bytes > maxSettingsBytes) {
+        throw const FormatException('Settings snapshot exceeds limit.');
+      }
+    }
+    return result;
+  }
+
+  Future<Uint8List> export(
+    List<ChatSession> sessions, {
+    Map<String, Object?> settings = const {},
+  }) async {
     if (sessions.length > maxSessions) {
       throw const FormatException('Too many sessions.');
     }
+    final validatedSettings = _validatedSettings(settings);
     var messageCount = 0;
     var textBytes = 0;
     for (final session in sessions) {
@@ -175,6 +324,11 @@ class SettingsBackupService {
       'version': 1,
       'sessions': snapshot,
       'attachments': blobs,
+      if (validatedSettings.isNotEmpty)
+        'settings': {
+          'version': settingsSchemaVersion,
+          'values': validatedSettings,
+        },
     };
     _validate(manifest, {for (final f in archive) f.name: f.content});
     final json = utf8.encode(jsonEncode(manifest));
@@ -217,10 +371,18 @@ class SettingsBackupService {
         await file.writeAsBytes(entry.value, flush: true);
         files[entry.key] = file;
       }
+      final settings = manifest.containsKey('settings')
+          ? Map<String, Object>.unmodifiable(
+              _validatedSettings(
+                _map((manifest['settings'] as Map)['values']),
+              ),
+            )
+          : const <String, Object>{};
       return StagedSettingsBackup._(
         staging,
         (manifest['sessions'] as List).map((s) => _map(s)).toList(),
         files,
+        settings,
       );
     } catch (_) {
       await staging.delete(recursive: true);
@@ -338,11 +500,19 @@ class SettingsBackupService {
   }
 
   static void _validate(Map<String, dynamic> m, Map<String, List<int>> files) {
-    _keys(m, {'format', 'version', 'sessions', 'attachments'});
+    _keys(m, {'format', 'version', 'sessions', 'attachments', 'settings'});
     if (m['format'] != 'ovid-transcripts' || m['version'] != 1) {
       throw const FormatException(
         'Unsupported backup format/version. Legacy JSON is export-only.',
       );
+    }
+    if (m.containsKey('settings')) {
+      final settings = _map(m['settings']);
+      _keys(settings, {'version', 'values'});
+      if (settings['version'] != settingsSchemaVersion) {
+        throw const FormatException('Unsupported settings schema version.');
+      }
+      _validatedSettings(_map(settings['values']));
     }
     final blobs = <String, int>{};
     for (final value in _list(m['attachments'], maxAttachments)) {

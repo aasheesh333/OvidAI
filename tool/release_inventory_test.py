@@ -24,6 +24,18 @@ def elf(machine=183, alignment=16384, relro_end=32768):
     return bytes(data)
 
 
+def elf32(machine=40, alignment=16384, relro_end=32768):
+    # Minimal ELF32 with independently specified LOAD and GNU_RELRO headers.
+    data = bytearray(512)
+    data[:16] = b'\x7fELF\x01\x01\x01' + bytes(9)
+    struct.pack_into('<HHIIIIIHHHHHH', data, 16,
+                     3, machine, 1, 0, 52, 0, 0, 52, 32, 2, 0, 0, 0)
+    struct.pack_into('<IIIIIIII', data, 52, 1, 0, 0, 0, 512, 512, 5, alignment)
+    struct.pack_into('<IIIIIIII', data, 84, 0x6474e552, 0, 16384, 0, 0,
+                     relro_end - 16384, 4, 1)
+    return bytes(data)
+
+
 def archive(entries):
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w') as z:
@@ -101,6 +113,19 @@ class ReleaseInventoryTest(unittest.TestCase):
         report = self.inspect([('lib/arm64-v8a/libflutter.so', elf(alignment=4096))])
         self.assertTrue(any('PT_LOAD' in e for e in report['alignment_errors']))
 
+    def test_alignment_findings_are_classified_by_origin(self):
+        bootstrap = archive([('bin/bash', elf(relro_end=28672))])
+        report = self.inspect([('lib/arm64-v8a/libovid_bootstrap.so', bootstrap),
+                               ('lib/arm64-v8a/libflutter.so', elf(relro_end=28672))])
+        summary = report['alignment_summary']
+        self.assertEqual(summary['total'], 2)
+        self.assertEqual(summary['outer_native_libraries'], 1)
+        self.assertEqual(summary['bootstrap_payload_elfs'], 1)
+        self.assertTrue(all('libovid_bootstrap.so!' in e
+                            for e in report['payload_alignment_errors']))
+        self.assertTrue(all(e.startswith('lib/arm64-v8a/libflutter.so:')
+                            for e in report['outer_alignment_errors']))
+
     def test_requires_bootstrap_for_each_delivered_abi(self):
         report = self.inspect([('lib/arm64-v8a/libflutter.so', elf())])
         self.assertTrue(any('bootstrap' in e for e in report['errors']))
@@ -163,15 +188,15 @@ class ReleaseInventoryTest(unittest.TestCase):
                               ('lib/arm64-v8a/libflutter.so', elf())])
 
     def run_bundle_gate(self, target=36, certificate='a' * 64, mode='production',
-                        manifest_target=None, debuggable=None):
+                        manifest_target=None, debuggable=None, relro_end=32768):
         manifest_target = target if manifest_target is None else manifest_target
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / 'fixture.aab'
             output = Path(directory) / 'report.json'
             artifact.write_bytes(archive([
                 ('base/manifest/AndroidManifest.xml', manifest_proto(manifest_target, debuggable)),
-                ('base/lib/arm64-v8a/libflutter.so', elf()),
-                ('base/lib/arm64-v8a/libovid_bootstrap.so', archive([('bin/bash', elf())])),
+                ('base/lib/arm64-v8a/libflutter.so', elf(relro_end=relro_end)),
+                ('base/lib/arm64-v8a/libovid_bootstrap.so', archive([('bin/bash', elf(relro_end=relro_end))])),
             ]))
             args = ['release_inventory.py', str(artifact), '--mode', mode,
                     '--expected-abis', 'arm64-v8a', '--expected-target', str(target),
@@ -199,6 +224,19 @@ class ReleaseInventoryTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(report['target_policy']['api36_floor_met'])
         self.assertFalse(report['target_policy']['play_qualified'])
+
+    def test_production_alignment_failure_names_elf_remediation(self):
+        # A misaligned GNU_RELRO end is an ELF property, not a ZIP-packaging
+        # property; the production gate must fail with the rebuild guidance and
+        # must not imply that repacking the bootstrap ZIP can fix it.
+        code, report = self.run_bundle_gate(relro_end=28672)
+        self.assertEqual(code, 1)
+        self.assertTrue(any('16 KB alignment' in e for e in report['errors']))
+        self.assertTrue(any('repacking the bootstrap ZIP' in e for e in report['errors']))
+        self.assertIn('alignment_remediation', report)
+        summary = report['native']['alignment_summary']
+        self.assertEqual(summary['outer_native_libraries'], 1)
+        self.assertEqual(summary['bootstrap_payload_elfs'], 1)
 
     def test_debug_inventory_can_describe_legacy_target(self):
         code, report = self.run_bundle_gate(target=28, certificate='', mode='debug')
@@ -247,6 +285,52 @@ class ReleaseInventoryTest(unittest.TestCase):
         for value, expected in ((b'\x00', False), (b'\x01', True), (b'\xff\xff\xff\xff\x0f', True)):
             with self.subTest(value=value):
                 self.assertEqual(self.gate.bundle_manifest(manifest_proto(36, value))['debuggable'], expected)
+
+
+class BootstrapSupplyAlignmentTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).with_name('bootstrap_supply.py')
+        if path.exists():
+            spec = importlib.util.spec_from_file_location('bootstrap_supply', path)
+            cls.supply = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cls.supply)
+
+    def setUp(self):
+        self.assertTrue(hasattr(self, 'supply'), 'bootstrap supply tool is not implemented')
+
+    def test_aligned_payload_has_no_findings(self):
+        contents = {'bin/bash': (elf(), 0o755), 'lib/libc.so': (elf(), 0o644)}
+        self.assertEqual(self.supply.alignment_findings(contents, 'arm64-v8a'), [])
+
+    def test_misaligned_relro_is_reported_per_member_and_skips_non_elf(self):
+        contents = {'bin/bash': (elf(relro_end=28672), 0o755),
+                    'bin/dash': (elf(), 0o755),
+                    'share/terminfo/x': (b'not-elf', 0o644)}
+        findings = self.supply.alignment_findings(contents, 'arm64-v8a')
+        self.assertEqual([f['path'] for f in findings], ['bin/bash'])
+        self.assertIn('GNU_RELRO', findings[0]['error'])
+
+    def test_arm32_payload_stays_inventory_only(self):
+        contents = {'bin/bash': (elf32(relro_end=28672), 0o755)}
+        self.assertEqual(self.supply.alignment_findings(contents, 'armeabi-v7a'), [])
+
+    def run_supply(self, argv, findings):
+        manifest = {'output': {'sha256': 'x'}, 'alignment_findings': findings}
+        with patch.object(self.supply, 'acquire', return_value=Path('/tmp/asset')), \
+                patch.object(self.supply, 'build', return_value=manifest), \
+                patch('sys.argv', ['bootstrap_supply.py', *argv]), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return self.supply.main()
+
+    def test_require_16kb_fails_closed_on_findings(self):
+        findings = [{'path': 'bin/bash', 'error': 'GNU_RELRO end is not 16 KB aligned'}]
+        self.assertEqual(self.run_supply(['aarch64', '--require-16kb'], findings), 1)
+        self.assertEqual(self.run_supply(['aarch64'], findings), 0)
+
+    def test_require_16kb_passes_clean_payload(self):
+        self.assertEqual(self.run_supply(['aarch64', '--require-16kb'], []), 0)
 
 
 if __name__ == '__main__':

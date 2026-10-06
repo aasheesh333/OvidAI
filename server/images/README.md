@@ -22,6 +22,16 @@ Masks, multiple input images, arbitrary custom parameters and quality controls
 are intentionally not advertised because compatibility across this pool has
 not been established.
 
+The same OpenAPI document (re-read 2026-10-06, no credential, no paid request)
+documents the structured error taxonomy now encoded in `adapters.py`: a body of
+`{"error": {"code", "message"}}`, with `not_an_image_model`,
+`unsupported_modality` and `unsupported_n` refused **before any provider is
+tried**, and a 503 meaning "No provider can serve this model right now". A 400
+can also be "an upstream payload rejection", so a 400 is verified nonacceptance
+only for the named pre-provider codes; `validation_error` is deliberately
+excluded because it may follow submission. This has not been confirmed against a
+live paid request; the 503 body shape remains an external validation gate.
+
 ## Implemented
 
 - `service.py`: one public alias, two/three distinct private backends,
@@ -38,13 +48,25 @@ not been established.
   expire or re-submit automatically. Invalid successful responses retain a
   reservation for reconciliation because they may already have been billed.
   Bare HTTP errors (including 429 and 5xx) from InferHub are ambiguous, never
-  fallback signals. Only a typed `UpstreamNotAccepted(429/503)` backed by an
-  adapter's verified nonacceptance evidence permits fallback. A status code or
+  fallback signals. Only a typed `UpstreamNotAccepted` backed by an adapter's
+  verified nonacceptance evidence permits fallback or release. A status code or
   Retry-After header is not such evidence; plain `UpstreamError` preserves the
-  reservation. No verified nonacceptance signal is currently wired in InferHub,
-  so its errors never authorize fallback or release an uncertain reservation.
+  reservation. `adapters.py` now wires that evidence: a structured InferHub
+  `error.code` documented as refused before any provider is tried (400
+  `not_an_image_model`/`unsupported_modality`/`unsupported_n`) or a structured
+  gateway error on 429/503 (rate limit, or no provider can serve this model).
+  Any other body, including every bare status, stays ambiguous. Live confirmation
+  of the 503 body shape is still an external gate.
+- `adapters.py`: the real provider adapter contract shared by the three
+  configured backends. `ProviderContract` builds the exact documented `[OI]`
+  request (`model`, `prompt`, `size`, `n: 1`, `response_format: b64_json`, and
+  one `image` data URL for edits), rejects an unsupported operation/size/edit
+  locally, and classifies a non-2xx body into `UpstreamNotAccepted` or
+  `UpstreamError`. `ImageService` builds every outgoing payload through it.
 - `inferhub.py`: the verified JSON API and authenticated startup catalog check;
-  bounded streamed responses, no redirects or image URL fetching.
+  bounded streamed responses, no redirects or image URL fetching. It derives the
+  endpoint and error signal from the backend's `ProviderContract`, so only a
+  structured documented refusal releases the reservation or permits fallback.
 - `verifier.py`: mountable FastAPI routes using the existing Firebase/App Check
   verifier, ban checks, current per-UID key mapping and LiteLLM key validity,
   ownership, expiry and explicit `ovid-image` model scope. Every request,

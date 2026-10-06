@@ -11,6 +11,21 @@ void main() {
   setUp(() => root = Directory.systemTemp.createTempSync('backup-test-'));
   tearDown(() => root.deleteSync(recursive: true));
 
+  Map<String, dynamic> manifestOf(List<int> bytes) =>
+      jsonDecode(
+            utf8.decode(
+              ZipDecoder().decodeBytes(bytes).findFile('manifest.json')!.content,
+            ),
+          )
+          as Map<String, dynamic>;
+
+  List<int> archiveWithManifest(Map<String, dynamic> manifest) {
+    final data = utf8.encode(jsonEncode(manifest));
+    final archive = Archive()
+      ..add(ArchiveFile.noCompress('manifest.json', data.length, data));
+    return ZipEncoder().encode(archive);
+  }
+
   test(
     'oversized transcript rejected and streaming content excluded',
     () async {
@@ -268,4 +283,185 @@ void main() {
       expect(root.listSync().length, 1);
     },
   );
+
+  test('allowlisted settings roundtrip and exclude secrets and grants', () async {
+    final service = SettingsBackupService();
+    final captured = SettingsBackupService.captureSettings({
+      'ovid_theme_mode': 'light',
+      'ovid_keep_alive': false,
+      'ovid_chat_font_scale': 1.25,
+      'ovid_response_timeout_sec': 120,
+      'ovid_provider_configs_v1': '{"apiKey":"secret"}',
+      'ovid_permission_grants_v1': ['grant'],
+      'ovid_mcp_env_secret': 'token',
+      'ovid_memories': 'private',
+    });
+    expect(captured.containsKey('ovid_provider_configs_v1'), isFalse);
+    expect(captured.containsKey('ovid_permission_grants_v1'), isFalse);
+    expect(captured.containsKey('ovid_mcp_env_secret'), isFalse);
+    expect(captured.containsKey('ovid_memories'), isFalse);
+    final bytes = await service.export([
+      ChatSession(id: 'one', title: 't', model: 'm'),
+    ], settings: captured);
+    expect(manifestOf(bytes)['settings'], {
+      'version': 1,
+      'values': {
+        'ovid_theme_mode': 'light',
+        'ovid_keep_alive': false,
+        'ovid_chat_font_scale': 1.25,
+        'ovid_response_timeout_sec': 120,
+      },
+    });
+    final staged = await service.stage(bytes, root);
+    expect(staged.settings, captured);
+    expect(staged.sessions.single['title'], 't');
+    await staged.dispose();
+  });
+
+  test('settings snapshot rejects unknown keys, bad types and oversized strings', () async {
+    final service = SettingsBackupService();
+    final sessions = [ChatSession(id: 'one', title: 't', model: 'm')];
+    await expectLater(
+      service.export(sessions, settings: {'ovid_sessions': 'leak'}),
+      throwsFormatException,
+    );
+    await expectLater(
+      service.export(sessions, settings: {'ovid_keep_alive': 'yes'}),
+      throwsFormatException,
+    );
+    await expectLater(
+      service.export(sessions, settings: {'ovid_keep_alive': double.nan}),
+      throwsFormatException,
+    );
+    await expectLater(
+      service.export(sessions, settings: {
+        'ovid_theme_mode':
+            'x' * (SettingsBackupService.maxSettingStringLength + 1),
+      }),
+      throwsFormatException,
+    );
+    expect(
+      () => SettingsBackupService.captureSettings({'ovid_keep_alive': 1}),
+      throwsFormatException,
+    );
+    expect(root.listSync(), isEmpty);
+  });
+
+  test('restore publishes the settings snapshot with the transcripts', () async {
+    Map<String, Object>? seen;
+    final service = SettingsBackupService(
+      publisher: (backup, ids) async {
+        seen = backup.settings;
+      },
+    );
+    final bytes = await service.export([
+      ChatSession(id: 'one', title: 't', model: 'm'),
+    ], settings: {'ovid_theme_mode': 'dark', 'ovid_keep_alive': true});
+    await service.restore(bytes, root);
+    expect(seen, {'ovid_theme_mode': 'dark', 'ovid_keep_alive': true});
+  });
+
+  test('settings restore applies every value or rolls back all previous values', () async {
+    final store = <String, Object?>{
+      'ovid_theme_mode': 'dark',
+      'ovid_keep_alive': true,
+      'unrelated': 'kept',
+    };
+    Future<void> write(String key, Object? value) async {
+      if (value == null) {
+        store.remove(key);
+      } else {
+        store[key] = value;
+      }
+    }
+
+    await SettingsBackupService.applySettingsAtomically(
+      snapshot: {'ovid_theme_mode': 'light', 'ovid_show_reasoning': false},
+      previous: {'ovid_theme_mode': 'dark', 'ovid_keep_alive': true},
+      write: write,
+    );
+    expect(store, {
+      'ovid_theme_mode': 'light',
+      'ovid_show_reasoning': false,
+      'unrelated': 'kept',
+    });
+
+    final failing = <String, Object?>{
+      'ovid_theme_mode': 'dark',
+      'ovid_keep_alive': true,
+    };
+    var failed = false;
+    Future<void> flaky(String key, Object? value) async {
+      if (!failed && key == 'ovid_show_reasoning' && value != null) {
+        failed = true;
+        throw StateError('disk full');
+      }
+      if (value == null) {
+        failing.remove(key);
+      } else {
+        failing[key] = value;
+      }
+    }
+
+    await expectLater(
+      SettingsBackupService.applySettingsAtomically(
+        snapshot: {'ovid_theme_mode': 'light', 'ovid_show_reasoning': false},
+        previous: {'ovid_theme_mode': 'dark', 'ovid_keep_alive': true},
+        write: flaky,
+      ),
+      throwsStateError,
+    );
+    expect(failing, {'ovid_theme_mode': 'dark', 'ovid_keep_alive': true});
+  });
+
+  test('settings restore rejects non-allowlisted keys before writing', () async {
+    var wrote = false;
+    await expectLater(
+      SettingsBackupService.applySettingsAtomically(
+        snapshot: {'ovid_provider_configs_v1': 'secret'},
+        previous: const {},
+        write: (key, value) async {
+          wrote = true;
+        },
+      ),
+      throwsFormatException,
+    );
+    expect(wrote, isFalse);
+  });
+
+  test('transcript-only archive stays version 1 with no settings section', () async {
+    final service = SettingsBackupService();
+    final bytes = await service.export([
+      ChatSession(id: 'one', title: 't', model: 'm'),
+    ]);
+    final manifest = manifestOf(bytes);
+    expect(manifest['version'], 1);
+    expect(manifest.containsKey('settings'), isFalse);
+    final staged = await service.stage(bytes, root);
+    expect(staged.settings, isEmpty);
+    await staged.dispose();
+  });
+
+  test('invalid settings schema, unknown fields and values reject without staging', () async {
+    final service = SettingsBackupService();
+    final bytes = await service.export([
+      ChatSession(id: 'one', title: 't', model: 'm'),
+    ], settings: {'ovid_theme_mode': 'dark'});
+    final manifest = manifestOf(bytes);
+    for (final mutate in <void Function(Map<String, dynamic>)>[
+      (m) => (m['settings'] as Map)['version'] = 999,
+      (m) => (m['settings'] as Map)['apiKey'] = 'secret',
+      (m) => ((m['settings'] as Map)['values'] as Map)['ovid_grants'] = 'secret',
+      (m) => ((m['settings'] as Map)['values'] as Map)['ovid_keep_alive'] = 'yes',
+      (m) => (m['settings'] as Map)['values'] = 'not-a-map',
+    ]) {
+      final copy = jsonDecode(jsonEncode(manifest)) as Map<String, dynamic>;
+      mutate(copy);
+      await expectLater(
+        service.stage(archiveWithManifest(copy), root),
+        throwsFormatException,
+      );
+      expect(root.listSync(), isEmpty);
+    }
+  });
 }

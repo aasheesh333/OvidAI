@@ -19,6 +19,8 @@ from decimal import Decimal, InvalidOperation, localcontext
 
 from PIL import Image
 
+from .adapters import request_shape
+
 ALIAS = 'ovid-image'
 MULTIPLIER = Decimal('0.30')
 MAX_BYTES = 16 * 1024 * 1024
@@ -342,7 +344,7 @@ class ImageService:
             # A deletion committed during an explicit refusal must fence the
             # next backend too, not just initial admission and late settlement.
             self.ledger.receipt(account, request)
-            payload = {**body, 'model': backend.model, 'size': size, 'n': 1, 'response_format': 'b64_json'}
+            payload = request_shape(backend.model, operation, body, size)
             try:
                 response = self.send(backend, operation, payload)
             except UpstreamError as error:
@@ -351,12 +353,9 @@ class ImageService:
                 # or fallback; bare 429/503 are unknown too.
                 if not isinstance(error, UpstreamNotAccepted):
                     raise self._unknown(account, request, fingerprint) from None
-                if error.status in (429, 503):
-                    continue
-                if error.status not in (400, 401, 403, 404, 422):
-                    raise self._unknown(account, request, fingerprint) from None
-                self.ledger.fail(account, request)
-                raise ImageError(400 if error.status in (400, 422) else 503, 'image_request_failed', receipt=self.ledger.receipt(account, request)) from None
+                # Verified nonacceptance: nothing was accepted for execution or
+                # billing, so another configured backend may be tried safely.
+                continue
             except Exception:
                 raise self._unknown(account, request, fingerprint) from None
             try:

@@ -6,11 +6,19 @@ release-candidate (`release`) and production gates additionally require a
 non-debuggable manifest; the release-candidate gate honors `--expected-target`
 (e.g. 28) and accepts any non-debug signer, verifying a pinned certificate only
 when one is supplied, and records 16 KB LOAD/RELRO and APK ZIP-alignment findings
-without enforcing them (a target-28 sideload candidate ships ZIP-payload native
-libs that inherently fail them). Production gates additionally enforce 64-bit
+without enforcing them (a target-28 sideload candidate ships prebuilt ELF
+payloads that inherently fail them). Production gates additionally enforce 64-bit
 LOAD/RELRO plus APK ZIP alignment, require target API 36+, and pin the signer to
 a required certificate SHA-256. None of these static checks establishes device
 or Play qualification.
+
+The 16 KB findings are ELF properties, not packaging properties: the outer APK
+ZIP alignment is independent and already checked with `zipalign -P 16`, while
+every alignment finding is a `PT_LOAD` or `GNU_RELRO` failure inside the ELF
+bytes themselves (top-level native libraries and the ELFs nested in the
+`libovid_bootstrap.so` ZIP payload). Repacking that ZIP or re-running zipalign
+cannot change them; only rebuilding the offending ELF inputs with a 16 KB-capable
+toolchain can. See `ALIGNMENT_REMEDIATION`.
 """
 import argparse
 import hashlib
@@ -28,6 +36,14 @@ ABIS = {'arm64-v8a': (2, 183), 'armeabi-v7a': (1, 40), 'x86_64': (2, 62)}
 BOOTSTRAP = 'libovid_bootstrap.so'
 MAX_MEMBER = 256 * 1024 * 1024
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
+ALIGNMENT_REMEDIATION = (
+    'PT_LOAD/GNU_RELRO alignment lives in the ELF bytes, so repacking the '
+    'bootstrap ZIP or re-running zipalign cannot change it. Rebuild the offending '
+    'ELF inputs (top-level prebuilt native libraries and the executables/libraries '
+    'nested in the bootstrap ZIP) with a 16 KB-capable toolchain (NDK r28+, AGP '
+    '8.5.1+) so every 64-bit PT_LOAD p_align is at least 16384 and every GNU_RELRO '
+    'segment ends on a 16384-byte boundary.'
+)
 
 
 def elf_inventory(data, abi):
@@ -90,7 +106,9 @@ def checked_members(z):
 
 
 def inspect_native(source, kind, expected_abis):
-    result = {'entries': [], 'errors': [], 'alignment_errors': [], 'abis': []}
+    result = {'entries': [], 'errors': [], 'alignment_errors': [],
+              'outer_alignment_errors': [], 'payload_alignment_errors': [],
+              'abis': []}
     seen, bootstrap_abis, elf_abis, flutter_abis = set(), set(), set(), set()
     with zipfile.ZipFile(source) as z:
         for info in checked_members(z):
@@ -119,8 +137,10 @@ def inspect_native(source, kind, expected_abis):
                             child['path'] = member.filename
                             child['sha256'] = hashlib.sha256(payload).hexdigest()
                             entry['elfs'].append(child)
-                            result['alignment_errors'].extend(
-                                f'{info.filename}!{member.filename}: {e}' for e in child['alignment_errors'])
+                            for e in child['alignment_errors']:
+                                finding = f'{info.filename}!{member.filename}: {e}'
+                                result['alignment_errors'].append(finding)
+                                result['payload_alignment_errors'].append(finding)
                     entry['elf_count'] = len(entry['elfs'])
                     if not entry['elf_count']:
                         raise ValueError('bootstrap contains no ELF')
@@ -130,11 +150,18 @@ def inspect_native(source, kind, expected_abis):
                     elf_abis.add(abi)
                     if name == 'libflutter.so':
                         flutter_abis.add(abi)
-                    result['alignment_errors'].extend(
-                        f'{info.filename}: {e}' for e in entry['alignment_errors'])
+                    for e in entry['alignment_errors']:
+                        finding = f'{info.filename}: {e}'
+                        result['alignment_errors'].append(finding)
+                        result['outer_alignment_errors'].append(finding)
             except (ValueError, KeyError, struct.error, zipfile.BadZipFile, RuntimeError) as error:
                 result['errors'].append(f'{info.filename}: {error}')
     result['abis'] = sorted(seen)
+    result['alignment_summary'] = {
+        'outer_native_libraries': len(result['outer_alignment_errors']),
+        'bootstrap_payload_elfs': len(result['payload_alignment_errors']),
+        'total': len(result['alignment_errors']),
+    }
     if seen != expected_abis:
         result['errors'].append(f'ABI set {sorted(seen)} != expected {sorted(expected_abis)}')
     for abi in sorted(expected_abis):
@@ -293,11 +320,20 @@ def main():
         report['native'] = native
         report['errors'].extend(native['errors'])
         # 16 KB LOAD/RELRO alignment is a Play/policy requirement enforced only
-        # by the production gate. A target-28 release candidate ships the
-        # ZIP-payload native libs that inherently fail it, so record the
-        # findings for transparency without failing the candidate gate.
+        # by the production gate. The release candidate records the findings for
+        # transparency without failing the candidate gate. Every finding is an
+        # ELF property, not a ZIP-packaging property (the APK ZIP alignment is
+        # checked separately with zipalign below).
+        summary = native['alignment_summary']
         if production:
             report['errors'].extend(native['alignment_errors'])
+            if summary['total']:
+                report['alignment_remediation'] = ALIGNMENT_REMEDIATION
+                report['errors'].append(
+                    f"16 KB alignment: {summary['total']} ELF finding(s) "
+                    f"({summary['outer_native_libraries']} top-level native "
+                    f"library, {summary['bootstrap_payload_elfs']} bootstrap "
+                    f"payload ELF); {ALIGNMENT_REMEDIATION}")
         else:
             report['alignment_scope'] = (
                 'release candidate: 16 KB alignment/RELRO recorded but not '

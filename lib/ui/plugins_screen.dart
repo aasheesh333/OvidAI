@@ -19,6 +19,7 @@ import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'github_login_sheet.dart';
+import 'mcp_oauth_sheet.dart';
 import 'plugin_install_progress.dart';
 import 'plugin_permission_sheet.dart';
 import 'plugin_settings_panel.dart';
@@ -3307,6 +3308,25 @@ class McpCard extends StatelessWidget {
   }
 }
 
+/// Production [McpOAuthService] seam: delegates to [McpService.I] without
+/// changing its attempt, PKCE, or persistence behavior.
+class _LiveMcpOAuthService implements McpOAuthService {
+  const _LiveMcpOAuthService();
+
+  @override
+  Future<String> beginAuthorization(String serverKey) async =>
+      (await McpService.I.beginMcpOAuthAuthorization(serverKey))
+          .authorizationUrl;
+
+  @override
+  Future<void> completeAuthorization(String serverKey, String callbackUri) =>
+      McpService.I.completeMcpOAuthAuthorization(serverKey, callbackUri);
+
+  @override
+  void cancelAuthorization(String serverKey) =>
+      McpService.I.cancelMcpOAuthAuthorization(serverKey);
+}
+
 /// MCP detail — connect/disconnect with config preview.
 class McpDetailScreen extends StatefulWidget {
   final McpServer server;
@@ -3329,6 +3349,27 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         leading: const BackButton(),
         title: Text(s.name),
         actions: [
+          // OAuth entry hook: shown only when this server carries a usable
+          // OAuth config.
+          FutureBuilder<McpOAuthConfig?>(
+            future: McpService.I.mcpOAuthConfigForAsync(s.canonicalId),
+            builder: (context, snapshot) {
+              final config = snapshot.data;
+              if (config == null || !config.isUsable) {
+                return const SizedBox.shrink();
+              }
+              return IconButton(
+                tooltip: 'Authorize with OAuth',
+                icon: const Icon(Icons.lock_open_outlined, size: 19),
+                onPressed: () => showMcpOAuthSheet(
+                  context,
+                  serverKey: s.canonicalId,
+                  serverName: s.name,
+                  service: const _LiveMcpOAuthService(),
+                ),
+              );
+            },
+          ),
           // Pencil — edit the mcp.json config in place (user request).
           IconButton(
             tooltip: 'Edit config',

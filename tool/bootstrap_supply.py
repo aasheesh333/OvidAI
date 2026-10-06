@@ -11,8 +11,12 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import subprocess
+import sys
 import tempfile
 import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_inventory import elf_inventory
 
 TAG = 'bootstrap-2026.08.23-r1%2Bapt.android-7'
 BASE = f'https://github.com/termux/termux-packages/releases/download/{TAG}'
@@ -52,6 +56,25 @@ def keep(name):
             or (len(parts) == 2 and parts[0] == 'bin' and parts[1] in BINS)
             or (len(parts) == 2 and parts[0] == 'lib' and '.so' in parts[1])
             or (name.startswith('lib/apt/methods/') and parts[-1] in METHODS))
+
+
+def alignment_findings(contents, abi):
+    """Report 16 KB PT_LOAD/GNU_RELRO failures for derived ELF payloads.
+
+    These are properties of the compiled ELF bytes, so they cannot be repaired
+    by ZIP packing choices. 64-bit ABIs are checked; ARM32 stays inventory-only.
+    """
+    findings = []
+    for name, (data, _mode) in sorted(contents.items()):
+        if not data.startswith(b'\x7fELF'):
+            continue
+        try:
+            report = elf_inventory(data, abi)
+        except ValueError:
+            continue
+        findings.extend({'path': name, 'error': error}
+                        for error in report['alignment_errors'])
+    return findings
 
 
 def build(asset, output, abi, pin):
@@ -105,6 +128,7 @@ def build(asset, output, abi, pin):
             'upstream': {'url': f'{BASE}/bootstrap-{abi}.zip', **pin},
             'recipeSha256': digest(Path(__file__)),
             'output': {'sha256': digest(staged), 'size': staged.stat().st_size},
+            'alignment_findings': alignment_findings(contents, ABI_MAP[abi]),
             'entries': sorted(entries, key=lambda e: e['path']),
         }
         staged_manifest = Path(tmp) / 'manifest.json'
@@ -151,18 +175,31 @@ def main():
                         default=Path(__file__).resolve().parents[1] / 'android/app/src/main/jniLibs')
     parser.add_argument('--offline', action='store_true')
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--require-16kb', action='store_true',
+                        help='fail if any derived 64-bit ELF fails PT_LOAD/GNU_RELRO 16 KB alignment')
     args = parser.parse_args()
     for abi in args.abis:
         if abi not in PINS:
             parser.error(f'unknown ABI: {abi}')
+    failed = False
     for abi in args.abis:
         asset = acquire(args.cache, abi, args.offline)
         if not args.verify_only:
             manifest = build(asset, args.output_root / ABI_MAP[abi] / 'libovid_bootstrap.so', abi, PINS[abi])
-            print(f'{abi}: verified upstream and derived {manifest["output"]["sha256"]}')
+            findings = manifest['alignment_findings']
+            print(f'{abi}: verified upstream and derived {manifest["output"]["sha256"]}'
+                  f' ({len(findings)} 16 KB alignment finding(s))')
+            if args.require_16kb and findings:
+                # Repacking cannot repair ELF RELRO/LOAD alignment; the pinned
+                # upstream payload must be rebuilt with a 16 KB-capable toolchain.
+                print(f'{abi}: refused: {len(findings)} derived ELF(s) fail 16 KB '
+                      f'PT_LOAD/GNU_RELRO alignment; rebuild the pinned upstream payload',
+                      file=sys.stderr)
+                failed = True
         else:
             print(f'{abi}: pinned upstream verified')
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

@@ -4,13 +4,22 @@ from decimal import Decimal
 
 import httpx
 
-from .service import Backend, ImageError, ImageService, MAX_BYTES, UpstreamError
+from . import adapters
+from .service import Backend, ImageError, ImageService, MAX_BYTES, UpstreamError, UpstreamNotAccepted
 
 
 class InferHub:
-    def __init__(self, key, client=None):
+    def __init__(self, key, client=None, contracts=None):
         self.key = key
         self.client = client or httpx.Client(timeout=120, follow_redirects=False)
+        self.contracts = dict(contracts or {})
+
+    def contract(self, backend):
+        contract = self.contracts.get(backend.model)
+        if contract is None:
+            contract = adapters.ProviderContract(backend.model, backend.sizes, backend.edit)
+            self.contracts[backend.model] = contract
+        return contract
 
     def verify_catalog(self, backends):
         response = self.client.get('https://api.inferhub.dev/v1/models',
@@ -22,18 +31,34 @@ class InferHub:
             row = catalog.get(backend.model, {})
             if row.get('output_modality') != 'image' or (backend.edit and 'image' not in row.get('modality', '').split(',')):
                 raise ImageError()
+            self.contracts[backend.model] = adapters.ProviderContract(backend.model, backend.sizes, backend.edit)
+
+    @staticmethod
+    def _error_body(response):
+        """Decode a bounded error body; anything else is ambiguous, not a refusal."""
+        data = bytearray()
+        for chunk in response.iter_bytes():
+            data.extend(chunk)
+            if len(data) > adapters.MAX_ERROR_BYTES:
+                return None
+        if not data:
+            return None
+        try:
+            return json.loads(bytes(data))
+        except (ValueError, UnicodeError):
+            return None
 
     def __call__(self, backend, operation, payload):
-        endpoint = 'edits' if operation == 'edit' else 'generations'
-        with self.client.stream('POST', f'https://api.inferhub.dev/v1/images/{endpoint}',
+        endpoint = self.contract(backend).endpoint(operation)
+        with self.client.stream('POST', f'https://api.inferhub.dev{endpoint}',
                                 headers={'Authorization': f'Bearer {self.key}'}, json=payload) as response:
             if response.status_code != 200:
-                if response.status_code >= 500:
-                    # An HTTP server/proxy error is not proof of a refusal.
-                    # It may follow a charge, including 500 and 503 responses.
-                    raise ImageError(409, 'image_request_pending')
-                # Includes bare 429: no documented/verifiable nonacceptance
-                # signal is wired, so a status must never authorize fallback.
+                # Only a structured, documented pre-provider refusal is a typed
+                # nonacceptance that may release/fall back. Bare 429/5xx and any
+                # upstream payload rejection stay ambiguous: they may follow a
+                # charge, so the reservation is preserved and never re-sent.
+                if adapters.is_verified_refusal(response.status_code, self._error_body(response)):
+                    raise UpstreamNotAccepted(response.status_code)
                 raise UpstreamError(response.status_code)
             data = bytearray()
             for chunk in response.iter_bytes():
