@@ -363,19 +363,24 @@ void pruneSpillDir(Directory spillDir) {
       return int.tryParse(base.substring(0, base.length - 4)) ?? 0;
     }
 
-    final files = spillDir
-        .listSync(followLinks: false)
-        .whereType<File>()
-        .where((f) => f.path.endsWith('.txt'))
-        .toList()
-      ..sort((a, b) => idOf(b).compareTo(idOf(a)));
+    final files =
+        spillDir
+            .listSync(followLinks: false)
+            .whereType<File>()
+            .where((f) => f.path.endsWith('.txt'))
+            .toList()
+          ..sort((a, b) => idOf(b).compareTo(idOf(a)));
     if (files.length <= maxSpillFilesPerWorkspace) return;
     for (final old in files.sublist(maxSpillFilesPerWorkspace)) {
       try {
         old.deleteSync();
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
-  } catch (e) { Diag.swallow('agent_service', e); }
+  } catch (e) {
+    Diag.swallow('agent_service', e);
+  }
 }
 
 Future<String> spillToolOutput(
@@ -583,10 +588,18 @@ class _RequestRoute {
 
   ProviderConfig providerCopy() {
     final p = ProviderConfig(
-      id: providerId, name: name, description: description, baseUrl: baseUrl,
-      apiKey: apiKey, isFree: isFree, custom: custom, connected: connected,
-      requiresApiKey: requiresApiKey, apiFormat: apiFormat,
-      models: List.of(models), selectedModel: model,
+      id: providerId,
+      name: name,
+      description: description,
+      baseUrl: baseUrl,
+      apiKey: apiKey,
+      isFree: isFree,
+      custom: custom,
+      connected: connected,
+      requiresApiKey: requiresApiKey,
+      apiFormat: apiFormat,
+      models: List.of(models),
+      selectedModel: model,
     );
     for (final e in visionOverrides.entries) {
       p.setModelVisionSupport(e.key, e.value);
@@ -598,6 +611,7 @@ class _RequestRoute {
 /// Async execution context for one admitted run. Every continuation inherits
 /// this zone value, independently of the session selected in the UI.
 class _RunCtx {
+  final Object accountToken = AppState.I.sessionAccountToken;
   final AgentRun run;
   final ChatSession session;
   final ProviderConfig provider;
@@ -616,22 +630,35 @@ class _RunCtx {
   /// promotion) must never wipe the promoted run's id, or the Stop button
   /// hides mid-stream and a second concurrent run can slip in.
   String? ownedRunId;
-  _RunCtx(this.run, this.session, this.provider, this.epoch,
-      {_RequestRoute? route})
-    : route = route ?? _RequestRoute(provider, run.modelSnapshot ?? session.model,
-          temperature: run.temperatureSnapshot);
+  _RunCtx(
+    this.run,
+    this.session,
+    this.provider,
+    this.epoch, {
+    _RequestRoute? route,
+  }) : route =
+           route ??
+           _RequestRoute(
+             provider,
+             run.modelSnapshot ?? session.model,
+             temperature: run.temperatureSnapshot,
+           );
 }
 
 /// One transport attempt owns only its captured generation and resources.
 /// In particular, a late postUrl completion/finally cannot touch a replacement.
 class _TransportOwner {
+  final Object accountToken = AppState.I.sessionAccountToken;
   final AgentRun run;
   final int epoch;
   HttpClient? client;
   HttpClientRequest? request;
   _TransportOwner(this.run, this.epoch);
 
-  bool get current => run.runEpoch == epoch && !run.cancelRequested;
+  bool get current =>
+      identical(accountToken, AppState.I.sessionAccountToken) &&
+      run.runEpoch == epoch &&
+      !run.cancelRequested;
 
   bool registerClient(HttpClient value) {
     client = value;
@@ -658,6 +685,7 @@ class _TransportOwner {
 }
 
 class AgentRun {
+  final Object accountToken = AppState.I.sessionAccountToken;
   String? runKey;
   final List<AgentEvent> runEvents = [];
   String? activeRunId;
@@ -682,8 +710,10 @@ class AgentRun {
   /// Stable id per queued message, index-aligned with [queue]. The UI keys
   /// rows by id so a delete/steer/edit cannot rebind another row's State.
   final List<int> queueIds = [];
+
   /// Only composer-originated queue entries may authorize @session reads.
   final Set<int> userReferenceQueueIds = {};
+
   /// Ordinary composer messages start a fresh dispatch. Explicit steering
   /// removes this marker; internal agent notices may still join the live run.
   final Set<int> nextDispatchQueueIds = {};
@@ -886,6 +916,7 @@ class AgentService extends ChangeNotifier {
     // Cold resume: rebuild subagent handles from the persisted lineage
     // after sessions load (the durable descriptor parity).
     AppState.I.onSessionsLoaded = () {
+      unawaited(restoreRunCheckpoints());
       restoreSubagentHandles();
       _recoverInterruptedRuns();
       unawaited(initializeSchedules());
@@ -969,7 +1000,8 @@ class AgentService extends ChangeNotifier {
   /// then the click. Sites listen to any subset of those families, and
   /// dispatching only one is why synthetic taps used to be ignored by canvas,
   /// map and video-player surfaces.
-  static String _humanTapJs(double x, double y) => """
+  static String _humanTapJs(double x, double y) =>
+      """
 (() => {
   const el = document.elementFromPoint($x, $y);
   if (!el) return 'nothing at $x,$y';
@@ -1026,7 +1058,9 @@ class AgentService extends ChangeNotifier {
     final roots = <String>[];
     try {
       roots.add((await _sessionWorkDir()).path);
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     final sid = _runSession?.id ?? AppState.I.activeSession?.id;
     if (sid != null && sid.isNotEmpty) {
       try {
@@ -1036,7 +1070,9 @@ class AgentService extends ChangeNotifier {
           }
           if (g.value.isNotEmpty) roots.add(g.value);
         }
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     // Plan mode NARROWS this set, never widens it (2026-09-29).
     //
@@ -1158,7 +1194,8 @@ class AgentService extends ChangeNotifier {
         : (_runResolved.activeRunId != null
               ? overlayStateRunning
               : overlayStateIdle);
-    if (!_runChainStale && next != _overlayState) unawaited(setOverlayState(next));
+    if (!_runChainStale && next != _overlayState)
+      unawaited(setOverlayState(next));
   }
 
   /// Approvals waiting in sessions OTHER than the foreground one.
@@ -1173,8 +1210,7 @@ class AgentService extends ChangeNotifier {
   List<({String sessionId, String title, ApprovalRequest request})>
   get pendingApprovalsElsewhere {
     final activeId = AppState.I.activeSessionId;
-    final out =
-        <({String sessionId, String title, ApprovalRequest request})>[];
+    final out = <({String sessionId, String title, ApprovalRequest request})>[];
     for (final entry in _runs.entries) {
       if (entry.key == activeId) continue;
       final req = entry.value.pendingApproval;
@@ -1335,7 +1371,9 @@ class AgentService extends ChangeNotifier {
   bool get _runChainStale {
     final z = _runCtx;
     if (z == null) return false;
-    return z.epoch != z.run.runEpoch || z.run.cancelRequested;
+    return !identical(z.accountToken, AppState.I.sessionAccountToken) ||
+        z.epoch != z.run.runEpoch ||
+        z.run.cancelRequested;
   }
 
   List<String> get _queue => _runResolved.queue;
@@ -1416,7 +1454,9 @@ class AgentService extends ChangeNotifier {
     j.killed = true;
     try {
       j.process?.kill();
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     notifyListeners();
   }
 
@@ -1432,6 +1472,7 @@ class AgentService extends ChangeNotifier {
   set lastError(String? v) {
     if (!_runChainStale) _runResolved.lastError = v;
   }
+
   bool get todoNudgeSent => _runResolved.todoNudgeSent;
   set todoNudgeSent(bool v) => _runResolved.todoNudgeSent = v;
 
@@ -1480,8 +1521,9 @@ class AgentService extends ChangeNotifier {
   /// aborted while the queue remains available for immediate continuation.
   /// Returns whether a queued continuation was preserved.
   bool stopRequested({required String sessionId}) {
-    for (final e in schedules.entries().where((e) =>
-        e.sessionId == sessionId && e.task['status'] == 'running')) {
+    for (final e in schedules.entries().where(
+      (e) => e.sessionId == sessionId && e.task['status'] == 'running',
+    )) {
       unawaited(schedules.cancelTask(e, pause: true));
     }
     final r = _runs[sessionId];
@@ -1528,7 +1570,9 @@ class AgentService extends ChangeNotifier {
           sub.interrupted = true;
           try {
             AppState.I.setAgentState(sub.sessionId, 'stopped');
-          } catch (e) { Diag.swallow('agent_service', e); }
+          } catch (e) {
+            Diag.swallow('agent_service', e);
+          }
           final childRun = _runs[sub.sessionId];
           if (childRun != null) _cancelBucket(childRun);
           if (roots.add(sub.sessionId)) grew = true;
@@ -1560,7 +1604,9 @@ class AgentService extends ChangeNotifier {
         sub.interrupted = true;
         try {
           AppState.I.setAgentState(sub.sessionId, 'stopped');
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
       }
     }
     final withQueue = <String>[];
@@ -1606,7 +1652,9 @@ class AgentService extends ChangeNotifier {
     // Buckets outside the map (rare) + processes no run claims.
     try {
       SandboxService.I.killAllProcesses();
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     // PR46: any live PTY shells must die too — they're long-lived by
     // design, which makes them a panic-stop leak without this.
     unawaited(PtyPool.I.discardAll());
@@ -1689,7 +1737,9 @@ class AgentService extends ChangeNotifier {
     if (_appForegrounded) return;
     try {
       await _overlayChannel.invokeMethod(deviceOverlayShowMethod);
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     await setOverlayLive(_overlayLive);
     await setOverlayState(_overlayState);
   }
@@ -1699,7 +1749,9 @@ class AgentService extends ChangeNotifier {
   Future<void> hideDeviceOverlay() async {
     try {
       await _overlayChannel.invokeMethod(deviceOverlayHideMethod);
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   bool _overlayLive = false;
@@ -1743,7 +1795,9 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayStateMethod, {
         'state': state,
       });
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Mark the overlay live (run active) or idle. The native side shows a
@@ -1755,7 +1809,9 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayLiveMethod, {
         'live': live,
       });
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   bool _appForegrounded = true;
@@ -1862,7 +1918,9 @@ class AgentService extends ChangeNotifier {
         await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
           'listening': false,
         });
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
       return;
     }
     // Explicit mic permission first: the overlay only exists while the
@@ -1897,20 +1955,26 @@ class AgentService extends ChangeNotifier {
           await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
             'listening': false,
           });
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
         await handleDeviceOverlayText(t);
         try {
           await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
             'text': '',
           });
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
         return;
       }
       try {
         await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
           'text': text,
         });
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     });
     if (stopped()) {
       await voice.cancel();
@@ -1924,7 +1988,9 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
         'listening': started,
       });
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Overlay mic failure feedback: reset the mic button and explain why in
@@ -1935,12 +2001,16 @@ class AgentService extends ChangeNotifier {
       await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
         'listening': false,
       });
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     try {
       await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
         'text': message,
       });
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Resolve the running session represented by foreground-notification
@@ -1993,17 +2063,17 @@ class AgentService extends ChangeNotifier {
 
   /// Checkpoint active run start to preferences and ledger so START_STICKY service
   /// restarts do not corrupt session state.
-  Future<void> checkpointRunStart(String sessionId, String runId) async {
+  Future<void> checkpointRunStart(
+    String sessionId,
+    String runId, {
+    Object? owner,
+  }) async {
+    final token = owner ?? AppState.I.sessionAccountToken;
+    if (!identical(token, AppState.I.sessionAccountToken)) return;
     _persistedRunCheckpoints[sessionId] = runId;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        _kActiveRunsCheckpointKey,
-        jsonEncode(_persistedRunCheckpoints),
-      );
-    } catch (e) { Diag.swallow('agent_service', e); }
+    await _flushRunCheckpoints(token);
     unawaited(
-      SessionLedger.I.append(sessionId, 'checkpoint', {
+      _appendRunCheckpoint(token, sessionId, {
         'runId': runId,
         'state': 'running',
       }),
@@ -2011,29 +2081,53 @@ class AgentService extends ChangeNotifier {
   }
 
   /// Checkpoint active run end/cleanup from preferences and ledger.
-  Future<void> checkpointRunEnd(String sessionId) async {
+  Future<void> checkpointRunEnd(String sessionId, {Object? owner}) async {
+    final token = owner ?? AppState.I.sessionAccountToken;
+    if (!identical(token, AppState.I.sessionAccountToken)) return;
     _persistedRunCheckpoints.remove(sessionId);
+    await _flushRunCheckpoints(token);
+    unawaited(_appendRunCheckpoint(token, sessionId, {'state': 'idle'}));
+  }
+
+  Future<void> _appendRunCheckpoint(
+    Object token,
+    String sessionId,
+    Map<String, dynamic> payload,
+  ) async {
+    if (!identical(token, AppState.I.sessionAccountToken)) return;
+    try {
+      await SessionLedger.I.append(sessionId, 'checkpoint', payload);
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
+  }
+
+  Future<void> _flushRunCheckpoints(Object token) async {
+    if (!identical(token, AppState.I.sessionAccountToken)) return;
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (!identical(token, AppState.I.sessionAccountToken)) return;
+      final key = AppState.I.accountScopedPrefKey(_kActiveRunsCheckpointKey);
       if (_persistedRunCheckpoints.isEmpty) {
-        await prefs.remove(_kActiveRunsCheckpointKey);
+        await prefs.remove(key);
       } else {
-        await prefs.setString(
-          _kActiveRunsCheckpointKey,
-          jsonEncode(_persistedRunCheckpoints),
-        );
+        await prefs.setString(key, jsonEncode(_persistedRunCheckpoints));
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
-    unawaited(
-      SessionLedger.I.append(sessionId, 'checkpoint', {'state': 'idle'}),
-    );
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Restore and validate active run checkpoints after process start.
   Future<void> restoreRunCheckpoints() async {
+    final token = AppState.I.sessionAccountToken;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kActiveRunsCheckpointKey);
+      if (!identical(token, AppState.I.sessionAccountToken)) return;
+      final raw = prefs.getString(
+        AppState.I.accountScopedPrefKey(_kActiveRunsCheckpointKey),
+      );
+      if (!identical(token, AppState.I.sessionAccountToken)) return;
       if (raw != null && raw.isNotEmpty) {
         final map = jsonDecode(raw);
         if (map is Map) {
@@ -2043,8 +2137,12 @@ class AgentService extends ChangeNotifier {
                 .toString();
           }
         }
+      } else {
+        _persistedRunCheckpoints.clear();
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   void _cancelBucket(AgentRun r) {
@@ -2057,7 +2155,7 @@ class AgentService extends ChangeNotifier {
       return;
     }
     if (r.runKey != null) {
-      unawaited(checkpointRunEnd(r.runKey!));
+      unawaited(checkpointRunEnd(r.runKey!, owner: r.accountToken));
     }
     r.cancelRequested = true;
     // Run-epoch (stop/output): invalidate this generation so stale
@@ -2072,11 +2170,15 @@ class AgentService extends ChangeNotifier {
     try {
       r.activeClient?.close(force: true);
       r.activeClient = null;
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     try {
       r.activeRequest?.abort();
       r.activeRequest = null;
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     // A pending approval / question is a hard block: the tool awaits its
     // completer. Without resolving it here, Stop left the run parked
     // forever with activeRunId set (composer stuck on Stop).
@@ -2085,7 +2187,9 @@ class AgentService extends ChangeNotifier {
       r.pendingApproval = null;
       try {
         pending.completer.complete(false);
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     // PR32: INSTANT stop — a running build/install (bash/npm/apt) used
     // to keep the run parked until its full 10-minute timeout. Kill
@@ -2101,16 +2205,22 @@ class AgentService extends ChangeNotifier {
     if (runKey.isNotEmpty) {
       try {
         SandboxService.I.killRunProcesses(runKey);
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
       try {
         PtyPool.I.discardFor(runKey);
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     for (final j in r.jobs.values.toList()) {
       try {
         j.killed = true;
         j.process?.kill(ProcessSignal.sigkill);
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     _emitToRun(
       r,
@@ -2121,34 +2231,72 @@ class AgentService extends ChangeNotifier {
   }
 
   /// Drop a session's run entirely (called from AppState.deleteSession).
+  void sessionAccountChanged() {
+    for (final sub in _subagents.values) {
+      sub.interrupted = true;
+      sub.finished = true;
+      sub.finishedAt ??= DateTime.now();
+      sub.messages.clear();
+      sub.userReferenceMessages.clear();
+    }
+    _subagents.clear();
+    _persistedRunCheckpoints.clear();
+    // Restored checkpoint entries are loaded only once the new account's
+    // authoritative session namespace is published.
+    for (final id in _runs.keys.toList()) {
+      final run = _runs[id]!;
+      ++run.runEpoch;
+      _queueClear(run);
+      run.activeClient?.close(force: true);
+      dropSessionRun(id);
+    }
+    _pendingAttachments.clear();
+    _queuedAttachments.clear();
+    _continuationScheduled.clear();
+    _userPromptContext.clear();
+    _sessionEvents.clear();
+    _transcriptPathCache.clear();
+  }
+
   void dropSessionRun(String sessionId) {
-    if (_runs[sessionId]?.controlRun == true) stopRequested(sessionId: sessionId);
+    if (_runs[sessionId]?.controlRun == true) {
+      stopRequested(sessionId: sessionId);
+    }
     _pendingAttachments.remove(sessionId);
     _queuedAttachments.removeWhere((key, _) => key.$1 == sessionId);
     final r = _runs.remove(sessionId);
     // Keyed per (session, mode), so drop every mode variant for this session —
     // plus the bare legacy key.
-    _alwaysAllowedTools.removeWhere((k, _) =>
-        k == sessionId || k.startsWith('$sessionId|'));
+    _alwaysAllowedTools.removeWhere(
+      (k, _) => k == sessionId || k.startsWith('$sessionId|'),
+    );
     _deniedApprovals.remove(sessionId);
     if (r == null) return;
     r.cancelRequested = true;
     try {
       r.activeRequest?.abort();
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     if (r.pendingApproval != null) {
       try {
         r.pendingApproval!.completer.complete(false);
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     try {
       SandboxService.I.killRunProcesses(sessionId);
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     for (final job in r.jobs.values) {
       if (!job.finished) {
         try {
           job.process?.kill(ProcessSignal.sigkill);
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
       }
     }
     notifyListeners();
@@ -2156,12 +2304,15 @@ class AgentService extends ChangeNotifier {
 
   /// Enqueue a message to run after the current turn completes.
   void enqueueMessage(String text, {String? sessionId}) {
+    if (_runChainStale || !AppState.I.sessionAccountReady) return;
     if (text.trim().isEmpty) return;
     final run = sessionId != null ? _runFor(sessionId) : _runResolved;
     _queueAdd(run, text, userReferences: true);
     run.nextDispatchQueueIds.add(run.queueIds.last);
     final sid = sessionId ?? _runSession?.id ?? '';
-    _queuedAttachments[(sid, run.queueIds.last)] = List.of(_attachmentsFor(sid));
+    _queuedAttachments[(sid, run.queueIds.last)] = List.of(
+      _attachmentsFor(sid),
+    );
     _emitToRun(
       run,
       'think',
@@ -2182,12 +2333,20 @@ class AgentService extends ChangeNotifier {
     if (run == null || run.queue.isEmpty || run.activeRunId != null) return;
     if (!_continuationScheduled.add(sessionId)) return;
     _syncQueueIds(run);
-    final userReferences = run.userReferenceQueueIds.contains(run.queueIds.first);
+    final userReferences = run.userReferenceQueueIds.contains(
+      run.queueIds.first,
+    );
     final attachments = _attachmentsForQueuedMessage(run, 0);
     final text = _queueRemoveAt(run, 0);
     notifyListeners();
-    unawaited(_startQueuedContinuation(sessionId, text, attachments,
-        userReferences: userReferences));
+    unawaited(
+      _startQueuedContinuation(
+        sessionId,
+        text,
+        attachments,
+        userReferences: userReferences,
+      ),
+    );
   }
 
   Future<void> _startQueuedContinuation(
@@ -2196,7 +2355,12 @@ class AgentService extends ChangeNotifier {
     List<({String name, String path, int size})> attachments, {
     bool userReferences = false,
   }) async {
+    final accountToken = AppState.I.sessionAccountToken;
+    final ownedRun = _runs[sessionId];
     try {
+      if (!identical(accountToken, AppState.I.sessionAccountToken) ||
+          !AppState.I.sessionAccountReady)
+        return;
       var target = AppState.I.sessionById(sessionId);
       if (target == null) {
         // Session deleted — NEVER fire the queued message into whatever
@@ -2236,6 +2400,10 @@ class AgentService extends ChangeNotifier {
       final starter = queuedRunStarterForTest;
       final delays = queuedContinuationRetryDelaysForTest;
       for (var attempt = 0; ; attempt++) {
+        if (!identical(accountToken, AppState.I.sessionAccountToken) ||
+            !identical(target, AppState.I.sessionById(sessionId))) {
+          return;
+        }
         try {
           if (starter != null) {
             await starter(targetId, text);
@@ -2262,7 +2430,9 @@ class AgentService extends ChangeNotifier {
         }
       }
     } finally {
-      _continuationScheduled.remove(sessionId);
+      if (identical(ownedRun, _runs[sessionId])) {
+        _continuationScheduled.remove(sessionId);
+      }
     }
   }
 
@@ -2376,7 +2546,8 @@ class AgentService extends ChangeNotifier {
 
   /// Test seam: enqueue without a live run.
   @visibleForTesting
-  void queueMessageForTest(String text) => _queueAdd(_runResolved, text, userReferences: true);
+  void queueMessageForTest(String text) =>
+      _queueAdd(_runResolved, text, userReferences: true);
 
   /// Remove a message from the queue.
   void removeQueuedMessage(int index) {
@@ -2507,13 +2678,50 @@ class AgentService extends ChangeNotifier {
   /// `onNavigationRequest`, and sniffing a MIME type would cost a HEAD request
   /// on every single navigation.
   static const Set<String> _downloadExtensions = {
-    'zip', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'tar', 'zst',
-    'pdf', 'epub', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods',
-    'csv', 'tsv',
-    'mp3', 'm4a', 'wav', 'ogg', 'flac', 'aac',
-    'mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v',
-    'apk', 'aab', 'dmg', 'exe', 'msi', 'iso', 'img',
-    'deb', 'rpm', 'jar', 'whl',
+    'zip',
+    'gz',
+    'tgz',
+    'bz2',
+    'xz',
+    '7z',
+    'rar',
+    'tar',
+    'zst',
+    'pdf',
+    'epub',
+    'doc',
+    'docx',
+    'xls',
+    'xlsx',
+    'ppt',
+    'pptx',
+    'odt',
+    'ods',
+    'csv',
+    'tsv',
+    'mp3',
+    'm4a',
+    'wav',
+    'ogg',
+    'flac',
+    'aac',
+    'mp4',
+    'webm',
+    'mov',
+    'avi',
+    'mkv',
+    'm4v',
+    'apk',
+    'aab',
+    'dmg',
+    'exe',
+    'msi',
+    'iso',
+    'img',
+    'deb',
+    'rpm',
+    'jar',
+    'whl',
   };
 
   /// Maximum byte length for messages received from page-side JavaScript
@@ -2645,7 +2853,9 @@ class AgentService extends ChangeNotifier {
         await _restoreSessionTabsIfNeeded(key);
         if (browserTabs.isNotEmpty) return;
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     try {
       // Legacy upgrades only: fall back to the global copy when no
       // per-session record exists anywhere yet.
@@ -2768,7 +2978,9 @@ class AgentService extends ChangeNotifier {
               );
         }
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     if (tabs.isEmpty) {
       // A brand-new session starts with a FRESH home-page tab (google.com),
       // never a blank page — its own cookie jar (profile), so logins from
@@ -2837,7 +3049,9 @@ class AgentService extends ChangeNotifier {
         await prefs.setStringList('$_kBrowserSessionPrefix$key', urls);
         await prefs.setInt('$_kBrowserActiveTab$key', activeTabIndex);
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Test seam: persist the current browser tabs exactly as a page-finished
@@ -2875,7 +3089,9 @@ class AgentService extends ChangeNotifier {
       await prefs.remove('$_kBrowserSessionV2Prefix$sessionId');
       await prefs.remove('$_kBrowserSessionPrefix$sessionId');
       await prefs.remove('$_kBrowserActiveTab$sessionId');
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     await SessionBrowserProfiles.I.forgetOrigins(sessionId: sessionId);
   }
 
@@ -2892,10 +3108,11 @@ class AgentService extends ChangeNotifier {
   /// URL opened, or null when it was empty/refused (the chip hides the queue
   /// entry only on success, so a refused popup stays visible and auditable).
   String? openBrowserPopup(BrowserTab tab, [String? url]) {
-    final raw = (url ??
-            (tab.popupRequests.isEmpty ? null : tab.popupRequests.last) ??
-            '')
-        .trim();
+    final raw =
+        (url ??
+                (tab.popupRequests.isEmpty ? null : tab.popupRequests.last) ??
+                '')
+            .trim();
     final uri = Uri.tryParse(raw);
     final scheme = (uri?.scheme ?? '').toLowerCase();
     if (uri == null || scheme != 'http' && scheme != 'https') {
@@ -2987,8 +3204,7 @@ class AgentService extends ChangeNotifier {
     final ip = InternetAddress.tryParse(host);
     if (ip != null) {
       // IPv6 loopback.
-      if (ip.type == InternetAddressType.IPv6 &&
-          ip.address == '::1') {
+      if (ip.type == InternetAddressType.IPv6 && ip.address == '::1') {
         return false;
       }
       if (ip.type == InternetAddressType.IPv4) {
@@ -3167,7 +3383,9 @@ class AgentService extends ChangeNotifier {
       for (final e in work.listSync(recursive: true, followLinks: false)) {
         if (e is File && e.path.endsWith('/$name')) return e.path;
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     return null;
   }
 
@@ -3215,7 +3433,9 @@ class AgentService extends ChangeNotifier {
           final dest = File('${prevDir.path}/$name');
           dest.parent.createSync(recursive: true);
           e.copySync(dest.path);
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
       }
       return '${prevDir.path}/${hostIndexHtml.split('/').last}';
     } catch (_) {
@@ -3256,7 +3476,9 @@ class AgentService extends ChangeNotifier {
     if (platform is AndroidWebViewController) {
       try {
         return platform.webViewIdentifier;
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     return null;
   }
@@ -3469,7 +3691,9 @@ class AgentService extends ChangeNotifier {
           desktopVerifyScriptForTest(),
         );
         measured = parseDesktopProbeForTest(after).clientWidth;
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     final confirmed = repaired && measured >= expected - 40;
     tab.consoleLog.add((
@@ -3500,7 +3724,9 @@ class AgentService extends ChangeNotifier {
     if (c == null) return;
     try {
       await c.runJavaScript(browserZoomScriptForTest(tab.userZoom));
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Apply an already-validated user zoom to [tab]: clamped setter
@@ -3621,7 +3847,7 @@ class AgentService extends ChangeNotifier {
       _emit(
         'browser',
         'popup opened in a new tab'
-        '${target.isEmpty ? '' : ' ($target)'}: $url',
+            '${target.isEmpty ? '' : ' ($target)'}: $url',
       );
     } else {
       _emit(
@@ -3845,8 +4071,10 @@ class AgentService extends ChangeNotifier {
     // SECURITY (2026-10-02): geolocation is now denied by default for all
     // origins. The previous blanket grant shared the device's precise location
     // with every page the agent (or user) visited, with no per-origin consent.
-    final Map<String, Object?> payload =
-        geoPayloadFromFix(const {}, denied: true);
+    final Map<String, Object?> payload = geoPayloadFromFix(
+      const {},
+      denied: true,
+    );
 
     // Surfaced the way every other page-permission decision is: the Browser
     // timeline AND the tab console, so `browser_console` can explain why a
@@ -3900,7 +4128,8 @@ class AgentService extends ChangeNotifier {
     Map<String, Object?> payload,
   ) async {
     final controller = tab.controller;
-    if (controller == null) return; // Tab torn down while the fix was in flight.
+    if (controller == null)
+      return; // Tab torn down while the fix was in flight.
     try {
       await controller.runJavaScript(geoReplyJs(id, payload));
     } catch (e) {
@@ -3915,7 +4144,6 @@ class AgentService extends ChangeNotifier {
     }
   }
 
-
   /// Agent-facing: get (creating if needed) the controller for a tab.
   WebViewController controllerForTab(BrowserTab tab) {
     // Record the physical viewport baseline once (browser_resize derives
@@ -3927,7 +4155,9 @@ class AgentService extends ChangeNotifier {
         BrowserTab.devW = (sz.width / dpr).round();
         BrowserTab.devH = (sz.height / dpr).round();
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     // NOTE: file access for local previews is handled by the platform
     // impl — webview_flutter_android's loadFile() sets
     // settings.setAllowFileAccess(true) itself.
@@ -4059,17 +4289,17 @@ class AgentService extends ChangeNotifier {
             // (missed apply, rewritten meta, old WebView). Covers refresh and
             // SPA navigations — persistence by verification, not by hope.
             unawaited(_verifyDesktopForced(tab, url));
-             // Dialog/popup capture: webview_flutter has no onJsAlert API,
-             // so shim alert/confirm/prompt + window.open once per page.
-             //
-             // SECURITY (2026-09-24): confirm() used to return TRUE for every
-             // page — including pages the user browses by hand — so "Are you
-             // sure you want to delete/send/pay?" was silently answered yes and
-             // the action proceeded with no UI ever shown. It now FAILS CLOSED
-             // (false) while still recording the prompt, so nothing
-             // destructive happens behind the user's back.
-             try {
-               tab.controller?.runJavaScript('''
+            // Dialog/popup capture: webview_flutter has no onJsAlert API,
+            // so shim alert/confirm/prompt + window.open once per page.
+            //
+            // SECURITY (2026-09-24): confirm() used to return TRUE for every
+            // page — including pages the user browses by hand — so "Are you
+            // sure you want to delete/send/pay?" was silently answered yes and
+            // the action proceeded with no UI ever shown. It now FAILS CLOSED
+            // (false) while still recording the prompt, so nothing
+            // destructive happens behind the user's back.
+            try {
+              tab.controller?.runJavaScript('''
 window.__ovidDialog = null;
 window.alert = (m) => { window.__ovidDialog = {kind:'alert', message:String(m)}; };
 window.confirm = (m) => { window.__ovidDialog = {kind:'confirm', message:String(m), answered:false}; return false; };
@@ -4120,7 +4350,9 @@ if (!window.__ovidBlankHooked) {
   }, true);
 }
 ''');
-             } catch (e) { Diag.swallow('agent_service', e); }
+            } catch (e) {
+              Diag.swallow('agent_service', e);
+            }
 
             tab.networkLog.add((
               at: DateTime.now(),
@@ -4142,29 +4374,33 @@ if (!window.__ovidBlankHooked) {
   window.addEventListener('error', (e) => { try { OvidConsole.postMessage('error: ' + String(e.message).slice(0,500)); } catch(_){} });
 })();
 ''');
-            } catch (e) { Diag.swallow('agent_service', e); }
-             // navigator.geolocation bridge (2026-09-29): webview_flutter_android
-             // delivers NO geolocation prompt — its PermissionRequestConstants
-             // cover only audio/video/MIDI/protected-media, because Android
-             // routes location through
-             // WebChromeClient.onGeolocationPermissionsShowPrompt, and this app
-             // must not install its own WebChromeClient (the plugin's file
-             // chooser, JS dialogs and console bridge all hang off it). So a page
-             // asking for its position never got an answer at all: no success, no
-             // error, no timeout — just a hang. Location-gated logins looked
-             // broken and browser_console had nothing to show.
-             //
-             // The shim answers every request via the OvidGeolocation channel
-             // (app side: _onGeoRequest → native `locationFix`) and ALWAYS
-             // settles: an explicit W3C error when the permission or the fix is
-             // missing, and the page's own `timeout` honoured, so a lost bridge
-             // reply cannot reintroduce the hang being fixed here. Per document,
-             // like the dialog shim above — a fresh document has a fresh
-             // `navigator`, so a one-time install would leave the next navigation
-             // hanging again.
-             try {
-               tab.controller?.runJavaScript(geolocationShimJs);
-             } catch (e) { Diag.swallow('agent_service', e); }
+            } catch (e) {
+              Diag.swallow('agent_service', e);
+            }
+            // navigator.geolocation bridge (2026-09-29): webview_flutter_android
+            // delivers NO geolocation prompt — its PermissionRequestConstants
+            // cover only audio/video/MIDI/protected-media, because Android
+            // routes location through
+            // WebChromeClient.onGeolocationPermissionsShowPrompt, and this app
+            // must not install its own WebChromeClient (the plugin's file
+            // chooser, JS dialogs and console bridge all hang off it). So a page
+            // asking for its position never got an answer at all: no success, no
+            // error, no timeout — just a hang. Location-gated logins looked
+            // broken and browser_console had nothing to show.
+            //
+            // The shim answers every request via the OvidGeolocation channel
+            // (app side: _onGeoRequest → native `locationFix`) and ALWAYS
+            // settles: an explicit W3C error when the permission or the fix is
+            // missing, and the page's own `timeout` honoured, so a lost bridge
+            // reply cannot reintroduce the hang being fixed here. Per document,
+            // like the dialog shim above — a fresh document has a fresh
+            // `navigator`, so a one-time install would leave the next navigation
+            // hanging again.
+            try {
+              tab.controller?.runJavaScript(geolocationShimJs);
+            } catch (e) {
+              Diag.swallow('agent_service', e);
+            }
           },
           onWebResourceError: (_) {
             tab.loading = false;
@@ -4200,7 +4436,9 @@ if (!window.__ovidBlankHooked) {
                 // paste it into a browser that will download it.
                 try {
                   await Clipboard.setData(ClipboardData(text: url));
-                } catch (e) { Diag.swallow('agent_service', e); }
+                } catch (e) {
+                  Diag.swallow('agent_service', e);
+                }
               }
               _emit(
                 'browser',
@@ -4215,7 +4453,9 @@ if (!window.__ovidBlankHooked) {
               // hand it to the system browser and stay on the current page.
               try {
                 await launchUrl(uri, mode: LaunchMode.externalApplication);
-              } catch (e) { Diag.swallow('agent_service', e); }
+              } catch (e) {
+                Diag.swallow('agent_service', e);
+              }
               _emit(
                 'shell',
                 'Google sign-in opened in the system browser — complete it '
@@ -4265,7 +4505,9 @@ if (!window.__ovidBlankHooked) {
               }
               try {
                 await launchUrl(uri, mode: LaunchMode.externalApplication);
-              } catch (e) { Diag.swallow('agent_service', e); }
+              } catch (e) {
+                Diag.swallow('agent_service', e);
+              }
               return NavigationDecision.prevent;
             }
             return NavigationDecision.navigate;
@@ -4325,39 +4567,41 @@ if (!window.__ovidBlankHooked) {
       // and only raise the OS dialog when the user is the one browsing (never
       // mid-agent-run, where a modal would stall the run).
       try {
-        unawaited(platformController.setOnPlatformPermissionRequest((
-          request,
-        ) async {
-          final wanted = request.types;
-          final names = wanted.map((t) => t.name).join(', ');
-          var allGranted = wanted.isNotEmpty;
-          for (final type in wanted) {
-            final permission = androidPermissionForWebViewType(type);
-            if (permission == null) {
-              // DRM / protected media id, or a type this build does not know:
-              // refused, not guessed at.
-              allGranted = false;
-              continue;
-            }
-            var status = await permission.status;
-            if (!status.isGranted && !busy && !browserBusy) {
-              status = await permission.request();
-            }
-            if (!status.isGranted) allGranted = false;
-          }
-          if (allGranted) {
-            await request.grant();
-          } else {
-            await request.deny();
-          }
-          _emit(
-            'browser',
-            '${allGranted ? 'granted' : 'denied'} page permission '
-            '(${Uri.tryParse(tab.url)?.host ?? tab.url}): $names',
-          );
-        }).catchError((Object error) {
-          _emit('err', 'page permission handler failed: $error');
-        }));
+        unawaited(
+          platformController
+              .setOnPlatformPermissionRequest((request) async {
+                final wanted = request.types;
+                final names = wanted.map((t) => t.name).join(', ');
+                var allGranted = wanted.isNotEmpty;
+                for (final type in wanted) {
+                  final permission = androidPermissionForWebViewType(type);
+                  if (permission == null) {
+                    // DRM / protected media id, or a type this build does not know:
+                    // refused, not guessed at.
+                    allGranted = false;
+                    continue;
+                  }
+                  var status = await permission.status;
+                  if (!status.isGranted && !busy && !browserBusy) {
+                    status = await permission.request();
+                  }
+                  if (!status.isGranted) allGranted = false;
+                }
+                if (allGranted) {
+                  await request.grant();
+                } else {
+                  await request.deny();
+                }
+                _emit(
+                  'browser',
+                  '${allGranted ? 'granted' : 'denied'} page permission '
+                      '(${Uri.tryParse(tab.url)?.host ?? tab.url}): $names',
+                );
+              })
+              .catchError((Object error) {
+                _emit('err', 'page permission handler failed: $error');
+              }),
+        );
       } catch (error) {
         _emit('err', 'page permission handler failed: $error');
       }
@@ -4482,7 +4726,9 @@ if (!window.__ovidBlankHooked) {
   _SessionStudio get _studio {
     final s = _runSession;
     final sid = s?.sandboxId ?? s?.id ?? '__none__';
-    return _studioFor(jsonEncode([sid, s?.repo, s?.branch, s?.workspaceFolder]));
+    return _studioFor(
+      jsonEncode([sid, s?.repo, s?.branch, s?.workspaceFolder]),
+    );
   }
 
   /// Studio live buffers (path → content) — scoped to the ACTIVE session.
@@ -4536,8 +4782,10 @@ if (!window.__ovidBlankHooked) {
   bool get _ownsRepoCache =>
       (RepoCache.I.boundSessionId == null ||
           RepoCache.I.boundSessionId == _runSession?.id) &&
-      (_runSession?.repo == null || RepoCache.I.repoFull == _runSession?.repo) &&
-      (_runSession?.branch == null || RepoCache.I.defaultBranch == _runSession?.branch) &&
+      (_runSession?.repo == null ||
+          RepoCache.I.repoFull == _runSession?.repo) &&
+      (_runSession?.branch == null ||
+          RepoCache.I.defaultBranch == _runSession?.branch) &&
       (RepoCache.I.workspaceFolder == null ||
           RepoCache.I.workspaceFolder == _runSession?.workspaceFolder);
 
@@ -4554,7 +4802,8 @@ if (!window.__ovidBlankHooked) {
     final sessionId = _currentRunKey();
     final repo = sessionRepoFull;
     final folder = AppState.I.activeSession?.workspaceFolder;
-    if (sessionId.isEmpty || ((repo == null || repo.isEmpty) && folder == null)) return;
+    if (sessionId.isEmpty || ((repo == null || repo.isEmpty) && folder == null))
+      return;
     if (RepoCache.I.isReady &&
         RepoCache.I.repoFull == repo &&
         RepoCache.I.defaultBranch == sessionBranch &&
@@ -4602,21 +4851,27 @@ if (!window.__ovidBlankHooked) {
     final active = st.activeFilePath;
     final operations = _studioFileOperations[st] ??= {};
     final operation = operations[path] = Object();
-    final repoOwns = _ownsRepoCache &&
+    final repoOwns =
+        _ownsRepoCache &&
         (RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null);
     final cacheBefore = RepoCache.I.files[path];
     final work = await _sessionWorkDir();
-    if (!identical(st, _studio) || !identical(session, _runSession) ||
-        binding != RepoCache.I.bindingGeneration || operations[path] != operation ||
-        st.fileBuffer[path] != before || (wasOpen && !st.openFiles.contains(path)) ||
+    if (!identical(st, _studio) ||
+        !identical(session, _runSession) ||
+        binding != RepoCache.I.bindingGeneration ||
+        operations[path] != operation ||
+        st.fileBuffer[path] != before ||
+        (wasOpen && !st.openFiles.contains(path)) ||
         (repoOwns && RepoCache.I.files[path] != cacheBefore)) {
       throw StateError('Studio save superseded by an edit or workspace change');
     }
     final safe = workspaceFilePath(work, path);
-    if (safe == null) throw StateError('Path escapes workspace or uses a symlink: $path');
+    if (safe == null)
+      throw StateError('Path escapes workspace or uses a symlink: $path');
     final file = File(safe);
     file.parent.createSync(recursive: true);
-    if (workspaceFilePath(work, path) != safe) throw StateError('Workspace path changed while saving: $path');
+    if (workspaceFilePath(work, path) != safe)
+      throw StateError('Workspace path changed while saving: $path');
     file.writeAsStringSync(content);
     st.fileBuffer[path] = content;
     if (!st.openFiles.contains(path)) st.openFiles.add(path);
@@ -4701,7 +4956,9 @@ if (!window.__ovidBlankHooked) {
       if (f.existsSync()) {
         _studio.syncedMtime[path] = f.lastModifiedSync().millisecondsSinceEpoch;
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Live file follow (P9): after shell commands, check every open tab's
@@ -4715,10 +4972,16 @@ if (!window.__ovidBlankHooked) {
     final binding = RepoCache.I.bindingGeneration;
     final before = Map<String, String>.of(st.fileBuffer);
     final operations = _studioFileOperations[st] ??= {};
-    final admitted = {for (final path in st.openFiles) path: operations[path] = Object()};
-    bool owns(String path) => identical(st, _studio) && identical(session, _runSession) &&
-        binding == RepoCache.I.bindingGeneration && operations[path] == admitted[path] &&
-        st.openFiles.contains(path) && st.fileBuffer[path] == before[path];
+    final admitted = {
+      for (final path in st.openFiles) path: operations[path] = Object(),
+    };
+    bool owns(String path) =>
+        identical(st, _studio) &&
+        identical(session, _runSession) &&
+        binding == RepoCache.I.bindingGeneration &&
+        operations[path] == admitted[path] &&
+        st.openFiles.contains(path) &&
+        st.fileBuffer[path] == before[path];
     var changed = false;
     for (final path in admitted.keys) {
       try {
@@ -4733,14 +4996,17 @@ if (!window.__ovidBlankHooked) {
         // Size guard: don't slurp huge binaries into the editor.
         if (f.lengthSync() > 2 * 1024 * 1024) continue;
         final content = await f.readAsString();
-        if (!owns(path) || f.lastModifiedSync().millisecondsSinceEpoch != mtime) continue;
+        if (!owns(path) || f.lastModifiedSync().millisecondsSinceEpoch != mtime)
+          continue;
         st.syncedMtime[path] = mtime;
         if (content != st.fileBuffer[path]) {
           st.fileBuffer[path] = content;
           changed = true;
           _emit('file', 'live-reloaded $path (changed on disk)');
         }
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     if (changed) notifyListeners();
   }
@@ -4877,8 +5143,11 @@ if (!window.__ovidBlankHooked) {
   Future<String> workspaceContext() async {
     final s = _runSession;
     final work = await _sessionWorkDir();
-    final provenance = s == null || s.workspaceFolder == null ? '' : s.workspaceFolderPinned ?
-        'The user pinned this chat to the folder above.' : '''
+    final provenance = s == null || s.workspaceFolder == null
+        ? ''
+        : s.workspaceFolderPinned
+        ? 'The user pinned this chat to the folder above.'
+        : '''
 Working folder (inherited): ${work.path}
 This folder was carried over from the user's LAST selection — it was NOT
 chosen for this chat. It is still where all
@@ -4912,7 +5181,9 @@ user which one instead of assuming this one.''';
   /// a heading with that session's recent messages. Unresolvable mentions
   /// stay literal so the model can still see the intent.
   Future<String> expandReferences(String text, ChatSession s) async {
-    final mentions = RegExp(r'@(?:"([^"]+)"|([\w./:-]+))').allMatches(text).toList();
+    final mentions = RegExp(
+      r'@(?:"([^"]+)"|([\w./:-]+))',
+    ).allMatches(text).toList();
     if (mentions.isEmpty) return text;
     final blocks = <String>[];
     for (final m in mentions) {
@@ -4990,7 +5261,9 @@ user which one instead of assuming this one.''';
               .join(', ');
           blocks.add('── referenced directory "$rel" ──\n$listing');
         }
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     if (blocks.isEmpty) return text;
     return '$text\n\n[expanded references]\n${blocks.join('\n\n')}';
@@ -5002,13 +5275,19 @@ user which one instead of assuming this one.''';
     final byId = app.sessionById(ref);
     if (byId != null) return [byId];
     final name = ref.toLowerCase();
-    final exact = app.rootSessions.where((s) => s.title.toLowerCase() == name).toList();
-    return exact.isNotEmpty ? exact : app.rootSessions
-        .where((s) => s.title.toLowerCase().contains(name)).toList();
+    final exact = app.rootSessions
+        .where((s) => s.title.toLowerCase() == name)
+        .toList();
+    return exact.isNotEmpty
+        ? exact
+        : app.rootSessions
+              .where((s) => s.title.toLowerCase().contains(name))
+              .toList();
   }
 
   bool _canReadSession(ChatSession current, String targetId) =>
-      current.id == targetId || AppState.I.shareSessionMemory ||
+      current.id == targetId ||
+      AppState.I.shareSessionMemory ||
       current.referencedSessionIds.contains(targetId);
 
   String _handleSessionRead(Map<String, dynamic> args) {
@@ -5020,7 +5299,10 @@ user which one instead of assuming this one.''';
     }
     final target = AppState.I.sessionById(id);
     if (target == null) return 'Session not found.';
-    final offset = ((args['offset'] as num?)?.toInt() ?? 0).clamp(0, target.messages.length);
+    final offset = ((args['offset'] as num?)?.toInt() ?? 0).clamp(
+      0,
+      target.messages.length,
+    );
     final limit = ((args['limit'] as num?)?.toInt() ?? 30).clamp(1, 100);
     final rows = target.messages.skip(offset).take(limit).toList();
     return 'Transcript "${target.title}" ($id), rows $offset–${offset + rows.length} '
@@ -5046,7 +5328,8 @@ user which one instead of assuming this one.''';
     // file shows as + lines).
     final before = _readFileBefore(path);
     final repoOwns =
-        _ownsRepoCache && (RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null);
+        _ownsRepoCache &&
+        (RepoCache.I.files.containsKey(path) || RepoCache.I.repoFull != null);
     if (repoOwns) {
       RepoCache.I.write(path, content);
       openStudioFile(path, content);
@@ -5077,7 +5360,8 @@ user which one instead of assuming this one.''';
   Future<void> _mirrorToDisk(String path, String content) async {
     final work = await _sessionWorkDir();
     final safe = workspaceFilePath(work, path);
-    if (safe == null) throw StateError('Path escapes workspace or uses a symlink: $path');
+    if (safe == null)
+      throw StateError('Path escapes workspace or uses a symlink: $path');
     final f = File(safe);
     f.parent.createSync(recursive: true);
     if (workspaceFilePath(work, path) != safe) {
@@ -5101,7 +5385,9 @@ user which one instead of assuming this one.''';
           return File(safe).readAsStringSync();
         }
       }
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     return null;
   }
 
@@ -5125,7 +5411,9 @@ user which one instead of assuming this one.''';
       if (m == null) return;
       m.toolDetail = buildEditDiff(path, before, after);
       AppState.I.refresh();
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// diff-card parity (PR25): build a compact unified-style diff for
@@ -5213,7 +5501,9 @@ user which one instead of assuming this one.''';
         length: f.lengthSync(),
         modified: f.lastModifiedSync(),
       );
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// null = fresh (no prior observation to go stale); true = matches;
@@ -5240,17 +5530,18 @@ user which one instead of assuming this one.''';
   /// them all and the agent reads them from the workspace.
   static const maxAttachments = 20;
   final Map<String, List<({String name, String path, int size})>>
-      _pendingAttachments = {};
+  _pendingAttachments = {};
   final Map<String, int> _attachmentCopies = {};
   final Map<(String, int), List<({String name, String path, int size})>>
-      _queuedAttachments = {};
+  _queuedAttachments = {};
 
   List<({String name, String path, int size})> _attachmentsForQueuedMessage(
     AgentRun run,
     int index,
   ) {
     _syncQueueIds(run);
-    return _queuedAttachments[(run.runKey ?? '', run.queueIds[index])] ?? const [];
+    return _queuedAttachments[(run.runKey ?? '', run.queueIds[index])] ??
+        const [];
   }
 
   List<MessageAttachment> _attachmentMetadata(
@@ -5288,8 +5579,12 @@ user which one instead of assuming this one.''';
     _attachmentCopies[s.id] = (_attachmentCopies[s.id] ?? 0) + 1;
     Directory? upload;
     try {
-      if (fileName.isEmpty || fileName == '.' || fileName == '..' ||
-          fileName.contains('/') || fileName.contains('\\') || fileName.contains('\u0000')) {
+      if (fileName.isEmpty ||
+          fileName == '.' ||
+          fileName == '..' ||
+          fileName.contains('/') ||
+          fileName.contains('\\') ||
+          fileName.contains('\u0000')) {
         return 'invalid attachment filename';
       }
       final src = File(sourcePath);
@@ -5753,7 +6048,9 @@ user which one instead of assuming this one.''';
         onlyPluginId: pluginId,
       );
       await refreshSkills(sessionId: sessionId);
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Names of the skill/command contributions a legacy plugin row actually
@@ -5834,8 +6131,10 @@ user which one instead of assuming this one.''';
     }
     final seed = switch (p.name) {
       'Web Search' => const ['web_search'],
-      'Image Studio' => ImageStudio.I.tools
-          .map((t) => (t['function'] as Map)['name'] as String).toList(),
+      'Image Studio' =>
+        ImageStudio.I.tools
+            .map((t) => (t['function'] as Map)['name'] as String)
+            .toList(),
       'File Reader' => const ['read_attachment'],
       'Web Fetch & Reader' => const ['fetch_url'],
       'Code Runner' => const ['run_code'],
@@ -5948,7 +6247,8 @@ user which one instead of assuming this one.''';
     final isChild = _runSession?.isSubagent ?? false;
     for (final t in _coreTools) {
       final fn = t['function'];
-      if (!app.memoryEnabled && fn is Map &&
+      if (!app.memoryEnabled &&
+          fn is Map &&
           (fn['name'] as String).startsWith('memory_')) {
         continue;
       }
@@ -6422,7 +6722,8 @@ user which one instead of assuming this one.''';
             },
             'duration_ms': {
               'type': 'integer',
-              'description': 'Travel time from origin to destination (default 600).',
+              'description':
+                  'Travel time from origin to destination (default 600).',
             },
           },
           'required': ['from_x', 'from_y', 'to_x', 'to_y'],
@@ -7733,7 +8034,8 @@ user which one instead of assuming this one.''';
       'type': 'function',
       'function': {
         'name': 'schedule_list',
-        'description': 'List this session\'s schedules, statuses and next dates.',
+        'description':
+            'List this session\'s schedules, statuses and next dates.',
         'parameters': {'type': 'object', 'properties': {}},
       },
     },
@@ -7757,7 +8059,8 @@ user which one instead of assuming this one.''';
       'type': 'function',
       'function': {
         'name': 'session_read',
-        'description': 'Read a transcript by session_id, with offset/limit paging. '
+        'description':
+            'Read a transcript by session_id, with offset/limit paging. '
             'Other chats require an explicit user @session reference or sharing enabled. Read-only.',
         'parameters': {
           'type': 'object',
@@ -7855,12 +8158,19 @@ user which one instead of assuming this one.''';
             },
             'cursor': {
               'type': 'integer',
-              'description': 'Paging offset from a previous call (opaque)',
+              'description':
+                  'Paging offset, 0–100000; nonzero requires generation',
+            },
+            'generation': {
+              'type': 'integer',
+              'description':
+                  'Snapshot generation returned by page one; reuse on every page. Restart at cursor 0 when expired.',
             },
             'scope': {
               'type': 'string',
               'enum': ['all', 'this'],
-              'description': 'all = every session (requires sharing); this = current (default when sharing is off)',
+              'description':
+                  'all = every session (requires sharing); this = current (default when sharing is off)',
             },
             'session_id': {'type': 'string'},
           },
@@ -8082,10 +8392,22 @@ user which one instead of assuming this one.''';
         'parameters': {
           'type': 'object',
           'properties': {
-            'scope': {'type': 'string', 'enum': ['global', 'session']},
-            'file': {'type': 'string', 'description': 'Plain .md filename; default MEMORY.md. No paths.'},
-            'mode': {'type': 'string', 'enum': ['append', 'create', 'replace']},
-            'revision': {'type': 'string', 'description': 'Required for replace; from memory_read.'},
+            'scope': {
+              'type': 'string',
+              'enum': ['global', 'session'],
+            },
+            'file': {
+              'type': 'string',
+              'description': 'Plain .md filename; default MEMORY.md. No paths.',
+            },
+            'mode': {
+              'type': 'string',
+              'enum': ['append', 'create', 'replace'],
+            },
+            'revision': {
+              'type': 'string',
+              'description': 'Required for replace; from memory_read.',
+            },
             'content': {
               'type': 'string',
               'description': 'The memory to store (a concise fact)',
@@ -8099,13 +8421,17 @@ user which one instead of assuming this one.''';
       'type': 'function',
       'function': {
         'name': 'memory_read',
-        'description': 'Read a canonical Markdown memory file and its revision, with a bounded file index. '
+        'description':
+            'Read a canonical Markdown memory file and its revision, with a bounded file index. '
             'global is shared personal memory; session is this owning chat and children only. '
             'No arbitrary session IDs or filesystem paths. Default file MEMORY.md.',
         'parameters': {
           'type': 'object',
           'properties': {
-            'scope': {'type': 'string', 'enum': ['global', 'session']},
+            'scope': {
+              'type': 'string',
+              'enum': ['global', 'session'],
+            },
             'file': {'type': 'string'},
             'offset': {'type': 'integer', 'minimum': 0},
             'limit': {'type': 'integer', 'minimum': 1, 'maximum': 8000},
@@ -8842,7 +9168,8 @@ user which one instead of assuming this one.''';
   bool get _hasInRunQueueMessages {
     _syncQueueIds(_runResolved);
     return _runResolved.queueIds.any(
-        (id) => !_runResolved.nextDispatchQueueIds.contains(id));
+      (id) => !_runResolved.nextDispatchQueueIds.contains(id),
+    );
   }
 
   /// Explicit steering and internal notices join the current run. Ordinary
@@ -8859,9 +9186,11 @@ user which one instead of assuming this one.''';
     while (_hasInRunQueueMessages) {
       _syncQueueIds(_runResolved);
       final index = _runResolved.queueIds.indexWhere(
-          (id) => !_runResolved.nextDispatchQueueIds.contains(id));
-      final userReferences = _runResolved.userReferenceQueueIds
-          .contains(_runResolved.queueIds[index]);
+        (id) => !_runResolved.nextDispatchQueueIds.contains(id),
+      );
+      final userReferences = _runResolved.userReferenceQueueIds.contains(
+        _runResolved.queueIds[index],
+      );
       final attachments = _attachmentsForQueuedMessage(_runResolved, index);
       attachmentsToAcknowledge?.addAll(attachments);
       final queued = _queueRemoveAt(_runResolved, index);
@@ -8888,7 +9217,9 @@ user which one instead of assuming this one.''';
       if (userReferences && target != null && queued.contains('@')) {
         try {
           modelText = await expandReferences(queued, target);
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
       }
       msgs.add({
         'role': 'user',
@@ -9099,7 +9430,8 @@ user which one instead of assuming this one.''';
   /// Budgets are per-kind: prose keeps more, tool output keeps less (it is
   /// the bulkiest and the most redundant). Compaction still owns the
   /// long-range pruning; this only bounds a single replayed row.
-  List<Map<String, dynamic>> _replayHistory(ChatSession s, {
+  List<Map<String, dynamic>> _replayHistory(
+    ChatSession s, {
     Set<Message> fullTextMessages = const {},
   }) {
     const proseBudget = 4000;
@@ -9138,7 +9470,9 @@ user which one instead of assuming this one.''';
         'role': m.role == 'user' ? 'user' : 'assistant',
         'content': [
           if (text.isNotEmpty)
-            fullTextMessages.contains(m) ? text : cleanTruncate(text, proseBudget),
+            fullTextMessages.contains(m)
+                ? text
+                : cleanTruncate(text, proseBudget),
           if (m.attachments.isNotEmpty) _attachmentContext(m.attachments),
         ].join('\n\n'),
       });
@@ -9200,8 +9534,8 @@ user which one instead of assuming this one.''';
               'it without restating it. Continue the task directly from '
               'the messages that follow, without acknowledging this '
               'checkpoint.\n\n<compacted-summary>\n${s.compactedSummary}\n'
-               '</compacted-summary>',
-         },
+              '</compacted-summary>',
+        },
       // Staged attachments note — the files are in the session workspace.
       if (atts.isNotEmpty)
         {
@@ -9704,6 +10038,7 @@ user which one instead of assuming this one.''';
     List<({String name, String path, int size})>? attachments,
     Map<String, dynamic>? scheduledTask,
   }) async {
+    if (_runChainStale || !AppState.I.sessionAccountReady) return;
     final s = sessionId == null
         ? AppState.I.activeSession
         : AppState.I.sessionById(sessionId);
@@ -9720,23 +10055,34 @@ user which one instead of assuming this one.''';
     // the managed loop may start a child turn, including during initialization.
     if (s.isSubagent &&
         (Zone.current[#subagentRunOwner] == null ||
-         !identical(Zone.current[#subagentRunOwner], subagentForSession(s.id)))) {
-      await continueSubagent(s.id, originalPrompt,
-          userReferences: expandRefsFor?.id == s.id);
+            !identical(
+              Zone.current[#subagentRunOwner],
+              subagentForSession(s.id),
+            ))) {
+      await continueSubagent(
+        s.id,
+        originalPrompt,
+        userReferences: expandRefsFor?.id == s.id,
+      );
       return;
     }
     // Reserve synchronously, before reference expansion or plugin hooks. A
     // refused re-entry must not overwrite the live run's snapshots.
     final bucket = _runFor(s.id);
     if (bucket.activeRunId != null) {
-      _emitToRun(bucket, 'think',
-          'run already active for this session — refusing re-entry',
-          sessionId: s.id);
+      _emitToRun(
+        bucket,
+        'think',
+        'run already active for this session — refusing re-entry',
+        sessionId: s.id,
+      );
       if (scheduledTask != null) throw StateError('Session is already busy');
       return;
     }
     final provider = AppState.I.providerForSession(s);
-    if (provider == null || !provider.isConfigured || s.model.isEmpty ||
+    if (provider == null ||
+        !provider.isConfigured ||
+        s.model.isEmpty ||
         s.model == 'Select a provider') {
       final error = provider == null
           ? 'Select a provider and model before sending a message.'
@@ -9752,7 +10098,11 @@ user which one instead of assuming this one.''';
       throw StateError('Scheduled execution stopped before admission');
     }
     final preset = PresetRegistry.byId(s.presetId);
-    final route = _RequestRoute(provider, s.model, temperature: preset.temperature);
+    final route = _RequestRoute(
+      provider,
+      s.model,
+      temperature: preset.temperature,
+    );
     bucket.modelSnapshot = route.model;
     bucket.temperatureSnapshot = route.temperature;
     bucket.controlRun = s.mode == AgentMode.control.name;
@@ -9764,9 +10114,14 @@ user which one instead of assuming this one.''';
     bucket.activeRunId = ctx.ownedRunId;
     return runZoned(() async {
       try {
-        await _prepareRunTask(originalPrompt, ctx, freshTurn: freshTurn,
-            expandRefsFor: expandRefsFor, attachments: attachments,
-            scheduledTask: scheduledTask);
+        await _prepareRunTask(
+          originalPrompt,
+          ctx,
+          freshTurn: freshTurn,
+          expandRefsFor: expandRefsFor,
+          attachments: attachments,
+          scheduledTask: scheduledTask,
+        );
       } finally {
         // Preparation may block/fail/stop before the body owns cleanup.
         if (bucket.activeRunId == ctx.ownedRunId) {
@@ -9887,8 +10242,14 @@ user which one instead of assuming this one.''';
     // started, and Android froze the Dart isolate mid-run (the reported
     // "agent stops if I mistakenly open the app again").
     AgentNotificationService.I.agentWorking('starting task…', sessionId: s.id);
-    return _runTaskBody(prompt, ctx, freshTurn: freshTurn, atts: atts,
-        submittedPrompt: originalPrompt, submittedMessage: attachmentMessage);
+    return _runTaskBody(
+      prompt,
+      ctx,
+      freshTurn: freshTurn,
+      atts: atts,
+      submittedPrompt: originalPrompt,
+      submittedMessage: attachmentMessage,
+    );
   }
 
   /// Persona block for the session's preset (empty for standard).
@@ -9920,7 +10281,9 @@ user which one instead of assuming this one.''';
       try {
         final f = File('$dir/AGENTS.md');
         if (f.existsSync()) return f.readAsStringSync();
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
       return null;
     }
 
@@ -9933,7 +10296,9 @@ user which one instead of assuming this one.''';
     if (text == null) {
       try {
         text ??= readRoot((await _sessionWorkDir()).path);
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     text ??= _readSessionRepoFile('AGENTS.md');
     if (text == null || text.trim().isEmpty) return '';
@@ -10043,7 +10408,7 @@ can drive there yourself with the device_* tools):
       unawaited(showDeviceOverlay());
     }
     final controlGeneration = DeviceControlService.I.generation;
-    unawaited(checkpointRunStart(s.id, runId));
+    unawaited(checkpointRunStart(s.id, runId, owner: ctx.accountToken));
     SandboxService.I.tagRun(s.id);
     // Warm the hook transcript path (session ledger JSONL) so
     // `transcript_path` is present in hook payloads fired during the run.
@@ -10071,14 +10436,24 @@ can drive there yourself with the device_* tools):
     // Ensure skills are scanned for this session's workspace BEFORE the
     // system prompt is assembled.
     await _refreshSkillRoots(s.id);
+    if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) return;
 
-    if (AppState.I.plugins.any((p) => p.name == 'Image Studio' && p.installed && p.enabled)) {
+    if (AppState.I.plugins.any(
+      (p) => p.name == 'Image Studio' && p.installed && p.enabled,
+    )) {
       try {
-        await ImageStudio.I.refresh(await OvidCloudService.I.imageHeaders());
+        final headers = await OvidCloudService.I.imageHeaders();
+        if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) {
+          return;
+        }
+        await ImageStudio.I.refresh(headers);
       } catch (_) {
-        ImageStudio.I.clearCapabilities();
+        if (!_runChainStale && identical(AppState.I.sessionById(s.id), s)) {
+          ImageStudio.I.clearCapabilities();
+        }
       }
     }
+    if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) return;
 
     // FIX 2 (c): the plan briefing must land in the SAME turn as the roster.
     // The roster (`_tools`) is read per request inside `_callLlm`, but this
@@ -10253,10 +10628,8 @@ ${await _agentsMdBlock()}
         modeName: mode.name,
       );
     }
-    Future<String> buildSys() async => '${sysTemplate.replaceAll(
-      planSectionToken,
-      planBriefing,
-    )}\n\n${await workspaceContext()}';
+    Future<String> buildSys() async =>
+        '${sysTemplate.replaceAll(planSectionToken, planBriefing)}\n\n${await workspaceContext()}';
 
     // ── Volatile context (prefix-cache friendly) ──
     // Time, active goal, reminders and the live todo checklist change often.
@@ -10283,29 +10656,50 @@ ${await _agentsMdBlock()}
         : '$sys\n\n$volatileCtx';
 
     if (AppState.I.memoryEnabled) {
-      try { await AppState.I.prepareMemory(); }
-      catch (e) { _emit('think', 'Memory unavailable: $e'); }
+      try {
+        await AppState.I.prepareMemory();
+      } catch (e) {
+        _emit('think', 'Memory unavailable: $e');
+      }
     }
     final notices = List<String>.of(s.pendingAgentNotices);
     final fullTextMessages = <Message>{};
     if (notices.isNotEmpty) {
       s.pendingAgentNotices.clear();
-      final noticeMessage = Message(role: 'user', content: notices.join('\n\n'));
+      final noticeMessage = Message(
+        role: 'user',
+        content: notices.join('\n\n'),
+      );
       s.messages.add(noticeMessage);
       fullTextMessages.add(noticeMessage);
       AppState.I.persistSessions();
     }
-    final expanded = submittedPrompt != null && originalPrompt != submittedPrompt;
-    if (expanded && submittedMessage != null) fullTextMessages.add(submittedMessage);
+    final expanded =
+        submittedPrompt != null && originalPrompt != submittedPrompt;
+    if (expanded && submittedMessage != null)
+      fullTextMessages.add(submittedMessage);
     List<Map<String, dynamic>> requestMessages() {
-      final rows = buildRequestMessages(s, sys, atts: atts, volatile: volatileCtx,
-          fullTextMessages: fullTextMessages);
+      final rows = buildRequestMessages(
+        s,
+        sys,
+        atts: atts,
+        volatile: volatileCtx,
+        fullTextMessages: fullTextMessages,
+      );
       if (expanded) {
-        final attachmentContext = submittedMessage?.attachments.isNotEmpty == true
-            ? '\n\n${_attachmentContext(submittedMessage!.attachments)}' : '';
-        final index = rows.lastIndexWhere((m) => m['role'] == 'user' &&
-            m['content'] == '${submittedPrompt.trim()}$attachmentContext');
-        final replacement = {'role': 'user', 'content': '$originalPrompt$attachmentContext'};
+        final attachmentContext =
+            submittedMessage?.attachments.isNotEmpty == true
+            ? '\n\n${_attachmentContext(submittedMessage!.attachments)}'
+            : '';
+        final index = rows.lastIndexWhere(
+          (m) =>
+              m['role'] == 'user' &&
+              m['content'] == '${submittedPrompt.trim()}$attachmentContext',
+        );
+        final replacement = {
+          'role': 'user',
+          'content': '$originalPrompt$attachmentContext',
+        };
         if (index >= 0) {
           rows[index] = replacement;
         } else {
@@ -10314,6 +10708,7 @@ ${await _agentsMdBlock()}
       }
       return rows;
     }
+
     final msgs = requestMessages();
 
     final attachmentsToAcknowledge = List.of(atts);
@@ -10334,7 +10729,8 @@ ${await _agentsMdBlock()}
           _emit('done', 'stopped by user');
           break;
         }
-        if (ctx.run.controlRun && !_runChainStale &&
+        if (ctx.run.controlRun &&
+            !_runChainStale &&
             _overlayState == overlayStateError) {
           unawaited(setOverlayState(overlayStateRunning));
         }
@@ -10581,6 +10977,7 @@ ${await _agentsMdBlock()}
                   (u?['cache_write_tokens'] as num?)?.toInt() ?? 0,
               duration: Duration.zero,
             ),
+            owner: ctx.accountToken,
           );
           final toolDelta =
               _runResolved.toolMs - _runResolved.analyticsToolMsRecorded;
@@ -10654,10 +11051,7 @@ ${await _agentsMdBlock()}
           // Exhausted: never leave a partial bubble next to the error notice.
           _discardLiveAttempt(s);
           _emit('err', err);
-          _appendAssistant(
-            ModelFailure.fromError(err).transcript,
-            session: s,
-          );
+          _appendAssistant(ModelFailure.fromError(err).transcript, session: s);
           lastRunElapsedMs = DateTime.now()
               .difference(_runStart ?? DateTime.now())
               .inMilliseconds;
@@ -10844,20 +11238,21 @@ ${await _agentsMdBlock()}
                       );
                 }
               }
-              result = await runZoned(
-                () => _dispatch(name, args),
-                zoneValues: zoneValues,
-              ).timeout(
-                budget,
-                onTimeout: () {
-                  SandboxService.I.killCallProcesses(callKey);
-                  return 'Error: tool "$name" timed out after '
-                      '${budget.inSeconds}s and its processes were KILLED. It '
-                      'may have partially completed — check the current state '
-                      '(read the file, `git status`) before doing anything '
-                      'else, and do NOT re-run it blindly.';
-                },
-              );
+              result =
+                  await runZoned(
+                    () => _dispatch(name, args),
+                    zoneValues: zoneValues,
+                  ).timeout(
+                    budget,
+                    onTimeout: () {
+                      SandboxService.I.killCallProcesses(callKey);
+                      return 'Error: tool "$name" timed out after '
+                          '${budget.inSeconds}s and its processes were KILLED. It '
+                          'may have partially completed — check the current state '
+                          '(read the file, `git status`) before doing anything '
+                          'else, and do NOT re-run it blindly.';
+                    },
+                  );
             }
             if (toolMsg != null) {
               _toolFinish(
@@ -10981,134 +11376,141 @@ ${await _agentsMdBlock()}
       _appendAssistant('Agent error: $e', session: s);
     } finally {
       Future<void> settleRun() async {
-      // A replacement (even one already finished) owns the bucket's final
-      // bookkeeping. Stop without replacement still lands pending plan mode.
-      if (ctx.epoch != ctx.run.runEpoch && !ctx.run.stoppedByUser) return;
-      // Stop/output ownership: only the run that still OWNS the bucket may
-      // clear it. An old run unwinding after a Stop+queue promotion (the
-      // promoted run already admitted and streaming) must NOT null out
-      // activeRunId — that hid the Stop button mid-stream and let the user
-      // Send a second concurrent run (ghost/duplicate responses). Likewise
-      // only the owning run clears the cancel flag: a stale run's blanket
-      // clear could erase a fresh stop request on the promoted run.
-      final ownsRun = ctx.ownedRunId != null && activeRunId == ctx.ownedRunId;
-      if (ownsRun) activeRunId = null;
-      // G2: a transition queued during the LAST turn must not be stranded by
-      // the run ending — land it as the run unwinds. The second arm is the
-      // STOP path: `_cancelBucket` already nulled `activeRunId`, so this run no
-      // longer owns the bucket and the `ownsRun` guard alone would skip the
-      // landing forever (the flag then sat in prefs until the user happened to
-      // send another message, a turn late). When a Stop instead promoted a
-      // queued CONTINUATION, `activeRunId` is the NEW run's id and `busyFor` is
-      // true — that run lands the transition at its own turn boundary, so we
-      // must not touch it here.
-      if (ownsRun || !busyFor(s.id)) {
-        _applyPendingPlanMode(s);
-        // FIX 2 (c): a Stop that lands a transition here never reaches another
-        // turn boundary, so re-derive `sys` and refresh the snapshot — else the
-        // transcript would record a briefing the run had already outgrown.
-        sys = await buildSys();
+        // A replacement (even one already finished) owns the bucket's final
+        // bookkeeping. Stop without replacement still lands pending plan mode.
         if (ctx.epoch != ctx.run.runEpoch && !ctx.run.stoppedByUser) return;
-        s.systemPromptSnapshot = volatileCtx.trim().isEmpty
-            ? sys
-            : '$sys\n\n$volatileCtx';
-      }
-      // Capture BEFORE the reset below: a user-cancelled run must not yank
-      // the user back to Ovid (they stopped to take over themselves).
-      final userStopped = ctx.run.cancelRequested || ctx.epoch != ctx.run.runEpoch;
-      // Run end always clears the live pop (stream over → overlay idle).
-      if (ctx.run.controlRun && ownsRun) {
-        unawaited(setOverlayLive(false));
-        unawaited(setOverlayState(overlayStateIdle));
-      }
-      unawaited(checkpointRunEnd(s.id));
-      SandboxService.I.tagRun(null);
-      if (ownsRun) _cancelRequested = false;
-      // The Zone exits with this function — there is nothing to pop.
-      // The queue auto-continue continues on THIS run's session, captured
-      // from the zone (never the currently-active one in the UI).
-      final pinned = ctx.run;
-      final pinnedSessionId = ctx.session.id;
-      // Ledger (PR19): run_end closes every open span — the barrier that
-      // makes TOOL_OUTCOME_UNKNOWN resolvable on recovery.
-      unawaited(
-        SessionLedger.I.append(pinnedSessionId, 'turn_end', {
-          'steps': pinned.steps,
-          'turns': pinned.turns,
-          'toolMs': pinned.toolMs,
-          'llmMs': pinned.llmMs,
-        }),
-      );
-      // PR24: on_turn_end — the blocking Stop gate now lives at the natural
-      // stop point inside the turn loop (a veto re-enters the model loop),
-      // so the run-end finally no longer fires 'stop'. Call exactly one of
-      // fireStop/fire per HookService contract.
-      // LLM session title (the title generator parity): one cheap background call after
-      // the first real exchange — fire-and-forget, heuristic stays on fail.
-      unawaited(maybeGenerateSessionTitle(ctx.session));
-      // Foreground notification retires with the run (covers error paths
-      // where no 'done'/'err' event ever fires).
-      AgentNotificationService.I.agentIdle(sessionId: pinnedSessionId);
-      _startScheduleTimer();
-      // When a Control run completes, bring Ovid AI back to foreground
-      // so the user sees the final response immediately. Request the
-      // return BEFORE hiding the overlay: the visible overlay carries
-      // the foreground privilege the return relies on, and hiding first
-      // can drop it. Skipped for user-stopped runs (the user stopped to
-      // take over themselves) and non-Control runs. A failed return
-      // surfaces as a think row instead of vanishing silently.
-      if (ctx.run.controlRun && ownsRun && completedNaturally && !userStopped) {
-        // Pin the task session first (own try block): a selection-side
-        // failure must never skip the launch, and a failed launch must
-        // never roll the selection back — a manual tap still lands on the
-        // right session either way.
-        try {
-          // Select session in AppState so UI and transcript stay on current task session
-          AppState.I.selectSession(pinnedSessionId);
-          onControlTaskCompleted?.call(pinnedSessionId);
-        } catch (e) {
-          _emit(
-            'think',
-            'could not switch to the task session: '
-                '${e.toString().split('\n').first}',
-          );
+        // Stop/output ownership: only the run that still OWNS the bucket may
+        // clear it. An old run unwinding after a Stop+queue promotion (the
+        // promoted run already admitted and streaming) must NOT null out
+        // activeRunId — that hid the Stop button mid-stream and let the user
+        // Send a second concurrent run (ghost/duplicate responses). Likewise
+        // only the owning run clears the cancel flag: a stale run's blanket
+        // clear could erase a fresh stop request on the promoted run.
+        final ownsRun = ctx.ownedRunId != null && activeRunId == ctx.ownedRunId;
+        if (ownsRun) activeRunId = null;
+        // G2: a transition queued during the LAST turn must not be stranded by
+        // the run ending — land it as the run unwinds. The second arm is the
+        // STOP path: `_cancelBucket` already nulled `activeRunId`, so this run no
+        // longer owns the bucket and the `ownsRun` guard alone would skip the
+        // landing forever (the flag then sat in prefs until the user happened to
+        // send another message, a turn late). When a Stop instead promoted a
+        // queued CONTINUATION, `activeRunId` is the NEW run's id and `busyFor` is
+        // true — that run lands the transition at its own turn boundary, so we
+        // must not touch it here.
+        if (ownsRun || !busyFor(s.id)) {
+          _applyPendingPlanMode(s);
+          // FIX 2 (c): a Stop that lands a transition here never reaches another
+          // turn boundary, so re-derive `sys` and refresh the snapshot — else the
+          // transcript would record a briefing the run had already outgrown.
+          sys = await buildSys();
+          if (ctx.epoch != ctx.run.runEpoch && !ctx.run.stoppedByUser) return;
+          s.systemPromptSnapshot = volatileCtx.trim().isEmpty
+              ? sys
+              : '$sys\n\n$volatileCtx';
         }
-        try {
-          await DeviceControlService.I.openApp(
-            'com.dhanuk.ovidai',
-            sessionId: pinnedSessionId,
-          );
-        } catch (e) {
-          // Native reports LAUNCH_BLOCKED when the OS swallows the launch
-          // without throwing: name the tap-back path instead of going
-          // silent (the notification lands on the pinned session above).
-          var msg =
-              'could not return to Ovid: ${e.toString().split('\n').first}';
-          if (e is PlatformException && e.code == 'LAUNCH_BLOCKED') {
-            final detail = (e.message ?? '').trim();
-            msg = detail.isNotEmpty
-                ? '$detail Tap the Ovid notification to return to the task session.'
-                : 'Ovid could not come to the foreground. Tap the Ovid '
-                      'notification to return to the task session.';
+        // Capture BEFORE the reset below: a user-cancelled run must not yank
+        // the user back to Ovid (they stopped to take over themselves).
+        final userStopped =
+            ctx.run.cancelRequested || ctx.epoch != ctx.run.runEpoch;
+        // Run end always clears the live pop (stream over → overlay idle).
+        if (ctx.run.controlRun && ownsRun) {
+          unawaited(setOverlayLive(false));
+          unawaited(setOverlayState(overlayStateIdle));
+        }
+        unawaited(checkpointRunEnd(s.id, owner: ctx.accountToken));
+        SandboxService.I.tagRun(null);
+        if (ownsRun) _cancelRequested = false;
+        // The Zone exits with this function — there is nothing to pop.
+        // The queue auto-continue continues on THIS run's session, captured
+        // from the zone (never the currently-active one in the UI).
+        final pinned = ctx.run;
+        final pinnedSessionId = ctx.session.id;
+        // Ledger (PR19): run_end closes every open span — the barrier that
+        // makes TOOL_OUTCOME_UNKNOWN resolvable on recovery.
+        unawaited(
+          SessionLedger.I.append(pinnedSessionId, 'turn_end', {
+            'steps': pinned.steps,
+            'turns': pinned.turns,
+            'toolMs': pinned.toolMs,
+            'llmMs': pinned.llmMs,
+          }),
+        );
+        // PR24: on_turn_end — the blocking Stop gate now lives at the natural
+        // stop point inside the turn loop (a veto re-enters the model loop),
+        // so the run-end finally no longer fires 'stop'. Call exactly one of
+        // fireStop/fire per HookService contract.
+        // LLM session title (the title generator parity): one cheap background call after
+        // the first real exchange — fire-and-forget, heuristic stays on fail.
+        unawaited(maybeGenerateSessionTitle(ctx.session));
+        // Foreground notification retires with the run (covers error paths
+        // where no 'done'/'err' event ever fires).
+        AgentNotificationService.I.agentIdle(sessionId: pinnedSessionId);
+        _startScheduleTimer();
+        // When a Control run completes, bring Ovid AI back to foreground
+        // so the user sees the final response immediately. Request the
+        // return BEFORE hiding the overlay: the visible overlay carries
+        // the foreground privilege the return relies on, and hiding first
+        // can drop it. Skipped for user-stopped runs (the user stopped to
+        // take over themselves) and non-Control runs. A failed return
+        // surfaces as a think row instead of vanishing silently.
+        if (ctx.run.controlRun &&
+            ownsRun &&
+            completedNaturally &&
+            !userStopped) {
+          // Pin the task session first (own try block): a selection-side
+          // failure must never skip the launch, and a failed launch must
+          // never roll the selection back — a manual tap still lands on the
+          // right session either way.
+          try {
+            // Select session in AppState so UI and transcript stay on current task session
+            AppState.I.selectSession(pinnedSessionId);
+            onControlTaskCompleted?.call(pinnedSessionId);
+          } catch (e) {
+            _emit(
+              'think',
+              'could not switch to the task session: '
+                  '${e.toString().split('\n').first}',
+            );
           }
-          _emit('think', msg);
+          try {
+            await DeviceControlService.I.openApp(
+              'com.dhanuk.ovidai',
+              sessionId: pinnedSessionId,
+            );
+          } catch (e) {
+            // Native reports LAUNCH_BLOCKED when the OS swallows the launch
+            // without throwing: name the tap-back path instead of going
+            // silent (the notification lands on the pinned session above).
+            var msg =
+                'could not return to Ovid: ${e.toString().split('\n').first}';
+            if (e is PlatformException && e.code == 'LAUNCH_BLOCKED') {
+              final detail = (e.message ?? '').trim();
+              msg = detail.isNotEmpty
+                  ? '$detail Tap the Ovid notification to return to the task session.'
+                  : 'Ovid could not come to the foreground. Tap the Ovid '
+                        'notification to return to the task session.';
+            }
+            _emit('think', msg);
+          }
         }
+        // Overlay lifecycle: run end brings the floating overlay down.
+        // Unguarded hide only removes the window; non-Control runs never
+        // showed one, so this is a no-op for them.
+        if (ctx.run.controlRun &&
+            ownsRun &&
+            ctx.epoch == ctx.run.runEpoch &&
+            controlGeneration == DeviceControlService.I.generation) {
+          DeviceControlService.I.cancelDeviceActions();
+          unawaited(VoiceInputService.I.cancel());
+          unawaited(hideDeviceOverlay());
+        }
+        notifyListeners();
+        // Queue auto-continue. On a Stop the scheduler already promoted the
+        // next message (idempotent, so this is a no-op then); on a normal
+        // completion this starts it now. Either way the queue can never stall.
+        _scheduleQueuedContinuation(pinnedSessionId);
       }
-      // Overlay lifecycle: run end brings the floating overlay down.
-      // Unguarded hide only removes the window; non-Control runs never
-      // showed one, so this is a no-op for them.
-      if (ctx.run.controlRun && ownsRun && ctx.epoch == ctx.run.runEpoch &&
-          controlGeneration == DeviceControlService.I.generation) {
-        DeviceControlService.I.cancelDeviceActions();
-        unawaited(VoiceInputService.I.cancel());
-        unawaited(hideDeviceOverlay());
-      }
-      notifyListeners();
-      // Queue auto-continue. On a Stop the scheduler already promoted the
-      // next message (idempotent, so this is a no-op then); on a normal
-      // completion this starts it now. Either way the queue can never stall.
-      _scheduleQueuedContinuation(pinnedSessionId);
-      }
+
       await settleRun();
     }
   }
@@ -11258,7 +11660,7 @@ ${await _agentsMdBlock()}
   ///
   /// Only the ledger resolves filenames and invalidates their lifetime.
   final Map<String, ({String path, (int, int) generation})>
-      _transcriptPathCache = {};
+  _transcriptPathCache = {};
 
   /// Synchronous best-effort lookup for hook payloads; '' when unknown.
   String _transcriptPathFor(String sessionId) {
@@ -11280,9 +11682,14 @@ ${await _agentsMdBlock()}
         final path = await SessionLedger.I.transcriptPath(sessionId);
         if (generation == SessionLedger.I.transcriptGeneration(sessionId) &&
             path != null) {
-          _transcriptPathCache[sessionId] = (path: path, generation: generation);
+          _transcriptPathCache[sessionId] = (
+            path: path,
+            generation: generation,
+          );
         }
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }();
   }
 
@@ -11291,7 +11698,8 @@ ${await _agentsMdBlock()}
       _warmTranscriptPath(sessionId);
 
   @visibleForTesting
-  String transcriptPathForTest(String sessionId) => _transcriptPathFor(sessionId);
+  String transcriptPathForTest(String sessionId) =>
+      _transcriptPathFor(sessionId);
 
   /// Execute a prompt-backed capability tool through a live model (NP5).
   ///
@@ -11350,7 +11758,8 @@ ${await _agentsMdBlock()}
 
   _RequestRoute _requestRoute(ProviderConfig p, ChatSession session) {
     final ctx = _runCtx;
-    if (ctx != null && identical(ctx.session, session) &&
+    if (ctx != null &&
+        identical(ctx.session, session) &&
         ctx.route.providerId == p.id) {
       return ctx.route;
     }
@@ -11397,12 +11806,15 @@ ${await _agentsMdBlock()}
     final targets = <({String label, _RequestRoute route})>[];
     final shortfall = <String>[];
     if (requested.isEmpty) {
-      targets.add((label: sessionProvider.id,
-          route: _requestRoute(sessionProvider, session)));
+      targets.add((
+        label: sessionProvider.id,
+        route: _requestRoute(sessionProvider, session),
+      ));
       for (final recent in AppState.I.recentModels) {
         if (targets.length >= 3) break;
         if (recent.providerId == sessionProvider.id) continue;
-        if (targets.any((t) => t.route.providerId == recent.providerId)) continue;
+        if (targets.any((t) => t.route.providerId == recent.providerId))
+          continue;
         final rp = AppState.I.providerById(recent.providerId);
         if (rp == null || !rp.isConfigured) continue;
         targets.add((label: rp.id, route: _RequestRoute(rp, recent.model)));
@@ -11416,7 +11828,9 @@ ${await _agentsMdBlock()}
           final providerId = id.substring(0, separator);
           final model = id.substring(separator + 2).trim();
           final target = AppState.I.providerById(providerId);
-          if (target != null && target.isConfigured && model.isNotEmpty &&
+          if (target != null &&
+              target.isConfigured &&
+              model.isNotEmpty &&
               target.models.contains(model)) {
             targets.add((label: id, route: _RequestRoute(target, model)));
           } else {
@@ -11436,8 +11850,9 @@ ${await _agentsMdBlock()}
           }
           continue;
         }
-        final matches = AppState.I.providers.where(
-            (prov) => prov.isConfigured && prov.models.contains(id)).toList();
+        final matches = AppState.I.providers
+            .where((prov) => prov.isConfigured && prov.models.contains(id))
+            .toList();
         if (matches.length == 1) {
           targets.add((label: id, route: _RequestRoute(matches.single, id)));
         } else if (matches.length > 1) {
@@ -11744,7 +12159,10 @@ ${await _agentsMdBlock()}
   }) async {
     route ??= _requestRoute(p, session);
     p = route.providerCopy();
-    final owner = _TransportOwner(_runResolved, _runCtx?.epoch ?? _runResolved.runEpoch);
+    final owner = _TransportOwner(
+      _runResolved,
+      _runCtx?.epoch ?? _runResolved.runEpoch,
+    );
     var lastErr = 'unknown';
     for (var attempt = 0; attempt <= 4; attempt++) {
       if (!owner.current) return null;
@@ -11809,7 +12227,10 @@ ${await _agentsMdBlock()}
     bool dropReasoningEffort = false,
     _RequestRoute? route,
   }) async {
-    final owner = _TransportOwner(_runResolved, _runCtx?.epoch ?? _runResolved.runEpoch);
+    final owner = _TransportOwner(
+      _runResolved,
+      _runCtx?.epoch ?? _runResolved.runEpoch,
+    );
     if (!owner.current) return null;
     route ??= _requestRoute(p, session);
     p = route.providerCopy();
@@ -11988,10 +12409,21 @@ ${await _agentsMdBlock()}
             '(e.g. DeepSeek, GPT-4o, Claude, Gemini) to use them.',
             session: session,
           );
-          return await _callLlm(p, msgs, session, includeTools: false,
-              streamToTranscript: streamToTranscript, route: route);
+          return await _callLlm(
+            p,
+            msgs,
+            session,
+            includeTools: false,
+            streamToTranscript: streamToTranscript,
+            route: route,
+          );
         }
-        lastError = ModelFailure.httpError(res.statusCode, p.name, modelId, txt);
+        lastError = ModelFailure.httpError(
+          res.statusCode,
+          p.name,
+          modelId,
+          txt,
+        );
         _emit(
           'err',
           'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}',
@@ -12013,8 +12445,7 @@ ${await _agentsMdBlock()}
               .transform(SseLineSplitter(maxBytes: 8 * 1024 * 1024))
               .transform(
                 _IdleResetTimeout(idleBudget, (msg) {
-                  lastError =
-                      'model stream idle for ${idleBudget.inSeconds}s';
+                  lastError = 'model stream idle for ${idleBudget.inSeconds}s';
                   return TimeoutException(lastError ?? 'model stream timeout');
                 }),
               )) {
@@ -12035,7 +12466,8 @@ ${await _agentsMdBlock()}
         }
         if (j['error'] != null) {
           final error = j['error'];
-          lastError = 'Provider stream error: ${error is Map ? error['message'] ?? error : error}';
+          lastError =
+              'Provider stream error: ${error is Map ? error['message'] ?? error : error}';
           _emit('err', lastError!);
           return null;
         }
@@ -12411,7 +12843,10 @@ ${await _agentsMdBlock()}
     bool streamToTranscript = true,
     required _RequestRoute route,
   }) async {
-    final owner = _TransportOwner(_runResolved, _runCtx?.epoch ?? _runResolved.runEpoch);
+    final owner = _TransportOwner(
+      _runResolved,
+      _runCtx?.epoch ?? _runResolved.runEpoch,
+    );
     if (!owner.current) return null;
     HttpClient? client;
     final ttftWatch = Stopwatch()..start();
@@ -12493,7 +12928,12 @@ ${await _agentsMdBlock()}
         final txt = utf8.decode(data, allowMalformed: true);
         if (!owner.current) return null;
         client.close(force: true);
-        lastError = ModelFailure.httpError(res.statusCode, p.name, modelId, txt);
+        lastError = ModelFailure.httpError(
+          res.statusCode,
+          p.name,
+          modelId,
+          txt,
+        );
         _emit(
           'err',
           'LLM ${res.statusCode}: ${txt.substring(0, txt.length.clamp(0, 300))}',
@@ -12516,8 +12956,7 @@ ${await _agentsMdBlock()}
               .transform(SseLineSplitter(maxBytes: 8 * 1024 * 1024))
               .transform(
                 _IdleResetTimeout(idleBudget, (msg) {
-                  lastError =
-                      'model stream idle for ${idleBudget.inSeconds}s';
+                  lastError = 'model stream idle for ${idleBudget.inSeconds}s';
                   return TimeoutException(lastError ?? 'model stream timeout');
                 }),
               )) {
@@ -12662,6 +13101,9 @@ ${await _agentsMdBlock()}
 
   // ── TOOL DISPATCH (with mode-based approvals) ─────────────────────────
   Future<String> _dispatch(String name, Map<String, dynamic> args) async {
+    if (_runChainStale || !AppState.I.sessionAccountReady) {
+      return 'Cancelled: session account changed.';
+    }
     // Per-run tool accounting — one step per tool dispatch, wall-clock
     // duration into toolMs (surfaced in the composer StatsLine).
     final sw = Stopwatch()..start();
@@ -12699,6 +13141,9 @@ ${await _agentsMdBlock()}
         },
         model: _runSession?.model,
       );
+      if (_runChainStale || !AppState.I.sessionAccountReady) {
+        return 'Cancelled: session account changed.';
+      }
       // A hook may rewrite the tool args without blocking — apply the
       // rewrite BEFORE dispatch (pre_tool only).
       if (gate.updatedInput != null) {
@@ -12758,6 +13203,9 @@ ${await _agentsMdBlock()}
     }
     try {
       final res = await _dispatchInner(name, args);
+      if (_runChainStale || !AppState.I.sessionAccountReady) {
+        return 'Cancelled: session account changed.';
+      }
       if (ledgerSid != null) {
         unawaited(
           SessionLedger.I.append(ledgerSid, 'tool_end', {
@@ -13249,10 +13697,7 @@ ${await _agentsMdBlock()}
         );
         if (schemeRefusal2 != null) return schemeRefusal2;
         // SECURITY (SSRF): refuse private/internal hosts.
-        final ssrfRefusal2 = _ssrfUrlReason(
-          url,
-          tool: 'browser_navigate',
-        );
+        final ssrfRefusal2 = _ssrfUrlReason(url, tool: 'browser_navigate');
         if (ssrfRefusal2 != null) return ssrfRefusal2;
         // Strict permission model: same host-grant gate as browser_open.
         final navUri2 = Uri.tryParse(url);
@@ -13278,7 +13723,9 @@ ${await _agentsMdBlock()}
         if (ctl != null) {
           try {
             title = await ctl.getTitle();
-          } catch (e) { Diag.swallow('agent_service', e); }
+          } catch (e) {
+            Diag.swallow('agent_service', e);
+          }
         }
         return 'Navigated to $url\nTitle: ${title ?? tab.title ?? "unknown"}';
 
@@ -13292,10 +13739,7 @@ ${await _agentsMdBlock()}
         );
         if (newTabSchemeRefusal != null) return newTabSchemeRefusal;
         // SECURITY (SSRF): refuse private/internal hosts.
-        final newTabSsrfRefusal = _ssrfUrlReason(
-          url,
-          tool: 'browser_new_tab',
-        );
+        final newTabSsrfRefusal = _ssrfUrlReason(url, tool: 'browser_new_tab');
         if (newTabSsrfRefusal != null) return newTabSsrfRefusal;
         final ok = await _maybeApprove(
           'browser_new_tab',
@@ -14311,7 +14755,7 @@ ${await _agentsMdBlock()}
         if (!match.custom) {
           return '"$name" is a built-in server — it can be disconnected but not removed.';
         }
-        AppState.I.removeMcpServer(match);
+        await AppState.I.removeMcpServer(match);
         _emit('done', 'MCP server removed: $name');
         return 'MCP server "$name" removed.';
 
@@ -14423,7 +14867,9 @@ ${await _agentsMdBlock()}
             return 'element not visible: $sel — scroll (browser_scroll) or '
                 'wait (browser_wait_for) first, then click';
           }
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
         await Future.delayed(
           Duration(milliseconds: 150 + DateTime.now().millisecond % 250),
         );
@@ -14558,12 +15004,12 @@ ${await _agentsMdBlock()}
   if (!el) return ${jsonEncode('no element: $target')};
   el.scrollIntoView({block:'center', behavior:'instant'});
   ${switch (dir) {
-                  'up' => 'el.scrollBy({top:-$amount,behavior:"smooth"});',
-                  'down' => 'el.scrollBy({top:$amount,behavior:"smooth"});',
-                  'top' => 'el.scrollTo({top:0,behavior:"smooth"});',
-                  'bottom' => 'el.scrollTo({top:el.scrollHeight,behavior:"smooth"});',
-                  _ => 'return "unknown direction";',
-                }}
+                'up' => 'el.scrollBy({top:-$amount,behavior:"smooth"});',
+                'down' => 'el.scrollBy({top:$amount,behavior:"smooth"});',
+                'top' => 'el.scrollTo({top:0,behavior:"smooth"});',
+                'bottom' => 'el.scrollTo({top:el.scrollHeight,behavior:"smooth"});',
+                _ => 'return "unknown direction";',
+              }}
   return ${jsonEncode('scrolled element $target $dir')};
 })()''';
         try {
@@ -14663,7 +15109,9 @@ ${await _agentsMdBlock()}
               found = true;
               break;
             }
-          } catch (e) { Diag.swallow('agent_service', e); }
+          } catch (e) {
+            Diag.swallow('agent_service', e);
+          }
           await Future.delayed(const Duration(milliseconds: 300));
         }
         final targetDesc = (sel != null && sel.trim().isNotEmpty)
@@ -14802,7 +15250,8 @@ ${await _agentsMdBlock()}
         dcTab.controller ??= controllerForTab(dcTab);
         final dcSel = args['selector'] as String;
         final dcCount = ((args['count'] as num?)?.toInt() ?? 2).clamp(2, 3);
-        final dcJs = '''
+        final dcJs =
+            '''
 (() => {
   const el = document.querySelector(${jsonEncode(dcSel)});
   if (!el) return ${jsonEncode('no element: $dcSel')};
@@ -14865,7 +15314,8 @@ ${await _agentsMdBlock()}
         // a second evaluation releases it. Faking the duration inside one
         // synchronous script fires down and up with no time between them — and
         // elapsed time is precisely what a long-press handler measures.
-        final lpDown = '''
+        final lpDown =
+            '''
 (() => {
   const el = ${lpSel == null ? 'null' : 'document.querySelector(${jsonEncode(lpSel)})'};
   let x = ${lpX ?? 'null'};
@@ -14913,16 +15363,16 @@ ${await _agentsMdBlock()}
   return 'released';
 })()''';
         try {
-          final started = (await lpTab.controller!
-                  .runJavaScriptReturningResult(lpDown))
-              .toString();
+          final started = (await lpTab.controller!.runJavaScriptReturningResult(
+            lpDown,
+          )).toString();
           if (started == 'NO_TARGET') {
             return 'long-press found no element at that selector or coordinate.';
           }
           await Future<void>.delayed(Duration(milliseconds: lpDur));
-          final done = (await lpTab.controller!
-                  .runJavaScriptReturningResult(lpUp))
-              .toString();
+          final done = (await lpTab.controller!.runJavaScriptReturningResult(
+            lpUp,
+          )).toString();
           final target = lpSel ?? '(${lpX ?? '?'}, ${lpY ?? '?'})';
           _emit('shell', 'long-press $target ${lpDur}ms');
           return 'long-pressed $target for ${lpDur}ms — $done';
@@ -14944,7 +15394,8 @@ ${await _agentsMdBlock()}
           return 'browser_swipe requires from_x, from_y, to_x and to_y.';
         }
         final swSteps = ((args['steps'] as num?)?.toInt() ?? 8).clamp(2, 40);
-        final swJs = '''
+        final swJs =
+            '''
 (() => {
   const fx = $swFromX, fy = $swFromY, tx = $swToX, ty = $swToY;
   const start = document.elementFromPoint(fx, fy);
@@ -15483,7 +15934,8 @@ ${await _agentsMdBlock()}
 
       case 'commit':
         final message = (args['message'] ?? 'Ovid agent update') as String;
-        if (!_ownsRepoCache) return 'repo binding changed. call repo_sync first.';
+        if (!_ownsRepoCache)
+          return 'repo binding changed. call repo_sync first.';
         // An unbound, empty session has no remote identity to reconcile.
         // Bound sessions still recover durable intents even without drafts.
         if (RepoCache.I.repoFull == null && !RepoCache.I.hasPending) {
@@ -15492,7 +15944,8 @@ ${await _agentsMdBlock()}
         // Recovery is read-only and must run even after restart without drafts.
         try {
           final recovered = await RepoCache.I.reconcilePending();
-          if (recovered != null) return 'confirmed prior atomic commit ${RepoCache.I.lastCommit?.commitSha} ($recovered files); no new mutation';
+          if (recovered != null)
+            return 'confirmed prior atomic commit ${RepoCache.I.lastCommit?.commitSha} ($recovered files); no new mutation';
         } catch (e) {
           return 'commit reconciliation required: $e';
         }
@@ -15597,8 +16050,13 @@ ${await _agentsMdBlock()}
             final registry =
                 registryOverrideForTest ?? await GlobalRepoRegistry.instance();
             final selected = _runSession?.workspaceFolder;
-            final sharedPath = selected != null &&
-                    GlobalRepoRegistry.checkoutMatches(selected, githubRepo, cloneBranch)
+            final sharedPath =
+                selected != null &&
+                    GlobalRepoRegistry.checkoutMatches(
+                      selected,
+                      githubRepo,
+                      cloneBranch,
+                    )
                 ? selected
                 : await registry.ensureCloned(githubRepo, cloneBranch);
             final sid =
@@ -15866,7 +16324,9 @@ ${await _agentsMdBlock()}
     for (final pat in _destructivePatterns) {
       try {
         if (RegExp(pat, dotAll: true).hasMatch(cmd)) return true;
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
     }
     return false;
   }
@@ -16157,7 +16617,7 @@ ${await _agentsMdBlock()}
       _emit(
         'think',
         'plan mode: refused $tool on ${outside.length} path(s) outside the '
-        'workspace — no permission prompt while planning',
+            'workspace — no permission prompt while planning',
       );
       return null;
     }
@@ -16173,9 +16633,7 @@ ${await _agentsMdBlock()}
           'Allow or Always allow remembers access for this session. '
           'Directories include descendants; files grant only that exact file.',
       allowAlways: true,
-      pathTargets: {
-        for (final p in unique) p: await Directory(p).exists(),
-      },
+      pathTargets: {for (final p in unique) p: await Directory(p).exists()},
     );
     if (!ok) return null;
     for (final p in unique) {
@@ -16488,7 +16946,9 @@ ${await _agentsMdBlock()}
       bool allowAlways = false,
     }) async {
       final ok = await _askUser(
-        t, s, d,
+        t,
+        s,
+        d,
         allowAlways: allowAlways,
         approvalKey: approvalKey,
       );
@@ -16977,7 +17437,8 @@ ${await _agentsMdBlock()}
       for (final target in pathTargets.entries) {
         if (ok) {
           store.addPathGrant(
-            session.id, target.key,
+            session.id,
+            target.key,
             mode: req.modeName,
             recursive: target.value,
             decision: req.remember
@@ -16986,7 +17447,8 @@ ${await _agentsMdBlock()}
           );
         } else {
           store.addPathDeny(
-            session.id, target.key,
+            session.id,
+            target.key,
             mode: req.modeName,
             recursive: target.value,
           );
@@ -17194,7 +17656,10 @@ ${await _agentsMdBlock()}
       'session_search' ||
       'memory_search' => 'search',
       'fetch_url' => 'web',
-      'generate_image' || 'edit_image' || 'resize_image' || 'crop_image' => 'sparkle',
+      'generate_image' ||
+      'edit_image' ||
+      'resize_image' ||
+      'crop_image' => 'sparkle',
       'render_html' => 'code',
       'dispatch_agent' => 'agent',
       'workflow' => 'workflow',
@@ -17591,7 +18056,9 @@ ${await _agentsMdBlock()}
       );
       final raw = r.toString();
       if (action == 'read') return 'dialog: $raw';
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     final d = tab.pendingDialog;
     if (d == null) return 'no pending dialog';
     if (action == 'dismiss' || action == 'accept') {
@@ -17699,7 +18166,9 @@ ${await _agentsMdBlock()}
     } catch (e) {
       try {
         await sink.close();
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
       if (f.existsSync()) f.deleteSync();
       return 'download failed: $e';
     }
@@ -17873,7 +18342,9 @@ ${await _agentsMdBlock()}
     } catch (e) {
       try {
         await tab.controller!.runJavaScript('window.__ovidUploadBuf = null;');
-      } catch (e) { Diag.swallow('agent_service', e); }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
       return 'upload failed: $e';
     }
   }
@@ -18404,7 +18875,8 @@ ${await _agentsMdBlock()}
       // is the largest avoidable slice of the "control mode is very slow" report.
       // The guard only ever needed the package name, so ask for exactly that.
       final packageName = await device.foregroundPackage();
-      if (_runChainStale) return DeviceControlService.cancelledSupersededMessage;
+      if (_runChainStale)
+        return DeviceControlService.cancelledSupersededMessage;
       if (packageName == null || packageName.trim().isEmpty) {
         return 'DENIED: Ovid could not verify the live foreground app. Retry device_read before acting.';
       }
@@ -18690,7 +19162,9 @@ ${await _agentsMdBlock()}
           // see; the cache original is redundant the moment it lands.
           try {
             if (await copied.exists()) await source.delete();
-          } catch (e) { Diag.swallow('agent_service', e); }
+          } catch (e) {
+            Diag.swallow('agent_service', e);
+          }
           _recordProduced(copied.path, bytes.length);
           _emit('shell', 'device_screenshot: ${copied.path}');
           if (!_stageVisionImage(
@@ -18846,7 +19320,9 @@ ${await _agentsMdBlock()}
         var mtime = 0;
         try {
           mtime = entity.lastModifiedSync().millisecondsSinceEpoch;
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
         hits.add((rel: rel, mtime: mtime));
         if (hits.length >= cap) break;
       }
@@ -18887,7 +19363,10 @@ ${await _agentsMdBlock()}
 
     // Search repo cache.
     if (basePath == null || basePath.isEmpty || basePath == '.') {
-      for (final entry in _ownsRepoCache ? RepoCache.I.files.entries : <MapEntry<String, String>>[]) {
+      for (final entry
+          in _ownsRepoCache
+              ? RepoCache.I.files.entries
+              : <MapEntry<String, String>>[]) {
         if (matches >= maxMatches) break;
         if (includeRe != null && !includeRe.hasMatch(entry.key)) continue;
         final lines = entry.value.split('\n');
@@ -19197,9 +19676,7 @@ ${await _agentsMdBlock()}
   /// parallel that would repoint whichever chat the user happened to be
   /// looking at), which also marks it user-pinned so the prompt stops calling
   /// the folder inherited.
-  Future<String> _handleRequestWorkingFolder(
-    Map<String, dynamic> args,
-  ) async {
+  Future<String> _handleRequestWorkingFolder(Map<String, dynamic> args) async {
     final sid = _runSession?.id;
     if (sid == null) return 'No active session to pin a folder to.';
     final reason = (args['reason'] as String? ?? '').trim();
@@ -19260,7 +19737,9 @@ ${await _agentsMdBlock()}
       await _overlayChannel.invokeMethod(deviceOverlaySetPromptMethod, {
         'prompt': prompt,
       });
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
   }
 
   /// Test seam: drive ask_user_question's handler directly (no LLM).
@@ -19443,7 +19922,9 @@ ${await _agentsMdBlock()}
     Iterable<String> outside,
   ) {
     final list = outside.toList();
-    final tail = root.length > 60 ? '…${root.substring(root.length - 57)}' : root;
+    final tail = root.length > 60
+        ? '…${root.substring(root.length - 57)}'
+        : root;
     return 'PLAN MODE: "$name" stays inside the working directory while '
         'planning, and these path(s) are outside it:\n'
         '  ${list.join('\n  ')}\n'
@@ -19825,7 +20306,11 @@ ${await _agentsMdBlock()}
           (r) =>
               '${r['id']} — '
               '${r['status'] ?? 'pending'}; next ${r['fireAt']}; '
-              '${r['dailyAt'] != null ? 'daily ${r['dailyAt']} device-local' : r['every'] != null ? 'every ${r['every']}s' : 'one-off'}'
+              '${r['dailyAt'] != null
+                  ? 'daily ${r['dailyAt']} device-local'
+                  : r['every'] != null
+                  ? 'every ${r['every']}s'
+                  : 'one-off'}'
               ' — ${r['prompt']}',
         )
         .join('\n');
@@ -19850,8 +20335,9 @@ ${await _agentsMdBlock()}
   static const _scheduleChannel = MethodChannel('ovid/native');
 
   late final ScheduleCoordinator schedules = ScheduleCoordinator(
-    entries: () => AppState.I.sessions.expand((s) =>
-        s.schedules.map((t) => ScheduleEntry(s.id, t))),
+    entries: () => AppState.I.sessions.expand(
+      (s) => s.schedules.map((t) => ScheduleEntry(s.id, t)),
+    ),
     clock: DateTime.now,
     persist: _persistSchedules,
     isBusy: busyFor,
@@ -19899,7 +20385,8 @@ ${await _agentsMdBlock()}
 
   /// One deadline, no polling and no model calls when no task is due.
   void _startScheduleTimer() {
-    if (!_schedulesReady || _scheduleTimerPaused || schedules.dispatching) return;
+    if (!_schedulesReady || _scheduleTimerPaused || schedules.dispatching)
+      return;
     final next = schedules.nextWake;
     if (next == _armedSchedule && (_scheduleTimer?.isActive ?? false)) return;
     _scheduleTimer?.cancel();
@@ -19951,16 +20438,24 @@ ${await _agentsMdBlock()}
     _schedulesChanged();
   }
 
-  Future<void> editSchedule(ScheduleEntry entry, Map<String, dynamic> args) async {
-    if (entry.task['status'] == 'running') throw StateError('Pause the task before editing');
+  Future<void> editSchedule(
+    ScheduleEntry entry,
+    Map<String, dynamic> args,
+  ) async {
+    if (entry.task['status'] == 'running')
+      throw StateError('Pause the task before editing');
     final replacement = schedules.create(args);
     replacement['id'] = entry.task['id'];
     final old = Map<String, dynamic>.of(entry.task);
-    entry.task..clear()..addAll(replacement);
+    entry.task
+      ..clear()
+      ..addAll(replacement);
     try {
       await _persistSchedules();
     } catch (_) {
-      entry.task..clear()..addAll(old);
+      entry.task
+        ..clear()
+        ..addAll(old);
       rethrow;
     }
     _schedulesChanged();
@@ -19981,15 +20476,19 @@ ${await _agentsMdBlock()}
     final s = AppState.I.sessionById(entry.sessionId);
     if (s == null) return const ScheduleResult.failed('Session deleted');
     final provider = AppState.I.providerForSession(s);
-    if (provider == null || !provider.isConfigured || s.model.isEmpty ||
+    if (provider == null ||
+        !provider.isConfigured ||
+        s.model.isEmpty ||
         s.model == 'Select a provider') {
       return const ScheduleResult.retryable('Provider/model setup required');
     }
-    if (busyFor(s.id)) return const ScheduleResult.retryable('Session became busy');
+    if (busyFor(s.id))
+      return const ScheduleResult.retryable('Session became busy');
     if (schedules.stopped || entry.task['status'] != 'running') {
       return const ScheduleResult.failed('Stopped before execution');
     }
-    final delivery = '[schedule ${entry.task['id']} / ${entry.task['runId']} — '
+    final delivery =
+        '[schedule ${entry.task['id']} / ${entry.task['runId']} — '
         'previously scheduled task; apply the normal tool and approval policies:]\n'
         '${entry.task['prompt']}';
     // Do NOT yank the user to another chat. Background work stays session-owned.
@@ -20001,14 +20500,24 @@ ${await _agentsMdBlock()}
       return const ScheduleResult.failed('Stopped before execution');
     }
     if (!wasVisible) {
-      unawaited(AgentNotificationService.I.agentWorking(
-        'reminder fired in "${s.title}"', sessionId: s.id,
-      ));
+      unawaited(
+        AgentNotificationService.I.agentWorking(
+          'reminder fired in "${s.title}"',
+          sessionId: s.id,
+        ),
+      );
     }
     _runFor(s.id).lastError = null;
-    await runTask(delivery, sessionId: s.id, freshTurn: false, scheduledTask: entry.task);
+    await runTask(
+      delivery,
+      sessionId: s.id,
+      freshTurn: false,
+      scheduledTask: entry.task,
+    );
     final error = _runs[s.id]?.lastError;
-    return error == null ? const ScheduleResult.completed() : ScheduleResult.failed(error);
+    return error == null
+        ? const ScheduleResult.completed()
+        : ScheduleResult.failed(error);
   }
 
   // ── Subagents ─────────────────────────────────────────────────────────
@@ -20023,16 +20532,18 @@ ${await _agentsMdBlock()}
 
   /// Subagents currently running, globally. Restored handles from a cold start
   /// are marked finished, so they never consume budget.
-  int get _liveSubagents =>
-      _subagents.values.where((s) => !s.finished).length;
+  int get _liveSubagents => _subagents.values.where((s) => !s.finished).length;
 
   String _owningRoot(String sessionId) =>
       AppState.I.lineageOf(sessionId).firstOrNull?.id ?? sessionId;
 
   /// Includes durable descendants without enabling new nested dispatches.
   int _liveSubagentsOf(String parentSessionId) => _subagents.values
-      .where((s) => !s.finished &&
-          _owningRoot(s.parentSessionId) == _owningRoot(parentSessionId))
+      .where(
+        (s) =>
+            !s.finished &&
+            _owningRoot(s.parentSessionId) == _owningRoot(parentSessionId),
+      )
       .length;
 
   /// Refusal text when the concurrency ceiling is hit. Names the ceiling and
@@ -20080,7 +20591,9 @@ ${await _agentsMdBlock()}
     try {
       final docs = await getApplicationDocumentsDirectory();
       roots.add('${docs.path}/skills');
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     try {
       final pinned = session.workspaceFolder;
       final work =
@@ -20108,7 +20621,9 @@ ${await _agentsMdBlock()}
         '${work.path}/.codex/prompts',
         '${work.path}/.codex/agents',
       ]);
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     final mounts = <PluginCatalogMount>[];
     for (final runtime in await PluginRuntimeManager.I.activeRuntimes()) {
       if (!PluginContributionRegistry.I.isPluginActiveForSession(
@@ -20136,14 +20651,18 @@ ${await _agentsMdBlock()}
     try {
       final docs = await getApplicationDocumentsDirectory();
       SkillService.I.addRoot('${docs.path}/skills');
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     try {
       final work = await _sessionWorkDir();
       SkillService.I.addRoot('${work.path}/.dsh/skills');
       SkillService.I.addRoot('${work.path}/.agents/skills');
       SkillService.I.addRoot('${work.path}/agents');
       SkillService.I.addRoot('${work.path}/.agents');
-    } catch (e) { Diag.swallow('agent_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_service', e);
+    }
     if (AppState.I.legacyPluginExecutionAllowed ||
         _runSessionOverrideForTest != null) {
       for (final p in AppState.I.plugins) {
@@ -20159,7 +20678,9 @@ ${await _agentsMdBlock()}
           SkillService.I.addRoot('${dir.path}/commands');
           SkillService.I.addRoot('${dir.path}/skills');
           SkillService.I.addRoot('${dir.path}/agents');
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
       }
     }
     await SkillService.I.reload();
@@ -20236,7 +20757,10 @@ ${await _agentsMdBlock()}
     }
   }
 
-  Future<String> _handleMemoryFile(String tool, Map<String, dynamic> args) async {
+  Future<String> _handleMemoryFile(
+    String tool,
+    Map<String, dynamic> args,
+  ) async {
     final app = AppState.I;
     if (!app.memoryEnabled) return 'Memory is disabled in Settings.';
     try {
@@ -20251,28 +20775,49 @@ ${await _agentsMdBlock()}
           ? {'scope', 'file', 'content', 'mode', 'revision'}
           : {'scope', 'file', 'offset', 'limit'};
       if (args.keys.any((k) => !allowed.contains(k))) {
-        throw const FormatException('Unknown memory argument; session IDs and paths are not accepted.');
+        throw const FormatException(
+          'Unknown memory argument; session IDs and paths are not accepted.',
+        );
       }
       final store = await app.prepareMemory();
       // Recheck after async initialization so a deleted chat cannot resurrect.
-      if (app.memoryOwner(current.id) != owner) throw StateError('Memory ownership changed.');
+      if (app.memoryOwner(current.id) != owner)
+        throw StateError('Memory ownership changed.');
       final key = scope == 'global' ? null : owner;
       final file = args['file'] as String? ?? 'MEMORY.md';
       if (tool == 'memory_save') {
-        final doc = store.save(key, file, args['content'] as String,
-            mode: args['mode'] as String? ?? 'append', revision: args['revision'] as String?);
+        final doc = store.save(
+          key,
+          file,
+          args['content'] as String,
+          mode: args['mode'] as String? ?? 'append',
+          revision: args['revision'] as String?,
+        );
         app.refresh();
-        return jsonEncode({'status': 'saved', 'scope': scope, 'file': file, 'revision': doc.revision});
+        return jsonEncode({
+          'status': 'saved',
+          'scope': scope,
+          'file': file,
+          'revision': doc.revision,
+        });
       }
       final doc = store.read(key, file);
       final offset = (args['offset'] as int? ?? 0).clamp(0, doc.content.length);
       final limit = (args['limit'] as int? ?? 8000).clamp(1, 8000);
       final end = (offset + limit).clamp(0, doc.content.length);
-      return jsonEncode({'scope': scope, 'file': file, 'revision': doc.revision,
-        'files': store.list(key), 'content': doc.content.substring(offset, end),
-        'offset': offset, 'next_offset': end < doc.content.length ? end : null,
-        'total_chars': doc.content.length});
-    } catch (e) { return 'Memory error: $e'; }
+      return jsonEncode({
+        'scope': scope,
+        'file': file,
+        'revision': doc.revision,
+        'files': store.list(key),
+        'content': doc.content.substring(offset, end),
+        'offset': offset,
+        'next_offset': end < doc.content.length ? end : null,
+        'total_chars': doc.content.length,
+      });
+    } catch (e) {
+      return 'Memory error: $e';
+    }
   }
 
   /// Test seam: run a tool through the real dispatch gates (plan mode +
@@ -20725,17 +21270,14 @@ ${await _agentsMdBlock()}
           !(_runSession?.isSubagent ?? false)) {
         final body = await _skillContentWithFiles(mounted, rawArgs: '');
         final input = (args['input'] ?? args['arguments'])?.toString() ?? '';
-        return _handleDispatchAgent(
-          {
-            'prompt': input.isEmpty
-                ? 'Carry out your role as defined in your instructions.'
-                : input,
-            'label': mounted.name,
-            'persona': body,
-            'allowed_tools': mounted.allowedTools.toList(),
-          },
-          modelOverride: mounted.model,
-        );
+        return _handleDispatchAgent({
+          'prompt': input.isEmpty
+              ? 'Carry out your role as defined in your instructions.'
+              : input,
+          'label': mounted.name,
+          'persona': body,
+          'allowed_tools': mounted.allowedTools.toList(),
+        }, modelOverride: mounted.model);
       }
       _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
       // Same scoping + bundled-file surfacing as the `skill` tool path.
@@ -20873,9 +21415,14 @@ ${await _agentsMdBlock()}
 
   /// Feed a follow-up instruction to a subagent session (parent tool call or
   /// the child's own composer). Returns a status line for the caller.
-  Future<String> continueSubagent(String sessionId, String message, {
+  Future<String> continueSubagent(
+    String sessionId,
+    String message, {
     bool userReferences = false,
   }) async {
+    if (!AppState.I.sessionAccountReady) {
+      return 'Account switching — retry after sessions load.';
+    }
     final text = message.trim();
     if (text.isEmpty) return 'message is empty';
     final child = AppState.I.sessionById(sessionId);
@@ -20906,18 +21453,20 @@ ${await _agentsMdBlock()}
     // Each resumed generation owns a fresh handle object. Settlement listeners
     // may immediately resume/stop it without mutating the closing generation.
     final handle = SubagentInfo(
-          id: sub?.id ?? child.agentId ?? _nextSubagentId(),
-          label: child.agentLabel ?? child.title,
-          sessionId: child.id,
-          parentSessionId: child.parentId ?? child.id,
-          parentMode: mode,
-          prompt: text,
-          background: sub?.background ?? false,
-        );
+      id: sub?.id ?? child.agentId ?? _nextSubagentId(),
+      label: child.agentLabel ?? child.title,
+      sessionId: child.id,
+      parentSessionId: child.parentId ?? child.id,
+      parentMode: mode,
+      prompt: text,
+      background: sub?.background ?? false,
+    );
     child.agentId = handle.id;
     _subagents[handle.id] = handle;
     AppState.I.setAgentState(child.id, 'running');
-    unawaited(_runSubagentSession(handle, text, userReferences: userReferences));
+    unawaited(
+      _runSubagentSession(handle, text, userReferences: userReferences),
+    );
     return 'resumed ${handle.id}';
   }
 
@@ -21061,7 +21610,8 @@ ${await _agentsMdBlock()}
   String _handleInterruptAgent(Map<String, dynamic> args) {
     final id = args['agent_id'] as String;
     final sub = _subagents[id];
-    if (sub == null || !_canManageSubagent(sub)) return 'Subagent $id not found.';
+    if (sub == null || !_canManageSubagent(sub))
+      return 'Subagent $id not found.';
     if (sub.finished) return 'Subagent $id already finished.';
     interruptSubagentTree(sub.sessionId);
     _emit('think', 'interrupted subagent $id');
@@ -21492,7 +22042,9 @@ ${await _agentsMdBlock()}
       if (jsonMatch != null) {
         try {
           report = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
-        } catch (e) { Diag.swallow('agent_service', e); }
+        } catch (e) {
+          Diag.swallow('agent_service', e);
+        }
       }
       final status =
           (report?['status'] as String? ??
@@ -21539,10 +22091,7 @@ ${await _agentsMdBlock()}
     ChatSession child,
     SubagentInfo sub,
   ) async {
-    if (!HookService.I.hasHookListeners(
-      'subagent_end',
-      sessionId: child.id,
-    )) {
+    if (!HookService.I.hasHookListeners('subagent_end', sessionId: child.id)) {
       return null;
     }
     try {
@@ -21580,6 +22129,11 @@ ${await _agentsMdBlock()}
         ..result = 'subagent session missing';
       return;
     }
+    final accountToken = AppState.I.sessionAccountToken;
+    bool currentOwner() =>
+        identical(accountToken, AppState.I.sessionAccountToken) &&
+        identical(child, AppState.I.sessionById(child.id));
+    if (!currentOwner()) return;
     // Mirror the child's newest activity into the parent's card while it
     // works (the card is the parent-side view of the child's progress).
     Timer? mirror;
@@ -21624,31 +22178,42 @@ ${await _agentsMdBlock()}
       // initialization too. Initial dispatch already fired this; the lifecycle
       // service reserves exactly once per boot and child id.
       await SessionLifecycleService.I.sessionStarted(
-        child, reason: SessionStartReason.subagent,
+        child,
+        reason: SessionStartReason.subagent,
       );
       var next = firstPrompt;
       var expandNext = userReferences;
       void takeFollowUp() {
         expandNext = sub.userReferenceMessages.contains(0);
         final remaining = sub.userReferenceMessages
-            .where((index) => index > 0).map((index) => index - 1).toList();
-        sub.userReferenceMessages..clear()..addAll(remaining);
+            .where((index) => index > 0)
+            .map((index) => index - 1)
+            .toList();
+        sub.userReferenceMessages
+          ..clear()
+          ..addAll(remaining);
         next = sub.messages.removeAt(0);
       }
+
       var stopBlocks = 0;
       while (true) {
-        if (sub.interrupted) break;
+        if (sub.interrupted || !currentOwner()) break;
         child.messages.add(Message(role: 'user', content: next));
         AppState.I.refresh();
         AppState.I.persistSessions();
-        if (sub.interrupted) break;
+        if (sub.interrupted || !currentOwner()) break;
         // A full run: streaming bubbles, tool cards, compaction, jobs — all
         // inside the child's own session and workspace.
         await runZoned(
-          () => runTask(next, sessionId: child.id, freshTurn: false,
-              expandRefsFor: expandNext ? child : null),
+          () => runTask(
+            next,
+            sessionId: child.id,
+            freshTurn: false,
+            expandRefsFor: expandNext ? child : null,
+          ),
           zoneValues: {#subagentRunOwner: sub},
         );
+        if (!currentOwner()) break;
         sub.result = _lastAssistantText(child);
         if (sub.interrupted) break;
         if (sub.messages.isEmpty) {
@@ -21658,7 +22223,7 @@ ${await _agentsMdBlock()}
           // blocks cannot spin forever.
           endHookFired = true;
           final block = await _subagentStopBlockReason(child, sub);
-          if (sub.interrupted) break;
+          if (sub.interrupted || !currentOwner()) break;
           // A follow-up can arrive while the hook awaits. Recheck before the
           // synchronous settlement below releases ownership and its slot.
           if (sub.messages.isNotEmpty) {
@@ -21687,6 +22252,7 @@ ${await _agentsMdBlock()}
       // Skipped when the stop-point gate already fired it, so a natural stop
       // never double-fires the same event.
       if (!endHookFired &&
+          currentOwner() &&
           HookService.I.hasHookListeners('subagent_end', sessionId: child.id)) {
         try {
           await HookService.I.fire(
@@ -21695,7 +22261,11 @@ ${await _agentsMdBlock()}
             payload: {
               'subagentId': sub.id,
               'parentSessionId': sub.parentSessionId,
-              'state': failed ? 'failed' : sub.interrupted ? 'stopped' : 'finished',
+              'state': failed
+                  ? 'failed'
+                  : sub.interrupted
+                  ? 'stopped'
+                  : 'finished',
               'interrupted': sub.interrupted,
               'result': cleanTruncate(sub.result, 400),
               'transcript_path': _transcriptPathFor(child.id),
@@ -21710,11 +22280,17 @@ ${await _agentsMdBlock()}
       sub
         ..finished = true
         ..finishedAt = DateTime.now();
-      AppState.I.setAgentState(
-        child.id,
-        failed ? 'failed' : sub.interrupted ? 'stopped' : 'finished',
-        result: sub.result,
-      );
+      if (currentOwner()) {
+        AppState.I.setAgentState(
+          child.id,
+          failed
+              ? 'failed'
+              : sub.interrupted
+              ? 'stopped'
+              : 'finished',
+          result: sub.result,
+        );
+      }
       if (card != null) {
         card.toolSummary = cleanTruncate(
           '${sub.id} · ${sub.state} · ${sub.elapsed.inSeconds}s',
@@ -21725,9 +22301,11 @@ ${await _agentsMdBlock()}
             '── ${sub.state} in ${sub.elapsed.inSeconds}s ──\n'
             '${cleanTruncate(sub.result, 2000)}\n';
       }
-      _emit('think', '${sub.id} ${sub.state}');
-      notifyListeners();
-      _deliverSettlementNotice(sub);
+      if (currentOwner()) {
+        _emit('think', '${sub.id} ${sub.state}');
+        notifyListeners();
+        _deliverSettlementNotice(sub);
+      }
     }
   }
 
@@ -21950,14 +22528,43 @@ ${await _agentsMdBlock()}
   final List<SessionEvent> _sessionEvents = [];
 
   Future<String> _handleSessionSearch(Map<String, dynamic> args) async {
-    final query = (args['query'] as String).trim();
-    final limit = (args['limit'] as num?)?.toInt() ?? 20;
-    final cursor = (args['cursor'] as num?)?.toInt() ?? 0;
+    final rawQuery = args['query'];
+    if (rawQuery is! String || rawQuery.length > SessionSearch.maxQueryLength) {
+      return 'Error: query must be text of at most ${SessionSearch.maxQueryLength} characters.';
+    }
+    final query = rawQuery.trim();
+    final limitValue = args['limit'] ?? 20;
+    final cursorValue = args['cursor'] ?? 0;
+    final pageGeneration = args['generation'];
+    if (limitValue is! int ||
+        limitValue < 0 ||
+        limitValue > SessionSearch.maxLimit ||
+        cursorValue is! int ||
+        cursorValue < 0 ||
+        cursorValue > SessionSearch.maxCursor ||
+        (pageGeneration != null &&
+            (pageGeneration is! int || pageGeneration < 0))) {
+      return 'Error: limit must be 0–100, cursor 0–100000, and generation a nonnegative integer.';
+    }
+    final limit = limitValue;
+    final cursor = cursorValue;
+    const restart =
+        'Session search changed. Restart at cursor 0 without generation.';
+    if (cursor > 0 && pageGeneration == null) return restart;
     final app = AppState.I;
+    final accountToken = app.sessionAccountToken;
     final current = _runSession;
     if (current == null) return 'No active session.';
-    final scope = args['scope'] as String? ?? (app.shareSessionMemory ? 'all' : 'this');
+    bool currentOwner() =>
+        identical(accountToken, app.sessionAccountToken) &&
+        app.sessionAccountReady &&
+        identical(current, app.sessionById(current.id)) &&
+        !_runChainStale;
+    if (!currentOwner()) return restart;
+    final scope =
+        args['scope'] as String? ?? (app.shareSessionMemory ? 'all' : 'this');
     final targetId = args['session_id'] as String?;
+    if (scope != 'this' && scope != 'all') return 'Error: invalid scope.';
     if ((targetId != null && !_canReadSession(current, targetId)) ||
         (targetId == null && scope == 'all' && !app.shareSessionMemory)) {
       return 'DENIED: broad session search requires Share session memory. '
@@ -21965,26 +22572,42 @@ ${await _agentsMdBlock()}
     }
     if (query.isEmpty) return 'query is required';
 
-    // Reindex from the live session list (derived data — cheap rebuild).
-    await SessionSearch.I.reindex([
-      for (final s in app.sessions)
-        (
-          id: s.id,
-          model: s.model,
-          rows: [
-            for (final m in s.messages)
-              if (m.content.trim().isNotEmpty)
-                (role: m.role, content: m.content),
-          ],
-        ),
-    ]);
+    final index = SessionSearch.I;
+    int? indexed = pageGeneration as int?;
+    if (indexed != null && indexed != index.generation) return restart;
+    if (indexed == null) {
+      // Hydrate before the authoritative snapshot, keeping account ownership
+      // across the decoder's cooperative yields.
+      await app.loadSessionsForSearch();
+      if (!currentOwner()) return restart;
+      final expected = index.generation;
+      indexed = await index.reindex([
+        for (final s in app.sessions)
+          (
+            id: s.id,
+            model: s.model,
+            rows: [
+              for (final m in s.messages)
+                if (m.content.trim().isNotEmpty)
+                  (role: m.role, content: m.content),
+            ],
+          ),
+      ], expectedGeneration: expected);
+    }
+    if (indexed == null || !currentOwner()) return restart;
 
     final hits = await SessionSearch.I.search(
       query,
       limit: limit,
       cursor: cursor,
       sessionId: targetId ?? (scope == 'all' ? null : current.id),
+      expectedGeneration: indexed,
     );
+    if (!currentOwner() || indexed != index.generation) return restart;
+    if ((targetId != null && !_canReadSession(current, targetId)) ||
+        (targetId == null && scope == 'all' && !app.shareSessionMemory)) {
+      return 'DENIED: session access changed.';
+    }
     if (hits.isEmpty) {
       return 'No matches for "$query"'
           '${cursor > 0 ? ' (cursor $cursor)' : ''}.';
@@ -21993,8 +22616,11 @@ ${await _agentsMdBlock()}
       for (final h in hits)
         '[${h.role} · ${_sessionShortName(h.sessionId)}] ${h.snippet}',
     ];
-    final more = hits.length >= limit
-        ? '\n(more: re-call with cursor ${cursor + limit})'
+    final more =
+        limit > 0 &&
+            hits.length >= limit &&
+            cursor + limit <= SessionSearch.maxCursor
+        ? '\n(more: re-call with cursor ${cursor + limit}, generation $indexed)'
         : '';
     return 'session_search "$query" → ${hits.length} result(s):\n'
         '${lines.join('\n')}$more';
@@ -22151,64 +22777,126 @@ ${await _agentsMdBlock()}
   }
 
   Future<String> _imageTool(String tool, Map<String, dynamic> args) async {
+    // Inference accounting survives local save/publication failures. A failed
+    // file write does not undo a confirmed charge or authorize another POST.
+    String accounting = '';
     try {
-      if (!AppState.I.plugins.any((p) => p.name == 'Image Studio' && p.installed && p.enabled)) {
+      final app = AppState.I;
+      final owner = app.sessionAccountToken;
+      final run = _runCtx;
+      if (!AppState.I.plugins.any(
+        (p) => p.name == 'Image Studio' && p.installed && p.enabled,
+      )) {
         return 'Error: enable Image Studio before using image tools.';
       }
       final session = _runSession;
       if (session == null) return 'Error: image tools require a session.';
+      bool current() =>
+          identical(owner, app.sessionAccountToken) &&
+          app.sessionAccountReady &&
+          identical(session, app.sessionById(session.id)) &&
+          (run == null ||
+              (identical(run, _runCtx) &&
+                  run.epoch == run.run.runEpoch &&
+                  !run.run.cancelRequested &&
+                  identical(run.accountToken, owner)));
+      if (!current()) return 'Cancelled: image run or account changed.';
       final inference = tool == 'generate_image' || tool == 'edit_image';
       final allowed = inference
           ? {'prompt', 'size', 'request_id', if (tool == 'edit_image') 'path'}
-          : {'path', 'width', 'height', if (tool == 'crop_image') ...['x', 'y']};
+          : {
+              'path',
+              'width',
+              'height',
+              if (tool == 'crop_image') ...['x', 'y'],
+            };
       if (args.keys.any((k) => !allowed.contains(k))) {
         return 'Error: unsupported image arguments. Use the current tool schema.';
       }
       final work = await _sessionWorkDir();
+      if (!current()) return 'Cancelled: image run or account changed.';
       final outputRoot = await _resolveGrantedPath(work.path, tool: tool);
+      if (!current()) return 'Cancelled: image run or account changed.';
       if (outputRoot == null) return _accessDeniedMessage([work.path]);
       Uint8List? input;
       if (tool != 'generate_image') {
         final path = args['path'];
-        if (path is! String || path.isEmpty) return 'Error: exact image path is required.';
+        if (path is! String || path.isEmpty) {
+          return 'Error: exact image path is required.';
+        }
         // Always use the canonical standard grant resolver, including relative
         // paths and symlinks. Do not basename-match attachments.
         final resolved = await _resolveGrantedPath(path, tool: tool);
+        if (!current()) return 'Cancelled: image run or account changed.';
         if (resolved == null) return _accessDeniedMessage([path]);
         input = await ImageStudio.readInput(File(resolved));
+        if (!current()) return 'Cancelled: image run or account changed.';
       }
       Uint8List bytes;
       if (inference) {
         final headers = await OvidCloudService.I.imageHeaders();
-        if (headers.isEmpty) return 'Error: sign in to Ovid Cloud to use image generation or editing.';
+        if (!current()) return 'Cancelled: image run or account changed.';
+        if (headers.isEmpty) {
+          return 'Error: sign in to Ovid Cloud to use image generation or editing.';
+        }
         await ImageStudio.I.refresh(headers);
-        bytes = await ImageStudio.I.infer(
+        if (!current()) return 'Cancelled: image run or account changed.';
+        final result = await ImageStudio.I.inferResult(
           prompt: args['prompt'] as String,
           size: args['size'] as String,
           requestId: args['request_id'] as String,
           input: input,
           headers: headers,
         );
+        if (!current()) return 'Cancelled: image run or account changed.';
+        accounting =
+            'Request `${result.record.requestId}`: ${result.record.state}; '
+            'exact charge ${result.receipt?.charged ?? 'unconfirmed'}; '
+            'receipt ${result.receiptPersisted ? 'saved' : 'not saved'}. '
+            '${result.notice ?? ''}';
+        if (result.bytes == null) {
+          final prefix = accounting.isEmpty ? '' : '$accounting ';
+          return '${prefix}Image bytes unavailable; no image was saved.';
+        }
+        bytes = result.bytes!;
       } else {
-        bytes = await ImageStudio.transform(input!,
-          width: args['width'] as int, height: args['height'] as int,
+        bytes = await ImageStudio.transform(
+          input!,
+          width: args['width'] as int,
+          height: args['height'] as int,
           x: tool == 'crop_image' ? args['x'] as int : null,
-          y: tool == 'crop_image' ? args['y'] as int : null);
+          y: tool == 'crop_image' ? args['y'] as int : null,
+        );
+        if (!current()) return 'Cancelled: image run or account changed.';
       }
       final file = await ImageStudio.save(bytes, Directory(outputRoot));
+      final prefix = accounting.isEmpty ? '' : '$accounting ';
+      if (!current()) {
+        return '${prefix}Image file saved but session changed; no chat publication.';
+      }
       final relative = file.path.substring(outputRoot.length + 1);
       _recordProduced(relative, bytes.length);
-      session.messages.add(Message(role: 'assistant', kind: MsgKind.imageGen,
-        content: args['prompt'] as String? ?? '${tool == 'crop_image' ? 'Cropped' : 'Resized'} image', imagePath: file.path));
+      session.messages.add(
+        Message(
+          role: 'assistant',
+          kind: MsgKind.imageGen,
+          content:
+              args['prompt'] as String? ??
+              '${tool == 'crop_image' ? 'Cropped' : 'Resized'} image',
+          imagePath: file.path,
+        ),
+      );
       AppState.I.refresh();
       await AppState.I.persistSessions();
-      return 'Image saved: `${file.path}` (workspace path: `$relative`). '
+      return '${prefix}Image saved: `${file.path}` (workspace path: `$relative`). '
           'Displayed in chat. ${bytes.length} bytes.'
           '${AppState.I.lastSessionPersistFailed ? ' Chat history persistence failed; the image file is saved.' : ''}';
     } on ImageStudioError catch (error) {
-      return 'Error: $error';
+      final prefix = accounting.isEmpty ? '' : '$accounting ';
+      return '${prefix}Error: $error';
     } catch (_) {
-      return 'Error: image operation failed. Check arguments and the exact source path. '
+      final prefix = accounting.isEmpty ? '' : '$accounting ';
+      return '${prefix}Error: image operation failed. Check arguments and the exact source path. '
           'For cloud retries reuse the same request_id.';
     }
   }

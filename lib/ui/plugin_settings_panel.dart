@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/native_plugin.dart';
 import '../core/plugin_manifest.dart';
 import '../core/theme.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Schema-driven plugin settings form (audit 2026-09-25).
 ///
@@ -142,90 +143,152 @@ class _PluginSettingsPanelState extends State<PluginSettingsPanel> {
       children: [
         for (final field in widget.fields)
           Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: TextField(
-              key: ValueKey('plugin-settings-field-${field.key}'),
-              controller: _controllers[field.key],
+            padding: const EdgeInsets.only(bottom: 14),
+            child: _SettingsField(
+              fieldKey: field.key,
+              label: _labelFor(field),
+              secret: field.secret,
+              hint: field.hint,
+              controller: _controllers[field.key]!,
               enabled: !_loading && !_saving,
-              obscureText: field.secret,
-              enableSuggestions: !field.secret,
-              autocorrect: !field.secret,
-              keyboardType: field.secret
-                  ? TextInputType.visiblePassword
-                  : null,
-              style: const TextStyle(fontSize: 13),
-              decoration: InputDecoration(
-                labelText: _labelFor(field),
-                helperText: field.hint?.isNotEmpty == true
-                    ? field.hint
-                    : (field.secret
-                          ? 'Stored in secure storage on this device.'
-                          : null),
-                helperMaxLines: 3,
-                prefixIcon: field.secret
-                    ? Icon(
-                        Icons.lock_outline,
-                        size: 16,
-                        color: Aether.textFaint,
-                      )
-                    : null,
-                border: const OutlineInputBorder(),
-                isDense: true,
-              ),
+              onChanged: (_) {
+                if (_saved) setState(() => _saved = false);
+              },
             ),
           ),
         if (_error != null)
           Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Text(
-              _error!,
+            padding: const EdgeInsets.only(bottom: 10),
+            child: AetherCard(
               key: const ValueKey('plugin-settings-error'),
-              style: TextStyle(fontSize: 12, color: Aether.danger),
+              color: Aether.danger.withValues(alpha: 0.06),
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.error_outline, size: 16, color: Aether.dangerC),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: AetherType.body.copyWith(color: Aether.dangerC),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         if (_saved && !_saving)
           Padding(
-            padding: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.only(bottom: 10),
             child: Row(
               key: const ValueKey('plugin-settings-saved'),
               children: [
                 Icon(
                   Icons.check_circle_outline,
-                  size: 14,
+                  size: 16,
                   color: Aether.successLight,
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  'Settings saved',
-                  style: TextStyle(fontSize: 12, color: Aether.textMuted),
-                ),
+                Expanded(child: Text('Settings saved', style: AetherType.bodyMuted)),
               ],
             ),
           ),
-        FilledButton.icon(
+        AetherPrimaryButton(
           key: const ValueKey('plugin-settings-save'),
-          style: FilledButton.styleFrom(
-            backgroundColor: Aether.accent,
-            // 44dp tap-target invariant.
-            minimumSize: const Size(0, 44),
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+          label: _saving ? 'Saving…' : 'Save settings',
+          icon: _saving ? null : Icons.save_outlined,
+          loading: _saving,
+          onPressed: _loading || _saving ? null : _save,
+        ),
+      ],
+    );
+  }
+}
+
+class _SettingsField extends StatelessWidget {
+  const _SettingsField({
+    required this.fieldKey,
+    required this.label,
+    required this.secret,
+    required this.hint,
+    required this.controller,
+    required this.enabled,
+    required this.onChanged,
+  });
+  final String fieldKey;
+  final String label;
+  final bool secret;
+  final String? hint;
+  final TextEditingController controller;
+  final bool enabled;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final helper = hint?.isNotEmpty == true
+        ? hint
+        : (secret ? 'Stored in secure storage on this device.' : null);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            if (secret) ...[
+              Icon(Icons.lock_outline, size: 14, color: Aether.textFaint),
+            ],
+            Text(label, style: AetherType.label),
+            if (secret) ...[
+              AetherPill(
+                label: 'SECRET',
+                color: Aether.textMuted,
+                filled: false,
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 6),
+        TextField(
+          key: ValueKey('plugin-settings-field-$fieldKey'),
+          controller: controller,
+          onChanged: onChanged,
+          enabled: enabled,
+          obscureText: secret,
+          enableSuggestions: !secret,
+          autocorrect: !secret,
+          keyboardType: secret ? TextInputType.visiblePassword : null,
+          style: AetherType.body,
+          decoration: InputDecoration(
+            filled: true,
+            fillColor: Aether.surfaceAlt,
+            hintText: label,
+            hintStyle: TextStyle(color: Aether.textFaint, fontSize: 14),
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 12,
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(AetherRadius.rMd),
+              borderSide: BorderSide(color: Aether.hairline),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(AetherRadius.rMd),
+              borderSide: BorderSide(color: Aether.accent, width: 1.2),
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(AetherRadius.rMd),
+              borderSide: BorderSide(color: Aether.hairline),
             ),
           ),
-          onPressed: _loading || _saving ? null : _save,
-          icon: _saving
-              ? const SizedBox(
-                  width: 15,
-                  height: 15,
-                  child: CircularProgressIndicator(strokeWidth: 1.6),
-                )
-              : const Icon(Icons.save_outlined, size: 16),
-          label: Text(
-            _saving ? 'Saving…' : 'Save settings',
-            style: const TextStyle(fontSize: 13.5),
-          ),
         ),
+        if (helper != null) ...[
+          const SizedBox(height: 6),
+          Text(helper, style: AetherType.caption),
+        ],
       ],
     );
   }

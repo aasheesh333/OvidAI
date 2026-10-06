@@ -1,9 +1,17 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:http/http.dart' as http;
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
+
+import 'diag.dart';
+import 'image_receipt_store.dart';
+
+export 'image_receipt_store.dart' show ImageReceipt, ImageRequestRecord;
 
 class ImageStudioError implements Exception {
   const ImageStudioError(this.message);
@@ -12,13 +20,115 @@ class ImageStudioError implements Exception {
   String toString() => message;
 }
 
+/// Exact accounting and actual output are independent. Result recovery only
+/// exposes bytes accompanied by matching authenticated terminal accounting.
+class ImageStudioResult {
+  const ImageStudioResult({
+    required this.record,
+    required this.receiptPersisted,
+    this.bytes,
+    this.notice,
+  });
+  final ImageRequestRecord record;
+  final bool receiptPersisted;
+  final Uint8List? bytes;
+  final String? notice;
+  ImageReceipt? get receipt => record.receipt;
+  bool get imageAvailable => bytes != null;
+}
+
+class _ImageHttpResponse {
+  const _ImageHttpResponse(this.status, this.body);
+  final int status;
+  final Map<String, dynamic> body;
+}
+
 /// The only image inference contract exposed to the app is Ovid's public alias.
 /// Local operations use Flutter's image codec/canvas and require no cloud key.
-class ImageStudio {
-  ImageStudio({http.Client? client})
-    : _client = client; // ignore: prefer_initializing_formals
+class ImageStudio extends ChangeNotifier {
+  ImageStudio({http.Client? client, ImageReceiptStore? receiptStore})
+    : _client = client, // ignore: prefer_initializing_formals
+      _store = receiptStore ?? ImageReceiptStore();
   static final I = ImageStudio();
   final http.Client? _client;
+  final ImageReceiptStore _store;
+  String? _accountId;
+  int _generation = 0;
+  int _capabilityGeneration = 0;
+  List<ImageRequestRecord> _receipts = const [];
+  List<ImageRequestRecord> get receipts => _receipts;
+  String? get accountId => _accountId;
+  int get accountGeneration => _generation;
+  int _receiptLoadGeneration = 0;
+  bool _receiptsLoading = false;
+  bool get receiptsLoading => _receiptsLoading;
+  String? _receiptLoadError;
+  String? get receiptLoadError => _receiptLoadError;
+
+  /// Call synchronously at every auth/account-readiness boundary, including
+  /// sign-out and same-UID reauthentication. Bind null while not account-ready.
+  void bindAccount(String? accountId) {
+    _generation++;
+    _accountId = accountId;
+    _receipts = const [];
+    _receiptsLoading = false;
+    _receiptLoadError = null;
+    clearCapabilities();
+    notifyListeners();
+  }
+
+  bool _current(String account, int generation) =>
+      _accountId == account && _generation == generation;
+
+  void _checkCurrent(String account, int generation) {
+    if (!_current(account, generation)) {
+      throw const ImageStudioError(
+        'Image account changed. Reopen receipts under the original account.',
+      );
+    }
+  }
+
+  static String newRequestId() =>
+      'image-${base64UrlEncode(List.generate(24, (_) => Random.secure().nextInt(256))).replaceAll('=', '')}';
+
+  Future<void> loadReceipts() async {
+    final account = _accountId;
+    final generation = _generation;
+    if (account == null) return;
+    final loadGeneration = ++_receiptLoadGeneration;
+    _receiptsLoading = true;
+    _receiptLoadError = null;
+    notifyListeners();
+    try {
+      final rows = await _store.list(account);
+      _checkCurrent(account, generation);
+      if (loadGeneration == _receiptLoadGeneration) _receipts = rows;
+    } catch (_) {
+      if (_current(account, generation) &&
+          loadGeneration == _receiptLoadGeneration) {
+        _receiptLoadError =
+            'Image receipts could not be loaded. Retry loading before starting new image work.';
+      }
+      rethrow;
+    } finally {
+      if (_current(account, generation) &&
+          loadGeneration == _receiptLoadGeneration) {
+        _receiptsLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  /// Invoke before account cleanup; invalidates in-flight publication immediately.
+  /// Keep the journal key during prefs reset/restore. It contains dedup fences.
+  Future<void> clearAccountData(
+    String accountId, {
+    bool deleted = false,
+  }) async {
+    if (_accountId == accountId) bindAccount(null);
+    await _store.redactAccount(accountId, deleted: deleted);
+  }
+
   static const alias = 'ovid-image';
   static const maxBytes = 16 * 1024 * 1024;
   static const sizes = ['1024x1024', '1536x1024', '1024x1536', '2048x2048'];
@@ -33,21 +143,31 @@ class ImageStudio {
       : const [];
 
   void clearCapabilities() {
+    _capabilityGeneration++;
     _operations = {};
     _refreshed = null;
   }
 
   Future<void> refresh(Map<String, String> headers) async {
     clearCapabilities();
-    if (headers.isEmpty) return;
+    final account = _accountId;
+    final generation = _generation;
+    final capabilityGeneration = _capabilityGeneration;
+    if (headers.isEmpty || account == null) return;
     try {
-      final body = await _request(
+      final response = await _request(
         'GET',
         'capabilities',
         headers,
         null,
         maxResponse: 16384,
       );
+      if (!_current(account, generation) ||
+          capabilityGeneration != _capabilityGeneration) {
+        return;
+      }
+      final body = response.body;
+      if (response.status != 200) return;
       if (body['model'] != alias || body['operations'] is! Map) return;
       for (final op in ['generate', 'edit']) {
         final values = (body['operations'] as Map)[op];
@@ -61,11 +181,14 @@ class ImageStudio {
       }
       _refreshed = DateTime.now();
     } catch (_) {
-      clearCapabilities();
+      if (_current(account, generation) &&
+          capabilityGeneration == _capabilityGeneration) {
+        clearCapabilities();
+      }
     }
   }
 
-  Future<Map<String, dynamic>> _request(
+  Future<_ImageHttpResponse> _request(
     String method,
     String endpoint,
     Map<String, String> headers,
@@ -83,25 +206,6 @@ class ImageStudio {
         });
         if (body != null) request.body = jsonEncode(body);
         final response = await client.send(request);
-        if (response.statusCode != 200) {
-          if (response.statusCode == 401 || response.statusCode == 403) {
-            clearCapabilities();
-            throw const ImageStudioError(
-              'Image access requires a current Ovid Cloud sign-in and image permission.',
-            );
-          }
-          if (response.statusCode == 402) {
-            throw const ImageStudioError('Image usage limit reached.');
-          }
-          if (response.statusCode == 409) {
-            throw const ImageStudioError(
-              'Image request is pending or already recorded. Do not submit a new paid request; retry with the same request_id.',
-            );
-          }
-          throw const ImageStudioError(
-            'Ovid image service is unavailable or rejected this request.',
-          );
-        }
         final bytes = BytesBuilder(copy: false);
         await for (final chunk in response.stream) {
           if (bytes.length + chunk.length > maxResponse) {
@@ -111,8 +215,9 @@ class ImageStudio {
           }
           bytes.add(chunk);
         }
-        return jsonDecode(utf8.decode(bytes.takeBytes()))
-            as Map<String, dynamic>;
+        final decoded = jsonDecode(utf8.decode(bytes.takeBytes()));
+        if (decoded is! Map<String, dynamic>) throw const FormatException();
+        return _ImageHttpResponse(response.statusCode, decoded);
       })().timeout(
         method == 'GET'
             ? const Duration(seconds: 15)
@@ -122,7 +227,7 @@ class ImageStudio {
       rethrow;
     } catch (_) {
       throw const ImageStudioError(
-        'Image request could not be confirmed. Retry with the same request_id to avoid another paid job.',
+        'Image request could not be confirmed. Check the existing receipt; do not submit another paid job.',
       );
     } finally {
       if (_client == null) client.close();
@@ -136,32 +241,323 @@ class ImageStudio {
     required Map<String, String> headers,
     required String requestId,
   }) async {
-    final operation = input == null ? 'generate' : 'edit';
-    if (!supportedSizes(operation).contains(size)) {
+    final result = await inferResult(
+      prompt: prompt,
+      size: size,
+      input: input,
+      headers: headers,
+      requestId: requestId,
+    );
+    if (result.bytes != null) return result.bytes!;
+    throw ImageStudioError(
+      result.notice ??
+          'Image bytes are unavailable. Check the existing receipt; do not submit another paid job.',
+    );
+  }
+
+  /// Compatibility [infer] delegates here; callers needing accounting must use
+  /// this result. Reusing an admitted ID is ALWAYS a read-only GET, never POST.
+  Future<ImageStudioResult> inferResult({
+    required String prompt,
+    required String size,
+    Uint8List? input,
+    required Map<String, String> headers,
+    String? requestId,
+  }) async {
+    final account = _accountId;
+    final generation = _generation;
+    if (account == null || headers.isEmpty) {
       throw const ImageStudioError(
-        'This image operation or size is currently unavailable.',
+        'Image access requires a current account-bound Ovid Cloud sign-in.',
       );
     }
+    // Freeze caller-owned mutable values before the first await.
+    headers = Map<String, String>.of(headers);
+    input = input == null ? null : Uint8List.fromList(input);
+    requestId ??= newRequestId();
+    final operation = input == null ? 'generate' : 'edit';
     if (prompt.trim().isEmpty ||
-        prompt.length > 8000 ||
-        !RegExp(r'^[A-Za-z0-9_.:-]{8,128}$').hasMatch(requestId)) {
+        prompt.runes.length > 8000 ||
+        !sizes.contains(size) ||
+        !validImageRequestId(requestId)) {
       throw const ImageStudioError(
         'Supply a prompt (1–8000 characters) and request_id (8–128 letters, digits, dots, colons, underscores or hyphens).',
       );
     }
     final inputInfo = input == null ? null : await inspect(input);
-    final response = await _request(
-      'POST',
-      input == null ? 'generations' : 'edits',
-      {...headers, 'Idempotency-Key': requestId},
-      {
-        'model': alias,
-        'prompt': prompt,
-        'size': size,
-        if (input != null)
-          'image': 'data:${inputInfo!.mime};base64,${base64Encode(input)}',
+    _checkCurrent(account, generation);
+    // Sorted keys + Python ensure_ascii=True semantics match baseline7839d52.
+    final body = <String, dynamic>{
+      if (input != null)
+        'image': 'data:${inputInfo!.mime};base64,${base64Encode(input)}',
+      'model': alias,
+      'prompt': prompt,
+      'size': size,
+    };
+    final fingerprint = sha256
+        .convert(utf8.encode(_serverJson([operation, body])))
+        .toString();
+    final candidate = ImageRequestRecord(
+      accountId: account,
+      requestId: requestId,
+      fingerprint: fingerprint,
+    );
+    late ({ImageRequestRecord record, bool created}) admission;
+    try {
+      admission = await _store.reserve(
+        candidate,
+        isCurrent: () => _current(account, generation),
+        canSubmit: () => supportedSizes(operation).contains(size),
+      );
+    } catch (_) {
+      _checkCurrent(account, generation);
+      throw const ImageStudioError(
+        'Image admission could not be saved or conflicts with existing work. Check saved receipts before submitting; an unresolved job blocks new paid requests.',
+      );
+    }
+    _checkCurrent(account, generation);
+    if (!admission.created) {
+      return _recover(admission.record, headers, generation);
+    }
+    _publish(admission.record);
+    _checkCurrent(account, generation);
+    _ImageHttpResponse? response;
+    try {
+      response = await _request(
+        'POST',
+        input == null ? 'generations' : 'edits',
+        {...headers, 'Idempotency-Key': requestId},
+        body,
+      );
+    } catch (_) {
+      // Durable admission already protects retries even if updating unknown fails.
+    }
+    _checkCurrent(account, generation);
+    return _finish(admission.record, response, generation, allowImage: true);
+  }
+
+  /// Quota-independent status recovery. No capability refresh or POST needed.
+  Future<ImageStudioResult> recover({
+    required String requestId,
+    required Map<String, String> headers,
+    bool retrieveImage = false,
+  }) async {
+    final account = _accountId;
+    final generation = _generation;
+    if (account == null || headers.isEmpty || !validImageRequestId(requestId)) {
+      throw const ImageStudioError(
+        'Sign in to the original image account to check this receipt.',
+      );
+    }
+    headers = Map<String, String>.of(headers);
+    final rows = await _store.list(account);
+    _checkCurrent(account, generation);
+    final record = rows.where((r) => r.requestId == requestId).firstOrNull;
+    if (record == null) {
+      throw const ImageStudioError(
+        'No saved request identity for this account.',
+      );
+    }
+    return _recover(record, headers, generation, retrieveImage: retrieveImage);
+  }
+
+  Future<ImageStudioResult> _recover(
+    ImageRequestRecord record,
+    Map<String, String> headers,
+    int generation, {
+    bool retrieveImage = false,
+  }) async {
+    _checkCurrent(record.accountId, generation);
+    _ImageHttpResponse? response;
+    try {
+      response = await _request(
+        'GET',
+        'requests/${Uri.encodeComponent(record.requestId)}',
+        headers,
+        null,
+        maxResponse: 16384,
+      );
+    } catch (e) {
+      Diag.swallow('image_studio.recover_status', e);
+    }
+    _checkCurrent(record.accountId, generation);
+    final status = await _finish(
+      record,
+      response,
+      generation,
+      allowImage: false,
+    );
+    if (!retrieveImage || response?.status != 200 || !status.receiptPersisted) {
+      return status;
+    }
+    // A local terminal row alone is not proof of current authenticated access.
+    // Require the fresh ownership-scoped GET to agree with durable accounting.
+    ImageReceipt? verified;
+    try {
+      verified = ImageReceipt.parse(response!.body['receipt']);
+    } catch (e) {
+      Diag.swallow('image_studio.recover_receipt', e);
+    }
+    if (verified?.state != 'confirmed' ||
+        !_sameReceipt(verified, status.receipt)) {
+      return status;
+    }
+    _checkCurrent(record.accountId, generation);
+    _ImageHttpResponse? replay;
+    try {
+      replay = await _request(
+        'GET',
+        'requests/${Uri.encodeComponent(record.requestId)}/result',
+        headers,
+        null,
+      );
+    } catch (e) {
+      Diag.swallow('image_studio.recover_replay', e);
+    }
+    _checkCurrent(record.accountId, generation);
+    // Missing, foreign, or conflicting result receipts never inherit a saved
+    // confirmation. Keep exact accounting even when replay expires or fails.
+    ImageReceipt? replayReceipt;
+    try {
+      replayReceipt = ImageReceipt.parse(replay?.body['receipt']);
+    } catch (e) {
+      Diag.swallow('image_studio.replay_receipt', e);
+    }
+    if (replay?.status == 200 && _sameReceipt(verified, replayReceipt)) {
+      return _finish(status.record, replay, generation, allowImage: true);
+    }
+    if (replay?.status == 401 || replay?.status == 403) clearCapabilities();
+    return ImageStudioResult(
+      record: status.record,
+      receiptPersisted: status.receiptPersisted,
+      notice: switch (replay?.status) {
+        410 =>
+          'Image result expired. Saved exact accounting is retained; no replacement job was submitted.',
+        401 || 403 =>
+          'Sign in to the original account with current image permission to recover this image.',
+        200 =>
+          'The image result receipt did not match the verified receipt. Saved exact accounting is retained; no replacement job was submitted.',
+        _ =>
+          'Image bytes are unavailable. Saved exact accounting is retained; retry recovery without submitting a new paid job.',
       },
     );
+  }
+
+  static bool _sameReceipt(ImageReceipt? a, ImageReceipt? b) =>
+      a != null &&
+      b != null &&
+      a.accountId == b.accountId &&
+      a.requestId == b.requestId &&
+      a.fingerprint == b.fingerprint &&
+      a.state == b.state &&
+      a.charged == b.charged;
+
+  Future<ImageStudioResult> _finish(
+    ImageRequestRecord original,
+    _ImageHttpResponse? response,
+    int generation, {
+    required bool allowImage,
+  }) async {
+    var record = original.unknown;
+    Uint8List? bytes;
+    ImageReceipt? returnedReceipt;
+    String? notice;
+    if (response?.status == 401 || response?.status == 403) clearCapabilities();
+    try {
+      if (response?.body['receipt'] != null) {
+        returnedReceipt = ImageReceipt.parse(response!.body['receipt']);
+        record = original.withReceipt(returnedReceipt);
+      }
+    } catch (_) {
+      notice =
+          'The returned receipt did not match the saved request. Check the existing receipt; do not resubmit.';
+    }
+    if (allowImage &&
+        response?.status == 200 &&
+        returnedReceipt != null &&
+        record.state == 'confirmed' &&
+        notice == null) {
+      try {
+        bytes = await _decodeImage(response!.body);
+      } catch (_) {
+        notice =
+            'Charge confirmed, but the returned image could not be decoded. No replacement job was submitted.';
+      }
+    }
+    _checkCurrent(original.accountId, generation);
+    var persisted = false;
+    try {
+      record = await _store.update(
+        record,
+        isCurrent: () => _current(original.accountId, generation),
+      );
+      persisted = true;
+    } on ImageReceiptConflict catch (conflict) {
+      record = conflict.record;
+      persisted = true;
+      bytes = null;
+      notice =
+          'The returned receipt conflicts with saved accounting. The saved exact charge is retained; no replacement job was submitted.';
+    } catch (_) {
+      // Recovery may have read terminal accounting before storage became
+      // unavailable. A stale/uncommitted response cannot replace that evidence.
+      if (!original.unresolved) {
+        record = original;
+        bytes = null;
+      }
+      notice =
+          'Receipt update could not be saved. The original request identity is retained; check it before any new paid job.';
+    }
+    _checkCurrent(original.accountId, generation);
+    if (bytes != null && !_sameReceipt(returnedReceipt, record.receipt)) {
+      bytes = null;
+    }
+    _publish(record);
+    _checkCurrent(original.accountId, generation);
+    notice ??= switch (response?.status) {
+      410 =>
+        'Server image replay or receipt retention expired. Saved accounting is retained; image bytes are unavailable.',
+      404 =>
+        'The server did not find this request. Its outcome remains uncertain; no new paid submission is allowed.',
+      401 || 403 =>
+        'Sign in to the original account with current image permission to check this receipt.',
+      _ =>
+        bytes != null
+            ? null
+            : record.state == 'confirmed'
+            ? 'Charge confirmed. Image bytes are unavailable from receipt recovery.'
+            : 'Image outcome ${record.state}. Check this receipt; do not submit a replacement paid job.',
+    };
+    return ImageStudioResult(
+      record: record,
+      receiptPersisted: persisted,
+      bytes: bytes,
+      notice: notice,
+    );
+  }
+
+  void _publish(ImageRequestRecord record) {
+    _receipts = List.unmodifiable([
+      ..._receipts.where((r) => r.requestId != record.requestId),
+      record,
+    ]);
+    notifyListeners();
+  }
+
+  static String _serverJson(Object value) {
+    final json = jsonEncode(value);
+    final buffer = StringBuffer();
+    for (final unit in json.codeUnits) {
+      if (unit >= 0x7f) {
+        buffer.write('\\u${unit.toRadixString(16).padLeft(4, '0')}');
+      } else {
+        buffer.writeCharCode(unit);
+      }
+    }
+    return buffer.toString();
+  }
+
+  static Future<Uint8List> _decodeImage(Map<String, dynamic> response) async {
     try {
       if (response['model'] != alias) throw const FormatException();
       final data = response['data'] as List;
@@ -178,7 +574,7 @@ class ImageStudio {
       return bytes;
     } catch (_) {
       throw const ImageStudioError(
-        'The image service returned invalid image content. Retry only with the same request_id.',
+        'The image service returned invalid image content. Check the existing receipt; do not resubmit.',
       );
     }
   }

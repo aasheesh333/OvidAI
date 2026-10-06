@@ -3,11 +3,16 @@ name: Validate and Build Android
 on:
   push:
     # hoplite/** — agent thread branches: push builds a device-testable
-    # APK/AAB before review, so fixes can be tested without merging.
+    # debug APK before review, so fixes can be tested without merging.
     branches: [main, ci/verified-android-build-20260827, 'hoplite/**']
   pull_request:
     branches: [main, ci/verified-android-build-20260827]
   workflow_dispatch:
+    inputs:
+      production_release:
+        description: 'Build production-signed artifacts (all release gates required)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,22 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # Detect presence of signing secrets without using the `secrets` context
-      # in `if:` conditions (not allowed by GitHub Actions). A flag file is
-      # written and later steps check for its existence.
-      - name: Detect signing configuration
+      - name: Detect development Firebase configuration
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "signing=true" >> "$GITHUB_ENV"
-          fi
           if [ -n "$GOOGLE_SERVICES" ]; then
             echo "firebase=true" >> "$GITHUB_ENV"
           fi
-          echo "signing_enabled=$( [ -n "$KEYSTORE_B64" ] && echo yes || echo no )"
-          echo "firebase_enabled=$( [ -n "$GOOGLE_SERVICES" ] && echo yes || echo no )"
 
       - name: Setup Java
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
@@ -58,7 +54,7 @@ jobs:
 
       # Inject Firebase config from secret — never committed to the repo.
       - name: Write google-services.json
-        if: env.firebase == 'true'
+        if: env.firebase == 'true' && inputs.production_release != true
         env:
           GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
@@ -67,20 +63,18 @@ jobs:
 
       # Decode release keystore + write signing properties from secrets.
       - name: Prepare release signing
-        if: env.signing == 'true'
+        if: inputs.production_release == true
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          printf '%s' "$KEYSTORE_B64" | base64 -d > android/release-keystore.jks
-          {
-            echo "storeFile=release-keystore.jks"
-            echo "storePassword=$KEYSTORE_PASSWORD"
-            echo "keyAlias=$KEY_ALIAS"
-            echo "keyPassword=$KEY_PASSWORD"
-          } > android/keystore.properties
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: python3 tool/release_prepare.py
+
+      - name: Test release inventory gates
+        run: python3 -m unittest discover -s tool -p 'release_*test.py'
 
       - name: Resolve dependencies
         run: flutter pub get --enforce-lockfile
@@ -107,57 +101,89 @@ jobs:
       - name: Build debug APK
         run: flutter build apk --debug --dart-define=OVID_BUILD=${{ github.sha }}
 
-      - name: Free disk before release build
-        if: env.signing == 'true'
-        run: |
-          # The release build recompiles everything; the debug build's
-          # intermediates plus the NDK toolchain leave the runner tight on
-          # space (llvm-strip once died with "No space left on device").
-          # Drop only regenerable intermediates — the debug APK itself is
-          # kept for the rename/upload step below.
-          rm -rf build/app/intermediates build/app/tmp build/app/kotlin
-          df -h /
+      - name: Native host tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
 
-      - name: Build signed release APK + AAB
-        if: env.signing == 'true'
-        run: |
-          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
-          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
-
-      - name: Rename artifacts
-        run: |
-          cp build/app/outputs/flutter-apk/app-debug.apk \
-             build/app/outputs/flutter-apk/Ovid-debug.apk
-          if [ -f build/app/outputs/flutter-apk/app-release.apk ]; then
-            cp build/app/outputs/flutter-apk/app-release.apk \
-               build/app/outputs/flutter-apk/Ovid-release.apk
-          fi
+      - name: Gate debug APK inventory
+        run: >-
+          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-debug.apk
+          --mode debug --expected-target 28 --output build/release-inventory/debug.json
 
       - name: Upload debug APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Ovid-APK-debug
-          path: build/app/outputs/flutter-apk/Ovid-debug.apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
           retention-days: 30
 
+      - name: Free disk before release build
+        if: inputs.production_release == true
+        run: |
+          # The release build recompiles everything; the debug build's
+          # intermediates plus the NDK toolchain leave the runner tight on
+          # space (llvm-strip once died with "No space left on device").
+          # Drop only regenerable intermediates — the debug APK itself is
+          # already uploaded above.
+          rm -rf build/app/intermediates build/app/tmp build/app/kotlin
+          df -h /
+
+      - name: Validate production key before release compilation
+        if: inputs.production_release == true
+        working-directory: android
+        run: ./gradlew :app:validateProductionReleaseSigning --no-daemon
+
+      - name: Build signed release APK + AAB
+        if: inputs.production_release == true
+        run: |
+          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
+          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
+
+      # The production contract requires API 36. The current target28 runtime
+      # is architecture-blocked; do not lower this gate to publish it.
+      - name: Gate production APK and AAB
+        if: inputs.production_release == true
+        env:
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          status=0
+          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-release.apk --mode production --expected-target 36 --output build/release-inventory/release-apk.json || status=1
+          python3 tool/release_inventory.py build/app/outputs/bundle/release/app-release.aab --mode production --expected-target 36 --output build/release-inventory/release-aab.json || status=1
+          exit "$status"
+
       - name: Upload release APK
-        if: env.signing == 'true'
+        if: inputs.production_release == true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Ovid-APK-release
-          path: build/app/outputs/flutter-apk/Ovid-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload release AAB (Play)
-        if: env.signing == 'true'
+      - name: Upload release AAB (static gates only; not Play qualified)
+        if: inputs.production_release == true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Ovid-AAB-release
           path: build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload release inventory and native test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Ovid-release-evidence
+          path: |
+            build/release-inventory/
+            build/app/test-results/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove injected release credentials
+        if: always() && inputs.production_release == true
+        run: rm -f android/keystore.properties android/release-keystore.jks android/app/google-services.json
 
       # NOTE: `--split-debug-info=build/symbols` produces Dart deobfuscation
       # symbols. These are intentionally NOT uploaded as a workflow artifact:

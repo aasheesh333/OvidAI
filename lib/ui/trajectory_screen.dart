@@ -1,9 +1,12 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import '../core/format.dart';
 
 import '../core/session_ledger.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Trajectory view (PR19) — the event-ledger tab for one session:
 /// every turn / tool / checkpoint / recovery record from the append-only
@@ -21,6 +24,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
   List<Map<String, dynamic>> _events = [];
   SessionProjection? _proj;
   bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
@@ -29,14 +33,46 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
   }
 
   Future<void> _load() async {
-    final events = await SessionLedger.I.read(widget.sessionId);
-    final proj = await SessionLedger.I.projection(widget.sessionId);
-    if (!mounted) return;
     setState(() {
-      _events = events;
-      _proj = proj;
-      _loading = false;
+      _loading = true;
+      _error = null;
     });
+    try {
+      final events = await SessionLedger.I.read(widget.sessionId);
+      final proj = await SessionLedger.I.projection(widget.sessionId);
+      if (!mounted) return;
+      setState(() {
+        _events = events;
+        _proj = proj;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _loading = false;
+      });
+    }
+  }
+
+  void _showDetail(Map<String, dynamic> event) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: Text(_titleFor(event)),
+        content: SelectableText(
+          const JsonEncoder.withIndent('  ').convert(event),
+          style: AetherType.mono,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   IconData _iconFor(String? kind) => switch (kind) {
@@ -78,11 +114,12 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
       'turn_start' => 'model request · ${e['msgs'] ?? '?'} rows',
       'turn_end' =>
         'steps ${e['steps'] ?? 0} · turns ${e['turns'] ?? 0} · '
-        'tool ${((e['toolMs'] as num?) ?? 0) as int}ms · '
-        'llm ${((e['llmMs'] as num?) ?? 0) as int}ms',
+         'tool ${(e['toolMs'] as num?)?.toInt() ?? 0}ms · '
+         'llm ${(e['llmMs'] as num?)?.toInt() ?? 0}ms',
       'tool_end' =>
-        '${((e['ms'] as num?) ?? 0) as int}ms · ${e['ok'] == true ? 'ok' : 'failed'}'
-        '${e['error'] != null ? ' · ${e['error']}' : ''}',
+         '${(e['ms'] as num?)?.toInt() ?? 0}ms · ${e['ok'] == true ? 'ok' : 'failed'}'
+         '${e['error'] != null ? ' · ${e['error']}' : ''}',
+      'note' => '${e['text'] ?? e['message'] ?? ''}',
       _ => '',
     };
   }
@@ -95,126 +132,167 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
       backgroundColor: Aether.bg,
       appBar: AppBar(
         leading: const BackButton(),
-        title: Text('Trajectory · ${s?.title ?? 'session'}',
-            style: const TextStyle(fontSize: 14)),
+        title: Tooltip(
+          message: 'Trajectory · ${s?.title ?? 'session'}',
+          child: Text(
+            'Trajectory · ${s?.title ?? 'session'}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14),
+          ),
+        ),
         actions: [
           IconButton(
             tooltip: 'Reload ledger',
             icon: const Icon(Icons.refresh, size: 19),
-            onPressed: () {
-              setState(() => _loading = true);
-              _load();
-            },
+            onPressed: _loading ? null : _load,
           ),
         ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(strokeWidth: 1.6))
-          : Column(
-              children: [
+          : _error != null
+          ? SingleChildScrollView(
+              child: AetherEmptyState(
+                icon: Icons.error_outline,
+                title: 'Could not load ledger',
+                message: _error,
+                action: AetherSecondaryButton(label: 'Retry', onPressed: _load),
+              ),
+            )
+          : CustomScrollView(
+              slivers: [
                 if (p != null && p.turns > 0)
-                  Container(
-                    width: double.infinity,
-                    margin: const EdgeInsets.fromLTRB(12, 10, 12, 6),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Aether.surface,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Aether.hairline),
+                  SliverToBoxAdapter(child: Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AetherSpacing.space4,
+                      AetherSpacing.space3,
+                      AetherSpacing.space4,
+                      AetherSpacing.space2,
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Session stats (ledger projection)',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: Aether.text,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          '${p.turns} turns · ${p.steps} tool calls · '
-                          'wall ${formatCompactDuration(Duration(milliseconds: p.wallMs))} · '
-                          'llm ${formatCompactDuration(Duration(milliseconds: p.llmMs))} · '
-                          'tools ${formatCompactDuration(Duration(milliseconds: p.toolMs))}',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                        if (p.toolCounts.isNotEmpty) ...[
-                          const SizedBox(height: 6),
+                    child: AetherCard(
+                      key: const ValueKey('trajectory-stats'),
+                      padding: const EdgeInsets.all(AetherSpacing.space4),
+                      title: const Text('Session stats (ledger projection)'),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                           Text(
-                            'top: '
-                            '${(p.toolCounts.entries.toList()
-                                  ..sort((a, b) => b.value.compareTo(a.value)))
-                                  .take(4)
-                                  .map((e) => '${e.key}×${e.value}')
-                                  .join(' · ')}',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Aether.textFaint,
-                            ),
+                            '${p.turns} turns · ${p.steps} tool calls · '
+                            'wall ${formatCompactDuration(Duration(milliseconds: p.wallMs))} · '
+                            'llm ${formatCompactDuration(Duration(milliseconds: p.llmMs))} · '
+                            'tools ${formatCompactDuration(Duration(milliseconds: p.toolMs))}',
+                            style: AetherType.bodyMuted.copyWith(fontSize: 12),
                           ),
+                          if (p.toolCounts.isNotEmpty) ...[
+                            const SizedBox(height: AetherSpacing.space2),
+                            Text(
+                              'top: '
+                              '${(p.toolCounts.entries.toList()
+                                    ..sort((a, b) => b.value.compareTo(a.value)))
+                                    .take(4)
+                                    .map((e) => '${e.key}×${e.value}')
+                                    .join(' · ')}',
+                              style: AetherType.caption,
+                            ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
-                  ),
-                Expanded(
-                  child: _events.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No ledger records yet.\nEvents are recorded as '
-                            'you run the agent in this session.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              color: Aether.textMuted,
-                            ),
-                          ),
-                        )
-                      : ListView.builder(
-                          padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-                          itemCount: _events.length,
+                  )),
+                if (_events.isEmpty)
+                         const SliverToBoxAdapter(child: AetherEmptyState(
+                          key: ValueKey('trajectory-empty'),
+                          icon: Icons.timeline_outlined,
+                          title: 'No ledger records yet',
+                          message:
+                              'Events are recorded as you run the agent in '
+                              'this session.',
+                         ))
+                else
+                         SliverPadding(
+                           padding: const EdgeInsets.fromLTRB(14, 4, 14, 16),
+                           sliver: SliverList.builder(
+                          itemCount: _events.length + 1,
                           itemBuilder: (_, i) {
-                            final e = _events[i];
+                            if (i == 0) {
+                              return const Padding(
+                                padding: EdgeInsets.fromLTRB(2, 4, 2, 10),
+                                child: AetherSectionTitle(
+                                  key: ValueKey('trajectory-events-title'),
+                                  eyebrow: 'Events',
+                                ),
+                              );
+                            }
+                            final e = _events[i - 1];
                             final detail = _detailFor(e);
-                            return Container(
-                              margin: const EdgeInsets.only(bottom: 4),
-                              decoration: BoxDecoration(
-                                color: Aether.surface,
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Aether.hairline),
-                              ),
-                              child: ListTile(
-                                dense: true,
-                                contentPadding:
-                                    const EdgeInsets.symmetric(horizontal: 12),
-                                leading: Icon(
-                                  _iconFor(e['kind'] as String?),
-                                  size: 17,
-                                  color: _colorFor(e['kind'] as String?),
+                            final kind = e['kind'] as String?;
+                            final color = _colorFor(kind);
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: AetherCard(
+                                padding: const EdgeInsets.fromLTRB(
+                                  14,
+                                  12,
+                                  14,
+                                  12,
                                 ),
-                                title: Text(
-                                  '#${e['seq'] ?? i} · ${_titleFor(e)}',
-                                  style: const TextStyle(fontSize: 12.5),
+                                child: Row(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Icon(
+                                      _iconFor(kind),
+                                      size: 16,
+                                      color: color,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            '${e['t'] ?? ''}',
+                                            style: AetherType.mono.copyWith(
+                                              fontSize: 11,
+                                              color: Aether.textFaint,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            '#${e['seq'] ?? i - 1} · '
+                                            '${_titleFor(e)}',
+                                            style: AetherType.title.copyWith(
+                                              fontSize: 13,
+                                            ),
+                                          ),
+                                           if (detail.isNotEmpty) ...[
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              detail,
+                                              style:
+                                                  AetherType.bodyMuted.copyWith(
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                           ],
+                                           TextButton(
+                                             key: ValueKey('trajectory-detail-${e['seq'] ?? i - 1}'),
+                                             onPressed: () => _showDetail(e),
+                                             child: const Text('View details'),
+                                           ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                subtitle: Text(
-                                  '${e['t'] ?? ''}'
-                                  '${detail.isEmpty ? '' : '\n$detail'}',
-                                  style: TextStyle(
-                                    fontSize: 10.5,
-                                    color: Aether.textFaint,
-                                  ),
-                                ),
-                                isThreeLine: detail.isNotEmpty,
                               ),
                             );
                           },
-                        ),
-                ),
+                        )),
+                SliverToBoxAdapter(child: SizedBox(height: MediaQuery.paddingOf(context).bottom)),
               ],
             ),
     );

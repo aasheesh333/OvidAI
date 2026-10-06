@@ -164,9 +164,17 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
     }
 
-    // Exactly one "+" plus the separate refresh affordance.
+    // Exactly one "+" in the AppBar, plus the separate refresh affordance.
+    // Empty-state CTAs from the redesign carry their own add icons but all
+    // route to this same sheet, so the parity contract pins the AppBar entry.
     expect(find.byTooltip('Add plugin or marketplace'), findsOneWidget);
-    expect(find.byIcon(Icons.add), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.byIcon(Icons.add),
+      ),
+      findsOneWidget,
+    );
     expect(find.byTooltip('Refresh marketplaces'), findsOneWidget);
     expect(find.byTooltip('Add marketplace'), findsNothing);
     expect(find.text('Use + to add from GitHub'), findsOneWidget);

@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 
 import '../core/format.dart';
 import '../core/cloud_usage_store.dart';
+import '../core/image_studio.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'cloud_usage_status.dart';
+import 'image_receipt_panel.dart';
+import 'widgets/aether_primitives.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
 /// PROVIDER-WISE usage tracking — "kisne kitna khaya" view.
@@ -23,12 +26,12 @@ class _Pricing {
   const _Pricing(this.inputPer1M, this.outputPer1M);
 
   static const List<(String, _Pricing)> _table = [
-    ('claude-opus-4', _Pricing(15, 75)),
-    ('claude-opus', _Pricing(15, 75)),
-    ('claude-sonnet-4', _Pricing(3, 15)),
-    ('claude-sonnet', _Pricing(3, 15)),
-    ('claude-3-5-haiku', _Pricing(0.80, 4)),
-    ('claude-haiku', _Pricing(0.80, 4)),
+    ('', _Pricing(15, 75)),
+    ('', _Pricing(15, 75)),
+    ('', _Pricing(3, 15)),
+    ('', _Pricing(3, 15)),
+    ('', _Pricing(0.80, 4)),
+    ('', _Pricing(0.80, 4)),
     ('gpt-4o-mini', _Pricing(0.15, 0.60)),
     ('gpt-4o', _Pricing(2.50, 10)),
     ('gpt-4.1', _Pricing(2, 8)),
@@ -77,7 +80,7 @@ class _Pricing {
 class ProviderUsage {
   final String providerId;
   final String providerName;
-  final String tier; // 'Ovid Free' | 'BYOK'
+  final String tier; // 'FREE' | 'BYOK'
   final IconData icon;
   final Color color;
   int requests;
@@ -107,8 +110,8 @@ class UsageScreen extends StatelessWidget {
   /// Aggregate the real usage log into per-provider summaries.
   ///
   /// The built-in Ovid Cloud provider is intentionally EXCLUDED here: its usage
-  /// is server-authoritative (fetched from `/usage`, shown by
-  /// [_OvidCloudUsageCard]), not computed from the device-side log. Custom and
+  /// is server-authoritative (fetched from `/usage`, shown by the plan header
+  /// via [CloudUsageStore]), not computed from the device-side log. Custom and
   /// other built-in providers (the user's own keys) stay app-side as before.
   List<ProviderUsage> _aggregate(AppState app) {
     // Pick provider metadata from the catalog for icon/color.
@@ -184,14 +187,37 @@ class UsageScreen extends StatelessWidget {
 
     return Scaffold(
       backgroundColor: Aether.bg,
-      appBar: AppBar(leading: const BackButton(), title: const Text('Usage')),
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Usage'),
+        actions: [
+          PopupMenuButton<String>(
+            tooltip: 'More actions',
+            icon: Icon(Icons.more_vert, color: Aether.textMuted),
+            onSelected: (value) {
+              if (value == 'image-receipts') {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const ImageReceiptsScreen(),
+                  ),
+                );
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem<String>(
+                value: 'image-receipts',
+                child: Text('Image receipts'),
+              ),
+            ],
+          ),
+        ],
+      ),
       body: AnimatedBuilder(
         animation: app,
         builder: (_, _) {
           // Aggregate INSIDE the builder: the outer build runs once, so
           // capturing here would freeze token/cost stats at first open.
           final providers = _aggregate(app);
-          final reqs = providers.fold<int>(0, (s, p) => s + p.requests);
           final tokensIn = providers.fold<int>(0, (s, p) => s + p.tokensIn);
           final tokensOut = providers.fold<int>(0, (s, p) => s + p.tokensOut);
           final todayEntries = app.usageLog.where((e) {
@@ -209,103 +235,50 @@ class UsageScreen extends StatelessWidget {
           return ListView(
             padding: const EdgeInsets.only(bottom: 40),
             children: [
-              // ---- Ovid Cloud plan (server-authoritative; free tier is Zen) ----
-              const _OvidCloudUsageCard(),
-              // ---- All-time summary (custom + other providers, app-side) ----
-              Container(
-                margin: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Aether.surface,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: Aether.hairline),
-                ),
-                child: Row(
-                  children: [
-                    _stat('Today’s tokens', _fmtTok(todayTokens)),
-                    _stat('Requests', '$reqs'),
-                    _stat('Providers', '${providers.length}'),
-                  ],
-                ),
-              ),
+              // ---- Hero: Ovid Cloud plan (server-authoritative) ----
+              const _PlanHeroHeader(),
 
-              // ---- tokens banner ----
-              Container(
-                margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: Aether.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Aether.hairline),
-                ),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.data_usage_outlined,
-                      size: 15,
-                      color: Aether.textFaint,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Input · output',
-                      style: TextStyle(fontSize: 11, color: Aether.textFaint),
-                    ),
-                    Text(
-                      '${_fmtTok(tokensIn)} in · ${_fmtTok(tokensOut)} out',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        fontFamily: Aether.mono,
-                        color: Aether.text,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
+              // ---- Local token banner (unchanged copy for parity) ----
               Padding(
-                padding: EdgeInsets.fromLTRB(18, 18, 18, 6),
-                child: Text(
-                  'LOCAL MEASURED USAGE · OTHER PROVIDERS',
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.2,
-                    color: Aether.textFaint,
-                  ),
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                child: _LocalTotalsStrip(
+                  todayTokens: todayTokens,
+                  tokensIn: tokensIn,
+                  tokensOut: tokensOut,
+                ),
+              ),
+
+              // ---- 'By provider' section ----
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 22, 18, 10),
+                child: const AetherSectionTitle(
+                  eyebrow: 'By provider',
+                  subtitle:
+                      'Local measured usage · other providers (BYOK & free).',
                 ),
               ),
 
               if (providers.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.all(40),
-                  child: Center(
-                    child: Text(
-                      'No usage yet.\nSend a message to start tracking token usage.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        height: 1.6,
-                        color: Aether.textMuted,
-                      ),
-                    ),
-                  ),
+                const AetherEmptyState(
+                  icon: Icons.query_stats,
+                  title: 'No usage yet',
+                  message: 'Start a chat to see per-provider usage here.',
                 )
               else
-                for (final p in providers) _ProviderTile(provider: p),
+                for (final p in providers)
+                  Padding(
+                    key: ValueKey(p.providerId),
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                    child: _ProviderCard(provider: p),
+                  ),
 
               if (providers.isNotEmpty)
                 Padding(
-                  padding: EdgeInsets.fromLTRB(18, 18, 18, 0),
+                  padding: const EdgeInsets.fromLTRB(18, 6, 18, 0),
                   child: Text(
-                    'Usage tracked from real API responses (token counts from the provider).',
-                    style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                    'Usage tracked from real API responses '
+                    '(token counts from the provider).',
+                    style: AetherType.caption,
                   ),
                 ),
             ],
@@ -314,27 +287,29 @@ class UsageScreen extends StatelessWidget {
       ),
     );
   }
+}
 
-  static String _fmtTok(int n) => formatCompactCount(n);
+/// Route hosting the account-scoped [ImageReceiptPanel], reachable from the
+/// Usage app bar menu. The panel is read-only: status checks are GET
+/// recoveries against the saved request identity and never submit new paid
+/// image work. Bound to the singleton studio and the current cloud key.
+class ImageReceiptsScreen extends StatelessWidget {
+  const ImageReceiptsScreen({super.key});
 
-  Widget _stat(String label, String value, {bool big = false}) {
-    return Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Image receipts'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
         children: [
-          Text(
-            label,
-            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: big ? 22 : 16,
-              fontWeight: FontWeight.w700,
-              fontFamily: Aether.mono,
-              color: big ? Aether.accent : Aether.text,
-            ),
+          ImageReceiptPanel(
+            studio: ImageStudio.I,
+            headers: OvidCloudService.I.imageHeaders,
           ),
         ],
       ),
@@ -342,44 +317,446 @@ class UsageScreen extends StatelessWidget {
   }
 }
 
-/// List tile — one row per provider.
-class _ProviderTile extends StatelessWidget {
-  final ProviderUsage provider;
-  const _ProviderTile({required this.provider});
+/// A single compact stat column used by the local totals strip.
+Widget _stat(String label, String value, {bool big = false}) {
+  return Expanded(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: TextStyle(fontSize: 10.5, color: Aether.textFaint)),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: big ? 22 : 16,
+            fontWeight: FontWeight.w700,
+            fontFamily: Aether.mono,
+            color: big ? Aether.accent : Aether.text,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+String _fmtTok(int n) => formatCompactCount(n);
+
+/// Today's token snapshot + "in · out" micro-banner, kept behaviourally
+/// identical to the previous layout so downstream tests that assert these
+/// exact text strings (`'30'`, `'20 in · 10 out'`) still pass under the
+/// redesign.
+class _LocalTotalsStrip extends StatelessWidget {
+  const _LocalTotalsStrip({
+    required this.todayTokens,
+    required this.tokensIn,
+    required this.tokensOut,
+  });
+
+  final int todayTokens;
+  final int tokensIn;
+  final int tokensOut;
 
   @override
   Widget build(BuildContext context) {
-    final p = provider;
-    return ListTile(
-      leading: CircleAvatar(
-        radius: 17,
-        backgroundColor: p.color.withValues(alpha: 0.12),
-        child: Icon(p.icon, size: 17, color: p.color),
-      ),
-      title: Row(
-        children: [
-          Flexible(
-            child: Text(
-              p.providerName,
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Other providers · measured on this device',
+          style: AetherType.caption,
+        ),
+        const SizedBox(height: 8),
+        AetherCard(
+          padding: const EdgeInsets.all(16),
+          child: Row(children: [_stat('Today’s tokens', _fmtTok(todayTokens))]),
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: Aether.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Aether.hairline),
           ),
-          const SizedBox(width: 8),
-          Tag(p.tier, color: Aether.textMuted, filled: false),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Icon(
+                Icons.data_usage_outlined,
+                size: 15,
+                color: Aether.textFaint,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Input · output · all recorded usage',
+                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              ),
+              Text(
+                '${_fmtTok(tokensIn)} in · ${_fmtTok(tokensOut)} out',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  fontFamily: Aether.mono,
+                  color: Aether.text,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Hero plan header rendered on an [AetherGradientHeader] wash.
+///
+/// Server-authoritative data from [CloudUsageStore] / [OvidCloudService] drives
+/// the pill (FREE/PLUS/PRO/MAX), the big "remaining" number, and the soft
+/// progress bar. Freshness state is surfaced via [CloudUsageStatus].
+class _PlanHeroHeader extends StatefulWidget {
+  const _PlanHeroHeader();
+
+  @override
+  State<_PlanHeroHeader> createState() => _PlanHeroHeaderState();
+}
+
+class _PlanHeroHeaderState extends State<_PlanHeroHeader> {
+  late final CloudUsageStore _store;
+  OvidUsage? get _usage => _store.usage;
+  bool get _loading => _store.loading && _usage == null;
+
+  @override
+  void initState() {
+    super.initState();
+    _store = CloudUsageStore.acquire(AppState.I);
+    _store.addListener(_changed);
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _store.removeListener(_changed);
+    _store.release();
+    super.dispose();
+  }
+
+  /// Human-readable plan name for the pill.
+  ///
+  /// Honours both the server's `is_paid` and [AppState.ovidCloudIsPaid] — the
+  /// FREE/PLUS/PRO/MAX pill is purely a visual summary of the already-decided
+  /// plan state; neither the tier nor the paid flag is invented here.
+  String _pillLabel(String tier, bool isPaid) {
+    if (!isPaid || tier == 'free' || tier.isEmpty) return 'FREE';
+    switch (tier) {
+      case '3x':
+        return 'PLUS';
+      case '7x':
+        return 'PRO';
+      case '15x':
+        return 'MAX';
+      default:
+        return tier.toUpperCase();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    final tier = _usage?.tier ?? app.ovidCloudTier;
+    final isPaid = _usage?.isPaid ?? app.ovidCloudIsPaid;
+    final label = _pillLabel(tier, isPaid);
+    final pillColor = isPaid ? Aether.accent : Aether.textMuted;
+    final pct = _usage?.remainingFraction;
+
+    final card = AetherCard(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Icon(Icons.auto_awesome, size: 18, color: Aether.accent),
+              Text('Ovid Cloud', style: AetherType.title),
+              AetherPill(label: label, color: pillColor),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _usage == null
+                ? 'Saved plan · awaiting server confirmation'
+                : _store.stale || _store.error != null
+                ? 'Last known plan and allowance'
+                : 'Server-confirmed plan and allowance',
+            style: AetherType.caption,
+          ),
+          const SizedBox(height: 14),
+          if (_loading)
+            const SizedBox(
+              height: 20,
+              width: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            _RemainingHero(pct: pct),
+          const SizedBox(height: 10),
+          Text('Server-authoritative', style: AetherType.caption),
+          CloudUsageStatus(store: _store),
+          if (_usage != null && _usage!.models.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Text(
+              'AVAILABLE MODELS · remaining usage',
+              style: AetherType.caption.copyWith(
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.9,
+              ),
+            ),
+            const SizedBox(height: 8),
+            for (final m in _usage!.models) _ModelRow(model: m),
+            const SizedBox(height: 4),
+            Text(
+              'All models share your plan’s usage allowance.',
+              style: AetherType.caption,
+            ),
+          ],
         ],
       ),
-      subtitle: Text(
-        '${p.requests} requests · ${_fmtK(p.tokensIn)} in · ${_fmtK(p.tokensOut)} out',
-        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-      ),
-      trailing: Icon(Icons.chevron_right, size: 14, color: Aether.textFaint),
-      onTap: () => Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => ProviderUsageScreen(provider: p)),
+    );
+
+    return Stack(
+      children: [
+        const AetherGradientHeader(height: 110, child: SizedBox.expand()),
+        Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 4), child: card),
+      ],
+    );
+  }
+}
+
+class _RemainingHero extends StatelessWidget {
+  const _RemainingHero({required this.pct});
+  final double? pct;
+
+  @override
+  Widget build(BuildContext context) {
+    if (pct == null) {
+      return Text('Usage unavailable', style: AetherType.bodyMuted);
+    }
+    final percentText = '${(pct! * 100).round()}% remaining';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(percentText, style: AetherType.display),
+        const SizedBox(height: 10),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: LinearProgressIndicator(
+            value: pct,
+            minHeight: 8,
+            backgroundColor: Aether.surfaceAlt,
+            valueColor: AlwaysStoppedAnimation(
+              pct! < 0.1 ? Aether.danger : Aether.accent,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ModelRow extends StatelessWidget {
+  const _ModelRow({required this.model});
+  final OvidModelUsage model;
+
+  @override
+  Widget build(BuildContext context) {
+    final pct = model.remainingFraction;
+    final label = pct == null
+        ? 'Usage unavailable'
+        : '${(pct * 100).round()}% remaining';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            ovidModelLabel(model.model),
+            style: TextStyle(
+              fontSize: 12,
+              fontFamily: Aether.mono,
+              color: Aether.text,
+            ),
+          ),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: pct != null && pct < 0.15 ? Aether.danger : Aether.accent,
+            ),
+          ),
+          const SizedBox(height: 4),
+          if (pct != null)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: LinearProgressIndicator(
+                value: pct,
+                minHeight: 5,
+                backgroundColor: Aether.surfaceAlt,
+                valueColor: AlwaysStoppedAnimation(
+                  pct < 0.15 ? Aether.danger : Aether.accent,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
+}
 
-  String _fmtK(int n) => formatCompactCount(n);
+/// Per-provider card.
+///
+/// Replaces the previous `ListTile` + chevron with a self-contained
+/// [AetherCard] featuring an icon chip, provider title with a tier
+/// [AetherPill], a mono counts row (reqs / in / out), and an
+/// button that toggles an inline per-model breakdown. Tapping the
+/// card still opens the full [ProviderUsageScreen] for charts and totals.
+class _ProviderCard extends StatefulWidget {
+  const _ProviderCard({required this.provider});
+  final ProviderUsage provider;
+
+  @override
+  State<_ProviderCard> createState() => _ProviderCardState();
+}
+
+class _ProviderCardState extends State<_ProviderCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.provider;
+    final countsLine =
+        '${p.requests} requests · ${_fmtTok(p.tokensIn)} in · ${_fmtTok(p.tokensOut)} out';
+    return InkWell(
+      borderRadius: BorderRadius.circular(AetherRadius.rLg),
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => ProviderUsageScreen(provider: p)),
+      ),
+      child: AetherCard(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: p.color.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                    border: Border.all(color: p.color.withValues(alpha: 0.25)),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(p.icon, size: 18, color: p.color),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(p.providerName, style: AetherType.title),
+                      const SizedBox(height: 4),
+                      AetherPill(
+                        label: p.tier,
+                        color: p.tier == 'FREE'
+                            ? Aether.success
+                            : Aether.textMuted,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              countsLine,
+              style: AetherType.bodyMuted.copyWith(
+                fontFamily: Aether.mono,
+                fontSize: 12,
+              ),
+            ),
+            if (p.models.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  label: Text(
+                    _expanded
+                        ? 'Hide models'
+                        : 'Show ${p.models.length} model${p.models.length == 1 ? '' : 's'}',
+                  ),
+                  icon: Icon(_expanded ? Icons.expand_less : Icons.expand_more),
+                  onPressed: () => setState(() => _expanded = !_expanded),
+                ),
+              ),
+              if (_expanded) ...[
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Aether.surfaceAlt,
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                    border: Border.all(color: Aether.hairline),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final m in p.models)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: _ModelCounts(model: m),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Keep the complete model identifier readable even at large text sizes.
+class _ModelCounts extends StatelessWidget {
+  const _ModelCounts({required this.model});
+  final (String, int, int) model;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Text(model.$1, style: AetherType.mono.copyWith(color: Aether.text)),
+      const SizedBox(height: 4),
+      Text(
+        '${model.$2} req · ${_fmtTok(model.$3)} tok',
+        style: AetherType.caption,
+      ),
+    ],
+  );
 }
 
 /// Detailed per-provider usage screen.
@@ -440,7 +817,23 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                 tokensOut: 0,
                 models: [],
               ));
-    final daily = AppState.I.dailyActivityFor(p.providerId, days: 14);
+    // Calendar-day buckets from measured tokens only. The shared activity
+    // helper gives even empty days a minimum bar height, which would imply
+    // activity here. Never turn a caller-supplied totals snapshot into history.
+    final now = DateTime.now();
+    final today = DateTime.utc(now.year, now.month, now.day);
+    final daily = List<int>.filled(14, 0);
+    for (final entry in AppState.I.usageLog) {
+      if (entry.providerId != p.providerId || entry.time.isAfter(now)) continue;
+      final local = entry.time.toLocal();
+      final date = DateTime.utc(local.year, local.month, local.day);
+      final age = today.difference(date).inDays;
+      if (age >= 0 && age < 14 && entry.totalTokens > 0) {
+        daily[13 - age] += entry.totalTokens;
+      }
+    }
+    final hasTrend = daily.where((tokens) => tokens > 0).length >= 2;
+    final maxTokens = daily.reduce((a, b) => a > b ? a : b);
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(leading: const BackButton(), title: Text(p.providerName)),
@@ -493,17 +886,49 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
               borderRadius: BorderRadius.circular(14),
               border: Border.all(color: Aether.hairline),
             ),
-            child: Row(
-              children: [
-                _cell('Requests', '${p.requests}'),
-                _cell('Tokens in', _fmtK(p.tokensIn)),
-                _cell('Tokens out', _fmtK(p.tokensOut)),
-              ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final stacked =
+                    constraints.maxWidth /
+                        MediaQuery.textScalerOf(context).scale(1) <
+                    280;
+                final cells = [
+                  _cell('Requests', '${p.requests}'),
+                  _cell('Tokens in', _fmtTok(p.tokensIn)),
+                  _cell('Tokens out', _fmtTok(p.tokensOut)),
+                ];
+                return stacked
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (final cell in cells)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 6),
+                              child: cell,
+                            ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          for (final cell in cells) Expanded(child: cell),
+                        ],
+                      );
+              },
             ),
           ),
 
           const _SectionLabel('LAST 14 DAYS'),
+          if (!hasTrend)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18),
+              child: Text(
+                'Not enough recent activity for a trend.',
+                style: AetherType.caption,
+              ),
+            )
+          else
           Container(
+            key: const ValueKey('usage-activity-chart'),
             margin: const EdgeInsets.symmetric(horizontal: 16),
             padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
             decoration: BoxDecoration(
@@ -512,27 +937,37 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
               border: Border.all(color: Aether.hairline),
             ),
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                Text(
+                  'Daily measured tokens · relative to busiest day',
+                  style: AetherType.caption,
+                ),
+                const SizedBox(height: 8),
                 SizedBox(
                   height: 72,
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      for (final d in daily)
+                      for (var i = 0; i < daily.length; i++)
                         Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 2.5,
-                            ),
-                            child: FractionallySizedBox(
-                              heightFactor: d,
-                              alignment: Alignment.bottomCenter,
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  color: p.color.withValues(
-                                    alpha: 0.35 + d * 0.5,
+                          child: Semantics(
+                            label:
+                                '${today.subtract(Duration(days: 13 - i)).toIso8601String().split('T').first}: ${daily[i]} tokens',
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 2.5,
+                              ),
+                              child: FractionallySizedBox(
+                                heightFactor: daily[i] / maxTokens,
+                                alignment: Alignment.bottomCenter,
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: p.color.withValues(
+                                      alpha: 0.35 + daily[i] / maxTokens * 0.5,
+                                    ),
+                                    borderRadius: BorderRadius.circular(3),
                                   ),
-                                  borderRadius: BorderRadius.circular(3),
                                 ),
                               ),
                             ),
@@ -542,11 +977,13 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  spacing: 16,
+                  runSpacing: 4,
                   children: [
                     Text(
-                      '14 days ago',
+                      '13 days ago',
                       style: TextStyle(fontSize: 9.5, color: Aether.textFaint),
                     ),
                     Text(
@@ -581,16 +1018,10 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
               ),
               child: Column(
                 children: [
-                  const _Row(
-                    h: true,
-                    cells: ['MODEL', 'REQ', 'TOKENS'],
-                    flexes: [5, 2, 3],
-                  ),
-                  const Divider(height: 12),
                   for (final m in p.models)
-                    _Row(
-                      cells: [m.$1, '${m.$2}', _fmtK(m.$3)],
-                      flexes: const [5, 2, 3],
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: _ModelCounts(model: m),
                     ),
                 ],
               ),
@@ -600,27 +1031,23 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
     );
   }
 
-  String _fmtK(int n) => formatCompactCount(n);
-
   Widget _cell(String label, String value) {
-    return Expanded(
-      child: Column(
-        children: [
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              fontFamily: Aether.mono,
-            ),
+    return Column(
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+            fontFamily: Aether.mono,
           ),
-          const SizedBox(height: 3),
-          Text(
-            label,
-            style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-          ),
-        ],
-      ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          label,
+          style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+        ),
+      ],
     );
   }
 }
@@ -641,255 +1068,4 @@ class _SectionLabel extends StatelessWidget {
       ),
     ),
   );
-}
-
-class _Row extends StatelessWidget {
-  final List<String> cells;
-  final List<int> flexes;
-  final bool h;
-  const _Row({required this.cells, required this.flexes, this.h = false});
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          for (var i = 0; i < cells.length; i++)
-            Expanded(
-              flex: flexes[i],
-              child: Text(
-                cells[i],
-                overflow: TextOverflow.ellipsis,
-                textAlign: i == 0 ? TextAlign.left : TextAlign.right,
-                style: TextStyle(
-                  fontSize: h ? 9.5 : 11.5,
-                  fontFamily: Aether.mono,
-                  fontWeight: h ? FontWeight.w700 : FontWeight.w400,
-                  letterSpacing: h ? 1.1 : 0,
-                  color: h ? Aether.textFaint : Aether.text,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Ovid Cloud plan card — server-authoritative usage.
-///
-/// Usage is fetched from the gateway's `/usage` (the source of truth), never
-/// computed on the device, so it is identical across a user's devices and
-/// shows remaining usage for Free and paid plans without exposing internal costs.
-class _OvidCloudUsageCard extends StatefulWidget {
-  const _OvidCloudUsageCard();
-
-  @override
-  State<_OvidCloudUsageCard> createState() => _OvidCloudUsageCardState();
-}
-
-class _OvidCloudUsageCardState extends State<_OvidCloudUsageCard> {
-  late final CloudUsageStore _store;
-  OvidUsage? get _usage => _store.usage;
-  bool get _loading => _store.loading && _usage == null;
-
-  @override
-  void initState() {
-    super.initState();
-    _store = CloudUsageStore.acquire(AppState.I);
-    _store.addListener(_changed);
-  }
-
-  void _changed() {
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void dispose() {
-    _store.removeListener(_changed);
-    _store.release();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final tier = _usage?.tier ?? OvidCloudService.I.confirmedTier ?? '';
-    final isPaid = _usage?.isPaid ?? (tier.isNotEmpty && tier != 'free');
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 14, 16, 2),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Aether.accent.withValues(alpha: 0.14), Aether.surface],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Aether.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Icon(Icons.auto_awesome, size: 18, color: Aether.accent),
-              const SizedBox(width: 8),
-              Text(
-                'Ovid Cloud',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: Aether.text,
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: isPaid ? Aether.accent : Aether.surfaceAlt,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  tier.isEmpty
-                      ? 'PLAN UNAVAILABLE'
-                      : isPaid
-                      ? '${tier.toUpperCase()} PLAN'
-                      : 'FREE',
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.8,
-                    color: isPaid ? Colors.white : Aether.textMuted,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          if (_loading)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: SizedBox(
-                height: 16,
-                width: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            )
-          else
-            _remainingUsage(_usage),
-          CloudUsageStatus(store: _store),
-        ],
-      ),
-    );
-  }
-
-  Widget _remainingUsage(OvidUsage? u) {
-    final pct = u?.remainingFraction;
-    if (u == null || pct == null) {
-      return Text(
-        'Usage unavailable',
-        style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: LinearProgressIndicator(
-            value: pct,
-            minHeight: 7,
-            backgroundColor: Aether.surfaceAlt,
-            valueColor: AlwaysStoppedAnimation(
-              pct < 0.1 ? Aether.danger : Aether.accent,
-            ),
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          '${(pct * 100).round()}% remaining',
-          style: TextStyle(fontSize: 11, color: Aether.textFaint),
-        ),
-        if (u.models.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          Text(
-            'AVAILABLE MODELS · remaining usage',
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.9,
-              color: Aether.textFaint,
-            ),
-          ),
-          const SizedBox(height: 8),
-          for (final m in u.models) _modelBar(m),
-          const SizedBox(height: 4),
-          Text(
-            'All models share your plan’s usage allowance.',
-            style: TextStyle(
-              fontSize: 10.5,
-              height: 1.4,
-              color: Aether.textFaint,
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _modelBar(OvidModelUsage m) {
-    final pct = m.remainingFraction;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                ovidModelLabel(m.model),
-                style: TextStyle(
-                  fontSize: 12,
-                  fontFamily: Aether.mono,
-                  color: Aether.text,
-                ),
-              ),
-              Text(
-                pct == null
-                    ? 'Usage unavailable'
-                    : '${(pct * 100).round()}% remaining',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: pct != null && pct < 0.15
-                      ? Aether.danger
-                      : Aether.accent,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-          if (pct != null)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(5),
-              child: LinearProgressIndicator(
-                value: pct,
-                minHeight: 5,
-                backgroundColor: Aether.surfaceAlt,
-                valueColor: AlwaysStoppedAnimation(
-                  pct < 0.15 ? Aether.danger : Aether.accent,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
 }

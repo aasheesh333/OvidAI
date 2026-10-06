@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/account_service.dart';
 import 'package:ovid_ai/ui/account_deletion_panel.dart';
+import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 
 void main() {
   testWidgets('removed deletion panel ignores late successful provider proof', (
@@ -68,8 +69,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.textContaining('not yet activated'), findsOneWidget);
-      final button = tester.widget<OutlinedButton>(
-        find.widgetWithText(OutlinedButton, 'Delete your account'),
+      final button = tester.widget<AetherDangerButton>(
+        find.widgetWithText(AetherDangerButton, 'Delete your account'),
       );
       expect(button.onPressed, isNull);
     },

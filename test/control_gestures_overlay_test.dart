@@ -307,9 +307,15 @@ void main() {
       // measures.
       final i = agentSrc.indexOf("case 'browser_long_press':");
       final body = agentSrc.substring(i, i + 5000);
-      final down = body.indexOf('runJavaScriptReturningResult(lpDown)');
+      // Argument lists may wrap across lines — match the call and its script
+      // argument, not the exact one-line formatting.
+      final down = body.indexOf(
+        RegExp(r'runJavaScriptReturningResult\(\s*lpDown'),
+      );
       final delay = body.indexOf('Future<void>.delayed');
-      final up = body.indexOf('runJavaScriptReturningResult(lpUp)');
+      final up = body.indexOf(
+        RegExp(r'runJavaScriptReturningResult\(\s*lpUp'),
+      );
       expect(down, greaterThan(-1));
       expect(delay, greaterThan(down));
       expect(up, greaterThan(delay));

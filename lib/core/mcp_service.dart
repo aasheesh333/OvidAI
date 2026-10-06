@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -63,15 +64,38 @@ class McpOAuthToken {
   /// `refresh_token`/`token_type`/`expires_in`).
   factory McpOAuthToken.fromTokenResponse(Map<String, dynamic> j) {
     final expiresIn = j['expires_in'];
+    final access = j['access_token'];
+    final type = j['token_type'] ?? 'Bearer';
+    if (access is! String || access.isEmpty ||
+        RegExp(r'[\x00-\x20\x7f]').hasMatch(access) ||
+        type is! String || type.toLowerCase() != 'bearer' ||
+        (j.containsKey('refresh_token') && j['refresh_token'] is! String) ||
+        (j.containsKey('expires_in') &&
+            (expiresIn is! int || expiresIn < 0 || expiresIn > 315360000))) {
+      throw const FormatException('Malformed OAuth token response');
+    }
     return McpOAuthToken(
-      accessToken: j['access_token']?.toString() ?? '',
-      refreshToken: j['refresh_token']?.toString(),
-      tokenType: j['token_type']?.toString() ?? 'Bearer',
+      accessToken: access,
+      refreshToken: j['refresh_token'] as String?,
+      tokenType: 'Bearer',
       expiresAt: expiresIn is num
           ? DateTime.now().add(Duration(seconds: expiresIn.toInt()))
           : null,
     );
   }
+}
+
+/// Browser handoff. State and the PKCE verifier stay owned by the service;
+/// callers pass the complete callback URI to completeMcpOAuthAuthorization.
+class McpOAuthAuthorization {
+  final String authorizationUrl;
+  final DateTime expiresAt;
+  final McpOAuthConfig _config;
+  final String _state;
+  final String _verifier;
+  final Object _generation;
+  McpOAuthAuthorization._(this.authorizationUrl, this.expiresAt,
+      this._config, this._state, this._verifier, this._generation);
 }
 
 /// Legacy MCP SSE transport channel (GET /sse event stream + POST
@@ -86,18 +110,21 @@ class McpOAuthToken {
 /// The GET stream stays open for the channel's lifetime; [close] tears it
 /// down. All waits are bounded by caller-supplied timeouts.
 class _SseMcpChannel {
-  _SseMcpChannel._(this._client, this._ownsClient, this._onDestinationRejected);
+  _SseMcpChannel._(this._client, this._ownsClient, this._onDestinationRejected,
+      this._onNotification);
 
   factory _SseMcpChannel({
     http.Client? client,
     required void Function(String) onDestinationRejected,
+    required void Function(Map<String, dynamic>) onNotification,
   }) => _SseMcpChannel._(
-    client ?? http.Client(), client == null, onDestinationRejected,
+    client ?? http.Client(), client == null, onDestinationRejected, onNotification,
   );
 
   final http.Client _client;
   final bool _ownsClient;
   final void Function(String) _onDestinationRejected;
+  final void Function(Map<String, dynamic>) _onNotification;
   StreamSubscription<String>? _sub;
 
   Uri? messageEndpoint;
@@ -218,7 +245,11 @@ class _SseMcpChannel {
     try {
       final decoded = jsonDecode(data);
       if (decoded is Map<String, dynamic>) {
-        _pending.add(decoded);
+        if (!decoded.containsKey('id')) {
+          _onNotification(decoded);
+        } else {
+          _pending.add(decoded);
+        }
         _wake();
       }
     } catch (_) {
@@ -343,6 +374,9 @@ class _SseMcpChannel {
   void _wake() {
     final w = _waiter;
     if (w != null && !w.isCompleted) w.complete();
+    for (final waiter in _responseWaiters) {
+      if (!waiter.isCompleted) waiter.complete();
+    }
   }
 
   void _onDone() {
@@ -1015,11 +1049,10 @@ class McpService {
 
   // ── OAuth for hosted MCP servers (item 6) ──────────────────────────
   //
-  // Browser-based OAuth flow API. The actual browser UI is OUT OF SCOPE —
-  // the UI gap: some screen must (1) call [buildMcpAuthorizeUrl], (2) open
-  // it in a browser / Custom Tab, (3) capture the redirect
-  // (`?code=…&state=…`), and (4) call [exchangeMcpOAuthCode] +
-  // [storeMcpOAuthToken]. The token is then attached as
+  // Browser-based OAuth flow API. Call beginMcpOAuthAuthorization, open its
+  // authorizationUrl, then pass the FULL redirect URI to
+  // completeMcpOAuthAuthorization. The service verifies state/redirect/PKCE
+  // and owns persistence. The token is then attached as
   // `Authorization: Bearer …` to every HTTP/SSE request for that server,
   // and refreshed automatically on 401 when a refresh token exists.
   //
@@ -1034,6 +1067,50 @@ class McpService {
 
   final Map<String, McpOAuthConfig> _oauthConfigs = {};
   final Map<String, McpOAuthToken> _oauthTokens = {};
+  final _oauthGenerations = <String, Object>{};
+  final _oauthConfigGenerations = <String, Object>{};
+  final _oauthStorageOperations = <String, Future<void>>{};
+  final _oauthRefreshes = <String, Future<McpOAuthToken?>>{};
+  final _oauthAttempts = <String, McpOAuthAuthorization>{};
+
+  Object _oauthGeneration(String key) =>
+      _oauthGenerations.putIfAbsent(key, Object.new);
+
+  Object _invalidateOAuth(String key) {
+    _oauthRefreshes.remove(key);
+    _oauthAttempts.remove(key);
+    return _oauthGenerations[key] = Object();
+  }
+
+  bool _ownsOAuth(String key, Object generation) =>
+      identical(_oauthGenerations[key], generation);
+
+  // Config persistence is fenced separately from token/attempt state: only a
+  // newer config registration or a full removal may drop a queued config
+  // write. Starting or cancelling an authorization attempt never does.
+  Object _configGeneration(String key) =>
+      _oauthConfigGenerations.putIfAbsent(key, Object.new);
+
+  Object _invalidateOAuthConfig(String key) =>
+      _oauthConfigGenerations[key] = Object();
+
+  bool _ownsOAuthConfig(String key, Object generation) =>
+      identical(_oauthConfigGenerations[key], generation);
+
+  // Serialize reads/writes/deletes as well as fencing publication. A delete
+  // must finish AFTER a platform write already in flight, before any new write.
+  Future<void> _oauthStorage(String key, Future<void> Function() operation) {
+    final previous = _oauthStorageOperations[key] ?? Future<void>.value();
+    final next = previous.then((_) => operation());
+    final settled = next.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    _oauthStorageOperations[key] = settled;
+    unawaited(settled.then((_) {
+      if (identical(_oauthStorageOperations[key], settled)) {
+        _oauthStorageOperations.remove(key);
+      }
+    }));
+    return next;
+  }
 
   /// Test seam: OAuth tokens never touch the real secure storage.
   @visibleForTesting
@@ -1046,14 +1123,17 @@ class McpService {
     String serverKey,
     McpOAuthConfig config,
   ) async {
+    _invalidateOAuth(serverKey);
+    final generation = _invalidateOAuthConfig(serverKey);
     _oauthConfigs[serverKey] = config;
     if (oauthSecureStorageDisabledForTest) return;
-    try {
+    await _oauthStorage(serverKey, () async {
+      if (!_ownsOAuthConfig(serverKey, generation)) return;
       await ovidSecureStorage().write(
         key: _oauthConfigKey(serverKey),
         value: jsonEncode(config.toJson()),
       );
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    });
   }
 
   /// In-memory OAuth config, or null when none was registered.
@@ -1062,10 +1142,12 @@ class McpService {
 
   /// OAuth config, falling back to secure storage (survives restarts).
   Future<McpOAuthConfig?> mcpOAuthConfigForAsync(String serverKey) async {
+    final generation = _configGeneration(serverKey);
     final mem = _oauthConfigs[serverKey];
     if (mem != null) return mem;
     if (oauthSecureStorageDisabledForTest) return null;
     try {
+      await _oauthStorageOperations[serverKey];
       final raw = await ovidSecureStorage().read(
         key: _oauthConfigKey(serverKey),
       );
@@ -1073,6 +1155,7 @@ class McpService {
       final cfg = McpOAuthConfig.fromJson(
         (jsonDecode(raw) as Map).cast<String, dynamic>(),
       );
+      if (!_ownsOAuthConfig(serverKey, generation)) return null;
       _oauthConfigs[serverKey] = cfg;
       return cfg;
     } catch (_) {
@@ -1085,22 +1168,55 @@ class McpService {
     String serverKey,
     McpOAuthToken token,
   ) async {
+    final generation = _invalidateOAuth(serverKey);
+    await _storeOAuthToken(serverKey, token, generation);
+  }
+
+  Future<bool> _storeOAuthToken(
+    String serverKey, McpOAuthToken token, Object generation,
+  ) async {
+    if (!_ownsOAuth(serverKey, generation)) return false;
+    if (!oauthSecureStorageDisabledForTest) {
+      await _oauthStorage(serverKey, () async {
+        if (!_ownsOAuth(serverKey, generation)) return;
+        await ovidSecureStorage().write(
+          key: _oauthTokenKey(serverKey), value: jsonEncode(token.toJson()),
+        );
+      });
+    }
+    if (!_ownsOAuth(serverKey, generation)) return false;
     _oauthTokens[serverKey] = token;
-    if (oauthSecureStorageDisabledForTest) return;
-    try {
-      await ovidSecureStorage().write(
-        key: _oauthTokenKey(serverKey),
-        value: jsonEncode(token.toJson()),
-      );
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    return true;
+  }
+
+  /// Disconnect and forget all OAuth material. Call with the canonical id
+  /// before deleting/replacing a server or removing its owning account/plugin.
+  Future<void> removeMcpOAuth(String serverKey) async {
+    // First invalidate synchronously. Even a storage operation that starts
+    // while disconnect's best-effort session DELETE awaits cannot resurrect
+    // the removed identity.
+    _invalidateOAuth(serverKey);
+    _invalidateOAuthConfig(serverKey);
+    _oauthTokens.remove(serverKey);
+    _oauthConfigs.remove(serverKey);
+    final disconnecting = disconnect(serverKey);
+    final deleting = oauthSecureStorageDisabledForTest
+        ? Future<void>.value()
+        : _oauthStorage(serverKey, () async {
+            await ovidSecureStorage().delete(key: _oauthTokenKey(serverKey));
+            await ovidSecureStorage().delete(key: _oauthConfigKey(serverKey));
+          });
+    await Future.wait([disconnecting, deleting]);
   }
 
   /// The stored OAuth token for [serverKey], or null when none / unreadable.
   Future<McpOAuthToken?> mcpOAuthTokenFor(String serverKey) async {
+    final generation = _oauthGeneration(serverKey);
     final mem = _oauthTokens[serverKey];
     if (mem != null) return mem;
     if (oauthSecureStorageDisabledForTest) return null;
     try {
+      await _oauthStorageOperations[serverKey];
       final raw = await ovidSecureStorage().read(
         key: _oauthTokenKey(serverKey),
       );
@@ -1108,6 +1224,7 @@ class McpService {
       final token = McpOAuthToken.fromJson(
         (jsonDecode(raw) as Map).cast<String, dynamic>(),
       );
+      if (!_ownsOAuth(serverKey, generation)) return null;
       _oauthTokens[serverKey] = token;
       return token;
     } catch (_) {
@@ -1117,11 +1234,107 @@ class McpService {
 
   /// Drop the stored OAuth token for [serverKey] (disconnect/revoke path).
   Future<void> clearMcpOAuthToken(String serverKey) async {
+    _invalidateOAuth(serverKey);
     _oauthTokens.remove(serverKey);
     if (oauthSecureStorageDisabledForTest) return;
-    try {
+    await _oauthStorage(serverKey, () async {
       await ovidSecureStorage().delete(key: _oauthTokenKey(serverKey));
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    });
+  }
+
+  /// Begin a ten-minute, one-use S256 authorization attempt for a canonical id.
+  /// Starting again invalidates the previous attempt and pending refresh writes.
+  Future<McpOAuthAuthorization> beginMcpOAuthAuthorization(String serverKey) async {
+    final generation = _invalidateOAuth(serverKey);
+    final config = await mcpOAuthConfigForAsync(serverKey);
+    if (!_ownsOAuth(serverKey, generation) || config == null) {
+      throw StateError('OAuth configuration unavailable or replaced');
+    }
+    _oauthEndpoint(config.authorizationUrl);
+    _oauthEndpoint(config.tokenUrl);
+    final redirect = Uri.tryParse(config.redirectUri ?? '');
+    if (redirect == null || !redirect.hasScheme || redirect.hasFragment ||
+        redirect.userInfo.isNotEmpty ||
+        (redirect.scheme != 'https' && redirect.scheme != 'http' &&
+            !redirect.hasAuthority) ||
+        redirect.queryParametersAll.values.any((v) => v.length != 1) ||
+        redirect.queryParameters.keys.any(const {'code', 'state', 'error'}.contains)) {
+      throw StateError('OAuth redirect URI is invalid');
+    }
+    final random = Random.secure();
+    String nonce() => base64Url.encode(List.generate(32, (_) => random.nextInt(256)))
+        .replaceAll('=', '');
+    final state = nonce();
+    final verifier = nonce();
+    final challenge = base64Url.encode(sha256.convert(ascii.encode(verifier)).bytes)
+        .replaceAll('=', '');
+    final attempt = McpOAuthAuthorization._(
+      buildMcpAuthorizeUrl(config: config, state: state, codeChallenge: challenge),
+      _now().add(const Duration(minutes: 10)), config, state, verifier, generation,
+    );
+    _oauthAttempts[serverKey] = attempt;
+    return attempt;
+  }
+
+  /// Validate the entire callback before exchanging, then store only if the
+  /// server/config generation is still current. Invalid callbacks consume the
+  /// attempt too. No callback secrets are included in exception messages.
+  Future<McpOAuthToken> completeMcpOAuthAuthorization(
+    String serverKey, String callbackUri,
+  ) async {
+    final attempt = _oauthAttempts.remove(serverKey);
+    if (attempt == null || !_ownsOAuth(serverKey, attempt._generation) ||
+        !_now().isBefore(attempt.expiresAt)) {
+      throw StateError('OAuth attempt expired or unavailable');
+    }
+    final callback = Uri.tryParse(callbackUri);
+    final expected = Uri.parse(attempt._config.redirectUri!);
+    if (callback == null || callback.hasFragment || callback.userInfo.isNotEmpty ||
+        callback.scheme != expected.scheme || callback.host != expected.host ||
+        callback.port != expected.port || callback.path != expected.path ||
+        callback.queryParametersAll.values.any((v) => v.length != 1) ||
+        !callback.queryParameters.keys.every((key) =>
+            expected.queryParameters.containsKey(key) ||
+            const {'code', 'state'}.contains(key)) ||
+        expected.queryParameters.entries.any((e) => callback.queryParameters[e.key] != e.value) ||
+        callback.queryParameters['state'] != attempt._state ||
+        callback.queryParameters.containsKey('error') ||
+        (callback.queryParameters['code'] ?? '').isEmpty) {
+      throw StateError('OAuth callback rejected');
+    }
+    final token = await exchangeMcpOAuthCode(config: attempt._config,
+        code: callback.queryParameters['code']!, codeVerifier: attempt._verifier);
+    if (!await _storeOAuthToken(serverKey, token, attempt._generation)) {
+      throw StateError('OAuth attempt replaced or removed');
+    }
+    return token;
+  }
+
+  void cancelMcpOAuthAuthorization(String serverKey) => _invalidateOAuth(serverKey);
+
+  static Uri _oauthEndpoint(String? value) {
+    final uri = Uri.tryParse(value ?? '');
+    if (uri == null || !uri.hasAuthority || uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty || uri.hasFragment ||
+        RegExp(r'^https?://[^/?#]*@', caseSensitive: false).hasMatch(value ?? '') ||
+        (uri.scheme != 'https' && !(uri.scheme == 'http' &&
+            const {'127.0.0.1', '::1', 'localhost'}.contains(uri.host)))) {
+      throw StateError('OAuth endpoint requires HTTPS (or loopback HTTP)');
+    }
+    return uri;
+  }
+
+  Future<http.Response> _postOAuth(http.Client client, String url,
+      Map<String, String> fields) async {
+    final request = http.Request('POST', _oauthEndpoint(url))
+      ..followRedirects = false
+      ..bodyFields = fields;
+    final streamed = await client.send(request).timeout(const Duration(seconds: 30));
+    if (const {301, 302, 303, 307, 308}.contains(streamed.statusCode)) {
+      unawaited(streamed.stream.listen(null).cancel());
+      throw StateError('OAuth token endpoint redirected');
+    }
+    return await http.Response.fromStream(streamed).timeout(const Duration(seconds: 30));
   }
 
   /// Build the browser authorize URL for the OAuth flow (step 1 of the
@@ -1174,20 +1387,14 @@ class McpService {
     }
     final client = httpClientForTest ?? http.Client();
     try {
-      final res = await client
-          .post(
-            Uri.parse(tokenUrl.trim()),
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: {
+      final res = await _postOAuth(client, tokenUrl.trim(), {
               'grant_type': 'authorization_code',
               'code': code,
               'redirect_uri': config.redirectUri ?? '',
               'client_id': config.clientId ?? '',
               if (codeVerifier != null && codeVerifier.isNotEmpty)
                 'code_verifier': codeVerifier,
-            },
-          )
-          .timeout(const Duration(seconds: 30));
+            });
       if (res.statusCode < 200 || res.statusCode >= 300) {
         throw Exception(
           'OAuth token exchange failed: HTTP ${res.statusCode}',
@@ -1206,11 +1413,27 @@ class McpService {
   /// Refresh the stored token for [serverKey] via its refresh token.
   /// Returns the new token (already stored), or null when refresh is not
   /// possible/failed.
-  Future<McpOAuthToken?> refreshMcpOAuthToken(String serverKey) async {
+  Future<McpOAuthToken?> refreshMcpOAuthToken(String serverKey) {
+    final existing = _oauthRefreshes[serverKey];
+    if (existing != null) return existing;
+    final generation = _oauthGeneration(serverKey);
+    final future = _refreshMcpOAuthToken(serverKey, generation);
+    _oauthRefreshes[serverKey] = future;
+    unawaited(future.then((_) {
+      if (identical(_oauthRefreshes[serverKey], future)) {
+        _oauthRefreshes.remove(serverKey);
+      }
+    }));
+    return future;
+  }
+
+  Future<McpOAuthToken?> _refreshMcpOAuthToken(
+    String serverKey, Object generation,
+  ) async {
     final config = await mcpOAuthConfigForAsync(serverKey);
     final current = await mcpOAuthTokenFor(serverKey);
     final tokenUrl = config?.tokenUrl;
-    if (tokenUrl == null ||
+    if (!_ownsOAuth(serverKey, generation) || tokenUrl == null ||
         tokenUrl.trim().isEmpty ||
         current == null ||
         !current.canRefresh) {
@@ -1218,17 +1441,11 @@ class McpService {
     }
     final client = httpClientForTest ?? http.Client();
     try {
-      final res = await client
-          .post(
-            Uri.parse(tokenUrl.trim()),
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: {
+      final res = await _postOAuth(client, tokenUrl.trim(), {
               'grant_type': 'refresh_token',
               'refresh_token': current.refreshToken!,
               'client_id': config!.clientId ?? '',
-            },
-          )
-          .timeout(const Duration(seconds: 30));
+            });
       if (res.statusCode < 200 || res.statusCode >= 300) return null;
       final j = jsonDecode(res.body) as Map<String, dynamic>;
       if ((j['access_token']?.toString() ?? '').isEmpty) return null;
@@ -1242,8 +1459,7 @@ class McpService {
               expiresAt: next.expiresAt,
             )
           : next;
-      await storeMcpOAuthToken(serverKey, merged);
-      return merged;
+      return await _storeOAuthToken(serverKey, merged, generation) ? merged : null;
     } catch (_) {
       return null;
     } finally {
@@ -1252,10 +1468,16 @@ class McpService {
   }
 
   /// `Authorization` header for [rs]'s server from the stored OAuth token.
-  /// Empty when no usable token exists (expired tokens are refreshed
-  /// lazily on 401 by the HTTP/SSE transports, not here).
+  /// Expired tokens refresh before use; teardown never starts a refresh.
   Future<Map<String, String>> _authHeaders(_RunningServer rs) async {
-    final token = await mcpOAuthTokenFor(_key(rs.server));
+    if (rs.userDisconnected) return const {};
+    var token = await mcpOAuthTokenFor(_key(rs.server));
+    if (rs.userDisconnected) return const {};
+    if (token != null && token.isExpired && !rs.userDisconnected) {
+      _requireCurrent(rs);
+      token = await refreshMcpOAuthToken(_key(rs.server));
+      _requireCurrent(rs);
+    }
     if (token == null || token.accessToken.isEmpty || token.isExpired) {
       return const {};
     }
@@ -1265,7 +1487,10 @@ class McpService {
   /// Attempt one silent refresh for [rs]'s server. True when a fresh token
   /// is now stored.
   Future<bool> _tryRefreshOAuth(_RunningServer rs) async {
-    return await refreshMcpOAuthToken(_key(rs.server)) != null;
+    _requireCurrent(rs);
+    final token = await refreshMcpOAuthToken(_key(rs.server));
+    _requireCurrent(rs);
+    return token != null;
   }
 
   // ── Legacy SSE transport (item 6) ──────────────────────────────────
@@ -1298,6 +1523,7 @@ class McpService {
       late final _SseMcpChannel channel;
       channel = _SseMcpChannel(
         client: httpClientForTest,
+        onNotification: (message) => _onNotification(rs, message),
         onDestinationRejected: (reason) {
           if (!identical(rs.sseChannel, channel)) return;
           rs.sseDestinationFailure = reason;
@@ -2101,11 +2327,7 @@ class McpService {
     rs.stdoutLines.stream.listen((line) {
       try {
         final json = jsonDecode(line) as Map<String, dynamic>;
-        if (!json.containsKey('id') &&
-            json['method'] == 'notifications/tools/list_changed' &&
-            identical(_running[key], rs)) {
-          unawaited(_rediscoverTools(key));
-        }
+        _onNotification(rs, json);
       } catch (e) { Diag.swallow('mcp_service', e); }
     });
   }
@@ -2278,6 +2500,7 @@ class McpService {
   /// endpoint so the server can terminate that session.
   Future<void> disconnect(String serverName) async {
     final key = _keyForName(serverName);
+    _invalidateOAuth(key);
     _sseDestinationFailures.remove(key);
     final rs = _running.remove(key);
     _cancelReconnect(key);
@@ -2309,6 +2532,219 @@ class McpService {
     } catch (e) { Diag.swallow('mcp_service', e); }
     rs.sseChannel = null;
     if (sessionDelete != null) await sessionDelete;
+  }
+
+  void _onNotification(_RunningServer rs, Map<String, dynamic> message) {
+    if (message.containsKey('id') || !identical(_running[_key(rs.server)], rs) ||
+        rs.userDisconnected) {
+      return;
+    }
+    final method = message['method'];
+    if (method == 'notifications/tools/list_changed') {
+      unawaited(_rediscoverTools(_key(rs.server)));
+    }
+    final catalogs = switch (method) {
+      'notifications/prompts/list_changed' => ['prompts/list'],
+      'notifications/resources/list_changed' => ['resources/list', 'resources/templates/list'],
+      _ => <String>[],
+    };
+    for (final catalog in catalogs) {
+      rs.catalogVersions[catalog] = (rs.catalogVersions[catalog] ?? 0) + 1;
+      rs.catalogs.remove(catalog);
+    }
+  }
+
+  _RunningServer _protocolServer(String name, String capability) {
+    final rs = _running[_keyForName(name)];
+    if (rs == null || !rs.handshakeDone || !_ownerActive(rs.server)) {
+      throw StateError('MCP server is not connected or active');
+    }
+    if (rs.server.transport == 'native') {
+      throw UnsupportedError('Native MCP $capability methods are not implemented');
+    }
+    if (rs.capabilities[capability] is! Map) {
+      throw UnsupportedError('MCP server does not advertise $capability');
+    }
+    return rs;
+  }
+
+  Future<Map<String, dynamic>> _protocolRequest(_RunningServer rs,
+      String method, Map<String, dynamic> params, Duration timeout) async {
+    _requireCurrent(rs);
+    final result = switch (rs.server.transport) {
+      'http' => await _rpcHttp(rs, method, params, timeout: timeout),
+      'sse' => await _rpcSse(rs, method, params, timeout: timeout),
+      _ => await _rpc(rs, method, params, timeout: timeout),
+    };
+    _requireCurrent(rs);
+    if (result.isTimeout) throw TimeoutException('$method timed out');
+    if (result.isError) throw StateError('$method failed: ${result.error}');
+    final payload = result.value;
+    if (payload is! Map<String, dynamic>) {
+      throw FormatException('$method expected an object');
+    }
+    if (utf8.encode(jsonEncode(payload)).length > 4 * 1024 * 1024) {
+      throw StateError('$method response exceeds byte limit');
+    }
+    return payload;
+  }
+
+  /// Capability-gated, bounded, atomic catalogs. Notifications evict snapshots;
+  /// an in-flight invalidated snapshot is rejected, never cached or returned.
+  Future<List<Map<String, dynamic>>> listPrompts(String serverName, {
+    Duration? timeout, bool refresh = false,
+  }) => _listCatalog(serverName, 'prompts', 'prompts/list', 'prompts', 'name', timeout, refresh);
+
+  Future<List<Map<String, dynamic>>> listResources(String serverName, {
+    Duration? timeout, bool refresh = false,
+  }) => _listCatalog(serverName, 'resources', 'resources/list', 'resources', 'uri', timeout, refresh);
+
+  Future<List<Map<String, dynamic>>> listResourceTemplates(String serverName, {
+    Duration? timeout, bool refresh = false,
+  }) => _listCatalog(serverName, 'resources', 'resources/templates/list', 'resourceTemplates', 'uriTemplate', timeout, refresh);
+
+  Future<List<Map<String, dynamic>>> _listCatalog(String name, String capability,
+      String method, String field, String identity, Duration? timeout, bool refresh) async {
+    final rs = _protocolServer(name, capability);
+    if (!refresh && rs.catalogs.containsKey(method)) return rs.catalogs[method]!;
+    final version = rs.catalogVersions[method] ?? 0;
+    final deadline = _now().add(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+    final entries = <Map<String, dynamic>>[];
+    final identities = <String>{};
+    final cursors = <String>{};
+    String? cursor;
+    var bytes = 0;
+    for (var page = 0; page < 50; page++) {
+      final left = _remainingUntil(deadline);
+      if (left <= Duration.zero) throw TimeoutException('$method timed out');
+      final payload = await _protocolRequest(rs, method, {'cursor': ?cursor}, left);
+      if ((rs.catalogVersions[method] ?? 0) != version) {
+        throw StateError('$method invalidated during discovery; retry');
+      }
+      bytes += utf8.encode(jsonEncode(payload)).length;
+      if (bytes > 4 * 1024 * 1024) throw StateError('$method catalog exceeds byte limit');
+      final items = payload[field];
+      if (items is! List) throw FormatException('$method expected $field array');
+      if (entries.length + items.length > 10000) throw StateError('$method catalog exceeds item limit');
+      for (final item in items) {
+        if (item is! Map<String, dynamic>) throw FormatException('$method invalid item');
+        _requiredString(item, identity);
+        _requiredString(item, 'name');
+        _optionalString(item, 'description');
+        _optionalString(item, 'title');
+        if (!identities.add(item[identity] as String)) throw FormatException('$method duplicate identity');
+        if (capability == 'prompts' && item.containsKey('arguments')) {
+          final arguments = item['arguments'];
+          if (arguments is! List) throw const FormatException('Invalid prompt arguments');
+          final names = <String>{};
+          for (final arg in arguments) {
+            if (arg is! Map<String, dynamic>) throw const FormatException('Invalid prompt argument');
+            _requiredString(arg, 'name');
+            _optionalString(arg, 'description');
+            if (!names.add(arg['name'] as String) ||
+                (arg.containsKey('required') && arg['required'] is! bool)) {
+              throw const FormatException('Invalid or duplicate prompt argument');
+            }
+          }
+        }
+        if (capability == 'resources') _optionalString(item, 'mimeType');
+        entries.add(_freeze(item) as Map<String, dynamic>);
+      }
+      final next = payload['nextCursor'];
+      if (next == null && !payload.containsKey('nextCursor')) {
+        final snapshot = List<Map<String, dynamic>>.unmodifiable(entries);
+        rs.catalogs[method] = snapshot;
+        return snapshot;
+      }
+      if (next is! String || next.isEmpty || next.length > 4096 || !cursors.add(next)) {
+        throw FormatException('$method invalid or repeated cursor');
+      }
+      cursor = next;
+    }
+    throw StateError('$method exceeds page limit');
+  }
+
+  static void _requiredString(Map<String, dynamic> value, String key) {
+    if (value[key] is! String || (value[key] as String).isEmpty) {
+      throw FormatException('Expected nonempty $key string');
+    }
+  }
+
+  static void _optionalString(Map<String, dynamic> value, String key) {
+    if (value.containsKey(key) && value[key] is! String) {
+      throw FormatException('Expected $key string');
+    }
+  }
+
+  static dynamic _freeze(dynamic value) => switch (value) {
+    Map<String, dynamic> map => Map<String, dynamic>.unmodifiable(map.map((k, v) => MapEntry(k, _freeze(v)))),
+    List list => List<dynamic>.unmodifiable(list.map(_freeze)),
+    _ => value,
+  };
+
+  static void _resourceContents(dynamic value) {
+    if (value is! Map<String, dynamic>) throw const FormatException('Invalid resource contents');
+    _requiredString(value, 'uri');
+    _optionalString(value, 'mimeType');
+    if (value.containsKey('text') == value.containsKey('blob')) {
+      throw const FormatException('Resource needs exactly one text or blob');
+    }
+    if (value.containsKey('text')) {
+      if (value['text'] is! String) throw const FormatException('Invalid resource text');
+    } else {
+      if (value['blob'] is! String) throw const FormatException('Invalid resource blob');
+      base64Decode(value['blob'] as String);
+    }
+  }
+
+  static void _promptContent(dynamic value) {
+    if (value is! Map<String, dynamic>) throw const FormatException('Invalid prompt content');
+    switch (value['type']) {
+      case 'text':
+        if (value['text'] is! String) throw const FormatException('Invalid prompt text');
+      case 'image':
+      case 'audio':
+        _requiredString(value, 'mimeType');
+        _requiredString(value, 'data');
+        base64Decode(value['data'] as String);
+      case 'resource':
+        _resourceContents(value['resource']);
+      case 'resource_link':
+        _requiredString(value, 'uri');
+        _requiredString(value, 'name');
+      default:
+        throw const FormatException('Unknown prompt content type');
+    }
+  }
+
+  Future<Map<String, dynamic>> getPrompt(String serverName, String name, {
+    Map<String, String> arguments = const {}, Duration? timeout,
+  }) async {
+    if (name.isEmpty) throw ArgumentError('Prompt name is empty');
+    final rs = _protocolServer(serverName, 'prompts');
+    final payload = await _protocolRequest(rs, 'prompts/get', {'name': name, 'arguments': arguments},
+        timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+    _optionalString(payload, 'description');
+    final messages = payload['messages'];
+    if (messages is! List) throw const FormatException('Expected prompt messages array');
+    for (final message in messages) {
+      if (message is! Map<String, dynamic> || !const {'user', 'assistant'}.contains(message['role'])) {
+        throw const FormatException('Invalid prompt message role');
+      }
+      _promptContent(message['content']);
+    }
+    return _freeze(payload) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> readResource(String serverName, String uri, {Duration? timeout}) async {
+    if (uri.isEmpty) throw ArgumentError('Resource URI is empty');
+    final rs = _protocolServer(serverName, 'resources');
+    final payload = await _protocolRequest(rs, 'resources/read', {'uri': uri},
+        timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+    final contents = payload['contents'];
+    if (contents is! List) throw const FormatException('Expected resource contents array');
+    for (final content in contents) { _resourceContents(content); }
+    return _freeze(payload) as Map<String, dynamic>;
   }
 
   /// Call a tool on a connected server. Returns the text result.
@@ -2613,7 +3049,7 @@ class McpService {
         final contentType = res.headers['content-type'] ?? '';
         Map<String, dynamic>? j;
         if (contentType.contains('text/event-stream')) {
-          j = _parseSseResponse(res.body, id);
+          j = _parseSseResponse(res.body, id, rs: rs);
         } else if (res.body.trim().isNotEmpty) {
           try {
             j = jsonDecode(res.body) as Map<String, dynamic>;
@@ -2727,8 +3163,9 @@ class McpService {
   /// Parse a `text/event-stream` body into the JSON-RPC response whose `id`
   /// matches [id]. Handles `event:` lines and multi-line `data:` blocks
   /// (joined per the SSE spec). Returns null if no matching event is found.
-  Map<String, dynamic>? _parseSseResponse(String body, int id) {
+  Map<String, dynamic>? _parseSseResponse(String body, int id, {_RunningServer? rs}) {
     final events = body.split(RegExp(r'\r?\n\r?\n'));
+    Map<String, dynamic>? response;
     for (final event in events) {
       final dataParts = <String>[];
       for (final rawLine in event.split('\n')) {
@@ -2741,10 +3178,11 @@ class McpService {
       final payload = dataParts.join('\n');
       try {
         final decoded = jsonDecode(payload) as Map<String, dynamic>;
-        if (decoded['id']?.toString() == id.toString()) return decoded;
+        if (rs != null && !decoded.containsKey('id')) _onNotification(rs, decoded);
+        if (decoded['id']?.toString() == id.toString()) response = decoded;
       } catch (e) { Diag.swallow('mcp_service', e); }
     }
-    return null;
+    return response;
   }
 
   /// An HTTP server has no process to watch for death, so a connection-
@@ -2963,6 +3401,8 @@ class _RunningServer {
   bool rediscovering = false;
   bool rediscoverAgain = false;
   List<McpToolDef> tools = [];
+  final catalogs = <String, List<Map<String, dynamic>>>{};
+  final catalogVersions = <String, int>{};
   final stdoutLines = _LineStream();
   final stderrLines = <String>[];
 

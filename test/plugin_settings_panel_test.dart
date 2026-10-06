@@ -53,6 +53,7 @@ void main() {
     WidgetTester tester, {
     List<NativePluginConfigField> fields = fields,
     String pluginName = pluginName,
+    VoidCallback? onSaved,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -62,6 +63,7 @@ void main() {
             child: PluginSettingsPanel(
               pluginName: pluginName,
               fields: fields,
+              onSaved: onSaved,
             ),
           ),
         ),
@@ -84,9 +86,9 @@ void main() {
         find.byKey(const ValueKey('plugin-settings-field-api_token')),
         findsOneWidget,
       );
-      // Accessible labels + helper text render.
-      expect(find.text('Endpoint'), findsOneWidget);
-      expect(find.text('API Token'), findsOneWidget);
+      // Each field has an external label and an input hint.
+      expect(find.text('Endpoint'), findsNWidgets(2));
+      expect(find.text('API Token'), findsNWidgets(2));
       expect(find.text('Base URL of the API'), findsOneWidget);
       expect(find.text('From the dashboard'), findsOneWidget);
     });
@@ -108,7 +110,7 @@ void main() {
       expect(plain.obscureText, isFalse);
     });
 
-    testWidgets('every input carries a non-empty accessible label', (
+    testWidgets('every input has an external label and matching hint', (
       tester,
     ) async {
       await pumpPanel(
@@ -125,10 +127,11 @@ void main() {
       final named = tester.widget<TextField>(
         find.byKey(const ValueKey('plugin-settings-field-named')),
       );
-      // An empty declared label falls back to the key — never unlabeled.
-      expect(raw.decoration!.labelText, isNotEmpty);
-      expect(raw.decoration!.labelText, 'raw_key');
-      expect(named.decoration!.labelText, 'Named field');
+      // An empty declared label falls back to the key in both places.
+      expect(raw.decoration!.hintText, 'raw_key');
+      expect(named.decoration!.hintText, 'Named field');
+      expect(find.text('raw_key'), findsNWidgets(2));
+      expect(find.text('Named field'), findsNWidgets(2));
     });
 
     testWidgets('the save action meets the 44dp tap-target invariant', (
@@ -166,7 +169,9 @@ void main() {
     testWidgets('save routes non-secret to prefs, secret to secure storage', (
       tester,
     ) async {
-      await pumpPanel(tester);
+      var savedCallbacks = 0;
+      await pumpPanel(tester, onSaved: () => savedCallbacks++);
+      expect(savedCallbacks, 0);
 
       await tester.enterText(
         find.byKey(const ValueKey('plugin-settings-field-endpoint')),
@@ -197,6 +202,7 @@ void main() {
       expect(await secure.read(key: tokenSecureKey), 'sk-secret-77');
       // Honest save feedback.
       expect(find.byKey(const ValueKey('plugin-settings-saved')), findsOneWidget);
+      expect(savedCallbacks, 1);
     });
   });
 

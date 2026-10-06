@@ -228,12 +228,21 @@ void main() {
   });
 
   group('the auth badge is not colour-only', () {
+    // The badge's icon assertions are scoped to the badge's own tooltip: the
+    // editor header's SAVED pill legitimately uses the same check_circle
+    // icon, so an unscoped byIcon finder can no longer tell the two apart.
+    Finder badgeIcon(String tooltip, IconData icon) => find.descendant(
+          of: find.byTooltip(tooltip),
+          matching: find.byIcon(icon),
+        );
+
     testWidgets('signed in: its own shape and a semantics label',
         (tester) async {
       setSurface(tester, const Size(1200, 900));
       await pumpStudio(tester);
 
-      expect(find.byIcon(Icons.check_circle), findsOneWidget);
+      expect(badgeIcon('Signed in to GitHub', Icons.check_circle),
+          findsOneWidget);
       expect(semanticLabels(tester), contains('Signed in to GitHub'));
     });
 
@@ -246,8 +255,10 @@ void main() {
       setSurface(tester, const Size(1200, 900));
       await pumpStudio(tester);
 
-      expect(find.byIcon(Icons.cancel), findsOneWidget);
-      expect(find.byIcon(Icons.check_circle), findsNothing);
+      expect(badgeIcon('Not signed in to GitHub', Icons.cancel),
+          findsOneWidget);
+      expect(badgeIcon('Not signed in to GitHub', Icons.check_circle),
+          findsNothing);
       expect(semanticLabels(tester), contains('Not signed in to GitHub'));
     });
   });

@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
+import 'widgets/aether_primitives.dart';
 
 /// WS2: live progress for plugin installs (and MCP runtime installs).
 ///
@@ -133,18 +134,17 @@ class _ProgressLogViewState extends State<ProgressLogView> {
   Widget build(BuildContext context) {
     return Container(
       height: widget.height,
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Aether.surfaceAlt,
-        borderRadius: BorderRadius.circular(8),
+        color: Aether.codeBg,
+        borderRadius: BorderRadius.circular(AetherRadius.rMd),
+        border: Border.all(color: Aether.hairline),
       ),
       child: widget.lines.isEmpty
-          ? Text(
-              'Waiting for output…',
-              style: TextStyle(
-                fontSize: 11,
-                fontFamily: Aether.mono,
-                color: Aether.textMuted,
+          ? Center(
+              child: Text(
+                'Waiting for output…',
+                style: AetherType.mono.copyWith(color: Aether.textMuted),
               ),
             )
           : Scrollbar(
@@ -155,10 +155,9 @@ class _ProgressLogViewState extends State<ProgressLogView> {
                 itemCount: widget.lines.length,
                 itemBuilder: (context, i) => Text(
                   widget.lines[i],
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontFamily: Aether.mono,
-                    height: 1.35,
+                  style: AetherType.mono.copyWith(
+                    height: 1.4,
+                    color: Aether.text,
                   ),
                 ),
               ),
@@ -197,6 +196,15 @@ class _PluginInstallProgressSheetState
   }
 
   @override
+  void didUpdateWidget(PluginInstallProgressSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.progress != widget.progress) {
+      oldWidget.progress.removeListener(_onChange);
+      widget.progress.addListener(_onChange);
+    }
+  }
+
+  @override
   void dispose() {
     widget.progress.removeListener(_onChange);
     super.dispose();
@@ -209,106 +217,115 @@ class _PluginInstallProgressSheetState
   @override
   Widget build(BuildContext context) {
     final p = widget.progress;
-    return SafeArea(
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: SingleChildScrollView(
-        padding: EdgeInsets.fromLTRB(
-          18,
-          10,
-          18,
-          18 + MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: Column(
+        child: MediaQuery.removeViewInsets(
+          context: context,
+          removeBottom: true,
+        child: AetherSheet(
+      title: widget.title,
+      actions: [
+        if (p.done)
+          AetherPrimaryButton(
+            label: p.ok ? 'Done' : 'Close',
+            onPressed: () => Navigator.of(context).pop(),
+          )
+        else
+          SizedBox(
+            width: double.infinity,
+            child: TextButton(
+            style: TextButton.styleFrom(
+              foregroundColor: Aether.textMuted,
+              minimumSize: const Size(0, 44),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            ),
+            child: const Text('Close — install continues', textAlign: TextAlign.center),
+            onPressed: () => Navigator.of(context).pop(),
+            ),
+          ),
+      ],
+      child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Drag handle.
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 10),
-                decoration: BoxDecoration(
-                  color: Aether.textMuted.withValues(alpha: 0.4),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            Text(
-              widget.title,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-            ),
             if (widget.subtitle != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                widget.subtitle!,
-                style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-              ),
+              Text(widget.subtitle!, style: AetherType.bodyMuted),
+              const SizedBox(height: 12),
             ],
-            const SizedBox(height: 10),
             Row(
               children: [
+                if (!p.done)
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.8,
+                      valueColor: AlwaysStoppedAnimation<Color>(Aether.accent),
+                    ),
+                  )
+                else
+                  Icon(
+                    p.ok ? Icons.check_circle : Icons.error,
+                    size: 18,
+                    color: p.ok ? Aether.successLight : Aether.danger,
+                  ),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     p.phase,
-                    style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+                    style: AetherType.body.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
-                if (!p.done) ...[
-                  const SizedBox(width: 8),
-                  const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 1.6),
-                  ),
-                ] else
-                  Icon(
-                    p.ok ? Icons.check_circle : Icons.error,
-                    size: 16,
-                    color: p.ok ? Aether.successLight : Aether.danger,
-                  ),
               ],
             ),
-            const SizedBox(height: 6),
-            if (p.progress == null)
-              const LinearProgressIndicator()
-            else
-              LinearProgressIndicator(value: p.progress),
             const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(AetherRadius.rPill),
+              child: LinearProgressIndicator(
+                value: p.done ? (p.progress ?? 0) : p.progress,
+                minHeight: 6,
+                backgroundColor: Aether.surfaceAlt,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  p.done && !p.ok ? Aether.danger : Aether.accent,
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
             ProgressLogView(lines: p.lines),
             if (p.done) ...[
-              const SizedBox(height: 10),
-              Text(
-                p.summary,
-                style: TextStyle(
-                  fontSize: 12.5,
-                  color: p.ok ? Aether.successLight : Aether.danger,
+              const SizedBox(height: 12),
+              AetherCard(
+                color: (p.ok ? Aether.success : Aether.danger).withValues(
+                  alpha: 0.06,
+                ),
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      p.ok ? Icons.check_circle : Icons.error_outline,
+                      size: 16,
+                      color: p.ok ? Aether.successLight : Aether.dangerC,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        p.summary,
+                        style: AetherType.body.copyWith(
+                          color: p.ok ? Aether.successLight : Aether.dangerC,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
-            const SizedBox(height: 12),
-            if (p.done)
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(),
-                style: FilledButton.styleFrom(
-                  backgroundColor: p.ok ? Aether.accent : Aether.surfaceRaised,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                child: Text(
-                  p.ok ? 'Done' : 'Close',
-                  style: const TextStyle(fontSize: 13.5),
-                ),
-              )
-            else
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Close — install continues'),
-              ),
           ],
+      ),
+        ),
         ),
       ),
     );

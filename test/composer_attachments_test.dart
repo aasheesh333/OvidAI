@@ -355,6 +355,10 @@ void main() {
   test('scheduled artifact stays in its workspace and leaves composer draft unsent', () async {
     agent.schedules.stopped = false;
     addTearDown(() => agent.schedules.stopped = false);
+    // render_html awaits the coalesced session write. The file-level default
+    // suspends it (no wall-clock timers), which leaves that future pending and
+    // stalls the tool until its timeout; this test exercises the real write.
+    app.suspendCoalescedPersistenceForTest = false;
     await attach('unsent.txt', 'private draft');
     final draftPath = agent.pendingAttachments.single.path;
     final task = agent.schedules.create({

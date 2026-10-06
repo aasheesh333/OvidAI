@@ -110,8 +110,13 @@ void main() {
     final src = File('lib/core/agent_service.dart').readAsStringSync();
 
     test('the "the user pinned this chat" branch is gated on the flag', () {
-      // The false claim must only be reachable when the flag is set.
-      expect(src, contains(': s.workspaceFolderPinned ?'));
+      // The false claim must only be reachable when the flag is set. The
+      // ternary may wrap its `?` onto the next line — gate on the shape,
+      // not the exact line-breaking.
+      expect(
+        src,
+        contains(RegExp(r':\s*s\.workspaceFolderPinned\s*\?')),
+      );
       expect(src, contains('The user pinned this chat to the folder above'));
     });
 

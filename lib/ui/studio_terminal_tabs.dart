@@ -9,6 +9,7 @@ import '../core/studio_terminal.dart';
 import '../core/theme.dart';
 import 'studio_errors.dart';
 import 'studio_layout.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Test seam: replaces the sandbox spawner for the Studio terminal so host
 /// widget tests can drive a real host shell without a native sandbox.
@@ -92,6 +93,10 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
     return Column(
       children: [
         _strip(context),
+        // The hairline under the strip is its own 1px row: a bottom Border on
+        // the strip's Container counts as padding (Decoration.padding) and
+        // squeezed the strip's 44dp buttons to 43dp.
+        Divider(height: 1, thickness: 1, color: Aether.hairline),
         Expanded(
           child: _terms.isEmpty
               ? const SizedBox.shrink()
@@ -102,9 +107,23 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
   }
 
   /// Terminal tab strip. Doubles as the resize handle, so the 44dp touch
-  /// target is doing real work instead of eating vertical space twice.
+  /// target is doing real work instead of eating vertical space twice. The
+  /// tab selector itself renders through [AetherSegmentedControl]; per-tab
+  /// close is a dedicated action for the active tab (so the segmented control
+  /// stays uniform and keyboard-accessible).
   Widget _strip(BuildContext context) {
     final scale = MediaQuery.textScalerOf(context).scale(1.0);
+    // Build segmented options from the live shell list — a busy terminal gets
+    // a sync icon, idle gets a chevron. Labels stay short ("bash N") so a
+    // handful of terminals fit without wrapping on compact widths.
+    final options = <({int value, String label, IconData? icon})>[
+      for (var i = 0; i < _terms.length; i++)
+        (
+          value: i,
+          label: 'bash ${i + 1}',
+          icon: _terms[i].shell.busy ? Icons.sync : Icons.chevron_right,
+        ),
+    ];
     final strip = Material(
       type: MaterialType.canvas,
       color: Aether.surface,
@@ -113,101 +132,60 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
         onVerticalDragUpdate: widget.onResizeDrag == null
             ? null
             : (d) => widget.onResizeDrag!(d.delta.dy),
-        child: SizedBox(
+        child: Container(
           key: studioTerminalHandleKey,
+          // Tight at exactly the 44dp tap-target budget: any border or
+          // vertical padding here comes out of the buttons' height (a
+          // Container counts a bottom border as padding).
           height: math.max(kStudioTapTarget, kStudioTapTarget * scale),
-          child: Row(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: LayoutBuilder(builder: (context, constraints) => Row(
             children: [
-              const SizedBox(width: 10),
+              if (constraints.maxWidth >= 560 * math.max(1.0, scale)) ...[
               Icon(Icons.terminal, size: 14, color: Aether.textMuted),
-              const SizedBox(width: 6),
+              const SizedBox(width: 8),
               Semantics(
                 header: true,
                 child: Text(
                   'TERMINALS',
-                  style: TextStyle(
-                    fontSize: kStudioMinFontSize,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.6,
+                  style: AetherType.label.copyWith(
+                    letterSpacing: 1.2,
                     color: Aether.textFaint,
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 12),
+              ],
               Expanded(
-                child: ListView.builder(
+                child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
-                  itemCount: _terms.length,
-                  itemBuilder: (_, i) {
-                    final t = _terms[i];
-                    final sel = i == _active;
-                    return AnimatedBuilder(
-                      animation: t.shell,
-                      builder: (_, _) {
-                        final busy = t.shell.busy;
-                        return StudioTapTarget(
-                          onTap: () => setState(() => _active = i),
-                          label: 'bash ${i + 1}'
-                              '${busy ? ', running a command' : ''}'
-                              '${sel ? ', active' : ''}',
-                          selected: sel,
-                          minWidth: 0,
-                          child: Container(
-                            // No vertical margin and no Border.all: the strip
-                            // is exactly the 44dp tap-target budget, and an
-                            // 8dp inset plus a 1px border squeezed the close
-                            // button to 34dp and then 42dp. Selection is
-                            // carried by the fill, the weight and the
-                            // `selected` semantics flag — not by colour alone.
-                            padding: const EdgeInsets.only(left: 9),
-                            margin: const EdgeInsets.only(right: 4),
-                            decoration: BoxDecoration(
-                              color:
-                                  sel ? Aether.surfaceAlt : Colors.transparent,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  busy ? Icons.sync : Icons.chevron_right,
-                                  size: 13,
-                                  color: busy
-                                      ? Aether.accent
-                                      : sel
-                                          ? Aether.textMuted
-                                          : Aether.textFaint,
-                                ),
-                                const SizedBox(width: 4),
-                                Text(
-                                  'bash ${i + 1}',
-                                  style: TextStyle(
-                                    fontFamily: Aether.mono,
-                                    fontFamilyFallback: kStudioMonoFallback,
-                                    fontSize: kStudioMinFontSize,
-                                    fontWeight:
-                                        sel ? FontWeight.w700 : FontWeight.w400,
-                                    color: sel
-                                        ? Aether.text
-                                        : Aether.textFaint,
-                                  ),
-                                ),
-                                StudioIconButton(
-                                  icon: Icons.close,
-                                  tooltip: 'Close terminal ${i + 1}',
-                                  iconSize: 13,
-                                  onPressed: () => _closeTerminal(i),
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    );
-                  },
+                  child: AnimatedBuilder(
+                    // Rebuild the segmented control whenever any shell's busy
+                    // state flips so the per-option icon stays in sync.
+                    animation: Listenable.merge(
+                      [for (final t in _terms) t.shell],
+                    ),
+                    builder: (_, _) {
+                      return AetherSegmentedControl<int>(
+                        options: options,
+                        value: _active.clamp(0, _terms.length - 1),
+                        onChanged: (v) => setState(() => _active = v),
+                      );
+                    },
+                  ),
                 ),
               ),
-              // New terminal button.
+              // Close the currently active terminal (the segmented control is
+              // uniform; close is a separate action on the active tab so it is
+              // reachable with a single tap without hunting through per-pill
+              // controls).
+              if (_terms.isNotEmpty)
+                StudioIconButton(
+                  icon: Icons.close,
+                  tooltip: 'Close terminal ${_active + 1}',
+                  iconSize: 16,
+                  onPressed: () => _closeTerminal(_active),
+                ),
               StudioIconButton(
                 icon: Icons.add,
                 tooltip: 'New terminal',
@@ -225,9 +203,8 @@ class _StudioTerminalTabsState extends State<StudioTerminalTabs> {
                   iconSize: 20,
                   onPressed: widget.onToggleCollapse,
                 ),
-              const SizedBox(width: 2),
             ],
-          ),
+          )),
         ),
       ),
     );

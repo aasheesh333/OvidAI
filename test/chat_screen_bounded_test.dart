@@ -217,6 +217,10 @@ void main() {
     await tester.enterText(ownAnswer, 'Custom');
     await tester.tap(find.text('Option B'));
     await tester.pump();
+    // The approval dock is a bounded scroll view; reveal the action before
+    // tapping so the selection is committed.
+    await tester.ensureVisible(find.text('Answer'));
+    await tester.pump();
     await tester.tap(find.text('Answer'));
     expect(req.answers['same-id'], 'Option B');
     await tester.pump();

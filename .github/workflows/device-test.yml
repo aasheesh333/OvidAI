@@ -1,14 +1,12 @@
-name: Ovid Device Test (Free Emulator)
+name: Ovid Legacy Debug Emulator Diagnostics
 
 on:
   workflow_dispatch:
-    inputs:
-      minutes:
-        description: 'How long to run the app (minutes)'
-        default: '6'
-        required: false
   push:
     branches: [ci/verified-android-build-20260827]
+
+permissions:
+  contents: read
 
 jobs:
   emulator-test:
@@ -26,7 +24,7 @@ jobs:
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       # KVM works on GitHub's free ubuntu runners — boot takes ~2 min
       # unlike the 50-min TCG slog on the local box.
@@ -48,19 +46,32 @@ jobs:
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: stable
+          flutter-version: '3.47.4'
           cache: true
 
-      - name: Lower targetSdk for the test build (exec data-dir workaround)
-        # Android 10+ with targetSdk >= 29 blocks exec() of files in the
-        # app's private dir (avc: denied {execute_no_trans}), so the
-        # sandbox bash can't start on an AOSP emulator. Real OEM devices
-        # (ColorOS et al.) allow it, so only the TEST build uses 28.
-        run: |
-          sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 28/' \
-            android/app/build.gradle.kts
+      - name: Resolve locked dependencies
+        run: flutter pub get --enforce-lockfile
 
-      - name: Build debug APK (with x86_64 so the emulator can run it)
-        run: flutter build apk --debug --target-platform android-x64
+      - name: Test release inventory gates
+        run: python3 -m unittest discover -s tool -p 'release_*test.py'
+
+      - name: Package native sandbox bootstrap (per-ABI jniLibs payload)
+        run: bash tool/prepare_bootstrap.sh
+
+      # Flutter's default ABI filters include all three ABIs even when only
+      # android-x64 is requested. Build all three to avoid partial ABI contents.
+      - name: Build universal debug APK (includes x86_64)
+        run: flutter build apk --debug
+
+      - name: Gate actual emulator artifact inventory
+        run: >-
+          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-debug.apk
+          --mode debug --expected-target 28
+          --output test-output/debug-inventory.json
+
+      - name: Native host tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
 
       # Reactivecircus runner handles SDK install, AVD creation, boot,
       # and gives us `adb` ready to go in later steps.
@@ -76,26 +87,32 @@ jobs:
             -noaudio -no-boot-anim -camera-back none -memory 2048
           disable-animations: true
           script: |
-            set -x
+            set -eu
+            mkdir -p test-output
+            adb shell getconf PAGE_SIZE > test-output/page-size.txt
+            adb shell getprop ro.product.cpu.abilist > test-output/device-abis.txt
             adb install build/app/outputs/flutter-apk/app-debug.apk
             adb shell monkey -p com.dhanuk.ovidai -c android.intent.category.LAUNCHER 1
             sleep 150
-            mkdir -p test-output
             # B. Vibe-coder simulation inside the sandbox: exercise every
             # core tool the agent uses (node, npm, python, git, curl).
             # base64-encoded to keep YAML/shell quoting sane.
             VIBE_B64="IyEvZGF0YS9kYXRhL2NvbS5kaGFudWsub3ZpZGFpL2ZpbGVzL3NhbmRib3gvYmluL2Jhc2gKZXhwb3J0IFBBVEg9L2RhdGEvZGF0YS9jb20uZGhhbnVrLm92aWRhaS9maWxlcy9zYW5kYm94L2JpbjokUEFUSApjZCAvZGF0YS9kYXRhL2NvbS5kaGFudWsub3ZpZGFpL2ZpbGVzL3NhbmRib3gvaG9tZSAyPi9kZXYvbnVsbCB8fCBjZCAvdG1wCmVjaG8gIj09IHZlcnNpb25zID09Ijsgbm9kZSAtLXZlcnNpb247IG5wbSAtLXZlcnNpb247IHB5dGhvbiAtLXZlcnNpb247IGdpdCAtLXZlcnNpb247IGN1cmwgLS12ZXJzaW9uIHwgaGVhZCAtMQplY2hvICI9PSBucG0gPT0iOyBybSAtZiBwYWNrYWdlLmpzb247IG5wbSBpbml0IC15ID4vZGV2L251bGwgMj4mMSAmJiBucG0gaW5zdGFsbCAtLW5vLWF1ZGl0IC0tbm8tZnVuZCBpcy1vZGRAMy4wLjEgMj4mMSB8IHRhaWwgLTEKZWNobyAiPT0gcHl0aG9uIHBpcCA9PSI7IHBpcCBpbnN0YWxsIC0tcXVpZXQgcmVxdWVzdHMgMj4mMSB8IHRhaWwgLTE7IHB5dGhvbiAtYyAiaW1wb3J0IHJlcXVlc3RzOyBwcmludCgncmVxdWVzdHMgb2snLCByZXF1ZXN0cy5fX3ZlcnNpb25fXykiCmVjaG8gIj09IG5vZGUgcnVuID09Ijsgbm9kZSAtZSAiY29uc29sZS5sb2coJ25vZGUgcnVuczonLCAyKzIpIgplY2hvICI9PSBnaXQgPT0iOyBybSAtcmYgdmliZTsgZ2l0IGluaXQgLXEgdmliZSAmJiBjZCB2aWJlICYmIGdpdCBjb25maWcgdXNlci5lbWFpbCB0QHQgJiYgZ2l0IGNvbmZpZyB1c2VyLm5hbWUgdCAmJiBlY2hvIGhpID4gYS50eHQgJiYgZ2l0IGFkZCAuICYmIGdpdCBjb21taXQgLXEgLW0gdmliZSAmJiBnaXQgbG9nIC0tb25lbGluZQplY2hvICI9PSBjdXJsIGh0dHBzID09IjsgY3VybCAtZnNTTCBodHRwczovL3BhY2thZ2VzLWNmLnRlcm11eC5kZXYvYXB0L3Rlcm11eC1tYWluL2Rpc3RzL3N0YWJsZS9SZWxlYXNlIC1vIC9kZXYvbnVsbCAtdyAnbWlycm9yIGh0dHAgJXtodHRwX2NvZGV9XG4nICYmIGVjaG8gY3VybC1vawplY2hvIEFMTF9ET05FCg=="
-            adb shell "run-as com.dhanuk.ovidai sh -c 'echo $VIBE_B64 > files/vibe.b64; cd files; export LD_LIBRARY_PATH=/data/data/com.dhanuk.ovidai/files/sandbox/lib; export PATH=/data/data/com.dhanuk.ovidai/files/sandbox/bin; export HOME=/data/data/com.dhanuk.ovidai/files/sandbox/home; export TMPDIR=/data/data/com.dhanuk.ovidai/files/sandbox/tmp; mkdir -p \$HOME \$TMPDIR; /data/data/com.dhanuk.ovidai/files/sandbox/bin/base64 -d vibe.b64 > vibe.sh && /data/data/com.dhanuk.ovidai/files/sandbox/bin/bash vibe.sh'" > test-output/vibe-out.txt 2>&1 || true
+            # run-as is a diagnostic domain, not production app-process evidence.
+            status=0
+            adb shell "run-as com.dhanuk.ovidai sh -c 'echo $VIBE_B64 > files/vibe.b64; cd files; export LD_LIBRARY_PATH=/data/data/com.dhanuk.ovidai/files/sandbox/lib; export PATH=/data/data/com.dhanuk.ovidai/files/sandbox/bin; export HOME=/data/data/com.dhanuk.ovidai/files/sandbox/home; export TMPDIR=/data/data/com.dhanuk.ovidai/files/sandbox/tmp; mkdir -p \$HOME \$TMPDIR; /data/data/com.dhanuk.ovidai/files/sandbox/bin/base64 -d vibe.b64 > vibe.sh && /data/data/com.dhanuk.ovidai/files/sandbox/bin/bash -e -o pipefail vibe.sh'" > test-output/vibe-out.txt 2>&1 || status=$?
             cat test-output/vibe-out.txt
             adb logcat -d > test-output/full.logcat.txt 2>&1 || true
             adb shell run-as com.dhanuk.ovidai ls files/sandbox/bin > test-output/sandbox-bin.txt 2>&1 || true
             adb exec-out screencap -p > test-output/screen.png 2>/dev/null || true
-            echo TEST_COMPLETE_MARKER
+            exit "$status"
 
       - name: Upload test artifacts (screenshot + log)
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: ovid-device-test
-          path: test-output/
+          path: |
+            test-output/
+            build/app/test-results/testDebugUnitTest/
           if-no-files-found: ignore

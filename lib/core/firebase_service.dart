@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'diag.dart';
 import 'account_service.dart';
 import 'account_session.dart';
+import 'state.dart';
 import 'image_studio.dart';
 import 'auth_identity.dart';
 import 'auth_phone_flow.dart';
@@ -31,7 +32,9 @@ class FirebaseService extends ChangeNotifier {
     Future<void> Function()? configure,
     AuthIdentity? identity,
     User? initialUser,
+    Stream<User?>? userChanges,
   }) : _configureForTest = configure,
+       _userChangesForTest = userChanges,
        _authIdentity = identity,
        _user = initialUser {
     identity?.observeUser(initialUser);
@@ -45,11 +48,13 @@ class FirebaseService extends ChangeNotifier {
     required Future<void> Function() configure,
     AuthIdentity? identity,
     User? initialUser,
+    Stream<User?>? userChanges,
   }) : this._(
          initializeApp: initializeApp,
          configure: configure,
          identity: identity,
-         initialUser: initialUser,
+          initialUser: initialUser,
+          userChanges: userChanges,
        );
 
   static const _consentKey = 'ovid_telemetry_consent'; // 'yes' | 'no' | null
@@ -65,7 +70,10 @@ class FirebaseService extends ChangeNotifier {
   bool get isSignedIn => _user != null && !_user!.isAnonymous;
   final _accountSession = AccountSession();
   bool get accountReady =>
-      isSignedIn && (!accountService.enabled || _accountSession.ready);
+      isSignedIn &&
+      AppState.I.sessionAccountReady &&
+      AppState.I.sessionAccountId == 'firebase:$uid' &&
+      (!accountService.enabled || _accountSession.ready);
   String? get accountError => _accountSession.error;
   late final accountService = AccountService(
     idToken: (force) => getIdToken(forceRefresh: force),
@@ -106,6 +114,7 @@ class FirebaseService extends ChangeNotifier {
   Future<void>? _initialization;
   final Future<void> Function()? _initializeApp;
   final Future<void> Function()? _configureForTest;
+  final Stream<User?>? _userChangesForTest;
 
   /// Initialize Firebase if a config is present. Safe to call on all builds.
   Future<void> initialize() {
@@ -138,7 +147,10 @@ class FirebaseService extends ChangeNotifier {
     if (_configureForTest != null) {
       try {
         await _configureForTest();
-        notifyListeners();
+        _authSub ??= _userChangesForTest?.listen((user) {
+          unawaited(_onUser(user));
+        });
+        await _onUser(_user);
         return;
       } catch (_) {
         _available = false;
@@ -153,8 +165,10 @@ class FirebaseService extends ChangeNotifier {
           androidProvider: AndroidProvider.playIntegrity,
         );
       }
-      _authSub ??= FirebaseAuth.instance.userChanges().listen(_onUser);
-      _onUser(_identity.currentUser);
+      _authSub ??= FirebaseAuth.instance.userChanges().listen((user) {
+        unawaited(_onUser(user));
+      });
+      await _onUser(_identity.currentUser);
 
       // Route Flutter + platform errors to Crashlytics only when consented.
       if (_consentGiven) _attachCrashHandlers();
@@ -165,15 +179,47 @@ class FirebaseService extends ChangeNotifier {
     }
   }
 
-  void _onUser(User? user) {
+  Future<void> _onUser(User? user, {AuthIntent? intent}) async {
     _identity.observeUser(user);
     final changed = _user?.uid != user?.uid;
     if (changed) {
       _authRevision++;
     }
-    if (changed) ImageStudio.I.clearCapabilities();
+    // A successful reauthentication is a new image owner even for the same UID.
+    // Keep the auth revision stable: an in-progress phone flow captures it.
+    // Ordinary user/token refresh events have no intent and retain image work.
+    if (changed ||
+        user == null ||
+        user.isAnonymous ||
+        intent == AuthIntent.reauthenticate) {
+      ImageStudio.I.bindAccount(null);
+    }
     _user = user;
     if (changed || user == null) _accountSession.clear();
+    final revision = _authRevision;
+    // This boundary invalidates sessions/runs/search synchronously before any
+    // auth listener can expose the replacement account.
+    final transition = AppState.I.transitionSessionAccount(
+      user == null || user.isAnonymous ? 'guest' : 'firebase:${user.uid}',
+    );
+    try {
+      await transition;
+    } catch (e) {
+      Diag.swallow('account.sessions', e);
+    }
+    if (revision != _authRevision ||
+        (intent != null && _identity.currentUser?.uid != user?.uid)) {
+      return;
+    }
+    if (accountReady && ImageStudio.I.accountId != user?.uid) {
+      ImageStudio.I.bindAccount(user!.uid);
+      try {
+        await ImageStudio.I.loadReceipts();
+      } catch (e) {
+        Diag.swallow('account.image_receipts', e);
+      }
+      if (revision != _authRevision) return;
+    }
     notifyListeners();
     if (isSignedIn && accountService.enabled && !_accountSession.ready) {
       unawaited(retryAccountLogin());
@@ -183,10 +229,31 @@ class FirebaseService extends ChangeNotifier {
   Future<void> retryAccountLogin() async {
     final u = _user;
     if (u == null || u.isAnonymous || !accountService.enabled) return;
+    final revision = _authRevision;
+    _accountSession.clear();
+    ImageStudio.I.bindAccount(null);
+    await AppState.I.transitionSessionAccount('firebase:${u.uid}');
+    if (revision != _authRevision ||
+        _user?.uid != u.uid ||
+        !AppState.I.sessionAccountReady) {
+      return;
+    }
     await _accountSession.bind(u.uid, () async {
       final result = await accountService.acknowledgeLogin();
-      if (result.allowsLogin) lastDeletionReceipt = null;
+      if (revision == _authRevision && result.allowsLogin) {
+        lastDeletionReceipt = null;
+      }
     });
+    if (revision != _authRevision) return;
+    if (accountReady) {
+      ImageStudio.I.bindAccount(u.uid);
+      try {
+        await ImageStudio.I.loadReceipts();
+      } catch (e) {
+        Diag.swallow('account.image_receipts', e);
+      }
+      if (revision != _authRevision) return;
+    }
     notifyListeners();
   }
 
@@ -198,29 +265,29 @@ class FirebaseService extends ChangeNotifier {
     if (intent == AuthIntent.reauthenticate) _identity.invalidateProof();
     final error = await _identity.social(providerId, intent);
     if (error == null) {
-      _onUser(_identity.currentUser);
+      await _onUser(_identity.currentUser, intent: intent);
     }
     return error;
   }
 
   PhoneAuthFlow createPhoneFlow(AuthIntent intent) {
-    final expectedUid = FirebaseAuth.instance.currentUser?.uid;
+    final expectedUid = _identity.currentUser?.uid;
     if (intent == AuthIntent.reauthenticate) _identity.invalidateProof();
     return PhoneAuthFlow(
-      currentUid: () => FirebaseAuth.instance.currentUser?.uid,
+      currentUid: () => _identity.currentUser?.uid,
       currentSession: () => _authRevision,
       verify: (number, token, callbacks) async {
         if (!_available || !authProviders.isEnabled('phone')) {
           throw FirebaseAuthException(code: 'provider-not-configured');
         }
-        if (FirebaseAuth.instance.currentUser?.uid != expectedUid) {
+        if (_identity.currentUser?.uid != expectedUid) {
           throw FirebaseAuthException(code: 'account-changed');
         }
         if (intent == AuthIntent.link) _identity.requireLinkProof();
         if (intent == AuthIntent.reauthenticate && number != phoneNumber) {
           throw FirebaseAuthException(code: 'user-mismatch');
         }
-        await FirebaseAuth.instance.verifyPhoneNumber(
+        await _identity.auth().verifyPhoneNumber(
           phoneNumber: number,
           timeout: const Duration(seconds: 60),
           forceResendingToken: token,
@@ -232,7 +299,7 @@ class FirebaseService extends ChangeNotifier {
       },
       apply: (credential) async {
         await _identity.phone(credential, intent, expectedUid);
-        _onUser(_identity.currentUser);
+        await _onUser(_identity.currentUser, intent: intent);
       },
     );
   }
@@ -246,7 +313,9 @@ class FirebaseService extends ChangeNotifier {
       );
     }
     _identity.consumeDeletionProof();
+    final revision = _authRevision;
     final result = await accountService.requestDeletion(requestId);
+    if (revision != _authRevision) return result;
     if (result.isPending) {
       lastDeletionReceipt = result;
       // The retained server request is the success criterion; signing out only
@@ -311,10 +380,12 @@ class FirebaseService extends ChangeNotifier {
   /// Used to authenticate to the Ovid Cloud mint endpoint, which verifies it
   /// against Google's public keys. [forceRefresh] re-mints a near-expiry token.
   Future<String?> getIdToken({bool forceRefresh = false}) async {
+    final revision = _authRevision;
     final u = _user ?? FirebaseAuth.instance.currentUser;
     if (u == null) return null;
     try {
-      return await u.getIdToken(forceRefresh);
+      final token = await u.getIdToken(forceRefresh);
+      return revision == _authRevision && _user?.uid == u.uid ? token : null;
     } catch (e) {
       debugPrint('getIdToken failed: $e');
       return null;
@@ -349,11 +420,13 @@ class FirebaseService extends ChangeNotifier {
     if (_identity.busy) return;
     _identity.cancelPending();
     _authRevision++;
-    ImageStudio.I.clearCapabilities();
+    ImageStudio.I.bindAccount(null);
     if (!_available) return;
     _accountSession.clear();
     _user = null;
+    final transition = AppState.I.transitionSessionAccount('guest');
     notifyListeners();
+    await transition;
     await FirebaseAuth.instance.signOut();
     try {
       await GoogleSignIn().signOut();

@@ -150,7 +150,16 @@ void main() {
       expect(find.byTooltip('Add marketplace'), findsNothing);
       expect(find.byTooltip('Install plugin from GitHub'), findsNothing);
       expect(find.byTooltip('Refresh marketplaces'), findsOneWidget);
-      expect(find.byIcon(Icons.add), findsOneWidget);
+      // Exactly one "+" in the AppBar. The redesign's empty-state CTAs also
+      // carry add icons, but every one of them routes to the same sheet, so
+      // the contract is pinned on the AppBar entry specifically.
+      expect(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.byIcon(Icons.add),
+        ),
+        findsOneWidget,
+      );
       // Empty MCP list shows the "+" hint.
       expect(find.text('Use + to add from GitHub'), findsOneWidget);
       expect(tester.takeException(), isNull);

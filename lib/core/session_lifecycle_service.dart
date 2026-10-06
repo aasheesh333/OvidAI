@@ -111,13 +111,17 @@ class SessionLifecycleService {
     required SessionStartReason reason,
   }) {
     final token = _bootTokenProvider();
-    final key = '${_generationFor(token)}:${session.id}';
+    final account = AppState.I.sessionAccountToken;
+    final key =
+        '${_generationFor(token)}:${identityHashCode(account)}:${session.id}';
     final existing = _starts[key];
     if (existing != null) return existing;
     final firstReason = _reasons.putIfAbsent(key, () => reason);
     final completed = _completedHooks.putIfAbsent(key, () => {});
     late final Future<void> future;
-    future = _runStart(session, firstReason, token, completed).then((success) {
+    future = _runStart(session, firstReason, token, account, completed).then((
+      success,
+    ) {
       if (!success && identical(_starts[key], future)) _starts.remove(key);
     });
     _starts[key] = future;
@@ -130,11 +134,15 @@ class SessionLifecycleService {
     ChatSession session,
     SessionStartReason reason,
     Object? token,
+    Object account,
     Set<String> completed,
   ) async {
     try {
+      bool current() => identical(account, AppState.I.sessionAccountToken);
       if (!skipActivationWaitForTest) await _activationWaiter(token);
+      if (!current()) return false;
       await _skillRefresher(session);
+      if (!current()) return false;
       final payload = <String, dynamic>{
         'reason': reason.name,
         'parentSessionId': session.parentId,

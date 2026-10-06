@@ -81,9 +81,12 @@ void main() {
     expect(find.text('(NO WORKSPACE)'), findsNothing);
     expect(find.text('(no workspace)'), findsNothing);
     expect(find.text('AASHEESH333/OVIDAI'), findsNothing);
-    // Original headings are intact.
+    // Original headings are intact (the doc-comment contract above:
+    // brand wordmark, primary CTA, search hint, SESSIONS section). In the
+    // Aether redesign the search heading is the search field's hint text.
     expect(find.text('Ovid'), findsOneWidget);
     expect(find.text('New session'), findsOneWidget);
+    expect(find.text('Search sessions'), findsOneWidget);
     expect(find.text('SESSIONS'), findsOneWidget);
   });
 

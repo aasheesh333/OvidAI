@@ -200,7 +200,9 @@ void main() {
     test('run-end finally clears the live state', () {
       final src = agentSource();
       // The run-end finally: activeRunId cleared, checkpoint flushed.
-      final idx = src.indexOf('unawaited(checkpointRunEnd(s.id));');
+      final idx = src.indexOf(
+        'unawaited(checkpointRunEnd(s.id, owner: ctx.accountToken));',
+      );
       expect(idx, greaterThanOrEqualTo(0));
       final window = src.substring(idx - 200, idx + 100);
       expect(window, contains('setOverlayLive(false)'));

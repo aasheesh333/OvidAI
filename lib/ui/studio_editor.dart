@@ -13,6 +13,7 @@ import '../core/workspace_files.dart';
 import '../core/theme.dart';
 import 'studio_layout.dart';
 import 'studio_errors.dart';
+import 'widgets/aether_primitives.dart';
 
 // ── Studio editor ───────────────────────────────────────────────────────────
 // Extracted from studio_screen.dart and fixed (2026-09-30 audit):
@@ -187,8 +188,7 @@ class _NoTabsHint extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Align(
-        alignment: Alignment.centerLeft,
+      child: SingleChildScrollView(
         child: Text(
           'No open files — tap a file in the tree or +',
           style: TextStyle(fontSize: 12, color: Aether.textFaint),
@@ -557,20 +557,19 @@ class _StudioEditorState extends State<StudioEditor> {
             child: Material(
               type: MaterialType.canvas,
               color: Aether.bg,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
+              child: StudioPaneViewport(
+                chrome: [
                   _header(path, ctrl),
                   if (_conflicts.containsKey(_boundKey)) _conflictBar(),
                   if (_findOpen) _findBar(ctrl),
-                  Expanded(child: IndexedStack(
+                ],
+                child: IndexedStack(
                     index: _buffers.keys.toList().indexOf(_boundKey!),
                     children: [for (final entry in _buffers.entries)
                       KeyedSubtree(key: ValueKey(entry.key),
                         child: _field(entry.key.$2, entry.value, _undoControllers[entry.key]!)),
                     ],
-                  )),
-                ],
+                ),
               ),
             ),
           ),
@@ -600,40 +599,99 @@ class _StudioEditorState extends State<StudioEditor> {
 
   Widget _header(String path, TextEditingController ctrl) {
     final pos = _positionOf(ctrl);
+    final conflict = _conflicts.containsKey(_boundKey);
+    final name = path.split('/').last;
+    final dir = path.contains('/')
+        ? path.substring(0, path.lastIndexOf('/'))
+        : '';
+    // Mode pill reflects the editor's state of this tab: conflict > unsaved
+    // draft > clean. Rendered through AetherPill so Studio's chrome shares the
+    // monochrome + accent language used elsewhere in the app.
+    final AetherPill pill;
+    if (conflict) {
+      pill = AetherPill(
+        label: 'CONFLICT',
+        icon: Icons.sync_problem_outlined,
+        color: Aether.dangerC,
+      );
+    } else if (_dirty) {
+      pill = AetherPill(
+        label: 'UNSAVED',
+        icon: Icons.circle,
+        color: Aether.warnLight,
+      );
+    } else {
+      pill = AetherPill(
+        label: 'SAVED',
+        icon: Icons.check_circle,
+        color: Aether.successLight,
+      );
+    }
     return Container(
-      constraints: const BoxConstraints(minHeight: kStudioTapTarget),
-      color: Aether.surfaceAlt,
-      padding: const EdgeInsets.only(left: 10, right: 2),
+      constraints: BoxConstraints(
+        minHeight: kStudioTapTarget +
+            4 * (MediaQuery.textScalerOf(context).scale(1.0) - 1).clamp(0, 2),
+      ),
+      decoration: BoxDecoration(
+        color: Aether.surfaceAlt,
+        border: Border(bottom: BorderSide(color: Aether.hairline)),
+      ),
+      padding: const EdgeInsets.only(left: 12, right: 4, top: 4, bottom: 4),
       child: LayoutBuilder(
         builder: (context, c) {
-          final roomy = c.maxWidth >= 520;
-          return Row(
+          final scale = MediaQuery.textScalerOf(context).scale(1.0);
+          final roomy = c.maxWidth >= 760 * math.max(1.0, scale);
+          final identity = Row(
             children: [
-              Semantics(
-                label: _dirty ? 'Unsaved changes' : 'No unsaved changes',
-                child: Icon(
-                  _dirty ? Icons.circle : Icons.edit_note,
-                  size: 13,
-                  color: _dirty ? Aether.warnLight : Aether.accent,
-                ),
+              Icon(
+                Icons.description_outlined,
+                size: 15,
+                color: _dirty ? Aether.warnLight : Aether.accent,
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 8),
               Expanded(
                 child: Semantics(
                   header: true,
                   label: 'Editing $path',
-                  child: Text(
-                    path,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: Aether.mono,
-                      fontFamilyFallback: kStudioMonoFallback,
-                      fontSize: 12,
-                      color: Aether.textMuted,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          name,
+                          overflow: TextOverflow.ellipsis,
+                          style: AetherType.title.copyWith(
+                            fontSize: 13.5,
+                            color: Aether.text,
+                          ),
+                        ),
+                      ),
+                      if (dir.isNotEmpty && roomy) ...[
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            dir,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontFamily: Aether.mono,
+                              fontFamilyFallback: kStudioMonoFallback,
+                              fontSize: kStudioMinFontSize,
+                              color: Aether.textFaint,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
               ),
+              const SizedBox(width: 8),
+              pill,
+            ],
+          );
+          final actions = Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               if (roomy) ...[
                 Semantics(
                   liveRegion: true,
@@ -669,7 +727,25 @@ class _StudioEditorState extends State<StudioEditor> {
                 tooltip: 'Save changes',
                 iconSize: 18,
                 color: _dirty ? Aether.accent : null,
-                onPressed: _dirty && !_conflicts.containsKey(_boundKey) ? _save : null,
+                onPressed:
+                    _dirty && !conflict ? _save : null,
+              ),
+            ],
+          );
+          if (roomy) {
+            return Row(children: [
+              Expanded(child: identity),
+              const SizedBox(width: 8),
+              actions,
+            ]);
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              identity,
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: actions,
               ),
             ],
           );
@@ -691,7 +767,8 @@ class _StudioEditorState extends State<StudioEditor> {
       ),
       child: LayoutBuilder(
         builder: (context, c) {
-          final roomy = c.maxWidth >= 420;
+          final roomy = c.maxWidth >= 420 * math.max(1.0,
+              MediaQuery.textScalerOf(context).scale(1.0));
           return Row(
             children: [
               Icon(Icons.search, size: 16, color: Aether.textMuted),
@@ -846,7 +923,7 @@ class _NoFileView extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       color: Aether.bg,
-      child: Center(
+      child: SingleChildScrollView(
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Semantics(

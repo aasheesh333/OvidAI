@@ -8,6 +8,7 @@ import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
 import '../core/auth_identity.dart';
 import 'auth_methods.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Mandatory Firebase sign-in gate with server account acknowledgement.
 ///
@@ -42,9 +43,10 @@ class LoginGate extends StatefulWidget {
   State<LoginGate> createState() => _LoginGateState();
 }
 
-class _LoginGateState extends State<LoginGate> {
+class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
   late final _firebase = widget.service ?? FirebaseService.I;
   bool _bindStarted = false;
+  Object? _bindOwner;
 
   /// True while Firebase.initializeApp is in flight. The splash screen is
   /// shown until this drops to false — no child frame leaks through.
@@ -53,6 +55,7 @@ class _LoginGateState extends State<LoginGate> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _firebase.addListener(_onAuth);
     _kickFirebaseInit();
   }
@@ -70,6 +73,7 @@ class _LoginGateState extends State<LoginGate> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _firebase.removeListener(_onAuth);
     super.dispose();
   }
@@ -77,14 +81,31 @@ class _LoginGateState extends State<LoginGate> {
   void _onAuth() {
     if (!mounted) return;
     final fb = _firebase;
+    final owner = OvidCloudService.I.accountIdentity;
+    if (_bindOwner != owner) {
+      _bindOwner = owner;
+      _bindStarted = false;
+    }
     if (!fb.accountReady) _bindStarted = false;
     if (fb.isAvailable && fb.accountReady && !_bindStarted) {
       _bindStarted = true;
       // Bind the Ovid Cloud key in the background; a failure leaves the app
       // usable with the user's own custom providers.
-      unawaited(widget.bindCloud?.call() ?? OvidCloudService.I.bindOvidCloud());
+      unawaited(
+        widget.bindCloud?.call() ?? OvidCloudService.I.ensureConnected(),
+      );
     }
     setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _firebase.isAvailable &&
+        _firebase.accountReady &&
+        widget.bindCloud == null) {
+      unawaited(OvidCloudService.I.ensureConnected());
+    }
   }
 
   @override
@@ -100,51 +121,12 @@ class _LoginGateState extends State<LoginGate> {
         final fb = _firebase;
         // Firebase not configured in this build → no anonymous bypass.
         if (!fb.isAvailable) {
-          return Scaffold(
-            body: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Sign-in is unavailable in this build.'),
-                  TextButton(
-                    onPressed: _kickFirebaseInit,
-                    child: const Text('Retry'),
-                  ),
-                ],
-              ),
-            ),
-          );
+          return _UnavailableScreen(onRetry: _kickFirebaseInit);
         }
         // ── State 3: authenticated ──
         if (fb.isSignedIn) {
           if (!fb.accountReady) {
-            return Scaffold(
-              body: Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        fb.accountError ?? 'Confirming account status…',
-                        textAlign: TextAlign.center,
-                      ),
-                      if (fb.accountError != null) ...[
-                        TextButton(
-                          onPressed: fb.retryAccountLogin,
-                          child: const Text('Retry account check'),
-                        ),
-                        TextButton(
-                          onPressed: fb.signOut,
-                          child: const Text('Sign out and sign in again'),
-                        ),
-                      ] else
-                        const CircularProgressIndicator(),
-                    ],
-                  ),
-                ),
-              ),
-            );
+            return _AccountNotReadyScreen(service: fb);
           }
           return _PostLoginWelcomeGate(child: widget.child);
         }
@@ -159,8 +141,37 @@ class _LoginGateState extends State<LoginGate> {
 // Splash screen — shown while Firebase initializes.
 // ---------------------------------------------------------------------------
 
-class _SplashScreen extends StatelessWidget {
+class _SplashScreen extends StatefulWidget {
   const _SplashScreen();
+
+  @override
+  State<_SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<_SplashScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _anim;
+  late final Animation<double> _fade;
+
+  @override
+  void initState() {
+    super.initState();
+    _anim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    );
+    _fade = CurvedAnimation(
+      parent: _anim,
+      curve: const Interval(0, 0.4, curve: Curves.easeOut),
+    );
+    _anim.repeat();
+  }
+
+  @override
+  void dispose() {
+    _anim.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -170,17 +181,215 @@ class _SplashScreen extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.auto_awesome, size: 56, color: Aether.accent),
-            const SizedBox(height: 24),
+            FadeTransition(
+              opacity: _fade,
+              child: Text(
+                'Ovid',
+                style: AetherType.display.copyWith(
+                  letterSpacing: -0.5,
+                  fontSize: 44,
+                ),
+              ),
+            ),
+            const SizedBox(height: AetherSpacing.space6),
+            // Animated accent-gradient underline progress indicator.
             SizedBox(
-              width: 24,
-              height: 24,
+              width: 140,
+              height: 3,
+              child: AnimatedBuilder(
+                animation: _anim,
+                builder: (context, _) {
+                  final t = _anim.value;
+                  return CustomPaint(
+                    painter: _AccentUnderlinePainter(progress: t),
+                    size: const Size(140, 3),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: AetherSpacing.space4),
+            // Semantic spinner so tests + accessibility tools can locate the
+            // loading affordance (the gradient underline is decorative).
+            SizedBox(
+              width: 18,
+              height: 18,
               child: CircularProgressIndicator(
-                strokeWidth: 2.5,
-                color: Aether.accent.withValues(alpha: 0.6),
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  Aether.accent.withValues(alpha: 0.6),
+                ),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AccentUnderlinePainter extends CustomPainter {
+  _AccentUnderlinePainter({required this.progress});
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final base = Paint()
+      ..color = Aether.hairline
+      ..strokeWidth = size.height
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(
+      Offset(0, size.height / 2),
+      Offset(size.width, size.height / 2),
+      base,
+    );
+    // Moving accent-gradient segment traversing the underline.
+    final segmentWidth = size.width * 0.4;
+    final travel = size.width + segmentWidth;
+    final x = -segmentWidth + progress * travel;
+    final rect = Rect.fromLTWH(x, 0, segmentWidth, size.height);
+    final shader = LinearGradient(
+      colors: [
+        Aether.accent.withValues(alpha: 0.0),
+        Aether.accent,
+        Aether.accent.withValues(alpha: 0.0),
+      ],
+    ).createShader(rect);
+    final grad = Paint()
+      ..shader = shader
+      ..strokeWidth = size.height
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(
+      Offset(x, size.height / 2),
+      Offset(x + segmentWidth, size.height / 2),
+      grad,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _AccentUnderlinePainter old) =>
+      old.progress != progress;
+}
+
+// ---------------------------------------------------------------------------
+// Unavailable screen — Firebase not configured in this build.
+// ---------------------------------------------------------------------------
+
+class _UnavailableScreen extends StatelessWidget {
+  const _UnavailableScreen({required this.onRetry});
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(AetherSpacing.space6),
+              child: AetherCard(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const _GateWordmark(),
+                    const SizedBox(height: AetherSpacing.space5),
+                    Text(
+                      'Sign-in is unavailable in this build.',
+                      style: AetherType.title,
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
+                    Text(
+                      'Firebase authentication is not configured. Retry to '
+                      'reinitialize, or restart the app once configuration is '
+                      'available.',
+                      style: AetherType.bodyMuted,
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: AetherSpacing.space5),
+                    AetherPrimaryButton(label: 'Retry', onPressed: onRetry),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Account-not-ready screen — signed in but server account check pending or
+// failed.
+// ---------------------------------------------------------------------------
+
+class _AccountNotReadyScreen extends StatelessWidget {
+  const _AccountNotReadyScreen({required this.service});
+  final FirebaseService service;
+
+  @override
+  Widget build(BuildContext context) {
+    final error = service.accountError;
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(AetherSpacing.space6),
+              child: AetherCard(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const _GateWordmark(),
+                    const SizedBox(height: AetherSpacing.space5),
+                    Semantics(
+                      header: true,
+                      child: Text('Confirming your account', style: AetherType.h2),
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
+                    Text(
+                      error ??
+                          'Checking your account with the Ovid service. '
+                              'This usually takes a moment.',
+                      style: AetherType.bodyMuted,
+                    ),
+                    const SizedBox(height: AetherSpacing.space5),
+                    if (error == null)
+                      Center(
+                        child: SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            semanticsLabel: 'Confirming your account',
+                            strokeWidth: 2.5,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Aether.accent,
+                            ),
+                          ),
+                        ),
+                      )
+                    else ...[
+                      AetherPrimaryButton(
+                        label: 'Retry',
+                        onPressed: service.retryAccountLogin,
+                      ),
+                      const SizedBox(height: AetherSpacing.space2),
+                      AetherGhostButton(
+                        label: 'Sign out',
+                        onPressed: service.signOut,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -204,6 +413,23 @@ class _PostLoginWelcomeGate extends StatefulWidget {
 
 class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
   bool _checked = false;
+  OverlayEntry? _welcomeEntry;
+  Timer? _autoDismiss;
+
+  void _removeWelcome() {
+    _autoDismiss?.cancel();
+    _autoDismiss = null;
+    final entry = _welcomeEntry;
+    _welcomeEntry = null;
+    entry?.remove();
+    entry?.dispose();
+  }
+
+  @override
+  void dispose() {
+    _removeWelcome();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -230,17 +456,13 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
 
   void _showWelcomeOverlay() {
     final overlay = Overlay.of(context, rootOverlay: true);
-    late final OverlayEntry entry;
-    Timer? autoDismiss;
-
-    void remove() {
-      autoDismiss?.cancel();
-      entry.remove();
-    }
-
-    entry = OverlayEntry(builder: (_) => _WelcomeBanner(onDismiss: remove));
+    final entry = _welcomeEntry = OverlayEntry(
+      builder: (_) => _WelcomeBanner(onDismiss: _removeWelcome),
+    );
     overlay.insert(entry);
-    autoDismiss = Timer(const Duration(seconds: 5), remove);
+    if (!MediaQuery.accessibleNavigationOf(context)) {
+      _autoDismiss = Timer(const Duration(seconds: 5), _removeWelcome);
+    }
   }
 
   @override
@@ -289,60 +511,47 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
 
   @override
   Widget build(BuildContext context) {
-    final bottom = MediaQuery.of(context).padding.bottom;
-    return Positioned(
-      left: 16,
-      right: 16,
-      bottom: 16 + bottom,
-      child: SlideTransition(
-        position: _slide,
-        child: FadeTransition(
-          opacity: _fade,
-          child: GestureDetector(
-            onTap: widget.onDismiss,
-            child: Material(
-              elevation: 8,
-              borderRadius: BorderRadius.circular(16),
-              color: Aether.surface,
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Welcome to Ovid',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                        color: Aether.text,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Your AI assistant is ready. Chat with any model, '
-                      'create agents, browse the web.',
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        height: 1.5,
-                        color: Aether.textMuted,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: FilledButton(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Aether.accent,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
+    return Positioned.fill(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+        child: SafeArea(
+          minimum: const EdgeInsets.all(AetherSpacing.space4),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: SlideTransition(
+                position: _slide,
+                child: FadeTransition(
+                  opacity: _fade,
+                  child: SingleChildScrollView(
+                    child: GestureDetector(
+                      onTap: widget.onDismiss,
+                      child: Semantics(
+                        liveRegion: true,
+                        child: AetherCard(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Text('Welcome to Ovid', style: AetherType.h2),
+                              const SizedBox(height: AetherSpacing.space2),
+                              Text(
+                                'Explore your available models, create agents, '
+                                'and browse the web.',
+                                style: AetherType.bodyMuted,
+                              ),
+                              const SizedBox(height: AetherSpacing.space4),
+                              AetherPrimaryButton(
+                                label: "Let's go",
+                                onPressed: widget.onDismiss,
+                              ),
+                            ],
                           ),
                         ),
-                        onPressed: widget.onDismiss,
-                        child: const Text("Let's go"),
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -357,71 +566,143 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
 // Login screen — shown when Firebase is available but user is not signed in.
 // ---------------------------------------------------------------------------
 
+class _GateWordmark extends StatelessWidget {
+  const _GateWordmark();
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    header: true,
+    child: Text(
+      'Ovid',
+      textAlign: TextAlign.center,
+      style: AetherType.display.copyWith(fontSize: 44, letterSpacing: -0.5),
+    ),
+  );
+}
+
 class _LoginScreen extends StatelessWidget {
   const _LoginScreen({required this.service});
   final FirebaseService service;
 
   @override
   Widget build(BuildContext context) {
+    final deletion = service.lastDeletionReceipt;
+    final pending = deletion?.isPending == true;
+    final deadline = deletion?.deleteAfter
+        ?.toUtc()
+        .toIso8601String()
+        .replaceFirst('T', '\n')
+        .replaceFirst('Z', ' UTC');
     return Scaffold(
       backgroundColor: Aether.bg,
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: ListView(
-              shrinkWrap: true,
-              padding: const EdgeInsets.all(28),
-              children: [
-                const SizedBox(height: 8),
-                if (service.lastDeletionReceipt?.isPending == true)
-                  Text(
-                    'Deletion requested on the server. Scheduled after ${service.lastDeletionReceipt!.deleteAfter!.toUtc().toIso8601String()} (UTC). Sign in before then to cancel.',
-                    textAlign: TextAlign.center,
-                  ),
-                Icon(Icons.auto_awesome, size: 48, color: Aether.accent),
-                const SizedBox(height: 20),
-                Text(
-                  'Welcome to Ovid',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.w700,
-                    color: Aether.text,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Sign in to start. Your account unlocks the '
-                  'built-in Ovid models and keeps your usage synced across '
-                  'devices.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 13.5,
-                    height: 1.5,
-                    color: Aether.textMuted,
-                  ),
-                ),
-                const SizedBox(height: 28),
-                AuthMethods(
-                  providers: service.authProviders,
-                  intent: AuthIntent.signIn,
-                  social: (id) =>
-                      service.authenticateSocial(id, AuthIntent.signIn),
-                  phone: () => service.createPhoneFlow(AuthIntent.signIn),
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  'By continuing you agree to use Ovid responsibly. Abuse, '
-                  'automated farming, or sharing accounts may lead to '
-                  'suspension.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 11, color: Aether.textFaint),
-                ),
-              ],
+      body: Stack(
+        children: [
+          // Gradient wash behind the top third of the screen.
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: AetherGradientHeader(
+                height: MediaQuery.of(context).size.height / 3,
+                child: const SizedBox.shrink(),
+              ),
             ),
           ),
-        ),
+          SafeArea(
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: ListView(
+                  shrinkWrap: true,
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: const EdgeInsets.fromLTRB(
+                    AetherSpacing.space4,
+                    AetherSpacing.space7,
+                    AetherSpacing.space4,
+                    AetherSpacing.space6,
+                  ),
+                  children: [
+                    // Wordmark + tagline.
+                    const _GateWordmark(),
+                    const SizedBox(height: AetherSpacing.space3),
+                    Center(
+                      child: Text(
+                        'Your AI, grounded on your data',
+                        style: TextStyle(
+                          fontSize: 14,
+                          height: 1.4,
+                          color: Aether.textMuted,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                    const SizedBox(height: AetherSpacing.space7),
+                    if (pending) ...[
+                      AetherCard(
+                        color: Aether.warn.withValues(alpha: 0.10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Account deletion pending',
+                              style: AetherType.title,
+                            ),
+                            const SizedBox(height: AetherSpacing.space2),
+                            Text(
+                              'Deletion was requested on the server.',
+                              style: AetherType.bodyMuted,
+                            ),
+                            if (deadline != null) ...[
+                              const SizedBox(height: AetherSpacing.space2),
+                              Text(
+                                'Scheduled after\n$deadline',
+                                style: AetherType.body,
+                              ),
+                              const SizedBox(height: AetherSpacing.space2),
+                              Text(
+                                'Sign in before then to cancel.',
+                                style: AetherType.bodyMuted,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: AetherSpacing.space5),
+                    ],
+                    AetherCard(
+                      padding: const EdgeInsets.all(AetherSpacing.space4),
+                      title: const Text('Sign in or create an account'),
+                      child: AuthMethods(
+                        providers: service.authProviders,
+                        intent: AuthIntent.signIn,
+                        social: (id) => service.authenticateSocial(
+                          id,
+                          AuthIntent.signIn,
+                        ),
+                        phone: () => service.createPhoneFlow(AuthIntent.signIn),
+                      ),
+                    ),
+                    const SizedBox(height: AetherSpacing.space6),
+                    Text(
+                      'By continuing you agree to use Ovid responsibly. '
+                      'Abuse, automated farming, or sharing accounts may '
+                      'lead to suspension.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.5,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr/qr.dart' as qr;
 
 import '../core/conversation_share_service.dart';
 import '../core/state.dart';
+import '../core/theme.dart';
+import 'widgets/aether_primitives.dart';
 
 Future<void> showConversationShareSheet(
   BuildContext context,
@@ -13,8 +16,9 @@ Future<void> showConversationShareSheet(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,
+    backgroundColor: Colors.transparent,
     builder: (_) => FractionallySizedBox(
-      heightFactor: .88,
+      heightFactor: .92,
       child: ConversationShareSheet(session: session, service: service),
     ),
   );
@@ -124,144 +128,409 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
   @override
   Widget build(BuildContext context) {
     final available = _service.available;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    'Share conversation',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Close',
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close),
-                ),
-              ],
+    final activeShare = _shares.isEmpty ? null : _shares.first;
+
+    return AetherSheet(
+      title: 'Share conversation',
+      actions: [
+        AetherGhostButton(
+          label: 'Close',
+          onPressed: () => Navigator.pop(context),
+        ),
+      ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_busy)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: LinearProgressIndicator(minHeight: 2),
             ),
-            if (_busy) const LinearProgressIndicator(),
-            Expanded(
-              child: ListView(
-                children: [
-                  const Text(
-                    'Anyone with the link can read this frozen text snapshot. Later chat edits are not included.',
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Only the messages below are shared. Thinking, tools, internal context, detected credentials, attachments and session metadata are excluded. Review the text for personal information.',
-                  ),
-                  if (!available) ...[
-                    const SizedBox(height: 12),
-                    const Text(
-                      'Sharing is unavailable: deployment is not configured.',
-                    ),
-                  ],
-                  if (_error != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      _error!,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 12),
-                  Text(
-                    'Preview · ${_snapshot.messages.length} messages',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  for (final message in _snapshot.messages)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            message.role == 'user' ? 'You' : 'Assistant',
-                            style: const TextStyle(fontWeight: FontWeight.w600),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(message.content),
-                        ],
-                      ),
-                    ),
-                  if (!_snapshot.withinLimits)
-                    const Text(
-                      'No shareable text, or snapshot exceeds the 500-message / 200 KB / 20,000-character-per-message limit.',
-                    ),
-                  const Divider(),
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Existing links',
-                          style: TextStyle(fontWeight: FontWeight.w600),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                if (activeShare != null)
+                  _ActiveShareCard(
+                    share: activeShare,
+                    busy: _busy,
+                    onCopy: () => _copy(activeShare),
+                    onRevoke: () => _revoke(activeShare),
+                  )
+                else
+                  AetherCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Create a read-only link',
+                          style: AetherType.title,
                         ),
-                      ),
-                      TextButton(
-                        onPressed: available && !_busy ? _refresh : null,
-                        child: const Text('Refresh'),
-                      ),
-                    ],
+                        const SizedBox(height: 6),
+                        Text(
+                          'Anyone with the link can read this frozen text snapshot. Later chat edits are not included.',
+                          style: AetherType.bodyMuted,
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          'Only the messages below are shared. Thinking, tools, internal context, detected credentials, attachments and session metadata are excluded. Review the text for personal information.',
+                          style: AetherType.caption.copyWith(height: 1.5),
+                        ),
+                        if (!available) ...[
+                          const SizedBox(height: 12),
+                          Text(
+                            'Sharing is unavailable: deployment is not configured.',
+                            style: AetherType.body.copyWith(
+                              color: Aether.warnLight,
+                            ),
+                          ),
+                        ],
+                        if (_loaded && _shares.isEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 10),
+                            child: Text(
+                              'No active links for this session.',
+                              style: AetherType.bodyMuted,
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
-                  if (_loaded && _shares.isEmpty)
-                    const Text('No active links for this session.'),
-                  for (final share in _shares)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            share.url.toString(),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  AetherCard(
+                    color: Aether.danger.withValues(alpha: 0.06),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              Icons.error_outline,
+                              size: 16,
+                              color: Aether.dangerC,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                _error!,
+                                style: AetherType.body.copyWith(
+                                  color: Aether.dangerC,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (!_loaded)
+                          AetherGhostButton(
+                            label: 'Retry',
+                            icon: Icons.refresh,
+                            onPressed: available && !_busy ? _refresh : null,
                           ),
-                          Text(
-                            'Expires ${share.expiresAt.toLocal().toString().split('.').first}',
-                          ),
-                          Wrap(
-                            spacing: 8,
+                      ],
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 14),
+                AetherCard(
+                  title: Text(
+                    'Preview · ${_snapshot.messages.length} messages',
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final message in _snapshot.messages)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              TextButton.icon(
-                                onPressed: _busy ? null : () => _copy(share),
-                                icon: const Icon(Icons.copy, size: 18),
-                                label: const Text('Copy link'),
+                              Text(
+                                message.role == 'user' ? 'You' : 'Assistant',
+                                style: AetherType.label,
                               ),
-                              TextButton(
-                                onPressed: _busy ? null : () => _revoke(share),
-                                child: const Text('Revoke'),
-                              ),
+                              const SizedBox(height: 4),
+                              Text(message.content, style: AetherType.body),
                             ],
                           ),
-                        ],
-                      ),
+                        ),
+                      if (!_snapshot.withinLimits)
+                        Text(
+                          'No shareable text, or snapshot exceeds the 500-message / 200 KB / 20,000-character-per-message limit.',
+                          style: AetherType.caption.copyWith(
+                            color: Aether.warnLight,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Existing links', style: AetherType.label),
+                    AetherGhostButton(
+                      label: 'Refresh',
+                      icon: Icons.refresh,
+                      onPressed: available && !_busy ? _refresh : null,
                     ),
-                ],
-              ),
+                  ],
+                ),
+                if (_loaded && _shares.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      'No active links for this session.',
+                      style: AetherType.bodyMuted,
+                    ),
+                  ),
+                for (final share in _shares.skip(activeShare == null ? 0 : 1))
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: _ShareLinkRow(
+                      share: share,
+                      busy: _busy,
+                      onCopy: () => _copy(share),
+                      onRevoke: () => _revoke(share),
+                    ),
+                  ),
+              ],
             ),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed:
-                  available &&
-                      _loaded &&
-                      !_busy &&
-                      _snapshot.withinLimits &&
-                      _shares.isEmpty
-                  ? _create
-                  : null,
-              icon: const Icon(Icons.link),
-              label: const Text('Create link'),
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 12),
+          AetherPrimaryButton(
+            label: 'Create link',
+            icon: Icons.link,
+            onPressed:
+                available &&
+                    _loaded &&
+                    !_busy &&
+                    _snapshot.withinLimits &&
+                    _shares.isEmpty
+                ? _create
+                : null,
+          ),
+        ],
       ),
     );
   }
+}
+
+class _ActiveShareCard extends StatelessWidget {
+  const _ActiveShareCard({
+    required this.share,
+    required this.busy,
+    required this.onCopy,
+    required this.onRevoke,
+  });
+  final ConversationShare share;
+  final bool busy;
+  final VoidCallback onCopy;
+  final VoidCallback onRevoke;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = share.url.toString();
+    final expires = share.expiresAt.toLocal().toString().split('.').first;
+    return AetherCard(
+      title: Text('Shareable link', style: AetherType.title),
+      trailing: AetherPill(
+        label: 'LIVE',
+        color: Aether.successLight,
+        icon: Icons.check_circle_outline,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Center(
+            child: Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                border: Border.all(color: Aether.hairline),
+              ),
+              child: Semantics(
+                image: true,
+                label: 'QR code for shared conversation',
+                child: _QrCode(data: url, size: 180),
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: Aether.surfaceAlt,
+              borderRadius: BorderRadius.circular(AetherRadius.rMd),
+              border: Border.all(color: Aether.hairline),
+            ),
+            child: SelectableText(
+              url,
+              style: AetherType.mono.copyWith(color: Aether.text),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text('Expires $expires', style: AetherType.caption),
+          const SizedBox(height: 14),
+          _ShareActions(
+            busy: busy,
+            onCopy: onCopy,
+            onRevoke: onRevoke,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ShareLinkRow extends StatelessWidget {
+  const _ShareLinkRow({
+    required this.share,
+    required this.busy,
+    required this.onCopy,
+    required this.onRevoke,
+  });
+  final ConversationShare share;
+  final bool busy;
+  final VoidCallback onCopy;
+  final VoidCallback onRevoke;
+
+  @override
+  Widget build(BuildContext context) {
+    final expires = share.expiresAt.toLocal().toString().split('.').first;
+    return AetherCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SelectableText(
+            share.url.toString(),
+            style: AetherType.body,
+          ),
+          const SizedBox(height: 6),
+          Text('Expires $expires', style: AetherType.caption),
+          const SizedBox(height: 10),
+          _ShareActions(
+            busy: busy,
+            onCopy: onCopy,
+            onRevoke: onRevoke,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ShareActions extends StatelessWidget {
+  const _ShareActions({
+    required this.busy,
+    required this.onCopy,
+    required this.onRevoke,
+  });
+  final bool busy;
+  final VoidCallback onCopy;
+  final VoidCallback onRevoke;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final copy = AetherGhostButton(
+        label: 'Copy link',
+        icon: Icons.copy,
+        onPressed: busy ? null : onCopy,
+      );
+      final revoke = AetherDangerButton(
+        label: 'Revoke',
+        icon: Icons.link_off,
+        onPressed: busy ? null : onRevoke,
+      );
+      // Each label needs its scaled text, icon, gap and button padding.
+      final actionWidth = 360 * MediaQuery.textScalerOf(context).scale(14) / 14;
+      if (constraints.maxWidth < actionWidth) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [copy, const SizedBox(height: 8), revoke],
+        );
+      }
+      return Row(
+        children: [
+          Expanded(child: copy),
+          const SizedBox(width: 10),
+          Expanded(child: revoke),
+        ],
+      );
+    },
+  );
+}
+
+/// Pure-Dart QR renderer. Encodes [data] into a QrCode and paints it to a
+/// crisp monochrome bitmap-style grid. Uses the already-vendored `qr`
+/// package so no new dependency is introduced.
+class _QrCode extends StatelessWidget {
+  const _QrCode({required this.data, this.size = 160});
+  final String data;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final qr.QrImage image;
+    try {
+      final code = qr.QrCode(
+        payload: qr.QrPayload.fromString(data),
+        errorCorrectLevel: qr.QrErrorCorrectLevel.medium,
+      );
+      image = qr.QrImage(code);
+    } catch (_) {
+      // An icon alone could be mistaken for a usable QR code.
+      return SizedBox(
+        width: size,
+        height: size,
+        child: Center(
+          child: Text(
+            'QR unavailable. Use Copy link.',
+            textAlign: TextAlign.center,
+            style: AetherType.body.copyWith(color: Colors.black),
+          ),
+        ),
+      );
+    }
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(painter: _QrPainter(image)),
+    );
+  }
+}
+
+class _QrPainter extends CustomPainter {
+  _QrPainter(this.image);
+  final qr.QrImage image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // QR requires a four-module quiet zone even for low-version short URLs.
+    final cellSize = size.shortestSide / (image.moduleCount + 8);
+    final paint = Paint()..color = const Color(0xFF0F1115);
+    for (var x = 0; x < image.moduleCount; x++) {
+      for (var y = 0; y < image.moduleCount; y++) {
+        if (image.isDark(y, x)) {
+          canvas.drawRect(
+            Rect.fromLTWH(
+              (x + 4) * cellSize,
+              (y + 4) * cellSize,
+              cellSize,
+              cellSize,
+            ),
+            paint,
+          );
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _QrPainter old) => old.image != image;
 }

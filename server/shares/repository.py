@@ -38,6 +38,8 @@ class ShareRepository:
                 CREATE INDEX IF NOT EXISTS shares_owner_session
                     ON shares(owner_uid, session_id);
                 CREATE TABLE IF NOT EXISTS deleted_accounts (uid TEXT PRIMARY KEY);
+                CREATE INDEX IF NOT EXISTS shares_expiry ON shares(expires_at)
+                    WHERE snapshot IS NOT NULL;
             ''')
 
     @contextmanager
@@ -132,8 +134,13 @@ class ShareRepository:
             db.execute('INSERT OR IGNORE INTO deleted_accounts VALUES (?)', (uid,))
             db.execute('DELETE FROM shares WHERE owner_uid=?', (uid,))
 
-    def purge_expired(self):
+    def purge_expired(self, limit=500):
         # Retain minimal dedup receipts until account deletion so a retry never
         # silently republishes an expired or revoked snapshot.
+        if type(limit) is not int or not 1 <= limit <= 10000:
+            raise ValueError('Retention batch size must be between 1 and 10000')
         with self._connection(write=True) as db:
-            db.execute('UPDATE shares SET snapshot=NULL WHERE expires_at<=?', (self.clock(),))
+            result = db.execute('''UPDATE shares SET snapshot=NULL WHERE rowid IN
+                (SELECT rowid FROM shares WHERE snapshot IS NOT NULL AND expires_at<=?
+                 ORDER BY expires_at, rowid LIMIT ?)''', (self.clock(), limit))
+            return result.rowcount

@@ -26,6 +26,67 @@ import 'diag.dart';
 typedef PromptHookEvaluator =
     Future<String?> Function(String prompt, Map<String, dynamic> context);
 
+/// Tool-capable agent-hook evaluation request (plugin hooks with
+/// `type: "agent"`). Unlike prompt hooks, agent hooks may call tools —
+/// the wired evaluator owns tool execution and must enforce
+/// [AgentHookEvaluation.approvedTools] plus its own permission policy.
+/// Bounds are part of the contract: [AgentHookEvaluation.budget] is the
+/// hard wall-clock limit (HookService drops any late result), and
+/// [AgentHookEvaluation.cancelled] completes when the evaluation is
+/// fenced — plugin removed/re-registered, session generation ended,
+/// hooks disabled, or the budget expired — so a well-behaved evaluator
+/// can stop its work promptly.
+class AgentHookEvaluation {
+  const AgentHookEvaluation({
+    required this.prompt,
+    required this.context,
+    required this.approvedTools,
+    required this.budget,
+    required this.cancelled,
+  });
+
+  /// Hook rule text. The redacted event stdin JSON is in [context]['stdin'].
+  final String prompt;
+
+  /// Redacted event/session/plugin/hook/model context.
+  final Map<String, dynamic> context;
+
+  /// Complete tool allowlist for THIS evaluation: the hook's own bounded
+  /// `tools` declaration, never broader. Empty means no tools. HookService
+  /// executes nothing itself.
+  final Set<String> approvedTools;
+
+  /// Hard evaluation budget; results after it is exceeded are dropped.
+  final Duration budget;
+
+  /// Completes when this evaluation is fenced (or once it settles).
+  final Future<void> cancelled;
+}
+
+/// Parsed decision of an agent-type hook evaluation. [decision] is
+/// operational data ('block' stops/vetoes; 'approve' proceeds); [reason]
+/// is publication text and is secret-scrubbed before ledger/result use.
+class AgentHookVerdict {
+  final String decision;
+  final String? reason;
+
+  const AgentHookVerdict(this.decision, [this.reason]);
+
+  const AgentHookVerdict.block([this.reason]) : decision = 'block';
+
+  const AgentHookVerdict.approve([this.reason]) : decision = 'approve';
+
+  bool get isBlock => decision == 'block';
+}
+
+/// Evaluates an agent-type hook. Production integration must wire this to a
+/// bounded tool-capable agent loop (approved tool scope + cancellation);
+/// it is NEVER routed through [PromptHookEvaluator] — reusing the
+/// prompt-only evaluator would misrepresent agent semantics. Null
+/// verdict, timeout, throw or any fence fails OPEN with a ledger note.
+typedef AgentHookEvaluator =
+    Future<AgentHookVerdict?> Function(AgentHookEvaluation evaluation);
+
 /// Gate outcome of [HookService.fireGate].
 enum HookDecision {
   /// The action proceeds.
@@ -77,13 +138,19 @@ class HookGateResult {
       decidedByPlugin = null,
       reason = null;
 
-  const HookGateResult.deny(this.decidedByPlugin, this.reason, {this.updatedInput})
-    : decision = HookDecision.deny,
-      bypassPermission = false;
+  const HookGateResult.deny(
+    this.decidedByPlugin,
+    this.reason, {
+    this.updatedInput,
+  }) : decision = HookDecision.deny,
+       bypassPermission = false;
 
-  const HookGateResult.ask(this.decidedByPlugin, this.reason, {this.updatedInput})
-    : decision = HookDecision.ask,
-      bypassPermission = false;
+  const HookGateResult.ask(
+    this.decidedByPlugin,
+    this.reason, {
+    this.updatedInput,
+  }) : decision = HookDecision.ask,
+       bypassPermission = false;
 }
 
 /// Outcome of [HookService.fireStop] — a Stop hook may veto the stop
@@ -221,6 +288,7 @@ class PromptHookVerdict {
 
   const PromptHookVerdict(this.decision, [this.reason]);
 }
+
 /// normalized [PluginHook]s at the 14 canonical agent-lifecycle points.
 ///
 /// Production plugin hook lifecycle (spec §8) — the runtime that fires
@@ -257,11 +325,13 @@ class PromptHookVerdict {
 /// Recursion prevention (§8.2): a hook cannot re-fire its own event
 /// while that event is executing, and nesting depth is capped.
 ///
-  /// Circuit breaker (§8.2): 3 consecutive execution failures of one plugin in
-  /// one session disable its hooks. Synchronous session_start and unavailable
-  /// runtimes remain retryable, without consuming the breaker.
+/// Circuit breaker (§8.2): 3 consecutive execution failures of one plugin in
+/// one session disable its hooks. Synchronous session_start and unavailable
+/// runtimes remain retryable, without consuming the breaker.
 class HookService extends ChangeNotifier {
-  HookService._();
+  HookService._() {
+    PluginContributionRegistry.I.addRegistrationListener(_registrationChanged);
+  }
   static final HookService I = HookService._();
 
   /// Master kill-switch (Settings toggle, default ON).
@@ -273,6 +343,17 @@ class HookService extends ChangeNotifier {
   ///       AgentService.I.evaluatePromptHook(prompt, context: ctx);
   /// Null (default) = prompt hooks are skipped fail-open with a ledger note.
   PromptHookEvaluator? promptHookEvaluator;
+
+  /// Wiring point for tool-capable agent-type hooks. AgentService currently
+  /// wires only prompt hooks; production integration still needs a bounded
+  /// agent loop that enforces
+  /// [AgentHookEvaluation.approvedTools], its permission policy and
+  /// [AgentHookEvaluation.cancelled].
+  /// Null (default) = agent hooks are skipped fail-open with a ledger
+  /// note. Never fall back to [promptHookEvaluator]: agent semantics
+  /// require tool scope and cancellation that a prompt cannot honestly
+  /// claim.
+  AgentHookEvaluator? agentHookEvaluator;
 
   /// Wiring point for user-initiated stops (item 4). The AgentService worker
   /// sets this to report whether the stop for [sessionId] was USER-initiated
@@ -325,18 +406,84 @@ class HookService extends ChangeNotifier {
   // Never reopen a prior process's plaintext environment on restart.
   final String _envBoot = DateTime.now().microsecondsSinceEpoch.toString();
   int _envSerial = 0;
-  final Map<String, Map<String, (String, NormalizedPluginManifest?)>> _envFiles = {};
+  final Map<String, Map<String, (String, int)>> _envFiles = {};
   final Map<String, (Object, int)> _endingSessions = {};
 
-  bool _hookCurrent(String sessionId, String pluginId, PluginHook hook, int epoch) {
-    if (!enabled || epoch != (_sessionContextEpochs[sessionId] ?? 0)) return false;
+  // Each admitted event owns an immutable registration snapshot. Nested events
+  // get their own snapshot; async completions retain the originating Zone.
+  static final Object _registrationSnapshotKey = Object();
+  Map<String, int> _registrationSnapshot(
+    List<(String, PluginHook, String)> hooks,
+  ) => {
+    for (final entry in hooks)
+      entry.$1: PluginContributionRegistry.I.revisionFor(entry.$1),
+  };
+
+  void _registrationChanged(
+    String pluginId,
+    NormalizedPluginManifest? previous,
+  ) {
+    // ABA fence: any register/unregister is a new lifetime. In-flight agent
+    // evaluations of this plugin are cancelled before the caller's first
+    // async disable/uninstall step can run.
+    _fenceAgentEvals(pluginId: pluginId);
+    final descriptors = {
+      for (final hook in previous?.hooks ?? <PluginHook>[])
+        HookContextStore.descriptor(previous!, hook),
+    };
+    final sessions = {
+      ..._sessionContexts.keys,
+      ..._sessionContextEpochs.keys,
+      ..._envFiles.keys,
+      // Durable contributions also live in sessions this process never
+      // opened. Enumerate the app session list so a disable or same-object
+      // re-registration erases them before a later start can revalidate the
+      // identical descriptor and restore them.
+      ...AppState.I.sessions.map((s) => s.id),
+    };
+    for (final sid in sessions) {
+      _sessionContexts[sid]?.removeWhere((key, _) => descriptors.contains(key));
+      final file = _envFiles[sid]?.remove(pluginId);
+      if (file != null) _removeEnvFile(file.$1);
+      // Enqueue targeted deletes synchronously, before a new start can restore.
+      for (final descriptor in descriptors) {
+        unawaited(
+          _contextStore.put(sid, descriptor, null).catchError((Object _) {
+            Diag.swallow(
+              'hook_context',
+              'encrypted context invalidation unavailable',
+            );
+          }),
+        );
+      }
+    }
+    _consecutiveFails.removeWhere((key, _) => key.startsWith('$pluginId|'));
+    _tripped.removeWhere((key) => key.startsWith('$pluginId|'));
+    _clearBlocker(pluginId);
+  }
+
+  bool _hookCurrent(
+    String sessionId,
+    String pluginId,
+    PluginHook hook,
+    int epoch,
+  ) {
+    if (!enabled || epoch != (_sessionContextEpochs[sessionId] ?? 0)) {
+      return false;
+    }
     if (pluginId.startsWith('legacy:')) {
-      return _resolveHooks(hook.event, sessionId).any((e) =>
-        e.$1 == pluginId && e.$2.payload == hook.payload);
+      return _resolveHooks(
+        hook.event,
+        sessionId,
+      ).any((e) => e.$1 == pluginId && e.$2.payload == hook.payload);
     }
     final registry = PluginContributionRegistry.I;
-    return registry.isPluginActiveForSession(pluginId, sessionId) &&
-        (registry.manifestFor(pluginId)?.hooks.any((h) => identical(h, hook)) ?? false);
+    final snapshot =
+        Zone.current[_registrationSnapshotKey] as Map<String, int>?;
+    return snapshot?[pluginId] == registry.revisionFor(pluginId) &&
+        registry.isPluginActiveForSession(pluginId, sessionId) &&
+        (registry.manifestFor(pluginId)?.hooks.any((h) => identical(h, hook)) ??
+            false);
   }
 
   /// The `session_start` context a hook produced for [sessionId], or ''.
@@ -348,44 +495,78 @@ class HookService extends ChangeNotifier {
     // influence. Registry/manifest order is stable even after targeted installs.
     final hooks = _resolveHooks('session_start', sessionId);
     final valid = hooks.map((entry) => _contextKey(entry.$1, entry.$2)).toSet();
-    final removed = contributions.keys.where((key) => !valid.contains(key)).toList();
+    final removed = contributions.keys
+        .where((key) => !valid.contains(key))
+        .toList();
     for (final key in removed) {
       contributions.remove(key);
     }
     // The synchronous model-context reader can filter immediately. Queue the
     // durable removal before any subsequent start can restore these entries.
     if (removed.isNotEmpty) {
-      unawaited(_contextStore.reconcile(sessionId, valid).then<void>((_) {},
-        onError: (Object _, StackTrace _) {
-          Diag.swallow('hook_context', 'encrypted context invalidation unavailable');
-        }));
+      unawaited(
+        _contextStore
+            .reconcile(sessionId, valid)
+            .then<void>(
+              (_) {},
+              onError: (Object _, StackTrace _) {
+                Diag.swallow(
+                  'hook_context',
+                  'encrypted context invalidation unavailable',
+                );
+              },
+            ),
+      );
     }
     final text = hooks
         .map((entry) => contributions[_contextKey(entry.$1, entry.$2)] ?? '')
-        .where((text) => text.isNotEmpty).join('\n');
+        .where((text) => text.isNotEmpty)
+        .join('\n');
     return _capContext(text, maxSessionContextChars);
   }
 
   String _contextKey(String pluginId, PluginHook hook) {
     final manifest = PluginContributionRegistry.I.manifestFor(pluginId);
     if (manifest != null) return HookContextStore.descriptor(manifest, hook);
-    return jsonEncode([pluginId, manifest?.rootPath, manifest?.version, hook.toJson()]);
+    return jsonEncode([
+      pluginId,
+      manifest?.rootPath,
+      manifest?.version,
+      hook.toJson(),
+    ]);
   }
 
   Future<void> _restoreSessionContext(String sessionId) async {
     final epoch = _sessionContextEpochs[sessionId] ?? 0;
-    final valid = _resolveHooks('session_start', sessionId)
+    final hooks = _resolveHooks('session_start', sessionId);
+    final revisions = _registrationSnapshot(hooks);
+    final valid = hooks
         .where((entry) => !entry.$1.startsWith('legacy:'))
-        .map((entry) => _contextKey(entry.$1, entry.$2)).toSet();
+        .map((entry) => _contextKey(entry.$1, entry.$2))
+        .toSet();
     try {
+      _sessionContexts.putIfAbsent(sessionId, () => {});
       final restored = await _contextStore.reconcile(sessionId, valid);
       if (epoch != (_sessionContextEpochs[sessionId] ?? 0)) return;
+      final current = hooks
+          .where(
+            (entry) =>
+                revisions[entry.$1] ==
+                PluginContributionRegistry.I.revisionFor(entry.$1),
+          )
+          .map((entry) => _contextKey(entry.$1, entry.$2))
+          .toSet();
       final contexts = _sessionContexts.putIfAbsent(sessionId, () => {});
       // Fresh in-process results win over persisted results on targeted installs.
       for (final entry in restored.entries) {
-        contexts.putIfAbsent(entry.key, () => entry.value);
+        if (current.contains(entry.key)) {
+          contexts.putIfAbsent(entry.key, () => entry.value);
+        }
       }
-      contexts.removeWhere((key, _) => RegExp(r'^[a-f0-9]{64}$').hasMatch(key) && !valid.contains(key));
+      contexts.removeWhere(
+        (key, _) =>
+            RegExp(r'^[a-f0-9]{64}$').hasMatch(key) && !valid.contains(key),
+      );
     } catch (_) {
       // Fail open without logging decrypted values or platform exception data.
       Diag.swallow('hook_context', 'encrypted context restore unavailable');
@@ -394,7 +575,9 @@ class HookService extends ChangeNotifier {
 
   static String _capContext(String text, int cap) {
     const suffix = '\n[hook output truncated]';
-    return text.length <= cap ? text : '${text.substring(0, cap - suffix.length)}$suffix';
+    return text.length <= cap
+        ? text
+        : '${text.substring(0, cap - suffix.length)}$suffix';
   }
 
   /// Extract the injectable context from a hook's stdout, honoring the three
@@ -437,7 +620,9 @@ class HookService extends ChangeNotifier {
   @visibleForTesting
   void resetForTest() {
     for (final files in _envFiles.values) {
-      for (final file in files.values) { _removeEnvFile(file.$1); }
+      for (final file in files.values) {
+        _removeEnvFile(file.$1);
+      }
     }
     _envFiles.clear();
     _endingSessions.clear();
@@ -462,13 +647,22 @@ class HookService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       enabled = prefs.getBool('ovid_hooks_enabled') ?? true;
-    } catch (e) { Diag.swallow('hook_service', e); }
+    } catch (e) {
+      Diag.swallow('hook_service', e);
+    }
+    final dir = await _hookEnvDir();
+    if (dir != null) await _sweepOrphanEnv(dir);
   }
 
   Future<void> setEnabled(bool v) async {
     enabled = v;
     if (!v) {
-      for (final sid in {..._sessionContextEpochs.keys, ..._sessionContexts.keys, ..._envFiles.keys}) {
+      _fenceAgentEvals();
+      for (final sid in {
+        ..._sessionContextEpochs.keys,
+        ..._sessionContexts.keys,
+        ..._envFiles.keys,
+      }) {
         _sessionContextEpochs[sid] = (_sessionContextEpochs[sid] ?? 0) + 1;
         await _deleteSessionEnv(sid);
       }
@@ -477,7 +671,9 @@ class HookService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('ovid_hooks_enabled', v);
-    } catch (e) { Diag.swallow('hook_service', e); }
+    } catch (e) {
+      Diag.swallow('hook_service', e);
+    }
   }
 
   /// Test seam: replace the executor (no sandbox in unit tests).
@@ -527,6 +723,38 @@ class HookService extends ChangeNotifier {
 
   static int _chainDepth() => Zone.current[_depthKey] as int? ?? 0;
 
+  // In-flight agent evaluations, fenced as (pluginId, sessionId, completer).
+  // Fencing completes the completer so a wired evaluator can stop work; any
+  // result that arrives after the fence is dropped (fail-open).
+  final List<(String, String, Completer<void>)> _agentEvals = [];
+
+  static final Object _agentFenced = Object();
+  static final Object _agentTimedOut = Object();
+
+  Completer<void> _beginAgentEval(String pluginId, String sessionId) {
+    final fence = Completer<void>();
+    _agentEvals.add((pluginId, sessionId, fence));
+    return fence;
+  }
+
+  void _endAgentEval(Completer<void> fence) {
+    _agentEvals.removeWhere((e) => identical(e.$3, fence));
+    if (!fence.isCompleted) fence.complete();
+  }
+
+  void _fenceAgentEvals({String? pluginId, String? sessionId}) {
+    final matched = _agentEvals
+        .where(
+          (e) =>
+              (pluginId == null || e.$1 == pluginId) &&
+              (sessionId == null || e.$2 == sessionId),
+        )
+        .toList();
+    for (final e in matched) {
+      _endAgentEval(e.$3);
+    }
+  }
+
   /// Whether [pluginId]'s hooks are disabled for [sessionId] (breaker).
   bool pluginTrippedForTest(String pluginId, String sessionId) =>
       _tripped.contains('$pluginId|$sessionId');
@@ -549,7 +777,7 @@ class HookService extends ChangeNotifier {
       _noteBlocker(
         pluginId,
         'disabled for this session after $n consecutive failures '
-            '(circuit breaker) — re-enable the plugin to retry',
+        '(circuit breaker) — re-enable the plugin to retry',
       );
     } else {
       _consecutiveFails[key] = n;
@@ -650,7 +878,11 @@ class HookService extends ChangeNotifier {
   }
 
   static Object? _decodedOutput(String text) {
-    try { return jsonDecode(text); } catch (_) { return null; }
+    try {
+      return jsonDecode(text);
+    } catch (_) {
+      return null;
+    }
   }
 
   static String _safeOutput(String text, Map<String, dynamic> known) {
@@ -661,24 +893,34 @@ class HookService extends ChangeNotifier {
           collect(e.value, secret || _isSecretKey(e.key.toString()));
         }
       } else if (value is List) {
-        for (final item in value) { collect(item, secret); }
+        for (final item in value) {
+          collect(item, secret);
+        }
       } else if (secret && value is String && value.isNotEmpty) {
         secrets.add(value);
       }
     }
+
     collect(known);
     Object? decoded;
-    try { decoded = jsonDecode(text); } catch (_) {
+    try {
+      decoded = jsonDecode(text);
+    } catch (_) {
       Diag.swallow('hook_output', 'non-JSON output handled as text');
     }
     collect(decoded);
     var safe = decoded is Map || decoded is List
-        ? jsonEncode(_redactValue(decoded)) : text;
-    final ordered = secrets.toList()..sort((a, b) => b.length.compareTo(a.length));
+        ? jsonEncode(_redactValue(decoded))
+        : text;
+    final ordered = secrets.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
     for (final secret in ordered) {
       safe = safe.replaceAll(secret, '[redacted]');
       final encoded = jsonEncode(secret);
-      safe = safe.replaceAll(encoded.substring(1, encoded.length - 1), '[redacted]');
+      safe = safe.replaceAll(
+        encoded.substring(1, encoded.length - 1),
+        '[redacted]',
+      );
     }
     return safe;
   }
@@ -695,8 +937,7 @@ class HookService extends ChangeNotifier {
     String canonicalEvent,
     String? matcher,
     Map<String, dynamic> payload,
-  ) =>
-      _matcherApplies(canonicalEvent, matcher, payload);
+  ) => _matcherApplies(canonicalEvent, matcher, payload);
 
   static bool _matcherApplies(
     String canonicalEvent,
@@ -745,8 +986,12 @@ class HookService extends ChangeNotifier {
 
   /// Compatibility aliases apply only to manifests inspected by the [CC]
   /// adapter. The native name stays available to matchers and on stdin.
-  Map<String, dynamic>? _ccAliasPayload(String pluginId, Map<String, dynamic> payload) {
-    if (PluginContributionRegistry.I.manifestFor(pluginId)?.format != PluginFormat.claudeCode) {
+  Map<String, dynamic>? _ccAliasPayload(
+    String pluginId,
+    Map<String, dynamic> payload,
+  ) {
+    if (PluginContributionRegistry.I.manifestFor(pluginId)?.format !=
+        PluginFormat.claudeCode) {
       return null;
     }
     final tool = payload['tool'] ?? payload['tool_name'];
@@ -763,26 +1008,42 @@ class HookService extends ChangeNotifier {
       },
       _ => null,
     };
-    return alias == null ? null : {...payload, 'tool': alias, 'tool_name': alias};
+    return alias == null
+        ? null
+        : {...payload, 'tool': alias, 'tool_name': alias};
   }
 
-  bool _hookMatches(String pluginId, PluginHook hook, String event, Map<String, dynamic> payload) {
+  bool _hookMatches(
+    String pluginId,
+    PluginHook hook,
+    String event,
+    Map<String, dynamic> payload,
+  ) {
     final source = hook.unknownFields['ovidSourceEvent'];
     if (event == 'post_tool' && source != null) {
-      final failure = payload['hook_event_name'] == 'PostToolUseFailure' ||
-          payload['is_error'] == true || payload['error'] != null;
+      final failure =
+          payload['hook_event_name'] == 'PostToolUseFailure' ||
+          payload['is_error'] == true ||
+          payload['error'] != null;
       if ((source == 'PostToolUseFailure') != failure) return false;
     }
     final alias = _ccAliasPayload(pluginId, payload);
     final toolEvent = _isToolEvent(event) || event == 'permission_request';
-    final isCc = PluginContributionRegistry.I.manifestFor(pluginId)?.format == PluginFormat.claudeCode;
-    final matchEvent = event == 'permission_request' && isCc ? 'pre_tool' : event;
+    final isCc =
+        PluginContributionRegistry.I.manifestFor(pluginId)?.format ==
+        PluginFormat.claudeCode;
+    final matchEvent = event == 'permission_request' && isCc
+        ? 'pre_tool'
+        : event;
     if (!_matcherApplies(matchEvent, hook.matcher, payload) &&
-        !(toolEvent && alias != null && _matcherApplies(matchEvent, hook.matcher, alias))) {
+        !(toolEvent &&
+            alias != null &&
+            _matcherApplies(matchEvent, hook.matcher, alias))) {
       return false;
     }
     final predicate = _hookIfPredicate(hook);
-    return predicate == null || ifPredicateMatches(predicate, payload) ||
+    return predicate == null ||
+        ifPredicateMatches(predicate, payload) ||
         (toolEvent && alias != null && ifPredicateMatches(predicate, alias));
   }
 
@@ -802,7 +1063,12 @@ class HookService extends ChangeNotifier {
     Map<String, dynamic> payload,
   ) {
     if (canonicalEvent == 'session_start' || canonicalEvent == 'session_end') {
-      final reason = (canonicalEvent == 'session_start' ? payload['source'] ?? payload['reason'] : payload['reason'])?.toString() ?? '';
+      final reason =
+          (canonicalEvent == 'session_start'
+                  ? payload['source'] ?? payload['reason']
+                  : payload['reason'])
+              ?.toString() ??
+          '';
       return _ccSessionSource(reason);
     }
     if (canonicalEvent == 'pre_compact' || canonicalEvent == 'post_compact') {
@@ -904,7 +1170,7 @@ class HookService extends ChangeNotifier {
         if (m.hooks.any((h) => h.event == canonical)) {
           final state =
               PluginContributionRegistry.I.activationFor(pid)?.name ??
-                  'unregistered';
+              'unregistered';
           _noteBlocker(
             pid,
             state == 'pendingGlobal'
@@ -1053,6 +1319,59 @@ class HookService extends ChangeNotifier {
   }
 
   /// Directory holding per-session hook env files (item 8).
+  StreamIterator<FileSystemEntity>? _envSweep;
+  String? _envSweepPath;
+  Future<void>? _envSweepPending;
+
+  /// Incremental non-recursive GC. Keep the cursor between bounded batches
+  /// so unrelated entries cannot starve later orphans. Never follow links.
+  Future<void> _sweepOrphanEnv(Directory dir) {
+    final pending = _envSweepPending;
+    if (pending != null) return pending;
+    final task = (() async {
+      try {
+        if (_envSweepPath != dir.path) {
+          await _envSweep?.cancel();
+          _envSweep = null;
+          _envSweepPath = dir.path;
+        }
+        final iterator = _envSweep ??= StreamIterator(
+          dir.list(followLinks: false),
+        );
+        final clock = Stopwatch()..start();
+        for (
+          var visited = 0;
+          visited < 64 && clock.elapsedMilliseconds < 50;
+          visited++
+        ) {
+          if (!await iterator.moveNext().timeout(
+            const Duration(milliseconds: 100),
+          )) {
+            await iterator.cancel();
+            _envSweep = null;
+            break;
+          }
+          final entity = iterator.current;
+          if (!entity.path.endsWith('.env') ||
+              entity is Directory ||
+              _liveEnvPaths.containsKey(entity.path) ||
+              _envFiles.values.any(
+                (files) => files.values.any((e) => e.$1 == entity.path),
+              )) {
+            continue;
+          }
+          _removeEnvFile(entity.path);
+        }
+      } catch (_) {
+        await _envSweep?.cancel();
+        _envSweep = null;
+        Diag.swallow('hook_env', 'orphan environment cleanup unavailable');
+      }
+    })();
+    _envSweepPending = task;
+    return task.whenComplete(() => _envSweepPending = null);
+  }
+
   Future<Directory?> _hookEnvDir() async {
     try {
       final docs = await getApplicationDocumentsDirectory();
@@ -1077,23 +1396,33 @@ class HookService extends ChangeNotifier {
   Future<String> _sessionEnvFilePath(String sessionId, String pluginId) async {
     if (sessionId.isEmpty) return '';
     final epoch = _sessionContextEpochs.putIfAbsent(sessionId, () => 0);
+    final revision = PluginContributionRegistry.I.revisionFor(pluginId);
     final dir = await _hookEnvDir();
-    if (dir == null || epoch != _sessionContextEpochs[sessionId]) return '';
+    if (dir != null) await _sweepOrphanEnv(dir);
+    if (dir == null ||
+        epoch != _sessionContextEpochs[sessionId] ||
+        revision != PluginContributionRegistry.I.revisionFor(pluginId)) {
+      return '';
+    }
     _reconcileSessionEnv(sessionId);
     final files = _envFiles.putIfAbsent(sessionId, () => {});
     return files.putIfAbsent(pluginId, () {
-      final digest = sha256.convert(utf8.encode(jsonEncode([sessionId, pluginId, epoch])));
-      return ('${dir.path}/$_envBoot-${_envSerial++}-$digest.env',
-        PluginContributionRegistry.I.manifestFor(pluginId));
+      final digest = sha256.convert(
+        utf8.encode(jsonEncode([sessionId, pluginId, epoch])),
+      );
+      return ('${dir.path}/$_envBoot-${_envSerial++}-$digest.env', revision);
     }).$1;
   }
 
   void _removeEnvFile(String path) {
     try {
-      if (FileSystemEntity.typeSync(path, followLinks: false) != FileSystemEntityType.notFound) {
+      if (FileSystemEntity.typeSync(path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
         File(path).deleteSync();
       }
-    } catch (_) { Diag.swallow('hook_env', 'environment cleanup unavailable'); }
+    } catch (_) {
+      Diag.swallow('hook_env', 'environment cleanup unavailable');
+    }
   }
 
   void _reconcileSessionEnv(String sessionId) {
@@ -1102,7 +1431,7 @@ class HookService extends ChangeNotifier {
       final valid = pid.startsWith('legacy:')
           ? _resolveHooks('session_start', sessionId).any((e) => e.$1 == pid)
           : registry.isPluginActiveForSession(pid, sessionId) &&
-            identical(entry.$2, registry.manifestFor(pid));
+                entry.$2 == registry.revisionFor(pid);
       if (!valid) _removeEnvFile(entry.$1);
       return !valid;
     });
@@ -1110,16 +1439,28 @@ class HookService extends ChangeNotifier {
 
   static bool _safeEnvName(String name) =>
       RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(name) &&
-      !name.startsWith('PLUGIN_') && !name.startsWith('OVID_') &&
-      !name.startsWith('CLAUDE_') && !name.startsWith('CODEX_') &&
-      !name.startsWith('LD_') && !name.startsWith('DYLD_') &&
-      !const {'BASH_ENV', 'ENV', 'SHELLOPTS', 'BASHOPTS', 'IFS', 'NODE_OPTIONS',
-        'PYTHONSTARTUP'}.contains(name);
+      !name.startsWith('PLUGIN_') &&
+      !name.startsWith('OVID_') &&
+      !name.startsWith('CLAUDE_') &&
+      !name.startsWith('CODEX_') &&
+      !name.startsWith('LD_') &&
+      !name.startsWith('DYLD_') &&
+      !const {
+        'BASH_ENV',
+        'ENV',
+        'SHELLOPTS',
+        'BASHOPTS',
+        'IFS',
+        'NODE_OPTIONS',
+        'PYTHONSTARTUP',
+      }.contains(name);
 
   // A data-only subset of shell exports: no expansion, substitution or source.
   static MapEntry<String, String>? _envAssignment(String raw) {
     var line = raw.trim();
-    if (line.contains('\n') || line.contains('\r') || line.contains('\u0000')) return null;
+    if (line.contains('\n') || line.contains('\r') || line.contains('\u0000')) {
+      return null;
+    }
     if (line.startsWith('export ')) line = line.substring(7).trimLeft();
     final eq = line.indexOf('=');
     if (eq <= 0) return null;
@@ -1146,14 +1487,13 @@ class HookService extends ChangeNotifier {
     if (path.isEmpty) return const {};
     try {
       final f = File(path);
-      if (FileSystemEntity.typeSync(path, followLinks: false) != FileSystemEntityType.file ||
+      if (FileSystemEntity.typeSync(path, followLinks: false) !=
+              FileSystemEntityType.file ||
           f.lengthSync() > 65536) {
         return const {};
       }
       final text = f.readAsStringSync();
-      final capped = text.length > 65536
-          ? text.substring(0, 65536)
-          : text;
+      final capped = text.length > 65536 ? text.substring(0, 65536) : text;
       final out = <String, String>{};
       for (final rawLine in capped.split('\n')) {
         final line = rawLine.trim();
@@ -1162,7 +1502,10 @@ class HookService extends ChangeNotifier {
         if (assignment != null) {
           out[assignment.key] = assignment.value;
         } else {
-          Diag.swallow('hook_env', 'unsupported environment assignment skipped');
+          Diag.swallow(
+            'hook_env',
+            'unsupported environment assignment skipped',
+          );
         }
       }
       return out;
@@ -1179,18 +1522,25 @@ class HookService extends ChangeNotifier {
       if (path.isEmpty) return;
       final f = File(path);
       final type = FileSystemEntity.typeSync(path, followLinks: false);
-      if (type != FileSystemEntityType.file && type != FileSystemEntityType.notFound) return;
+      if (type != FileSystemEntityType.file &&
+          type != FileSystemEntityType.notFound) {
+        return;
+      }
       final bytes = utf8.encode('${lines.join('\n')}\n');
       if ((f.existsSync() ? f.lengthSync() : 0) + bytes.length > 65536) return;
       f.writeAsBytesSync(bytes, mode: FileMode.append);
-    } catch (_) { Diag.swallow('hook_env', 'environment update unavailable'); }
+    } catch (_) {
+      Diag.swallow('hook_env', 'environment update unavailable');
+    }
   }
 
   /// Delete the session env file (session_end cleanup).
   Future<void> _deleteSessionEnv(String sessionId) async {
     final files = _envFiles.remove(sessionId);
     if (files != null) {
-      for (final entry in files.values) { _removeEnvFile(entry.$1); }
+      for (final entry in files.values) {
+        _removeEnvFile(entry.$1);
+      }
     }
   }
 
@@ -1212,7 +1562,7 @@ class HookService extends ChangeNotifier {
     // built-in contract below always wins on collision.
     final envFilePath = await _sessionEnvFilePath(sessionId, pluginId);
     final sessionEnv = <String, String>{};
-    for (final entry in _envFiles[sessionId]?.values ?? <(String, NormalizedPluginManifest?)>[]) {
+    for (final entry in _envFiles[sessionId]?.values ?? <(String, int)>[]) {
       sessionEnv.addAll(_loadSessionEnv(entry.$1));
     }
     final runtime = HookExecutionScope.dependencyRoot(
@@ -1332,6 +1682,40 @@ class HookService extends ChangeNotifier {
     bool gate = false,
     String stdinPayload = '',
   }) async {
+    final path = env['CLAUDE_ENV_FILE'] ?? '';
+    final sessionId = env['PLUGIN_SESSION'] ?? '';
+    final epoch = _sessionContextEpochs[sessionId] ?? 0;
+    _liveEnvPaths[path] = (_liveEnvPaths[path] ?? 0) + 1;
+    try {
+      return await _execCommand(
+        hook,
+        env,
+        cwd,
+        gate: gate,
+        stdinPayload: stdinPayload,
+      );
+    } finally {
+      final remaining = (_liveEnvPaths[path] ?? 1) - 1;
+      if (remaining == 0) {
+        _liveEnvPaths.remove(path);
+      } else {
+        _liveEnvPaths[path] = remaining;
+      }
+      if (!_hookCurrent(sessionId, hook.pluginId, hook, epoch)) {
+        _removeEnvFile(path);
+      }
+    }
+  }
+
+  final Map<String, int> _liveEnvPaths = {};
+
+  Future<(int, String, String)> _execCommand(
+    PluginHook hook,
+    Map<String, String> env,
+    Directory? cwd, {
+    bool gate = false,
+    String stdinPayload = '',
+  }) async {
     final timeout = Duration(
       seconds: hook.timeoutS <= 0
           ? defaultTimeoutS
@@ -1385,7 +1769,8 @@ class HookService extends ChangeNotifier {
       await SandboxService.I.checkExisting();
     }
     final prefix = SandboxService.I.prefixPath;
-    if (prefix == null || !File('$prefix/bin/${_hookShell(hook)}').existsSync()) {
+    if (prefix == null ||
+        !File('$prefix/bin/${_hookShell(hook)}').existsSync()) {
       // The single most common real reason "hooks don't work": hook commands
       // execute inside the Studio sandbox, which only installs on first Studio
       // open. Record the reason instead of failing invisibly three times and
@@ -1423,7 +1808,9 @@ class HookService extends ChangeNotifier {
     );
     final proc = await runZoned(
       () => SandboxService.I.spawn(
-        [_hookShell(hook), '-c', command], hostWorkDir: cwd, env: env,
+        [_hookShell(hook), '-c', command],
+        hostWorkDir: cwd,
+        env: env,
       ),
       zoneValues: {SandboxService.allowedRootsZoneKey: scope},
     );
@@ -1442,14 +1829,19 @@ class HookService extends ChangeNotifier {
       }
       return utf8.decode(bytes, allowMalformed: true);
     }
+
     final stdoutFuture = readBounded(proc.stdout);
     final stderrFuture = readBounded(proc.stderr);
     try {
       return await (() async {
         try {
-          if (stdinPayload.isNotEmpty) proc.stdin.add(utf8.encode(stdinPayload));
+          if (stdinPayload.isNotEmpty) {
+            proc.stdin.add(utf8.encode(stdinPayload));
+          }
           await proc.stdin.close();
-        } catch (_) { /* Early exit can close stdin before we finish writing. */ }
+        } catch (_) {
+          /* Early exit can close stdin before we finish writing. */
+        }
         final code = await proc.exitCode;
         final out = await stdoutFuture;
         final err = await stderrFuture;
@@ -1462,7 +1854,9 @@ class HookService extends ChangeNotifier {
       // the sandbox's live-process registry — spawn registers it).
       try {
         proc.kill(ProcessSignal.sigkill);
-      } catch (e) { Diag.swallow('hook_service', e); }
+      } catch (e) {
+        Diag.swallow('hook_service', e);
+      }
       rethrow;
     }
   }
@@ -1512,29 +1906,37 @@ class HookService extends ChangeNotifier {
     // or overlapping start cannot invalidate the start already publishing.
     if (canonical == 'session_start') {
       if (!enabled) return const HookFireResult(output: '');
-      if (_firingEvents.contains('$sessionId|$canonical') || _chainDepth() >= maxDepth) {
+      if (_firingEvents.contains('$sessionId|$canonical') ||
+          _chainDepth() >= maxDepth) {
         return const HookFireResult(output: '', retryableFailure: true);
       }
     }
     if (event == 'PostToolUseFailure') {
       payload = {...payload, 'hook_event_name': 'PostToolUseFailure'};
     }
-    Map<String, (String, NormalizedPluginManifest?)>? endingEnv;
+    Map<String, (String, int)>? endingEnv;
     Object? endToken;
     void cleanEndingEnv() {
-      if (endToken != null && identical(_endingSessions[sessionId]?.$1, endToken)) {
+      if (endToken != null &&
+          identical(_endingSessions[sessionId]?.$1, endToken)) {
         _endingSessions.remove(sessionId);
       }
       final files = endingEnv;
       if (files == null) return;
       if (identical(_envFiles[sessionId], files)) _envFiles.remove(sessionId);
-      for (final entry in files.values) { _removeEnvFile(entry.$1); }
+      for (final entry in files.values) {
+        _removeEnvFile(entry.$1);
+      }
     }
-    if (canonical == 'session_start' && _endingSessions.containsKey(sessionId) &&
-        _endingSessions[sessionId]!.$2 == (_sessionContextEpochs[sessionId] ?? 0)) {
+
+    if (canonical == 'session_start' &&
+        _endingSessions.containsKey(sessionId) &&
+        _endingSessions[sessionId]!.$2 ==
+            (_sessionContextEpochs[sessionId] ?? 0)) {
       // A new start owns a new epoch/map while the old end retains only its
       // captured files. Detach once: later targeted starts share the fresh map.
-      _sessionContextEpochs[sessionId] = (_sessionContextEpochs[sessionId] ?? 0) + 1;
+      _sessionContextEpochs[sessionId] =
+          (_sessionContextEpochs[sessionId] ?? 0) + 1;
       _envFiles.remove(sessionId);
     }
     if (canonical == 'session_end') {
@@ -1543,8 +1945,12 @@ class HookService extends ChangeNotifier {
       }
       endToken = Object();
       endingEnv = _envFiles.putIfAbsent(sessionId, () => {});
-      _sessionContextEpochs[sessionId] = (_sessionContextEpochs[sessionId] ?? 0) + 1;
-      _endingSessions[sessionId] = (endToken, _sessionContextEpochs[sessionId]!);
+      _sessionContextEpochs[sessionId] =
+          (_sessionContextEpochs[sessionId] ?? 0) + 1;
+      _endingSessions[sessionId] = (
+        endToken,
+        _sessionContextEpochs[sessionId]!,
+      );
       final endEpoch = _sessionContextEpochs[sessionId];
       _sessionContexts.remove(sessionId);
       try {
@@ -1575,6 +1981,7 @@ class HookService extends ChangeNotifier {
       return const HookFireResult(output: '', retryableFailure: true);
     }
     final hooks = _resolveHooks(event, sessionId, onlyPluginId: onlyPluginId);
+    final revisions = _registrationSnapshot(hooks);
     if (hooks.isEmpty && canonical != 'session_start') {
       cleanEndingEnv();
       return const HookFireResult(output: '');
@@ -1598,7 +2005,10 @@ class HookService extends ChangeNotifier {
           model: model,
           completedStartHooks: completedStartHooks,
         ),
-        zoneValues: {_depthKey: chainDepth + 1},
+        zoneValues: {
+          _depthKey: chainDepth + 1,
+          _registrationSnapshotKey: revisions,
+        },
       );
       return result;
     } finally {
@@ -1621,11 +2031,7 @@ class HookService extends ChangeNotifier {
     required String stdinJson,
   }) async {
     final epoch = _sessionContextEpochs[sessionId] ?? 0;
-    final record = {
-      'plugin': pluginId,
-      'event': canonical,
-      'type': 'prompt',
-    };
+    final record = {'plugin': pluginId, 'event': canonical, 'type': 'prompt'};
     final eval = promptHookEvaluator;
     if (eval == null) {
       fired++;
@@ -1637,7 +2043,9 @@ class HookService extends ChangeNotifier {
               'prompt-type hook skipped: no PromptHookEvaluator wired '
               '(fail-open)',
         });
-      } catch (e) { Diag.swallow('hook_service', e); }
+      } catch (e) {
+        Diag.swallow('hook_service', e);
+      }
       return null;
     }
     fired++;
@@ -1646,7 +2054,10 @@ class HookService extends ChangeNotifier {
         ...Map<String, dynamic>.from(record),
         'promptChars': hook.payload.length,
       });
-    } catch (e) { Diag.swallow('hook_service', e); }
+    } catch (e) {
+      Diag.swallow('hook_service', e);
+    }
+    if (!_hookCurrent(sessionId, pluginId, hook, epoch)) return null;
     final prompt = _buildPromptHookPrompt(
       hook: hook,
       canonical: canonical,
@@ -1655,13 +2066,20 @@ class HookService extends ChangeNotifier {
     );
     String? response;
     try {
-      response = await eval(prompt, {
-        'event': canonical,
-        'session': sessionId,
-        'plugin': _displayName(pluginId),
-        'hook': hook.canonicalId,
-        'model': ?model,
-      }).timeout(Duration(seconds: hook.timeoutS <= 0 ? 120 : hook.timeoutS.clamp(1, maxTimeoutS)));
+      response =
+          await eval(prompt, {
+            'event': canonical,
+            'session': sessionId,
+            'plugin': _displayName(pluginId),
+            'hook': hook.canonicalId,
+            'model': ?model,
+          }).timeout(
+            Duration(
+              seconds: hook.timeoutS <= 0
+                  ? 120
+                  : hook.timeoutS.clamp(1, maxTimeoutS),
+            ),
+          );
     } catch (e) {
       if (!_hookCurrent(sessionId, pluginId, hook, epoch)) return null;
       failed++;
@@ -1673,13 +2091,19 @@ class HookService extends ChangeNotifier {
           'error': 'prompt-hook evaluation failed',
           'warning': 'prompt-hook evaluation failed (fail-open)',
         });
-      } catch (e) { Diag.swallow('hook_service', e); }
+      } catch (e) {
+        Diag.swallow('hook_service', e);
+      }
       return null;
     }
     if (!_hookCurrent(sessionId, pluginId, hook, epoch)) return null;
     final parsed = parsePromptHookDecision(response ?? '');
-    final verdict = parsed == null ? null : PromptHookVerdict(parsed.decision,
-        parsed.reason == null ? null : _safeOutput(parsed.reason!, payload));
+    final verdict = parsed == null
+        ? null
+        : PromptHookVerdict(
+            parsed.decision,
+            parsed.reason == null ? null : _safeOutput(parsed.reason!, payload),
+          );
     if (verdict == null) {
       _recordSuccess(pluginId, sessionId);
       try {
@@ -1688,7 +2112,9 @@ class HookService extends ChangeNotifier {
           'ok': true,
           'decision': 'unparseable — fail-open',
         });
-      } catch (e) { Diag.swallow('hook_service', e); }
+      } catch (e) {
+        Diag.swallow('hook_service', e);
+      }
       return null;
     }
     _recordSuccess(pluginId, sessionId);
@@ -1699,8 +2125,107 @@ class HookService extends ChangeNotifier {
         'decision': verdict.decision,
         if (verdict.reason != null) 'reason': verdict.reason,
       });
-    } catch (e) { Diag.swallow('hook_service', e); }
-    return verdict;
+    } catch (e) {
+      Diag.swallow('hook_service', e);
+    }
+    return _hookCurrent(sessionId, pluginId, hook, epoch) ? verdict : null;
+  }
+
+  Future<AgentHookVerdict?> _evalAgentHook({
+    required String pluginId,
+    required PluginHook hook,
+    required String canonical,
+    required String sessionId,
+    required Map<String, dynamic> payload,
+    required String? model,
+    required String stdinJson,
+  }) async {
+    final epoch = _sessionContextEpochs[sessionId] ?? 0;
+    final record = {'plugin': pluginId, 'event': canonical, 'type': 'agent'};
+    fired++;
+    final evaluator = agentHookEvaluator;
+    if (evaluator == null) {
+      await _ledger(sessionId, 'hook/result', {
+        ...record,
+        'ok': false,
+        'reason': 'AgentHookEvaluator unavailable (fail-open)',
+      });
+      return null;
+    }
+    final rawTools = hook.unknownFields['tools'];
+    final tools = rawTools is List
+        ? rawTools
+              .whereType<String>()
+              .where(
+                (tool) =>
+                    RegExp(r'^[a-zA-Z][a-zA-Z0-9_]{0,63}$').hasMatch(tool),
+              )
+              .toSet()
+        : <String>{};
+    final fence = _beginAgentEval(pluginId, sessionId);
+    final budget = Duration(
+      seconds: hook.timeoutS <= 0 ? 120 : hook.timeoutS.clamp(1, maxTimeoutS),
+    );
+    try {
+      final evaluation = AgentHookEvaluation(
+        prompt: hook.payload,
+        context: {
+          'event': canonical,
+          'session': sessionId,
+          'plugin': _displayName(pluginId),
+          'hook': hook.canonicalId,
+          'stdin': _safeOutput(stdinJson, payload),
+          'model': ?model,
+        },
+        approvedTools: Set.unmodifiable(tools),
+        budget: budget,
+        cancelled: fence.future,
+      );
+      final verdict = await Future.any<Object?>([
+        evaluator(evaluation),
+        fence.future.then((_) => _agentFenced),
+        Future<Object?>.delayed(budget, () => _agentTimedOut),
+      ]);
+      if (verdict == _agentFenced ||
+          !_hookCurrent(sessionId, pluginId, hook, epoch)) {
+        return null;
+      }
+      if (verdict == _agentTimedOut) {
+        await _ledger(sessionId, 'hook/result', {
+          ...record,
+          'ok': false,
+          'reason': 'AgentHookEvaluator timed out (fail-open)',
+        });
+        await SessionLedger.I.flush(sessionId);
+        return null;
+      }
+      if (verdict is! AgentHookVerdict ||
+          !const {'block', 'approve'}.contains(verdict.decision)) {
+        return null;
+      }
+      final safe = AgentHookVerdict(
+        verdict.decision,
+        verdict.reason == null ? null : _safeOutput(verdict.reason!, payload),
+      );
+      await _ledger(sessionId, 'hook/result', {
+        ...record,
+        'ok': true,
+        'decision': safe.decision,
+        if (safe.reason != null) 'reason': safe.reason,
+      });
+      return _hookCurrent(sessionId, pluginId, hook, epoch) ? safe : null;
+    } catch (_) {
+      if (_hookCurrent(sessionId, pluginId, hook, epoch)) {
+        await _ledger(sessionId, 'hook/result', {
+          ...record,
+          'ok': false,
+          'reason': 'AgentHookEvaluator failed (fail-open)',
+        });
+      }
+      return null;
+    } finally {
+      _endAgentEval(fence);
+    }
   }
 
   /// Build the evaluation prompt for a prompt-type hook: the hook's rule
@@ -1765,8 +2290,11 @@ class HookService extends ChangeNotifier {
       if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
       if (!_hookMatches(pluginId, hook, canonical, payload)) continue;
       final startKey = _contextKey(pluginId, hook);
-      if (canonical == 'session_start' && completedStartHooks?.contains(startKey) == true) {
-        if (completedStartHooks!.contains('halt:$startKey')) {
+      final receipt =
+          '$startKey:${PluginContributionRegistry.I.revisionFor(pluginId)}';
+      if (canonical == 'session_start' &&
+          completedStartHooks?.contains(receipt) == true) {
+        if (completedStartHooks!.contains('halt:$receipt')) {
           halted = true;
           break;
         }
@@ -1774,6 +2302,26 @@ class HookService extends ChangeNotifier {
       }
       if (_tripped.contains('$pluginId|$sessionId')) {
         retryableFailure = true;
+        continue;
+      }
+      if (hook.type == 'agent') {
+        final verdict = await _evalAgentHook(
+          pluginId: pluginId,
+          hook: hook,
+          canonical: canonical,
+          sessionId: sessionId,
+          payload: payload,
+          model: model,
+          stdinJson: stdinJson,
+        );
+        if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
+        if (verdict?.isBlock == true) {
+          promptBlocks.add((
+            pluginId,
+            hook,
+            verdict!.reason ?? 'blocked by agent hook ($pluginId)',
+          ));
+        }
         continue;
       }
       if (hook.type == 'prompt') {
@@ -1791,8 +2339,11 @@ class HookService extends ChangeNotifier {
           );
           if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
           if (verdict != null && verdict.decision == 'block') {
-            promptBlocks.add((pluginId, hook,
-                verdict.reason ?? 'blocked by prompt hook ($pluginId)'));
+            promptBlocks.add((
+              pluginId,
+              hook,
+              verdict.reason ?? 'blocked by prompt hook ($pluginId)',
+            ));
           }
           continue;
         }
@@ -1805,7 +2356,9 @@ class HookService extends ChangeNotifier {
             'ok': false,
             'reason': 'prompt-type hook has no shell runtime — skipped',
           });
-        } catch (e) { Diag.swallow('hook_service', e); }
+        } catch (e) {
+          Diag.swallow('hook_service', e);
+        }
         continue;
       }
       if (hook.type != 'command') continue;
@@ -1836,11 +2389,14 @@ class HookService extends ChangeNotifier {
               ? {...Map<String, dynamic>.from(record), 'async': true}
               : Map<String, dynamic>.from(record),
         );
-      } catch (e) { Diag.swallow('hook_service', e); }
+      } catch (e) {
+        Diag.swallow('hook_service', e);
+      }
       // `async: true` hooks are fire-and-forget per the Claude Code
       // contract: launch without awaiting so they never block the session.
       // Their output is NOT collected into session context (it may arrive
       // after the turn), and failures only touch the health ledger.
+      if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
       if (_hookDeclaresAsync(hook)) {
         // `_exec` resolves normally on nonzero exit — check the code the
         // same way the sync path does, instead of recording every
@@ -1858,7 +2414,10 @@ class HookService extends ChangeNotifier {
                   return;
                 }
                 if (code == 126 || code == 127) {
-                  _noteBlocker(pluginId, 'hook executable or dependency unavailable (exit $code) — repair runtime and retry');
+                  _noteBlocker(
+                    pluginId,
+                    'hook executable or dependency unavailable (exit $code) — repair runtime and retry',
+                  );
                 } else {
                   _recordFailure(pluginId, sessionId);
                 }
@@ -1872,27 +2431,44 @@ class HookService extends ChangeNotifier {
                     'stdoutChars': out.length,
                     'stderrChars': err.length,
                   });
-                } catch (e) { Diag.swallow('hook_service', e); }
+                } catch (e) {
+                  Diag.swallow('hook_service', e);
+                }
               })
               .catchError((Object error) {
-                if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) return;
-                if (error is! HookRuntimeUnavailable) _recordFailure(pluginId, sessionId);
+                if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) {
+                  return;
+                }
+                if (error is! HookRuntimeUnavailable) {
+                  _recordFailure(pluginId, sessionId);
+                }
               }),
         );
         continue;
       }
       try {
         if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
-        final (code, rawOut, rawErr) = await _exec(hook, env, cwd, stdinPayload: stdinJson);
+        final (code, rawOut, rawErr) = await _exec(
+          hook,
+          env,
+          cwd,
+          stdinPayload: stdinJson,
+        );
         if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) {
           _removeEnvFile(env['CLAUDE_ENV_FILE'] ?? '');
           continue;
         }
         if (code == 0 && canonical == 'session_start') {
-          _appendSessionEnv(env['CLAUDE_ENV_FILE'] ?? '', extractEnvFileAppend(rawOut));
+          _appendSessionEnv(
+            env['CLAUDE_ENV_FILE'] ?? '',
+            extractEnvFileAppend(rawOut),
+          );
         }
-        final known = <String, dynamic>{...payload, ...env,
-          ..._loadSessionEnv(env['CLAUDE_ENV_FILE'] ?? '')};
+        final known = <String, dynamic>{
+          ...payload,
+          ...env,
+          ..._loadSessionEnv(env['CLAUDE_ENV_FILE'] ?? ''),
+        };
         final out = _safeOutput(rawOut, known);
         final err = _safeOutput(rawErr, known);
         if (code != 0) {
@@ -1915,13 +2491,18 @@ class HookService extends ChangeNotifier {
                 'decision': 'block',
                 'reason': blockedReason,
               });
-            } catch (e) { Diag.swallow('hook_service', e); }
+            } catch (e) {
+              Diag.swallow('hook_service', e);
+            }
             break;
           }
           failed++;
           retryableFailure = true;
           if (code == 126 || code == 127) {
-            _noteBlocker(pluginId, 'hook executable or dependency unavailable (exit $code) — repair runtime and retry');
+            _noteBlocker(
+              pluginId,
+              'hook executable or dependency unavailable (exit $code) — repair runtime and retry',
+            );
           } else if (canonical != 'session_start') {
             _recordFailure(pluginId, sessionId);
           }
@@ -1934,7 +2515,9 @@ class HookService extends ChangeNotifier {
               'stdoutChars': out.length,
               'stderrChars': err.length,
             });
-          } catch (e) { Diag.swallow('hook_service', e); }
+          } catch (e) {
+            Diag.swallow('hook_service', e);
+          }
           continue;
         }
         _recordSuccess(pluginId, sessionId);
@@ -1953,8 +2536,11 @@ class HookService extends ChangeNotifier {
           // update in that interval must fence both in-memory and disk writes.
           if (contextEpoch != (_sessionContextEpochs[sessionId] ?? 0)) break;
           if (!pluginId.startsWith('legacy:') &&
-              (!PluginContributionRegistry.I.isPluginActiveForSession(pluginId, sessionId) ||
-               startKey != _contextKey(pluginId, hook))) {
+              (!PluginContributionRegistry.I.isPluginActiveForSession(
+                    pluginId,
+                    sessionId,
+                  ) ||
+                  startKey != _contextKey(pluginId, hook))) {
             continue;
           }
           final contexts = _sessionContexts.putIfAbsent(sessionId, () => {});
@@ -1962,17 +2548,29 @@ class HookService extends ChangeNotifier {
           if (!pluginId.startsWith('legacy:')) {
             final explicit = HookContextStore.explicitContext(out);
             try {
-              await _contextStore.put(sessionId, startKey,
-                explicit == null ? null : _capContext(explicit, maxSessionContextChars));
+              await _contextStore.put(
+                sessionId,
+                startKey,
+                explicit == null
+                    ? null
+                    : _capContext(explicit, maxSessionContextChars),
+              );
             } catch (_) {
-              Diag.swallow('hook_context', 'encrypted context persistence unavailable');
+              Diag.swallow(
+                'hook_context',
+                'encrypted context persistence unavailable',
+              );
             }
           }
-          completedStartHooks?.add(startKey);
-          if (!contract.continueHooks) completedStartHooks?.add('halt:$startKey');
+          if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
+          completedStartHooks?.add(receipt);
+          if (!contract.continueHooks) {
+            completedStartHooks?.add('halt:$receipt');
+          }
         }
         if (trimmed.isNotEmpty && !contract.suppressOutput) {
-          final isContextEvent = canonical == 'pre_request' || canonical == 'user_prompt_submit';
+          final isContextEvent =
+              canonical == 'pre_request' || canonical == 'user_prompt_submit';
           collected.add((pluginId, hook, isContextEvent ? context : trimmed));
         }
         if (published.systemMessage != null) {
@@ -1989,9 +2587,12 @@ class HookService extends ChangeNotifier {
             if (published.systemMessage != null)
               'systemMessage': published.systemMessage,
           });
-        } catch (e) { Diag.swallow('hook_service', e); }
+        } catch (e) {
+          Diag.swallow('hook_service', e);
+        }
         // `continue:false` halts further hooks for this event (item 9).
         if (!contract.continueHooks) {
+          if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
           halted = true;
           break;
         }
@@ -2006,10 +2607,14 @@ class HookService extends ChangeNotifier {
           await _ledger(sessionId, 'hook/result', {
             ...record,
             'ok': false,
-            'error': e is HookRuntimeUnavailable ? e.toString() : 'hook execution failed',
+            'error': e is HookRuntimeUnavailable
+                ? e.toString()
+                : 'hook execution failed',
             'warning': 'hook failed (fail-open) — run continues',
           });
-        } catch (e) { Diag.swallow('hook_service', e); }
+        } catch (e) {
+          Diag.swallow('hook_service', e);
+        }
       }
     }
     if (!enabled || contextEpoch != (_sessionContextEpochs[sessionId] ?? 0)) {
@@ -2022,8 +2627,10 @@ class HookService extends ChangeNotifier {
     final joined = activeText(collected).join('\n');
     // SessionStart's public output retains its legacy stdout shape. Standing
     // context is already parsed per hook above; never truncate a JSON envelope.
-    final output = canonical == 'pre_request' || canonical == 'user_prompt_submit'
-        ? _capContext(joined, 2048) : joined;
+    final output =
+        canonical == 'pre_request' || canonical == 'user_prompt_submit'
+        ? _capContext(joined, 2048)
+        : joined;
     return HookFireResult(
       output: output,
       systemMessages: activeText(systemMessages),
@@ -2115,10 +2722,13 @@ class HookService extends ChangeNotifier {
           : _transcriptPathFrom(redacted),
       'cwd': cwd,
       'permission_mode': redacted['permission_mode']?.toString() ?? '',
-      'hook_event_name': canonicalEvent == 'post_tool' &&
-          (redacted['hook_event_name'] == 'PostToolUseFailure' ||
-           redacted['is_error'] == true || redacted['error'] != null)
-          ? 'PostToolUseFailure' : ccHookEventNames[canonicalEvent] ?? canonicalEvent,
+      'hook_event_name':
+          canonicalEvent == 'post_tool' &&
+              (redacted['hook_event_name'] == 'PostToolUseFailure' ||
+                  redacted['is_error'] == true ||
+                  redacted['error'] != null)
+          ? 'PostToolUseFailure'
+          : ccHookEventNames[canonicalEvent] ?? canonicalEvent,
     };
     final tool = redacted['tool'] ?? redacted['tool_name'];
     if (tool != null) m['tool_name'] = tool.toString();
@@ -2135,7 +2745,8 @@ class HookService extends ChangeNotifier {
     final reason = redacted['reason'];
     if (reason != null) m['reason'] = reason.toString();
     if (canonicalEvent == 'session_start') {
-      m['source'] = redacted['source'] ?? _ccSessionSource(reason?.toString() ?? '');
+      m['source'] =
+          redacted['source'] ?? _ccSessionSource(reason?.toString() ?? '');
     }
     // Event-specific extras real hooks read.
     if (canonicalEvent == 'notification' && redacted['message'] != null) {
@@ -2214,8 +2825,10 @@ class HookService extends ChangeNotifier {
         if (j is Map) {
           if (j['ok'] is bool) {
             final reason = j['reason'];
-            return PromptHookVerdict(j['ok'] == true ? 'approve' : 'block',
-              reason is String ? reason : null);
+            return PromptHookVerdict(
+              j['ok'] == true ? 'approve' : 'block',
+              reason is String ? reason : null,
+            );
           }
           final d = j['decision']?.toString().toLowerCase().trim();
           if (d == 'block' || d == 'approve') {
@@ -2283,15 +2896,11 @@ class HookService extends ChangeNotifier {
     if (append is List) {
       raw = [for (final e in append) e.toString()];
     } else if (append is Map) {
-      raw = [
-        for (final e in append.entries) '${e.key}=${e.value}',
-      ];
+      raw = [for (final e in append.entries) '${e.key}=${e.value}'];
     } else {
       final envMap = hm['env'];
       if (envMap is! Map) return const [];
-      raw = [
-        for (final e in envMap.entries) '${e.key}=${e.value}',
-      ];
+      raw = [for (final e in envMap.entries) '${e.key}=${e.value}'];
     }
     final accepted = [
       for (final line in raw)
@@ -2347,7 +2956,10 @@ class HookService extends ChangeNotifier {
           payload: payload,
           model: model,
         ),
-        zoneValues: {_depthKey: chainDepth + 1},
+        zoneValues: {
+          _depthKey: chainDepth + 1,
+          _registrationSnapshotKey: _registrationSnapshot(hooks),
+        },
       );
     } finally {
       _firingEvents.remove(guardKey);
@@ -2416,7 +3028,10 @@ class HookService extends ChangeNotifier {
           payload: payload,
           model: model,
         ),
-        zoneValues: {_depthKey: chainDepth + 1},
+        zoneValues: {
+          _depthKey: chainDepth + 1,
+          _registrationSnapshotKey: _registrationSnapshot(hooks),
+        },
       );
       if (userStopChecker?.call(sessionId) == true) {
         return const HookStopResult.allow(userInitiated: true);
@@ -2466,6 +3081,7 @@ class HookService extends ChangeNotifier {
       allows.removeWhere((e) => !_hookCurrent(sessionId, e.$1, e.$2, epoch));
       updatedInput = rewrites.lastOrNull?.$3;
     }
+
     // Set when any hook returns permissionDecision:"allow" — the caller then
     // skips the ordinary user approval prompt for this call (audit 2026-09-25).
     var bypassPermission = false;
@@ -2476,6 +3092,28 @@ class HookService extends ChangeNotifier {
       if (!_hookMatches(pluginId, hook, canonical, payload)) continue;
       if (_tripped.contains('$pluginId|$sessionId')) continue;
       final displayName = _displayName(pluginId);
+      if (hook.type == 'agent') {
+        final verdict = await _evalAgentHook(
+          pluginId: pluginId,
+          hook: hook,
+          canonical: canonical,
+          sessionId: sessionId,
+          payload: payload,
+          model: model,
+          stdinJson: stdinJson,
+        );
+        if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
+        reconcileContributions();
+        if (verdict?.isBlock == true) {
+          final reason = verdict!.reason ?? '$displayName denied this action';
+          return HookGateResult.deny(
+            displayName,
+            reason,
+            updatedInput: updatedInput,
+          );
+        }
+        continue;
+      }
       if (hook.type == 'prompt') {
         // Prompt-type hooks on gate events are LLM-evaluated (item 3); a
         // "block" verdict denies like exit code 2.
@@ -2493,8 +3131,7 @@ class HookService extends ChangeNotifier {
         reconcileContributions();
         if (verdict != null && verdict.decision == 'block') {
           failed++;
-          final reason =
-              verdict.reason ?? '$displayName denied this action';
+          final reason = verdict.reason ?? '$displayName denied this action';
           try {
             await _ledger(sessionId, 'hook/result', {
               'plugin': pluginId,
@@ -2504,7 +3141,11 @@ class HookService extends ChangeNotifier {
               'decision': 'deny',
               'reason': reason,
             });
-          } catch (e) { Diag.swallow('hook_service', e); }
+          } catch (e) {
+            Diag.swallow('hook_service', e);
+          }
+          if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
+          reconcileContributions();
           return HookGateResult.deny(
             displayName,
             reason,
@@ -2539,7 +3180,9 @@ class HookService extends ChangeNotifier {
           'hook/invoked',
           Map<String, dynamic>.from(record),
         );
-      } catch (e) { Diag.swallow('hook_service', e); }
+      } catch (e) {
+        Diag.swallow('hook_service', e);
+      }
       try {
         if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
         final (code, rawOut, rawErr) = await _exec(
@@ -2550,20 +3193,29 @@ class HookService extends ChangeNotifier {
           stdinPayload: stdinJson,
         );
         if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
-        final known = <String, dynamic>{'payload': payload, 'env': env,
-          'output': _decodedOutput(rawOut)};
+        final known = <String, dynamic>{
+          'payload': payload,
+          'env': env,
+          'output': _decodedOutput(rawOut),
+        };
         final out = _safeOutput(rawOut, known);
         final err = _safeOutput(rawErr, known);
         if (code != 0 && code != 2) {
           failed++;
           if (code == 126 || code == 127) {
-            _noteBlocker(pluginId, 'hook executable or dependency unavailable (exit $code) — repair runtime and retry');
+            _noteBlocker(
+              pluginId,
+              'hook executable or dependency unavailable (exit $code) — repair runtime and retry',
+            );
           } else {
             _recordFailure(pluginId, sessionId);
           }
           await _ledger(sessionId, 'hook/result', {
-            ...record, 'ok': false, 'exit': code,
-            'stdoutChars': out.length, 'stderrChars': err.length,
+            ...record,
+            'ok': false,
+            'exit': code,
+            'stdoutChars': out.length,
+            'stderrChars': err.length,
           });
           continue;
         }
@@ -2577,7 +3229,9 @@ class HookService extends ChangeNotifier {
         }
         reconcileContributions();
         final rawBlockReason = jsonBlockReason(rawOut);
-        final blockReason = rawBlockReason == null ? null : _safeOutput(rawBlockReason, known);
+        final blockReason = rawBlockReason == null
+            ? null
+            : _safeOutput(rawBlockReason, known);
         final decision = contract.decision;
         final permDecision = contract.permissionDecision;
         final denies =
@@ -2586,8 +3240,7 @@ class HookService extends ChangeNotifier {
             decision == 'block' ||
             decision == 'deny' ||
             permDecision == 'deny';
-        final asks = !denies &&
-            (decision == 'ask' || permDecision == 'ask');
+        final asks = !denies && (decision == 'ask' || permDecision == 'ask');
         if (!denies && !asks && permDecision == 'allow') {
           allows.add((pluginId, hook));
           bypassPermission = true;
@@ -2595,13 +3248,17 @@ class HookService extends ChangeNotifier {
         if (denies || asks) {
           failed++;
           final reason = _safeOutput(
-              (code == 2 && err.trim().isNotEmpty ? cleanHookJson(err.trim()) : null) ??
-              blockReason ??
-              contract.reason ??
-              contract.permissionDecisionReason ??
-              (out.trim().isEmpty
-                  ? '$displayName denied this action'
-                  : cleanHookJson(out.trim())), known);
+            (code == 2 && err.trim().isNotEmpty
+                    ? cleanHookJson(err.trim())
+                    : null) ??
+                blockReason ??
+                contract.reason ??
+                contract.permissionDecisionReason ??
+                (out.trim().isEmpty
+                    ? '$displayName denied this action'
+                    : cleanHookJson(out.trim())),
+            known,
+          );
           try {
             await _ledger(sessionId, 'hook/result', {
               ...record,
@@ -2611,9 +3268,15 @@ class HookService extends ChangeNotifier {
               'blockReason': ?blockReason,
               'reason': reason,
               if (contract.updatedInput != null)
-                'updatedInput': _decodedOutput(_safeOutput(jsonEncode(contract.updatedInput), known)),
+                'updatedInput': _decodedOutput(
+                  _safeOutput(jsonEncode(contract.updatedInput), known),
+                ),
             });
-          } catch (e) { Diag.swallow('hook_service', e); }
+          } catch (e) {
+            Diag.swallow('hook_service', e);
+          }
+          if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
+          reconcileContributions();
           return asks
               ? HookGateResult.ask(
                   displayName,
@@ -2635,10 +3298,15 @@ class HookService extends ChangeNotifier {
             'stdoutChars': out.length,
             'stderrChars': err.length,
             if (contract.updatedInput != null)
-              'updatedInput': _decodedOutput(_safeOutput(jsonEncode(contract.updatedInput), known)),
+              'updatedInput': _decodedOutput(
+                _safeOutput(jsonEncode(contract.updatedInput), known),
+              ),
             if (!contract.continueHooks) 'halted': true,
           });
-        } catch (e) { Diag.swallow('hook_service', e); }
+        } catch (e) {
+          Diag.swallow('hook_service', e);
+        }
+        if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
         if (!contract.continueHooks) break;
       } catch (e) {
         // Exec error/timeout/missing sandbox — fail-open, but count
@@ -2650,10 +3318,14 @@ class HookService extends ChangeNotifier {
           await _ledger(sessionId, 'hook/result', {
             ...record,
             'ok': false,
-            'error': e is HookRuntimeUnavailable ? e.toString() : 'hook execution failed',
+            'error': e is HookRuntimeUnavailable
+                ? e.toString()
+                : 'hook execution failed',
             'reason': 'gate fails open on error',
           });
-        } catch (e) { Diag.swallow('hook_service', e); }
+        } catch (e) {
+          Diag.swallow('hook_service', e);
+        }
       }
     }
     if (!enabled || epoch != (_sessionContextEpochs[sessionId] ?? 0)) {

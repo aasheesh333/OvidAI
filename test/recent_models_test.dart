@@ -83,13 +83,27 @@ void main() {
 
   testWidgets('ModelPickerSheet displays CURRENT badge and all past models in Recent section', (tester) async {
     final app = AppState.createForTest();
-    final p = app.providers.first;
-    p.models = ['gpt-4o', 'claude-3-5-sonnet', 'deepseek-r1'];
+    // A BYOK provider: the picker's recents card hides Ovid Cloud rows until
+    // the cloud catalogue is ready, and the catalogue never connects in
+    // tests — so the Recent section is only reachable through a keyed
+    // provider.
+    final p = app.providers.firstWhere(
+      (provider) => provider.id != AppState.ovidCloudProviderId,
+    );
+    p.models = ['gpt-4o', 'claude-sonnet-4', 'deepseek-r1'];
     p.apiKey = 'test-key';
 
     app.newSession();
     app.setModel(p.id, 'gpt-4o');
-    app.setModel(p.id, 'claude-3-5-sonnet'); // now claude is current, gpt-4o is past
+    app.setModel(p.id, 'claude-sonnet-4'); // now claude is current, gpt-4o is past
+
+    // The picker is a DraggableScrollableSheet at 50% of the viewport with a
+    // lazy sliver list — a tall viewport keeps the recents card mounted
+    // instead of below the fold.
+    tester.view.physicalSize = const Size(900, 1600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
       MaterialApp(
@@ -102,9 +116,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
 
-    // Tap model selector button in header to open sheet
-    final modelBtn = find.textContaining('claude-3-5-sonnet').first;
-    await tester.tap(modelBtn);
+    // Tap the header model label — the picker's trigger.
+    await tester.tap(
+      find.descendant(of: find.byType(AppBar), matching: find.text('claude-sonnet-4')),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
@@ -115,7 +130,7 @@ void main() {
     expect(find.text('CURRENT'), findsOneWidget);
 
     // Both current and past selected models are visible under Recent
-    expect(find.text('claude-3-5-sonnet'), findsWidgets);
+    expect(find.text('claude-sonnet-4'), findsWidgets);
     expect(find.text('gpt-4o'), findsWidgets);
   });
 }

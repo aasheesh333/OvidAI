@@ -62,11 +62,15 @@ void main() {
     final savedManifests = manifests.map((m) => m.toJson()).toList();
     HookService.I.resetForTest();
     SessionLifecycleService.I.resetForTest();
+    AppState.resetTestInstance();
+    final app = AppState.createForTest(pluginBootActivator: (_, _) async {});
+    // A real cold restart never unregisters: process death drops the registry
+    // while no session list is live, so the registration fence writes no
+    // durable erasure, and the fresh boot re-registers with no previous
+    // manifest. Tear down with zero known sessions to keep that honest.
     for (final manifest in manifests) {
       PluginContributionRegistry.I.unregisterPlugin(manifest.id);
     }
-    AppState.resetTestInstance();
-    final app = AppState.createForTest(pluginBootActivator: (_, _) async {});
     session = ChatSession.fromJson(savedSession);
     app.sessions.add(session);
     for (final json in savedManifests) {

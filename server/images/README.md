@@ -105,8 +105,10 @@ it removes replay blobs/private actual cost, blocks all future admission/replay
 for that UID, and retains minimal billing/dedup tombstones. Already accepted
 jobs can still settle their exact charge, but late output cannot be stored or
 returned. A deleted account cannot proceed to another backend after a refusal.
-The host must wire this into account deletion and schedule `purge_expired()`;
-neither wiring is supplied here. SQLite logical deletion is tested; WAL/backup
+`server.account.runtime.build()` now wires this into configured account deletion,
+and `server.account.retention` supplies bounded sweeps and a repeatable timer.
+See [configured deployment](../account/DEPLOYMENT.md); actual store provisioning
+and host scheduling remain mandatory. SQLite logical deletion is tested; WAL/backup
 retention and provider-side input/output deletion require deployment-owned
 cleanup. No production reconciliation or provider deletion adapter is invented.
 
@@ -133,6 +135,13 @@ sharing the upgraded SQLite schema does not make those workers compatible.
    tombstone and deadline; there is no automatic rollback adapter here.
 
 ## Exact activation blockers
+
+`server.images.runtime.mount_configured_images` composes the real host's mint,
+Firebase Admin, account fence, configured stores and supplied shared admission.
+Read-only `GET /v1/images/requests/{request_id}/result` retrieves a retained output
+and receipt at zero remaining quota without submitting/settling work. Like the
+receipt GET it requires current identity/App Check/scoped key/account access and
+returns 410 on expiry/deletion. See the deployment guide for the exact factory API.
 
 **The mounted routes return 503 unless both a service and an atomic admission
 bridge are supplied. No live configuration or `/opt` source was changed.**

@@ -20,7 +20,11 @@ void main() {
   test('a new session starts with the home page tab, never blank', () {
     final src = File('lib/core/agent_service.dart').readAsStringSync();
     final idx = src.indexOf('Future<void> _restoreSessionTabsIfNeeded');
-    final body = src.substring(idx, idx + 1400);
+    // Bound the window at the next member instead of a fixed length: a fixed
+    // 1400-char window silently stopped reaching the fresh-tab fallback once
+    // the legacy-envelope migration branch grew the function.
+    final end = src.indexOf('Future<void> onSessionSwitched', idx);
+    final body = src.substring(idx, end);
     expect(body.contains("about:blank"), isFalse);
     expect(body.contains("_defaultBrowserUrl"), isTrue);
     expect(src.contains("static const _defaultBrowserUrl = 'https://www.google.com'"), isTrue);

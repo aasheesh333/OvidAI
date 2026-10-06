@@ -1,0 +1,12 @@
+[Unit]
+Description=Ovid bounded image and share expiry sweep
+
+[Service]
+Type=oneshot
+# Deployment MUST supply User, WorkingDirectory, EnvironmentFile, ExecStart,
+# and ReadWritePaths using a drop-in. No guessed host paths are supplied.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+TimeoutStartSec=5min

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Exact user-facing state copy (spec §6.2). No item is ever labelled
 /// `Working` solely because it is enabled.
@@ -179,13 +180,16 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (!allTerminal)
-              LinearProgressIndicator(
-                key: const ValueKey('startup-progress-bar'),
-                value: total == 0 ? null : completed / total,
-                minHeight: 3,
-                backgroundColor: Aether.surfaceAlt,
-                color: Aether.accent,
-                semanticsLabel: 'Startup progress',
+              ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  key: const ValueKey('startup-progress-bar'),
+                  value: total == 0 ? null : completed / total,
+                  minHeight: 3,
+                  backgroundColor: Aether.surfaceAlt,
+                  color: Aether.accent,
+                  semanticsLabel: 'Startup progress',
+                ),
               ),
             Semantics(
               button: true,
@@ -240,35 +244,153 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
               ),
             ),
             if (_expanded)
-              for (final item in snapshot.items)
-                _StartupItemRow(
-                  key: ValueKey('startup-item-${item.id}'),
-                  item: item,
-                  onRetry: () => _coordinator.retry(item.id),
-                  onDisable: startupItemCanDisable(item)
-                      ? () => _coordinator.disable(item.id)
-                      : null,
-                  onOpenPlugins: startupItemOpensPlugins(item.state)
-                      ? () => widget.onOpenPlugins?.call(item.ownerId)
-                      : null,
-                  // Sandbox-not-installed is actionable (not just
-                  // retryable): one tap opens Studio setup. Once the sandbox
-                  // exists the row must not offer Install — a Degraded
-                  // installed sandbox needs Retry/Repair, not a reinstall.
-                  onInstallSandbox:
-                      item.id == 'sandbox.selfHeal' &&
-                          !widget.sandboxInstalled &&
-                          widget.onInstallSandbox != null
-                      ? widget.onInstallSandbox
-                      : null,
-                  // A live (possibly deadline-abandoned) invocation makes
-                  // Retry/Disable no-ops in the coordinator, so say so
-                  // instead of accepting a tap that silently does nothing.
-                  busy: _coordinator.isItemRunning(item.id),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 2, 8, 8),
+                child: AetherCard(
+                  padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+                  color: Aether.surface,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Step label + caption summarising what the panel
+                      // is doing right now (the currently running task's
+                      // label when any, otherwise the aggregate "finished"
+                      // caption). This also doubles as the AetherCard
+                      // header mandated by the UI redesign brief.
+                      _StartupStepHeader(
+                        snapshot: snapshot,
+                        allTerminal: allTerminal,
+                        anyProblem: anyProblem,
+                      ),
+                      const SizedBox(height: 6),
+                      Divider(
+                        height: 1,
+                        thickness: 1,
+                        color: Aether.hairline,
+                      ),
+                      const SizedBox(height: 6),
+                      for (final item in snapshot.items)
+                        _StartupItemRow(
+                          key: ValueKey('startup-item-${item.id}'),
+                          item: item,
+                          onRetry: () => _coordinator.retry(item.id),
+                          onDisable: startupItemCanDisable(item)
+                              ? () => _coordinator.disable(item.id)
+                              : null,
+                          onOpenPlugins: startupItemOpensPlugins(item.state) &&
+                                  widget.onOpenPlugins != null
+                              ? () =>
+                                    widget.onOpenPlugins?.call(item.ownerId)
+                              : null,
+                          // Sandbox-not-installed is actionable (not just
+                          // retryable): one tap opens Studio setup. Once
+                          // the sandbox exists the row must not offer
+                          // Install — a Degraded installed sandbox needs
+                          // Retry/Repair, not a reinstall.
+                          onInstallSandbox:
+                              item.id == 'sandbox.selfHeal' &&
+                                  !widget.sandboxInstalled &&
+                                  widget.onInstallSandbox != null
+                              ? widget.onInstallSandbox
+                              : null,
+                          // A live (possibly deadline-abandoned) invocation
+                          // makes Retry/Disable no-ops in the coordinator,
+                          // so say so instead of accepting a tap that
+                          // silently does nothing.
+                          busy: _coordinator.isItemRunning(item.id),
+                        ),
+                    ],
+                  ),
                 ),
+              ),
           ],
         );
       },
+    );
+  }
+}
+
+/// Compact header above the item rows summarising the current wave:
+/// the currently running step label (so the user sees "Mounting skills…"
+/// not just an abstract bar) with a caption underneath. When nothing is
+/// still working, it falls back to a problem/complete caption.
+class _StartupStepHeader extends StatelessWidget {
+  const _StartupStepHeader({
+    required this.snapshot,
+    required this.allTerminal,
+    required this.anyProblem,
+  });
+
+  final StartupSnapshot snapshot;
+  final bool allTerminal;
+  final bool anyProblem;
+
+  @override
+  Widget build(BuildContext context) {
+    final running = snapshot.items.firstWhere(
+      (i) =>
+          i.state == StartupItemState.running ||
+          i.state == StartupItemState.queued,
+      orElse: () => snapshot.items.first,
+    );
+    final isRunning =
+        running.state == StartupItemState.running ||
+        running.state == StartupItemState.queued;
+
+    final title = isRunning
+        ? running.label
+        : (anyProblem
+            ? 'Some items need attention'
+            : 'All startup items ready');
+    final caption = isRunning
+        ? 'Working on this step while the rest queues…'
+        : (anyProblem
+            ? 'Review the rows below to retry, disable or install.'
+            : 'You are good to go.');
+    final color = anyProblem && !isRunning
+        ? Aether.dangerC
+        : (isRunning ? Aether.accent : Aether.successLight);
+    final icon = anyProblem && !isRunning
+        ? Icons.warning_amber_rounded
+        : (isRunning
+            ? Icons.hourglass_bottom_rounded
+            : Icons.check_circle_outline);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Container(
+          width: 28,
+          height: 28,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(icon, size: 16, color: color),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                caption,
+                style: AetherType.caption,
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -345,12 +467,10 @@ class _StartupItemRow extends StatelessWidget {
                   const SizedBox(height: 1),
                   Text(
                     item.reason!,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 11, color: Aether.textFaint),
                   ),
                 ],
-                if (showRetry ||
+                if (showRetry || busy ||
                     onDisable != null ||
                     onOpenPlugins != null ||
                     onInstallSandbox != null) ...[
@@ -398,7 +518,7 @@ class _StartupItemRow extends StatelessWidget {
                       if (onDisable != null)
                         TextButton(
                           key: ValueKey('startup-disable-${item.id}'),
-                          onPressed: onDisable,
+                          onPressed: busy ? null : onDisable,
                           style: TextButton.styleFrom(
                             visualDensity: VisualDensity.compact,
                             padding: const EdgeInsets.symmetric(

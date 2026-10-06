@@ -201,8 +201,8 @@ class Lifecycle:
                                        if row['state'] == 'fenced' else 0)
                 db.save(row)
 
-    def _delete_data(self, db, row):
-        steps = getattr(self.data, 'deletion_steps', None)
+    def _delete_data(self, db, row, steps=None):
+        steps = steps or getattr(self.data, 'deletion_steps', None)
         if steps is None:
             self.data.delete_data(row['uid'], row['cleanup_context'])
             return
@@ -249,6 +249,13 @@ class Lifecycle:
             if 'cleanup_context' not in row:
                 row['cleanup_context'] = self.data.prepare(uid)
                 db.save(row)
+            validate_context = getattr(self.data, 'validate_context', None)
+            if validate_context is not None:
+                validate_context(row['cleanup_context'])
+                db.save(row)
+            required = getattr(self.data, 'required_deletion_steps', None)
+            if 'data' in row['completed'] and required is not None:
+                self._delete_data(db, row, required)
             for name, action in (('keys', self.data.revoke_keys),
                                  ('data', lambda uid, context: self._delete_data(db, row)),
                                  ('auth', lambda uid, context: self.admin.delete(uid))):

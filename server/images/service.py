@@ -14,6 +14,7 @@ import sqlite3
 import time
 import warnings
 from dataclasses import dataclass
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation, localcontext
 
 from PIL import Image
@@ -147,11 +148,18 @@ class Ledger:
                            (int(self.clock()) + receipt_retention,))
             db.execute('''CREATE TABLE IF NOT EXISTS image_deleted_accounts (
                 account TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)''')
+            db.execute('CREATE INDEX IF NOT EXISTS image_replay_expiry ON image_jobs(replay_until) WHERE response IS NOT NULL')
+            db.execute('CREATE INDEX IF NOT EXISTS image_receipt_expiry ON image_jobs(receipt_until) WHERE actual IS NOT NULL')
 
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     @staticmethod
     def _receipt(row):
@@ -170,6 +178,21 @@ class Ledger:
                 raise ImageError(410, 'image_receipt_expired')
             return self._receipt(row)
 
+    def replay(self, account, request):
+        """Read an existing result without admission, settlement or submission."""
+        with self.connect() as db:
+            self._require_account(db, account)
+            row = db.execute('SELECT * FROM image_jobs WHERE account=? AND request=?',
+                             (account, request)).fetchone()
+            if row is None:
+                raise ImageError(404, 'image_request_not_found')
+            if row['receipt_until'] is not None and self.clock() >= row['receipt_until']:
+                raise ImageError(410, 'image_receipt_expired')
+            if row['state'] != 'done':
+                raise ImageError(409, 'image_request_pending' if row['state'] in ('pending', 'unknown')
+                                 else 'image_request_failed', receipt=self._receipt(row))
+            return self._response(row)
+
     def _response(self, row):
         if row['response'] is None or row['replay_until'] is None or self.clock() >= row['replay_until']:
             receipt = self._receipt(row) if row['receipt_until'] is None or self.clock() < row['receipt_until'] else None
@@ -184,13 +207,21 @@ class Ledger:
         if self._deleted(db, account):
             raise ImageError(410, 'image_account_deleted')
 
-    def purge_expired(self):
+    def purge_expired(self, limit=500):
         """Scheduled local cleanup; never removes dedup or unresolved charges."""
+        if type(limit) is not int or not 1 <= limit <= 10000:
+            raise ValueError('Retention batch size must be between 1 and 10000')
         now = int(self.clock())
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            db.execute('UPDATE image_jobs SET response=NULL WHERE replay_until<=?', (now,))
-            db.execute('UPDATE image_jobs SET actual=NULL WHERE receipt_until<=?', (now,))
+            result = db.execute('''UPDATE image_jobs SET
+                response=CASE WHEN replay_until<=? THEN NULL ELSE response END,
+                actual=CASE WHEN receipt_until<=? THEN NULL ELSE actual END
+                WHERE rowid IN (SELECT rowid FROM image_jobs WHERE
+                    (response IS NOT NULL AND replay_until<=?) OR
+                    (actual IS NOT NULL AND receipt_until<=?) LIMIT ?)''',
+                (now, now, now, now, limit))
+            return result.rowcount
 
     def delete_account(self, account):
         """Idempotent local deletion adapter; caller supplies verified stable UID.

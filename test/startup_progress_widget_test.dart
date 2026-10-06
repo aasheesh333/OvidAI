@@ -795,7 +795,10 @@ void main() {
             body: MediaQuery(
               data: MediaQueryData(textScaler: TextScaler.linear(2.0)),
               child: SingleChildScrollView(
-                child: StartupProgressPanel(coordinator: c),
+                child: StartupProgressPanel(
+                  coordinator: c,
+                  onOpenPlugins: (_) {},
+                ),
               ),
             ),
           ),
@@ -1384,7 +1387,7 @@ void main() {
         await tester.pump(const Duration(milliseconds: 30));
       }
 
-      expect(find.text('NEEDS RE-APPROVAL'), findsOneWidget);
+      expect(find.text('NEEDS RE-APPROVAL', skipOffstage: false), findsOneWidget);
       expect(find.text('Healthy Plugin'), findsNothing);
       expect(
         find.byKey(ValueKey('plugin-card-highlight-${legacyPluginFocusId(a, 0)}')),

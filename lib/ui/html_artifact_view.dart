@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 
 import '../core/diag.dart';
 import '../core/html_artifact.dart';
+import '../core/theme.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Inline chat artifact host. The native view is deliberately independent of
 /// browser tabs, auth controllers and plugin UI. Removing it destroys the
@@ -283,6 +285,43 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
     super.dispose();
   }
 
+  Widget _control({
+    required String label,
+    required IconData icon,
+    required VoidCallback? onPressed,
+  }) {
+    // The shared ghost label button is fixed at 44dp. At enlarged text sizes
+    // let the label wrap and the action grow instead of truncating its name.
+    if (MediaQuery.textScalerOf(context).scale(14) <= 14) {
+      return AetherGhostButton(
+        label: label,
+        tooltip: label,
+        icon: icon,
+        onPressed: onPressed,
+      );
+    }
+    return Tooltip(
+      message: label,
+      child: TextButton(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          foregroundColor: Aether.textMuted,
+          minimumSize: const Size(48, 48),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 18),
+            const SizedBox(width: 8),
+            Flexible(child: Text(label)),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final artifact = widget.artifact;
@@ -325,8 +364,11 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
         ),
       );
     } else if (!supported) {
-      preview = const Text(
-        'Interactive preview requires Android. Use View source to inspect this saved artifact.',
+      preview = const SingleChildScrollView(
+        padding: EdgeInsets.all(12),
+        child: Text(
+          'Interactive preview requires Android. Use View source to inspect this saved artifact.',
+        ),
       );
     } else if (!_foreground || !_tickerEnabled || _expanded || _collapsed) {
       preview = Text(
@@ -344,24 +386,40 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
     }
     final controls = Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
+      runSpacing: 4,
       children: [
-        const Padding(
-          padding: EdgeInsets.all(4),
-          child: Text('Offline sandbox', style: TextStyle(fontSize: 11)),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AetherRadius.rPill),
+              border: Border.all(color: Aether.textMuted.withValues(alpha: .4)),
+            ),
+            child: Text(
+              'OFFLINE SANDBOX',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: .6,
+                color: Aether.textMuted,
+              ),
+            ),
+          ),
         ),
-        IconButton(
-          tooltip: _source ? 'Show preview' : 'View source',
-          icon: Icon(_source ? Icons.preview_outlined : Icons.code),
+        _control(
+          label: _source ? 'Show preview' : 'View source',
+          icon: _source ? Icons.preview_outlined : Icons.code,
           onPressed: () {
             _source = !_source;
             _refresh();
           },
         ),
-        IconButton(
-          tooltip: widget._fullscreen ? 'Exit fullscreen' : 'Expand preview',
-          icon: Icon(
-            widget._fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-          ),
+        _control(
+          label: widget._fullscreen ? 'Exit fullscreen' : 'Expand preview',
+          icon: widget._fullscreen
+              ? Icons.fullscreen_exit
+              : Icons.fullscreen,
           onPressed: _expanded
               ? null
               : widget._fullscreen
@@ -378,7 +436,19 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
         },
         child: Scaffold(
           appBar: AppBar(
-            title: Text(artifact.title),
+            toolbarHeight: math.max(
+              56,
+              MediaQuery.textScalerOf(context).scale(15) * 2.8 + 16,
+            ),
+            title: Tooltip(
+              message: artifact.title,
+              child: Text(
+                artifact.title,
+                style: AetherType.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
             leading: BackButton(onPressed: _exitFullscreen),
           ),
           body: SafeArea(
@@ -393,44 +463,35 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
         ),
       );
     }
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 4, 0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    artifact.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                IconButton(
-                  tooltip: _collapsed ? 'Open artifact' : 'Collapse artifact',
-                  icon: Icon(
-                    _collapsed ? Icons.expand_more : Icons.expand_less,
-                  ),
-                  onPressed: () {
-                    _collapsed = !_collapsed;
-                    _refresh();
-                  },
-                ),
-              ],
-            ),
-          ),
-          if (!_collapsed) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: controls,
-            ),
-            SizedBox(height: height, child: preview),
-          ],
-        ],
+    // Inline: Aether card host with a collapsible preview body.
+    final collapseBtn = IconButton(
+      tooltip: _collapsed ? 'Open artifact' : 'Collapse artifact',
+      icon: Icon(_collapsed ? Icons.expand_more : Icons.expand_less),
+      onPressed: () {
+        _collapsed = !_collapsed;
+        _refresh();
+      },
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: AetherCard(
+        padding: const EdgeInsets.all(12),
+        title: Text(
+          artifact.title,
+          style: AetherType.title,
+        ),
+        trailing: collapseBtn,
+        child: _collapsed
+            ? const SizedBox.shrink()
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  controls,
+                  const SizedBox(height: 4),
+                  SizedBox(height: height, child: preview),
+                ],
+              ),
       ),
     );
   }

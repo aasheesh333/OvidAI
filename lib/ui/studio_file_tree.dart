@@ -5,6 +5,7 @@ import '../core/repo_cache.dart';
 import '../core/theme.dart';
 import 'studio_errors.dart';
 import 'studio_layout.dart';
+import 'widgets/aether_primitives.dart';
 
 // ── Studio file tree ────────────────────────────────────────────────────────
 // Extracted from studio_screen.dart and rewritten (2026-09-30 audit).
@@ -227,21 +228,26 @@ class _StudioFileTreeState extends State<StudioFileTree> {
         final active = AgentService.I.activeFilePath;
 
         return Container(
-          color: Aether.surface,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const _TreeHeader(),
-              Expanded(
-                child: nodes.isEmpty
-                    ? const _TreeEmpty()
-                    : ListView.builder(
-                        padding: EdgeInsets.zero,
-                        itemCount: nodes.length,
-                        itemBuilder: (_, i) => _row(nodes[i], active, cache),
-                      ),
+          decoration: BoxDecoration(
+            color: Aether.surface,
+            border: Border(right: BorderSide(color: Aether.hairline)),
+          ),
+          child: CustomScrollView(
+            slivers: [
+              const SliverToBoxAdapter(child: _TreeHeader()),
+              SliverToBoxAdapter(
+                child: Divider(height: 1, thickness: 1, color: Aether.hairline),
               ),
-              _TreeFooter(ready: cache.isReady, count: cache.files.length),
+              if (nodes.isEmpty)
+                const SliverToBoxAdapter(child: _TreeEmpty())
+              else
+                SliverList.builder(
+                  itemCount: nodes.length,
+                  itemBuilder: (_, i) => _row(nodes[i], active, cache),
+                ),
+              SliverToBoxAdapter(
+                child: _TreeFooter(ready: cache.isReady, count: cache.files.length),
+              ),
             ],
           ),
         );
@@ -253,6 +259,53 @@ class _StudioFileTreeState extends State<StudioFileTree> {
     final selected = !node.isDirectory && active == node.path;
     final failed = _failed.contains(node.path);
     final loading = _loading.contains(node.path);
+    return _FileTreeRow(
+      node: node,
+      selected: selected,
+      failed: failed,
+      loading: loading,
+      expanded: _expanded.contains(node.path),
+      onActivate: () => _activate(node),
+    );
+  }
+}
+
+/// A hover-aware, selection-aware tree row.
+///
+/// Hover state is a `_FileTreeRow`-local flag driven by a `MouseRegion`; the
+/// row paints `Aether.surfaceAlt` when hovered (and not selected), the accent
+/// soft overlay when the row's file is the active tab, and transparent
+/// otherwise. The 44dp tap-target invariant is preserved via [StudioTapTarget].
+class _FileTreeRow extends StatefulWidget {
+  const _FileTreeRow({
+    required this.node,
+    required this.selected,
+    required this.failed,
+    required this.loading,
+    required this.expanded,
+    required this.onActivate,
+  });
+
+  final StudioTreeNode node;
+  final bool selected;
+  final bool failed;
+  final bool loading;
+  final bool expanded;
+  final VoidCallback onActivate;
+
+  @override
+  State<_FileTreeRow> createState() => _FileTreeRowState();
+}
+
+class _FileTreeRowState extends State<_FileTreeRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final node = widget.node;
+    final selected = widget.selected;
+    final failed = widget.failed;
+    final loading = widget.loading;
     final indent = 8.0 + node.depth * 14.0;
 
     final IconData icon;
@@ -264,8 +317,9 @@ class _StudioFileTreeState extends State<StudioFileTree> {
       icon = Icons.error_outline;
       iconColor = Aether.dangerC;
     } else if (node.isDirectory) {
-      icon =
-          _expanded.contains(node.path) ? Icons.folder_open_outlined : Icons.folder_outlined;
+      icon = widget.expanded
+          ? Icons.folder_open_outlined
+          : Icons.folder_outlined;
       iconColor = Aether.textMuted;
     } else {
       icon = Icons.description_outlined;
@@ -276,51 +330,74 @@ class _StudioFileTreeState extends State<StudioFileTree> {
         ? '${node.name}, could not be loaded — tap to retry'
         : node.isDirectory
             ? '${node.name}, folder, '
-                '${_expanded.contains(node.path) ? 'expanded' : 'collapsed'}'
+                '${widget.expanded ? 'expanded' : 'collapsed'}'
             : '${node.name}, file${selected ? ', open' : ''}';
 
-    return StudioTapTarget(
-      onTap: () => _activate(node),
-      label: label,
-      selected: selected,
-      minWidth: 0,
-      child: Container(
-        color: selected ? Aether.accentSoft : Colors.transparent,
-        padding: EdgeInsets.only(left: indent, right: 8),
-        alignment: Alignment.centerLeft,
-        child: Row(
-          children: [
-            Icon(icon, size: 15, color: iconColor),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                node.name,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontFamily: Aether.mono,
-                  fontFamilyFallback: kStudioMonoFallback,
-                  color: selected
-                      ? Aether.accent
-                      : failed
-                          ? Aether.dangerC
-                          : node.isDirectory
-                              ? Aether.text
-                              : Aether.textMuted,
+    // Selected > hover > plain. Hover tint only when not already selected so
+    // the accent overlay never gets swapped out from under the pointer.
+    final Color background;
+    if (selected) {
+      background = Aether.accentSoft;
+    } else if (_hover) {
+      background = Aether.surfaceAlt;
+    } else {
+      background = Colors.transparent;
+    }
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: StudioTapTarget(
+        onTap: widget.onActivate,
+        label: label,
+        selected: selected,
+        minWidth: 0,
+        child: LayoutBuilder(builder: (context, constraints) => AnimatedContainer(
+          duration: const Duration(milliseconds: 110),
+          curve: Curves.easeOut,
+          color: background,
+          // Deep directory nesting must still leave room for the filename and
+          // staging action. The full path remains available through a tooltip.
+          padding: EdgeInsets.only(
+              left: indent.clamp(8.0, (constraints.maxWidth * 0.25).clamp(8.0, 80.0)),
+              right: 8),
+          alignment: Alignment.centerLeft,
+          child: Row(
+            children: [
+              Icon(icon, size: 15, color: iconColor),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Tooltip(message: node.path, child: Text(
+                  node.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontFamily: Aether.mono,
+                    fontFamilyFallback: kStudioMonoFallback,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                    color: selected
+                        ? Aether.accent
+                        : failed
+                            ? Aether.dangerC
+                            : node.isDirectory
+                                ? Aether.text
+                                : Aether.textMuted,
+                  ),
+                )),
+              ),
+              if (node.isDirectory)
+                Icon(
+                  widget.expanded ? Icons.expand_more : Icons.chevron_right,
+                  size: 15,
+                  color: Aether.textFaint,
                 ),
-              ),
-            ),
-            if (node.isDirectory)
-              Icon(
-                _expanded.contains(node.path)
-                    ? Icons.expand_more
-                    : Icons.chevron_right,
-                size: 15,
-                color: Aether.textFaint,
-              ),
-            if (!node.isDirectory) StudioStagingMenu(path: node.path),
-          ],
-        ),
+              if (!node.isDirectory)
+                StudioStagingMenu(path: node.path),
+            ],
+          ),
+        )),
       ),
     );
   }
@@ -381,18 +458,22 @@ class _TreeHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-      child: Semantics(
-        header: true,
-        child: Text(
-          'FILES',
-          style: TextStyle(
-            fontSize: kStudioMinFontSize,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.2,
-            color: Aether.textFaint,
+      padding: const EdgeInsets.fromLTRB(14, 12, 10, 10),
+      child: Row(
+        children: [
+          Icon(Icons.folder_copy_outlined, size: 14, color: Aether.textFaint),
+          const SizedBox(width: 8),
+          Semantics(
+            header: true,
+            child: Text(
+              'FILES',
+              style: AetherType.label.copyWith(
+                letterSpacing: 1.4,
+                color: Aether.textFaint,
+              ),
+            ),
           ),
-        ),
+        ],
       ),
     );
   }

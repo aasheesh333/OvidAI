@@ -1,0 +1,11 @@
+[Unit]
+Description=Erase expired Ovid replay and share content every five minutes
+
+[Timer]
+OnCalendar=*-*-* *:0/5:00
+Persistent=true
+RandomizedDelaySec=15
+Unit=ovid-retention.service
+
+[Install]
+WantedBy=timers.target

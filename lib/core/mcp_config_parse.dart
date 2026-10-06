@@ -69,6 +69,10 @@ McpOAuthConfig? parseMcpOAuthConfig(
 }) {
   if (raw is! Map) return null;
   final m = raw.cast<String, dynamic>();
+  if (m['authorization_url'] != null && m['authorize_url'] != null &&
+      m['authorization_url'] != m['authorize_url']) {
+    throw const FormatException('Conflicting OAuth authorization aliases');
+  }
   String? str(String key) {
     final v = m[key];
     if (v is! String || v.trim().isEmpty) return null;

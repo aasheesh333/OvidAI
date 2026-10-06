@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../core/theme.dart';
 import '../core/agent_service.dart';
+import 'widgets/aether_primitives.dart';
 
 @visibleForTesting
 Widget Function(BrowserTab tab)? browserWebViewBuilderForTest;
@@ -35,6 +37,12 @@ class BrowserScreen extends StatefulWidget {
 class _BrowserScreenState extends State<BrowserScreen> {
   final _agent = AgentService.I;
   final TextEditingController _url = TextEditingController();
+  // The focus node is owned here (not by AetherField) because tapping the
+  // omnibar must flip the controller from the displayed title back to the
+  // live URL, and the Aether primitive does not expose an onTap/onTapOutside
+  // callback — only focus. Watching focus is semantically richer anyway:
+  // tab-key navigation and screen-reader-driven focus do the right thing too.
+  final FocusNode _urlFocus = FocusNode();
   bool _editingUrl = false;
 
   @override
@@ -55,11 +63,21 @@ class _BrowserScreenState extends State<BrowserScreen> {
       }
     }
     agent.addListener(_onAgentChanged);
+    _urlFocus.addListener(_onUrlFocusChanged);
     // Omnibar initial value.
     final t = agent.browserTabs.isNotEmpty
         ? agent.browserTabs[agent.activeTabIndex]
         : null;
     if (t != null) _url.text = _omnibarText(t);
+  }
+
+  void _onUrlFocusChanged() {
+    if (!mounted) return;
+    if (_urlFocus.hasFocus) {
+      _beginUrlEditing();
+    } else {
+      _endUrlEditing();
+    }
   }
 
   static bool _sameHost(String a, String b) {
@@ -138,6 +156,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
   @override
   void dispose() {
     _agent.removeListener(_onAgentChanged);
+    _urlFocus.removeListener(_onUrlFocusChanged);
+    _urlFocus.dispose();
     _url.dispose();
     super.dispose();
   }
@@ -157,6 +177,43 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Widget build(BuildContext context) {
     final agent = _agent;
     final tab = _activeTab;
+    final textScaler = MediaQuery.textScalerOf(context);
+    final stackedActions =
+        MediaQuery.sizeOf(context).width < textScaler.scale(300);
+    final actions = <Widget>[
+      IconButton(
+        tooltip: tab?.desktopMode == true
+            ? 'Switch to mobile view'
+            : 'Switch to desktop view',
+        icon: Icon(
+          tab?.desktopMode == true
+              ? Icons.phone_android_outlined
+              : Icons.desktop_windows_outlined,
+          size: 19,
+        ),
+        onPressed: tab == null
+            ? null
+            : () async {
+                await agent.setTabDesktopMode(tab, !tab.desktopMode);
+                if (mounted) setState(() {});
+              },
+      ),
+      IconButton(
+        tooltip: 'Open in browser',
+        icon: const Icon(Icons.open_in_new, size: 19),
+        onPressed: tab == null || tab.localPreviewPath != null
+            ? null
+            : () => _openInExternalBrowser(tab.url),
+      ),
+      IconButton(
+        tooltip: 'New tab',
+        icon: const Icon(Icons.add, size: 19),
+        onPressed: () {
+          agent.newBrowserTab();
+          setState(() {});
+        },
+      ),
+    ];
     final controller = tab == null || browserWebViewBuilderForTest != null
         ? tab?.controller
         : agent.controllerForTab(tab);
@@ -165,6 +222,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
       appBar: AppBar(
         leading: const BackButton(),
         title: const Text('Browser'),
+        toolbarHeight: math.max(56, textScaler.scale(22) * 1.4 + 16),
+        bottom: stackedActions
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(48),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: actions,
+                ),
+              )
+            : null,
         actions: [
           // Agent-activity indicator: blue pulsing while agent drives.
           AnimatedBuilder(
@@ -176,40 +243,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
               ),
             ),
           ),
-          IconButton(
-            tooltip: tab?.desktopMode == true
-                ? 'Switch to mobile view'
-                : 'Switch to desktop view',
-            visualDensity: VisualDensity.compact,
-            icon: Icon(
-              tab?.desktopMode == true
-                  ? Icons.phone_android_outlined
-                  : Icons.desktop_windows_outlined,
-              size: 19,
-            ),
-            onPressed: tab == null
-                ? null
-                : () async {
-                    await agent.setTabDesktopMode(tab, !tab.desktopMode);
-                    setState(() {});
-                  },
-          ),
-          IconButton(
-            tooltip: 'Open in browser',
-            icon: const Icon(Icons.open_in_new, size: 19),
-            onPressed: tab == null || tab.localPreviewPath != null
-                ? null
-                : () => _openInExternalBrowser(tab.url),
-          ),
-          IconButton(
-            tooltip: 'New tab',
-            visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.add, size: 19),
-            onPressed: () {
-              agent.newBrowserTab();
-              setState(() {});
-            },
-          ),
+          if (!stackedActions) ...actions,
         ],
       ),
       body: SafeArea(
@@ -218,7 +252,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
             // Tab strip
             if (agent.browserTabs.length > 1)
               Container(
-                height: 36,
+                height: math.max(60, textScaler.scale(11.5) * 1.5 + 20),
                 color: Aether.surfaceAlt,
                 child: Row(
                   children: [
@@ -229,74 +263,74 @@ class _BrowserScreenState extends State<BrowserScreen> {
                         itemBuilder: (_, i) {
                           final t = agent.browserTabs[i];
                           final selected = i == agent.activeTabIndex;
-                          return GestureDetector(
-                            onTap: () {
-                              agent.selectBrowserTab(i);
-                              setState(() {});
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                              ),
-                              margin: const EdgeInsets.fromLTRB(6, 5, 0, 5),
-                              decoration: BoxDecoration(
-                                color: selected
-                                    ? Aether.surface
-                                    : Colors.transparent,
-                                borderRadius: BorderRadius.circular(8),
-                                border: selected
-                                    ? Border.all(color: Aether.hairline)
-                                    : null,
-                              ),
-                              alignment: Alignment.center,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 110,
-                                    ),
-                                    child: Text(
-                                      _tabLabel(t),
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 11.5,
-                                        color: selected
-                                            ? Aether.text
-                                            : Aether.textMuted,
+                          return Semantics(
+                            selected: selected,
+                            button: true,
+                            child: InkWell(
+                              onTap: () {
+                                agent.selectBrowserTab(i);
+                                setState(() {});
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.only(left: 12),
+                                margin: const EdgeInsets.fromLTRB(6, 5, 0, 5),
+                                decoration: BoxDecoration(
+                                  color: selected
+                                      ? Aether.surface
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: selected
+                                      ? Border.all(color: Aether.hairline)
+                                      : null,
+                                ),
+                                alignment: Alignment.center,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    ConstrainedBox(
+                                      constraints: const BoxConstraints(
+                                        maxWidth: 110,
                                       ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 5),
-                                  // Was a bare 12x12dp Icon in a
-                                  // GestureDetector, sitting ~5px from the tab
-                                  // body: the easiest mis-tap in the app was
-                                  // closing the wrong tab, and TalkBack had
-                                  // nothing to announce. The hit area is now
-                                  // opaque and labelled.
-                                  Semantics(
-                                    button: true,
-                                    label: 'Close tab',
-                                    child: GestureDetector(
-                                      behavior: HitTestBehavior.opaque,
-                                      onTap: () {
-                                        agent.closeBrowserTab(i);
-                                        setState(() {});
-                                      },
-                                      child: SizedBox(
-                                        width: 32,
-                                        height: 32,
-                                        child: Center(
-                                          child: Icon(
-                                            Icons.close,
-                                            size: 12,
-                                            color: Aether.textFaint,
+                                      child: Tooltip(
+                                        message: _tabLabel(t),
+                                        child: Text(
+                                          _tabLabel(t),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 11.5,
+                                            color: selected
+                                                ? Aether.text
+                                                : Aether.textMuted,
                                           ),
                                         ),
                                       ),
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(width: 5),
+                                    Semantics(
+                                      key: ValueKey('browser-close-${t.id}'),
+                                      button: true,
+                                      label: 'Close tab',
+                                      child: InkWell(
+                                        onTap: () {
+                                          agent.closeBrowserTab(i);
+                                          setState(() {});
+                                        },
+                                        child: SizedBox(
+                                          width: 48,
+                                          height: 48,
+                                          child: Center(
+                                            child: Icon(
+                                              Icons.close,
+                                              size: 12,
+                                              color: Aether.textFaint,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           );
@@ -306,44 +340,48 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ],
                 ),
               ),
-            // Omnibar
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-              child: Row(
-                children: [
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    icon: Icon(
-                      Icons.arrow_back_ios,
-                      size: 15,
-                      color: Aether.textMuted,
-                    ),
+            // Give the address field a full row on phones. The header grows
+            // with the input's text metrics rather than clipping at 76dp.
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final narrow = constraints.maxWidth < 600;
+                final fieldHeight = math.max(
+                  48.0, textScaler.scale(14) * 1.5 + 24,
+                );
+                final navigation = <Widget>[
+                  AetherGhostButton(
+                    key: const ValueKey('browser-back'),
+                    label: 'Back',
+                    tooltip: 'Back',
+                    icon: Icons.arrow_back_ios_new,
+                    iconOnly: true,
+                    iconSize: 48,
                     onPressed: () async {
                       if (await controller?.canGoBack() ?? false) {
                         await controller!.goBack();
                       }
                     },
                   ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    icon: Icon(
-                      Icons.arrow_forward_ios,
-                      size: 15,
-                      color: Aether.textMuted,
-                    ),
+                  AetherGhostButton(
+                    key: const ValueKey('browser-forward'),
+                    label: 'Forward',
+                    tooltip: 'Forward',
+                    icon: Icons.arrow_forward_ios,
+                    iconOnly: true,
+                    iconSize: 48,
                     onPressed: () async {
                       if (await controller?.canGoForward() ?? false) {
                         await controller!.goForward();
                       }
                     },
                   ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    icon: Icon(
-                      Icons.refresh,
-                      size: 17,
-                      color: Aether.textMuted,
-                    ),
+                  AetherGhostButton(
+                    key: const ValueKey('browser-reload'),
+                    label: 'Reload',
+                    tooltip: 'Reload',
+                    icon: Icons.refresh,
+                    iconOnly: true,
+                    iconSize: 48,
                     onPressed: () {
                       final t = _activeTab;
                       final lp = t?.localPreviewPath;
@@ -354,67 +392,96 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       }
                     },
                   ),
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Aether.surfaceAlt,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Aether.hairline),
-                      ),
-                      child: TextField(
-                        controller: _url,
-                        style: const TextStyle(fontSize: 12.5),
-                        textInputAction: TextInputAction.go,
-                        onSubmitted: (value) {
-                          _nav(value);
-                          _endUrlEditing();
-                        },
-                        onTap: _beginUrlEditing,
-                        onTapOutside: (_) => _endUrlEditing(),
-                        decoration: InputDecoration(
-                          isDense: true,
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 9,
-                          ),
-                          hintText: 'Search or type URL',
-                          hintStyle: TextStyle(
-                            fontSize: 12,
-                            color: Aether.textFaint,
-                          ),
-                          prefixIcon: Icon(
-                            tab?.localPreviewPath != null
-                                ? Icons.preview_outlined
-                                : (tab?.url ?? '').startsWith('https')
-                                ? Icons.lock_outline
-                                : Icons.public,
-                            size: 12,
-                            color: tab?.localPreviewPath != null
-                                ? Aether.accent
-                                : (tab?.url ?? '').startsWith('https')
-                                ? Aether.successLight
-                                : Aether.textFaint,
-                          ),
-                          prefixIconConstraints: const BoxConstraints(
-                            minWidth: 28,
-                          ),
-                          border: InputBorder.none,
-                        ),
-                      ),
+                ];
+                final address = AetherField(
+                  key: const ValueKey('browser-url-field'),
+                  label: 'URL',
+                  showLabel: false,
+                  hint: 'Search or type URL',
+                  controller: _url,
+                  focusNode: _urlFocus,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 11,
+                  ),
+                  prefixIcon: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Icon(
+                      tab?.localPreviewPath != null
+                          ? Icons.preview_outlined
+                          : (tab?.url ?? '').startsWith('https')
+                          ? Icons.lock_outline
+                          : Icons.public,
+                      size: 14,
+                      color: tab?.localPreviewPath != null
+                          ? Aether.accent
+                          : (tab?.url ?? '').startsWith('https')
+                          ? Aether.successLight
+                          : Aether.textFaint,
                     ),
                   ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    icon: Icon(
-                      Icons.open_in_browser,
-                      size: 17,
-                      color: Aether.textMuted,
-                    ),
-                    onPressed: () => _nav(_url.text),
+                  onSubmitted: (value) {
+                    _nav(value);
+                    _endUrlEditing();
+                  },
+                );
+                final go = AetherGhostButton(
+                  label: 'Go',
+                  tooltip: 'Go',
+                  icon: Icons.open_in_browser,
+                  iconOnly: true,
+                  iconSize: 48,
+                  onPressed: () => _nav(_url.text),
+                );
+                return AetherGradientHeader(
+                  height: fieldHeight + 18 + (narrow ? 48 : 0),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 10, 6, 8),
+                    child: narrow
+                        ? Column(children: [
+                            Row(children: [Expanded(child: address), go]),
+                            Row(children: navigation),
+                          ])
+                        : Row(children: [
+                            ...navigation,
+                            const SizedBox(width: 4),
+                            Expanded(child: address),
+                            go,
+                          ]),
                   ),
-                ],
-              ),
+                );
+              },
             ),
+            // Status row — AetherStatusDot + compact caption describing the
+            // active tab (agent busy, protocol, host). Replaces the old
+            // scattered dots and gives screen readers one place to speak.
+            if (tab != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 2, 14, 6),
+                child: Row(
+                  children: [
+                    AetherStatusDot(
+                      key: const ValueKey('browser-status-dot'),
+                      color: (agent.browserBusy || agent.busy)
+                          ? Aether.accent
+                          : Aether.successLight,
+                      pulsing: agent.browserBusy || agent.busy,
+                      size: 7,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        (agent.browserBusy || agent.busy)
+                            ? 'Agent is driving · ${_hostOrPreview(tab)}'
+                            : 'Ready · ${_hostOrPreview(tab)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AetherType.caption,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             // Held popups (window.open / target=_blank clicks captured
             // for the agent): without this chip such a click looked
             // like a dead UI. Desktop browsers show a blocked-popup
@@ -485,6 +552,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (t.localPreviewPath != null) return 'Preview';
     if (t.url == 'ovid://preview') return 'Preview';
     if (t.title?.isNotEmpty == true) return t.title!;
+    final host = Uri.tryParse(t.url)?.host ?? '';
+    return host.isNotEmpty ? host : t.url;
+  }
+
+  String _hostOrPreview(BrowserTab t) {
+    if (t.localPreviewPath != null) return 'Live preview';
     final host = Uri.tryParse(t.url)?.host ?? '';
     return host.isNotEmpty ? host : t.url;
   }
@@ -760,41 +833,49 @@ class _PopupNotice extends StatelessWidget {
     final label = pending.length == 1
         ? 'Popup held: $host'
         : '${pending.length} popups held - newest: $host';
+    final actions = Wrap(
+      children: [
+        TextButton(
+          key: const ValueKey('popup-open'),
+          onPressed: onOpen,
+          child: const Text('Open'),
+        ),
+        TextButton(
+          key: const ValueKey('popup-dismiss'),
+          onPressed: onDismiss,
+          child: const Text('Dismiss'),
+        ),
+      ],
+    );
+    final description = Row(
+      children: [
+        Icon(Icons.block_outlined, size: 14, color: Aether.textMuted),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+          ),
+        ),
+      ],
+    );
     return Container(
       key: const ValueKey('popup-notice'),
       color: Aether.surfaceAlt,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-      child: Row(
-        children: [
-          Icon(Icons.block_outlined, size: 14, color: Aether.textMuted),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
-            ),
-          ),
-          TextButton(
-            key: const ValueKey('popup-open'),
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-            ),
-            onPressed: onOpen,
-            child: const Text('Open'),
-          ),
-          TextButton(
-            key: const ValueKey('popup-dismiss'),
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-            ),
-            onPressed: onDismiss,
-            child: const Text('Dismiss'),
-          ),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 600) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                description,
+                Align(alignment: Alignment.centerRight, child: actions),
+              ],
+            );
+          }
+          return Row(children: [Expanded(child: description), actions]);
+        },
       ),
     );
   }

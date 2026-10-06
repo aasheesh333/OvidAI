@@ -398,7 +398,7 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
             : hasPrompt
             ? 'prompt'
             : 'command';
-        if (type != 'command' && type != 'prompt') {
+        if (type != 'command' && type != 'prompt' && type != 'agent') {
           b.issues.add(CompatibilityIssue(
             severity: CompatibilitySeverity.optional,
             message: 'Unsupported hook type; only command and prompt hooks can execute. Agent hooks require a tool-capable evaluator.',
@@ -406,7 +406,14 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
           ));
           continue;
         }
-        final payload = (type == 'prompt' ? prompt : command) ?? '';
+        if (type == 'agent') {
+          b.issues.add(CompatibilityIssue(
+            severity: CompatibilitySeverity.optional,
+            message: 'Agent hook requires a wired tool-capable evaluator.',
+            fields: ['hooks.$rawEvent'],
+          ));
+        }
+        final payload = (type == 'command' ? command : prompt) ?? '';
         if (payload.trim().isEmpty) {
           b.issues.add(CompatibilityIssue(
             severity: CompatibilitySeverity.optional,

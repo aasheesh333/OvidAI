@@ -6,12 +6,13 @@ import '../core/ovid_cloud_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'cloud_usage_status.dart';
+import 'widgets/aether_primitives.dart';
 
-/// Billing / Plan screen — opencode/ChatGPT-style.
+/// Plans & Billing screen — premium Aether redesign.
 ///
-/// Shows the user's current Ovid Cloud plan, what each plan offers, and
-/// server-authoritative remaining usage. Checkout currently offers the
-/// gateway's explicitly labelled test-mode activation flow.
+/// Preserves the plan tiles (Free, Plus ₹499, Pro ₹899, Max ₹1699), hides
+/// USD everywhere, retains the selected-tier state, and routes "Pay now" through
+/// [OvidCloudService.upgrade] (which is server-gated by the test-upgrade env).
 class BillingScreen extends StatefulWidget {
   const BillingScreen({super.key});
 
@@ -19,6 +20,8 @@ class BillingScreen extends StatefulWidget {
   State<BillingScreen> createState() => _BillingScreenState();
 }
 
+/// Single plan definition. Price strings are pre-localised to INR — the
+/// screen must never surface USD, even transiently.
 class _PlanOption {
   const _PlanOption(
     this.tier,
@@ -26,24 +29,57 @@ class _PlanOption {
     this.price,
     this.blurb,
     this.multiplier,
+    this.includes,
   );
   final String tier;
   final String title;
   final String price;
   final String blurb;
   final String multiplier;
+  final List<String> includes;
 }
 
 const _plans = <_PlanOption>[
-  _PlanOption('free', 'Free', '₹0', 'Just chat — no card needed.', '1x'),
-  _PlanOption('3x', 'Plus', '₹499', '3× the Free base usage allowance.', '3x'),
-  _PlanOption('7x', 'Pro', '₹899', '7× the Free base usage allowance.', '7x'),
+  _PlanOption(
+    'free',
+    'Free',
+    'Free',
+    'Just chat — no card needed.',
+    '×1',
+    <String>[
+      'Shared base allowance across all models',
+      'No credit card required',
+    ],
+  ),
+  _PlanOption(
+    '3x',
+    'Plus',
+    '₹499',
+    '3× the Free base usage allowance.',
+    '×3',
+    <String>[
+      '3× the Free base allowance',
+    ],
+  ),
+  _PlanOption(
+    '7x',
+    'Pro',
+    '₹899',
+    '7× the Free base usage allowance.',
+    '×7',
+    <String>[
+      '7× the Free base allowance',
+    ],
+  ),
   _PlanOption(
     '15x',
     'Max',
     '₹1699',
     '15× the Free base usage allowance.',
-    '15x',
+    '×15',
+    <String>[
+      '15× the Free base allowance',
+    ],
   ),
 ];
 
@@ -64,6 +100,12 @@ class _BillingScreenState extends State<BillingScreen> {
     super.dispose();
   }
 
+  int _tierRank(String tier) {
+    const order = ['free', '3x', '7x', '15x'];
+    final i = order.indexOf(tier);
+    return i;
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
@@ -71,37 +113,67 @@ class _BillingScreenState extends State<BillingScreen> {
       backgroundColor: Aether.bg,
       appBar: AppBar(
         leading: const BackButton(),
-        title: const Text('Plan & Billing'),
+        toolbarHeight: MediaQuery.textScalerOf(context).scale(20) > 30 ? 88 : 56,
+        title: const Text('Plans & Billing'),
       ),
       body: AnimatedBuilder(
         animation: Listenable.merge([app, FirebaseService.I, _store]),
         builder: (_, _) {
           final tier = _usage?.tier ?? OvidCloudService.I.confirmedTier ?? '';
-          final isPaid = _usage?.isPaid ?? (tier.isNotEmpty && tier != 'free');
+          final isPaid =
+              _usage?.isPaid ?? (tier.isNotEmpty && tier != 'free');
+          final currentPlan = _plans.firstWhere(
+            (p) => p.tier == tier,
+            orElse: () => _plans.first,
+          );
+          final currentRank = _tierRank(tier);
+          final currentIndex = _plans.indexWhere((p) => p.tier == tier);
+          final nextPlan =
+              (currentIndex >= 0 && currentIndex < _plans.length - 1)
+              ? _plans[currentIndex + 1]
+              : null;
+
+          // The header surfaces an "Upgrade" CTA targeting the next tier up,
+          // so the primary action is reachable without scrolling through the
+          // plan list on small screens.
           return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+            padding: const EdgeInsets.only(bottom: 32),
             children: [
-              _currentPlanCard(tier, isPaid),
-              const SizedBox(height: 20),
-              Text(
-                'PLANS',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.1,
-                  color: Aether.textFaint,
+              _CurrentPlanHeader(
+                plan: currentPlan,
+                hasTier: currentIndex >= 0,
+                isPaid: isPaid,
+                loading: _loading,
+                usage: _usage,
+                store: _store,
+                nextPlan: nextPlan,
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
+                child: AetherSectionTitle(
+                  eyebrow: 'Choose a plan',
+                  subtitle: _usage == null && !_loading
+                      ? 'Plans scale off the shared Free base allowance.'
+                      : null,
                 ),
               ),
-              const SizedBox(height: 10),
-              for (final p in _plans) _planTile(p, tier),
-              const SizedBox(height: 16),
-              Text(
-                'Subscription prices are in INR. Test-mode activation is '
-                'available when enabled by the server; real checkout is coming soon.',
-                style: TextStyle(
-                  fontSize: 11.5,
-                  height: 1.5,
-                  color: Aether.textFaint,
+              for (final p in _plans)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                  child: _PlanCard(
+                    key: ValueKey('plan-${p.tier}'),
+                    plan: p,
+                    currentTier: tier,
+                    rank: _tierRank(p.tier),
+                    currentRank: currentRank,
+                  ),
+                ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                child: Text(
+                  'Prices are in INR. Test activation is available only when '
+                  'enabled by the server. Your plan changes after server confirmation.',
+                  style: AetherType.caption,
                 ),
               ),
             ],
@@ -110,100 +182,120 @@ class _BillingScreenState extends State<BillingScreen> {
       ),
     );
   }
+}
 
-  Widget _currentPlanCard(String tier, bool isPaid) {
-    final plan = _plans.firstWhere(
-      (p) => p.tier == tier,
-      orElse: () => _plans.first,
-    );
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Aether.accent.withValues(alpha: 0.16), Aether.surface],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Aether.hairline),
-      ),
+/// Gradient header summarising the current plan and server-reported allowance.
+/// The content is layered on top of [AetherGradientHeader] so
+/// the subtle wash matches other premium Aether surfaces.
+class _CurrentPlanHeader extends StatelessWidget {
+  const _CurrentPlanHeader({
+    required this.plan,
+    required this.hasTier,
+    required this.isPaid,
+    required this.loading,
+    required this.usage,
+    required this.store,
+    this.nextPlan,
+  });
+
+  final _PlanOption plan;
+  final bool hasTier;
+  final bool isPaid;
+  final bool loading;
+  final OvidUsage? usage;
+  final CloudUsageStore store;
+
+  /// The next paid tier above the current plan, if any. When present the
+  /// header surfaces a prominent "Upgrade" call-to-action so it is reachable
+  /// without scrolling through the plan list.
+  final _PlanOption? nextPlan;
+
+  @override
+  Widget build(BuildContext context) {
+    final pct = usage?.remainingFraction;
+    final percentText =
+        pct == null ? null : '${(pct * 100).round()}% remaining';
+    final pillColor = isPaid ? Aether.accent : Aether.textMuted;
+    final pillLabel = (hasTier ? plan.title : 'Unknown').toUpperCase();
+
+    final card = AetherCard(
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
           Wrap(
-            spacing: 12,
+            spacing: 10,
             runSpacing: 8,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              Text(
-                'Current plan',
-                style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 5,
-                ),
-                decoration: BoxDecoration(
-                  color: isPaid ? Aether.accent : Aether.surfaceAlt,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  tier.isEmpty ? 'UNKNOWN' : plan.title.toUpperCase(),
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.8,
-                    color: isPaid ? Colors.white : Aether.textMuted,
-                  ),
-                ),
-              ),
+              AetherPill(label: pillLabel, color: pillColor, filled: true),
+              Text('Current plan', style: AetherType.label),
             ],
           ),
           const SizedBox(height: 10),
           Text(
-            tier.isEmpty ? 'Plan unavailable' : plan.title,
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w700,
-              color: Aether.text,
-            ),
+            hasTier ? plan.title : 'Plan unavailable',
+            style: AetherType.h1,
           ),
           const SizedBox(height: 4),
           Text(
-            tier.isEmpty
-                ? 'Refresh to verify this account’s cloud plan.'
-                : plan.blurb,
-            style: TextStyle(
-              fontSize: 12.5,
-              height: 1.4,
-              color: Aether.textMuted,
-            ),
+            hasTier
+                ? plan.blurb
+                : 'Refresh to verify this account’s cloud plan.',
+            style: AetherType.bodyMuted,
           ),
-          if (_loading) ...[
-            const SizedBox(height: 14),
+          const SizedBox(height: 14),
+          if (loading)
             const SizedBox(
               height: 16,
               width: 16,
               child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-          ] else ...[
+            )
+          else
+            _UsageBar(pct: pct, percentText: percentText),
+          CloudUsageStatus(store: store),
+          if (nextPlan != null && hasTier) ...[
             const SizedBox(height: 16),
-            _usageBar(_usage),
+            SizedBox(
+              width: double.infinity,
+              child: _UpgradeButton(
+                plan: nextPlan!,
+                ghost: false,
+                label: 'Upgrade',
+                buttonKey: const ValueKey('upgrade-header'),
+              ),
+            ),
           ],
-          CloudUsageStatus(store: _store),
         ],
       ),
     );
-  }
 
-  Widget _usageBar(OvidUsage? u) {
-    final pct = u?.remainingFraction;
-    if (pct == null) {
-      return Text(
-        'Usage unavailable',
-        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-      );
+    // Wrap in the Aether gradient so the header reads as the "hero" of the
+    // screen. The gradient primitive clamps its own height; we let the inner
+    // content extend past it naturally via a Stack-less overlay — the
+    // gradient is purely decorative wash under the card.
+    return Stack(
+      children: [
+        const AetherGradientHeader(height: 110, child: SizedBox.expand()),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: card,
+        ),
+      ],
+    );
+  }
+}
+
+class _UsageBar extends StatelessWidget {
+  const _UsageBar({required this.pct, required this.percentText});
+  final double? pct;
+  final String? percentText;
+
+  @override
+  Widget build(BuildContext context) {
+    if (pct == null || percentText == null) {
+      return Text('Usage unavailable', style: AetherType.caption);
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -215,117 +307,136 @@ class _BillingScreenState extends State<BillingScreen> {
             minHeight: 8,
             backgroundColor: Aether.surfaceAlt,
             valueColor: AlwaysStoppedAnimation(
-              pct < 0.1 ? Aether.danger : Aether.accent,
+              pct! < 0.1 ? Aether.danger : Aether.accent,
             ),
           ),
         ),
         const SizedBox(height: 8),
-        Text(
-          '${(pct * 100).round()}% remaining',
-          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-        ),
+        Text(percentText!, style: AetherType.caption),
       ],
-    );
-  }
-
-  Widget _planTile(_PlanOption p, String currentTier) {
-    final current = p.tier == currentTier;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Aether.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: current ? Aether.accent : Aether.hairline,
-          width: current ? 1.5 : 1,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Text(
-                    p.title,
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: Aether.text,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Aether.surfaceAlt,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Text(
-                      p.multiplier,
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w700,
-                        color: Aether.accent,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 3),
-              Text(
-                p.blurb,
-                style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 16,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text(
-                p.price,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: Aether.text,
-                ),
-              ),
-              if (p.tier != 'free')
-                Text(
-                  '/ month',
-                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-                ),
-              if (current)
-                Text(
-                  'Current',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Aether.accent,
-                  ),
-                )
-              else if (p.tier != 'free')
-                _UpgradeButton(plan: p),
-            ],
-          ),
-        ],
-      ),
     );
   }
 }
 
-class _UpgradeButton extends StatefulWidget {
-  const _UpgradeButton({required this.plan});
+/// A single plan tile. Uses [AetherCard] as the base surface and promotes
+/// the active plan with an accent border.
+class _PlanCard extends StatelessWidget {
+  const _PlanCard({
+    super.key,
+    required this.plan,
+    required this.currentTier,
+    required this.rank,
+    required this.currentRank,
+  });
+
   final _PlanOption plan;
+  final String currentTier;
+  final int rank;
+  final int currentRank;
+
+  @override
+  Widget build(BuildContext context) {
+    final isCurrent = plan.tier == currentTier;
+    final isBelow = rank < currentRank;
+    final isFree = plan.tier == 'free';
+
+    final card = AetherCard(
+      padding: const EdgeInsets.all(18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(child: Text(plan.title, style: AetherType.h2)),
+              AetherPill(
+                label: plan.multiplier,
+                color: Aether.accent,
+                filled: true,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(plan.price, style: AetherType.display),
+          const SizedBox(height: 14),
+          for (final feature in plan.includes)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Icon(
+                      Icons.check_rounded,
+                      size: 16,
+                      color: Aether.accent,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(feature, style: AetherType.body)),
+                ],
+              ),
+            ),
+          const SizedBox(height: 14),
+          if (isCurrent)
+            SizedBox(
+              width: double.infinity,
+              child: const _BillingButton(
+                label: 'Current plan',
+                onPressed: null,
+              ),
+            )
+          else if (isFree)
+            Text('Included with your account', style: AetherType.bodyMuted)
+          else if (isBelow || currentRank < 0)
+            _UpgradeButton(
+              plan: plan,
+              ghost: true,
+              label: 'Change plan',
+            )
+          else
+            _UpgradeButton(
+              plan: plan,
+              ghost: false,
+              label: 'Upgrade',
+            ),
+        ],
+      ),
+    );
+
+    if (!isCurrent) return card;
+    // Accent-outlined overlay for the currently-active plan.
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(AetherRadius.rLg),
+        border: Border.all(color: Aether.accent, width: 1.5),
+      ),
+      child: card,
+    );
+  }
+}
+
+/// The plan-change CTA. Opens a bottom sheet with a "Pay now"
+/// button, which calls [OvidCloudService.upgrade] directly — the test
+/// bypass flips the server into instant-grant mode without changing the
+/// client wiring.
+class _UpgradeButton extends StatefulWidget {
+  const _UpgradeButton({
+    required this.plan,
+    required this.ghost,
+    required this.label,
+    this.buttonKey,
+  });
+  final _PlanOption plan;
+  final bool ghost;
+  final String label;
+
+  /// Overrides the inner tappable's `upgrade-<tier>` key. The header CTA
+  /// passes a distinct key so it never collides with the plan card's button
+  /// for the same tier (which would make `find.byKey` ambiguous).
+  final Key? buttonKey;
 
   @override
   State<_UpgradeButton> createState() => _UpgradeButtonState();
@@ -336,18 +447,82 @@ class _UpgradeButtonState extends State<_UpgradeButton> {
 
   Future<void> _payNow(BuildContext sheetContext, StateSetter setSheet) async {
     if (_busy) return;
-    setSheet(() => _busy = true);
-    final newTier = await OvidCloudService.I.upgrade(widget.plan.tier);
-    if (!mounted) return;
-    _busy = false;
+    final plan = widget.plan;
+    // A confirmed plan refresh can replace this card/header and dispose its
+    // button before the service finishes refreshing models. The sheet and
+    // screen messenger own completion feedback, not the initiating button.
     final messenger = ScaffoldMessenger.of(context);
+    setSheet(() => _busy = true);
+    final newTier = await OvidCloudService.I.upgrade(plan.tier);
+    _busy = false;
     if (sheetContext.mounted) Navigator.of(sheetContext).pop();
+    if (!messenger.mounted) return;
     messenger.showSnackBar(
       SnackBar(
         content: Text(
-          newTier == widget.plan.tier
-              ? 'You are now on the ${widget.plan.title} plan.'
+          newTier == plan.tier
+              ? 'You are now on the ${plan.title} plan.'
               : 'Could not complete the upgrade. Try again.',
+        ),
+      ),
+    );
+  }
+
+  void _openSheet() {
+    final plan = widget.plan;
+    final heading = '${widget.ghost ? 'Change' : 'Upgrade'} to ${plan.title}';
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Aether.surface,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (sheetCtx, setSheet) => SafeArea(
+          child: SingleChildScrollView(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    heading,
+                    style: AetherType.h2,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '${plan.price} · ${plan.blurb}',
+                    style: AetherType.bodyMuted,
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'Test activation is available only when enabled by the server. '
+                    'Pay now requests this plan; activation is confirmed by the server.',
+                    style: AetherType.caption,
+                  ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    child: _BillingButton(
+                      buttonKey: const ValueKey('billing-pay-now'),
+                      label: 'Pay now · ${plan.price}',
+                      busy: _busy,
+                      onPressed:
+                          _busy ? null : () => _payNow(sheetCtx, setSheet),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Center(
+                    child: TextButton(
+                      onPressed:
+                          _busy ? null : () => Navigator.pop(sheetCtx),
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -355,92 +530,73 @@ class _UpgradeButtonState extends State<_UpgradeButton> {
 
   @override
   Widget build(BuildContext context) {
-    return FilledButton(
-      key: ValueKey('upgrade-${widget.plan.tier}'),
-      style: FilledButton.styleFrom(
-        backgroundColor: Aether.accent,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-        minimumSize: const Size(0, 32),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    final key =
+        widget.buttonKey ?? ValueKey('upgrade-${widget.plan.tier}');
+    if (widget.ghost) {
+      return SizedBox(
+        key: key,
+        width: double.infinity,
+        child: _BillingButton(
+          ghost: true,
+          label: widget.label,
+          onPressed: _openSheet,
+        ),
+      );
+    }
+    return SizedBox(
+      key: key,
+      width: double.infinity,
+      child: _BillingButton(
+        label: widget.label,
+        onPressed: _openSheet,
       ),
-      onPressed: () {
-        showModalBottomSheet<void>(
-          context: context,
-          backgroundColor: Aether.surface,
-          isScrollControlled: true,
-          builder: (sheetCtx) => StatefulBuilder(
-            builder: (sheetCtx, setSheet) => SafeArea(
-              child: SingleChildScrollView(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Upgrade to ${widget.plan.title}',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: Aether.text,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        '${widget.plan.price} / month · ${widget.plan.blurb}',
-                        style: TextStyle(fontSize: 13, color: Aether.textMuted),
-                      ),
-                      const SizedBox(height: 14),
-                      Text(
-                        'Test mode: tap Pay now to activate this plan instantly for '
-                        'testing. Real payment will be wired here before launch.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          height: 1.5,
-                          color: Aether.textFaint,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Aether.accent,
-                            minimumSize: const Size(0, 48),
-                          ),
-                          onPressed: _busy
-                              ? null
-                              : () => _payNow(sheetCtx, setSheet),
-                          child: _busy
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : Text('Pay now · ${widget.plan.price}'),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Center(
-                        child: TextButton(
-                          onPressed: _busy
-                              ? null
-                              : () => Navigator.pop(sheetCtx),
-                          child: const Text('Cancel'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-      child: const Text('Upgrade', style: TextStyle(fontSize: 12.5)),
     );
+  }
+}
+
+/// Billing labels may wrap at accessibility text sizes; minimum height is a
+/// touch target, never a fixed box that clips the label.
+class _BillingButton extends StatelessWidget {
+  const _BillingButton({
+    required this.label,
+    required this.onPressed,
+    this.buttonKey,
+    this.ghost = false,
+    this.busy = false,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final Key? buttonKey;
+  final bool ghost;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final child = busy
+        ? Semantics(
+            label: 'Requesting plan change',
+            liveRegion: true,
+            child: const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          )
+        : Text(label, textAlign: TextAlign.center);
+    final style = FilledButton.styleFrom(
+      minimumSize: const Size(0, 48),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AetherRadius.rMd),
+      ),
+      textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+      backgroundColor: ghost ? Colors.transparent : Aether.accentC,
+      foregroundColor: ghost ? Aether.text : (Aether.dark ? Colors.black : Colors.white),
+    );
+    if (ghost) {
+      return TextButton(key: buttonKey, style: style, onPressed: onPressed, child: child);
+    }
+    return FilledButton(key: buttonKey, style: style, onPressed: onPressed, child: child);
   }
 }

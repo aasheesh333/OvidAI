@@ -217,6 +217,23 @@ class PluginContributionRegistry {
   /// so a re-register preserves a plugin's roster position).
   final Map<String, _Registration> _registrations = {};
 
+  // Tombstones survive unregister: identical-object re-registration is still
+  // a new lifetime. Consumers must capture this before any asynchronous work.
+  final Map<String, int> _revisions = {};
+  int revisionFor(String pluginId) => _revisions[pluginId] ?? 0;
+
+  final Set<void Function(String, NormalizedPluginManifest?)> _changeListeners = {};
+
+  void addRegistrationListener(void Function(String, NormalizedPluginManifest?) listener) =>
+      _changeListeners.add(listener);
+
+  void _changed(String pluginId, NormalizedPluginManifest? previous) {
+    _revisions[pluginId] = revisionFor(pluginId) + 1;
+    for (final listener in _changeListeners.toList()) {
+      listener(pluginId, previous);
+    }
+  }
+
   /// Registers (or re-registers, for upgrades/activation changes) every
   /// contribution of [manifest] under its canonical ids. Re-registering
   /// the SAME plugin id replaces that plugin's entries in place — the
@@ -250,18 +267,23 @@ class PluginContributionRegistry {
         (s) => PluginContribution.fromMcpServer(s, manifest.rootPath),
       ),
     ];
+    final previous = _registrations[manifest.id]?.manifest;
     _registrations[manifest.id] = _Registration(
       manifest,
       activation,
       immediateSessionId,
       contributions,
     );
+    _changed(manifest.id, previous);
   }
 
   /// Removes every contribution of [pluginId] (disable/uninstall/rollback
   /// — spec §9). True when a registration was removed.
-  bool unregisterPlugin(String pluginId) =>
-      _registrations.remove(pluginId) != null;
+  bool unregisterPlugin(String pluginId) {
+    final previous = _registrations.remove(pluginId);
+    _changed(pluginId, previous?.manifest);
+    return previous != null;
+  }
 
   /// §7 visibility: `globalActive`/`degraded` are visible in every
   /// session; `sessionActive` in its `immediateSessionId` and descendants (an empty

@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'sandbox_pkg.dart';
 import 'global_repo_registry.dart';
+import 'pty_service.dart' show OwnedProcessTree;
 
 typedef SandboxPolicy = ({
   List<String> allowedRoots,
@@ -72,6 +73,12 @@ class SandboxUnsupportedException implements Exception {
   const SandboxUnsupportedException(this.message);
   @override
   String toString() => message;
+}
+
+class SandboxCancelledException implements Exception {
+  const SandboxCancelledException();
+  @override
+  String toString() => 'Sandbox operation cancelled';
 }
 
 /// Pure preflight decision — device facts in, permanent-blocker out.
@@ -168,10 +175,10 @@ class SandboxService {
     final path = '$p/.ovid-git-credentials';
     if (_gitCredFilePath == path && _gitCredFileToken == token) return path;
     try {
-      File(
-        path,
-      ).writeAsStringSync('https://x-access-token:$token@github.com\n',
-          flush: true);
+      File(path).writeAsStringSync(
+        'https://x-access-token:$token@github.com\n',
+        flush: true,
+      );
       // Owner-only. The sandbox runs as the app UID, so any wider mode would
       // expose the token to every process on the device.
       Process.runSync('chmod', ['600', path]);
@@ -192,7 +199,9 @@ class SandboxService {
     try {
       final f = File(path);
       if (f.existsSync()) f.deleteSync();
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   /// Git auth env: host-scoped `store` helper + no interactive prompt (a hung
@@ -352,7 +361,9 @@ class SandboxService {
       if (abi.contains('arm64')) return 'arm64';
       if (abi.contains('x86_64')) return 'x86_64';
       if (abi.contains('arm')) return 'arm';
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     return 'arm64';
   }
 
@@ -363,7 +374,8 @@ class SandboxService {
 
   /// Session state supplies an explicit folder (including an explicit clear)
   /// without making sandbox startup recursively construct AppState.
-  static ({String? folder})? Function(String sandboxId)? sessionWorkspaceProvider;
+  static ({String? folder})? Function(String sandboxId)?
+  sessionWorkspaceProvider;
 
   Future<Directory> workDirFor(String sessionSandboxId) async {
     final session = sessionWorkspaceProvider?.call(sessionSandboxId);
@@ -373,7 +385,9 @@ class SandboxService {
     }
     // A Studio repo binding wins: the session works inside the shared
     // clone-once working copy instead of an isolated ws_<id> folder.
-    final bound = session == null ? await _boundWorkspaceFor(sessionSandboxId) : null;
+    final bound = session == null
+        ? await _boundWorkspaceFor(sessionSandboxId)
+        : null;
     if (bound != null) return bound;
     final root = await _ensureFilesRoot();
     final d = Directory('${root.path}/workspaces/ws_$sessionSandboxId');
@@ -389,7 +403,9 @@ class SandboxService {
       final reg = await GlobalRepoRegistry.instance();
       final path = reg.boundWorkspaceFor(sessionSandboxId);
       if (path != null) return Directory(path);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     return null;
   }
 
@@ -405,9 +421,9 @@ class SandboxService {
     }
     // Honor an already-initialized repo binding without blocking; when
     // the registry hasn't warmed yet this is null → default behavior.
-    final bound = session == null ? GlobalRepoRegistry.maybeInstance?.boundWorkspaceFor(
-      sessionSandboxId,
-    ) : null;
+    final bound = session == null
+        ? GlobalRepoRegistry.maybeInstance?.boundWorkspaceFor(sessionSandboxId)
+        : null;
     if (bound != null) return Directory(bound);
     if (_syncRoot != null) {
       return Directory('${_syncRoot!.path}/workspaces/ws_$sessionSandboxId');
@@ -424,7 +440,9 @@ class SandboxService {
     // honor session→repo bindings without awaiting.
     try {
       await GlobalRepoRegistry.instance();
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   /// Delete a session's workspace (session deleted → files go too).
@@ -435,12 +453,16 @@ class SandboxService {
       await (await GlobalRepoRegistry.instance()).unbindSession(
         sessionSandboxId,
       );
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     try {
       final root = await _ensureFilesRoot();
       final d = Directory('${root.path}/workspaces/ws_$sessionSandboxId');
       if (d.existsSync()) await d.delete(recursive: true);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   /// Storage-quota housekeeping (storage-quota parity):
@@ -470,7 +492,9 @@ class SandboxService {
         if (!activeSandboxIds.contains(id)) {
           try {
             await d.delete(recursive: true);
-          } catch (e) { Diag.swallow('sandbox_service', e); }
+          } catch (e) {
+            Diag.swallow('sandbox_service', e);
+          }
         }
       }
 
@@ -487,10 +511,14 @@ class SandboxService {
             if (e is File) {
               try {
                 size += e.lengthSync();
-              } catch (e) { Diag.swallow('sandbox_service', e); }
+              } catch (e) {
+                Diag.swallow('sandbox_service', e);
+              }
             }
           }
-        } catch (e) { Diag.swallow('sandbox_service', e); }
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
         total += size;
         byAccess.add((d, stat.accessed, size));
       }
@@ -505,9 +533,13 @@ class SandboxService {
         try {
           await d.delete(recursive: true);
           total -= size;
-        } catch (e) { Diag.swallow('sandbox_service', e); }
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   // ── Files root ─────────────────────────────────────────────────────
@@ -535,10 +567,34 @@ class SandboxService {
   }
 
   Future<bool> checkExisting() async {
+    if (_installInFlight) return _installed;
     if (_checked) return _installed;
-    _checked = true;    try {
+    try {
       final files = await _ensureFilesRoot();
       final prefix = Directory('${files.path}/sandbox');
+      final previous = Directory('${files.path}/sandbox-previous');
+      // A process death between the two renames or during configuration must
+      // never certify a half-ready prefix. Restore the last committed core.
+      final incomplete = File('${prefix.path}/.ovid-installing').existsSync();
+      if (incomplete) {
+        prefix.deleteSync(recursive: true);
+      }
+      if (!prefix.existsSync() && previous.existsSync()) {
+        previous.renameSync(prefix.path);
+      } else if (prefix.existsSync() && previous.existsSync()) {
+        previous.deleteSync(recursive: true);
+      }
+      // A killed worker may have left a generation-owned staging directory.
+      // The marker makes this path recognizable after process restart.
+      for (final child
+          in files.listSync(followLinks: false).whereType<Directory>()) {
+        if (!child.path.split('/').last.startsWith('sandbox-staging-')) {
+          continue;
+        }
+        if (File('${child.path}/.ovid-staging-owner').existsSync()) {
+          child.deleteSync(recursive: true);
+        }
+      }
       final bash = File('${prefix.path}/bin/bash');
       final coreutils = File('${prefix.path}/bin/coreutils');
       final ldPreload = File(
@@ -549,6 +605,7 @@ class SandboxService {
           ldPreload.existsSync()) {
         _prefix = prefix;
         _installed = true;
+        _checked = true;
         // Existing installs may predate the apt-CA fix: re-assert the
         // CA bundle + apt config on every boot so apt/git over HTTPS
         // keep working without a reinstall. The bundled keyring seed is
@@ -574,8 +631,10 @@ class SandboxService {
         // the background from main()'s post-frame callback.
         return true;
       }
+      _checked = true;
       return false;
     } catch (_) {
+      _checked = false;
       return false;
     }
   }
@@ -584,11 +643,17 @@ class SandboxService {
   /// idempotent, best-effort, never blocks first paint. Re-run safe.
   Future<void> selfHealInBackground() async {
     try {
+      if (_installJob != null || _coreRuntimeJob != null ||
+          _runtimeJobs.isNotEmpty) {
+        return;
+      }
       final prefix = _prefix;
       if (prefix == null) return;
       if (!Directory('${prefix.path}/bin').existsSync()) return;
       await _selfHealSandbox(prefix);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   // ═════════════════════════════════════════════════════════════════
@@ -606,26 +671,72 @@ class SandboxService {
   // breaks while no install has run yet.
   // ═════════════════════════════════════════════════════════════════
 
-  /// Serializes full installs: the Studio first-open flow, the
-  /// Health-screen hard reset, and any retry can never run against each
-  /// other (or against [installCoreRuntimes]'s dpkg lock). A second caller
-  /// waits for the first to finish, mirroring the [_coreRuntimesRunning]
-  /// discipline below. [installInFlight] lets the background jobs observe
-  /// the wait without joining it.
+  /// One full install shared by Studio/Health/retry callers. Runtime requests
+  /// that arrive before the core commits extend the flight's runtime phase.
   Future<void> install({
     required void Function(int phase, double progress, String line) onPhase,
     bool includeRuntimes = true,
-  }) async {
-    while (_installInFlight) {
-      await Future.delayed(const Duration(seconds: 2));
+  }) {
+    final existing = _installJob;
+    if (existing != null) {
+      _installListeners.add(onPhase);
+      _installNeedsRuntimes = _installNeedsRuntimes || includeRuntimes;
+      return existing;
     }
+    final generation = ++_installGeneration;
+    final previousRuntime = _coreRuntimeJob;
+    final previousLazy = _runtimeJobs.values.firstOrNull;
+    _installNeedsRuntimes = includeRuntimes;
+    _installListeners.add(onPhase);
     _installInFlight = true;
-    try {
-      await _installImpl(onPhase: onPhase, includeRuntimes: includeRuntimes);
-    } finally {
-      _installInFlight = false;
-    }
+    final completion = Completer<void>();
+    _installJob = completion.future;
+    unawaited(() async {
+      try {
+        await runZoned(() => withProcessScope(() async {
+          if (previousRuntime != null) await previousRuntime;
+          if (previousLazy != null) await previousLazy;
+          checkCancellation();
+          await _installImpl(
+            onPhase: (phase, progress, line) {
+              checkCancellation();
+              for (final listener in List.of(_installListeners)) {
+                listener(phase, progress, line);
+                checkCancellation();
+              }
+            },
+            generation: generation,
+          );
+        }, runKey: 'sandbox-install-$generation'), zoneValues: {_installZoneKey: true});
+        completion.complete();
+      } catch (e, st) {
+        completion.completeError(e, st);
+      } finally {
+        _installInFlight = false;
+        _installJob = null;
+        _installNeedsRuntimes = false;
+        _installListeners.clear();
+      }
+    }());
+    return completion.future;
   }
+
+  Future<void>? _installJob;
+  int _installGeneration = 0;
+  bool _installNeedsRuntimes = false;
+  final List<void Function(int, double, String)> _installListeners = [];
+
+  /// Cancellation retains the shared flight until its extraction/cleanup has
+  /// settled. Retry cannot race a still-writing worker isolate.
+  Future<void> cancelInstall() async {
+    final job = _installJob;
+    if (job == null) return;
+    killRunProcesses('sandbox-install-$_installGeneration');
+    try {
+      await job;
+    } catch (_) { /* The caller still observes the original failure. */ }
+  }
+
 
   /// True while a full [install] (phases 0–7) is running. The deferred
   /// background runtime job and the boot self-heal check this so they never
@@ -638,217 +749,297 @@ class SandboxService {
 
   Future<void> _installImpl({
     required void Function(int phase, double progress, String line) onPhase,
-    bool includeRuntimes = true,
+    required int generation,
   }) async {
     final files = await _ensureFilesRoot();
+    checkCancellation();
     final prefix = Directory('${files.path}/sandbox');
-    final staging = Directory('${files.path}/sandbox-staging');
-
-    onPhase(0, 0.0, r'$ ovid sandbox --preflight');
-    const buildStamp = String.fromEnvironment(
-      'OVID_BUILD',
-      defaultValue: 'local-dev',
-    );
-    onPhase(0, 0.05, 'ovid build ........ $buildStamp');
-    final facts = await _deviceFacts();
-    onPhase(
-      0,
-      0.1,
-      'device ............ ${facts.abi} · API '
-      '${facts.sdkInt > 0 ? '${facts.sdkInt}' : '?'} '
-      '(native bionic, no proot)',
-    );
-    // Honest device gates BEFORE the multi-minute install: permanent
-    // blockers surface as an actionable "continue without sandbox",
-    // not a cryptic EACCES at the end of a full extraction.
-    final blocker = sandboxPreflightGate(
-      sdkInt: facts.sdkInt,
-      dataExecAllowed: facts.dataExecAllowed,
-    );
-    if (blocker != null) throw blocker;
-    if (Platform.isAndroid) {
-      onPhase(0, 0.15, 'runtime ........... native sandbox (API 24+)');
-    }
-
-    // ── Locate the bundled bootstrap payload ──
-    onPhase(1, 0.0, r'$ read bundled bootstrap (libovid_bootstrap.so)');
-    final payload = await _readBootstrapPayload();
-    if (payload == null) {
-      // The channel's MISSING detail (process ABI vs payloads in the APK)
-      // is far more actionable than the generic line.
-      final readErr = _payloadReadError;
-      if (readErr != null) throw SandboxUnsupportedException(readErr);
-      throw Exception(
-        'Sandbox payload not found. Reinstall the app — the ABI split '
-        'for this device was not included in the install.',
+    final staging = Directory('${files.path}/sandbox-staging-$generation');
+    final previous = Directory('${files.path}/sandbox-previous');
+    final oldPrefix = _prefix;
+    final oldInstalled = _installed;
+    final oldAbi = _payloadAbi;
+    var published = false;
+    var committed = false;
+    try {
+      onPhase(0, 0.0, r'$ ovid sandbox --preflight');
+      const buildStamp = String.fromEnvironment(
+        'OVID_BUILD',
+        defaultValue: 'local-dev',
       );
-    }
-    _payloadAbi = payload.abi;
-    onPhase(
-      1,
-      1.0,
-      'payload ........... '
-      '${(payload.bytes.length / 1024 / 1024).toStringAsFixed(1)} MB · '
-      '${payload.abi} ✓',
-    );
+      onPhase(0, 0.05, 'ovid build ........ $buildStamp');
+      final facts = await _deviceFacts();
+      onPhase(
+        0,
+        0.1,
+        'device ............ ${facts.abi} · API '
+        '${facts.sdkInt > 0 ? '${facts.sdkInt}' : '?'} '
+        '(native bionic, no proot)',
+      );
+      // Honest device gates BEFORE the multi-minute install: permanent
+      // blockers surface as an actionable "continue without sandbox",
+      // not a cryptic EACCES at the end of a full extraction.
+      final blocker = sandboxPreflightGate(
+        sdkInt: facts.sdkInt,
+        dataExecAllowed: facts.dataExecAllowed,
+      );
+      if (blocker != null) throw blocker;
+      if (Platform.isAndroid) {
+        onPhase(0, 0.15, 'runtime ........... native sandbox (API 24+)');
+      }
 
-    // ── Extract zip into staging ──
-    // Decode + write runs in a worker isolate: ZipDecoder on a ~32 MB
-    // payload is the heaviest CPU stretch of the core install, and doing
-    // it on the UI thread would freeze the setup progress screen (ANR
-    // risk) on slower devices.
-    onPhase(2, 0.0, 'extracting sandbox payload');
-    if (staging.existsSync()) staging.deleteSync(recursive: true);
-    staging.createSync(recursive: true);
-    final extracted = await compute(decodeAndExtractPayload, (
-      bytes: payload.bytes,
-      stagingPath: staging.path,
-    ));
-    final symlinks = extracted.symlinks;
-    final count = extracted.count;
-    onPhase(2, 1.0, 'extracted ......... $count files ✓');
-
-    // ── chmod executables (TermuxInstaller rule) ──
-    onPhase(3, 0.0, 'setting exec bits');
-    await _chmodTree(staging, ['bin', 'lib/apt/methods', 'libexec']);
-    onPhase(3, 1.0, 'exec bits ......... ✓');
-
-    // ── Symlinks from SYMLINKS.txt ──
-    onPhase(4, 0.0, 'linking tool aliases');
-    var linked = 0;
-    for (final s in symlinks) {
-      final target = s.target;
-      final linkPath = s.linkPath;
-      final link = Link('${staging.path}/$linkPath');
-      try {
-        link.parent.createSync(recursive: true);
-        if (link.existsSync()) link.deleteSync();
-        // Only ABSOLUTE termux targets are rewritten — and they are
-        // rewritten to the FINAL prefix path (not staging!), because
-        // symlinks don't need their target to exist at creation time
-        // and the staging dir is renamed away a few lines later.
-        // RELATIVE targets (e.g. `libreadline.so.8` for link
-        // `./lib/libreadline.so`) are kept EXACTLY as written — resolving
-        // them against the link dir would bake in the STAGING path, and
-        // the staging→prefix rename would leave every link dangling
-        // (that's the "libreadline.so.8 not found" class of failure).
-        // TermuxInstaller.java does the same: Os.symlink(oldPath, newPath)
-        // with the raw relative target.
-        final dest = target.startsWith('/data/data/com.termux/files/usr/')
-            ? target.replaceFirst(
-                '/data/data/com.termux/files/usr/',
-                '${prefix.path}/',
-              )
-            : target;
-        link.createSync(dest);
-        linked++;
-      } catch (e) { Diag.swallow('sandbox_service', e); }
-    }
-    onPhase(4, 1.0, 'linked ............ $linked aliases ✓');
-
-    // ── Config: rewrite Termux prefix → our prefix in text configs ──
-    onPhase(5, 0.0, 'configuring prefix');
-    _rewritePrefixInConfigs(staging);
-    onPhase(5, 1.0, 'prefix configured . ✓');
-
-    // ── Move staging → prefix ──
-    if (prefix.existsSync()) prefix.deleteSync(recursive: true);
-    staging.renameSync(prefix.path);
-    _prefix = prefix;
-    _installed = true;
-
-    // ── Create runtime dirs (not in bootstrap payload) ──
-    // bash exec uses workingDirectory=$PREFIX/home; without this dir
-    // chdir fails with ENOENT → "No such file or directory".
-    Directory('${prefix.path}/home').createSync(recursive: true);
-    Directory('${prefix.path}/tmp').createSync(recursive: true);
-    // ── `usr` compat symlink ──
-    // Termux-bundled tooling sometimes hardcodes `<prefix>/usr/bin/...`
-    // (npx/npm shebangs from .deb installs, older packages). The payload
-    // root IS the "usr" — make `$PREFIX/usr` a self-symlink so
-    // `$PREFIX/usr/bin/env` resolves to `$PREFIX/bin/env`.
-    try {
-      final usr = Link('${prefix.path}/usr');
-      if (!usr.existsSync()) usr.createSync('.');
-    } catch (e) { Diag.swallow('sandbox_service', e); }
-
-    // ── Write OUR profile (defense-in-depth) ──
-    // Termux's bash has its prefix COMPILED IN, so `bash -l` sources
-    // `<termux>/etc/profile` (an unreadable cross-uid path →
-    // "Permission denied"). We run non-interactive exec with `-c` (no
-    // profile), but the interactive terminal may still want a profile —
-    // make sure OUR prefix's etc/profile points at OUR prefix, and drop a
-    // bashrc that exports the right PATH/LD_LIBRARY_PATH.
-    _writeProfile(prefix);
-    // apt/dpkg have Termux's prefix compiled in and LD_PRELOAD redirect is
-    // unreliable — give apt an explicit Dir config rooted at OUR prefix.
-    _writeAptConfig(prefix);
-    // Fresh install: await the keyring seed so the eager `apt update`
-    // below verifies on every ABI, including payloads without
-    // share/termux-keyring.
-    await _ensureBundledAptKeyring(prefix);
-
-    // ── Remove stale node tarballs from older installs ──
-    // Older builds downloaded node-vXX into HOME instead of using apt —
-    // those leftover dirs confuse PATH and waste space.
-    _cleanStaleHome(prefix);
-
-    // ── Sanity: run bash --version natively ──
-    // execChecked surfaces BOTH the exit code and stderr.  The dynamic
-    // linker's "CANNOT LINK EXECUTABLE ... library not found" errors go
-    // to stderr with exit 1 — the old exec() swallowed that and reported
-    // a false ✓ while every subsequent shell command failed.
-    onPhase(6, 0.0, r'$ bash --version (native exec sanity)');
-    try {
-      final (code, out) = await execChecked(['bash', '--version'])
-          .timeout(const Duration(seconds: 15));
-      if (code != 0) {
+      // ── Locate the bundled bootstrap payload ──
+      onPhase(1, 0.0, r'$ read bundled bootstrap (libovid_bootstrap.so)');
+      final payload = await _readBootstrapPayload();
+      if (payload == null) {
+        // The channel's MISSING detail (process ABI vs payloads in the APK)
+        // is far more actionable than the generic line.
+        final readErr = _payloadReadError;
+        if (readErr != null) throw SandboxUnsupportedException(readErr);
         throw Exception(
-          'bash --version exited $code: '
-          '${out.trim().split('\n').take(2).join(' / ')}',
+          'Sandbox payload not found. Reinstall the app — the ABI split '
+          'for this device was not included in the install.',
         );
       }
-      final firstLine = out.trim().split('\n').first;
+      _payloadAbi = payload.abi;
       onPhase(
-        6,
+        1,
         1.0,
-        'native exec ....... ✓ ${firstLine.substring(0, firstLine.length.clamp(0, 50))}',
+        'payload ........... '
+        '${(payload.bytes.length / 1024 / 1024).toStringAsFixed(1)} MB · '
+        '${payload.abi} ✓',
       );
-    } catch (e) {
-      // Self-explaining diagnostics instead of "report your device model":
-      // EACCES on exec is almost always a wrong-ISA payload (process vs
-      // payload ABI) or an exec-blocking ROM — both visible right here.
-      throw Exception(
-        'Sandbox installed but native exec failed: $e\n'
-        '  process ABI: ${facts.abi} · payload ABI: ${_payloadAbi ?? '?'}\n'
-        '  bash: ${_bashStatLine(prefix)}\n'
-        'If the ABIs differ, this APK build does not match the device — '
-        'install the build for ${facts.abi}. If they match, exec is being '
-        'blocked at the platform level: Android 10+ denies exec from app '
-        'storage for apps with targetSdkVersion >= 29 (keep targetSdk 28 — '
-        'see android/app/build.gradle.kts), or a locked-down ROM is '
-        'blocking exec.',
-      );
-    }
 
-    // ── Phase 7: Runtimes — node/npm/npx/pnpm + python/pip/uv ─────────
-    // REQUIRED for MCP servers (npx/uvx) and the agent's node/python
-    // tooling, and NETWORK-BOUND (apt update + install, minutes). It runs
-    // as part of the Studio first-open full install (or an explicit user
-    // retry) — never from a startup/background trigger. Flows that pass
-    // includeRuntimes=false (Health-screen hard reset) install the native
-    // core alone; every consumer also has the lazy ensureRuntime()
-    // fallback, so the app works offline and nothing blocks on it.
-    if (includeRuntimes) {
-      onPhase(7, 0.0, r'$ apt update && apt install runtimes');
-      await _installRuntimesWithRetry(onPhase);
-    } else {
-      onPhase(
-        7,
-        1.0,
-        'runtimes deferred — node/python install continues in the '
-        'background after the app opens',
+      // ── Extract zip into staging ──
+      // Decode + write runs in a worker isolate: ZipDecoder on a ~32 MB
+      // payload is the heaviest CPU stretch of the core install, and doing
+      // it on the UI thread would freeze the setup progress screen (ANR
+      // risk) on slower devices.
+      onPhase(2, 0.0, 'extracting sandbox payload');
+      if (staging.existsSync()) staging.deleteSync(recursive: true);
+      staging.createSync(recursive: true);
+      File(
+        '${staging.path}/.ovid-staging-owner',
+      ).writeAsStringSync('$generation', flush: true);
+      final extracted = await compute(decodeAndExtractPayload, (
+        bytes: payload.bytes,
+        stagingPath: staging.path,
+      ));
+      checkCancellation();
+      final symlinks = extracted.symlinks;
+      final count = extracted.count;
+      onPhase(2, 1.0, 'extracted ......... $count files ✓');
+
+      // ── chmod executables (TermuxInstaller rule) ──
+      onPhase(3, 0.0, 'setting exec bits');
+      await _chmodTree(staging, ['bin', 'lib/apt/methods', 'libexec']);
+      onPhase(3, 1.0, 'exec bits ......... ✓');
+
+      // ── Symlinks from SYMLINKS.txt ──
+      onPhase(4, 0.0, 'linking tool aliases');
+      var linked = 0;
+      for (final s in symlinks) {
+        final target = s.target;
+        final linkPath = s.linkPath;
+        final link = Link('${staging.path}/$linkPath');
+        try {
+          link.parent.createSync(recursive: true);
+          if (link.existsSync()) link.deleteSync();
+          // Only ABSOLUTE termux targets are rewritten — and they are
+          // rewritten to the FINAL prefix path (not staging!), because
+          // symlinks don't need their target to exist at creation time
+          // and the staging dir is renamed away a few lines later.
+          // RELATIVE targets (e.g. `libreadline.so.8` for link
+          // `./lib/libreadline.so`) are kept EXACTLY as written — resolving
+          // them against the link dir would bake in the STAGING path, and
+          // the staging→prefix rename would leave every link dangling
+          // (that's the "libreadline.so.8 not found" class of failure).
+          // TermuxInstaller.java does the same: Os.symlink(oldPath, newPath)
+          // with the raw relative target.
+          final dest = target.startsWith('/data/data/com.termux/files/usr/')
+              ? target.replaceFirst(
+                  '/data/data/com.termux/files/usr/',
+                  '${prefix.path}/',
+                )
+              : target;
+          link.createSync(dest);
+          linked++;
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
+      }
+      onPhase(4, 1.0, 'linked ............ $linked aliases ✓');
+
+      // ── Config: rewrite Termux prefix → our prefix in text configs ──
+      onPhase(5, 0.0, 'configuring prefix');
+      _rewritePrefixInConfigs(staging, finalPath: prefix.path);
+      onPhase(5, 1.0, 'prefix configured . ✓');
+
+      // ── Move staging → prefix ──
+      // Validate native execution while the old prefix is still intact. Nothing
+      // advertises the candidate until this real subprocess succeeds.
+      Directory('${staging.path}/home').createSync(recursive: true);
+      Directory('${staging.path}/tmp').createSync(recursive: true);
+      final sanity = await _trackedRun(
+        '${staging.path}/bin/bash',
+        ['--version'],
+        workingDirectory: '${staging.path}/home',
+        environment: {
+          'LD_LIBRARY_PATH': '${staging.path}/lib',
+          'LD_PRELOAD':
+              '${staging.path}/lib/libtermux-exec-direct-ld-preload.so',
+          'PREFIX': staging.path,
+          'TERMUX__PREFIX': staging.path,
+        },
       );
+      checkCancellation();
+      if (sanity.exitCode != 0) {
+        throw Exception(
+          'Staged native exec failed (${sanity.exitCode}): ${sanity.stderr}',
+        );
+      }
+      File(
+        '${staging.path}/.ovid-installing',
+      ).writeAsStringSync('$generation', flush: true);
+      File('${staging.path}/.ovid-staging-owner').deleteSync();
+      if (previous.existsSync()) {
+        if (prefix.existsSync()) {
+          previous.deleteSync(recursive: true);
+        } else {
+          previous.renameSync(prefix.path);
+        }
+      }
+      if (prefix.existsSync()) prefix.renameSync(previous.path);
+      staging.renameSync(prefix.path);
+      published = true;
+      _prefix = prefix;
+      _installed = false;
+
+      // ── Create runtime dirs (not in bootstrap payload) ──
+      // bash exec uses workingDirectory=$PREFIX/home; without this dir
+      // chdir fails with ENOENT → "No such file or directory".
+      Directory('${prefix.path}/home').createSync(recursive: true);
+      Directory('${prefix.path}/tmp').createSync(recursive: true);
+      // ── `usr` compat symlink ──
+      // Termux-bundled tooling sometimes hardcodes `<prefix>/usr/bin/...`
+      // (npx/npm shebangs from .deb installs, older packages). The payload
+      // root IS the "usr" — make `$PREFIX/usr` a self-symlink so
+      // `$PREFIX/usr/bin/env` resolves to `$PREFIX/bin/env`.
+      try {
+        final usr = Link('${prefix.path}/usr');
+        if (!usr.existsSync()) usr.createSync('.');
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
+
+      // ── Write OUR profile (defense-in-depth) ──
+      // Termux's bash has its prefix COMPILED IN, so `bash -l` sources
+      // `<termux>/etc/profile` (an unreadable cross-uid path →
+      // "Permission denied"). We run non-interactive exec with `-c` (no
+      // profile), but the interactive terminal may still want a profile —
+      // make sure OUR prefix's etc/profile points at OUR prefix, and drop a
+      // bashrc that exports the right PATH/LD_LIBRARY_PATH.
+      _writeProfile(prefix);
+      // apt/dpkg have Termux's prefix compiled in and LD_PRELOAD redirect is
+      // unreliable — give apt an explicit Dir config rooted at OUR prefix.
+      _writeAptConfig(prefix);
+      // Fresh install: await the keyring seed so the eager `apt update`
+      // below verifies on every ABI, including payloads without
+      // share/termux-keyring.
+      await _ensureBundledAptKeyring(prefix);
+      checkCancellation();
+
+      // ── Remove stale node tarballs from older installs ──
+      // Older builds downloaded node-vXX into HOME instead of using apt —
+      // those leftover dirs confuse PATH and waste space.
+      _cleanStaleHome(prefix);
+
+      // ── Sanity: run bash --version natively ──
+      // execChecked surfaces BOTH the exit code and stderr.  The dynamic
+      // linker's "CANNOT LINK EXECUTABLE ... library not found" errors go
+      // to stderr with exit 1 — the old exec() swallowed that and reported
+      // a false ✓ while every subsequent shell command failed.
+      onPhase(6, 0.0, r'$ bash --version (native exec sanity)');
+      try {
+        final (code, out) = await execChecked([
+          'bash',
+          '--version',
+        ]).timeout(const Duration(seconds: 15));
+        if (code != 0) {
+          throw Exception(
+            'bash --version exited $code: '
+            '${out.trim().split('\n').take(2).join(' / ')}',
+          );
+        }
+        final firstLine = out.trim().split('\n').first;
+        onPhase(
+          6,
+          1.0,
+          'native exec ....... ✓ ${firstLine.substring(0, firstLine.length.clamp(0, 50))}',
+        );
+      } catch (e) {
+        if (e is SandboxCancelledException) rethrow;
+        // Self-explaining diagnostics instead of "report your device model":
+        // EACCES on exec is almost always a wrong-ISA payload (process vs
+        // payload ABI) or an exec-blocking ROM — both visible right here.
+        throw Exception(
+          'Sandbox installed but native exec failed: $e\n'
+          '  process ABI: ${facts.abi} · payload ABI: ${_payloadAbi ?? '?'}\n'
+          '  bash: ${_bashStatLine(prefix)}\n'
+          'If the ABIs differ, this APK build does not match the device — '
+          'install the build for ${facts.abi}. If they match, exec is being '
+          'blocked at the platform level: Android 10+ denies exec from app '
+          'storage for apps with targetSdkVersion >= 29 (keep targetSdk 28 — '
+          'see android/app/build.gradle.kts), or a locked-down ROM is '
+          'blocking exec.',
+        );
+      }
+
+      // ── Phase 7: Runtimes — node/npm/npx/pnpm + python/pip/uv ─────────
+      // REQUIRED for MCP servers (npx/uvx) and the agent's node/python
+      // tooling, and NETWORK-BOUND (apt update + install, minutes). It runs
+      // as part of the Studio first-open full install (or an explicit user
+      // retry) — never from a startup/background trigger. Flows that pass
+      // includeRuntimes=false (Health-screen hard reset) install the native
+      // core alone; every consumer also has the lazy ensureRuntime()
+      // fallback, so the app works offline and nothing blocks on it.
+      checkCancellation();
+      File('${prefix.path}/.ovid-installing').deleteSync();
+      committed = true;
+      _installed = true;
+      _checked = true;
+      if (previous.existsSync()) previous.deleteSync(recursive: true);
+      if (_installNeedsRuntimes) {
+        onPhase(7, 0.0, r'$ apt update && apt install runtimes');
+        await _installRuntimesWithRetry(onPhase);
+        checkCancellation();
+        if (!await runtimesVerified()) {
+          throw StateError(
+            'Sandbox core ready; runtime verification failed. Retry runtime setup.',
+          );
+        }
+      } else {
+        onPhase(
+          7,
+          1.0,
+          'core ready; runtimes deferred until an explicit install or runtime request',
+        );
+      }
+      checkCancellation();
+    } finally {
+      if (staging.existsSync()) staging.deleteSync(recursive: true);
+      if (!committed) {
+        if (published && prefix.existsSync()) {
+          prefix.deleteSync(recursive: true);
+        }
+        if (!prefix.existsSync() && previous.existsSync()) {
+          previous.renameSync(prefix.path);
+        }
+        _prefix = oldPrefix;
+        _installed = oldInstalled;
+        _payloadAbi = oldAbi;
+        _checked = false;
+      }
     }
   }
 
@@ -861,10 +1052,15 @@ class SandboxService {
   ) async {
     Future<bool> binRuns(String bin, [String args = '--version']) async {
       try {
-        final (code, _) = await execChecked(['bash', '-c', '$bin $args 2>&1'])
-            .timeout(const Duration(seconds: 15));
+        final (code, _) = await _checkedCommand([
+          'bash',
+          '-c',
+          '$bin $args 2>&1',
+        ], timeout: const Duration(seconds: 15));
+        checkCancellation();
         return code == 0;
-      } catch (_) {
+      } on SandboxCancelledException { rethrow; }
+      catch (_) {
         return false;
       }
     }
@@ -890,6 +1086,7 @@ class SandboxService {
         'ripgrep openssh rsync jq unzip tmux gh';
     var installed = false;
     for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
+      checkCancellation();
       final tag = attempt == 1
           ? r'$ apt update'
           : 'retry $attempt/3 · apt update';
@@ -900,6 +1097,7 @@ class SandboxService {
           timeout: const Duration(minutes: 3),
           onLine: (l) => onPhase(7, 0.05, l),
         );
+        checkCancellation();
         if (uCode != 0) {
           final tail = uOut.trim().split('\n').where((l) => l.isNotEmpty);
           onPhase(
@@ -930,6 +1128,7 @@ class SandboxService {
           timeout: const Duration(minutes: 8),
           onLine: (l) => onPhase(7, 0.4, l),
         );
+        checkCancellation();
         installed = code == 0;
         if (installed) {
           // apt path also needs the shebang fix: the debs it installed
@@ -950,6 +1149,7 @@ class SandboxService {
           );
         }
       } catch (e) {
+        if (e is SandboxCancelledException) rethrow;
         onPhase(
           7,
           0.4,
@@ -959,37 +1159,57 @@ class SandboxService {
       }
     }
 
-    // ── Direct .deb download fallback (apt-https transport broken) ──
-    // Some devices never complete apt's https method (Cloudflare TLS),
-    // making "no Release file" error every retry chain.  curl honors our
-    // CA bundle and works — so we fetch the package index + full .deb
-    // dependency closure ourselves and extract with a pure-Dart ar parser
-    // (dpkg itself can't run — its prefix is the other app's private dir).
+    // Apt transport failure is not permission to use an unsigned Packages
+    // index. The bundled ovid-pkg helper verifies signed Release metadata,
+    // the Packages digest and each archive before touching the prefix.
+    checkCancellation();
     if (!installed) {
-      onPhase(7, 0.45, '[deb] apt failed — fetching packages directly…');
+      onPhase(7, 0.45, '[pkg] apt unavailable — verifying signed repository…');
       try {
-        installed = await _debDirectInstall(onPhase, [
-          'nodejs',
-          'npm',
-          'python',
-          'python-pip',
-          'uv',
-          'git',
-          'curl',
-          'zlib', // PR30: node's link-time dependency (libz.so.1)
-          'gh', // GitHub CLI — PR/issue/release workflows for the agent
-          'ripgrep', // PR38: real Linux CLI parity
-          'openssh',
-          'rsync',
-          'jq',
-          'unzip',
-          'tmux',
-        ]);
+        final prefix = _prefix;
+        if (prefix == null) throw StateError('Sandbox prefix unavailable');
+        await _ensureBundledAptKeyring(prefix);
+        final trusted = Directory('${prefix.path}/etc/apt/trusted.gpg.d');
+        if (!trusted.existsSync() ||
+            !trusted.listSync().whereType<File>().any((f) => f.path.endsWith('.gpg'))) {
+          throw StateError('No app-bundled package signing keys available');
+        }
+        OvidPkgInstaller.writeAll(
+          prefix,
+          arch: aptArchFor(_payloadAbi, _deviceArch),
+          mirrors: _aptMirrors,
+        );
+        checkCancellation();
+        final (updateCode, updateOut) = await _checkedCommand([
+          'bash',
+          '-c',
+          'ovid-pkg update 2>&1',
+        ], timeout: const Duration(minutes: 6));
+        checkCancellation();
+        if (updateCode != 0) {
+          throw StateError(
+            'signed update failed ($updateCode): ${updateOut.trim()}',
+          );
+        }
+        final (installCode, installOut) = await _checkedCommand([
+          'bash',
+          '-c',
+          'ovid-pkg install $pkgs 2>&1',
+        ], timeout: const Duration(minutes: 12));
+        checkCancellation();
+        if (installCode != 0) {
+          throw StateError(
+            'signed install failed ($installCode): ${installOut.trim()}',
+          );
+        }
+        installed = true;
+        await _patchExtractedShebangs(prefix);
       } catch (e) {
+        if (e is SandboxCancelledException) rethrow;
         onPhase(
           7,
           0.45,
-          '[deb] direct fetch failed: ${e.toString().split('\n').first}',
+          '[pkg] signed install failed: ${e.toString().split('\n').first}',
         );
       }
     }
@@ -1000,7 +1220,7 @@ class SandboxService {
       _ensureTlsConfig(prefix);
       _ensurePipConfig(prefix);
       _probePythonPath();
-      // PR47: after install (or deb fallback), always write our runtime
+      // After apt or the signed package helper, write runtime
       // wrappers — npm/npx (no Termux-env dependency), ovid-pkg + apt/pkg
       // wrappers. Without this a fresh install on a broken device can't
       // ever get started whatever path got the bits in place.
@@ -1012,6 +1232,7 @@ class SandboxService {
     }
 
     // Verify node + npm/npx.
+    checkCancellation();
     if (await binRuns('node')) {
       final nodeOk = await binRuns('node');
       final npmOk = await binRuns('npm');
@@ -1026,7 +1247,9 @@ class SandboxService {
             'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1',
           ]).timeout(const Duration(minutes: 2));
           pnpmNote = await binRuns('pnpm') ? 'pnpm ✓' : 'pnpm ✗';
-        } catch (e) { Diag.swallow('sandbox_service', e); }
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
         onPhase(7, 0.7, 'node ................ ✓ node · npm · npx · $pnpmNote');
       } else {
         onPhase(7, 0.7, 'node ................ ⚠ node ok but npm/npx missing');
@@ -1056,6 +1279,7 @@ class SandboxService {
     // git/curl were previously only `command -v`-probed; a broken exec-path
     // or missing libexec went unnoticed until a real clone failed mid-task.
     await selfTest(onPhase);
+    checkCancellation();
   }
 
   /// runtime self-test: run each critical runtime and CHECK its
@@ -1069,8 +1293,11 @@ class SandboxService {
 
     // git — version + exec-path MUST point inside our prefix.
     try {
-      final (_, ver) = await execChecked(['bash', '-c', 'git --version 2>&1'])
-          .timeout(const Duration(seconds: 30));
+      final (_, ver) = await execChecked([
+        'bash',
+        '-c',
+        'git --version 2>&1',
+      ]).timeout(const Duration(seconds: 30));
       if (!ver.contains('git version')) {
         onPhase(
           8,
@@ -1089,10 +1316,15 @@ class SandboxService {
     }
     String? execPath;
     try {
-      final (_, ep) = await execChecked(['bash', '-c', 'git --exec-path 2>&1'])
-          .timeout(const Duration(seconds: 30));
+      final (_, ep) = await execChecked([
+        'bash',
+        '-c',
+        'git --exec-path 2>&1',
+      ]).timeout(const Duration(seconds: 30));
       execPath = ep.trim();
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     final prefixPath = _prefix!.path;
     if (execPath == null || execPath.isEmpty) {
       onPhase(8, 1.0, 'git exec-path .....  ⚠ not reported');
@@ -1112,8 +1344,11 @@ class SandboxService {
 
     // curl — must execute and report a version.
     try {
-      final (_, v) = await execChecked(['bash', '-c', 'curl --version 2>&1'])
-          .timeout(const Duration(seconds: 30));
+      final (_, v) = await execChecked([
+        'bash',
+        '-c',
+        'curl --version 2>&1',
+      ]).timeout(const Duration(seconds: 30));
       onPhase(
         8,
         1.0,
@@ -1127,8 +1362,11 @@ class SandboxService {
 
     // npm ping — registry reachability over our TLS config.
     try {
-      final (_, out) = await execChecked(['bash', '-c', 'npm ping 2>&1'])
-          .timeout(const Duration(seconds: 45));
+      final (_, out) = await execChecked([
+        'bash',
+        '-c',
+        'npm ping 2>&1',
+      ]).timeout(const Duration(seconds: 45));
       final l = out.toLowerCase();
       final ok = l.contains('pong') || l.contains('success');
       final lastLine = out
@@ -1225,14 +1463,20 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
 ''';
     try {
       File('${etc.path}/profile').writeAsStringSync(profile);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     try {
       File('${etc.path}/bash.bashrc').writeAsStringSync(profile);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     // Also drop a ~/.bashrc so interactive `bash -i` picks it up.
     try {
       File('$p/home/.bashrc').writeAsStringSync(profile);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   /// Delete leftover node-vXX dirs that older builds dropped into HOME.
@@ -1247,10 +1491,14 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
             name == 'node') {
           try {
             e.deleteSync(recursive: true);
-          } catch (e) { Diag.swallow('sandbox_service', e); }
+          } catch (e) {
+            Diag.swallow('sandbox_service', e);
+          }
         }
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   /// Rewrite a script's Termux-prefix shebang line to [prefix]. Returns the
@@ -1289,13 +1537,15 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
       final txt = f.readAsStringSync();
       final fixed = rewriteTermuxShebang(txt, prefix.path);
       if (fixed != null) f.writeAsStringSync(fixed);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
-  void _rewritePrefixInConfigs(Directory prefix) {
+  void _rewritePrefixInConfigs(Directory prefix, {String? finalPath}) {
     const termux = '/data/data/com.termux/files/usr';
-    final ours = prefix.path;
-    for (final entity in prefix.listSync(recursive: true)) {
+    final ours = finalPath ?? prefix.path;
+    for (final entity in prefix.listSync(recursive: true, followLinks: false)) {
       if (entity is! File) continue;
       final p = entity.path;
       final isConfig = p.contains('/etc/') || p.contains('/share/termux');
@@ -1313,7 +1563,9 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
         if (txt.contains(termux)) {
           entity.writeAsStringSync(txt.replaceAll(termux, ours));
         }
-      } catch (e) { Diag.swallow('sandbox_service', e); }
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
     }
   }
 
@@ -1402,9 +1654,13 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
           if (f.existsSync() && f.lengthSync() > 0) continue;
           f.writeAsBytesSync(e.value, flush: true);
           written++;
-        } catch (e) { Diag.swallow('sandbox_service', e); }
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     return written;
   }
 
@@ -1419,10 +1675,14 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
         try {
           final data = await rootBundle.load('assets/termux-keyring/$name');
           bundled[name] = data.buffer.asUint8List();
-        } catch (e) { Diag.swallow('sandbox_service', e); }
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
       }
       if (bundled.isNotEmpty) seedAptKeyring(trusted, bundled);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   void _writeAptConfig(Directory prefix) {
@@ -1431,11 +1691,15 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
     try {
       final etc = Directory('$p/etc/apt')..createSync(recursive: true);
       File('${etc.path}/ovid-apt.conf').writeAsStringSync(conf);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     // Point the default apt.conf at ours too (some apt builds read Dir::Etc::main).
     try {
       File('$p/etc/apt/apt.conf').writeAsStringSync(conf);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     // apt needs the Termux signing keys to verify packages. They ship under
     // share/termux-keyring/*.gpg — link them into trusted.gpg.d so apt's
     // GPGV verification succeeds (otherwise every install is rejected).
@@ -1454,19 +1718,25 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
               } catch (_) {
                 try {
                   File(k.path).copySync(dest);
-                } catch (e) { Diag.swallow('sandbox_service', e); }
+                } catch (e) {
+                  Diag.swallow('sandbox_service', e);
+                }
               }
             }
           }
         }
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     // dpkg needs an admindir + a status file to consider packages installed.
     try {
       Directory('$p/var/lib/dpkg').createSync(recursive: true);
       final status = File('$p/var/lib/dpkg/status');
       if (!status.existsSync()) status.writeAsStringSync('');
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     _ensureSourcesList(prefix);
     _ensureCaBundle(prefix);
     _ensureTlsConfig(prefix);
@@ -1497,7 +1767,9 @@ system_default = system_default_sect
 CipherString = DEFAULT@SECLEVEL=1
 MinProtocol = TLSv1.2
 ''');
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   /// pip.conf — keep pip's index/cache/config inside the sandbox HOME.
@@ -1520,7 +1792,9 @@ update-notifier=false
 fund=false
 audit=false
 ''');
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   /// Known-good Termux main-repo mirrors, tried in order.  A dead or stale
@@ -1538,241 +1812,6 @@ audit=false
     'https://termux.astra.in.ua/apt/termux-main',
   ];
   int _mirrorIdx = 0;
-
-  /// Direct .deb pool installer — bypasses apt's https transport entirely.
-  /// curl (bundled, works with our CA bundle) fetches the package index +
-  /// each .deb from a Termux mirror pool; dpkg then installs the full
-  /// dependency closure.  Used when apt repeatedly fails with TLS or
-  /// "no Release file" (its methods/https binary is broken on-device).
-  ///
-  /// [wanted] are the high-level packages (nodejs, python, …); the real
-  /// dependency closure (openssl/libcurl/libexpat/…) is resolved from the
-  /// parsed Packages index.
-  Future<bool> _debDirectInstall(
-    void Function(int phase, double progress, String line) onPhase,
-    List<String> wanted,
-  ) async {
-    final prefix = _prefix;
-    if (prefix == null) return false;
-    final p = prefix.path;
-    // The apt repo arch must match the PAYLOAD's ABI (what actually runs
-    // inside the sandbox), not the device's capability list.
-    final arch = aptArchFor(_payloadAbi, _deviceArch);
-    // ── 1. Fetch + decompress the binary index (mirrors cycled) ──
-    File? indexFile;
-    String? mirrorUsed;
-    for (var i = 0; i < _aptMirrors.length && indexFile == null; i++) {
-      final m = _aptMirrors[(_mirrorIdx + i) % _aptMirrors.length];
-      onPhase(7, 0.5, '[deb] $m …');
-      final (code, out) = await execChecked([
-        'bash',
-        '-c',
-        'mkdir -p "\$PREFIX/var/cache/apt/archives" && '
-            'cd "\$PREFIX/var/cache/apt" && '
-            'curl -fsSL --retry 2 --connect-timeout 25 '
-            '"$m/dists/stable/main/binary-$arch/Packages.gz" -o Packages.gz '
-            '&& (gzip -dkf Packages.gz || gunzip -c Packages.gz > Packages) '
-            '&& echo INDEX_OK || '
-            '(curl -fsSL --retry 2 '
-            '"$m/dists/stable/main/binary-$arch/Packages" -o Packages && '
-            'echo INDEX_OK)',
-      ]).timeout(const Duration(minutes: 3));
-      if (code == 0 && out.contains('INDEX_OK')) {
-        _mirrorIdx = (_mirrorIdx + i) % _aptMirrors.length;
-        mirrorUsed = m;
-        indexFile = File('$p/var/cache/apt/Packages');
-        onPhase(7, 0.55, '[deb] index ✓ (${m.split('/').last})');
-        break;
-      }
-    }
-    if (indexFile == null || mirrorUsed == null) {
-      onPhase(7, 0.55, '[deb] index fetch failed on all mirrors');
-      return false;
-    }
-
-    // ── 2. Parse the index (name → filename + depends) ──
-    final text = await indexFile.readAsString();
-    final stanzas = text.split(RegExp(r'\n\s*\n'));
-    final table =
-        <String, ({String filename, List<String> depends, String? sha256})>{};
-    for (final stanza in stanzas) {
-      String? name, filename, sha256;
-      final depends = <String>[];
-      for (final line in stanza.split('\n')) {
-        if (line.startsWith(' ')) {
-          // Continuation line — Depends lists wrap onto these.
-          if (depends.isNotEmpty) depends.add(line);
-          continue;
-        }
-        final colon = line.indexOf(':');
-        if (colon <= 0) continue;
-        final field = line.substring(0, colon).trim();
-        final value = line.substring(colon + 1).trim();
-        switch (field) {
-          case 'Package':
-            name = value;
-            break;
-          case 'Filename':
-            filename = value;
-            break;
-          case 'SHA256':
-            sha256 = value;
-            break;
-          case 'Depends':
-            depends.add(value);
-            break;
-        }
-      }
-      if (name != null && filename != null) {
-        table[name] = (filename: filename, depends: depends, sha256: sha256);
-      }
-    }
-    if (table.isEmpty) {
-      onPhase(7, 0.55, '[deb] index parse produced 0 packages');
-      return false;
-    }
-
-    // ── 3. Resolve the dependency closure ──
-    // Depends entries: "libicu (>= 77), openssl | libopenssl ..."
-    final depNameRe = RegExp('^[a-zA-Z0-9+._-]+');
-    final queue = List<String>.from(wanted);
-    final closure = <String>{};
-    while (queue.isNotEmpty && closure.length < 400) {
-      final name = queue.removeLast();
-      if (closure.contains(name)) continue;
-      final entry = table[name];
-      if (entry == null) continue; // virtual / already-base package
-      closure.add(name);
-      for (final raw in entry.depends) {
-        for (final depList in raw.split(',')) {
-          // Alternation "a | b | c": take the FIRST alternative that exists
-          // in the index (nodejs | nodejs-lts → only nodejs, they conflict).
-          String? picked;
-          for (final alt in depList.split('|')) {
-            final m = depNameRe.firstMatch(alt.trim());
-            if (m != null && table.containsKey(m.group(0)!)) {
-              picked = m.group(0)!;
-              break;
-            }
-          }
-          if (picked != null) queue.add(picked);
-        }
-      }
-    }
-    // Only packages actually in the index get downloaded.
-    final toFetch = closure.where(table.containsKey).toList();
-    onPhase(7, 0.6, '[deb] ${toFetch.length} packages in closure');
-
-    // ── 4. Download every .deb via curl ──
-    final archives = '$p/var/cache/apt/archives';
-    var downloaded = 0;
-    for (final name in toFetch) {
-      final fn = table[name]!.filename;
-      final debFile = File('$archives/${fn.split('/').last}');
-      if (debFile.existsSync() && debFile.lengthSync() > 1000) {
-        downloaded++;
-        continue;
-      }
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'curl -fsSL --retry 2 --connect-timeout 25 "$mirrorUsed/$fn" '
-            '-o "\$PREFIX/var/cache/apt/archives/${fn.split('/').last}"',
-      ]).timeout(const Duration(minutes: 5));
-      if (code != 0) {
-        onPhase(7, 0.65, '[deb] download failed: ${fn.split('/').last}');
-        return false;
-      }
-      // Integrity: the Termux index lists SHA256 per package — a MITM or
-      // truncated download that passes curl would otherwise install
-      // corrupt binaries into the sandbox.
-      final expected = table[name]!.sha256;
-      if (expected != null) {
-        final (hCode, hOut) = await execChecked([
-          'bash',
-          '-c',
-          'cd "\$PREFIX/var/cache/apt/archives" && '
-              'actual=\$(sha256sum "${fn.split('/').last}" | cut -d" " -f1) && '
-              '[ "\$actual" = "$expected" ] && echo SHA_OK || '
-              'echo "SHA_BAD \$actual"',
-        ]).timeout(const Duration(seconds: 30));
-        if (hCode != 0 || hOut.contains('SHA_BAD')) {
-          onPhase(7, 0.65, '[deb] SHA256 mismatch: ${fn.split('/').last}');
-          debFile.deleteSync();
-          return false;
-        }
-      }
-      downloaded++;
-      if (downloaded % 10 == 0) {
-        onPhase(7, 0.65, '[deb] $downloaded/${toFetch.length}…');
-      }
-    }
-
-    // ── 5. Extract every .deb directly into $PREFIX ──
-    // dpkg CANNOT work here: Termux's dpkg has /data/data/com.termux
-    // compiled in and always opens THAT config dir → Permission denied
-    // (verified on-device, 10+ identical failures).  But a .deb is just
-    // an `ar` archive wrapping data.tar.xz — curl/ar need no dpkg.
-    // We parse the ar header in Dart, decompress with the bundled xz,
-    // and untar straight into our own writable $PREFIX.
-    onPhase(7, 0.7, '[deb] extracting $downloaded packages…');
-    var extracted = 0;
-    for (final name in toFetch) {
-      final fn = table[name]!.filename.split('/').last;
-      final debPath = '$archives/$fn';
-      final deb = File(debPath);
-      if (!deb.existsSync()) continue;
-      final dataTarXz =
-          await _readArMember(deb, 'data.tar.xz') ??
-          await _readArMember(deb, 'data.tar.gz');
-      if (dataTarXz == null) {
-        onPhase(7, 0.72, '[deb] no data.tar in $fn — skipped');
-        continue;
-      }
-      final fmt = dataTarXz.name.endsWith('.xz') ? '-xJf' : '-xzf';
-      final tmpTar = '$archives/.data.tar';
-      await File(tmpTar).writeAsBytes(dataTarXz.bytes, flush: true);
-      // Termux debs contain paths under data/data/com.termux/files/usr/…
-      // (derooted Android prefix). Extract to a staging dir, then move the
-      // `usr/` subtree up into $PREFIX. Symlinks inside are relative
-      // (libzstd.so.1 -> libzstd.so.1.5.7) so they survive the move.
-      final stage = '$archives/.stage';
-      final (code, out) = await execChecked([
-        'bash',
-        '-c',
-        'rm -rf "$stage" && mkdir -p "$stage" && '
-            'tar $fmt "\$PREFIX/var/cache/apt/archives/.data.tar" -C "$stage" && '
-            'cp -a "$stage/data/data/com.termux/files/usr/." "\$PREFIX/" && '
-            'rm -rf "$stage"'
-            ' 2>&1 | tail -3',
-      ]).timeout(const Duration(minutes: 3));
-      await File(tmpTar).delete().catchError((_) => File(tmpTar));
-      if (code != 0) {
-        onPhase(
-          7,
-          0.72,
-          '[deb] tar failed on $fn: ${out.trim().split('\n').lastOrNull ?? code}',
-        );
-        continue;
-      }
-      extracted++;
-    }
-    if (extracted == 0) {
-      onPhase(7, 0.72, '[deb] nothing extracted — giving up');
-      return false;
-    }
-    onPhase(7, 0.75, '[deb] $extracted/$downloaded packages extracted ✓');
-
-    // ── 5b. Shebang rewrite: extracted SCRIPT bins (npm, npx, uvx…) have
-    // "#!/data/data/com.termux/files/usr/bin/env" baked in — the compiled-in
-    // Termux prefix — which is another app's private dir → "bad interpreter:
-    // Permission denied". Rewrite every shebang mentioning the Termux prefix
-    // to OUR prefix (termux-fix-shebang equivalent), then chmod.
-    await _patchExtractedShebangs(prefix);
-
-    // ── 6. Idempotent verification ──
-    return await runtimesVerified();
-  }
 
   /// Rewrites `#!/data/data/com.termux/files/...` shebangs in extracted
   /// Termux packages to point at OUR sandbox prefix. Runs after BOTH install
@@ -1850,62 +1889,21 @@ audit=false
     }
   }
 
-  /// Reads one member of an `ar` archive (`.deb` container) in pure Dart.
-  /// Returns null when [wanted] (e.g. `data.tar.xz`) is not present.
-  /// ar format: `!<arch>\n` global header, then per-member 60-byte headers
-  /// (name[16] mtime[12] uid[6] gid[6] mode[8] size[10] magic[2]="`\n"),
-  /// data padded to even byte boundary. Member names like "data.tar.xz/".
-  Future<({String name, List<int> bytes})?> _readArMember(
-    File ar,
-    String wanted,
-  ) async {
-    try {
-      final raf = await ar.open();
-      try {
-        final magic = await raf.read(8);
-        if (magic.length != 8 ||
-            String.fromCharCodes(magic.take(7)) != '!<arch>') {
-          return null;
-        }
-        while (true) {
-          final header = await raf.read(60);
-          if (header.length < 60) break;
-          final rawName = String.fromCharCodes(header.sublist(0, 16)).trim();
-          final sizeStr = String.fromCharCodes(header.sublist(48, 58)).trim();
-          final size = int.tryParse(sizeStr) ?? 0;
-          final name = rawName.endsWith('/')
-              ? rawName.substring(0, rawName.length - 1)
-              : rawName;
-          if (name == wanted) {
-            final bytes = await raf.read(size);
-            return (name: name, bytes: bytes);
-          }
-          // Skip this member (data padded to even offset).
-          await raf.setPosition(
-            await raf.position() + size + (size.isOdd ? 1 : 0),
-          );
-        }
-        return null;
-      } finally {
-        await raf.close();
-      }
-    } catch (_) {
-      return null;
-    }
-  }
-
   /// Writes `$prefix/etc/apt/sources.list` for one mirror (idempotent).
   void _writeSourcesList(Directory prefix, String mirror) {
     try {
       final dir = Directory('${prefix.path}/etc/apt')
         ..createSync(recursive: true);
-      File('${dir.path}/sources.list.d/termux.list')
-          .createSync(recursive: true);
+      File(
+        '${dir.path}/sources.list.d/termux.list',
+      ).createSync(recursive: true);
       File('${dir.path}/sources.list').writeAsStringSync(
         '# Ovid sandbox apt mirror (auto-managed)\n'
         'deb $mirror stable main\n',
       );
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   void _ensureSourcesList(Directory prefix) =>
@@ -1980,7 +1978,9 @@ audit=false
       if (out.length > 4096) {
         cert.writeAsStringSync(out.toString());
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   Future<void> _chmodTree(Directory root, List<String> subdirs) async {
@@ -2004,27 +2004,38 @@ audit=false
   /// `chmod -R 755 <path>` via the first usable chmod binary. Returns false
   /// when neither /system/bin/chmod nor toybox is available.
   Future<bool> _chmodRecursive(String path) async {
-    const attempts = [
+    final attempts = [
+      if (!Platform.isAndroid) ('/bin/chmod', ['-R', '755']),
       ('/system/bin/chmod', ['-R', '755']),
       ('toybox', ['chmod', '-R', '755']),
     ];
     for (final (bin, baseArgs) in attempts) {
       try {
-        final result = await Process.run(bin, [...baseArgs, path]);
+        final result = await _trackedRun(bin, [...baseArgs, path]);
         if (result.exitCode == 0) return true;
-      } catch (e) { Diag.swallow('sandbox_service', e); }
+      } catch (e) {
+        if (e is SandboxCancelledException) rethrow;
+        Diag.swallow('sandbox_service', e);
+      }
     }
     return false;
   }
 
   Future<void> _chmod(String path, int mode) async {
     try {
-      await Process.run('/system/bin/chmod', [mode.toRadixString(8), path]);
+      await _trackedRun(Platform.isAndroid ? '/system/bin/chmod' : '/bin/chmod',
+          [mode.toRadixString(8), path]);
+    } on SandboxCancelledException {
+      rethrow;
     } catch (_) {
       // Fallback: some devices lack /system/bin/chmod — try toybox.
       try {
-        await Process.run('toybox', ['chmod', mode.toRadixString(8), path]);
-      } catch (e) { Diag.swallow('sandbox_service', e); }
+        await _trackedRun('toybox', ['chmod', mode.toRadixString(8), path]);
+      } on SandboxCancelledException {
+        rethrow;
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
     }
   }
 
@@ -2034,7 +2045,9 @@ audit=false
         'getNativeLibraryDir',
       );
       if (v != null && v.isNotEmpty) return v;
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     return null;
   }
 
@@ -2053,17 +2066,23 @@ audit=false
     try {
       final v = await _nativeChannel.invokeMethod<String>('getProcessAbi');
       if (v != null && v.isNotEmpty) abi = v;
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     try {
       final v = await _nativeChannel.invokeMethod<int>('getSdkInt');
       if (v != null) sdkInt = v;
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     if (Platform.isAndroid) {
       // The probe spawns a shell — only worth it when actually installing.
       try {
         final v = await _nativeChannel.invokeMethod<bool>('isDataExecAllowed');
         if (v != null) dataExecAllowed = v;
-      } catch (e) { Diag.swallow('sandbox_service', e); }
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
     }
     return (abi: abi, sdkInt: sdkInt, dataExecAllowed: dataExecAllowed);
   }
@@ -2100,7 +2119,9 @@ audit=false
     } on PlatformException catch (e) {
       // MISSING carries "process ABI X has no payload (APK has: …)".
       _payloadReadError = e.message;
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     // Fallback: already-extracted copy (older builds / tests).
     try {
       final libDir = await _nativeLibraryDir;
@@ -2110,7 +2131,9 @@ audit=false
           return (bytes: await f.readAsBytes(), abi: 'unknown');
         }
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     return null;
   }
 
@@ -2127,7 +2150,9 @@ audit=false
       Directory('$p/tmp').createSync(recursive: true);
       Directory('$p/home/.npm').createSync(recursive: true);
       Directory('$p/home/.cache/pip').createSync(recursive: true);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     final env = <String, String>{
       'PREFIX': p,
       'TERMUX__PREFIX': p,
@@ -2211,7 +2236,9 @@ audit=false
           return;
         }
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
   }
 
   /// Plugin-runtime environment overrides (spec §6, additive helper).
@@ -2233,7 +2260,9 @@ audit=false
       Directory('$runtimeRoot/cache/pip').createSync(recursive: true);
       Directory('$runtimeRoot/storage/home').createSync(recursive: true);
       Directory('$runtimeRoot/bin').createSync(recursive: true);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     final prefix = I._prefix?.path;
     return {
       'HOME': '$runtimeRoot/storage/home',
@@ -2283,7 +2312,9 @@ audit=false
       try {
         final usr = Link('$p/usr');
         if (!usr.existsSync()) usr.createSync('.');
-      } catch (e) { Diag.swallow('sandbox_service', e); }
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
 
       // 2. Core so-version links (self-heal only what physically exists
       //    as the versioned file — we never invent libraries).
@@ -2304,7 +2335,9 @@ audit=false
           }
           link.parent.createSync(recursive: true);
           link.createSync(e.value); // relative, like SYMLINKS.txt
-        } catch (e) { Diag.swallow('sandbox_service', e); }
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
       }
 
       // 3. Shebangs + exec bits — same treatment as a fresh install.
@@ -2337,9 +2370,8 @@ audit=false
 
   // ── PR32: active-process registry (instant Stop) ──────────────────────
   // Every process spawned by exec/execChecked/execHost/spawn registers
-  // here; AgentService._cancelBucket → killAllProcesses() SIGKILLs the
-  // whole tree so Stop is INSTANT (a running build/install could keep
-  // the run parked for its full 10-minute timeout otherwise).
+  // here. Agent stop kills only agent-owned trees; explicit setup keeps its
+  // own cancel/settle boundary.
   final List<Process> _liveProcesses = [];
   final Map<String, List<Process>> _runProcesses = {};
 
@@ -2351,6 +2383,178 @@ audit=false
   /// the call that launched it. Per-call grouping lets the timeout do the honest
   /// thing — kill the command that hung — without collateral damage.
   final Map<String, List<Process>> _callProcesses = {};
+  final Map<Process, OwnedProcessTree> _processTrees = {};
+  final Set<Process> _installProcesses = {};
+  final Set<Process> _runtimeProcesses = {};
+  static const _installZoneKey = #ovidInstallOwner;
+  static const _runtimeZoneKey = #ovidRuntimeOwner;
+  final Map<String, int> _runEpochs = {};
+  final Map<String, int> _callEpochs = {};
+  int _agentProcessEpoch = 0;
+  final Set<Process> _lateStarts = {};
+  final Set<Process> _drainingStarts = {};
+  final Map<String, Set<Process>> _lateRunStarts = {};
+  final Map<String, Set<Process>> _lateCallStarts = {};
+  static const _processScopeKey = #ovidProcessScope;
+
+  /// Wrap the entire workflow (before its first await), including delayed
+  /// resource creation. Session IDs may be reused; this scope may not.
+  Future<T> withProcessScope<T>(
+    Future<T> Function() body, {
+    String? runKey,
+    String? callKey,
+  }) {
+    final scope = _captureProcessScope(runKey: runKey, callKey: callKey);
+    return runZoned(body, zoneValues: {_processScopeKey: scope});
+  }
+
+  ({int epoch, String? run, int runEpoch, String? call, int callEpoch})
+  _captureProcessScope({String? runKey, String? callKey}) {
+    final independent = Zone.current[_installZoneKey] == true ||
+        Zone.current[_runtimeZoneKey] == true;
+    final inherited = Zone.current[_processScopeKey];
+    // Detach from the agent only when entering independent setup. Nested
+    // commands must retain that setup's run/call fences, including timeouts.
+    final inherits = inherited != null && (!independent || inherited.epoch == -1);
+    if (inherits) _checkProcessScope(inherited);
+    final run = runKey ?? (inherits ? inherited.run as String? :
+        independent ? null : _currentRunKey);
+    final call = callKey ?? (inherits ? inherited.call as String? :
+        independent ? null : _currentCallKey);
+    return (
+      epoch: independent ? -1 : _agentProcessEpoch,
+      run: run,
+      runEpoch: _runEpochs[run] ?? 0,
+      call: call,
+      callEpoch: _callEpochs[call] ?? 0,
+    );
+  }
+
+  void _checkProcessScope(
+    ({int epoch, String? run, int runEpoch, String? call, int callEpoch}) scope,
+  ) {
+    if ((scope.epoch >= 0 && scope.epoch != _agentProcessEpoch) ||
+        scope.runEpoch != (_runEpochs[scope.run] ?? 0) ||
+        scope.callEpoch != (_callEpochs[scope.call] ?? 0)) {
+      throw const SandboxCancelledException();
+    }
+  }
+
+  void checkCancellation() {
+    final scope = Zone.current[_processScopeKey];
+    if (scope != null) _checkProcessScope(scope);
+  }
+
+  /// Inject only OS creation latency; tracking and real process cleanup remain
+  /// production code in tests.
+  @visibleForTesting
+  static Future<Process> Function(
+    String,
+    List<String>,
+    String?,
+    Map<String, String>?,
+  )?
+  processStartForTest;
+
+  Future<Process> _startOwned(
+    String executable,
+    List<String> arguments, {
+    String? workingDirectory,
+    Map<String, String>? environment,
+  }) async {
+    final scope = _captureProcessScope();
+    final starter =
+        processStartForTest?.call(
+          executable,
+          arguments,
+          workingDirectory,
+          environment,
+        ) ??
+        Process.start(
+          executable,
+          arguments,
+          workingDirectory: workingDirectory,
+          environment: environment,
+        );
+    // The awaiting Future keeps its continuation after Future.timeout; the
+    // generation check runs when Process.start eventually returns a handle.
+    final proc = await starter;
+    final tree = OwnedProcessTree(proc);
+    try {
+      _checkProcessScope(scope);
+    } catch (_) {
+      tree.kill();
+      _drainKilledProcess(proc);
+      await proc.exitCode;
+      rethrow;
+    }
+    _processTrees[proc] = tree;
+    if (Zone.current[_installZoneKey] == true) _installProcesses.add(proc);
+    if (Zone.current[_runtimeZoneKey] == true) _runtimeProcesses.add(proc);
+    _liveProcesses.add(proc);
+    if (scope.run != null) {
+      _runProcesses.putIfAbsent(scope.run!, () => []).add(proc);
+    }
+    if (scope.call != null) {
+      _callProcesses.putIfAbsent(scope.call!, () => []).add(proc);
+    }
+    _lateStarts.add(proc);
+    if (scope.run != null) {
+      _lateRunStarts.putIfAbsent(scope.run!, () => {}).add(proc);
+    }
+    if (scope.call != null) {
+      _lateCallStarts.putIfAbsent(scope.call!, () => {}).add(proc);
+    }
+    unawaited(proc.exitCode.then((_) => _forgetProcess(proc)));
+    return proc;
+  }
+
+  /// Call after binding stdout/stderr subscriptions. A Stop between process
+  /// creation and stream subscription still owns the late-spawned child.
+  void _startStreamsBound(Process proc) {
+    _lateStarts.remove(proc);
+    for (final map in [_lateRunStarts, _lateCallStarts]) {
+      for (final key in map.keys.toList()) {
+        map[key]!.remove(proc);
+        if (map[key]!.isEmpty) map.remove(key);
+      }
+    }
+  }
+
+  void _forgetProcess(Process proc) {
+    _liveProcesses.remove(proc);
+    _processTrees.remove(proc);
+    _installProcesses.remove(proc);
+    _runtimeProcesses.remove(proc);
+    _startStreamsBound(proc);
+    for (final map in [_runProcesses, _callProcesses]) {
+      for (final key in map.keys.toList()) {
+        map[key]!.remove(proc);
+        if (map[key]!.isEmpty) map.remove(key);
+      }
+    }
+  }
+
+  void _killProcess(Process proc) {
+    final tree = _processTrees[proc];
+    if (tree != null) {
+      tree.kill();
+    } else {
+      // No spawn record: the process was registered directly through a
+      // test seam (liveProcessesForTest/runProcessesForTest), so there is
+      // no captured birth to verify against /proc. Kill the handle
+      // directly — the pre-tree behavior. Every production registration
+      // goes through _startOwned (or trackCallProcessForTest), which
+      // always records a tree, so this branch is unreachable for
+      // sandbox-spawned processes.
+      try {
+        proc.kill(ProcessSignal.sigkill);
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
+    }
+    _forgetProcess(proc);
+  }
 
   String? _activeRunKey;
   String? _activeCallKey;
@@ -2392,7 +2596,9 @@ audit=false
     final scope = Zone.current[allowedRootsZoneKey];
     if (scope is! SandboxRootScope) return;
     for (final path in paths.entries) {
-      scope.decisions.add(PermissionGrant.path(path.key, recursive: path.value));
+      scope.decisions.add(
+        PermissionGrant.path(path.key, recursive: path.value),
+      );
     }
   }
 
@@ -2408,6 +2614,7 @@ audit=false
   @visibleForTesting
   void trackCallProcessForTest(String callKey, Process p) {
     _liveProcesses.add(p);
+    _processTrees[p] = OwnedProcessTree(p);
     _callProcesses.putIfAbsent(callKey, () => []).add(p);
   }
 
@@ -2435,16 +2642,18 @@ audit=false
   /// command keeps running, so the model used to be told "retry" and re-issued
   /// it — two copies of a mutating command against one workspace.
   void killCallProcesses(String key) {
+    _callEpochs[key] = (_callEpochs[key] ?? 0) + 1;
     final procs = _callProcesses.remove(key);
-    if (procs == null) return;
-    for (final p in List.of(procs)) {
+    for (final p in List.of(procs ?? <Process>[])) {
+      if (_lateStarts.contains(p)) _drainKilledProcess(p);
       try {
-        p.kill(ProcessSignal.sigkill);
-      } catch (e) { Diag.swallow('sandbox_service', e); }
-      _liveProcesses.remove(p);
-      for (final bucket in _runProcesses.values) {
-        bucket.remove(p);
+        _killProcess(p);
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
       }
+    }
+    for (final p in List.of(_lateCallStarts.remove(key) ?? {})) {
+      _drainKilledProcess(p);
     }
   }
 
@@ -2463,14 +2672,20 @@ audit=false
 
   /// Stop only the processes spawned for [key] without disturbing other runs.
   void killRunProcesses(String key) {
+    _runEpochs[key] = (_runEpochs[key] ?? 0) + 1;
     final procs = _runProcesses.remove(key);
     if (procs != null) {
       for (final p in List.of(procs)) {
+        if (_lateStarts.contains(p)) _drainKilledProcess(p);
         try {
-          p.kill(ProcessSignal.sigkill);
-        } catch (e) { Diag.swallow('sandbox_service', e); }
-        _liveProcesses.remove(p);
+          _killProcess(p);
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
       }
+    }
+    for (final p in List.of(_lateRunStarts.remove(key) ?? {})) {
+      _drainKilledProcess(p);
     }
   }
 
@@ -2484,17 +2699,47 @@ audit=false
   @visibleForTesting
   Map<String, String> sandboxEnvForTest() => _sandboxEnv();
 
-  /// Kill EVERY process this service spawned (agent Stop / app pause
-  /// cleanup). SIGKILL — cooperative exits are too slow for a Stop.
+  /// Global agent Stop: kill agent-owned process trees and invalidate late
+  /// agent spawns, without aborting the separately approved Studio installer.
   void killAllProcesses() {
-    for (final p in List.of(_liveProcesses)) {
-      try {
-        p.kill(ProcessSignal.sigkill);
-      } catch (e) { Diag.swallow('sandbox_service', e); }
+    _agentProcessEpoch++;
+    // Global agent Stop spares independently approved Studio setup. Per-run
+    // epochs additionally fence session-only stops without collateral damage.
+    for (final key in _runProcesses.keys.toList()) {
+      if (key.startsWith('sandbox-install-')) continue;
+      if (_runProcesses[key]!.every(_runtimeProcesses.contains)) continue;
+      _runEpochs[key] = (_runEpochs[key] ?? 0) + 1;
     }
-    _liveProcesses.clear();
-    _runProcesses.clear();
-    _callProcesses.clear();
+    for (final key in _callProcesses.keys.toList()) {
+      if (_callProcesses[key]!.every((p) =>
+          _installProcesses.contains(p) || _runtimeProcesses.contains(p))) {
+        continue;
+      }
+      _callEpochs[key] = (_callEpochs[key] ?? 0) + 1;
+    }
+    for (final p in List.of(_liveProcesses)) {
+      if (_installProcesses.contains(p) || _runtimeProcesses.contains(p)) continue;
+      if (_lateStarts.contains(p)) _drainKilledProcess(p);
+      try {
+        _killProcess(p);
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
+    }
+  }
+
+  void _drainKilledProcess(Process p) {
+    if (!_drainingStarts.add(p)) return;
+    try {
+      unawaited(p.stdout.drain<void>().catchError((Object _) {}));
+    } catch (e) {
+      Diag.swallow('process.stdout', e);
+    }
+    try {
+      unawaited(p.stderr.drain<void>().catchError((Object _) {}));
+    } catch (e) {
+      Diag.swallow('process.stderr', e);
+    }
   }
 
   /// Tracked Process.run: registers the process so killAllProcesses()
@@ -2507,20 +2752,19 @@ audit=false
     Map<String, String>? environment,
     void Function(String line)? onLine,
   }) async {
-    final proc = await Process.start(
+    final scope = _captureProcessScope();
+    final proc = await _startOwned(
       executable,
       arguments,
       workingDirectory: workingDirectory,
       environment: environment,
     );
-    _liveProcesses.add(proc);
-    final runKey = _currentRunKey;
-    if (runKey != null && runKey.isNotEmpty) {
-      _runProcesses.putIfAbsent(runKey, () => []).add(proc);
-    }
-    final callKey = _currentCallKey;
-    if (callKey != null && callKey.isNotEmpty) {
-      _callProcesses.putIfAbsent(callKey, () => []).add(proc);
+    try {
+      _checkProcessScope(scope);
+    } on SandboxCancelledException {
+      _drainKilledProcess(proc);
+      _killProcess(proc);
+      rethrow;
     }
     try {
       // Streaming path: a long install must show progress line by line, not
@@ -2533,18 +2777,29 @@ audit=false
             .transform(utf8.decoder)
             .transform(const LineSplitter())
             .listen((l) {
-              outBuf.writeln(l);
-              onLine(l);
+              try {
+                _checkProcessScope(scope);
+                outBuf.writeln(l);
+                onLine(l);
+              } on SandboxCancelledException {
+                /* stale output */
+              }
             })
             .asFuture<void>();
         final errF = proc.stderr
             .transform(utf8.decoder)
             .transform(const LineSplitter())
             .listen((l) {
-              errBuf.writeln(l);
-              onLine(l);
+              try {
+                _checkProcessScope(scope);
+                errBuf.writeln(l);
+                onLine(l);
+              } on SandboxCancelledException {
+                /* stale output */
+              }
             })
             .asFuture<void>();
+        _startStreamsBound(proc);
         final code = await proc.exitCode;
         await outF;
         await errF;
@@ -2562,6 +2817,7 @@ audit=false
         <int>[],
         (acc, chunk) => acc..addAll(chunk),
       );
+      _startStreamsBound(proc);
       final code = await proc.exitCode;
       final out = await outF;
       final err = await errF;
@@ -2571,10 +2827,7 @@ audit=false
         stderr: utf8.decode(err, allowMalformed: true),
       );
     } finally {
-      _liveProcesses.remove(proc);
-      if (runKey != null && runKey.isNotEmpty) {
-        _runProcesses[runKey]?.remove(proc);
-      }
+      _forgetProcess(proc);
     }
   }
 
@@ -2675,7 +2928,9 @@ audit=false
             return 'DENIED by sandbox policy: command matches denied pattern';
           }
         }
-      } catch (e) { Diag.swallow('sandbox_service', e); }
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
     }
 
     // Secret material is never readable by a spawned command. The git
@@ -2701,11 +2956,13 @@ audit=false
     }.toList();
     if (effectiveCwd != null && roots.isNotEmpty) {
       final allowed =
-          !(zoneRoots is SandboxRootScope && zoneRoots.isDenied(effectiveCwd)) &&
+          !(zoneRoots is SandboxRootScope &&
+              zoneRoots.isDenied(effectiveCwd)) &&
           (roots.any((root) => isPathContained(root, effectiveCwd)) ||
               (zoneRoots is SandboxRootScope &&
                   zoneRoots.decisions.any(
-                    (g) => !g.isDeny && g.recursive && g.coversPath(effectiveCwd),
+                    (g) =>
+                        !g.isDeny && g.recursive && g.coversPath(effectiveCwd),
                   )));
       if (!allowed) {
         return 'DENIED by sandbox policy: cwd escapes allowed roots';
@@ -2765,6 +3022,11 @@ audit=false
     Map<String, String>? env,
     void Function(String line)? onLine,
   }) async {
+    if (Zone.current[_processScopeKey] == null) {
+      return withProcessScope(() => exec(args, cwd: cwd,
+          hostWorkDir: hostWorkDir, env: env, onLine: onLine));
+    }
+    checkCancellation();
     final denial = checkPolicy(args, cwd: cwd, hostWorkDir: hostWorkDir);
     if (denial != null) return denial;
     if (_prefix == null) {
@@ -2785,11 +3047,13 @@ audit=false
             (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
         environment: merged,
       );
+      checkCancellation();
       // PR32's _trackedRun already decodes stdout/stderr to String — the
       // old `as List<int>` byte cast here threw TypeError on every command.
       final out = '${result.stdout}${result.stderr}';
       if (onLine != null) {
         for (final l in const LineSplitter().convert(out)) {
+          checkCancellation();
           onLine(l);
         }
       }
@@ -2812,6 +3076,7 @@ audit=false
       }
       return out;
     } catch (e) {
+      if (e is SandboxCancelledException) rethrow;
       if ('$e'.contains('sandbox not installed')) rethrow;
       // Exec-format / missing-lib failures → try the fallback once.
       if (_isGlibcFailure('$e')) {
@@ -2881,6 +3146,12 @@ audit=false
     Directory? hostWorkDir,
     Map<String, String>? env,
   }) async {
+    if (Zone.current[_processScopeKey] == null) {
+      return withProcessScope(
+        () => execChecked(args, cwd: cwd, hostWorkDir: hostWorkDir, env: env),
+      );
+    }
+    checkCancellation();
     final override = execCheckedOverrideForTest;
     if (override != null) {
       // The override stands in for the WHOLE sandbox (prefix + provisioning),
@@ -2934,8 +3205,8 @@ audit=false
     required Duration timeout,
     void Function(String line)? onLine,
   }) async {
-    Future<(int, String)> run() =>
-        execChecked(['bash', '-c', 'apt $sub']).timeout(timeout);
+    Future<(int, String)> run() => _checkedCommand(
+      ['bash', '-c', 'apt $sub'], timeout: timeout);
     var (code, out) = await run();
     var rotated = false;
     if (code != 0 && _looksLikeAptTls(out)) {
@@ -2955,8 +3226,11 @@ audit=false
       rotated = true;
     }
     if (rotated) {
-      final (uCode, uOut) = await execChecked(['bash', '-c', 'apt update 2>&1'])
-          .timeout(const Duration(minutes: 3));
+      final (uCode, uOut) = await _checkedCommand([
+        'bash',
+        '-c',
+        'apt update 2>&1',
+      ], timeout: const Duration(minutes: 3));
       if (sub.startsWith('update')) {
         (code, out) = (uCode, uOut);
       } else if (uCode != 0) {
@@ -2966,6 +3240,33 @@ audit=false
       }
     }
     return (code, out);
+  }
+
+  int _commandSequence = 0;
+
+  @visibleForTesting
+  Future<(int, String)> checkedCommandForTest(List<String> args, {
+    required Duration timeout,
+  }) => _checkedCommand(args, timeout: timeout);
+
+  /// A timed-out Future still owns its OS process. Mark its unique invocation
+  /// cancelled and await its exit before returning control to a retry path.
+  Future<(int, String)> _checkedCommand(List<String> args, {
+    required Duration timeout,
+  }) async {
+    final key = 'sandbox-command-${++_commandSequence}';
+    return withProcessScope(() async {
+      final pending = execChecked(args);
+      try {
+        return await pending.timeout(timeout);
+      } on TimeoutException {
+        killCallProcesses(key);
+        try {
+          await pending;
+        } catch (_) { /* reaped after cancellation */ }
+        rethrow;
+      }
+    }, callKey: key);
   }
 
   static bool _looksLikeAptTls(String out) {
@@ -2984,6 +3285,65 @@ audit=false
   Future<bool> ensureRuntime(
     String kind, {
     void Function(String line)? onLine,
+  }) {
+    if (Zone.current[_processScopeKey] == null) {
+      return withProcessScope(() => ensureRuntime(kind, onLine: onLine));
+    }
+    checkCancellation();
+    if (kind != 'node' && kind != 'python') {
+      throw ArgumentError.value(kind, 'kind', 'Expected node or python');
+    }
+    final existing = _runtimeJobs[kind];
+    if (existing != null) {
+      return existing.then((result) {
+        checkCancellation();
+        return result;
+      });
+    }
+    final install = _installJob;
+    if (install != null) {
+      _installNeedsRuntimes = true;
+      return install.then((_) {
+        checkCancellation();
+        return hasRuntime(kind == 'node' ? 'node' : 'python');
+      });
+    }
+    final core = _coreRuntimeJob;
+    if (core != null) {
+      return core.then((_) {
+        checkCancellation();
+        return hasRuntime(kind == 'node' ? 'node' : 'python');
+      });
+    }
+    final otherRuntime = _runtimeJobs.values.firstOrNull;
+    if (otherRuntime != null && !_runtimeJobs.containsKey(kind)) {
+      return otherRuntime.then((_) => ensureRuntime(kind, onLine: onLine));
+    }
+    final completion = Completer<bool>();
+    _runtimeJobs[kind] = completion.future;
+    final scope = _captureProcessScope();
+    unawaited(() async {
+      try {
+        _checkProcessScope(scope);
+        final result = await runZoned(() => withProcessScope(
+          () => _ensureRuntimeImpl(kind, onLine: onLine),
+        ), zoneValues: {_runtimeZoneKey: true});
+        _checkProcessScope(scope);
+        completion.complete(result);
+      } catch (e, st) {
+        completion.completeError(e, st);
+      } finally {
+        _runtimeJobs.remove(kind);
+      }
+    }());
+    return completion.future;
+  }
+
+  final Map<String, Future<bool>> _runtimeJobs = {};
+
+  Future<bool> _ensureRuntimeImpl(
+    String kind, {
+    void Function(String line)? onLine,
   }) async {
     final bin = kind == 'node' ? 'node' : 'python';
     if (_runtimeEnsured[kind] == true &&
@@ -2997,35 +3357,59 @@ audit=false
     // Fast path: check if already present (exit-code based —
     // `command -v` prints nothing and exits 1 when missing).
     try {
-      final (code, _) = await execChecked(['bash', '-c', 'command -v $bin'])
-          .timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v $bin',
+      ]).timeout(const Duration(seconds: 10));
+      checkCancellation();
       if (code == 0) {
         _runtimeEnsured[kind] = true;
         return true;
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } on SandboxCancelledException {
+      rethrow;
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     onLine?.call(
       '[runtime] installing ${kind == 'node' ? 'nodejs + npm + pnpm' : 'python + pip + uv'}…',
     );
     try {
-      await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
+      final (updateCode, _) = await _aptChecked(
+        'update 2>&1',
+        timeout: const Duration(minutes: 3),
+      );
+      checkCancellation();
+      if (updateCode != 0) throw StateError('apt update failed ($updateCode)');
       final pkgs = kind == 'node' ? 'nodejs npm' : 'python python-pip uv';
-      await _aptChecked(
+      final (installCode, _) = await _aptChecked(
         'install -y $pkgs 2>&1',
         timeout: const Duration(minutes: 8),
       );
+      checkCancellation();
+      if (installCode != 0) {
+        throw StateError('apt install failed ($installCode)');
+      }
       if (kind == 'node') {
         // Enable pnpm via corepack (best-effort, non-fatal).
         try {
-          await execChecked([
+          await _checkedCommand([
             'bash',
             '-c',
             'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1',
-          ]).timeout(const Duration(minutes: 2));
-        } catch (e) { Diag.swallow('sandbox_service', e); }
+          ], timeout: const Duration(minutes: 2));
+        } on SandboxCancelledException { rethrow; }
+        catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
       }
-      final (vCode, _) = await execChecked(['bash', '-c', 'command -v $bin'])
-          .timeout(const Duration(seconds: 10));
+      final (vCode, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v $bin',
+      ]).timeout(const Duration(seconds: 10));
+      checkCancellation();
       final ok = vCode == 0;
       if (ok) _runtimeEnsured[kind] = true;
       onLine?.call(
@@ -3034,6 +3418,7 @@ audit=false
       );
       return ok;
     } catch (e) {
+      if (e is SandboxCancelledException) rethrow;
       onLine?.call('[runtime] $kind install failed: $e');
       return false;
     }
@@ -3042,8 +3427,11 @@ audit=false
   /// Whether a runtime binary exists right now (no install attempted).
   Future<bool> hasRuntime(String bin) async {
     try {
-      final (code, _) = await execChecked(['bash', '-c', 'command -v $bin'])
-          .timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v $bin',
+      ]).timeout(const Duration(seconds: 10));
       return code == 0;
     } catch (_) {
       return false;
@@ -3063,13 +3451,18 @@ audit=false
     if (_compilerEnsured && _filePresent('bin/clang')) return true;
     _compilerEnsured = false;
     try {
-      final (code, _) = await execChecked(['bash', '-c', 'command -v clang'])
-          .timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v clang',
+      ]).timeout(const Duration(seconds: 10));
       if (code == 0) {
         _compilerEnsured = true;
         return true;
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     onLine?.call('[compiler] installing clang (~60 MB, one-time)…');
     try {
       await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
@@ -3162,13 +3555,18 @@ audit=false
     if (_jdkEnsured && _filePresent('bin/java')) return true;
     _jdkEnsured = false;
     try {
-      final (code, _) = await execChecked(['bash', '-c', 'command -v java'])
-          .timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v java',
+      ]).timeout(const Duration(seconds: 10));
       if (code == 0) {
         _jdkEnsured = true;
         return true;
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     onLine?.call('[jdk] installing openjdk-17 (one-time, large)…');
     try {
       await _aptChecked('update 2>&1', timeout: const Duration(minutes: 3));
@@ -3208,13 +3606,18 @@ audit=false
     if (_kotlinEnsured && _filePresent('opt/kotlinc/bin/kotlinc')) return true;
     _kotlinEnsured = false;
     try {
-      final (code, _) = await execChecked(['bash', '-c', 'command -v kotlinc'])
-          .timeout(const Duration(seconds: 10));
+      final (code, _) = await execChecked([
+        'bash',
+        '-c',
+        'command -v kotlinc',
+      ]).timeout(const Duration(seconds: 10));
       if (code == 0) {
         _kotlinEnsured = true;
         return true;
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     if (!await ensureJdk(onLine: onLine)) {
       onLine?.call('[kotlin] needs a JDK first — JDK install failed.');
       return false;
@@ -3264,8 +3667,11 @@ command -v kotlinc >/dev/null || exit 15
 rm -f "\$DL"
 echo INSTALLED
 ''';
-    final (code, out) = await execChecked(['bash', '-c', script])
-        .timeout(const Duration(minutes: 15));
+    final (code, out) = await execChecked([
+      'bash',
+      '-c',
+      script,
+    ]).timeout(const Duration(minutes: 15));
     final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
     if (code == 0 && out.contains('INSTALLED')) {
       onLine?.call('[kotlin] kotlinc installed ✓');
@@ -3296,7 +3702,9 @@ echo INSTALLED
         _prootEnsured = true;
         return true;
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     onLine?.call('[proot] provisioning Ubuntu userland (one-time)…');
     try {
       final ok = await _installProotUbuntu(onLine);
@@ -3402,8 +3810,11 @@ echo PROVISIONED
     final override = prootProvisionOverrideForTest;
     if (override != null) return override(onLine);
     final script = _prootProvisionScript(ubuntuArchFor(_deviceArch));
-    final (code, out) = await execChecked(['bash', '-c', script])
-        .timeout(const Duration(minutes: 20));
+    final (code, out) = await execChecked([
+      'bash',
+      '-c',
+      script,
+    ]).timeout(const Duration(minutes: 20));
     final tail = out.trim().split('\n').where((l) => l.isNotEmpty);
     if (code == 0 && out.contains('PROVISIONED')) {
       onLine?.call('[proot] Ubuntu userland ready ✓');
@@ -3516,7 +3927,9 @@ echo PROVISIONED
         _flutterEnsured = true;
         return true;
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     onLine?.call(
       '[flutter] installing Flutter $flutterVersion inside proot Ubuntu '
       '(~1.5 GB download, ~4 GB installed, one-time)…',
@@ -3656,8 +4069,18 @@ echo INSTALLED
   /// CLI-parity set — alongside the original required-for-agent set.
   Future<Map<String, bool>> probeRuntimes() async {
     const bins = [
-      'bash', 'node', 'npm', 'python', 'git', 'curl',
-      'rg', 'ssh', 'rsync', 'jq', 'unzip', 'tmux',
+      'bash',
+      'node',
+      'npm',
+      'python',
+      'git',
+      'curl',
+      'rg',
+      'ssh',
+      'rsync',
+      'jq',
+      'unzip',
+      'tmux',
     ];
     final result = <String, bool>{for (final b in bins) b: false};
     if (!_installed) return result;
@@ -3674,7 +4097,9 @@ echo INSTALLED
           if (t.startsWith('MISS ')) result[t.substring(5)] = false;
         }
       }
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     return result;
   }
 
@@ -3684,27 +4109,50 @@ echo INSTALLED
   Future<bool> installCoreRuntimes(
     void Function(int phase, double progress, String line) onPhase,
   ) async {
-    if (!_installed) return false;
-    _runtimesRequested = true;
-    if (_coreRuntimesRunning || _installInFlight) {
-      // A runtime install is already in flight (e.g. the Studio first-open
-      // full install racing the banner retry or the boot self-heal) —
-      // wait for it instead of running apt twice against the dpkg lock.
-      while (_coreRuntimesRunning || _installInFlight) {
-        await Future.delayed(const Duration(seconds: 2));
-      }
+    checkCancellation();
+    final lazy = _runtimeJobs.values.firstOrNull;
+    final install = _installJob;
+    if (install != null) {
+      _installNeedsRuntimes = true;
+      _installListeners.add(onPhase);
+      await install;
+      checkCancellation();
       return runtimesVerified();
     }
-    _coreRuntimesRunning = true;
-    try {
-      await _installRuntimesWithRetry(onPhase);
-      return await runtimesVerified();
-    } finally {
-      _coreRuntimesRunning = false;
+    final running = _coreRuntimeJob;
+    if (running != null) {
+      final result = await running;
+      checkCancellation();
+      return result;
     }
+    if (!_installed) return false;
+    _runtimesRequested = true;
+    final callerScope = Zone.current[_processScopeKey];
+    final completion = Completer<bool>();
+    _coreRuntimeJob = completion.future;
+    unawaited(() async {
+      try {
+        if (lazy != null) await lazy;
+        final result = await runZoned(() => withProcessScope(() async {
+          await _installRuntimesWithRetry((phase, progress, line) {
+            checkCancellation();
+            onPhase(phase, progress, line);
+          });
+          checkCancellation();
+          return runtimesVerified();
+        }), zoneValues: {_runtimeZoneKey: true});
+        if (callerScope != null) _checkProcessScope(callerScope);
+        completion.complete(result);
+      } catch (e, st) {
+        completion.completeError(e, st);
+      } finally {
+        _coreRuntimeJob = null;
+      }
+    }());
+    return completion.future;
   }
 
-  bool _coreRuntimesRunning = false;
+  Future<bool>? _coreRuntimeJob;
 
   // ═════════════════════════════════════════════════════════════════
   // LAZY PROOT-UBUNTU FALLBACK — provisioned ON DEMAND, never bundled.
@@ -3755,6 +4203,12 @@ echo INSTALLED
     Directory? hostWorkDir,
     Map<String, String>? env,
   }) async {
+    if (Zone.current[_processScopeKey] == null) {
+      return withProcessScope(
+        () => spawn(args, hostWorkDir: hostWorkDir, env: env),
+      );
+    }
+    checkCancellation();
     final denial = checkPolicy(
       args,
       cwd: hostWorkDir?.path,
@@ -3770,35 +4224,27 @@ echo INSTALLED
       }
     }
     final merged = {..._sandboxEnv(), ...?env};
-    final proc = await Process.start(
+    final proc = await _startOwned(
       args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
       args.sublist(1),
       workingDirectory: hostWorkDir != null
           ? hostWorkDir.path
           : '${_prefix!.path}/home',
       environment: merged,
-      mode: ProcessStartMode.normal,
     );
+    final scope = Zone.current[_processScopeKey];
+    try {
+      if (scope != null) _checkProcessScope(scope);
+    } on SandboxCancelledException {
+      _drainKilledProcess(proc);
+      _killProcess(proc);
+      rethrow;
+    }
+    _startStreamsBound(proc);
     // PR32 parity: spawned (long-lived) processes also register — Stop
     // must reach MCP servers / background jobs / persistent PTYs too.
-    _liveProcesses.add(proc);
-    final runKey = _currentRunKey;
-    if (runKey != null && runKey.isNotEmpty) {
-      _runProcesses.putIfAbsent(runKey, () => []).add(proc);
-    }
-    final callKey = _currentCallKey;
-    if (callKey != null && callKey.isNotEmpty) {
-      _callProcesses.putIfAbsent(callKey, () => []).add(proc);
-    }
-    proc.exitCode.whenComplete(() {
-      _liveProcesses.remove(proc);
-      if (runKey != null && runKey.isNotEmpty) {
-        _runProcesses[runKey]?.remove(proc);
-      }
-      if (callKey != null && callKey.isNotEmpty) {
-        _callProcesses[callKey]?.remove(proc);
-      }
-    });
+    // For spawn(), the caller owns the streams after return. The process
+    // remains registered until exit/Stop, including delayed construction.
     return proc;
   }
 
@@ -3815,7 +4261,9 @@ echo INSTALLED
       try {
         provisioned = File('${prefix.path}/ubuntu/etc/os-release').existsSync();
         prootBinary = File('${prefix.path}/bin/proot').existsSync();
-      } catch (e) { Diag.swallow('sandbox_service', e); }
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
+      }
     }
     return (
       provisioned: provisioned,
@@ -3828,6 +4276,10 @@ echo INSTALLED
   // PHONE TERMINAL — device shell, no install needed (Android 6+ incl.)
   // ═════════════════════════════════════════════════════════════════
   Future<String> execHost(String cmd, {Directory? hostWorkDir}) async {
+    if (Zone.current[_processScopeKey] == null) {
+      return withProcessScope(() => execHost(cmd, hostWorkDir: hostWorkDir));
+    }
+    checkCancellation();
     final denial = checkPolicy(['sh', '-c', cmd], hostWorkDir: hostWorkDir);
     if (denial != null) return denial;
     // PR32: tracked (Stop can kill it instantly).
@@ -3842,11 +4294,28 @@ echo INSTALLED
   // UNINSTALL
   // ═════════════════════════════════════════════════════════════════
   Future<void> uninstall() async {
+    for (final key in _runProcesses.keys.toList()) {
+      if (key.startsWith('sandbox-install-')) continue;
+      killRunProcesses(key);
+    }
+    for (final p in List.of(_runtimeProcesses)) {
+      _killProcess(p);
+    }
+    await cancelInstall();
+    final runtime = _coreRuntimeJob;
+    if (runtime != null) {
+      try { await runtime; } catch (_) { /* reaped before deleting prefix */ }
+    }
+    for (final lazy in List.of(_runtimeJobs.values)) {
+      try { await lazy; } catch (_) { /* reaped before deleting prefix */ }
+    }
     try {
       final files = await _ensureFilesRoot();
       final prefix = Directory('${files.path}/sandbox');
       if (prefix.existsSync()) prefix.deleteSync(recursive: true);
-    } catch (e) { Diag.swallow('sandbox_service', e); }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
     _prefix = null;
     _installed = false;
     _checked = false;
@@ -3876,7 +4345,6 @@ echo INSTALLED
   }
 }
 
-
 /// The filesystem roots one dispatch may reach.
 ///
 /// Mutable on purpose: [SandboxService.addApprovedRoots] appends a path the user
@@ -3895,6 +4363,5 @@ class SandboxRootScope {
   bool isDenied(String path) =>
       decisions.any((g) => g.isDeny && g.coversPath(path));
   bool isGranted(String path) =>
-      !isDenied(path) &&
-      decisions.any((g) => !g.isDeny && g.coversPath(path));
+      !isDenied(path) && decisions.any((g) => !g.isDeny && g.coversPath(path));
 }

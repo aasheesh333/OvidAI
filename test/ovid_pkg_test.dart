@@ -4,6 +4,8 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 
+import 'wave2_supply_fixture.dart';
+
 /// Task 5 (studio/git reliability §5.5): make `ovid-pkg` honest.
 ///
 /// The generated script must handle `upgrade`/`full-upgrade` without a
@@ -100,7 +102,7 @@ void main() {
       expect(branch, contains('>&2'));
     });
 
-    test('index fetch tries .gz before .xz and silences expected probes', () {
+    test('index fetch requires signed metadata before compressed probes', () {
       final start = content.indexOf('_fetch_index()');
       expect(start, greaterThan(0));
       final body = content.substring(start, content.indexOf('\n}', start));
@@ -111,16 +113,8 @@ void main() {
       // The mirror serves .gz but not .xz; probing .xz first printed a
       // misleading "curl: (22) ... 404" on every update.
       expect(gz, lessThan(xz), reason: '.gz must be probed before .xz');
-      // Both compressed probes suppress stderr; only the final plain fetch
-      // is allowed to surface an error.
-      expect(
-        RegExp(r'\.gz" -o "\$PKG_IDX/Packages\.gz" 2>/dev/null').hasMatch(body),
-        isTrue,
-      );
-      expect(
-        RegExp(r'\.xz" -o "\$PKG_IDX/Packages\.xz" 2>/dev/null').hasMatch(body),
-        isTrue,
-      );
+      expect(body.indexOf('_verify_release'), lessThan(gz));
+      expect(body, contains('_hash_ok'));
     });
   });
 
@@ -194,6 +188,9 @@ exec /usr/bin/dpkg "$@"
               '${entry.value.isEmpty ? '' : 'Depends: ${entry.value}\n'}\n';
         }).join(),
       );
+      SignedRepositoryFixture(
+        tmp.path,
+      ).seedCache(tmp.path, idx.readAsStringSync(), mirror: mirrors.first);
     }
 
     void successfulInstallStubs() {
@@ -530,6 +527,8 @@ exec /bin/$failingCommand "\$@"
           OvidPkgInstaller.writeAll(tmp, mirrors: mirrors);
           final stubs = Directory('${tmp.path}/stubs');
           writeStub(stubs, 'uname', 'echo ${arch.key}');
+          final signed = SignedRepositoryFixture(tmp.path)..trust(tmp.path);
+          signed.publish('Package: app\n\n', arch: arch.value);
           writeStub(stubs, 'curl', r'''
 prev=""; out=""; url=""
 for a in "$@"; do
@@ -537,9 +536,11 @@ for a in "$@"; do
   case "$a" in https://*) url="$a";; esac
   prev="$a"
 done
-case "$url" in */Packages) ;; *) exit 1;; esac
-printf '%s\n' "$url" >> "$PREFIX/index-urls"
-printf 'Package: app\nFilename: pool/app_1.deb\n\n' > "$out"
+case "$url" in */dists/stable/*) ;; *) exit 1;; esac
+case "$url" in */Packages) printf '%s\n' "$url" >> "$PREFIX/index-urls";; esac
+source="$PREFIX/repo/dists/stable/${url#*/dists/stable/}"
+[ -f "$source" ] || exit 22
+cp "$source" "$out"
 ''');
 
           final res = await Process.run('/bin/sh', [
@@ -641,8 +642,7 @@ printf 'Package: app\nFilename: pool/app_1.deb\n\n' > "$out"
       final out = '${res.stdout}${res.stderr}';
 
       expect(res.exitCode, isNot(0));
-      expect(out, contains('binary-arm/Packages'));
-      expect(out, isNot(contains('binary-armv7l/Packages')));
+      expect(out, contains('signed index verification failed'));
     });
 
     test(
@@ -714,7 +714,10 @@ exec /usr/bin/dpkg-deb "$@"
       ], environment: envWith(stubs)).timeout(const Duration(seconds: 30));
 
       expect(res.exitCode, isNot(0));
-      expect('${res.stdout}${res.stderr}', contains('stale'));
+      expect(
+        '${res.stdout}${res.stderr}',
+        contains('signed index verification failed'),
+      );
     });
 
     test('search rejects a stale/empty index', () async {

@@ -4,405 +4,448 @@ import 'package:flutter/foundation.dart';
 import 'state.dart';
 import 'sandbox_service.dart';
 
-/// ═══════════════════════════════════════════════════════════════════
-/// DEVICE / SANDBOX HEALTH (Settings → Device health)
-/// ═══════════════════════════════════════════════════════════════════
-/// Real capability checks, weighted to a 0–100 score.  Every check lists
-/// WHY it failed and WHAT it breaks, so the user (and the agent) can see
-/// exactly which packages are missing.  Repair = re-run the apt runtime
-/// installer (self-heals CA/TLS).
-/// ═══════════════════════════════════════════════════════════════════
+enum HealthStatus {
+  available,
+  missingConfiguration,
+  missing,
+  denied,
+  unsupported,
+  failed,
+}
 
 class HealthCheck {
+  final String id;
   final String name;
   final int points;
   final bool ok;
-
-  /// User-facing detail — for failures, the exact reason + impact.
   final String detail;
-
-  /// Can the Repair button fix this (i.e. it's a sandbox/apt item)?
   final bool repairable;
+  final HealthStatus? _status;
+  HealthStatus get status =>
+      _status ?? (ok ? HealthStatus.available : HealthStatus.failed);
   const HealthCheck({
+    this.id = '',
     required this.name,
     required this.points,
     required this.ok,
     required this.detail,
     this.repairable = false,
-  });
+    HealthStatus? status,
+    // Keep the public named parameter while retaining the legacy bool API.
+    // ignore: prefer_initializing_formals
+  }) : _status = status;
 }
 
 class HealthReport {
   final List<HealthCheck> checks;
   const HealthReport(this.checks);
-  /// Capped at 100 — the screen renders "$score of 100" and a
-  /// `score / 100` progress ring, so raw weights above 100 must clamp.
   int get score =>
       checks.fold<int>(0, (a, c) => a + (c.ok ? c.points : 0)).clamp(0, 100);
   List<HealthCheck> get failed => checks.where((c) => !c.ok).toList();
   bool get anyRepairable => failed.any((c) => c.repairable);
 }
 
+class HealthRepairCancelled implements Exception {
+  @override
+  String toString() =>
+      'Repair cancelled; completed package changes may remain. Re-run checks.';
+}
+
+/// The runtime owner must observe [whenCancelled], stop only its own work, and
+/// settle the worker future AFTER that work stops. A UI timeout is not a stop.
+class HealthRepairCancellation {
+  final _cancelled = Completer<void>();
+  bool get isCancelled => _cancelled.isCompleted;
+  Future<void> get whenCancelled => _cancelled.future;
+  void cancel() {
+    if (!isCancelled) _cancelled.complete();
+  }
+
+  void throwIfCancelled() {
+    if (isCancelled) throw HealthRepairCancelled();
+  }
+}
+
+typedef HealthRepairWorker =
+    Future<void> Function(
+      Set<String> targets,
+      HealthRepairCancellation cancellation,
+      void Function(String) onLine,
+    );
+
+/// Real per-command probes. Configuration is explicitly separate from runtime
+/// availability. No network inference is made from a binary's version output.
 class HealthService extends ChangeNotifier {
-  static final HealthService I = HealthService._();
-  HealthService._();
+  static final HealthService I = HealthService();
+  final Future<bool> Function() _installed;
+  final Future<(int, String)> Function(List<String>) _exec;
+  final Future<void> Function() _workspace;
+  final bool Function() _providerConfigured;
+  final Duration probeTimeout;
+
+  /// Injectable worker. Production construction binds the signed, target-scoped
+  /// command below; probe-only injected services never acquire a live installer.
+  HealthRepairWorker? repairWorker;
+  factory HealthService({
+    Future<bool> Function()? installed,
+    Future<(int, String)> Function(List<String>)? exec,
+    Future<void> Function()? workspace,
+    bool Function()? providerConfigured,
+    HealthRepairWorker? repairWorker,
+    Duration probeTimeout = const Duration(seconds: 10),
+  }) => HealthService._(
+    installed: installed,
+    exec: exec,
+    workspace: workspace,
+    providerConfigured: providerConfigured,
+    repairWorker:
+        repairWorker ??
+        (installed == null && exec == null && workspace == null
+            ? _repairPackages
+            : null),
+    probeTimeout: probeTimeout,
+  );
+
+  HealthService._({
+    Future<bool> Function()? installed,
+    Future<(int, String)> Function(List<String>)? exec,
+    Future<void> Function()? workspace,
+    bool Function()? providerConfigured,
+    this.repairWorker,
+    required this.probeTimeout,
+  }) : _installed = installed ?? SandboxService.I.checkExisting,
+       _exec = exec ?? _sandboxExec,
+       _workspace = workspace ?? _probeWorkspace,
+       _providerConfigured =
+           providerConfigured ??
+           (() => AppState.I.providers.any(
+             (p) => p.isConfigured && p.models.isNotEmpty,
+           ));
+
+  // Only package-backed checks supported by the signed installer. Base sandbox
+  // recovery (bash/apt), storage and provider configuration have other owners.
+  static const _repairPackagesByTarget = {
+    'python': 'python',
+    'pip': 'python-pip',
+    'node': 'nodejs',
+    'npm': 'npm',
+    'npx': 'npm',
+    'git': 'git',
+    'curl': 'curl',
+    'rg': 'ripgrep',
+    'ssh': 'openssh',
+    'rsync': 'rsync',
+    'jq': 'jq',
+    'unzip': 'unzip',
+    'tmux': 'tmux',
+  };
+  static int _repairSequence = 0;
+
+  static Future<void> _repairPackages(
+    Set<String> targets,
+    HealthRepairCancellation cancellation,
+    void Function(String) onLine,
+  ) async {
+    cancellation.throwIfCancelled();
+    if (targets.isEmpty ||
+        targets.any((id) => !_repairPackagesByTarget.containsKey(id))) {
+      throw UnsupportedError('No targeted package repair for this selection.');
+    }
+    final packages =
+        targets.map((id) => _repairPackagesByTarget[id]!).toSet().toList()
+          ..sort();
+    final sandbox = SandboxService.I;
+    final key = 'health-repair-${++_repairSequence}';
+    final settled = Completer<void>();
+    var timedOut = false;
+    Timer? deadline;
+    // Detach this callback on completion, so a later cancellation never kills
+    // another operation. Never cancelInstall/killAllProcesses: those are shared.
+    unawaited(
+      Future.any([cancellation.whenCancelled, settled.future]).then((_) {
+        if (!settled.isCompleted && cancellation.isCancelled) {
+          sandbox.killCallProcesses(key);
+        }
+      }),
+    );
+    try {
+      await runZoned(
+        () => sandbox.withProcessScope(
+          () async {
+            onLine('Repairing signed packages: ${packages.join(', ')}');
+            cancellation.throwIfCancelled();
+            deadline = Timer(const Duration(minutes: 12), () {
+              timedOut = true;
+              sandbox.killCallProcesses(key);
+            });
+            // install verifies/fetches its signed index and resolves dependencies.
+            // One command retains the installer's own lock for the whole operation.
+            // Await the producer even after cancellation/timeout; no abandoned work
+            // may race a retry. execChecked settles after exit and stream draining.
+            final (code, _) = await sandbox.execChecked([
+              'ovid-pkg',
+              'install',
+              ...packages,
+            ]);
+            cancellation.throwIfCancelled();
+            if (timedOut) {
+              throw TimeoutException('Signed package repair timed out.');
+            }
+            if (code != 0) {
+              throw StateError('Signed package repair failed (exit $code).');
+            }
+            onLine('Package command completed; verifying executable checks.');
+          },
+          runKey: key,
+          callKey: key,
+        ),
+        zoneValues: {SandboxService.callZoneKey: key},
+      );
+    } on SandboxCancelledException {
+      if (timedOut && !cancellation.isCancelled) {
+        throw TimeoutException('Signed package repair timed out.');
+      }
+      throw HealthRepairCancelled();
+    } catch (_) {
+      cancellation.throwIfCancelled();
+      if (timedOut) throw TimeoutException('Signed package repair timed out.');
+      rethrow;
+    } finally {
+      deadline?.cancel();
+      settled.complete();
+    }
+  }
+
+  static Future<(int, String)> _sandboxExec(List<String> args) async {
+    final key = 'health-${DateTime.now().microsecondsSinceEpoch}-${args.first}';
+    try {
+      return await runZoned(
+        () => SandboxService.I.execChecked(args),
+        zoneValues: {SandboxService.callZoneKey: key},
+      ).timeout(const Duration(seconds: 10));
+    } finally {
+      SandboxService.I.killCallProcesses(key);
+    }
+  }
+
+  static Future<void> _probeWorkspace() async {
+    final work = await SandboxService.I.workDirFor('health-probe');
+    await work.create(recursive: true);
+    final temp = await work.createTemp('probe-');
+    try {
+      await File('${temp.path}/write-test').writeAsString('ok', flush: true);
+    } finally {
+      await temp.delete(recursive: true);
+    }
+  }
 
   HealthReport? lastReport;
   bool checking = false;
+  bool repairing = false;
+  Future<HealthReport>? _checks;
+  HealthRepairCancellation? _repairCancellation;
+  bool get cancellationRequested => _repairCancellation?.isCancelled ?? false;
 
-  /// Run all checks and return the report.  Probes are real (sandbox
-  /// exec, file writes) but fast — everything has a hard timeout.
-  Future<HealthReport> runChecks() async {
+  Future<HealthReport> runChecks() =>
+      _checks ??= _runChecks().whenComplete(() => _checks = null);
+
+  static HealthStatus _failure(String detail, [int? code]) {
+    final text = detail.toLowerCase();
+    if (text.contains('permission denied') ||
+        text.contains('operation not permitted')) {
+      return HealthStatus.denied;
+    }
+    if (text.contains('exec format') ||
+        text.contains('unsupported abi') ||
+        text.contains('wrong elf')) {
+      return HealthStatus.unsupported;
+    }
+    if (code == 127 ||
+        text.contains('no such file') ||
+        text.contains('not found')) {
+      return HealthStatus.missing;
+    }
+    return HealthStatus.failed;
+  }
+
+  Future<HealthReport> _runChecks() async {
     checking = true;
     notifyListeners();
     final out = <HealthCheck>[];
-    final sandbox = SandboxService.I;
-    final isInstalled = await sandbox.checkExisting();
-
-    out.add(
-      HealthCheck(
-        name: 'Native Linux sandbox installed',
-        points: 20,
-        ok: isInstalled,
-        detail: isInstalled
-            ? 'Sandbox prefix is on-device.'
-            : 'Missing — install from the Studio screen (one-time, ~320 MB). '
-                  'Without it there are no bash/python/node/git tools.',
-        repairable: true,
-      ),
-    );
-
-    if (!isInstalled) {
-      out.addAll([
-        const HealthCheck(
-          name: 'Native exec (bash)',
-          points: 15,
-          ok: false,
-          detail: 'bash cannot run without the sandbox.',
-          repairable: true,
-        ),
-        const HealthCheck(
-          name: 'apt package manager',
-          points: 10,
-          ok: false,
-          detail: 'apt unavailable without the sandbox.',
-          repairable: true,
-        ),
-        for (final b in ['Python', 'Node.js / npm', 'git', 'curl'])
-          HealthCheck(
-            name: b,
-            points: 10,
-            ok: false,
-            detail: '$b is missing — the sandbox is not installed.',
-            repairable: true,
-          ),
-        const HealthCheck(
-          name: 'Workspace storage',
-          points: 10,
-          ok: false,
-          detail: 'Session workspace needs the sandbox app files dir.',
-          repairable: true,
-        ),
-      ]);
-    } else {
-      // bash native exec
-      var bashOk = false;
-      var bashDetail = 'Native bionic exec works.';
+    try {
+      var installed = false;
+      var installDetail = 'Missing — open Studio to install the sandbox.';
+      var installStatus = HealthStatus.missing;
       try {
-        final (code, o) = await sandbox
-            .execChecked(['bash', '--version'])
-            .timeout(const Duration(seconds: 10));
-        bashOk = code == 0;
-        if (!bashOk) {
-          bashDetail =
-              'bash exited $code: ${o.trim().split('\n').firstOrNull ?? 'no output'}';
+        installed = await _installed().timeout(probeTimeout);
+        if (installed) {
+          installDetail =
+              'Sandbox prefix exists; runtime commands checked separately.';
         }
       } catch (e) {
-        bashDetail = 'bash --version failed: $e';
+        installDetail = 'Sandbox check failed: $e';
+        installStatus = _failure('$e');
       }
       out.add(
         HealthCheck(
-          name: 'Native exec (bash)',
-          points: 15,
-          ok: bashOk,
-          detail: bashDetail,
-          repairable: true,
+          id: 'sandbox',
+          name: 'Native Linux sandbox installed',
+          points: 20,
+          ok: installed,
+          detail: installDetail,
+          status: installed ? HealthStatus.available : installStatus,
         ),
       );
-      // Probe the toolchain in ONE bash call.
-      final probe = await sandbox.probeRuntimes();
-      String miss(String b) => (probe[b] ?? false)
-          ? 'Available ($b).'
-          : '$b not found — apt runtime packages were never installed '
-                '(likely the earlier apt certificate issue). Tap Repair.';
-      out.add(
-        HealthCheck(
-          name: 'apt package manager',
-          points: 10,
-          ok: probe['bash'] == true && bashOk,
-          detail: bashOk
-              ? 'apt works in the sandbox (HTTPS self-heals on cert errors).'
-              : 'apt needs a working bash first.',
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'Python (+pip)',
-          points: 10,
-          ok: probe['python'] == true,
-          detail: miss('python'),
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'Node.js / npm (+npx)',
-          points: 10,
-          ok: probe['node'] == true && probe['npm'] == true,
-          detail: miss('node'),
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'git',
-          points: 10,
-          ok: probe['git'] == true,
-          detail: miss('git'),
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'curl / HTTPS tooling',
-          points: 10,
-          ok: probe['curl'] == true,
-          detail: miss('curl'),
-          repairable: true,
-        ),
-      );
-      // PR38: native-Linux-parity CLI tools — same eager-install set as
-      // node/python/git/curl, so a miss means the same "runtime packages
-      // were never installed" story and the same Repair button fixes it.
-      out.add(
-        HealthCheck(
-          name: 'ripgrep (rg)',
-          points: 5,
-          ok: probe['rg'] == true,
-          detail: miss('rg'),
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'openssh (ssh/scp/sftp)',
-          points: 5,
-          ok: probe['ssh'] == true,
-          detail: miss('ssh'),
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'rsync',
-          points: 0,
-          ok: probe['rsync'] == true,
-          detail: miss('rsync'),
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'jq',
-          points: 0,
-          ok: probe['jq'] == true,
-          detail: miss('jq'),
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'unzip',
-          points: 0,
-          ok: probe['unzip'] == true,
-          detail: miss('unzip'),
-          repairable: true,
-        ),
-      );
-      out.add(
-        HealthCheck(
-          name: 'tmux',
-          points: 0,
-          ok: probe['tmux'] == true,
-          detail: miss('tmux'),
-          repairable: true,
-        ),
-      );
-      // proot Ubuntu (glibc tools: flutter, prebuilt binaries). Informational
-      // — the native sandbox covers the common case; this surfaces whether
-      // the fallback userland exists and how often it was needed.
-      final proot = await sandbox.prootStatus();
-      out.add(
-        HealthCheck(
-          name: 'proot Ubuntu (glibc tools)',
-          points: 0,
-          ok: proot.provisioned && proot.prootBinary,
-          detail: proot.provisioned && proot.prootBinary
-              ? 'Provisioned — glibc-only tools (e.g. Flutter) can run.'
-              : proot.fallbackTriggers > 0
-              ? '${proot.fallbackTriggers} command(s) needed glibc; Ubuntu '
-                    'userland not provisioned yet — it installs on demand '
-                    '(~30 MB) or from a glibc command.'
-              : 'Not provisioned (optional). Installs on demand for '
-                    'glibc-only tools.',
-          repairable: false,
-        ),
-      );
-
-      // Workspace writable.
-      var wsOk = false;
-      var wsDetail = 'Session workspace is readable and writable.';
-      try {
-        final work = await sandbox.workDirFor('health-probe');
-        work.createSync(recursive: true);
-        final probe = File('${work.path}/write-test');
-        await probe.writeAsString('ok');
-        await probe.delete();
-        wsOk = true;
-      } catch (e) {
-        wsDetail = 'Workspace dir is not writable: $e';
+      const commands = <(String, String, int, List<String>)>[
+        ('bash', 'Native exec (bash)', 15, ['bash', '--version']),
+        ('apt', 'apt package manager', 10, ['apt', '--version']),
+        ('python', 'Python', 10, ['python', '--version']),
+        ('pip', 'Python pip', 0, ['python', '-m', 'pip', '--version']),
+        ('node', 'Node.js', 5, ['node', '--version']),
+        ('npm', 'npm', 5, ['npm', '--version']),
+        ('npx', 'npx / shebang chain', 0, ['npx', '--version']),
+        ('git', 'git', 5, ['git', '--version']),
+        ('curl', 'curl / HTTPS tooling', 5, ['curl', '--version']),
+        ('rg', 'ripgrep (rg)', 0, ['rg', '--version']),
+        ('ssh', 'OpenSSH', 0, ['ssh', '-V']),
+        ('rsync', 'rsync', 0, ['rsync', '--version']),
+        ('jq', 'jq', 0, ['jq', '--version']),
+        ('unzip', 'unzip', 0, ['unzip', '-v']),
+        ('tmux', 'tmux', 0, ['tmux', '-V']),
+      ];
+      for (final (id, name, points, args) in commands) {
+        var ok = false;
+        var status = HealthStatus.missing;
+        var detail = 'Unavailable without the sandbox. Open Studio to install.';
+        if (installed) {
+          try {
+            final (code, output) = await _exec(args).timeout(probeTimeout);
+            ok = code == 0;
+            status = ok ? HealthStatus.available : _failure(output, code);
+            detail = ok
+                ? '${args.join(' ')} succeeded. Network access is not tested.'
+                : '${status.name}: ${args.join(' ')} exited $code. ${output.trim()}';
+          } catch (e) {
+            status = _failure('$e');
+            detail = '${status.name}: $e';
+          }
+        }
+        if (detail.length > 600) detail = '${detail.substring(0, 600)}…';
+        out.add(
+          HealthCheck(
+            id: id,
+            name: name,
+            points: points,
+            ok: ok,
+            detail: detail,
+            status: status,
+            repairable:
+                installed &&
+                _repairPackagesByTarget.containsKey(id) &&
+                !ok &&
+                status != HealthStatus.denied &&
+                status != HealthStatus.unsupported,
+          ),
+        );
+      }
+      var writable = false;
+      var storageDetail = 'Unavailable without the sandbox.';
+      var storageStatus = HealthStatus.missing;
+      if (installed) {
+        try {
+          await _workspace().timeout(probeTimeout);
+          writable = true;
+          storageStatus = HealthStatus.available;
+          storageDetail = 'Temporary workspace file written and removed.';
+        } catch (e) {
+          storageStatus = _failure('$e');
+          storageDetail = 'Workspace probe failed: $e';
+        }
       }
       out.add(
         HealthCheck(
+          id: 'workspace',
           name: 'Workspace storage',
           points: 10,
-          ok: wsOk,
-          detail: wsDetail,
-          repairable: true,
+          ok: writable,
+          detail: storageDetail,
+          status: storageStatus,
         ),
       );
-
-      // ── PR22: device-workload probes (the exact on-device failure class) ──
-      // npx smoke: exercises the env shebang chain end-to-end (usr/bin/env
-      // compat symlink + patched shebangs). If this passes, every npm/npx
-      // shebang tool works.
-      if (probe['node'] == true) {
-        var npxOk = false;
-        var npxDetail = 'npx shebang chain resolves (usr compat ✓).';
-        try {
-          final (code, o) = await sandbox
-              .execChecked(['npx', '--version'])
-              .timeout(const Duration(seconds: 20));
-          npxOk = code == 0;
-          if (!npxOk) {
-            final tail = o.trim().split('\n');
-            npxDetail = 'npx --version exited $code — '
-                '${tail.isEmpty ? "no output" : tail.last}';
-          }
-        } catch (e) {
-          npxDetail = 'npx failed: $e';
-        }
-        out.add(
-          HealthCheck(
-            name: 'npx / shebang chain',
-            points: 0,
-            ok: npxOk,
-            detail: npxDetail,
-            repairable: true,
-          ),
-        );
-        // node smoke: links libz + friends at exec time — catches the
-        // "library libz.so.1 not found" class without running a build.
-        var nodeOk = false;
-        var nodeDetail = 'node links native libs (zlib ✓).';
-        try {
-          final (code, o) = await sandbox
-              .execChecked(['node', '-e', 'console.log(1+1)'])
-              .timeout(const Duration(seconds: 20));
-          nodeOk = code == 0 && o.contains('2');
-          if (!nodeOk) {
-            nodeDetail =
-                'node smoke failed ($code) — likely a missing lib symlink '
-                '(libz.so.1). Tap Repair.';
-          }
-        } catch (e) {
-          nodeDetail = 'node failed: $e';
-        }
-        out.add(
-          HealthCheck(
-            name: 'Node native link (libz)',
-            points: 0,
-            ok: nodeOk,
-            detail: nodeDetail,
-            repairable: true,
-          ),
-        );
-        // mkdtemp in OUR tmp: the spill/npm-cache failure class — node's
-        // mkdtemp falls back to the compiled-in Termux TMPDIR without
-        // the env override.
-        var tmpOk = false;
-        var tmpDetail = 'mkdtemp uses the sandbox TMPDIR ✓.';
-        try {
-          final (code, o) = await sandbox.execChecked([
-            'node',
-            '-e',
-            "const fs=require('fs'),os=require('os');"
-                "const d=fs.mkdtempSync(require('path').join(os.tmpdir(),"
-                "'ovid-'));console.log(d)",
-          ]).timeout(const Duration(seconds: 20));
-          tmpOk = code == 0 && o.contains('/sandbox');
-          if (!tmpOk) {
-            tmpDetail =
-                'node tmpdir points outside the sandbox (EACCES class). '
-                'Tap Repair.';
-          }
-        } catch (e) {
-          tmpDetail = 'mkdtemp probe failed: $e';
-        }
-        out.add(
-          HealthCheck(
-            name: 'TMPDIR / mkdtemp',
-            points: 0,
-            ok: tmpOk,
-            detail: tmpDetail,
-            repairable: true,
-          ),
-        );
-      }
+      final configured = _providerConfigured();
+      out.add(
+        HealthCheck(
+          id: 'provider',
+          name: 'AI provider configuration',
+          points: 15,
+          ok: configured,
+          status: configured
+              ? HealthStatus.available
+              : HealthStatus.missingConfiguration,
+          detail: configured
+              ? 'A provider and model are configured; credentials and reachability are not tested.'
+              : 'Missing configuration — choose a provider and model in Settings → Providers.',
+        ),
+      );
+      return lastReport = HealthReport(List.unmodifiable(out));
+    } finally {
+      checking = false;
+      notifyListeners();
     }
-
-    // Provider configured — not repairable from Health (needs the user's key).
-    final hasProvider = AppState.I.providers.any(
-      (p) => p.isConfigured && p.models.isNotEmpty,
-    );
-    out.add(
-      HealthCheck(
-        name: 'AI provider configured',
-        points: 10,
-        ok: hasProvider,
-        detail: hasProvider
-            ? 'At least one provider has a key + model.'
-            : 'Add an API key in Settings → Providers so the agent can run.',
-      ),
-    );
-
-    final report = HealthReport(out);
-    lastReport = report;
-    checking = false;
-    notifyListeners();
-    return report;
   }
 
-  /// Run the sandbox runtime repair (apt install of node/python/git/curl)
-  /// with verbose lines surfaced to the UI.  Re-runs the checks after.
-  Future<HealthReport> repair(void Function(String line) onLine) async {
-    final sandbox = SandboxService.I;
-    // PR22: self-heal first (usr symlink, lib links, shebangs, exec bits)
-    // — cheap + fixes the bad-interpreter/libz/EACCES class without a
-    // full runtime reinstall.
-    await sandbox.selfHealNow(onLine: onLine);
-    await sandbox.installCoreRuntimes((phase, progress, line) => onLine(line));
-    return runChecks();
+  void cancelRepair() {
+    _repairCancellation?.cancel();
+    notifyListeners();
+  }
+
+  Future<HealthReport> repair(
+    void Function(String) onLine, {
+    Set<String>? targets,
+  }) async {
+    if (repairing) throw StateError('A repair is already running.');
+    final worker = repairWorker;
+    if (worker == null) {
+      throw UnsupportedError(
+        'Targeted repair worker unavailable in this build. No repair was started.',
+      );
+    }
+    final cancellation = HealthRepairCancellation();
+    _repairCancellation = cancellation;
+    repairing = true;
+    notifyListeners();
+    try {
+      final report = await runChecks();
+      cancellation.throwIfCancelled();
+      final allowed = report.failed
+          .where((c) => c.repairable)
+          .map((c) => c.id)
+          .toSet();
+      final selected = Set<String>.of(targets ?? allowed);
+      if (selected.isEmpty || !allowed.containsAll(selected)) {
+        throw StateError('Select a failed, repairable runtime.');
+      }
+      await worker(Set.unmodifiable(selected), cancellation, (line) {
+        if (!cancellation.isCancelled) onLine(line);
+      });
+      cancellation.throwIfCancelled();
+      // A UI refresh begun during installation can still contain pre-install
+      // results. Let that producer settle before starting verification anew.
+      final inFlightChecks = _checks;
+      if (inFlightChecks != null) await inFlightChecks;
+      cancellation.throwIfCancelled();
+      final after = await runChecks();
+      cancellation.throwIfCancelled();
+      if (after.failed.any((c) => selected.contains(c.id))) {
+        throw StateError(
+          'Repair incomplete; selected runtime checks still fail.',
+        );
+      }
+      return after;
+    } finally {
+      repairing = false;
+      _repairCancellation = null;
+      notifyListeners();
+    }
   }
 }

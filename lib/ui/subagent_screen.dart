@@ -6,6 +6,7 @@ import '../core/agent_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'chat_screen.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Subagent session view — the child's OWN transcript.
 ///
@@ -67,17 +68,31 @@ class _SubagentScreenState extends State<SubagentScreen> {
     final text = _input.text.trim();
     if (text.isEmpty || _sending) return;
     setState(() => _sending = true);
-    final status = await AgentService.I.continueSubagent(
-      widget.sessionId,
-      text,
-      userReferences: true,
-    );
-    if (!mounted) return;
-    _input.clear();
-    setState(() => _sending = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(status), behavior: SnackBarBehavior.floating),
-    );
+    try {
+      final status = await AgentService.I.continueSubagent(
+        widget.sessionId,
+        text,
+        userReferences: true,
+      );
+      if (!mounted) return;
+      // Refusals are also returned as status strings. Keep the user's draft
+      // unless the service actually accepted it, including edits during await.
+      if ((status.startsWith('queued as the next turn for ') ||
+              status.startsWith('resumed ')) &&
+          _input.text.trim() == text) {
+        _input.clear();
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(status), behavior: SnackBarBehavior.floating),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not send follow-up: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
   }
 
   @override
@@ -94,10 +109,10 @@ class _SubagentScreenState extends State<SubagentScreen> {
               leading: const BackButton(),
               title: const Text('Subagent'),
             ),
-            body: Center(
-              child: Text(
-                'This subagent session is gone.',
-                style: TextStyle(fontSize: 13, color: Aether.textFaint),
+            body: SingleChildScrollView(
+              child: AetherEmptyState(
+                icon: Icons.account_tree_outlined,
+                title: 'This subagent session is gone.',
               ),
             ),
           );
@@ -114,16 +129,14 @@ class _SubagentScreenState extends State<SubagentScreen> {
           backgroundColor: Aether.bg,
           appBar: AppBar(
             leading: const BackButton(),
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  s.agentLabel ?? s.title,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 14),
-                ),
-                _Lineage(sessionId: s.id),
-              ],
+            title: Tooltip(
+              message: s.agentLabel ?? s.title,
+              child: Text(
+                s.agentLabel ?? s.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 14),
+              ),
             ),
             actions: [
               if (children.isNotEmpty)
@@ -145,6 +158,7 @@ class _SubagentScreenState extends State<SubagentScreen> {
           body: SafeArea(
             child: Column(
               children: [
+                _Lineage(sessionId: s.id),
                 _StatusStrip(session: s, state: state, sub: sub),
                 Expanded(
                   child: s.messages.isEmpty
@@ -164,6 +178,10 @@ class _SubagentScreenState extends State<SubagentScreen> {
                         ),
                 ),
                 _Composer(
+                  maxLines: MediaQuery.sizeOf(context).height -
+                              MediaQuery.viewInsetsOf(context).bottom < 480
+                      ? 2
+                      : 4,
                   controller: _input,
                   continuable: continuable,
                   running: running,
@@ -192,17 +210,14 @@ class _Lineage extends StatelessWidget {
     final chain = AppState.I.lineageOf(sessionId);
     if (chain.length < 2) return const SizedBox.shrink();
     final ancestors = chain.sublist(0, chain.length - 1);
-    return SizedBox(
-      height: 16,
-      child: ListView.builder(
+    return SingleChildScrollView(
         scrollDirection: Axis.horizontal,
-        itemCount: ancestors.length,
-        itemBuilder: (_, i) {
-          final a = ancestors[i];
-          return Row(
+        child: Row(
+          children: [for (final a in ancestors)
+            Row(
             children: [
-              InkWell(
-                onTap: () {
+              TextButton(
+                onPressed: () {
                   if (a.isSubagent) {
                     SubagentScreen.open(context, a.id);
                   } else {
@@ -224,9 +239,9 @@ class _Lineage extends StatelessWidget {
                 ),
               ),
             ],
-          );
-        },
-      ),
+            ),
+          ],
+        ),
     );
   }
 }
@@ -290,7 +305,6 @@ class _StatusStrip extends StatelessWidget {
       _ => Aether.successLight,
     };
     final bits = <String>[
-      state,
       if (sub != null) formatCompactDuration(sub!.elapsed),
       '${session.messages.length} rows',
       if (sub != null && sub!.messages.isNotEmpty)
@@ -299,24 +313,26 @@ class _StatusStrip extends StatelessWidget {
     ];
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.07),
         border: Border(bottom: BorderSide(color: Aether.hairline)),
       ),
-      child: Row(
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          Container(
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          AetherStatusDot(
+            key: const ValueKey('subagent-status-dot'),
+            color: color,
+            pulsing: state == 'running',
+            size: 8,
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
+          AetherPill(label: state, color: color, filled: true),
+          Text(
               bits.join(' · '),
               style: TextStyle(fontSize: 11, color: Aether.textMuted),
-            ),
           ),
           if (session.agentAllowedTools.isNotEmpty)
             Tooltip(
@@ -334,6 +350,7 @@ class _StatusStrip extends StatelessWidget {
 }
 
 class _Composer extends StatelessWidget {
+  final int maxLines;
   final TextEditingController controller;
   final bool continuable;
   final bool running;
@@ -341,6 +358,7 @@ class _Composer extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback onStop;
   const _Composer({
+    required this.maxLines,
     required this.controller,
     required this.continuable,
     required this.running,
@@ -407,7 +425,9 @@ class _Composer extends StatelessWidget {
                 child: TextField(
                   controller: controller,
                   minLines: 1,
-                  maxLines: 4,
+                  // Keep the composer usable above a phone keyboard at large
+                  // text sizes; the field itself scrolls longer drafts.
+                  maxLines: maxLines,
                   style: const TextStyle(fontSize: 15, height: 22 / 15),
                   decoration: InputDecoration(
                     border: InputBorder.none,
@@ -465,6 +485,7 @@ class _Composer extends StatelessWidget {
 Future<void> showSubagentCatalog(BuildContext context, String sessionId) async {
   await showModalBottomSheet<void>(
     context: context,
+    isScrollControlled: true,
     backgroundColor: Aether.surface,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
@@ -475,40 +496,43 @@ Future<void> showSubagentCatalog(BuildContext context, String sessionId) async {
         final app = AppState.I;
         final children = app.childrenOf(sessionId);
         return SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(18, 2, 18, 8),
-                child: Text(
-                  children.isEmpty
-                      ? 'No subagents yet'
-                      : 'Subagents (${children.length})',
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(sheetCtx).height * .85),
+            child: children.isEmpty
+              ? const SingleChildScrollView(child: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: AetherEmptyState(
+                    key: ValueKey('subagent-catalog-empty'),
+                    icon: Icons.account_tree_outlined,
+                    title: 'No subagents yet',
+                    message:
+                        'Ask the agent to dispatch one for a focused subtask — '
+                        'it gets its own transcript and workspace.',
                   ),
+                ))
+              : ListView(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
+                      child: AetherSectionTitle(
+                        eyebrow: 'Subagents (${children.length})',
+                      ),
+                    ),
+                    for (final child in children)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                        child: _CatalogCard(
+                          session: child,
+                          onOpen: () {
+                            Navigator.pop(sheetCtx);
+                            SubagentScreen.open(context, child.id);
+                          },
+                        ),
+                      ),
+                  ],
                 ),
-              ),
-              if (children.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
-                  child: Text(
-                    'Ask the agent to dispatch one for a focused subtask — '
-                    'it gets its own transcript and workspace.',
-                    style: TextStyle(fontSize: 12, color: Aether.textFaint),
-                  ),
-                ),
-              for (final child in children)
-                _CatalogRow(
-                  session: child,
-                  onOpen: () {
-                    Navigator.pop(sheetCtx);
-                    SubagentScreen.open(context, child.id);
-                  },
-                ),
-            ],
           ),
         );
       },
@@ -516,10 +540,14 @@ Future<void> showSubagentCatalog(BuildContext context, String sessionId) async {
   );
 }
 
-class _CatalogRow extends StatelessWidget {
+/// Premium catalog row: an [AetherCard] with the child's name, a status pill,
+/// its elapsed runtime, and a ghost "stop" button for running children. Tapping
+/// the card opens the child's transcript — the dispatch navigation contract is
+/// preserved: open always resolves through [SubagentScreen.open].
+class _CatalogCard extends StatelessWidget {
   final ChatSession session;
   final VoidCallback onOpen;
-  const _CatalogRow({required this.session, required this.onOpen});
+  const _CatalogCard({required this.session, required this.onOpen});
 
   @override
   Widget build(BuildContext context) {
@@ -534,32 +562,87 @@ class _CatalogRow extends StatelessWidget {
       _ => Aether.successLight,
     };
     final grandchildren = AppState.I.childrenOf(session.id).length;
-    return ListTile(
-      dense: true,
-      leading: Container(
-        width: 9,
-        height: 9,
-        margin: const EdgeInsets.only(top: 6),
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      ),
-      title: Text(
-        session.agentLabel ?? session.title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 13.5),
-      ),
-      subtitle: Text(
-        [
-          state,
-          if (sub != null) formatCompactDuration(sub.elapsed),
-          '${session.messages.length} rows',
-          session.mode,
-          if (grandchildren > 0) '$grandchildren sub',
-        ].join(' · '),
-        style: TextStyle(fontSize: 11, color: Aether.textFaint),
-      ),
-      trailing: Icon(Icons.chevron_right, size: 17, color: Aether.textFaint),
+    final runtime = sub != null
+        ? formatCompactDuration(sub.elapsed)
+        : '—';
+    final subtitleBits = <String>[
+      '${session.messages.length} rows',
+      session.mode,
+      if (grandchildren > 0) '$grandchildren sub',
+    ];
+    return InkWell(
       onTap: onOpen,
+      borderRadius: BorderRadius.circular(AetherRadius.rLg),
+      child: AetherCard(
+        padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+        child: Row(
+          children: [
+            AetherStatusDot(
+              color: color,
+              pulsing: running,
+              size: 9,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                          session.agentLabel ?? session.title,
+                          style: AetherType.title.copyWith(fontSize: 13.5),
+                        ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      AetherPill(
+                        label: state,
+                        color: color,
+                        filled: true,
+                      ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                      Icon(
+                        Icons.schedule,
+                        size: 11,
+                        color: Aether.textFaint,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        runtime,
+                        style: AetherType.caption.copyWith(
+                          fontFamily: 'JetBrainsMono',
+                        ),
+                      ),
+                      ],
+                      ),
+                      if (running)
+                        AetherGhostButton(
+                          key: ValueKey('subagent-stop-${session.id}'),
+                          label: 'Stop',
+                          icon: Icons.stop_circle_outlined,
+                          onPressed: () => agent.stopSubagentRun(session.id),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(subtitleBits.join(' · '), style: AetherType.caption),
+                ],
+              ),
+            ),
+            if (!running)
+              Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: Aether.textFaint,
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

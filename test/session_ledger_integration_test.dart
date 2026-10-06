@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqlite3/open.dart' show open, OperatingSystem;
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/memory_store.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
+import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
 
 void main() {
@@ -16,12 +19,30 @@ void main() {
   late AppState app;
   final ledger = SessionLedger.I;
 
+  setUpAll(() {
+    if (Platform.isLinux) {
+      open.overrideFor(OperatingSystem.linux, () {
+        try {
+          return ffi.DynamicLibrary.open('libsqlite3.so.0');
+        } catch (_) {
+          return ffi.DynamicLibrary.open(
+            '/usr/lib/x86_64-linux-gnu/libsqlite3.so.0',
+          );
+        }
+      });
+    }
+  });
+
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
     root = await Directory.systemTemp.createTemp('ledger-integration-');
     SessionLedger.rootOverrideForTest = root;
+    // Session deletion now drains every store, including the FTS search
+    // index; point it at the temp root or the cleanup task fails on the
+    // unmocked path_provider channel and persistence stays flagged.
+    SessionSearch.dbPathOverrideForTest = '${root.path}/search.db';
     app = AppState.createForTest(
       memoryStore: MemoryStore(Directory('${root.path}/memory')),
       workspaceDeleter: (_) async {},
@@ -36,6 +57,8 @@ void main() {
       await ledger.close(id);
     }
     AppState.resetTestInstance();
+    await SessionSearch.I.close();
+    SessionSearch.dbPathOverrideForTest = null;
     SessionLedger.rootOverrideForTest = null;
     await root.delete(recursive: true);
   });

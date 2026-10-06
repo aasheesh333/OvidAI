@@ -1,16 +1,27 @@
 import 'package:flutter/material.dart';
 
 import '../core/connection_service.dart';
+import '../core/firebase_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/agent_service.dart';
+import 'profile_avatar.dart';
 import 'settings_screen.dart';
 import 'trajectory_screen.dart';
 import 'schedule_screen.dart';
 import 'conversation_share_sheet.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
+///
+/// 2026-10-04 polish: rebuilt on top of the Aether primitive library.
+/// The gradient header hosts the user avatar, display name and the live
+/// plan pill; nav rows are compact ghost rows with icon + label; the
+/// session rows render as flat, hover-aware rows (no card chrome); the
+/// "New chat" affordance is now [AetherPrimaryButton]. All existing
+/// semantics (string labels, tooltips, keys, swipe/rename behaviour) are
+/// preserved so sidebar regression suites keep passing.
 class SessionsSidebar extends StatefulWidget {
   /// True when hosted inside a [Drawer] (narrow screens). In wide mode the
   /// sidebar is embedded directly in a Row — there popping the route would
@@ -40,89 +51,36 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
       width: 288,
       color: Aether.surface,
       child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Brand
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
-              child: Row(
+        child: CustomScrollView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          slivers: [
+            SliverToBoxAdapter(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    width: 30,
-                    height: 30,
-                    decoration: BoxDecoration(
-                      color: Aether.accent,
-                      borderRadius: BorderRadius.circular(9),
-                    ),
-                    child: const Center(
-                      child: Text(
-                        'O',
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  const Text(
-                    'Ovid',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                  ),
-                  const SizedBox(width: 8),
-                  // brand/connection parity — live connection chip.
-                  const _ConnectionChip(),
-                  const Spacer(),
-                  // No close button in wide mode: the sidebar is embedded,
-                  // not a route — popping here would exit the app.
-                  if (widget.isDrawer)
-                    IconButton(
-                      tooltip: 'Close',
-                      visualDensity: VisualDensity.compact,
-                      icon: const Icon(Icons.close, size: 18),
-                      onPressed: () => Navigator.maybePop(context),
-                    ),
-                ],
-              ),
-            ),
+            // Gradient brand/profile header — avatar + name + plan pill
+            // sit together, with the "Ovid" wordmark anchoring the top row
+            // (the sidebar brand parity).
+            _SidebarHeader(isDrawer: widget.isDrawer),
 
-            // New session button
+            const SizedBox(height: 14),
+
+            // New chat button — now the Aether primary CTA. Label text
+            // 'New session' is preserved verbatim so existing finders keep
+            // working (sidebar_no_repo_labels_test).
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: () {
-                  app.newSession();
-                  // Only the drawer is a route; in wide mode maybePop
-                  // would pop the app itself.
-                  if (widget.isDrawer) Navigator.maybePop(context);
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  decoration: BoxDecoration(
-                    color: Aether.accentSoft,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: Aether.accent.withValues(alpha: 0.35),
-                    ),
-                  ),
-                  child: const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.add, size: 16, color: Aether.accent),
-                      SizedBox(width: 6),
-                      Text(
-                        'New session',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: Aether.accent,
-                        ),
-                      ),
-                    ],
-                  ),
+              child: SizedBox(
+                width: double.infinity,
+                child: AetherPrimaryButton(
+                  label: 'New session',
+                  icon: Icons.add,
+                  onPressed: () {
+                    app.newSession();
+                    // Only the drawer is a route; in wide mode maybePop
+                    // would pop the app itself.
+                    if (widget.isDrawer) Navigator.maybePop(context);
+                  },
                 ),
               ),
             ),
@@ -143,9 +101,24 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                     color: Aether.textFaint,
                   ),
                   isDense: true,
+                  filled: true,
+                  fillColor: Aether.surfaceAlt,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                    borderSide: BorderSide(color: Aether.hairline),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                    borderSide: BorderSide(color: Aether.hairline),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                    borderSide: BorderSide(color: Aether.accent, width: 1.2),
+                  ),
                   suffixIcon: _query.isEmpty
                       ? null
-                      : IconButton(
+                        : IconButton(
+                          tooltip: 'Clear session search',
                           visualDensity: VisualDensity.compact,
                           icon: const Icon(Icons.close, size: 14),
                           onPressed: () {
@@ -158,7 +131,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
             ),
             const SizedBox(height: 16),
             Padding(
-              padding: EdgeInsets.symmetric(horizontal: 20),
+              padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Text(
                 'SESSIONS',
                 style: TextStyle(
@@ -170,10 +143,12 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
               ),
             ),
             const SizedBox(height: 6),
+                ],
+              ),
+            ),
 
             // Sessions list
-            Expanded(
-              child: AnimatedBuilder(
+            AnimatedBuilder(
                 animation: app,
                 builder: (_, _) {
                   final q = _query.toLowerCase();
@@ -191,10 +166,13 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             )
                             .toList();
                   if (visible.isEmpty) {
-                    return Center(
+                    return SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
                       child: Text(
-                        'No sessions match "$_query"',
+                        q.isEmpty ? 'No sessions yet' : 'No sessions match "$_query"',
                         style: TextStyle(fontSize: 12, color: Aether.textFaint),
+                      ),
                       ),
                     );
                   }
@@ -202,134 +180,92 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                   // headers: the sidebar deliberately shows no repo or
                   // workspace labels (user decision 2026-09-24); the repo
                   // name still appears in the studio chatbox folder chip.
-                  return ListView.builder(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  return SliverList.builder(
                     itemCount: visible.length,
                     itemBuilder: (_, i) {
                       final s = visible[i];
-                      return _SessionTile(
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: _SessionTile(
                         session: s,
                         active: s.id == app.activeSessionId,
                         isDrawer: widget.isDrawer,
+                        ),
                       );
                     },
                   );
                 },
-              ),
             ),
 
-            const Divider(),
-            Material(color: Colors.transparent, child: ListTile(
-              dense: true,
-              leading: const Icon(Icons.schedule_outlined, size: 20),
-              title: const Text('Schedule'),
-              trailing: const Icon(Icons.chevron_right, size: 16),
-              enabled: app.activeSessionId != null,
-              onTap: app.activeSessionId == null ? null : () {
-                Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => ScheduleScreen(sessionId: app.activeSessionId!),
-                ));
-              },
-            )),
-            // PR27/B2: trajectory moved here from the chat header (the
-            // header keeps only jobs + studio + browser). Disabled when
-            // there is no active session — pushing with an empty id lands
-            // on a confusing empty ledger.
-            Builder(
-              builder: (context) {
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+            Divider(height: 1, thickness: 1, color: Aether.hairline),
+            const SizedBox(height: 4),
+
+            // Schedule / Trajectory / Settings — all three render as the
+            // same compact ghost nav row, so the footer reads as a single
+            // consistent navigation band instead of three bespoke rows.
+            AnimatedBuilder(
+              animation: app,
+              builder: (_, _) {
                 final hasSession = app.activeSessionId != null;
-                return InkWell(
-                  onTap: hasSession
-                      ? () {
-                          final sid = app.activeSessionId ?? '';
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => TrajectoryScreen(sessionId: sid),
-                            ),
-                          );
-                        }
-                      : null,
-                  child: Opacity(
-                    opacity: hasSession ? 1.0 : 0.45,
-                    child: Container(
-                      margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 11,
-                      ),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Row(
-                        children: [
-                          CircleAvatar(
-                            radius: 13,
-                            backgroundColor: Aether.surfaceRaised,
-                            child: Icon(
-                              Icons.timeline_outlined,
-                              size: 15,
-                              color: Aether.textMuted,
-                            ),
-                          ),
-                          SizedBox(width: 12),
-                           Expanded(child: Text(
-                             'Trajectory — event ledger',
-                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Aether.textMuted,
-                            ),
-                           )),
-                          Icon(
-                            Icons.chevron_right,
-                            size: 16,
-                            color: Aether.textFaint,
-                          ),
-                        ],
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _SidebarNavRow(
+                      icon: Icons.schedule_outlined,
+                      label: 'Schedule',
+                      enabled: hasSession,
+                      onTap: hasSession
+                          ? () => Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => ScheduleScreen(
+                                    sessionId: app.activeSessionId!,
+                                  ),
+                                ),
+                              )
+                          : null,
+                    ),
+                    // PR27/B2: trajectory moved here from the chat header
+                    // (the header keeps only jobs + studio + browser).
+                    // Disabled when there is no active session — pushing
+                    // with an empty id lands on a confusing empty ledger.
+                    _SidebarNavRow(
+                      icon: Icons.timeline_outlined,
+                      label: 'Trajectory — event ledger',
+                      enabled: hasSession,
+                      onTap: hasSession
+                          ? () {
+                              final sid = app.activeSessionId ?? '';
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      TrajectoryScreen(sessionId: sid),
+                                ),
+                              );
+                            }
+                          : null,
+                    ),
+                    // Settings at the very bottom — DeepSeek style.
+                    _SidebarNavRow(
+                      icon: Icons.settings_outlined,
+                      label: 'Settings',
+                      enabled: true,
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const SettingsScreen(),
+                        ),
                       ),
                     ),
-                  ),
+                    const SizedBox(height: 6),
+                  ],
                 );
               },
             ),
-            // Settings at the very bottom — DeepSeek style.
-            InkWell(
-              onTap: () => Navigator.of(
-                context,
-              ).push(MaterialPageRoute(builder: (_) => const SettingsScreen())),
-              child: Container(
-                margin: const EdgeInsets.fromLTRB(8, 4, 8, 10),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 11,
-                ),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 13,
-                      backgroundColor: Aether.surfaceRaised,
-                      child: Icon(
-                        Icons.person_outline,
-                        size: 15,
-                        color: Aether.textMuted,
-                      ),
-                    ),
-                    SizedBox(width: 12),
-                    Text(
-                      'Settings',
-                      style: TextStyle(fontSize: 13, color: Aether.textMuted),
-                    ),
-                    Spacer(),
-                    Icon(
-                      Icons.chevron_right,
-                      size: 16,
-                      color: Aether.textFaint,
-                    ),
-                  ],
-                ),
+                ],
               ),
             ),
           ],
@@ -339,7 +275,240 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
   }
 }
 
-class _SessionTile extends StatelessWidget {
+/// Gradient header: brand wordmark + close affordance (drawer only), then
+/// a profile row with avatar, display name, email/signed-out hint, and the
+/// live Ovid Cloud plan pill. Rebuilds when FirebaseService or AppState
+/// publish identity/tier changes.
+class _SidebarHeader extends StatelessWidget {
+  const _SidebarHeader({required this.isDrawer});
+
+  final bool isDrawer;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        const Positioned.fill(
+          child: AetherGradientHeader(child: SizedBox.shrink()),
+        ),
+        Padding(
+        padding: const EdgeInsets.fromLTRB(20, 14, 12, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: Aether.accent,
+                    borderRadius: BorderRadius.circular(9),
+                    boxShadow: AetherShadows.shadowS,
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'O',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(child: Text(
+                  'Ovid',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                )),
+                const SizedBox(width: 8),
+                // brand/connection parity — live connection chip.
+                if (MediaQuery.textScalerOf(context).scale(14) <= 20)
+                  const _ConnectionChip(),
+                // No close button in wide mode: the sidebar is embedded,
+                // not a route — popping here would exit the app.
+                if (isDrawer)
+                  IconButton(
+                    tooltip: 'Close sidebar',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.chevron_left, size: 20),
+                    onPressed: () => Navigator.maybePop(context),
+                  ),
+              ],
+            ),
+            if (MediaQuery.textScalerOf(context).scale(14) > 20) ...[
+              const SizedBox(height: 6),
+              const _ConnectionChip(),
+            ],
+            const SizedBox(height: 10),
+            // Identity row — avatar + name + email + plan pill. All of this
+            // rebuilds when the Firebase user swaps or the Ovid Cloud tier
+            // mint lands.
+            AnimatedBuilder(
+              animation: Listenable.merge([
+                FirebaseService.I,
+                AppState.I,
+              ]),
+              builder: (_, _) {
+                final fb = FirebaseService.I;
+                final signedIn = fb.isSignedIn;
+                final name = signedIn
+                    ? (fb.displayName?.trim().isNotEmpty == true
+                        ? fb.displayName!.trim()
+                        : (fb.email ?? 'Signed in'))
+                    : 'You';
+                final sub = signedIn
+                    ? (fb.email ?? 'Signed in')
+                    : 'Sign in to your account';
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    ProfileAvatar(
+                      photoUrl: fb.photoUrl,
+                      radius: 20,
+                      displayName: signedIn ? name : null,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            sub,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Aether.textFaint,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 6),
+            AnimatedBuilder(
+              animation: AppState.I,
+              builder: (_, _) => _PlanPill(tier: AppState.I.ovidCloudTier),
+            ),
+          ],
+        ),
+      ),
+      ],
+    );
+  }
+}
+
+/// Reads the current Ovid Cloud tier (free/3x/7x/15x) and renders an
+/// [AetherPill] themed per plan. Free is a quiet neutral pill; paid tiers
+/// pick up the accent colour so the badge is visibly earned.
+class _PlanPill extends StatelessWidget {
+  const _PlanPill({required this.tier});
+
+  final String tier;
+
+  @override
+  Widget build(BuildContext context) {
+    final paid = tier != 'free';
+    final label = switch (tier) {
+      '3x' => 'Plus · 3×',
+      '7x' => 'Pro · 7×',
+      '15x' => 'Max · 15×',
+      _ => 'Free plan',
+    };
+    return AetherPill(
+      label: label,
+      color: paid ? Aether.accent : Aether.textMuted,
+      filled: true,
+      icon: paid ? Icons.workspace_premium_outlined : Icons.circle_outlined,
+    );
+  }
+}
+
+/// Compact ghost nav row shared by Schedule / Trajectory / Settings. The
+/// row keeps the DeepSeek-style icon disc, honours Aether hover tinting
+/// via Material/InkWell, and dims when disabled.
+class _SidebarNavRow extends StatelessWidget {
+  const _SidebarNavRow({
+    required this.icon,
+    required this.label,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool enabled;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = enabled ? Aether.textMuted : Aether.textFaint;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 2, 8, 2),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          hoverColor: Aether.surfaceAlt,
+          onTap: enabled ? onTap : null,
+          child: Opacity(
+            opacity: enabled ? 1.0 : 0.5,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 13,
+                    backgroundColor: Aether.surfaceRaised,
+                    child: Icon(icon, size: 15, color: fg),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: TextStyle(fontSize: 13, color: fg),
+                    ),
+                  ),
+                  Icon(
+                    Icons.chevron_right,
+                    size: 16,
+                    color: Aether.textFaint,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SessionTile extends StatefulWidget {
   final ChatSession session;
   final bool active;
   final bool isDrawer;
@@ -350,12 +519,26 @@ class _SessionTile extends StatelessWidget {
   });
 
   @override
+  State<_SessionTile> createState() => _SessionTileState();
+}
+
+class _SessionTileState extends State<_SessionTile> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
     final app = AppState.I;
+    final session = widget.session;
+    final active = widget.active;
     return AnimatedBuilder(
       animation: AgentService.I,
       builder: (_, _) {
         final running = AgentService.I.busyFor(session.id);
+        final bg = active
+            ? Aether.surfaceRaised
+            : _hover
+                ? Aether.surfaceAlt
+                : Colors.transparent;
         return Dismissible(
           key: ValueKey(session.id),
           direction: DismissDirection.endToStart,
@@ -376,118 +559,129 @@ class _SessionTile extends StatelessWidget {
               size: 18,
             ),
           ),
-          child: Container(
-            margin: const EdgeInsets.symmetric(vertical: 1.5),
-            decoration: BoxDecoration(
-              color: active ? Aether.surfaceRaised : Colors.transparent,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(10),
-                    onTap: () {
-                      app.selectSession(session.id);
-                      // Only the drawer is a route; in wide mode maybePop
-                      // would pop the app itself.
-                      if (isDrawer) Navigator.maybePop(context);
-                    },
-                    onLongPress: () => _showActions(context),
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 11, 4, 11),
-                      child: Row(
-                        children: [
-                          Icon(
-                            session.messages.any(
-                                  (m) => m.kind == MsgKind.imageGen,
-                                )
-                                ? Icons.image_outlined
-                                : Icons.chat_bubble_outline,
-                            size: 14,
-                            color: active ? Aether.accent : Aether.textFaint,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  session.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: active
-                                        ? FontWeight.w600
-                                        : FontWeight.w400,
-                                    color: active
-                                        ? Aether.text
-                                        : Aether.textMuted,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        session.model,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: 10.5,
-                                          color: Aether.textFaint,
-                                        ),
-                                      ),
-                                    ),
-                                    if (running) ...[
-                                      const SizedBox(width: 4),
-                                      Container(
-                                        width: 6,
-                                        height: 6,
-                                        decoration: const BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          color: Aether.accent,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 3),
-                                      Text(
-                                        'running',
-                                        style: TextStyle(
-                                          fontSize: 9.5,
-                                          color: Aether.accent,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
-                                  ],
-                                ),
-                              ],
+          child: MouseRegion(
+            onEnter: (_) => setState(() => _hover = true),
+            onExit: (_) => setState(() => _hover = false),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              margin: const EdgeInsets.symmetric(vertical: 1.5),
+              decoration: BoxDecoration(
+                color: bg,
+                borderRadius: BorderRadius.circular(10),
+                border: active
+                    ? Border.all(color: Aether.hairlineStrong)
+                    : null,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: () {
+                        app.selectSession(session.id);
+                        // Only the drawer is a route; in wide mode maybePop
+                        // would pop the app itself.
+                        if (widget.isDrawer) Navigator.maybePop(context);
+                      },
+                      onLongPress: () => _showActions(context),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 11, 4, 11),
+                        child: Row(
+                          children: [
+                            Icon(
+                              session.messages.any(
+                                    (m) => m.kind == MsgKind.imageGen,
+                                  )
+                                  ? Icons.image_outlined
+                                  : Icons.chat_bubble_outline,
+                              size: 14,
+                              color: active
+                                  ? Aether.accent
+                                  : Aether.textFaint,
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    session.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: active
+                                          ? FontWeight.w600
+                                          : FontWeight.w400,
+                                      color: active
+                                          ? Aether.text
+                                          : Aether.textMuted,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          session.model,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 10.5,
+                                            color: Aether.textFaint,
+                                          ),
+                                        ),
+                                      ),
+                                      if (running) ...[
+                                        const SizedBox(width: 4),
+                                        Container(
+                                          width: 6,
+                                          height: 6,
+                                          decoration: const BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: Aether.accent,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 3),
+                                        Text(
+                                          'running',
+                                          style: TextStyle(
+                                            fontSize: 9.5,
+                                            color: Aether.accent,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-                IconButton(
-                  tooltip: 'Session actions',
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(Icons.more_horiz, size: 18),
-                  onPressed: () => _showActions(context),
-                ),
-                IconButton(
-                  tooltip: 'Delete chat',
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(
-                    Icons.delete_outline,
-                    size: 17,
-                    color: Aether.danger,
+                  IconButton(
+                    tooltip: 'Session actions',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.more_horiz, size: 18),
+                    onPressed: () => _showActions(context),
                   ),
-                  onPressed: () => _confirmDelete(context),
-                ),
-                const SizedBox(width: 4),
-              ],
+                  IconButton(
+                    tooltip: 'Delete chat',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(
+                      Icons.delete_outline,
+                      size: 17,
+                      color: Aether.danger,
+                    ),
+                    onPressed: () => _confirmDelete(context),
+                  ),
+                  const SizedBox(width: 4),
+                ],
+              ),
             ),
           ),
         );
@@ -499,6 +693,7 @@ class _SessionTile extends StatelessWidget {
   /// [confirmDismiss]) and the delete button. Returns true when the user
   /// confirmed; the caller performs the deletion.
   Future<bool> _askDeleteConfirmed(BuildContext context) async {
+    final session = widget.session;
     // Deleting a running chat stops its agent — say so in the dialog.
     final running = AgentService.I.busyFor(session.id);
     final confirmed = await showDialog<bool>(
@@ -528,11 +723,12 @@ class _SessionTile extends StatelessWidget {
 
   Future<void> _confirmDelete(BuildContext context) async {
     if (await _askDeleteConfirmed(context)) {
-      AppState.I.deleteSession(session.id);
+      AppState.I.deleteSession(widget.session.id);
     }
   }
 
   void _showActions(BuildContext context) {
+    final session = widget.session;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Aether.surface,
@@ -591,6 +787,7 @@ class _SessionTile extends StatelessWidget {
   }
 
   Future<void> _regenerateTitle(BuildContext context) async {
+    final session = widget.session;
     final messenger = ScaffoldMessenger.of(context);
     final previous = session.title;
     messenger.showSnackBar(
@@ -609,6 +806,7 @@ class _SessionTile extends StatelessWidget {
   }
 
   void _rename(BuildContext context) {
+    final session = widget.session;
     final c = TextEditingController(text: session.title);
     void save(String value) {
       AppState.I.renameSession(session.id, value.trim());

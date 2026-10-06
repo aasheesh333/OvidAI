@@ -32,6 +32,7 @@ class OvidPkgInstaller {
     _writeText('$p/libexec/ovid-pkg-resolve.awk', _dependencyResolver);
     _writeText('$p/libexec/ovid-pkg-archive.awk', _archiveValidator);
     _writeText('$p/libexec/ovid-pkg-overlay.awk', _overlayValidator);
+    _writeText('$p/libexec/ovid-pkg-release.awk', _releaseValidator);
     _write('$p/bin/ovid-pkg', _ovidPkgFor(p, arch));
     if (mirrors != null && mirrors.isNotEmpty) {
       _writeText('$p/etc/apt/ovid-mirrors', '${mirrors.join('\n')}\n');
@@ -131,45 +132,149 @@ if [ -z "$MIRROR" ] && [ -r "$PREFIX/etc/apt/sources.list" ]; then
 fi
 [ -z "$MIRROR" ] && MIRROR=https://packages.termux.dev/apt/termux-main
 
-# Fetch + decompress the binary index for $ARCH. Returns non-zero when
-# every transport fails or decompression yields nothing — never leaves a
-# stale index behind a success exit.
-_fetch_index() {
-  _url="$1"
-  # .gz first: the mirror serves Packages.gz (and plain) but not Packages.xz,
-  # so probing .xz first printed a misleading "curl: (22) ... 404" on every
-  # update. Expected probe failures are silenced; only the final plain fetch
-  # surfaces an error.
-  if curl -fsSL --retry 2 --connect-timeout 25 "$_url.gz" -o "$PKG_IDX/Packages.gz" 2>/dev/null; then
-    gzip -dkf "$PKG_IDX/Packages.gz" || gunzip -kf "$PKG_IDX/Packages.gz" || return 1
-  elif curl -fsSL --retry 2 --connect-timeout 25 "$_url.xz" -o "$PKG_IDX/Packages.xz" 2>/dev/null; then
-    xz -dkf "$PKG_IDX/Packages.xz" || unxz -kf "$PKG_IDX/Packages.xz" || return 1
-  else
-    curl -fsSL --retry 2 --connect-timeout 25 "$_url" -o "$PKG_IDX/Packages" || return 1
-  fi
-  return 0
+# Serialize update/read/install so a generation cannot change under a reader.
+# A killed process may leave a lock: fail closed; the caller must reap its old
+# process before removing that lock. Never guess ownership from a recycled PID.
+mkdir "$PKG_IDX/lock" 2>/dev/null || { echo '[ovid-pkg] cache busy; recovery requires reaped owner' >&2; exit 1; }
+operation="$(mktemp -d "$PKG_IDX/operation.XXXXXX")" || { rmdir "$PKG_IDX/lock"; exit 1; }
+trap 'rm -rf "$operation"; rmdir "$PKG_IDX/lock"' EXIT
+trap 'exit 1' HUP INT TERM
+INDEX=""
+_error() { echo "[ovid-pkg] signed index verification failed: $*" >&2; return 1; }
+_bounded_fetch() {
+  # ulimit enforces a disk bound even for chunked responses/older curl builds.
+  # 1024-byte units on supported shells, at most 1 MiB extra rounding.
+  # Allow one allocation block of headroom (some transports preallocate).
+  # The actual byte count is still checked against the exact signed size.
+  (ulimit -f "$((($3 + 4095) / 512))" &&
+    curl -fsSL --proto '=https' --proto-redir '=https' --retry 1 \
+      --connect-timeout 15 --max-time 60 --max-filesize "$3" "$1" -o "$2") || return $?
+  [ -f "$2" ] && [ "$(wc -c < "$2")" -le "$3" ]
 }
-
-# A usable index exists on disk and actually carries package records.
+_hash_ok() {
+  [ -f "$1" ] && [ "$(wc -c < "$1")" = "$2" ] || return 1
+  _sum="$(sha256sum "$1")" || return 1
+  [ "${_sum%% *}" = "$3" ]
+}
+_verify_release() {
+  _signed="$1"
+  # Only existing app-seeded trust roots. Never download keys or consult a
+  # user's default GPG home/trustdb. The operation home starts empty.
+  set --
+  for _key in "$PREFIX/etc/apt/trusted.gpg.d/"*.gpg; do
+    [ -f "$_key" ] && set -- "$@" --keyring "$_key"
+  done
+  [ "$#" -gt 0 ] || { _error 'missing trusted keyring'; return 1; }
+  mkdir -p "$operation/gnupg" || return 1
+  if [ -f "$_signed/InRelease" ]; then
+    [ "$(wc -c < "$_signed/InRelease")" -le 1048576 ] || return 1
+    rm -f "$operation/Release"
+    gpgv --homedir "$operation/gnupg" "$@" --status-fd 3 \
+      --output "$operation/Release" "$_signed/InRelease" 3> "$operation/signature" 2> "$operation/gpg.log" || return 1
+  else
+    [ -f "$_signed/Release" ] && [ -f "$_signed/Release.gpg" ] || return 1
+    [ "$(wc -c < "$_signed/Release")" -le 1048576 ] &&
+      [ "$(wc -c < "$_signed/Release.gpg")" -le 65536 ] || return 1
+    gpgv --homedir "$operation/gnupg" "$@" --status-fd 3 \
+      "$_signed/Release.gpg" "$_signed/Release" 3> "$operation/signature" 2> "$operation/gpg.log" || return 1
+    cp "$_signed/Release" "$operation/Release" || return 1
+  fi
+  # SHA-256/384/512 only; gpgv historically accepts weak digest signatures.
+  awk '$2=="VALIDSIG" && ($10==8 || $10==9 || $10==10) { ok=1 } END { exit !ok }' "$operation/signature" || return 1
+  OVID_ARCH="$ARCH" awk -f "$PREFIX/libexec/ovid-pkg-release.awk" "$operation/Release" > "$operation/release-fields" || return 1
+  _date="$(sed -n '1p' "$operation/release-fields")"
+  _until="$(sed -n '2p' "$operation/release-fields")"
+  released="$(LC_ALL=C date -u -d "$_date" +%s)" || return 1
+  now="$(date -u +%s)" || return 1
+  expires="$((released + 604800))"
+  if [ -n "$_until" ]; then
+    _expiry="$(LC_ALL=C date -u -d "$_until" +%s)" || return 1
+    [ "$_expiry" -lt "$expires" ] && expires="$_expiry"
+  fi
+  [ "$released" -le "$((now + 300))" ] && [ "$now" -lt "$expires" ] && [ "$expires" -gt "$released" ] || return 1
+  release_hash="$(sha256sum "$operation/Release")" || return 1
+  release_hash="${release_hash%% *}"
+  if [ -f "$PKG_IDX/high-water" ]; then
+    read -r _floor _floor_hash < "$PKG_IDX/high-water" || return 1
+    case "$_floor" in ''|*[!0-9]*) return 1;; esac
+    [ "$released" -ge "$_floor" ] || return 1
+    [ "$released" != "$_floor" ] || [ "$release_hash" = "$_floor_hash" ] || return 1
+  fi
+}
+_packages_hash() {
+  awk -v path="main/binary-$ARCH/Packages$1" 'NR>2 && $3==path { print $1, $2 }' "$operation/release-fields"
+}
 _index_ok() {
-  [ -f "$PKG_IDX/Packages" ] && grep -q '^Package: ' "$PKG_IDX/Packages"
+  [ ! -e "$PKG_IDX/revoked" ] && [ -f "$PKG_IDX/current" ] || return 1
+  read -r generation < "$PKG_IDX/current" || return 1
+  case "$generation" in generation.*) ;; *) return 1;; esac
+  case "$generation" in *[!a-zA-Z0-9.]* ) return 1;; esac
+  _cached="$PKG_IDX/$generation"
+  [ "$(cat "$_cached/mirror" 2>/dev/null)" = "$MIRROR" ] || return 1
+  _verify_release "$_cached" || return 1
+  set -- $(_packages_hash '')
+  [ "$#" = 2 ] && _hash_ok "$_cached/Packages" "$2" "$1" || return 1
+  INDEX="$_cached/Packages"
+  grep -q '^Package: ' "$INDEX"
+}
+_fetch_index() {
+  # Revoke before transport, retaining the anti-rollback high-water mark.
+  : > "$PKG_IDX/revoked" || return 1
+  _stage="$operation/generation"
+  mkdir "$_stage" || return 1
+  _base="$MIRROR/dists/stable"
+  if ! _bounded_fetch "$_base/InRelease" "$_stage/InRelease" 1048576 2>/dev/null; then
+    rm -f "$_stage/InRelease"
+    _bounded_fetch "$_base/Release" "$_stage/Release" 1048576 &&
+      _bounded_fetch "$_base/Release.gpg" "$_stage/Release.gpg" 65536 || return 1
+  fi
+  _verify_release "$_stage" || return 1
+  # Require a signed uncompressed digest even when transporting .gz/.xz.
+  set -- $(_packages_hash '')
+  [ "$#" = 2 ] || return 1
+  _plain_hash="$1"; _plain_size="$2"; _got=0
+  for _ext in .gz .xz ''; do
+    set -- $(_packages_hash "$_ext")
+    [ "$#" = 2 ] || continue
+    if _bounded_fetch "$_base/main/binary-$ARCH/Packages$_ext" "$_stage/download" "$2"; then
+      _hash_ok "$_stage/download" "$2" "$1" || return 1
+      case "$_ext" in
+        .gz) (ulimit -f 65536 && gzip -dc "$_stage/download" > "$_stage/Packages") || return 1;;
+        .xz) (ulimit -f 65536 && xz --memlimit-decompress=64MiB -dc "$_stage/download" > "$_stage/Packages") || return 1;;
+        '') cp "$_stage/download" "$_stage/Packages" || return 1;;
+      esac
+      _got=1; break
+    fi
+  done
+  [ "$_got" = 1 ] && _hash_ok "$_stage/Packages" "$_plain_size" "$_plain_hash" || return 1
+  grep -q '^Package: ' "$_stage/Packages" || return 1
+  rm -f "$_stage/download"
+  printf '%s\n' "$MIRROR" > "$_stage/mirror" || return 1
+  generation="generation.${operation##*.}"
+  mv "$_stage" "$PKG_IDX/$generation" || return 1
+  printf '%s %s\n' "$released" "$release_hash" > "$operation/high-water" &&
+    mv "$operation/high-water" "$PKG_IDX/high-water" || return 1
+  printf '%s\n' "$generation" > "$operation/current" &&
+    mv "$operation/current" "$PKG_IDX/current" || return 1
+  rm -f "$PKG_IDX/revoked" || return 1
+  INDEX="$PKG_IDX/$generation/Packages"
+  # No other reader can own a prior generation while this command holds lock.
+  for _old in "$PKG_IDX/"generation.*; do
+    [ "$_old" = "$PKG_IDX/$generation" ] || rm -rf "$_old"
+  done
 }
 
 cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
   update)
-    url="$MIRROR/dists/stable/main/binary-$ARCH/Packages"
-    echo "[ovid-pkg] fetch index → $url (curl — apt https is unreliable)"
-    _fetch_index "$url" || { echo "[ovid-pkg] index fetch failed" >&2; exit 1; }
-    [ ! -f "$PKG_IDX/Packages" ] && { echo "[ovid-pkg] no index on disk" >&2; exit 1; }
-    _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
-    echo "[ovid-pkg] index ready ($(wc -l < "$PKG_IDX/Packages") lines)"
+    _fetch_index && _index_ok || { _error 'fetch, signature, hash, expiry or stale generation'; exit 1; }
+    echo "[ovid-pkg] index ready ($generation; Release SHA256=$release_hash; expires=$expires)"
     ;;
   search)
     pat="${1:-}"; [ -z "$pat" ] && { echo "usage: ovid-pkg search '<text>'" >&2; exit 1; }
-    if ! _index_ok; then ovid-pkg update || exit 1; fi
+    if ! _index_ok; then _fetch_index || { _error 'cache/update'; exit 1; }; fi
     _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
-    grep -B8 -- "$pat" "$PKG_IDX/Packages" | grep '^Package: ' | sort -u | head -40
+    grep -B8 -- "$pat" "$INDEX" | grep '^Package: ' | sort -u | head -40
     ;;
   install)
     # Strip apt flags before any package is resolved, so
@@ -184,22 +289,22 @@ case "$cmd" in
     # shellcheck disable=SC2086
     set -- $_names
     [ "$#" -lt 1 ] && { echo "usage: ovid-pkg install <pkg>..." >&2; exit 1; }
-    if ! _index_ok; then ovid-pkg update || exit 1; fi
+    if ! _index_ok; then _fetch_index || { _error 'cache/update'; exit 1; }; fi
     _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
     # Resolve the entire closure before transport or extraction. An owned
     # temporary directory prevents archive-name collisions between versions.
     work="$(mktemp -d "$PKG_IDX/archives/install.XXXXXX")" || exit 1
-    trap 'rm -rf "$work"' EXIT
+    trap 'rm -rf "$work" "$operation"; rmdir "$PKG_IDX/lock"' EXIT
     trap 'exit 1' HUP INT TERM
-    [ "$(wc -c < "$PKG_IDX/Packages")" -le 33554432 ] || {
+    [ "$(wc -c < "$INDEX")" -le 33554432 ] || {
       echo '[ovid-pkg] dependency index size limit exceeded' >&2; exit 1;
     }
     OVID_REQUESTS="$*" OVID_ARCH="$ARCH" awk -f "$PREFIX/libexec/ovid-pkg-resolve.awk" \
-      "$PKG_IDX/Packages" > "$work/plan" || exit 1
+      "$INDEX" > "$work/plan" || exit 1
     targets=""
     while IFS='|' read -r id name version architecture path size hash; do
       out="$work/$id.deb"
-      curl -fsSL --retry 2 --connect-timeout 25 --max-filesize "$size" "$MIRROR/$path" -o "$out"
+      _bounded_fetch "$MIRROR/$path" "$out" "$size"
       status=$?
       [ "$status" -eq 0 ] || { echo "[ovid-pkg] download failed: $name" >&2; exit "$status"; }
       [ "$(wc -c < "$out")" = "$size" ] || {
@@ -360,6 +465,45 @@ case "$cmd" in
     exit 2
     ;;
 esac
+''';
+
+// Release parsing is deliberately narrow: no shell evaluation of signed text,
+// duplicate fields/paths rejected, exact suite/arch path, SHA256 only.
+const _releaseValidator = r'''
+function fail(s) { print "[ovid-pkg] invalid signed Release: " s > "/dev/stderr"; bad=1; exit 1 }
+BEGIN { path="main/binary-" ENVIRON["OVID_ARCH"] "/Packages" }
+{
+  sub(/\r$/, "")
+  if (length($0)>4096) fail("line limit")
+  if ($0 ~ /^[ \t]/) {
+    if (field=="SHA256") {
+      if (NF!=3 || length($1)!=64 || $1 ~ /[^a-fA-F0-9]/ || $2 !~ /^[1-9][0-9]*$/) fail("hash entry")
+      if (seen[$3]++) fail("duplicate hash path")
+      if ($3==path || $3==path ".gz" || $3==path ".xz") {
+        if ($2+0>33554432) fail("Packages size limit")
+        hashes=hashes tolower($1) " " $2 " " $3 "\n"
+        if ($3==path) plain=1
+      }
+    }
+    next
+  }
+  if ($0=="") { field=""; next }
+  at=index($0, ":"); if (!at) fail("field")
+  field=substr($0,1,at-1)
+  if (field in values) fail("duplicate field")
+  value=substr($0,at+1); sub(/^[ \t]+/, "", value)
+  values[field]=value
+}
+END {
+  if (bad) exit 1
+  if (values["Suite"]!="stable" || values["Codename"]!="stable" || !plain) fail("suite or missing Packages hash")
+  # Strict RFC2822-like repository dates, parsed by coreutils date after this.
+  for (key in values) if (key=="Date" || key=="Valid-Until") {
+    if (values[key] !~ /^[A-Za-z][A-Za-z][A-Za-z], [0-9][0-9]? [A-Za-z][A-Za-z][A-Za-z] [0-9][0-9][0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] (UTC|GMT|\+0000)$/) fail("date syntax")
+  }
+  if (!values["Date"]) fail("missing Date")
+  print values["Date"]; print values["Valid-Until"]; printf "%s", hashes
+}
 ''';
 
 // Portable awk keeps resolution available before Node/Python are installed.

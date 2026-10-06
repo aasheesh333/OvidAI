@@ -12,6 +12,7 @@ import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/secure_store.dart';
 import 'package:qr/qr.dart';
+import 'utility_limits.dart';
 
 /// NP2b leftover utility capabilities (NP4 Task 2): QR Generator,
 /// SSH Key Manager, Mermaid Diagrams, Excalidraw Bridge, Icon Library,
@@ -48,7 +49,9 @@ String _requireString(Map<String, dynamic> args, String key) {
   if (value == null) {
     throw ArgumentError('Missing required argument: $key');
   }
-  return value.toString();
+  final text = value.toString();
+  checkUtilityInput(text);
+  return text;
 }
 
 String _requireNonBlank(Map<String, dynamic> args, String key) {
@@ -207,42 +210,40 @@ class QrGeneratorCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'generate',
-          description:
-              'Render text as a QR code PNG (base64). Refuses input beyond '
-              'QR capacity instead of truncating.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'text': {'type': 'string'},
-              'size': {'type': 'integer'},
-              'margin': {'type': 'integer'},
-            },
-            'required': ['text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'validate',
-          description:
-              'Honestly report whether text fits in a QR code (no silent '
-              'truncation).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'text': {'type': 'string'},
-            },
-            'required': ['text'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'generate',
+      description:
+          'Render text as a QR code PNG (base64). Refuses input beyond '
+          'QR capacity instead of truncating.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'text': {'type': 'string'},
+          'size': {'type': 'integer'},
+          'margin': {'type': 'integer'},
+        },
+        'required': ['text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'validate',
+      description:
+          'Honestly report whether text fits in a QR code (no silent '
+          'truncation).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'text': {'type': 'string'},
+        },
+        'required': ['text'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -363,9 +364,7 @@ List<int> _parseSshPublicLine(String raw) {
   try {
     return base64Decode(parts[1].replaceAll(RegExp(r'\s'), ''));
   } on FormatException {
-    throw FormatException(
-      'Invalid public key: the base64 body is malformed.',
-    );
+    throw FormatException('Invalid public key: the base64 body is malformed.');
   }
 }
 
@@ -388,7 +387,7 @@ String _pemArmor(String label, List<int> der) {
 
 class SshKeyManagerCapability implements NativePluginCapability {
   SshKeyManagerCapability({FlutterSecureStorage? secureStorage})
-      : _secure = secureStorage ?? ovidSecureStorage();
+    : _secure = secureStorage ?? ovidSecureStorage();
 
   final FlutterSecureStorage _secure;
 
@@ -402,70 +401,64 @@ class SshKeyManagerCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'generate',
-          description:
-              'Generate an ed25519 SSH key pair. Keys are returned, never '
-              'stored unless save is called.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'type': {'type': 'string'},
-            },
-          },
-        ),
-        NativePluginTool(
-          name: 'save',
-          description: 'Store a key pair in the vault under a name.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'name': {'type': 'string'},
-              'private_key': {'type': 'string'},
-              'public_key': {'type': 'string'},
-            },
-            'required': ['name', 'private_key', 'public_key'],
-          },
-        ),
-        NativePluginTool(
-          name: 'get',
-          description: 'Retrieve a stored key pair by name.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'name': {'type': 'string'},
-            },
-            'required': ['name'],
-          },
-        ),
-        NativePluginTool(
-          name: 'list',
-          description: 'List stored key names (without key material).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {},
-          },
-        ),
-        NativePluginTool(
-          name: 'fingerprint',
-          description:
-              'SHA-256 fingerprint of an OpenSSH public key line.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'public_key': {'type': 'string'},
-            },
-            'required': ['public_key'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'generate',
+      description:
+          'Generate an ed25519 SSH key pair. Keys are returned, never '
+          'stored unless save is called.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'type': {'type': 'string'},
+        },
+      },
+    ),
+    NativePluginTool(
+      name: 'save',
+      description: 'Store a key pair in the vault under a name.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'name': {'type': 'string'},
+          'private_key': {'type': 'string'},
+          'public_key': {'type': 'string'},
+        },
+        'required': ['name', 'private_key', 'public_key'],
+      },
+    ),
+    NativePluginTool(
+      name: 'get',
+      description: 'Retrieve a stored key pair by name.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'name': {'type': 'string'},
+        },
+        'required': ['name'],
+      },
+    ),
+    NativePluginTool(
+      name: 'list',
+      description: 'List stored key names (without key material).',
+      inputSchema: {'type': 'object', 'properties': {}},
+    ),
+    NativePluginTool(
+      name: 'fingerprint',
+      description: 'SHA-256 fingerprint of an OpenSSH public key line.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'public_key': {'type': 'string'},
+        },
+        'required': ['public_key'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -502,9 +495,7 @@ class SshKeyManagerCapability implements NativePluginCapability {
           'RSA key generation is not supported on this device — use ed25519.',
         );
       default:
-        throw ArgumentError(
-          'Unknown key type "$type": expected "ed25519".',
-        );
+        throw ArgumentError('Unknown key type "$type": expected "ed25519".');
     }
   }
 
@@ -528,11 +519,7 @@ class SshKeyManagerCapability implements NativePluginCapability {
 
   /// `openssh-key-v1` container (unencrypted, cipher/kdf `none`) holding an
   /// ed25519 key: genuinely parseable by `ssh-keygen`/`ssh-add`.
-  String _opensshV1Ed25519(
-    List<int> seed,
-    List<int> pub,
-    String comment,
-  ) {
+  String _opensshV1Ed25519(List<int> seed, List<int> pub, String comment) {
     final check = math.Random.secure().nextInt(0xFFFFFFFF);
     final checkBytes = (ByteData(4)..setUint32(0, check)).buffer.asUint8List();
     final privateSection = [
@@ -570,11 +557,7 @@ class SshKeyManagerCapability implements NativePluginCapability {
 
   String _storageKey(String name) => '$_prefix$name';
 
-  Future<String> _save(
-    String name,
-    String privateKey,
-    String publicKey,
-  ) async {
+  Future<String> _save(String name, String privateKey, String publicKey) async {
     if (privateKey.isEmpty) {
       throw ArgumentError('Missing required argument: private_key');
     }
@@ -602,11 +585,12 @@ class SshKeyManagerCapability implements NativePluginCapability {
 
   Future<String> _list() async {
     final all = await _secure.readAll();
-    final names = all.keys
-        .where((k) => k.startsWith(_prefix))
-        .map((k) => k.substring(_prefix.length))
-        .toList()
-      ..sort();
+    final names =
+        all.keys
+            .where((k) => k.startsWith(_prefix))
+            .map((k) => k.substring(_prefix.length))
+            .toList()
+          ..sort();
     return jsonEncode(names);
   }
 
@@ -669,55 +653,53 @@ class MermaidDiagramsCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'validate',
-          description:
-              'Check Mermaid syntax: known diagram header plus balanced '
-              'fences/braces.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'text': {'type': 'string'},
-            },
-            'required': ['text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'render',
-          description:
-              'Render a Mermaid diagram to SVG via kroki.io (needs network; '
-              'honest offline message when unreachable).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'text': {'type': 'string'},
-              'timeout_seconds': {'type': 'number'},
-            },
-            'required': ['text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'export',
-          description:
-              'Return diagram source text plus its char count (no file is '
-              'written).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'text': {'type': 'string'},
-              'path': {'type': 'string'},
-            },
-            'required': ['text'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'validate',
+      description:
+          'Check Mermaid syntax: known diagram header plus balanced '
+          'fences/braces.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'text': {'type': 'string'},
+        },
+        'required': ['text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'render',
+      description:
+          'Render a Mermaid diagram to SVG via kroki.io (needs network; '
+          'honest offline message when unreachable).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'text': {'type': 'string'},
+          'timeout_seconds': {'type': 'number'},
+        },
+        'required': ['text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'export',
+      description:
+          'Return diagram source text plus its char count (no file is '
+          'written).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'text': {'type': 'string'},
+          'path': {'type': 'string'},
+        },
+        'required': ['text'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -727,10 +709,7 @@ class MermaidDiagramsCapability implements NativePluginCapability {
       case 'validate':
         return _validate(_requireString(args, 'text'));
       case 'render':
-        return _render(
-          _requireString(args, 'text'),
-          _timeoutSeconds(args),
-        );
+        return _render(_requireString(args, 'text'), _timeoutSeconds(args));
       case 'export':
         return _export(_requireString(args, 'text'));
       default:
@@ -747,8 +726,9 @@ class MermaidDiagramsCapability implements NativePluginCapability {
     if (fenceCount.isOdd) {
       errors.add('Unbalanced code fences: an odd number of ``` markers.');
     }
-    final stripped =
-        text.replaceAll(RegExp('```[\\s\\S]*?```'), '').replaceAll('```', '');
+    final stripped = text
+        .replaceAll(RegExp('```[\\s\\S]*?```'), '')
+        .replaceAll('```', '');
     var braces = 0, brackets = 0, parens = 0;
     for (var i = 0; i < stripped.length; i++) {
       switch (stripped[i]) {
@@ -780,10 +760,9 @@ class MermaidDiagramsCapability implements NativePluginCapability {
         .split('\n')
         .map((l) => l.trim())
         .firstWhere((l) => l.isNotEmpty, orElse: () => '');
-    final header = firstLine.split(RegExp(r'\s|;')).firstWhere(
-          (s) => s.isNotEmpty,
-          orElse: () => '',
-        );
+    final header = firstLine
+        .split(RegExp(r'\s|;'))
+        .firstWhere((s) => s.isNotEmpty, orElse: () => '');
     if (!_mermaidHeaders.contains(header)) {
       errors.add(
         'Unknown diagram type "$header": expected a Mermaid diagram header '
@@ -806,21 +785,21 @@ class MermaidDiagramsCapability implements NativePluginCapability {
     const endpoint = 'https://kroki.io/mermaid/svg';
     http.Response response;
     try {
-      response = await _client
-          .post(
-            Uri.parse(endpoint),
-            headers: {
-              'Content-Type': 'text/plain',
-              'Accept': 'image/svg+xml',
-            },
-            body: text,
-          )
-          .timeout(Duration(seconds: timeoutSeconds));
+      response = await boundedUtilityRequest(
+        _client,
+        'POST',
+        Uri.parse(endpoint),
+        headers: {'Content-Type': 'text/plain', 'Accept': 'image/svg+xml'},
+        body: text,
+        timeoutSeconds: timeoutSeconds,
+      );
     } on TimeoutException {
       return 'Mermaid render is offline: the request to kroki.io timed out '
           'after $timeoutSeconds seconds with no SVG returned. Check '
           'connectivity and retry, or use the export tool to keep the '
           'diagram source.';
+    } on FormatException {
+      rethrow;
     } catch (e) {
       return 'Mermaid render is offline: could not reach kroki.io '
           '($e). No SVG was produced; check connectivity and retry, or use '
@@ -860,56 +839,55 @@ class ExcalidrawBridgeCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'stats',
-          description: 'Count scene elements by type.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'json_text': {'type': 'string'},
-            },
-            'required': ['json_text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'add_text',
-          description: 'Append a text element to a scene.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'json_text': {'type': 'string'},
-              'text': {'type': 'string'},
-              'x': {'type': 'number'},
-              'y': {'type': 'number'},
-            },
-            'required': ['json_text', 'text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'merge',
-          description: 'Concatenate the elements of two scenes.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'a_json': {'type': 'string'},
-              'b_json': {'type': 'string'},
-            },
-            'required': ['a_json', 'b_json'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'stats',
+      description: 'Count scene elements by type.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'json_text': {'type': 'string'},
+        },
+        'required': ['json_text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'add_text',
+      description: 'Append a text element to a scene.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'json_text': {'type': 'string'},
+          'text': {'type': 'string'},
+          'x': {'type': 'number'},
+          'y': {'type': 'number'},
+        },
+        'required': ['json_text', 'text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'merge',
+      description: 'Concatenate the elements of two scenes.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'a_json': {'type': 'string'},
+          'b_json': {'type': 'string'},
+        },
+        'required': ['a_json', 'b_json'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+    checkUtilityInput(args);
     switch (toolName) {
       case 'stats':
         return _stats(_requireString(args, 'json_text'));
@@ -931,6 +909,7 @@ class ExcalidrawBridgeCapability implements NativePluginCapability {
   }
 
   List<Map<String, dynamic>> _elementsOf(String raw, String key) {
+    checkUtilityJson(raw);
     dynamic decoded;
     try {
       decoded = jsonDecode(raw);
@@ -1015,29 +994,27 @@ class IconLibraryCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'search',
-          description:
-              'Search the Iconify icon set (no key needed); returns '
-              'prefix:name hits with SVG URLs.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'query': {'type': 'string'},
-              'limit': {'type': 'integer'},
-              'timeout_seconds': {'type': 'number'},
-            },
-            'required': ['query'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'search',
+      description:
+          'Search the Iconify icon set (no key needed); returns '
+          'prefix:name hits with SVG URLs.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'query': {'type': 'string'},
+          'limit': {'type': 'integer'},
+          'timeout_seconds': {'type': 'number'},
+        },
+        'required': ['query'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -1062,13 +1039,18 @@ class IconLibraryCapability implements NativePluginCapability {
     });
     http.Response response;
     try {
-      response = await _client
-          .get(uri)
-          .timeout(Duration(seconds: timeoutSeconds));
+      response = await boundedUtilityRequest(
+        _client,
+        'GET',
+        uri,
+        timeoutSeconds: timeoutSeconds,
+      );
     } on TimeoutException {
       return 'Icon search is offline: the request to api.iconify.design '
           'timed out after $timeoutSeconds seconds with no results. Check '
           'connectivity and retry.';
+    } on FormatException {
+      rethrow;
     } catch (e) {
       return 'Icon search is offline: could not reach api.iconify.design '
           '($e). Check connectivity and retry.';
@@ -1099,23 +1081,23 @@ class IconLibraryCapability implements NativePluginCapability {
     final icons = [
       for (final entry in rawIcons)
         if (entry is String && entry.trim().isNotEmpty)
-          {
-            'name': entry,
-            'svg_url': 'https://api.iconify.design/$entry.svg',
-          }
+          {'name': entry, 'svg_url': 'https://api.iconify.design/$entry.svg'}
         else if (entry is Map && entry['name'] != null)
           {
             'name': entry['name'].toString(),
-            'svg_url': 'https://api.iconify.design/'
+            'svg_url':
+                'https://api.iconify.design/'
                 '${entry['name']}.svg',
           },
     ];
     final total = decoded['total'];
-    return _trimOutput(jsonEncode({
-      'query': query.trim(),
-      'total': total is num ? total.toInt() : icons.length,
-      'icons': icons,
-    }));
+    return _trimOutput(
+      jsonEncode({
+        'query': query.trim(),
+        'total': total is num ? total.toInt() : icons.length,
+        'icons': icons,
+      }),
+    );
   }
 }
 
@@ -1141,41 +1123,38 @@ class FontPreviewCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'search',
-          description:
-              'Search Google Fonts families by name (no key needed).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'query': {'type': 'string'},
-              'timeout_seconds': {'type': 'number'},
-            },
-            'required': ['query'],
-          },
-        ),
-        NativePluginTool(
-          name: 'preview_url',
-          description:
-              'Build a fonts.googleapis.com css2 preview URL for a family '
-              '(open it to see the rendering; no binary is downloaded).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'family': {'type': 'string'},
-              'text': {'type': 'string'},
-            },
-            'required': ['family'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'search',
+      description: 'Search Google Fonts families by name (no key needed).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'query': {'type': 'string'},
+          'timeout_seconds': {'type': 'number'},
+        },
+        'required': ['query'],
+      },
+    ),
+    NativePluginTool(
+      name: 'preview_url',
+      description:
+          'Build a fonts.googleapis.com css2 preview URL for a family '
+          '(open it to see the rendering; no binary is downloaded).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'family': {'type': 'string'},
+          'text': {'type': 'string'},
+        },
+        'required': ['family'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -1183,10 +1162,7 @@ class FontPreviewCapability implements NativePluginCapability {
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
     switch (toolName) {
       case 'search':
-        return _search(
-          _requireNonBlank(args, 'query'),
-          _timeoutSeconds(args),
-        );
+        return _search(_requireNonBlank(args, 'query'), _timeoutSeconds(args));
       case 'preview_url':
         return _previewUrl(
           _requireNonBlank(args, 'family'),
@@ -1198,17 +1174,23 @@ class FontPreviewCapability implements NativePluginCapability {
   }
 
   Future<String> _search(String query, int timeoutSeconds) async {
-    final uri =
-        Uri.parse('https://www.googleapis.com/fonts/v1/webfonts?sort=alpha');
+    final uri = Uri.parse(
+      'https://www.googleapis.com/fonts/v1/webfonts?sort=alpha',
+    );
     http.Response response;
     try {
-      response = await _client
-          .get(uri)
-          .timeout(Duration(seconds: timeoutSeconds));
+      response = await boundedUtilityRequest(
+        _client,
+        'GET',
+        uri,
+        timeoutSeconds: timeoutSeconds,
+      );
     } on TimeoutException {
       return 'Font search is offline: the request to www.googleapis.com '
           'timed out after $timeoutSeconds seconds with no results. Check '
           'connectivity and retry.';
+    } on FormatException {
+      rethrow;
     } catch (e) {
       return 'Font search is offline: could not reach www.googleapis.com '
           '($e). Check connectivity and retry.';
@@ -1249,17 +1231,20 @@ class FontPreviewCapability implements NativePluginCapability {
             if (item['variants'] != null) 'variants': item['variants'],
           },
     ];
-    return _trimOutput(jsonEncode({
-      'query': query.trim(),
-      'count': families.length,
-      'families': families,
-    }));
+    return _trimOutput(
+      jsonEncode({
+        'query': query.trim(),
+        'count': families.length,
+        'families': families,
+      }),
+    );
   }
 
   String _previewUrl(String family, String text) {
     final encodedFamily = Uri.encodeQueryComponent(family.trim());
     final encodedText = Uri.encodeQueryComponent(text);
-    final url = 'https://fonts.googleapis.com/css2?family=$encodedFamily'
+    final url =
+        'https://fonts.googleapis.com/css2?family=$encodedFamily'
         '${text.isEmpty ? '' : '&text=$encodedText'}';
     return url;
   }
@@ -1284,40 +1269,37 @@ class AudioNotesCapability implements NativePluginCapability {
 
   @override
   List<NativePluginConfigField> get configFields => const [
-        NativePluginConfigField(
-          key: 'openai_api_key',
-          label: 'OpenAI API key',
-          secret: true,
-          hint: 'Pasted on the Configure sheet; used for Whisper.',
-        ),
-      ];
+    NativePluginConfigField(
+      key: 'openai_api_key',
+      label: 'OpenAI API key',
+      secret: true,
+      hint: 'Pasted on the Configure sheet; used for Whisper.',
+    ),
+  ];
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'transcribe',
-          description:
-              'Transcribe an http(s)-reachable audio URL via Whisper '
-              '(needs openai_api_key; URL-based only — on-device mic '
-              'dictation already exists via Voice Input).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'audio_url': {'type': 'string'},
-              'timeout_seconds': {'type': 'number'},
-            },
-            'required': ['audio_url'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'transcribe',
+      description:
+          'Transcribe an http(s)-reachable audio URL via Whisper '
+          '(needs openai_api_key; URL-based only — on-device mic '
+          'dictation already exists via Voice Input).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'audio_url': {'type': 'string'},
+          'timeout_seconds': {'type': 'number'},
+        },
+        'required': ['audio_url'],
+      },
+    ),
+  ];
 
   @override
-  Future<void> configure(Map<String, String> values) =>
-      NativePluginConfigStore.I.save(
-        pluginName: pluginName,
-        fields: configFields,
-        values: values,
-      );
+  Future<void> configure(Map<String, String> values) => NativePluginConfigStore
+      .I
+      .save(pluginName: pluginName, fields: configFields, values: values);
 
   @override
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
@@ -1345,20 +1327,23 @@ class AudioNotesCapability implements NativePluginCapability {
     }
     http.Response response;
     try {
-      response = await _client
-          .post(
-            Uri.parse('https://api.openai.com/v1/audio/transcriptions'),
-            headers: {
-              'Authorization': 'Bearer ${apiKey!.trim()}',
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({'model': 'whisper-1', 'url': uri.toString()}),
-          )
-          .timeout(Duration(seconds: timeoutSeconds));
+      response = await boundedUtilityRequest(
+        _client,
+        'POST',
+        Uri.parse('https://api.openai.com/v1/audio/transcriptions'),
+        headers: {
+          'Authorization': 'Bearer ${apiKey!.trim()}',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'model': 'whisper-1', 'url': uri.toString()}),
+        timeoutSeconds: timeoutSeconds,
+      );
     } on TimeoutException {
       return 'Audio transcription is offline: the request to '
           'api.openai.com timed out after $timeoutSeconds seconds with no '
           'transcript. Check connectivity and retry.';
+    } on FormatException {
+      rethrow;
     } catch (e) {
       return 'Audio transcription is offline: could not reach '
           'api.openai.com ($e). Check connectivity and retry.';
@@ -1394,17 +1379,20 @@ class ScreenAwarenessCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'read_screen',
-          description: 'Read the currently active screen UI elements and text',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'full': {'type': 'boolean', 'description': 'Read full window hierarchy'},
-            },
+    NativePluginTool(
+      name: 'read_screen',
+      description: 'Read the currently active screen UI elements and text',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'full': {
+            'type': 'boolean',
+            'description': 'Read full window hierarchy',
           },
-        ),
-      ];
+        },
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {}

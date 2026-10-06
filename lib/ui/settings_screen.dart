@@ -17,21 +17,30 @@ import '../core/presets.dart';
 import '../core/skills.dart';
 import '../core/session_browser_profiles.dart';
 import '../core/state.dart';
+import '../core/settings_actions.dart';
+import 'settings_action_widgets.dart';
+import 'settings_backup_screen.dart';
+import 'settings_health_screen.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
 import 'profile_avatar.dart';
 import 'share_actions.dart';
 import 'billing_screen.dart';
-import 'health_screen.dart';
 import 'memory_screen.dart';
 import 'permissions_screen.dart';
 import 'providers_screen.dart';
 import 'plugins_screen.dart';
 import 'usage_screen.dart';
+import 'widgets/aether_primitives.dart';
 import '../core/diag.dart';
 
-/// Settings hub — DeepSeek/kimi-k3 web style. Providers & Plugins are
-/// dedicated screens behind rows; everything else grouped below.
+/// Settings hub — Aether premium reskin.
+///
+/// Rows are grouped into premium cards (Account / Appearance / Models /
+/// Autonomy / Studio / Backup / Health / Diagnostics / About). All existing
+/// preference tiles and their persisted bindings are preserved verbatim —
+/// nothing was added to [AppState] or [SettingsActions]; the AetherCard
+/// wrappers only change presentation.
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
@@ -44,238 +53,379 @@ class SettingsScreen extends StatelessWidget {
         title: const Text('Settings'),
       ),
       body: ListView(
-        padding: const EdgeInsets.only(bottom: 40),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 40),
         children: [
-          // Firebase profile header → Account
-          InkWell(
-            onTap: () => Navigator.of(
+          // ── Account ───────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(eyebrow: 'Account'),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: _accountHeader(context),
+          ),
+
+          // ── Appearance ────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(eyebrow: 'Appearance'),
+          const SizedBox(height: 10),
+          const AetherCard(
+            padding: EdgeInsets.zero,
+            child: _ThemeToggle(),
+          ),
+
+          // ── Models ────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Models',
+            subtitle:
+                'Providers, context window, output cap, response timeout and preset routing.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _navTile(
+                  context,
+                  Icons.key_outlined,
+                  'Providers',
+                  'BYOK · free & custom providers',
+                  const ProvidersScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.memory_outlined,
+                  'Context & output',
+                  'Context window override (per-model auto by default) and max output tokens. Drives auto-compaction + the % context ring.',
+                  const _ContextModelScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.timer_outlined,
+                  'AI response timeout',
+                  'How long the agent may stream. Lower = snappier, higher = no cutoff of long answers.',
+                  const _TimeoutScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.tune_outlined,
+                  'Agent presets',
+                  'Tool rosters & permissions · built-in & custom presets',
+                  const _PresetsScreen(),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Autonomy ──────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Autonomy',
+            subtitle:
+                'What the agent may reach into on its own — paths, hosts, memory and chain-of-thought visibility.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.key_outlined),
+                  title: const Text(
+                    'Permissions',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  subtitle: const Text(
+                    'Paths and hosts the agent may always access',
+                    style: TextStyle(fontSize: 11.5),
+                  ),
+                  trailing: const Icon(Icons.chevron_right, size: 18),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const PermissionsScreen(),
+                    ),
+                  ),
+                ),
+                _hairline(),
+                const _SettingsSwitchTile(
+                  icon: Icons.psychology_outlined,
+                  title: 'Memory',
+                  subtitleOn:
+                      'ON — personal and current-chat memory context & tools',
+                  subtitleOff:
+                      'OFF — saved memory context & tools disabled',
+                  getter: _getMemoryEnabled,
+                  setter: _setMemoryEnabled,
+                ),
+                _hairline(),
+                const _ShareMemoryTile(),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.description_outlined,
+                  'Memory files',
+                  'View, edit, save, add or import Markdown memory',
+                  const MemoryScreen(),
+                ),
+                _hairline(),
+                const _SettingsSwitchTile(
+                  icon: Icons.auto_awesome,
+                  title: 'Reasoning mode',
+                  subtitleOn: 'ON — show thinking before answers',
+                  subtitleOff: 'OFF — hide thinking, answers only',
+                  getter: _getShowReasoning,
+                  setter: _setShowReasoning,
+                ),
+                _hairline(),
+                const _SettingsSwitchTile(
+                  icon: Icons.desktop_windows_outlined,
+                  title: 'Browser: desktop mode',
+                  subtitleOn:
+                      'ON — Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)',
+                  subtitleOff:
+                      'OFF — new tabs use the device\'s mobile viewport (default)',
+                  getter: _getBrowserDesktop,
+                  setter: _setBrowserDesktop,
+                ),
+                _hairline(),
+                const _DeviceIntegrityTile(),
+              ],
+            ),
+          ),
+
+          // ── Studio ────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Studio',
+            subtitle:
+                'Workspace agents, MCP servers and skill packs the agent can use in every chat.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _navTile(
+                  context,
+                  Icons.extension_outlined,
+                  'Plugins',
+                  'Agents, MCP servers, tools',
+                  const PluginsScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.auto_fix_high_outlined,
+                  'Skills',
+                  'Upload .md skill files the agent uses in chat',
+                  const SkillsScreen(),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Backup ────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Backup',
+            subtitle:
+                'Export, import, inspect and clear app-owned data.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _navTileWithAction(
+                  context,
+                  Icons.inventory_2_outlined,
+                  'Portable transcript backup',
+                  'Versioned archive · attachment limits · validate restore',
+                  const SettingsBackupScreen(),
+                  actionLabel: 'Backup',
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.download_outlined,
+                  'Export chats',
+                  'Download all sessions as JSON',
+                  const _ExportChatsScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.delete_outline,
+                  'Delete all data',
+                  SettingsActions.resetAll == null
+                      ? 'Unavailable · verified full reset is not connected'
+                      : 'Chats, keys and settings · irreversible',
+                  const SettingsResetScreen(),
+                ),
+                _hairline(),
+                const _StorageTile(),
+              ],
+            ),
+          ),
+
+          // ── Health ────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Health',
+            subtitle:
+                'Per-runtime probes and configuration repair.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: _navTileWithAction(
               context,
-            ).push(MaterialPageRoute(builder: (_) => const AuthScreen())),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
-              child: AnimatedBuilder(
-                animation: FirebaseService.I,
-                builder: (_, _) {
-                  final fb = FirebaseService.I;
-                  final signedIn = fb.isSignedIn;
-                  return Row(
-                    children: [
-                      ProfileAvatar(photoUrl: fb.photoUrl),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              signedIn
-                                  ? (fb.displayName ?? fb.email ?? 'You')
-                                  : 'You',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 15.5,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              signedIn
-                                  ? (fb.email ?? 'Signed in')
-                                  : 'Sign in to your account',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Aether.textFaint,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Text(
-                        signedIn ? 'Signed in' : 'Sign in',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Aether.accent,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Icon(
-                        Icons.chevron_right,
-                        size: 18,
-                        color: Aether.textFaint,
-                      ),
-                    ],
-                  );
-                },
-              ),
+              Icons.monitor_heart_outlined,
+              'Device health',
+              'Per-runtime probes · configuration and repair availability',
+              const SettingsHealthScreen(),
+              actionLabel: 'Health',
             ),
           ),
 
-          const SectionHeader('Workspace'),
-          _navTile(
-            context,
-            Icons.key_outlined,
-            'Providers',
-            'BYOK · free & custom providers',
-            const ProvidersScreen(),
+          // ── Diagnostics ───────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Diagnostics',
+            subtitle:
+                'Telemetry, background keep-alive and notification channel.',
           ),
-          _navTile(
-            context,
-            Icons.extension_outlined,
-            'Plugins',
-            'Agents, MCP servers, tools',
-            const PluginsScreen(),
-          ),
-
-          const SectionHeader('Workspace stats'),
-          _navTile(
-            context,
-            Icons.workspace_premium_outlined,
-            'Plan & Billing',
-            'Your Ovid Cloud plan · usage · upgrade',
-            const BillingScreen(),
-          ),
-          _navTile(
-            context,
-            Icons.bar_chart_rounded,
-            'Usage',
-            'Per-client spend · OvidAI, OpenCode, Claude Code, Z Code',
-            const UsageScreen(),
-          ),
-
-          const SectionHeader('Personalization'),
-          _navTile(
-            context,
-            Icons.auto_fix_high_outlined,
-            'Skills',
-            'Upload .md skill files the agent uses in chat',
-            const SkillsScreen(),
-          ),
-          const _SettingsSwitchTile(
-            icon: Icons.psychology_outlined,
-            title: 'Memory',
-            subtitleOn: 'ON — personal and current-chat memory context & tools',
-            subtitleOff: 'OFF — saved memory context & tools disabled',
-            getter: _getMemoryEnabled,
-            setter: _setMemoryEnabled,
-          ),
-          _navTile(context, Icons.description_outlined, 'Memory files',
-              'View, edit, save, add or import Markdown memory', const MemoryScreen()),
-          const _SettingsSwitchTile(
-            icon: Icons.auto_awesome,
-            title: 'Reasoning mode',
-            subtitleOn: 'ON — show thinking before answers',
-            subtitleOff: 'OFF — hide thinking, answers only',
-            getter: _getShowReasoning,
-            setter: _setShowReasoning,
-          ),
-
-          const SectionHeader('Agents & Sandbox'),
-          _navTile(
-            context,
-            Icons.monitor_heart_outlined,
-            'Device health',
-            'Score out of 100 — which packages/capabilities are available, why the score is what it is, and one-tap repair.',
-            const HealthScreen(),
-          ),
-          _navTile(
-            context,
-            Icons.timer_outlined,
-            'AI response timeout',
-            'How long the agent may stream. Lower = snappier, higher = no cutoff of long answers.',
-            const _TimeoutScreen(),
-          ),
-          _navTile(
-            context,
-            Icons.memory_outlined,
-            'Context & output',
-            'Context window override (per-model auto by default) and max output tokens. Drives auto-compaction + the % context ring.',
-            const _ContextModelScreen(),
-          ),
-          _navTile(
-            context,
-            Icons.tune_outlined,
-            'Agent presets',
-            'Tool rosters & permissions · built-in & custom presets',
-            const _PresetsScreen(),
-          ),
-          const _ShareMemoryTile(),
-          const _SettingsSwitchTile(
-            icon: Icons.desktop_windows_outlined,
-            title: 'Browser: desktop mode',
-            subtitleOn:
-                'ON — Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)',
-            subtitleOff:
-                'OFF — new tabs use the device\'s mobile viewport (default)',
-            getter: _getBrowserDesktop,
-            setter: _setBrowserDesktop,
-          ),
-          const SectionHeader('Data controls'),
-          _navTile(
-            context,
-            Icons.download_outlined,
-            'Export chats',
-            'Download all sessions as JSON',
-            const _ExportChatsScreen(),
-          ),
-          _navTile(
-            context,
-            Icons.delete_outline,
-            'Delete all data',
-            'Chats, keys and settings · irreversible',
-            const _DeleteAllDataScreen(),
-          ),
-          const _StorageTile(),
-
-          const SectionHeader('Privacy'),
-          _TelemetryTile(),
-          _privacyPolicyTile(context),
-
-          // ── Always-allowed grants (agent file/network access) ──────────
-          const SectionHeader('Permissions'),
-          ListTile(
-            leading: const Icon(Icons.key_outlined),
-            title: const Text('Permissions', style: TextStyle(fontSize: 14)),
-            subtitle: const Text(
-              'Paths and hosts the agent may always access',
-              style: TextStyle(fontSize: 11.5),
-            ),
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => const PermissionsScreen(),
-              ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _TelemetryTile(),
+                _hairline(),
+                const _KeepAliveToggle(),
+                _hairline(),
+                const _SettingsSwitchTile(
+                  icon: Icons.notifications_outlined,
+                  title: 'Notifications',
+                  subtitleOn:
+                      'Requested — status notifications also require OS permission and an available background service',
+                  subtitleOff:
+                      'OFF — no status notification; background runs may stop',
+                  getter: _getNotificationsEnabled,
+                  setter: _setNotificationsEnabled,
+                ),
+              ],
             ),
           ),
 
-          const SectionHeader('General'),
-          ListTile(
-            leading: const Icon(Icons.share_outlined),
-            title: const Text('Share Ovid'),
-            subtitle: const Text('Send the app website'),
-            onTap: () => showNativeShare(context, NativeShare.app),
-          ),
-          const _KeepAliveToggle(),
-          const _ThemeToggle(),
-          const _SettingsSwitchTile(
-            icon: Icons.notifications_outlined,
-            title: 'Notifications',
-            subtitleOn: 'ON — agent status shows while working',
-            subtitleOff:
-                'OFF — no status notification; background runs may stop',
-            getter: _getNotificationsEnabled,
-            setter: _setNotificationsEnabled,
-          ),
-          const _DeviceIntegrityTile(),
-          _navTile(
-            context,
-            Icons.info_outline,
-            'About',
-            'Ovid AI $kAppVersion',
-            const _AboutScreen(),
+          // ── About ─────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(eyebrow: 'About'),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _navTile(
+                  context,
+                  Icons.workspace_premium_outlined,
+                  'Plan & Billing',
+                  'Your Ovid Cloud plan · usage · upgrade',
+                  const BillingScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.bar_chart_rounded,
+                  'Usage',
+                  'Per-client spend · OvidAI, OpenCode, [CC], Z Code',
+                  const UsageScreen(),
+                ),
+                _hairline(),
+                ListTile(
+                  leading: const Icon(Icons.share_outlined),
+                  title: const Text('Share Ovid'),
+                  subtitle: const Text('Send the app website'),
+                  onTap: () => showNativeShare(context, NativeShare.app),
+                ),
+                _hairline(),
+                _privacyPolicyTile(context),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.info_outline,
+                  'About',
+                  'Ovid AI $kAppVersion',
+                  const _AboutScreen(),
+                ),
+              ],
+            ),
           ),
         ],
+      ),
+    );
+  }
+
+  // ── Section-local helpers ───────────────────────────────────────────
+  //
+  // The row builders below ONLY affect presentation — the targets, labels,
+  // subtitles and navigation semantics are the exact same as the pre-Aether
+  // layout so persisted preferences and existing finders continue to work.
+
+  Widget _accountHeader(BuildContext context) {
+    return InkWell(
+      onTap: () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const AuthScreen())),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
+        child: AnimatedBuilder(
+          animation: FirebaseService.I,
+          builder: (_, _) {
+            final fb = FirebaseService.I;
+            final signedIn = fb.isSignedIn;
+            return Row(
+              children: [
+                ProfileAvatar(photoUrl: fb.photoUrl),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        signedIn
+                            ? (fb.displayName ?? fb.email ?? 'You')
+                            : 'You',
+                        style: const TextStyle(
+                          fontSize: 15.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        signedIn
+                            ? (fb.email ?? 'Signed in')
+                            : 'Sign in to your account',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right,
+                  size: 18,
+                  color: Aether.textFaint,
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -287,18 +437,73 @@ class SettingsScreen extends StatelessWidget {
     String subtitle,
     Widget screen,
   ) {
-    return ListTile(
-      leading: Icon(icon, size: 20, color: Aether.textMuted),
-      title: Text(title, style: const TextStyle(fontSize: 14)),
-      subtitle: Text(
-        subtitle,
-        style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
+        leading: Icon(icon, size: 20, color: Aether.textMuted),
+        title: Text(title, style: const TextStyle(fontSize: 14)),
+        subtitle: Text(
+          subtitle,
+          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        ),
+        trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
+        onTap: () =>
+            Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen)),
       ),
-      trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
-      onTap: () =>
-          Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen)),
     );
   }
+
+  /// Variant of [_navTile] that also surfaces an [AetherGhostButton] in the
+  /// trailing area labelled [actionLabel]. The row itself preserves the
+  /// legacy tap-to-push behavior; the button is an additive affordance so
+  /// callers (and tests) can locate the row by its short premium verb.
+  Widget _navTileWithAction(
+    BuildContext context,
+    IconData icon,
+    String title,
+    String subtitle,
+    Widget screen, {
+    required String actionLabel,
+  }) {
+    void push() => Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => screen));
+    return InkWell(
+      onTap: push,
+      borderRadius: BorderRadius.circular(AetherRadius.rSm),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 4,
+          vertical: 10,
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: Aether.textMuted),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title, style: const TextStyle(fontSize: 14)),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            AetherGhostButton(label: actionLabel, onPressed: push),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _hairline() =>
+      Divider(height: 1, thickness: 1, color: Aether.hairline);
 
   Widget _privacyPolicyTile(BuildContext context) {
     return ListTile(
@@ -317,6 +522,7 @@ class SettingsScreen extends StatelessWidget {
       onTap: () => showDialog<void>(
         context: context,
         builder: (d) => AlertDialog(
+          scrollable: true,
           title: const Text('Privacy policy', style: TextStyle(fontSize: 15)),
           content: const Text(
             'View the Ovid AI privacy policy at:\n\nhttps://dhanuk.page.gd/ovid/\n\n'
@@ -335,6 +541,14 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
+/// Fixed-height gap between sections. Keeps the premium rhythm consistent
+/// regardless of the content height of the preceding card.
+class _SectionGap extends StatelessWidget {
+  const _SectionGap();
+  @override
+  Widget build(BuildContext context) => const SizedBox(height: 24);
+}
+
 /// Telemetry consent toggle bound to FirebaseService.
 class _TelemetryTile extends StatelessWidget {
   @override
@@ -343,26 +557,24 @@ class _TelemetryTile extends StatelessWidget {
       animation: FirebaseService.I,
       builder: (_, _) {
         final fb = FirebaseService.I;
-        return SwitchListTile(
-          dense: true,
-          secondary: Icon(
-            Icons.insights_outlined,
-            size: 19,
-            color: Aether.textMuted,
-          ),
-          title: const Text(
-            'Crash reports & analytics',
-            style: TextStyle(fontSize: 14),
-          ),
-          subtitle: Text(
-            fb.isAvailable
-                ? 'Optional · anonymous · helps fix bugs'
-                : 'Not configured in this build',
-            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-          ),
-          activeTrackColor: Aether.accent,
-          value: fb.consentGiven,
-          onChanged: fb.isAvailable ? (x) => fb.setConsent(x) : null,
+        return SettingsSwitchTile(
+          icon: Icons.insights_outlined,
+          title: 'Crash reports & analytics',
+          listenable: fb,
+          subtitleOn: fb.isAvailable
+              ? 'Optional telemetry requested'
+              : 'Not configured in this build',
+          subtitleOff: fb.isAvailable
+              ? 'Optional telemetry disabled'
+              : 'Not configured in this build',
+          getter: () => fb.consentGiven,
+          setter: fb.isAvailable
+              ? (v) => SettingsActions.persist(
+                  'ovid_telemetry_consent',
+                  v ? 'yes' : 'no',
+                  () => fb.setConsent(v),
+                )
+              : null,
         );
       },
     );
@@ -390,30 +602,14 @@ class _SettingsSwitchTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final app = AppState.I;
-    return AnimatedBuilder(
-      animation: app,
-      builder: (_, _) {
-        final v = getter();
-        return ListTile(
-          dense: true,
-          leading: Icon(icon, size: 19, color: Aether.textMuted),
-          title: Text(title, style: const TextStyle(fontSize: 14)),
-          subtitle: Text(
-            v ? subtitleOn : subtitleOff,
-            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-          ),
-          trailing: SizedBox(
-            height: 26,
-            child: Switch(
-              value: v,
-              activeTrackColor: Aether.accent,
-              onChanged: setter == null ? null : (x) => setter!(x),
-            ),
-          ),
-          onTap: setter == null ? null : () => setter!(!getter()),
-        );
-      },
+    return SettingsSwitchTile(
+      icon: icon,
+      title: title,
+      subtitleOn: subtitleOn,
+      subtitleOff: subtitleOff,
+      listenable: AppState.I,
+      getter: getter,
+      setter: setter,
     );
   }
 }
@@ -434,6 +630,13 @@ class _DeviceIntegrityTile extends StatelessWidget {
         final String detail;
         if (!app.securityChecked) {
           detail = 'Checking device integrity…';
+        } else if (![
+          'isRooted',
+          'isHookingFrameworkPresent',
+          'isDebuggerAttached',
+        ].every((key) => s[key] is bool)) {
+          detail =
+              'Integrity check unavailable — this device has not supplied a complete probe result.';
         } else if (!compromised) {
           detail = 'OK — no root, hooking framework, or debugger detected';
         } else {
@@ -467,16 +670,52 @@ class _DeviceIntegrityTile extends StatelessWidget {
 
 // ── Static accessors keep the tile declarations const-friendly ──
 bool _getMemoryEnabled() => AppState.I.memoryEnabled;
-Future<void> _setMemoryEnabled(bool v) => AppState.I.setMemoryEnabled(v);
+Future<void> _setMemoryEnabled(bool v) => SettingsActions.persist(
+  'ovid_memory_enabled',
+  v,
+  () => AppState.I.setMemoryEnabled(v),
+);
 bool _getNotificationsEnabled() => AppState.I.notificationsEnabled;
-Future<void> _setNotificationsEnabled(bool v) =>
-    AppState.I.setNotificationsEnabled(v);
+Future<void> _setNotificationsEnabled(bool v) => SettingsActions.persist(
+  'ovid_notifications_enabled',
+  v,
+  () => AppState.I.setNotificationsEnabled(v),
+);
 
 bool _getShowReasoning() => AppState.I.showReasoning;
-Future<void> _setShowReasoning(bool v) => AppState.I.setShowReasoning(v);
+Future<void> _setShowReasoning(bool v) => SettingsActions.persist(
+  'ovid_show_reasoning',
+  v,
+  () => AppState.I.setShowReasoning(v),
+);
 
 bool _getBrowserDesktop() => AppState.I.browserDesktopMode;
-Future<void> _setBrowserDesktop(bool v) => AppState.I.setBrowserDesktopMode(v);
+Future<void> _setBrowserDesktop(bool v) => SettingsActions.persist(
+  'ovid_browser_desktop_mode',
+  v,
+  () => AppState.I.setBrowserDesktopMode(v),
+);
+
+Future<void> _savePreference(
+  BuildContext context,
+  String key,
+  Object value,
+  Future<void> Function() write,
+) async {
+  try {
+    await SettingsActions.persist(key, value, write);
+  } catch (_) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Could not save preference. It may be session-only; select it again to retry.',
+          ),
+        ),
+      );
+    }
+  }
+}
 
 /// Human-readable byte counts for the Storage screen. Visible for tests.
 String formatStorageBytes(int bytes) {
@@ -514,23 +753,20 @@ Future<int> dirBytes(Directory dir) async {
 }
 
 /// Deletes everything inside [dir] but keeps the dir itself. Returns the
-/// freed byte count (measured before deletion). Visible for tests.
+/// measured byte difference; throws if cleanup is incomplete. Visible for tests.
 Future<int> clearDirContents(Directory dir) async {
-  var freed = 0;
-  try {
-    if (!await dir.exists()) return 0;
-    freed = await dirBytes(dir);
-    await for (final e in dir.list(followLinks: false)) {
-      try {
-        await e.delete(recursive: true);
-      } catch (e) {
-        Diag.swallow('settings_screen', e);
-      }
-    }
-  } catch (e) {
-    Diag.swallow('settings_screen', e);
+  if (!await dir.exists()) return 0;
+  final before = await dirBytes(dir);
+  await for (final e in dir.list(followLinks: false)) {
+    await e.delete(recursive: true);
   }
-  return freed;
+  final after = await dirBytes(dir);
+  if (await dir.list(followLinks: false).isEmpty != true) {
+    throw StateError(
+      'Some cache entries remain. Retry after active work finishes.',
+    );
+  }
+  return (before - after).clamp(0, before);
 }
 
 /// Storage row: opens the breakdown screen instead of just re-measuring.
@@ -627,9 +863,21 @@ class _StorageScreenState extends State<_StorageScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Cache cleanup incomplete. Some files may remain; retry after active work finishes.',
+            ),
+          ),
+        );
+      }
     } finally {
-      if (mounted) setState(() => _clearing = false);
-      _refresh();
+      if (mounted) {
+        setState(() => _clearing = false);
+        _refresh();
+      }
     }
   }
 
@@ -638,25 +886,23 @@ class _StorageScreenState extends State<_StorageScreen> {
     try {
       // Per-session profiles hold their own jars, so clearing only the default
       // one would leave every session still logged in.
-      // Every session's visit record is needed to find their cookies (a jar
-      // cannot be enumerated), then all of it is wiped.
-      final origins = await SessionBrowserProfiles.I.allRememberedOrigins();
+      // Empty URLs request whole jars. Keep origin metadata because the native
+      // count cannot prove that every profile was successfully cleared.
       final profiles = AppState.I.sessions
           .map((s) => BrowserProfileId.forSession(s.id))
           .toList();
       final perProfile = await SessionBrowserProfiles.I.clearCookies(
         profiles: profiles,
-        urls: origins,
+        urls: const [],
       );
       final cleared = await WebViewCookieManager().clearCookies();
-      await SessionBrowserProfiles.I.forgetOrigins();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            (cleared || perProfile > 0)
-                ? 'Browser cookies cleared (all sessions).'
-                : 'No browser cookies found.',
+            'Default jar: ${cleared ? 'cookies removed' : 'no removal reported'}. '
+            '$perProfile session profile(s) reported cleared. '
+            'All-session completion cannot be verified; origin records retained for retry.',
           ),
           behavior: SnackBarBehavior.floating,
         ),
@@ -718,18 +964,17 @@ class _StorageScreenState extends State<_StorageScreen> {
                 color: Aether.textMuted,
               ),
               title: const Text('Cache', style: TextStyle(fontSize: 14)),
-              subtitle: Text(
-                'Temporary files · safe to clear',
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Text(
+                    'Temporary files · safe to clear',
+                    style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                  ),
                   Text(
                     formatStorageBytes(_cache),
                     style: const TextStyle(fontSize: 13),
                   ),
-                  const SizedBox(width: 8),
                   TextButton(
                     onPressed: (_clearing || _cache == 0)
                         ? null
@@ -810,34 +1055,17 @@ class _ShareMemoryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
-    return AnimatedBuilder(
-      animation: app,
-      builder: (_, _) => ListTile(
-        dense: true,
-        leading: Icon(
-          Icons.psychology_outlined,
-          size: 19,
-          color: Aether.textMuted,
-        ),
-        title: const Text(
-          'Share session memory',
-          style: TextStyle(fontSize: 14),
-        ),
-        subtitle: Text(
-          app.shareSessionMemory
-              ? 'ON — the AI can search across all chats (memory_search).'
-              : 'OFF — every chat is isolated; the AI sees only this session.',
-          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-        ),
-        trailing: SizedBox(
-          height: 26,
-          child: Switch(
-            value: app.shareSessionMemory,
-            activeTrackColor: Aether.accent,
-            onChanged: (v) => app.setShareSessionMemory(v),
-          ),
-        ),
-        onTap: () => app.setShareSessionMemory(!app.shareSessionMemory),
+    return SettingsSwitchTile(
+      icon: Icons.psychology_outlined,
+      title: 'Share session memory',
+      listenable: app,
+      subtitleOn: 'ON — the AI can search across all chats (memory_search).',
+      subtitleOff: 'OFF — cross-chat memory search is disabled.',
+      getter: () => app.shareSessionMemory,
+      setter: (v) => SettingsActions.persist(
+        'ovid_share_session_memory',
+        v,
+        () => app.setShareSessionMemory(v),
       ),
     );
   }
@@ -867,7 +1095,7 @@ class _KeepAliveToggle extends StatelessWidget {
               style: TextStyle(fontSize: 14),
             ),
             subtitle: Text(
-              'Keep assistant listening for scheduled tasks in background',
+              'Request background keep-alive. OS permission, service availability and background Stop can prevent scheduled work.',
               style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
             ),
             value: app.keepAliveEnabled,
@@ -881,6 +1109,12 @@ class _KeepAliveToggle extends StatelessWidget {
 }
 
 /// Theme mode selector — System / Light / Dark (replaces the old toggle).
+///
+/// Rebuilt on the Aether primitives: the segmented control is now
+/// [AetherSegmentedControl] so the three mode pills (Auto / Light / Dark)
+/// match the rest of the premium reskin. The underlying persistence call
+/// — [AppState.setThemeMode] via [SettingsActions.persist] — is untouched,
+/// so toggling still flips [Aether.dark] exactly as before.
 class _ThemeToggle extends StatelessWidget {
   const _ThemeToggle();
 
@@ -891,47 +1125,71 @@ class _ThemeToggle extends StatelessWidget {
       animation: app,
       builder: (_, _) {
         final mode = app.themeMode;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ListTile(
-              dense: true,
-              leading: Icon(
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [Icon(
                 mode == 'system'
                     ? Icons.brightness_auto_outlined
                     : mode == 'light'
                     ? Icons.light_mode_outlined
                     : Icons.dark_mode_outlined,
-                size: 19,
+                size: 20,
                 color: Aether.textMuted,
               ),
-              title: const Text('Theme', style: TextStyle(fontSize: 14)),
-              subtitle: Text(
-                mode == 'system'
-                    ? 'Follow system — ${app.lightTheme ? 'currently light' : 'currently dark'}'
-                    : mode == 'light'
-                    ? 'Light — bright surfaces'
-                    : 'Dark (default)',
-                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-              ),
-              trailing: SegmentedButton<String>(
-                style: SegmentedButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  selectedBackgroundColor: Aether.accentSoft,
-                  selectedForegroundColor: Aether.accent,
-                  textStyle: const TextStyle(fontSize: 11),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Theme', style: AetherType.body),
+                    const SizedBox(height: 2),
+                    Text(
+                      mode == 'system'
+                          ? 'Follow system — ${app.lightTheme ? 'currently light' : 'currently dark'}'
+                          : mode == 'light'
+                          ? 'Light — bright surfaces'
+                          : 'Dark (default)',
+                      style: AetherType.caption,
+                    ),
+                  ],
                 ),
-                showSelectedIcon: false,
-                segments: const [
-                  ButtonSegment(value: 'system', label: Text('Auto')),
-                  ButtonSegment(value: 'light', label: Text('Light')),
-                  ButtonSegment(value: 'dark', label: Text('Dark')),
-                ],
-                selected: {mode},
-                onSelectionChanged: (v) => app.setThemeMode(v.first),
               ),
-            ),
-          ],
+              ]),
+              const SizedBox(height: 12),
+              LayoutBuilder(builder: (context, constraints) {
+                final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+                void change(String v) => _savePreference(
+                  context, 'ovid_theme_mode', v, () => app.setThemeMode(v));
+                if (constraints.maxWidth < 250 * scale) {
+                  return Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final option in const [('system', 'Auto'), ('light', 'Light'), ('dark', 'Dark')])
+                        ChoiceChip(
+                          label: Text(option.$2),
+                          selected: mode == option.$1,
+                          onSelected: (_) => change(option.$1),
+                        ),
+                    ],
+                  );
+                }
+                return AetherSegmentedControl<String>(
+                value: mode,
+                options: const [
+                  (value: 'system', label: 'Auto', icon: null),
+                  (value: 'light', label: 'Light', icon: null),
+                  (value: 'dark', label: 'Dark', icon: null),
+                ],
+                onChanged: change,
+              );
+              }),
+            ],
+          ),
         );
       },
     );
@@ -947,6 +1205,7 @@ class _TimeoutScreen extends StatelessWidget {
       backgroundColor: Aether.bg,
       appBar: AppBar(
         leading: const BackButton(),
+        toolbarHeight: kToolbarHeight * (MediaQuery.textScalerOf(context).scale(20) / 20),
         title: const Text('AI response timeout'),
       ),
       body: AnimatedBuilder(
@@ -970,7 +1229,14 @@ class _TimeoutScreen extends StatelessWidget {
               RadioGroup<int>(
                 groupValue: cur,
                 onChanged: (v) {
-                  if (v != null) AppState.I.setResponseTimeout(v);
+                  if (v != null) {
+                    _savePreference(
+                      context,
+                      'ovid_response_timeout_sec',
+                      v,
+                      () => AppState.I.setResponseTimeout(v),
+                    );
+                  }
                 },
                 child: Column(
                   children: [
@@ -1017,7 +1283,12 @@ class _TimeoutScreen extends StatelessWidget {
                 activeColor: Aether.accent,
                 inactiveColor: Aether.surfaceAlt,
                 label: '${cur}s',
-                onChanged: (v) => AppState.I.setResponseTimeout(v.round()),
+                onChanged: (v) => _savePreference(
+                  context,
+                  'ovid_response_timeout_sec',
+                  v.round(),
+                  () => AppState.I.setResponseTimeout(v.round()),
+                ),
               ),
             ],
           );
@@ -1107,7 +1378,12 @@ class _ContextModelScreen extends StatelessWidget {
               ),
               RadioGroup<int>(
                 groupValue: app.contextWindowOverride,
-                onChanged: (v) => AppState.I.setContextWindowOverride(v ?? 0),
+                onChanged: (v) => _savePreference(
+                  context,
+                  'ovid_context_window_override',
+                  v ?? 0,
+                  () => AppState.I.setContextWindowOverride(v ?? 0),
+                ),
                 child: Column(
                   children: [
                     for (final (v, label) in _windowPresets)
@@ -1139,7 +1415,12 @@ class _ContextModelScreen extends StatelessWidget {
               const SizedBox(height: 4),
               RadioGroup<int>(
                 groupValue: app.maxOutputTokens,
-                onChanged: (v) => AppState.I.setMaxOutputTokens(v ?? 0),
+                onChanged: (v) => _savePreference(
+                  context,
+                  'ovid_max_output_tokens',
+                  v ?? 0,
+                  () => AppState.I.setMaxOutputTokens(v ?? 0),
+                ),
                 child: Column(
                   children: [
                     for (final (v, label) in _outPresets)
@@ -1172,6 +1453,7 @@ class _ExportChatsScreen extends StatefulWidget {
 
 class _ExportChatsScreenState extends State<_ExportChatsScreen> {
   bool _busy = false;
+  File? _exported;
 
   Future<void> _export() async {
     setState(() => _busy = true);
@@ -1188,6 +1470,7 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
         const JsonEncoder.withIndent('  ').convert(payload),
       );
       if (!mounted) return;
+      setState(() => _exported = file);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Exported to:\n${file.path}'),
@@ -1233,75 +1516,17 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
                 : const Icon(Icons.download_outlined, size: 18),
             label: Text(_busy ? 'Exporting…' : 'Export all sessions'),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DeleteAllDataScreen extends StatefulWidget {
-  const _DeleteAllDataScreen();
-  @override
-  State<_DeleteAllDataScreen> createState() => _DeleteAllDataScreenState();
-}
-
-class _DeleteAllDataScreenState extends State<_DeleteAllDataScreen> {
-  Future<void> _delete() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete ALL data?'),
-        content: const Text(
-          'This removes every session, saved API key, provider config, '
-          'plugin state, and setting. The app will reset to defaults. '
-          'This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text(
-              'Delete everything',
-              style: TextStyle(color: Aether.danger),
+          if (_exported != null)
+            OutlinedButton.icon(
+              onPressed: _busy
+                  ? null
+                  : () => showNativeShare(
+                      context,
+                      () => NativeShare.file(_exported!.path),
+                    ),
+              icon: const Icon(Icons.share_outlined),
+              label: const Text('Share / save JSON'),
             ),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    await AppState.I.deleteAllData();
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('All data deleted.')));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Delete all data')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Text(
-            'Deletes every session, all API keys, providers, plugin state, '
-            'and app preferences. Sandbox workspaces are removed too.',
-            style: TextStyle(
-              fontSize: 13.5,
-              height: 1.6,
-              color: Aether.textMuted,
-            ),
-          ),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            style: FilledButton.styleFrom(backgroundColor: Aether.danger),
-            onPressed: _delete,
-            icon: const Icon(Icons.delete_forever_outlined, size: 18),
-            label: const Text('Delete all data'),
-          ),
         ],
       ),
     );
@@ -1696,7 +1921,9 @@ class _SkillsScreenState extends State<SkillsScreen> {
 
   Widget _empty(BuildContext context) {
     return Center(
-      child: Column(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(Icons.auto_fix_high_outlined, size: 40, color: Aether.textFaint),
@@ -1726,6 +1953,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
             label: const Text('Upload .md skill'),
           ),
         ],
+        ),
       ),
     );
   }
@@ -1742,9 +1970,10 @@ class _PresetsScreen extends StatelessWidget {
       text:
           '${preset.id}_custom_${DateTime.now().millisecondsSinceEpoch % 1000}',
     );
-    final ok = await showDialog<bool>(
+    final route = DialogRoute<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
+        scrollable: true,
         title: const Text(
           'Duplicate as custom preset',
           style: TextStyle(fontSize: 16),
@@ -1775,9 +2004,10 @@ class _PresetsScreen extends StatelessWidget {
         ],
       ),
     );
-    // Read the values out, then dispose. Both controllers were leaked before:
-    // every Duplicate left two TextEditingController instances (and their
-    // listeners plus platform text-input resources) alive for the app's life.
+    final ok = await Navigator.of(context, rootNavigator: true).push(route);
+    // A popped route still builds its fields during its exit transition (and
+    // keyboard inset changes). Release controllers only after overlay removal.
+    await route.completed;
     final confirmed = ok == true;
     final idText = idController.text.trim();
     final nameText = nameController.text.trim();
@@ -1906,7 +2136,9 @@ class _PresetTileState extends State<_PresetTile> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           ListTile(
-            title: Row(
+            title: Wrap(
+              spacing: 8,
+              runSpacing: 4,
               children: [
                 Text(
                   p.label,
@@ -1915,7 +2147,6 @@ class _PresetTileState extends State<_PresetTile> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(width: 8),
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 6,
@@ -1970,8 +2201,11 @@ class _PresetTileState extends State<_PresetTile> {
                 ],
               ],
             ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Wrap(
+              spacing: 4,
               children: [
                 IconButton(
                   tooltip: 'Duplicate as custom',

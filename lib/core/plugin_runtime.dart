@@ -2214,11 +2214,11 @@ class PluginRuntimeManager extends ChangeNotifier {
   /// Unregisters the plugin's contributions and marks the persisted
   /// install disabled (the record survives; [enable] restores it).
   Future<void> disable(String pluginId) async {
+    PluginContributionRegistry.I.unregisterPlugin(pluginId);
     await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: false);
     final entries = await _loadEntries();
     final entry = entries[pluginId];
     if (entry == null) {
-      PluginContributionRegistry.I.unregisterPlugin(pluginId);
       return;
     }
     entries[pluginId] = PluginInstallEntry(
@@ -2231,7 +2231,6 @@ class PluginRuntimeManager extends ChangeNotifier {
       disabled: true,
     );
     await _saveEntries(entries);
-    PluginContributionRegistry.I.unregisterPlugin(pluginId);
     for (final p in AppState.I.plugins) {
       if (p.runtimeId == pluginId) {
         p
@@ -2330,6 +2329,7 @@ class PluginRuntimeManager extends ChangeNotifier {
   /// Full teardown: registry, committed content, dependency sandbox,
   /// activation record, grant, and plugin-owned secrets (spec §5.1/§9).
   Future<void> uninstall(String pluginId) async {
+    PluginContributionRegistry.I.unregisterPlugin(pluginId);
     await AppState.I.unmountPluginOwnedMcpServers(pluginId, uninstall: true);
     // Durable status is removed even when there is no activation entry left.
     await PluginRuntimeStatusStore.I.remove(pluginId);
@@ -2337,7 +2337,6 @@ class PluginRuntimeManager extends ChangeNotifier {
     final entry = entries.remove(pluginId);
     await _saveEntries(entries);
     await _removeRuntimeRow(pluginId);
-    PluginContributionRegistry.I.unregisterPlugin(pluginId);
     if (entry != null) {
       try {
         final d = Directory(entry.contentDir);

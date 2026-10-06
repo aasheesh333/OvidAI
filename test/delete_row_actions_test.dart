@@ -79,41 +79,64 @@ void main() {
     matching: find.byTooltip('Delete chat'),
   );
 
+  // Aether redesign: provider removal lives behind the tile's overflow menu
+  // ('More actions' → 'Remove'), not a dedicated row IconButton.
+  Finder providerOverflowFor(String providerId) => find.descendant(
+    of: find.byKey(ValueKey(providerId)),
+    matching: find.byTooltip('More actions'),
+  );
+
+  Future<void> tapRemoveFor(WidgetTester tester, String providerId) async {
+    await tester.tap(providerOverflowFor(providerId));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+  }
+
   group('provider row delete action', () {
     testWidgets('has an accessible label only for custom providers', (
       tester,
     ) async {
       final semantics = tester.ensureSemantics();
-      addCustomProvider();
+      final provider = addCustomProvider();
 
       await pumpProviders(tester);
 
-      expect(find.byTooltip('Delete provider'), findsOneWidget);
+      // The affordance sits behind the row's (tooltip-labelled) overflow menu.
+      expect(providerOverflowFor(provider.id), findsOneWidget);
+      await tester.tap(providerOverflowFor(provider.id));
+      await tester.pumpAndSettle();
+
+      final removeItem = find.bySemanticsLabel(RegExp(r'(^|\n)Remove($|\n)'));
+      expect(removeItem, findsOneWidget);
+      final removeSemantics = tester.getSemantics(removeItem);
       expect(
-        find.bySemanticsLabel(RegExp(r'(^|\n)Delete provider($|\n)')),
-        findsOneWidget,
-      );
-      final deleteSemantics = tester.getSemantics(
-        find.byTooltip('Delete provider'),
-      );
-      expect(
-        deleteSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+        removeSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
         isTrue,
       );
       expect(
-        deleteSemantics.getSemanticsData().flagsCollection.isButton,
+        removeSemantics.getSemanticsData().flagsCollection.isButton,
         isTrue,
       );
-      final builtIn = app.providers.firstWhere((provider) => !provider.custom);
+      // Dismiss the popup via its barrier (middle-left is outside the menu).
+      await tester.tapAt(const Offset(10, 400));
+      await tester.pumpAndSettle();
+
+      // A built-in BYOK row: the managed Ovid Cloud tile has no overflow
+      // menu at all, so the negative check needs a keyed BYOK tile.
+      final builtIn = app.providers.firstWhere(
+        (provider) =>
+            !provider.custom && provider.id != AppState.ovidCloudProviderId,
+      );
+      await tester.ensureVisible(providerOverflowFor(builtIn.id));
+      await tester.pumpAndSettle();
+      await tester.tap(providerOverflowFor(builtIn.id));
+      await tester.pumpAndSettle();
       expect(
-        find.descendant(
-          of: find.byKey(ValueKey(builtIn.id)),
-          matching: find.bySemanticsLabel(
-            RegExp(r'(^|\n)Delete provider($|\n)'),
-          ),
-        ),
+        find.bySemanticsLabel(RegExp(r'(^|\n)Remove($|\n)')),
         findsNothing,
       );
+      expect(find.text('Edit'), findsOneWidget);
       semantics.dispose();
     });
 
@@ -121,10 +144,9 @@ void main() {
       final provider = addCustomProvider();
       await pumpProviders(tester);
 
-      await tester.tap(find.byTooltip('Delete provider'));
-      await tester.pumpAndSettle();
+      await tapRemoveFor(tester, provider.id);
 
-      expect(find.text('Delete ${provider.name}?'), findsOneWidget);
+      expect(find.text('Remove ${provider.name}?'), findsOneWidget);
       await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
       await tester.pumpAndSettle();
 
@@ -136,9 +158,8 @@ void main() {
       final provider = addCustomProvider();
       await pumpProviders(tester);
 
-      await tester.tap(find.byTooltip('Delete provider'));
-      await tester.pumpAndSettle();
-      expect(find.text('Delete ${provider.name}?'), findsOneWidget);
+      await tapRemoveFor(tester, provider.id);
+      expect(find.text('Remove ${provider.name}?'), findsOneWidget);
 
       await tester.tap(find.widgetWithText(TextButton, 'Delete'));
       await tester.pumpAndSettle();
@@ -158,8 +179,7 @@ void main() {
       };
       await pumpProviders(tester);
 
-      await tester.tap(find.byTooltip('Delete provider'));
-      await tester.pumpAndSettle();
+      await tapRemoveFor(tester, provider.id);
       await tester.tap(find.widgetWithText(TextButton, 'Delete'));
       await tester.pumpAndSettle();
 

@@ -4,6 +4,8 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/sandbox_pkg.dart';
 
+import 'wave2_supply_fixture.dart';
+
 // Offline integration fixtures execute the generated installer and real host
 // dpkg-deb/tar/hash tools. Only transport is replaced; nothing is installed.
 class PackageFixture {
@@ -12,6 +14,9 @@ class PackageFixture {
   );
   final List<String> records = [];
   late final String prefix = '${root.path}/prefix';
+  late final SignedRepositoryFixture signed = SignedRepositoryFixture(
+    root.path,
+  );
 
   PackageFixture() {
     OvidPkgInstaller.writeAll(Directory(prefix), arch: 'aarch64');
@@ -86,6 +91,7 @@ cp "$FIXTURE_REPO/pool/${url##*/}" "$out"
     final index = File('$prefix/var/cache/ovid-pkg/Packages');
     index.parent.createSync(recursive: true);
     index.writeAsStringSync('${records.join('\n')}\n');
+    signed.seedCache(prefix, index.readAsStringSync());
     return Process.run(
       '/bin/sh',
       ['$prefix/bin/ovid-pkg', 'install', ...names],

@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/secure_store.dart';
+import 'utility_limits.dart';
 
 /// Part B (NP2) pure-Dart utility capabilities: File Converter,
 /// Markdown Editor, Password Vault, Env Manager, and Log Analyzer.
@@ -52,43 +53,54 @@ class FileConverterCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'csv_to_json',
-          description: 'Convert comma-separated CSV to JSON string values. '
-              'Supports quoted multiline fields and LF/CRLF/CR records; '
-              'requires unique nonblank headers and exact column counts.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'csv_text': {'type': 'string'},
-            },
-            'required': ['csv_text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'json_to_csv',
-          description: 'Flatten a JSON array of objects into CSV rows.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'json_text': {'type': 'string'},
-            },
-            'required': ['json_text'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'csv_to_json',
+      description:
+          'Convert comma-separated CSV to JSON string values. '
+          'Supports quoted multiline fields and LF/CRLF/CR records; '
+          'requires unique nonblank headers and exact column counts.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'csv_text': {'type': 'string'},
+        },
+        'required': ['csv_text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'json_to_csv',
+      description: 'Flatten a JSON array of objects into CSV rows.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'json_text': {'type': 'string'},
+        },
+        'required': ['json_text'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
+    checkUtilityInput(args);
+    return runBoundedUtility(
+      () => FileConverterCapability()._execute(toolName, args),
+      cancellation: cancellation,
+    );
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'csv_to_json':
         return _csvToJson(_requireString(args, 'csv_text'));
@@ -137,10 +149,14 @@ class FileConverterCapability implements NativePluginCapability {
             recordStarted = false;
           }
         } else if (closedQuote) {
-          throw FormatException('Unexpected text after CSV closing quote at offset $i.');
+          throw FormatException(
+            'Unexpected text after CSV closing quote at offset $i.',
+          );
         } else if (c == '"') {
           if (current.isNotEmpty) {
-            throw FormatException('Unexpected quote in unquoted CSV field at offset $i.');
+            throw FormatException(
+              'Unexpected quote in unquoted CSV field at offset $i.',
+            );
           }
           inQuotes = true;
           recordStarted = true;
@@ -171,15 +187,24 @@ class FileConverterCapability implements NativePluginCapability {
     final headers = records.current;
     _validateCsvHeaders(headers);
     final rows = <Map<String, String>>[];
+    var outputSize = 2;
     while (records.moveNext()) {
       final fields = records.current;
       if (fields.length != headers.length) {
-        throw FormatException('CSV record ${rows.length + 2} has '
-            '${fields.length} columns; expected ${headers.length}.');
+        throw FormatException(
+          'CSV record ${rows.length + 2} has '
+          '${fields.length} columns; expected ${headers.length}.',
+        );
       }
       final row = <String, String>{};
       for (var i = 0; i < headers.length; i++) {
         row[headers[i]] = fields[i];
+      }
+      outputSize += jsonEncode(row).length + 1;
+      if (outputSize > 1048576 || rows.length >= 10000) {
+        throw const FormatException(
+          'CSV output/row limit exceeded: 1048576 code units/10000 rows.',
+        );
       }
       rows.add(row);
     }
@@ -187,6 +212,9 @@ class FileConverterCapability implements NativePluginCapability {
   }
 
   void _validateCsvHeaders(List<String> headers) {
+    if (headers.length > 128) {
+      throw const FormatException('CSV column limit exceeded: 128.');
+    }
     if (headers.isEmpty || headers.any((h) => h.trim().isEmpty)) {
       throw FormatException('CSV headers must contain nonblank column names.');
     }
@@ -210,6 +238,7 @@ class FileConverterCapability implements NativePluginCapability {
   }
 
   String _jsonToCsv(String jsonText) {
+    checkUtilityJson(jsonText);
     dynamic decoded;
     try {
       decoded = jsonDecode(jsonText);
@@ -222,6 +251,9 @@ class FileConverterCapability implements NativePluginCapability {
       );
     }
     if (decoded.isEmpty) return '';
+    if (decoded.length > 10000) {
+      throw const FormatException('CSV row limit exceeded: 10000.');
+    }
     final keys = <String>[];
     for (final item in decoded) {
       if (item is! Map) {
@@ -231,22 +263,31 @@ class FileConverterCapability implements NativePluginCapability {
       }
       for (final key in item.keys) {
         final name = key.toString();
-        if (!keys.contains(name)) keys.add(name);
+        if (!keys.contains(name)) {
+          if (keys.length >= 128) {
+            throw const FormatException('CSV column limit exceeded: 128.');
+          }
+          keys.add(name);
+        }
       }
     }
     _validateCsvHeaders(keys);
     final rows = <String>[_csvRow(keys)];
+    var outputSize = rows.single.length;
     for (final item in decoded) {
       final map = item as Map;
-      rows.add(_csvRow(
-        [for (final key in keys) _jsonValueToCell(map[key])],
-      ));
+      rows.add(_csvRow([for (final key in keys) _jsonValueToCell(map[key])]));
+      outputSize += rows.last.length + 1;
+      if (outputSize > 1048576) {
+        throw const FormatException(
+          'CSV output limit exceeded: 1048576 code units.',
+        );
+      }
     }
     return rows.join('\n');
   }
 
-  String _csvRow(List<String> cells) =>
-      cells.map(_csvCell).join(',');
+  String _csvRow(List<String> cells) => cells.map(_csvCell).join(',');
 }
 
 // ---------------------------------------------------------------------------
@@ -262,54 +303,62 @@ class MarkdownEditorCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'render_html',
-          description: 'Render markdown to HTML.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'markdown': {'type': 'string'},
-            },
-            'required': ['markdown'],
-          },
-        ),
-        NativePluginTool(
-          name: 'extract_toc',
-          description:
-              'Extract headers (H1-H6) with levels and slug anchors.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'markdown': {'type': 'string'},
-            },
-            'required': ['markdown'],
-          },
-        ),
-        NativePluginTool(
-          name: 'stats',
-          description:
-              'Report word count, character count, and reading time.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'markdown': {'type': 'string'},
-            },
-            'required': ['markdown'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'render_html',
+      description: 'Render markdown to HTML.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'markdown': {'type': 'string'},
+        },
+        'required': ['markdown'],
+      },
+    ),
+    NativePluginTool(
+      name: 'extract_toc',
+      description: 'Extract headers (H1-H6) with levels and slug anchors.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'markdown': {'type': 'string'},
+        },
+        'required': ['markdown'],
+      },
+    ),
+    NativePluginTool(
+      name: 'stats',
+      description: 'Report word count, character count, and reading time.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'markdown': {'type': 'string'},
+        },
+        'required': ['markdown'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
+    checkUtilityInput(args);
+    return runBoundedUtility(
+      () => MarkdownEditorCapability()._execute(toolName, args),
+      cancellation: cancellation,
+    );
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'render_html':
         return md.markdownToHtml(_requireString(args, 'markdown'));
@@ -364,7 +413,7 @@ class MarkdownEditorCapability implements NativePluginCapability {
 
 class PasswordVaultCapability implements NativePluginCapability {
   PasswordVaultCapability({FlutterSecureStorage? secureStorage})
-      : _secure = secureStorage ?? ovidSecureStorage();
+    : _secure = secureStorage ?? ovidSecureStorage();
 
   final FlutterSecureStorage _secure;
 
@@ -378,59 +427,54 @@ class PasswordVaultCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'generate',
-          description: 'Generate a cryptographically secure password.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'length': {'type': 'integer'},
-              'uppercase': {'type': 'boolean'},
-              'lowercase': {'type': 'boolean'},
-              'numbers': {'type': 'boolean'},
-              'symbols': {'type': 'boolean'},
-            },
-          },
-        ),
-        NativePluginTool(
-          name: 'store',
-          description: 'Securely store a secret under a key.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'key': {'type': 'string'},
-              'secret': {'type': 'string'},
-            },
-            'required': ['key', 'secret'],
-          },
-        ),
-        NativePluginTool(
-          name: 'get',
-          description: 'Retrieve a stored secret by key.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'key': {'type': 'string'},
-            },
-            'required': ['key'],
-          },
-        ),
-        NativePluginTool(
-          name: 'list',
-          description: 'List stored secret keys (without values).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {},
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'generate',
+      description: 'Generate a cryptographically secure password.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'length': {'type': 'integer'},
+          'uppercase': {'type': 'boolean'},
+          'lowercase': {'type': 'boolean'},
+          'numbers': {'type': 'boolean'},
+          'symbols': {'type': 'boolean'},
+        },
+      },
+    ),
+    NativePluginTool(
+      name: 'store',
+      description: 'Securely store a secret under a key.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'key': {'type': 'string'},
+          'secret': {'type': 'string'},
+        },
+        'required': ['key', 'secret'],
+      },
+    ),
+    NativePluginTool(
+      name: 'get',
+      description: 'Retrieve a stored secret by key.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'key': {'type': 'string'},
+        },
+        'required': ['key'],
+      },
+    ),
+    NativePluginTool(
+      name: 'list',
+      description: 'List stored secret keys (without values).',
+      inputSchema: {'type': 'object', 'properties': {}},
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -461,8 +505,9 @@ class PasswordVaultCapability implements NativePluginCapability {
 
   int _parseLength(dynamic raw) {
     if (raw == null) return 16;
-    final parsed =
-        raw is num ? raw.toInt() : int.tryParse(raw.toString().trim());
+    final parsed = raw is num
+        ? raw.toInt()
+        : int.tryParse(raw.toString().trim());
     if (parsed == null) {
       throw FormatException('Invalid length "$raw": expected an integer.');
     }
@@ -492,9 +537,7 @@ class PasswordVaultCapability implements NativePluginCapability {
       if (symbols) symbolSet,
     ];
     if (sets.isEmpty) {
-      throw ArgumentError(
-        'At least one character set must be enabled.',
-      );
+      throw ArgumentError('At least one character set must be enabled.');
     }
     final random = math.Random.secure();
     final alphabet = sets.join();
@@ -534,11 +577,12 @@ class PasswordVaultCapability implements NativePluginCapability {
 
   Future<String> _list() async {
     final all = await _secure.readAll();
-    final keys = all.keys
-        .where((k) => k.startsWith(_prefix))
-        .map((k) => k.substring(_prefix.length))
-        .toList()
-      ..sort();
+    final keys =
+        all.keys
+            .where((k) => k.startsWith(_prefix))
+            .map((k) => k.substring(_prefix.length))
+            .toList()
+          ..sort();
     return jsonEncode({'keys': keys});
   }
 }
@@ -558,52 +602,48 @@ class EnvManagerCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'parse',
-          description: 'Parse .env content into key-value pairs.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'env_content': {'type': 'string'},
-            },
-            'required': ['env_content'],
-          },
-        ),
-        NativePluginTool(
-          name: 'set',
-          description:
-              'Update or add a variable while preserving other lines.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'env_content': {'type': 'string'},
-              'key': {'type': 'string'},
-              'value': {'type': 'string'},
-            },
-            'required': ['env_content', 'key', 'value'],
-          },
-        ),
-        NativePluginTool(
-          name: 'merge',
-          description:
-              'Merge two .env files; override values win on collision.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'base_env': {'type': 'string'},
-              'override_env': {'type': 'string'},
-            },
-            'required': ['base_env', 'override_env'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'parse',
+      description: 'Parse .env content into key-value pairs.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'env_content': {'type': 'string'},
+        },
+        'required': ['env_content'],
+      },
+    ),
+    NativePluginTool(
+      name: 'set',
+      description: 'Update or add a variable while preserving other lines.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'env_content': {'type': 'string'},
+          'key': {'type': 'string'},
+          'value': {'type': 'string'},
+        },
+        'required': ['env_content', 'key', 'value'],
+      },
+    ),
+    NativePluginTool(
+      name: 'merge',
+      description: 'Merge two .env files; override values win on collision.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'base_env': {'type': 'string'},
+          'override_env': {'type': 'string'},
+        },
+        'required': ['base_env', 'override_env'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -670,8 +710,7 @@ class EnvManagerCapability implements NativePluginCapability {
       final trimmed = line.trim();
       if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
       var rest = trimmed;
-      final exportMatch =
-          RegExp(r'^export\s+').firstMatch(rest);
+      final exportMatch = RegExp(r'^export\s+').firstMatch(rest);
       if (exportMatch != null) {
         rest = rest.substring(exportMatch.end).trimLeft();
       }
@@ -701,8 +740,7 @@ class EnvManagerCapability implements NativePluginCapability {
 
   String _quoteValueIfNeeded(String value) {
     if (value.isEmpty) return value;
-    if (value.trim() != value ||
-        RegExp(r'''[\s#"'`$\\]''').hasMatch(value)) {
+    if (value.trim() != value || RegExp(r'''[\s#"'`$\\]''').hasMatch(value)) {
       final escaped = value
           .replaceAll(r'\', r'\\')
           .replaceAll('"', r'\"')
@@ -729,8 +767,9 @@ class EnvManagerCapability implements NativePluginCapability {
     var found = false;
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i];
-      final stripped =
-          line.endsWith('\r') ? line.substring(0, line.length - 1) : line;
+      final stripped = line.endsWith('\r')
+          ? line.substring(0, line.length - 1)
+          : line;
       final suffix = line.endsWith('\r') ? '\r' : '';
       final match = pattern.firstMatch(stripped);
       if (match != null) {
@@ -739,8 +778,7 @@ class EnvManagerCapability implements NativePluginCapability {
       }
     }
     if (!found) {
-      final prefix =
-          content.isNotEmpty && !content.endsWith('\n') ? '\n' : '';
+      final prefix = content.isNotEmpty && !content.endsWith('\n') ? '\n' : '';
       return '$content$prefix$name=$emitted\n';
     }
     return lines.join('\n');
@@ -760,8 +798,10 @@ class EnvManagerCapability implements NativePluginCapability {
 // Log Analyzer
 // ---------------------------------------------------------------------------
 
-final _logLevelPattern =
-    RegExp(r'\b(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG)\b', caseSensitive: false);
+final _logLevelPattern = RegExp(
+  r'\b(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG)\b',
+  caseSensitive: false,
+);
 
 const _logLevels = {'FATAL', 'ERROR', 'WARN', 'INFO', 'DEBUG', 'UNKNOWN'};
 
@@ -774,40 +814,36 @@ class LogAnalyzerCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'parse',
-          description:
-              'Categorize log entries by severity; find error clusters.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'log_text': {'type': 'string'},
-            },
-            'required': ['log_text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'filter',
-          description:
-              'Filter log lines by severity level and search text.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'log_text': {'type': 'string'},
-              'level': {'type': 'string'},
-              'query': {'type': 'string'},
-            },
-            'required': ['log_text'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'parse',
+      description: 'Categorize log entries by severity; find error clusters.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'log_text': {'type': 'string'},
+        },
+        'required': ['log_text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'filter',
+      description: 'Filter log lines by severity level and search text.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'log_text': {'type': 'string'},
+          'level': {'type': 'string'},
+          'query': {'type': 'string'},
+        },
+        'required': ['log_text'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 

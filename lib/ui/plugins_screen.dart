@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../core/agent_service.dart';
+import 'widgets/aether_primitives.dart';
 import '../core/github_service.dart';
 import '../core/hook_service.dart';
 import '../core/mcp_config_parse.dart';
@@ -131,6 +132,7 @@ Future<bool> showDeleteConfirmationDialog(
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
+      scrollable: true,
       title: Text(title),
       content: Text(content),
       actions: [
@@ -470,16 +472,19 @@ Widget? pluginActivationBadge(PluginItem plugin) {
 Future<void> showPluginAddSheet(BuildContext context) {
   final app = AppState.I;
   final repoC = TextEditingController();
+  String? repoError;
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
+    useSafeArea: true,
     backgroundColor: Aether.surface,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
     builder: (ctx) => AnimatedBuilder(
       animation: app,
-      builder: (ctx, _) => Padding(
+      builder: (ctx, _) => StatefulBuilder(
+        builder: (ctx, update) => Padding(
         padding: EdgeInsets.fromLTRB(
           16,
           16,
@@ -517,6 +522,7 @@ Future<void> showPluginAddSheet(BuildContext context) {
                     ),
                   ),
                   IconButton(
+                    tooltip: 'Close',
                     visualDensity: VisualDensity.compact,
                     icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
                     onPressed: () => Navigator.pop(ctx),
@@ -546,8 +552,10 @@ Future<void> showPluginAddSheet(BuildContext context) {
                 controller: repoC,
                 autofocus: true,
                 style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   hintText: 'owner/repo or https://github.com/owner/repo',
+                  errorText: repoError,
+                  errorMaxLines: 4,
                 ),
               ),
               const SizedBox(height: 8),
@@ -565,10 +573,12 @@ Future<void> showPluginAddSheet(BuildContext context) {
                   label: const Text('Fetch from GitHub'),
                   onPressed: () {
                     final txt = repoC.text.trim();
-                    if (txt.isEmpty) return;
-                    Navigator.pop(ctx);
                     final src = _githubSourceFromInput(txt);
-                    if (src == null) return;
+                    if (src == null) {
+                      update(() => repoError = 'Enter owner/repo or a GitHub repository URL.');
+                      return;
+                    }
+                    Navigator.pop(ctx);
                     _runSourceInstall(context, src, null);
                   },
                 ),
@@ -593,15 +603,7 @@ Future<void> showPluginAddSheet(BuildContext context) {
                     final messenger = ScaffoldMessenger.of(context);
                     final added = app.addMarketplace(repoC.text);
                     if (added == null) {
-                      messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Enter owner/repo (or a GitHub URL) that is not '
-                            'already added.',
-                          ),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
+                      update(() => repoError = 'Enter owner/repo (or a GitHub URL) that is not already added.');
                       return;
                     }
                     Navigator.pop(ctx);
@@ -667,9 +669,10 @@ Future<void> showPluginAddSheet(BuildContext context) {
                         ),
                         // Every entry — including the legacy default, which
                         // 404s and is no longer seeded — is removable.
-                        GestureDetector(
-                          onTap: () => app.removeMarketplace(m),
-                          child: const Icon(
+                        IconButton(
+                          tooltip: 'Remove marketplace',
+                          onPressed: () => app.removeMarketplace(m),
+                          icon: const Icon(
                             Icons.delete_outline,
                             size: 16,
                             color: Aether.danger,
@@ -682,6 +685,7 @@ Future<void> showPluginAddSheet(BuildContext context) {
             ],
           ),
         ),
+      ),
       ),
     ),
   );
@@ -724,6 +728,7 @@ Future<void> _runSourceInstall(
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: Aether.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -885,7 +890,11 @@ class _PluginsScreenState extends State<PluginsScreen> {
         : items.indexWhere((p) => focusIds[p] == focus);
     if (index >= 0 && _scroll.hasClients && _revealAttempts < 24) {
       _revealAttempts++;
-      final estimate = (index * _estimatedPluginCardExtent).clamp(
+      // Variable-height cards (large text, long errors, MCP rows) cannot be
+      // found by repeatedly jumping to the same fixed-height estimate.
+      final estimate = (_revealAttempts == 1
+          ? index * _estimatedPluginCardExtent
+          : _scroll.offset + _scroll.position.viewportDimension * 0.8).clamp(
         0.0,
         _scroll.position.maxScrollExtent,
       );
@@ -899,7 +908,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
   }
 
   Future<void> _syncCatalogs({bool force = false}) async {
-    if (_syncing) return;
+    if (!mounted || _syncing) return;
     setState(() => _syncing = true);
     try {
       await AppState.I.syncMarketplaceCatalogs(force: force);
@@ -917,7 +926,8 @@ class _PluginsScreenState extends State<PluginsScreen> {
       backgroundColor: Aether.bg,
       appBar: AppBar(
         leading: const BackButton(),
-        title: const Text('Plugins'),
+        toolbarHeight: MediaQuery.textScalerOf(context).scale(20) > 28 ? 104 : 64,
+        title: const Text('Plugins & marketplaces'),
         actions: [
           if (_syncing)
             const Padding(
@@ -1023,11 +1033,10 @@ class _PluginsScreenState extends State<PluginsScreen> {
                 ),
               ),
               SliverToBoxAdapter(
-                child: SizedBox(
-                  height: 36,
-                  child: ListView(
+                child: SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
                     children: [
                       for (final c in cats)
                         Padding(
@@ -1079,26 +1088,50 @@ class _PluginsScreenState extends State<PluginsScreen> {
               SliverToBoxAdapter(
                 child: Padding(
                   padding: EdgeInsets.fromLTRB(20, 12, 20, 2),
-                  child: Text(
-                    migrationOnly ? 'NEEDS RE-APPROVAL' : 'ALL PLUGINS',
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1.4,
-                      color: Aether.textFaint,
-                    ),
+                  child: AetherSectionTitle(
+                    eyebrow: migrationOnly
+                        ? 'Needs re-approval'
+                        : items.isEmpty || items.any((p) => p.installed)
+                            ? 'Installed'
+                            : 'Available',
+                    subtitle: migrationOnly
+                        ? null
+                        : app.plugins.isEmpty
+                            ? 'Nothing installed yet'
+                            : null,
                   ),
                 ),
               ),
+              if (items.isEmpty && !migrationOnly)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                    child: AetherEmptyState(
+                      key: const ValueKey('plugins-empty-state'),
+                      icon: Icons.extension_outlined,
+                      title: app.plugins.isEmpty ? 'No plugins installed' : 'No matching plugins',
+                      message: app.plugins.isEmpty
+                          ? 'Add a plugin from a GitHub repo or a marketplace '
+                          'with the + button above — one capability approval, '
+                          'then it is yours.'
+                          : 'Try another search or category to find your plugins.',
+                      action: app.plugins.isEmpty ? AetherPrimaryButton(
+                        label: 'Add plugin or marketplace',
+                        icon: Icons.add,
+                        onPressed: () => showPluginAddSheet(context),
+                      ) : null,
+                    ),
+                  ),
+                ),
               SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                 sliver: SliverList.separated(
                   itemCount: items.length,
                   separatorBuilder: (_, _) => const SizedBox(height: 10),
                   itemBuilder: (_, i) {
                     final p = items[i];
                     final focusId = focusIds[p];
-                    return PluginCard(
+                    final card = PluginCard(
                       key: focusId == null
                           ? null
                           : _pluginCardKeys.putIfAbsent(
@@ -1113,12 +1146,189 @@ class _PluginsScreenState extends State<PluginsScreen> {
                           : focusId != null &&
                                 focusId == widget.focusCanonicalId,
                     );
+                    if (!migrationOnly && i > 0 && items[i - 1].installed && !p.installed) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Padding(
+                            padding: EdgeInsets.only(top: 8, bottom: 10),
+                            child: AetherSectionTitle(eyebrow: 'Available'),
+                          ),
+                          card,
+                        ],
+                      );
+                    }
+                    return card;
                   },
                 ),
               ),
+              // ── Marketplaces section (premium redesign) ──
+              if (!migrationOnly)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 10, 20, 2),
+                    child: AetherSectionTitle(
+                      eyebrow: 'Marketplaces',
+                      subtitle: app.marketplaces.isEmpty
+                          ? 'No marketplaces added yet'
+                          : null,
+                    ),
+                  ),
+                ),
+              if (!migrationOnly && app.marketplaces.isEmpty)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                    child: AetherEmptyState(
+                      key: const ValueKey('marketplaces-empty-state'),
+                      icon: Icons.inventory_2_outlined,
+                      title: 'No marketplaces yet',
+                      message:
+                          'Marketplaces are GitHub repositories listing '
+                          'plugins and MCP servers. Add one with the + button.',
+                      action: AetherSecondaryButton(
+                        label: 'Add marketplace',
+                        icon: Icons.add,
+                        onPressed: () => showPluginAddSheet(context),
+                      ),
+                    ),
+                  ),
+                )
+              else if (!migrationOnly)
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                  sliver: SliverList.separated(
+                    itemCount: app.marketplaces.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 10),
+                    itemBuilder: (_, i) => _MarketplaceCard(
+                      key: ValueKey(
+                        'marketplace-card-${app.marketplaces[i]}',
+                      ),
+                      repo: app.marketplaces[i],
+                    ),
+                  ),
+                ),
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+/// Premium marketplace repo card: name, remove, and a Browse ghost that
+/// routes through the AppState marketplace catalog fetcher so the installed
+/// plugin list refreshes without closing this screen.
+class _MarketplaceCard extends StatefulWidget {
+  final String repo;
+  const _MarketplaceCard({super.key, required this.repo});
+
+  @override
+  State<_MarketplaceCard> createState() => _MarketplaceCardState();
+}
+
+class _MarketplaceCardState extends State<_MarketplaceCard> {
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AetherCard(
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: Aether.surfaceRaised,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(
+              Icons.inventory_2_outlined,
+              size: 18,
+              color: Aether.textMuted,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                    widget.repo,
+                  style: AetherType.title.copyWith(fontSize: 13.5),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'GitHub marketplace',
+                  style: AetherType.caption,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+          AetherGhostButton(
+            label: _busy ? 'Browsing…' : 'Browse',
+            icon: Icons.open_in_new,
+            loading: _busy,
+            onPressed: _busy
+                ? null
+                : () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    setState(() => _busy = true);
+                    try {
+                      final msg = await app.fetchMarketplaceCatalog(widget.repo);
+                      if (!mounted) return;
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: Text(msg),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    } catch (e) {
+                      if (mounted) {
+                        messenger.showSnackBar(SnackBar(content: Text('Could not load marketplace: $e')));
+                      }
+                    } finally {
+                      if (mounted) setState(() => _busy = false);
+                    }
+                  },
+          ),
+          const SizedBox(width: 2),
+          IconButton(
+            key: ValueKey('marketplace-remove-${widget.repo}'),
+            tooltip: 'Remove marketplace',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(
+              Icons.delete_outline,
+              size: 18,
+              color: Aether.danger,
+            ),
+            onPressed: _busy
+                ? null
+                : () async {
+                    final ok = await showDeleteConfirmationDialog(
+                      context,
+                      title: 'Remove ${widget.repo}?',
+                      content:
+                          'Removes this marketplace repo. Plugins already '
+                          'installed from it stay installed.',
+                    );
+                    if (!ok) return;
+                    app.removeMarketplace(widget.repo);
+                  },
+          ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -1201,14 +1411,14 @@ class PluginCard extends StatelessWidget {
             width: highlighted ? 1.5 : 1,
           ),
         ),
-        child: Row(
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (highlighted)
               Container(
                 key: ValueKey('plugin-card-highlight-$_keyId'),
-                width: 3,
-                height: 40,
+                width: 40,
+                height: 3,
                 margin: const EdgeInsets.only(right: 8),
                 decoration: BoxDecoration(
                   color: Aether.accent,
@@ -1233,8 +1443,9 @@ class PluginCard extends StatelessWidget {
                 color: Aether.textMuted,
               ),
             ),
-            const SizedBox(width: 12),
-            Expanded(
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1291,16 +1502,12 @@ class PluginCard extends StatelessWidget {
                           ? startupItemStateLabel(durable.state)
                           : '${startupItemStateLabel(durable.state)} · '
                                 '${durable.reason}',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 11, color: Aether.textMuted),
                     ),
                   ],
                   const SizedBox(height: 6),
                   Text(
                     plugin.description,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 12.5,
                       height: 1.45,
@@ -1310,8 +1517,10 @@ class PluginCard extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(width: 8),
-            Column(
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -1320,7 +1529,7 @@ class PluginCard extends StatelessWidget {
                   children: [
                     if (plugin.installed) ...[
                       SizedBox(
-                        height: 28,
+                        height: 48,
                         child: Switch(
                           key: ValueKey('plugin-switch-${plugin.name}'),
                           value: plugin.enabled,
@@ -1372,8 +1581,8 @@ class PluginCard extends StatelessWidget {
                       ),
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(
-                        minWidth: 28,
-                        minHeight: 28,
+                        minWidth: 48,
+                        minHeight: 48,
                       ),
                       tooltip: 'Delete plugin',
                       onPressed: () async {
@@ -1457,6 +1666,7 @@ class PluginCard extends StatelessWidget {
                 ),
               ],
             ),
+            ),
           ],
         ),
       ),
@@ -1471,6 +1681,13 @@ class PluginDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (context, _) => _buildDetail(context),
+    );
+  }
+
+  Widget _buildDetail(BuildContext context) {
     final app = AppState.I;
     // Declarative plugin settings UI (audit 2026-09-25): the settings
     // fields an installed plugin's normalized manifest declares. Data-only
@@ -1595,12 +1812,13 @@ class PluginDetailScreen extends StatelessWidget {
                       style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                     ),
                     const SizedBox(height: 6),
-                    Row(
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
                       children: [
                         // Task 11 (spec §11): source/format badge beside
                         // the category tag on the detail header.
                         Tag(plugin.category.toUpperCase(), filled: true),
-                        const SizedBox(width: 4),
                         Tag(
                           PluginCard.sourceFormatLabel(plugin),
                           filled: false,
@@ -1873,9 +2091,10 @@ class PluginDetailScreen extends StatelessWidget {
           ],
           if (plugin.installed) ...[
             const SizedBox(height: 8),
-            Row(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
+                SizedBox(
                   child: OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Aether.textMuted,
@@ -1902,8 +2121,8 @@ class PluginDetailScreen extends StatelessWidget {
                     },
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
+                const SizedBox(height: 8),
+                SizedBox(
                   child: OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Aether.danger,
@@ -2261,6 +2480,7 @@ class _EffectiveGrantRow extends StatelessWidget {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, update) => AlertDialog(
+          scrollable: true,
           title: const Text(
             'Plugin permissions',
             style: TextStyle(fontSize: 15),
@@ -2437,7 +2657,7 @@ class _McpSection extends StatelessWidget {
                   ),
                 ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               const Tag('LIVE', color: Aether.accent, filled: true),
             ],
           ),
@@ -2453,22 +2673,19 @@ class _McpSection extends StatelessWidget {
             ),
           )
         else
-          SizedBox(
-            height: 132,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
+          Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              itemCount: servers.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 10),
-              itemBuilder: (_, i) {
-                final s = servers[i];
-                return McpCard(
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                for (final s in servers) McpCard(
                   key: cardKeys?.putIfAbsent(s.canonicalId, () => GlobalKey()),
                   server: s,
                   highlighted: s.canonicalId == focusCanonicalId,
-                );
-              },
-            ),
+                ),
+                ],
+              ),
           ),
       ],
     );
@@ -2733,8 +2950,14 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
             for (final name in widget.missing)
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
-                child: TextField(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(name, style: AetherType.label),
+                    const SizedBox(height: 6),
+                    TextField(
                   controller: _controllers[name],
+                  enabled: !_saving,
                   obscureText: true,
                   enableSuggestions: false,
                   autocorrect: false,
@@ -2744,6 +2967,8 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
                     border: const OutlineInputBorder(),
                     isDense: true,
                   ),
+                ),
+                  ],
                 ),
               ),
             if (_error != null)
@@ -2810,7 +3035,9 @@ class _McpRuntimeInstallSheetState extends State<_McpRuntimeInstallSheet> {
     });
     // Explicit user-tapped runtime install (not a silent one): streams
     // the installer's lines into the follow-mode log below.
-    final ok = await SandboxService.I.ensureRuntime(
+    var ok = false;
+    try {
+      ok = await SandboxService.I.ensureRuntime(
       widget.kind,
       onLine: (line) {
         if (!mounted) return;
@@ -2818,7 +3045,10 @@ class _McpRuntimeInstallSheetState extends State<_McpRuntimeInstallSheet> {
           _log.add(line);
         });
       },
-    );
+      );
+    } catch (e) {
+      if (mounted) _log.add('Runtime installation failed: $e');
+    }
     if (!mounted) return;
     setState(() {
       _installing = false;
@@ -2853,7 +3083,7 @@ class _McpRuntimeInstallSheetState extends State<_McpRuntimeInstallSheet> {
               // jump-to-bottom when near the bottom) replaces the old
               // static 30-line Text — the user always sees the latest
               // installer output and real errors.
-              ProgressLogView(lines: _log, height: 180),
+              ProgressLogView(lines: List.of(_log), height: 180),
             ],
             const SizedBox(height: 12),
             if (!_done)
@@ -2924,7 +3154,9 @@ class McpCard extends StatelessWidget {
           : null,
       child: Container(
         key: ValueKey('mcp-card-${server.canonicalId}'),
-        width: 196,
+        width: MediaQuery.sizeOf(context).width < 600
+            ? MediaQuery.sizeOf(context).width - 32
+            : 300,
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: Aether.surface,
@@ -2956,6 +3188,7 @@ class McpCard extends StatelessWidget {
           ),
         ),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
@@ -2975,7 +3208,7 @@ class McpCard extends StatelessWidget {
                 ),
                 const Spacer(),
                 SizedBox(
-                  height: 24,
+                  height: 48,
                   child: Switch(
                     key: ValueKey('mcp-switch-${server.canonicalId}'),
                     value: server.connected,
@@ -2994,8 +3227,8 @@ class McpCard extends StatelessWidget {
                   ),
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(
-                    minWidth: 24,
-                    minHeight: 24,
+                    minWidth: 48,
+                    minHeight: 48,
                   ),
                   tooltip: 'Delete server',
                   onPressed: () async {
@@ -3009,14 +3242,12 @@ class McpCard extends StatelessWidget {
                 ),
               ],
             ),
-            const Spacer(),
+            const SizedBox(height: 10),
             Row(
               children: [
                 Expanded(
                   child: Text(
                     server.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       fontSize: 12.5,
                       fontWeight: FontWeight.w600,
@@ -3050,8 +3281,6 @@ class McpCard extends StatelessWidget {
                     reason == null || reason.isEmpty
                         ? label
                         : '$label · $reason',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 10.5,
                       color: durable.state == StartupItemState.ready
@@ -3511,8 +3740,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
           16,
           16 + MediaQuery.of(ctx).viewInsets.bottom,
         ),
-        child: SizedBox(
-          height: MediaQuery.of(ctx).size.height * 0.62,
+        child: SingleChildScrollView(
           child: _McpJsonEditorSheet(
             controller: ctrl,
             onSave: (command, args, env, url, transport, headers, cwd) async {
@@ -3667,18 +3895,19 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
   @override
   Widget build(BuildContext context) {
     final sheet = Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
             Icon(Icons.edit_outlined, size: 16, color: Aether.textMuted),
             const SizedBox(width: 8),
-            const Text(
+            const Expanded(child: Text(
               'Edit mcp.json',
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-            ),
-            const Spacer(),
+            )),
             IconButton(
+              tooltip: 'Close',
               icon: const Icon(Icons.close, size: 18),
               onPressed: _saving ? null : () => Navigator.pop(context),
             ),
@@ -3691,12 +3920,12 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
           style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
         ),
         const SizedBox(height: 12),
-        Expanded(
+        SizedBox(
           child: TextField(
             controller: widget.controller,
             readOnly: _saving,
             maxLines: null,
-            expands: true,
+            minLines: 6,
             textAlignVertical: TextAlignVertical.top,
             style: TextStyle(fontFamily: Aether.mono, fontSize: 12),
             decoration: InputDecoration(

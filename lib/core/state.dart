@@ -6,8 +6,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart'
-    show Brightness, WidgetsBinding;
+import 'package:flutter/widgets.dart' show Brightness, WidgetsBinding;
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -36,7 +35,10 @@ import 'theme.dart';
 import 'sandbox_service.dart';
 import 'session_data_sharing.dart';
 import 'session_lifecycle_service.dart';
+import 'session_search.dart';
 import 'session_ledger.dart';
+import 'settings_actions.dart';
+import 'settings_backup_service.dart';
 import 'presets.dart';
 import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
@@ -54,6 +56,8 @@ import 'native_plugins/rest_descriptors_infra.dart';
 import 'native_plugins/sandbox_utilities.dart';
 import 'native_plugins/web_and_db_utilities.dart';
 import 'diag.dart';
+
+part 'settings_state_integration.dart';
 
 /// Friendly UI label for a model id. The Ovid Cloud managed alias `auto`
 /// renders as `Auto` (one clean option in the picker/chip); every other model
@@ -1380,7 +1384,8 @@ class ChatSession {
     if (titleGenerated) 'titleGenerated': true,
     if (referencedSessionIds.isNotEmpty)
       'referencedSessionIds': referencedSessionIds.toList(),
-    if (pendingAgentNotices.isNotEmpty) 'pendingAgentNotices': pendingAgentNotices,
+    if (pendingAgentNotices.isNotEmpty)
+      'pendingAgentNotices': pendingAgentNotices,
   };
 
   void recordAnalytics({
@@ -1457,6 +1462,14 @@ class _SessionCleanup {
       },
     );
   }
+}
+
+class _AccountHandoff {
+  _AccountHandoff(this.account, this.rows, this.active, this.usage);
+  final String account;
+  final List<String> rows;
+  final String? active;
+  final List<String> usage;
 }
 
 const _sessionBootstrapTailSize = 50;
@@ -1758,6 +1771,7 @@ class AppState extends ChangeNotifier {
     _testInstance?.sessionEncodeCountsForTest.clear();
     _testInstance?._cancelPersistDebounce();
     _testInstance = null;
+    _singleton._bindSettingsActions();
     StartupCoordinator.I.statusSink = null;
     PluginRuntimeStatusStore.I.resetForTest();
     // ignore: invalid_use_of_visible_for_testing_member
@@ -1797,8 +1811,11 @@ class AppState extends ChangeNotifier {
     // install routing, the agent roster, and dispatch see them from boot.
     registerAllNativePlugins();
     _ensureActiveSession();
+    _bindSettingsActions();
     SandboxService.sessionWorkspaceProvider = (id) {
-      final session = sessions.where((s) => (s.sandboxId ?? s.id) == id).firstOrNull;
+      final session = sessions
+          .where((s) => (s.sandboxId ?? s.id) == id)
+          .firstOrNull;
       return session == null ? null : (folder: session.workspaceFolder);
     };
   }
@@ -2207,7 +2224,7 @@ class AppState extends ChangeNotifier {
     for (final s in owned) {
       s.connected = false;
       try {
-        await McpService.I.disconnect(s.canonicalId);
+        await McpService.I.removeMcpOAuth(s.canonicalId);
       } catch (e) {
         Diag.swallow('state', e);
       }
@@ -2407,9 +2424,188 @@ class AppState extends ChangeNotifier {
   String? _deferredActiveSessionId;
   ChatSession? _deferredActiveSession;
   final Map<String, ({ChatSession owner, int? prefixLength})>
-      _deferredProjections = {};
+  _deferredProjections = {};
   int _deferredActiveTailLength = 0;
   var _deferredSessionGeneration = 0;
+
+  String _sessionAccountId = 'guest';
+  Object _sessionAccountToken = Object();
+  // Cleanup ownership changes only on an actual account handoff. A settings
+  // barrier invalidates producers, but must still drain already-owned deletes.
+  Object _sessionCleanupToken = Object();
+  bool _sessionAccountReady = true;
+  bool _sessionNamespaceLoaded = false;
+  Future<void>? _accountTransition;
+  bool _settingsBusy = false;
+  Future<void>? _settingsOperation;
+  final List<_SessionCleanup> _pendingAccountCleanup = [];
+  final Map<String, _AccountHandoff> _retainedHandoffs = {};
+  String get sessionAccountId => _sessionAccountId;
+  Object get sessionAccountToken => _sessionAccountToken;
+  bool get sessionAccountReady => _sessionAccountReady && !_settingsBusy;
+  String _accountKey(String key, [String? account]) {
+    final owner = account ?? _sessionAccountId;
+    return owner == 'guest'
+        ? key
+        : '${key}_owner_${Uri.encodeComponent(owner)}';
+  }
+
+  String accountScopedPrefKey(String key) => _accountKey(key);
+
+  /// Revoke old ownership synchronously, then restore only the explicitly
+  /// named local namespace. Legacy rows have no UID provenance and stay guest.
+  Future<void> transitionSessionAccount(String account) {
+    if (account == _sessionAccountId && _accountTransition != null) {
+      return _accountTransition!;
+    }
+    if (account == _sessionAccountId && _sessionAccountReady) {
+      final cleanup = _SessionCleanup(
+        () => SessionSearch.I.setAccount(account),
+      );
+      _pendingWorkspaceDeletions.add(cleanup);
+      return cleanup.pending;
+    }
+    final oldAccount = _sessionAccountId;
+    final oldRows =
+        _sessionAccountReady &&
+            _sessionNamespaceLoaded &&
+            (sessions.isNotEmpty || _deferredSessionJson != null)
+        ? _sessionJsonForPersistence()
+        : null;
+    final oldActive = activeSessionId;
+    final oldUsage = usageLog.isNotEmpty
+        ? [for (final e in usageLog) jsonEncode(e.toJson())]
+        : const <String>[];
+    if (oldRows != null || oldUsage.isNotEmpty) {
+      _retainedHandoffs[oldAccount] = _AccountHandoff(
+        oldAccount,
+        oldRows ?? const [],
+        oldActive,
+        oldUsage,
+      );
+    }
+    final previous = _accountTransition;
+    final settingsOperation = _settingsOperation;
+    final writing = _persistWriteInFlight;
+    final oldCleanup = _pendingWorkspaceDeletions.toList();
+    // Start outstanding retries while their original account is still
+    // current. Once the token changes an old retry must never act on B.
+    for (final task in oldCleanup) {
+      if (!task.running && task.error != null) task.retry();
+    }
+    _cancelPersistDebounce();
+    _persistScheduled = false;
+    _completeScheduledPersistence();
+    final token = _sessionAccountToken = Object();
+    _sessionCleanupToken = Object();
+    _sessionAccountId = account;
+    _sessionAccountReady = false;
+    _sessionNamespaceLoaded = false;
+    _clearDeferredSessions();
+    _dirtySessionIds.clear();
+    _notifiedDeletedSessionIds.clear();
+    _ledgerDeletions.clear();
+    _pendingWorkspaceDeletions.clear();
+    _pendingAccountCleanup.addAll(oldCleanup);
+    sessions.clear();
+    usageLog.clear();
+    activeSessionId = null;
+    AgentService.I.sessionAccountChanged();
+    final cleanup = _SessionCleanup(() async {
+      if (!identical(token, _sessionAccountToken)) return;
+      await SessionSearch.I.setAccount(account);
+    });
+    _pendingWorkspaceDeletions.add(cleanup);
+    notifyListeners();
+    late final Future<void> transition;
+    transition = () async {
+      try {
+        try {
+          await previous;
+        } catch (_) {
+          /* a newer owner may retry */
+        }
+        await writing;
+        // A failed restore must roll back its captured namespace before any
+        // account (including A -> B -> A) can hydrate or write that namespace.
+        await settingsOperation;
+        for (final task in List<_SessionCleanup>.of(_pendingAccountCleanup)) {
+          await task.pending;
+          if (task.error != null) {
+            throw StateError('Previous account cleanup incomplete');
+          }
+          _pendingAccountCleanup.remove(task);
+        }
+        final prefs = await SharedPreferences.getInstance();
+        for (final handoff in List.of(_retainedHandoffs.values)) {
+          await _writeAccountHandoff(prefs, handoff);
+          if (identical(_retainedHandoffs[handoff.account], handoff)) {
+            _retainedHandoffs.remove(handoff.account);
+          }
+        }
+        await cleanup.pending;
+        if (!identical(token, _sessionAccountToken)) return;
+        if (cleanup.error != null) {
+          throw StateError('Account search cleanup incomplete');
+        }
+        // No provisional guest transcript is ever attributed to a Firebase UID.
+        _deferredSessionJson = List.of(
+          prefs.getStringList(_accountKey(_kSessions)) ?? const [],
+        );
+        activeSessionId = prefs.getString(_accountKey(_kActive));
+        await _loadUsage();
+        await _hydrateDeferredSessions();
+        if (!identical(token, _sessionAccountToken)) return;
+        _sessionAccountReady = true;
+        _sessionNamespaceLoaded = true;
+        lastSessionPersistFailed = false;
+        notifyListeners();
+      } catch (_) {
+        if (identical(token, _sessionAccountToken)) {
+          lastSessionPersistFailed = true;
+          notifyListeners();
+        }
+        rethrow;
+      } finally {
+        if (identical(_accountTransition, transition)) {
+          _accountTransition = null;
+        }
+      }
+    }();
+    _accountTransition = transition;
+    return transition;
+  }
+
+  Future<void> _writeAccountHandoff(
+    SharedPreferences prefs,
+    _AccountHandoff handoff,
+  ) async {
+    if (handoff.rows.isNotEmpty) {
+      if (!await prefs.setStringList(
+        _accountKey(_kSessions, handoff.account),
+        handoff.rows,
+      )) {
+        throw StateError('Account session storage rejected write');
+      }
+      final saved = handoff.active == null
+          ? await prefs.remove(_accountKey(_kActive, handoff.account))
+          : await prefs.setString(
+              _accountKey(_kActive, handoff.account),
+              handoff.active!,
+            );
+      if (!saved) {
+        throw StateError('Account active session storage rejected write');
+      }
+    }
+    if (handoff.usage.isNotEmpty) {
+      if (!await prefs.setStringList(
+        _accountKey(_kUsage, handoff.account),
+        handoff.usage,
+      )) {
+        throw StateError('Account usage storage rejected write');
+      }
+    }
+  }
 
   // ── Coalesced per-session persistence (spec §5.4) ────────────────────────
   /// Ids whose content changed since the last successful write. Mutations mark
@@ -2501,6 +2697,7 @@ class AppState extends ChangeNotifier {
     ChatSession session,
     SessionStartReason reason,
   ) {
+    final account = _sessionAccountToken;
     final future = () async {
       try {
         // The exactly-once `session_start` must observe the persisted session,
@@ -2508,6 +2705,9 @@ class AppState extends ChangeNotifier {
         await flushSessionPersistence();
       } catch (e) {
         Diag.swallow('state', e);
+      }
+      if (!identical(account, _sessionAccountToken) || !sessionAccountReady) {
+        return;
       }
       await SessionLifecycleService.I.sessionStarted(session, reason: reason);
     }();
@@ -3621,21 +3821,28 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Finish only deferred history; never reload over live edits for a query.
+  Future<void> loadSessionsForSearch() => _hydrateDeferredSessions();
+
   Future<void> loadSessions() async {
+    await _settingsOperation;
+    final token = _sessionAccountToken;
     if (_deferredSessionJson != null || _deferredSessionsPending) {
       await _hydrateDeferredSessions();
       return;
     }
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getStringList(_kSessions);
+      if (!identical(token, _sessionAccountToken)) return;
+      final raw = prefs.getStringList(_accountKey(_kSessions));
+      _sessionNamespaceLoaded = true;
       if (raw != null && raw.isNotEmpty) {
         final loaded = raw.map(_decodeSessionSync).toList();
         sessions
           ..clear()
           ..addAll(loaded);
       }
-      activeSessionId = prefs.getString(_kActive);
+      activeSessionId = prefs.getString(_accountKey(_kActive));
       // Never restore INTO a subagent session — the app opens on a user chat.
       final active = sessionById(activeSessionId);
       if (active == null || active.isSubagent) {
@@ -3677,16 +3884,20 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _loadSessionsForFirstFrame() async {
+    await _settingsOperation;
+    final token = _sessionAccountToken;
     List<String>? raw;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final requestedActiveId = prefs.getString(_kActive);
-      raw = prefs.getStringList(_kSessions);
+      if (!identical(token, _sessionAccountToken)) return;
+      final requestedActiveId = prefs.getString(_accountKey(_kActive));
+      raw = prefs.getStringList(_accountKey(_kSessions));
+      _sessionNamespaceLoaded = true;
       final requestedActiveRaw = _activeRawSession(
         raw ?? const [],
         requestedActiveId,
       );
-      final cached = prefs.getString(_kSessionBootstrap);
+      final cached = prefs.getString(_accountKey(_kSessionBootstrap));
       if (cached != null &&
           requestedActiveId != null &&
           requestedActiveRaw != null) {
@@ -3695,6 +3906,7 @@ class AppState extends ChangeNotifier {
           final fingerprint = await Isolate.run(
             () => _sessionSourceFingerprint(requestedActiveRaw),
           );
+          if (!identical(token, _sessionAccountToken)) return;
           if (envelope['version'] != 1 ||
               envelope['sourceFingerprint'] != fingerprint) {
             throw const FormatException('stale session bootstrap');
@@ -3726,6 +3938,7 @@ class AppState extends ChangeNotifier {
           if (!encoded.startsWith(idPrefix)) continue;
           try {
             final candidate = await _decodeSessionForFirstFrame(encoded);
+            if (!identical(token, _sessionAccountToken)) return;
             if (candidate.id == requestedActiveId && !candidate.isSubagent) {
               activeJson = candidate.toJson();
               break;
@@ -3739,6 +3952,7 @@ class AppState extends ChangeNotifier {
         for (final encoded in raw) {
           try {
             final candidate = await _decodeSessionForFirstFrame(encoded);
+            if (!identical(token, _sessionAccountToken)) return;
             if (!candidate.isSubagent) {
               activeJson = candidate.toJson();
               break;
@@ -3762,7 +3976,7 @@ class AppState extends ChangeNotifier {
       final active = ChatSession.fromJson(tailJson);
       _setFirstFrameActiveSession(active);
       if (requestedActiveId != active.id) {
-        await prefs.setString(_kActive, active.id);
+        await prefs.setString(_accountKey(_kActive), active.id);
       }
       await _writeSessionBootstrapFromSession(
         prefs,
@@ -3770,6 +3984,7 @@ class AppState extends ChangeNotifier {
         _activeRawSession(raw, active.id),
       );
     } catch (_) {
+      if (!identical(token, _sessionAccountToken)) return;
       if (raw != null) {
         _deferredSessionJson ??= List<String>.of(raw);
       }
@@ -3802,7 +4017,7 @@ class AppState extends ChangeNotifier {
       return;
     }
     _deferredSessionJson = List<String>.of(
-      prefs.getStringList(_kSessions) ?? const [],
+      prefs.getStringList(_accountKey(_kSessions)) ?? const [],
     );
     _deferredSessionsPending = false;
     _expandDeferredDeletedSessionIds();
@@ -3843,20 +4058,31 @@ class AppState extends ChangeNotifier {
 
   void _scheduleSessionDeletion(String id, String? sandboxId) {
     if (!_notifiedDeletedSessionIds.add(id)) return;
+    final token = _sessionCleanupToken;
+    bool current() => identical(token, _sessionCleanupToken);
     // Enqueue the ledger fence synchronously BEFORE lifecycle callbacks can
     // schedule late hook/run events, including for deferred descendants.
-    final ledger = _SessionCleanup(() => SessionLedger.I.delete(id));
+    final ledger = _SessionCleanup(() async {
+      if (current()) await SessionLedger.I.delete(id);
+    });
     _ledgerDeletions[id] = ledger;
     _pendingWorkspaceDeletions.add(ledger);
     _pendingWorkspaceDeletions.add(
       _SessionCleanup(() async {
+        if (current()) await SessionSearch.I.deleteSession(id);
+      }),
+    );
+    _pendingWorkspaceDeletions.add(
+      _SessionCleanup(() async {
         final store = await _openMemoryStore();
-        store.deleteSession(id);
+        if (current()) store.deleteSession(id);
       }),
     );
     if (sandboxId != null) {
       _pendingWorkspaceDeletions.add(
-        _SessionCleanup(() => _workspaceDeleter(sandboxId)),
+        _SessionCleanup(() async {
+          if (current()) await _workspaceDeleter(sandboxId);
+        }),
       );
     }
     onSessionDeleted?.call(id);
@@ -3865,24 +4091,43 @@ class AppState extends ChangeNotifier {
   Future<void> _awaitWorkspaceDeletions() async {
     final observed = <_SessionCleanup>{};
     while (true) {
-      final pending = _pendingWorkspaceDeletions.where(
-        (task) => !observed.contains(task),
-      ).toList();
+      final pending = _pendingWorkspaceDeletions
+          .where((task) => !observed.contains(task))
+          .toList();
       if (pending.isEmpty) break;
       observed.addAll(pending);
       await Future.wait(pending.map((task) => task.pending));
       _pendingWorkspaceDeletions.removeWhere(
-        (task) => observed.contains(task) && !task.running && task.error == null,
+        (task) =>
+            observed.contains(task) && !task.running && task.error == null,
       );
     }
     _ledgerDeletions.removeWhere(
-      (_, task) => observed.contains(task) && !task.running && task.error == null,
+      (_, task) =>
+          observed.contains(task) && !task.running && task.error == null,
     );
     if (_pendingWorkspaceDeletions.any(
       (task) => task.running || task.error != null,
     )) {
       throw StateError('Session cleanup incomplete');
     }
+  }
+
+  /// Drain every deletion store, including FTS. Retry only failed operations;
+  /// completed lifecycle callbacks are never repeated. Owners captured by each
+  /// task reject a retry after an account transition.
+  Future<void> awaitSessionDeletions({bool retryFailed = false}) async {
+    final token = _sessionAccountToken;
+    await _loadDeferredSessionSnapshot();
+    if (!identical(token, _sessionAccountToken)) return;
+    if (retryFailed) {
+      for (final task in _pendingWorkspaceDeletions.toList()) {
+        await task.pending;
+        if (!identical(token, _sessionAccountToken)) return;
+        if (task.error != null) task.retry();
+      }
+    }
+    await _awaitWorkspaceDeletions();
   }
 
   /// Await ledger cleanup, including descendants discovered in deferred state.
@@ -3896,9 +4141,9 @@ class AppState extends ChangeNotifier {
     await _loadDeferredSessionSnapshot();
     final observed = <String>{};
     while (true) {
-      final entries = _ledgerDeletions.entries.where(
-        (entry) => !observed.contains(entry.key),
-      ).toList();
+      final entries = _ledgerDeletions.entries
+          .where((entry) => !observed.contains(entry.key))
+          .toList();
       if (entries.isEmpty) break;
       for (final entry in entries) {
         observed.add(entry.key);
@@ -3921,7 +4166,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _hydrateDeferredSessions() async {
+    final token = _sessionAccountToken;
     await _loadDeferredSessionSnapshot();
+    if (!identical(token, _sessionAccountToken)) return;
     final raw = _deferredSessionJson;
     if (raw == null) return;
     final generation = _deferredSessionGeneration;
@@ -4058,7 +4305,8 @@ class AppState extends ChangeNotifier {
     }
     // Same persisted creation identity but no provable overlap: retain all
     // saved history rather than silently truncate an already-edited projection.
-    if (prefixLength == null && live.createdAt == full.createdAt &&
+    if (prefixLength == null &&
+        live.createdAt == full.createdAt &&
         live.messages.length < full.messages.length) {
       prefixLength = full.messages.length;
     }
@@ -4155,12 +4403,21 @@ class AppState extends ChangeNotifier {
   // never while enqueueing streamed tokens. No transcript JSON is allocated.
   Object? _sessionNestedSignature(Object? value) {
     if (value is Map) {
-      return Object.hash('map', Object.hashAll(value.entries.map(
-        (entry) => Object.hash(entry.key, _sessionNestedSignature(entry.value)),
-      )));
+      return Object.hash(
+        'map',
+        Object.hashAll(
+          value.entries.map(
+            (entry) =>
+                Object.hash(entry.key, _sessionNestedSignature(entry.value)),
+          ),
+        ),
+      );
     }
     if (value is Iterable) {
-      return Object.hash('list', Object.hashAll(value.map(_sessionNestedSignature)));
+      return Object.hash(
+        'list',
+        Object.hashAll(value.map(_sessionNestedSignature)),
+      );
     }
     return Object.hash(value.runtimeType, value);
   }
@@ -4186,6 +4443,7 @@ class AppState extends ChangeNotifier {
   /// (Re)arm the trailing debounce. A zero window falls back to a microtask
   /// (the test default) so no wall-clock Timer is left pending in widget tests.
   void _armPersistDebounce() {
+    if (_settingsBusy) return;
     if (suspendCoalescedPersistenceForTest) return;
     _persistDebounceTimer?.cancel();
     if (_sessionPersistDebounce <= Duration.zero) {
@@ -4211,6 +4469,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _flushScheduledPersistence() async {
+    if (_settingsBusy) return;
     _cancelPersistDebounce();
     if (!_persistScheduled) return;
     _persistScheduled = false;
@@ -4224,6 +4483,7 @@ class AppState extends ChangeNotifier {
   /// Run a pending coalesced write immediately and await it. Called on session
   /// switch and lifecycle pause so a pending change is never dropped.
   Future<void> flushSessionPersistence() async {
+    if (_settingsBusy) return;
     _cancelPersistDebounce();
     _persistScheduled = false;
     final wrote = await _ensureSessionWrite();
@@ -4300,6 +4560,11 @@ class AppState extends ChangeNotifier {
   }
 
   Future<bool> _writeSessionsNow() async {
+    if (!sessionAccountReady) return false;
+    final token = _sessionAccountToken;
+    final sessionsKey = _accountKey(_kSessions);
+    final activeKey = _accountKey(_kActive);
+    final bootstrapKey = _accountKey(_kSessionBootstrap);
     try {
       if (failNextSessionWriteForTest) {
         failNextSessionWriteForTest = false;
@@ -4307,6 +4572,8 @@ class AppState extends ChangeNotifier {
       }
       final prefs = await SharedPreferences.getInstance();
       await _loadDeferredSessionSnapshot();
+      if (!identical(token, _sessionAccountToken)) return false;
+      _sessionNamespaceLoaded = true;
       final dirtySnapshot = Set<String>.of(_dirtySessionIds);
       final deferredGeneration = _deferredSessionGeneration;
       final deletedSnapshot = Set<String>.of(_deferredDeletedSessionIds);
@@ -4317,32 +4584,39 @@ class AppState extends ChangeNotifier {
       // The cache is a derivative of exact session-list truth. Either interrupted
       // write order produces a fingerprint mismatch and a safe fallback.
       try {
-        await _writeSessionBootstrapFromSession(prefs, active, activeRaw);
+        await _writeSessionBootstrapFromSession(
+          prefs,
+          active,
+          activeRaw,
+          key: bootstrapKey,
+        );
       } catch (e) {
         Diag.swallow('state', e);
       }
-      if (!await prefs.setStringList(_kSessions, encoded)) {
+      if (!await prefs.setStringList(sessionsKey, encoded)) {
         throw StateError('Session storage rejected write');
       }
       final activeSaved = activeIdWritten != null
-          ? await prefs.setString(_kActive, activeIdWritten)
-          : await prefs.remove(_kActive);
+          ? await prefs.setString(activeKey, activeIdWritten)
+          : await prefs.remove(activeKey);
       if (!activeSaved) {
         throw StateError('Active session storage rejected write');
       }
+      if (!identical(token, _sessionAccountToken)) return false;
       _persistedActiveSessionId = activeIdWritten;
       // A delete can affect only opaque/deferred rows, leaving live membership
       // unchanged. Acknowledge precisely the fences included in this write.
       _persistedDeferredGeneration = deferredGeneration;
       _persistedDeferredDeletedIds = deletedSnapshot;
       _dirtySessionIds.removeAll(dirtySnapshot);
-      await _awaitWorkspaceDeletions();
+      await awaitSessionDeletions();
       if (lastSessionPersistFailed) {
         lastSessionPersistFailed = false;
         notifyListeners();
       }
       return true;
     } catch (_) {
+      if (!identical(token, _sessionAccountToken)) return false;
       // A failed write must not leave the derivative caches claiming the
       // changes are durable; force a full re-encode next time. Returning false
       // stops the coalescing loop from retrying forever.
@@ -4358,10 +4632,12 @@ class AppState extends ChangeNotifier {
   Future<void> _writeSessionBootstrapFromSession(
     SharedPreferences prefs,
     ChatSession? active,
-    String? activeRaw,
-  ) async {
+    String? activeRaw, {
+    String? key,
+  }) async {
+    key ??= _accountKey(_kSessionBootstrap);
     if (active == null || active.isSubagent || activeRaw == null) {
-      await prefs.remove(_kSessionBootstrap);
+      await prefs.remove(key);
       return;
     }
     final json = active.toJson();
@@ -4371,7 +4647,7 @@ class AppState extends ChangeNotifier {
         : 0;
     json['messages'] = messages.sublist(tailStart);
     await prefs.setString(
-      _kSessionBootstrap,
+      key,
       jsonEncode({
         'version': 1,
         'sourceFingerprint': _sessionSourceFingerprint(activeRaw),
@@ -4426,12 +4702,15 @@ class AppState extends ChangeNotifier {
       }
       final full = ChatSession.fromJson(fullJson);
       final prefix = _deferredProjectionPrefix(full, session);
-      final raw = jsonEncode(session.toJson()..['messages'] = prefix != null
-          ? [
-              ...((fullJson['messages'] as List?) ?? const []).take(prefix),
-              ...session.messages.map((m) => m.toJson()),
-            ]
-          : fullJson['messages'] ?? const []);
+      final raw = jsonEncode(
+        session.toJson()
+          ..['messages'] = prefix != null
+              ? [
+                  ...((fullJson['messages'] as List?) ?? const []).take(prefix),
+                  ...session.messages.map((m) => m.toJson()),
+                ]
+              : fullJson['messages'] ?? const [],
+      );
       rawById[session.id] = raw;
       signatureById[session.id] = _sessionContentSignature(session);
       sessionEncodeCountsForTest[session.id] =
@@ -4464,8 +4743,8 @@ class AppState extends ChangeNotifier {
             encoded.add(
               needsEncode(partial)
                   ? identical(partial, _deferredActiveSession)
-                      ? encodeMerged(partial, fullJson)
-                      : encode(partial)
+                        ? encodeMerged(partial, fullJson)
+                        : encode(partial)
                   : reuse(partial),
             );
           } else if (partial != null) {
@@ -4512,13 +4791,13 @@ class AppState extends ChangeNotifier {
     _invalidateSessionPersistenceCache();
   }
 
-  /// Delete all user data: sessions, workspaces, providers, keys, plugin
-  /// state, usage log, memories, and app preferences. Resets in-memory
-  /// state to defaults and seeds a fresh session.
+  /// Legacy best-effort local reset, retained for existing callers. This does
+  /// not establish verified all-store completion and must not be bound to the
+  /// SettingsActions reset capability. Its historical partial-failure semantics
+  /// are separate from the transactional transcript restore contract.
   Future<void> deleteAllData() async {
+    if (_settingsBusy) throw StateError('Settings operation in progress.');
     try {
-      // An unavailable platform directory must not prevent the remaining reset.
-      // Keep the failure visible to memory consumers instead of showing old data.
       try {
         (await _openMemoryStore()).deleteAll();
         _memoryError = null;
@@ -4531,7 +4810,6 @@ class AppState extends ChangeNotifier {
       await prefs.clear();
       await runtimeStatusStore.clear();
       _clearDeferredSessions();
-      // Secure-storage keys (API credentials, MCP env) are cleared below.
       for (final s in List.of(sessions)) {
         final sid = s.sandboxId;
         if (sid != null) unawaited(SandboxService.I.deleteWorkspace(sid));
@@ -4552,15 +4830,9 @@ class AppState extends ChangeNotifier {
       autoRunSafeCommands = true;
       shareSessionMemory = false;
       shareStudioOnRestart = true;
-      // deleteAllData resets in-memory state to the persisted DEFAULTS (prefs
-      // were just wiped, so the next load falls through to `?? true`).
       shareBrowserOnRestart = true;
       lastSelectedModel = '';
       lastSelectedProviderId = null;
-      // Clear the in-memory GitHub login as well: deleteAll() wipes the token
-      // from secure storage, and leaving isLoggedIn true meant Studio kept
-      // rendering a signed-in UI until the next restart — memory and disk
-      // disagreeing about the same fact.
       try {
         await GitHubService.I.signOut();
       } catch (e) {
@@ -4986,7 +5258,8 @@ class AppState extends ChangeNotifier {
     themeMode = mode;
     if (mode == 'system') {
       // Resolve from platform brightness.
-      final brightness = WidgetsBinding.instance.platformDispatcher.platformBrightness;
+      final brightness =
+          WidgetsBinding.instance.platformDispatcher.platformBrightness;
       final isLight = brightness == Brightness.light;
       lightTheme = isLight;
       Aether.dark = !isLight;
@@ -5198,6 +5471,30 @@ class AppState extends ChangeNotifier {
   final List<McpServer> mcpServers = [];
   final Map<String, ServiceStatus> serviceStatus = {};
 
+  /// Pending `setMcpOAuthConfig` writes queued by [_addImportedMcpRow],
+  /// keyed by canonical id. Tests that race import against removal (or
+  /// want to observe a failed OAuth-config write rolling the import row
+  /// back) can await [awaitPendingMcpOAuthImports] to drain the queue.
+  final Map<String, Future<void>> _mcpOAuthImportWrites =
+      <String, Future<void>>{};
+
+  /// Test seam: when non-null, [_addImportedMcpRow] calls this instead of
+  /// `McpService.I.setMcpOAuthConfig`. Returning a future that completes
+  /// with an error exercises the rollback path.
+  @visibleForTesting
+  static Future<void> Function(String canonicalId, McpOAuthConfig config)?
+      mcpOAuthWriteOverrideForTest;
+
+  /// Settles after every pending OAuth-config write queued by import. Safe
+  /// to call multiple times; failed writes have already rolled the row
+  /// back by the time this returns.
+  Future<void> awaitPendingMcpOAuthImports() async {
+    while (_mcpOAuthImportWrites.isNotEmpty) {
+      final pending = _mcpOAuthImportWrites.values.toList();
+      await Future.wait(pending);
+    }
+  }
+
   void updateServiceStatus(
     String key,
     ServiceHealth health, {
@@ -5241,8 +5538,11 @@ class AppState extends ChangeNotifier {
     return current.id;
   }
 
-  Future<MemoryStore> _openMemoryStore() async => _memoryStore ??=
-      MemoryStore(Directory('${(await getApplicationDocumentsDirectory()).path}/personal-memory'));
+  Future<MemoryStore> _openMemoryStore() async => _memoryStore ??= MemoryStore(
+    Directory(
+      '${(await getApplicationDocumentsDirectory()).path}/personal-memory',
+    ),
+  );
 
   Future<MemoryStore> prepareMemory() => _memoryOpening ??= () async {
     try {
@@ -5278,7 +5578,9 @@ class AppState extends ChangeNotifier {
           final name = 'legacy-${digest.substring(0, 24)}.md';
           if (store.list(null).contains(name)) {
             if (store.read(null, name).content != content) {
-              throw StateError('Legacy memory conflicts with $name; original snippets retained.');
+              throw StateError(
+                'Legacy memory conflicts with $name; original snippets retained.',
+              );
             }
           } else {
             store.save(null, name, content, mode: 'create');
@@ -5302,7 +5604,9 @@ class AppState extends ChangeNotifier {
       final owner = memoryOwner(sessionId);
       if (_memoryError != null) return 'Memory unavailable: $_memoryError';
       return _memoryStore?.context(owner) ?? '';
-    } catch (e) { return 'Memory unavailable: $e'; }
+    } catch (e) {
+      return 'Memory unavailable: $e';
+    }
   }
 
   Future<void> saveMemory(MemoryItem m) async {
@@ -5540,9 +5844,7 @@ class AppState extends ChangeNotifier {
   /// agent clone that pinned "the active session" would repoint whichever chat
   /// the user happened to be looking at.
   void setSessionWorkspaceFolder(String? path, {String? sessionId}) {
-    final s = sessionId == null
-        ? activeSession
-        : sessionById(sessionId);
+    final s = sessionId == null ? activeSession : sessionById(sessionId);
     if (s == null) return;
     final normalized = (path == null || path.trim().isEmpty)
         ? null
@@ -5646,6 +5948,7 @@ class AppState extends ChangeNotifier {
   }
 
   void deleteSession(String id) {
+    if (_settingsBusy) throw StateError('Settings operation in progress.');
     final s = sessions.where((x) => x.id == id).firstOrNull;
     // A chat owns its subagents: deleting it deletes their transcripts and
     // workspaces too, otherwise orphan children linger invisibly forever.
@@ -6127,43 +6430,46 @@ class AppState extends ChangeNotifier {
   static const _maxUsageEntries = 2000;
 
   Future<void> _loadUsage() async {
+    final token = _sessionAccountToken;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getStringList(_kUsage);
+      if (!identical(token, _sessionAccountToken)) return;
+      final raw = prefs.getStringList(_accountKey(_kUsage));
+      usageLog.clear();
       if (raw == null) return;
-      usageLog
-        ..clear()
-        ..addAll(
-          raw.map((e) {
-            try {
-              return UsageEntry.fromJson(jsonDecode(e) as Map<String, dynamic>);
-            } catch (_) {
-              return null;
-            }
-          }).whereType<UsageEntry>(),
-        );
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  Future<void> _persistUsage() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      // Keep the most recent [_maxUsageEntries].
-      final recent = usageLog.length > _maxUsageEntries
-          ? usageLog.sublist(usageLog.length - _maxUsageEntries)
-          : usageLog;
-      await prefs.setStringList(
-        _kUsage,
-        recent.map((e) => jsonEncode(e.toJson())).toList(),
+      usageLog.addAll(
+        raw.map((e) {
+          try {
+            return UsageEntry.fromJson(jsonDecode(e) as Map<String, dynamic>);
+          } catch (_) {
+            return null;
+          }
+        }).whereType<UsageEntry>(),
       );
     } catch (e) {
       Diag.swallow('state', e);
     }
   }
 
-  void appendUsage(UsageEntry e) {
+  Future<void> _persistUsage() async {
+    final token = _sessionAccountToken;
+    final key = _accountKey(_kUsage);
+    final recent = usageLog.length > _maxUsageEntries
+        ? usageLog.sublist(usageLog.length - _maxUsageEntries)
+        : usageLog;
+    final snapshot = recent.map((e) => jsonEncode(e.toJson())).toList();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!identical(token, _sessionAccountToken)) return;
+      await prefs.setStringList(key, snapshot);
+    } catch (e) {
+      Diag.swallow('state', e);
+    }
+  }
+
+  void appendUsage(UsageEntry e, {Object? owner}) {
+    if (!_sessionAccountReady) return;
+    if (owner != null && !identical(owner, _sessionAccountToken)) return;
     usageLog.add(e);
     _persistUsage();
     refresh();
@@ -6387,12 +6693,10 @@ class AppState extends ChangeNotifier {
         )
         .toList();
     for (final s in toRemoveMcps) {
-      if (s.connected) {
-        try {
-          await McpService.I.disconnect(s.canonicalId);
-        } catch (e) {
-          Diag.swallow('state', e);
-        }
+      try {
+        await McpService.I.removeMcpOAuth(s.canonicalId);
+      } catch (e) {
+        Diag.swallow('state', e);
       }
       mcpServers.remove(s);
     }
@@ -6834,7 +7138,7 @@ class AppState extends ChangeNotifier {
         )
         .toList();
     for (final server in removed) {
-      await McpService.I.disconnect(server.canonicalId);
+      await McpService.I.removeMcpOAuth(server.canonicalId);
       await Future.wait([
         deleteMcpEnv(server.canonicalId),
         deleteMcpHeaders(server.canonicalId),
@@ -6927,13 +7231,15 @@ class AppState extends ChangeNotifier {
     final owned = mcpServers.where((s) => s.ownerPluginId == pluginId).toList();
     for (final server in owned) {
       server.connected = false;
-      await McpService.I.disconnect(server.canonicalId);
       if (uninstall) {
+        await McpService.I.removeMcpOAuth(server.canonicalId);
         await Future.wait([
           deleteMcpEnv(server.canonicalId),
           deleteMcpHeaders(server.canonicalId),
         ]);
         mcpServers.remove(server);
+      } else {
+        await McpService.I.disconnect(server.canonicalId);
       }
     }
     await _persistCustomMcpServers();
@@ -7417,7 +7723,44 @@ class AppState extends ChangeNotifier {
     // authorization flow can pick it up. The OAuth browser-capture UI is
     // out of scope — config + token storage + buildMcpAuthorizeUrl exist.
     if (oauth != null) {
-      unawaited(McpService.I.setMcpOAuthConfig(server.canonicalId, oauth));
+      final canonicalId = server.canonicalId;
+      final writer = mcpOAuthWriteOverrideForTest ??
+          McpService.I.setMcpOAuthConfig;
+      // Fence the write so a racing remove can await it and tests can
+      // observe failure-driven rollback deterministically. Chain after
+      // any earlier queued write for the same canonical id so a repeat
+      // import never reorders behind an in-flight failure handler. Swallow
+      // a prior failure on the chain: it already rolled back its own row,
+      // and must not skip this row's write.
+      final previous = _mcpOAuthImportWrites[canonicalId];
+      final tracked = (previous ?? Future<void>.value())
+          .catchError((Object _) {})
+          .then((_) => writer(canonicalId, oauth))
+          .then(
+        (_) {},
+        onError: (Object err, StackTrace _) {
+          // Roll the import back: if the row we added is still present and
+          // unchanged, remove it and re-persist. A later remove/replace
+          // that already succeeded must not be clobbered — identity check
+          // against the exact server instance guards against that.
+          final idx = mcpServers.indexOf(server);
+          if (idx >= 0) {
+            mcpServers.removeAt(idx);
+            if (headers.isNotEmpty) {
+              unawaited(deleteMcpHeaders(canonicalId));
+            }
+            unawaited(_persistCustomMcpServers());
+            refresh();
+          }
+          Diag.swallow('state', err);
+        },
+      );
+      _mcpOAuthImportWrites[canonicalId] = tracked;
+      unawaited(tracked.whenComplete(() {
+        if (identical(_mcpOAuthImportWrites[canonicalId], tracked)) {
+          _mcpOAuthImportWrites.remove(canonicalId);
+        }
+      }));
     }
     return server;
   }
@@ -8003,14 +8346,24 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> removeMcpServer(McpServer s) async {
+    // Drain any still-queued OAuth-config import write for this canonical
+    // id so the removal cannot race ahead of its secure-store sidecar
+    // publication (and leave an orphan token after the user removed the
+    // row). A failed queued write already rolls the row back; waiting is
+    // still safe because the queue strips completed entries.
+    final pending = _mcpOAuthImportWrites[s.canonicalId];
+    if (pending != null) {
+      await pending;
+    }
     mcpServers.remove(s);
     if (!s.custom) {
       await _recordRemovedBuiltinSeed(s.canonicalId);
     }
     // Task 4: full teardown — kill the process, cancel any pending
-    // reconnect, wipe secure env/headers, and prune the connected intent
-    // so a restart never auto-respawns a removed server.
-    await McpService.I.disconnect(s.canonicalId);
+    // reconnect, wipe secure env/headers, drop persisted OAuth tokens/config,
+    // and prune the connected intent so a restart never auto-respawns a
+    // removed server.
+    await McpService.I.removeMcpOAuth(s.canonicalId);
     await Future.wait([
       deleteMcpEnv(s.canonicalId),
       deleteMcpHeaders(s.canonicalId),
@@ -8927,84 +9280,419 @@ class AppState extends ChangeNotifier {
     // fabricated number.
     const extra = <(String, String, String, String)>[
       // ── Top CLI-used plugins/MCP ──
-      ('Puppeteer MCP', 'mcp-community', 'Headless browser automation for agents.', 'MCP'),
-      ('Postgres Tools', 'mcp-community', 'Query and inspect Postgres databases.', 'MCP'),
+      (
+        'Puppeteer MCP',
+        'mcp-community',
+        'Headless browser automation for agents.',
+        'MCP',
+      ),
+      (
+        'Postgres Tools',
+        'mcp-community',
+        'Query and inspect Postgres databases.',
+        'MCP',
+      ),
       ('Figma Bridge', 'figma', 'Read design frames and tokens.', 'MCP'),
-      ('Slack Notify', 'community', 'Send agent updates to Slack channels.', 'Tool'),
-      ('Shell History', 'ovidai', 'Searchable sandbox terminal history.', 'Tool'),
-      ('Linear Sync', 'community', 'Create and update Linear issues from chat.', 'Tool'),
-      ('Sentry Watch', 'community', 'Pull errors into chat and let agents fix them.', 'Tool'),
-      ('Stripe MCP', 'stripe', 'Payments, invoices and customers via MCP.', 'MCP'),
-      ('Vercel Deploy', 'vercel', 'Ship previews straight from the sandbox.', 'Tool'),
+      (
+        'Slack Notify',
+        'community',
+        'Send agent updates to Slack channels.',
+        'Tool',
+      ),
+      (
+        'Shell History',
+        'ovidai',
+        'Searchable sandbox terminal history.',
+        'Tool',
+      ),
+      (
+        'Linear Sync',
+        'community',
+        'Create and update Linear issues from chat.',
+        'Tool',
+      ),
+      (
+        'Sentry Watch',
+        'community',
+        'Pull errors into chat and let agents fix them.',
+        'Tool',
+      ),
+      (
+        'Stripe MCP',
+        'stripe',
+        'Payments, invoices and customers via MCP.',
+        'MCP',
+      ),
+      (
+        'Vercel Deploy',
+        'vercel',
+        'Ship previews straight from the sandbox.',
+        'Tool',
+      ),
       ('DB Designer', 'community', 'Draw and migrate schemas in chat.', 'Tool'),
-      ('Audio Notes', 'community', 'Transcribe meetings into sessions.', 'Tool'),
+      (
+        'Audio Notes',
+        'community',
+        'Transcribe meetings into sessions.',
+        'Tool',
+      ),
       ('Tailwind Helper', 'community', 'Tailwind-aware UI generation.', 'Tool'),
       ('Terraform MCP', 'hashicorp', 'Plan and apply infra safely.', 'MCP'),
-      ('Notion Sync', 'community', 'Two-way sync with Notion databases.', 'Tool'),
-      ('WhatsApp Bridge', 'community', 'Let the agent reply on WhatsApp via template.', 'Tool'),
-      ('YouTube Summarizer', 'community', 'Paste a link, get a summary + chapters.', 'Tool'),
-      ('Email Drafts', 'community', 'Generate and queue emails from chat.', 'Tool'),
-      ('Exa Search MCP', 'exa', 'Semantic web search — find docs, APIs, papers.', 'MCP'),
-      ('Playwright MCP', 'playwright', 'Modern browser automation with smart waiting.', 'MCP'),
-      ('Discord MCP', 'discord-mcp', 'Read/send Discord messages, manage servers.', 'MCP'),
-      ('Telegram MCP', 'telegram', 'Bot API — send messages, listen to channels.', 'MCP'),
+      (
+        'Notion Sync',
+        'community',
+        'Two-way sync with Notion databases.',
+        'Tool',
+      ),
+      (
+        'WhatsApp Bridge',
+        'community',
+        'Let the agent reply on WhatsApp via template.',
+        'Tool',
+      ),
+      (
+        'YouTube Summarizer',
+        'community',
+        'Paste a link, get a summary + chapters.',
+        'Tool',
+      ),
+      (
+        'Email Drafts',
+        'community',
+        'Generate and queue emails from chat.',
+        'Tool',
+      ),
+      (
+        'Exa Search MCP',
+        'exa',
+        'Semantic web search — find docs, APIs, papers.',
+        'MCP',
+      ),
+      (
+        'Playwright MCP',
+        'playwright',
+        'Modern browser automation with smart waiting.',
+        'MCP',
+      ),
+      (
+        'Discord MCP',
+        'discord-mcp',
+        'Read/send Discord messages, manage servers.',
+        'MCP',
+      ),
+      (
+        'Telegram MCP',
+        'telegram',
+        'Bot API — send messages, listen to channels.',
+        'MCP',
+      ),
       ('Obsidian MCP', 'obsidian', 'Read/write Obsidian vault notes.', 'MCP'),
-      ('Firebase MCP', 'firebase', 'Firestore, Auth, Storage — full Firebase access.', 'MCP'),
-      ('Supabase MCP', 'supabase', 'Postgres + Auth + Storage from Supabase.', 'MCP'),
-      ('Airtable MCP', 'airtable', 'Read/write Airtable bases and tables.', 'MCP'),
-      ('Google Drive MCP', 'google', 'Search, read, and upload files to Drive.', 'MCP'),
-      ('GitLab MCP', 'gitlab', 'GitLab repos, MRs, issues — full DevOps.', 'MCP'),
-      ('Jira MCP', 'atlassian', 'Create and update Jira issues and sprints.', 'MCP'),
-      ('Trello MCP', 'atlassian', 'Boards, cards, lists — Trello automation.', 'MCP'),
+      (
+        'Firebase MCP',
+        'firebase',
+        'Firestore, Auth, Storage — full Firebase access.',
+        'MCP',
+      ),
+      (
+        'Supabase MCP',
+        'supabase',
+        'Postgres + Auth + Storage from Supabase.',
+        'MCP',
+      ),
+      (
+        'Airtable MCP',
+        'airtable',
+        'Read/write Airtable bases and tables.',
+        'MCP',
+      ),
+      (
+        'Google Drive MCP',
+        'google',
+        'Search, read, and upload files to Drive.',
+        'MCP',
+      ),
+      (
+        'GitLab MCP',
+        'gitlab',
+        'GitLab repos, MRs, issues — full DevOps.',
+        'MCP',
+      ),
+      (
+        'Jira MCP',
+        'atlassian',
+        'Create and update Jira issues and sprints.',
+        'MCP',
+      ),
+      (
+        'Trello MCP',
+        'atlassian',
+        'Boards, cards, lists — Trello automation.',
+        'MCP',
+      ),
       ('Redis MCP', 'redis', 'Key-value store operations and pub/sub.', 'MCP'),
-      ('MongoDB MCP', 'mongodb', 'Document queries, aggregations, indexes.', 'MCP'),
-      ('S3 MCP', 'aws', 'S3 buckets — upload, list, download, presigned URLs.', 'MCP'),
-      ('Cloudflare MCP', 'cloudflare', 'Workers, KV, R2, DNS — edge compute.', 'MCP'),
-      ('Docker MCP', 'docker', 'Manage containers, images, volumes, networks.', 'MCP'),
-      ('Kubernetes MCP', 'k8s', 'Pods, services, deployments — cluster control.', 'MCP'),
-      ('OpenAI DALL\u00b7E MCP', 'openai', 'Image generation via DALL\u00b7E 3.', 'MCP'),
-      ('ElevenLabs MCP', 'elevenlabs', 'Text-to-speech with realistic voices.', 'MCP'),
-      ('LangChain MCP', 'langchain', 'Chains, agents, memory — full LangChain.', 'MCP'),
-      ('AutoGPT Bridge', 'agpt', 'Chain multiple agents for complex tasks.', 'MCP'),
-      ('Vector DB MCP', 'pinecone', 'Pinecone/Weaviate — vector search & memory.', 'MCP'),
-      ('Appwrite MCP', 'appwrite', 'Auth, DB, storage, functions — backend suite.', 'MCP'),
-      ('PocketBase MCP', 'pocketbase', 'Lightweight backend in a single binary.', 'MCP'),
-      ('Cal.com MCP', 'cal', 'Scheduling, bookings, calendar management.', 'MCP'),
-      ('Zapier MCP', 'zapier', 'Trigger zaps and read automation results.', 'MCP'),
+      (
+        'MongoDB MCP',
+        'mongodb',
+        'Document queries, aggregations, indexes.',
+        'MCP',
+      ),
+      (
+        'S3 MCP',
+        'aws',
+        'S3 buckets — upload, list, download, presigned URLs.',
+        'MCP',
+      ),
+      (
+        'Cloudflare MCP',
+        'cloudflare',
+        'Workers, KV, R2, DNS — edge compute.',
+        'MCP',
+      ),
+      (
+        'Docker MCP',
+        'docker',
+        'Manage containers, images, volumes, networks.',
+        'MCP',
+      ),
+      (
+        'Kubernetes MCP',
+        'k8s',
+        'Pods, services, deployments — cluster control.',
+        'MCP',
+      ),
+      (
+        'OpenAI DALL\u00b7E MCP',
+        'openai',
+        'Image generation via DALL\u00b7E 3.',
+        'MCP',
+      ),
+      (
+        'ElevenLabs MCP',
+        'elevenlabs',
+        'Text-to-speech with realistic voices.',
+        'MCP',
+      ),
+      (
+        'LangChain MCP',
+        'langchain',
+        'Chains, agents, memory — full LangChain.',
+        'MCP',
+      ),
+      (
+        'AutoGPT Bridge',
+        'agpt',
+        'Chain multiple agents for complex tasks.',
+        'MCP',
+      ),
+      (
+        'Vector DB MCP',
+        'pinecone',
+        'Pinecone/Weaviate — vector search & memory.',
+        'MCP',
+      ),
+      (
+        'Appwrite MCP',
+        'appwrite',
+        'Auth, DB, storage, functions — backend suite.',
+        'MCP',
+      ),
+      (
+        'PocketBase MCP',
+        'pocketbase',
+        'Lightweight backend in a single binary.',
+        'MCP',
+      ),
+      (
+        'Cal.com MCP',
+        'cal',
+        'Scheduling, bookings, calendar management.',
+        'MCP',
+      ),
+      (
+        'Zapier MCP',
+        'zapier',
+        'Trigger zaps and read automation results.',
+        'MCP',
+      ),
       ('Make.com MCP', 'make', 'Run Make.com scenarios from agent.', 'MCP'),
-      ('Bitbucket MCP', 'atlassian', 'Repos, PRs, pipelines for Bitbucket.', 'MCP'),
-      ('Vercel MCP', 'vercel', 'Deploy, manage projects, domains via API.', 'MCP'),
+      (
+        'Bitbucket MCP',
+        'atlassian',
+        'Repos, PRs, pipelines for Bitbucket.',
+        'MCP',
+      ),
+      (
+        'Vercel MCP',
+        'vercel',
+        'Deploy, manage projects, domains via API.',
+        'MCP',
+      ),
       ('Railway MCP', 'railway', 'Deploy and manage Railway services.', 'MCP'),
       ('Heroku MCP', 'heroku', 'Dyno management, config vars, addons.', 'MCP'),
-      ('DigitalOcean MCP', 'digitalocean', 'Droplets, App Platform, Spaces, DNS.', 'MCP'),
+      (
+        'DigitalOcean MCP',
+        'digitalocean',
+        'Droplets, App Platform, Spaces, DNS.',
+        'MCP',
+      ),
       ('Twilio MCP', 'twilio', 'SMS, calls, WhatsApp — messaging APIs.', 'MCP'),
-      ('Discord Bot Builder', 'discord-mcp', 'Build and deploy Discord bots from chat.', 'Agent'),
-      ('Web Scraper Pro', 'ovidai', 'Visual CSS selector \u2192 structured data.', 'Tool'),
+      (
+        'Discord Bot Builder',
+        'discord-mcp',
+        'Build and deploy Discord bots from chat.',
+        'Agent',
+      ),
+      (
+        'Web Scraper Pro',
+        'ovidai',
+        'Visual CSS selector \u2192 structured data.',
+        'Tool',
+      ),
       ('API Tester', 'ovidai', 'Build and test REST APIs from chat.', 'Tool'),
-      ('Regex Builder', 'ovidai', 'Natural language \u2192 regex with tests.', 'Tool'),
-      ('SQL Formatter', 'ovidai', 'Pretty-print and optimize SQL queries.', 'Tool'),
-      ('JSON Visualizer', 'ovidai', 'Paste JSON \u2192 interactive tree explorer.', 'Tool'),
-      ('Env Manager', 'ovidai', 'Manage .env files across repos safely.', 'Tool'),
-      ('Log Analyzer', 'ovidai', 'Parse and explain log files with patterns.', 'Tool'),
-      ('Git Diff Explain', 'ovidai', 'AI explanation of what a diff actually does.', 'Tool'),
-      ('File Converter', 'ovidai', 'Convert between formats: CSV/JSON/YAML/XML.', 'Tool'),
-      ('QR Generator', 'ovidai', 'Generate QR codes for URLs, WiFi, contact cards.', 'Tool'),
-      ('Password Vault', 'ovidai', 'Secure local password manager with autofill.', 'Tool'),
-      ('SSH Key Manager', 'ovidai', 'Generate and manage SSH keys for servers.', 'Tool'),
-      ('Cron Designer', 'ovidai', 'Visual cron schedule builder and explainer.', 'Tool'),
-      ('Markdown Editor', 'ovidai', 'Live-preview markdown editor with export.', 'Tool'),
-      ('Mermaid Diagrams', 'ovidai', 'Flowcharts, sequence diagrams from text.', 'Tool'),
-      ('Excalidraw Bridge', 'excalidraw', 'Draw diagrams in Excalidraw, sync to repo.', 'Tool'),
-      ('Color Palette Gen', 'ovidai', 'Generate accessible color palettes from descriptions.', 'Tool'),
-      ('Icon Library', 'ovidai', 'Search 200k+ icons (Lucide, Material, Feather).', 'Tool'),
-      ('Font Preview', 'ovidai', 'Preview Google Fonts with custom text.', 'Tool'),
-      ('Code Review AI', 'ovidai', 'AI-powered code review with fix suggestions.', 'Agent'),
-      ('Test Writer', 'ovidai', 'Generate unit tests for any function/class.', 'Agent'),
-      ('README Writer', 'ovidai', 'Auto-generate professional README files.', 'Agent'),
-      ('Changelog Gen', 'ovidai', 'Generate changelog from git history.', 'Agent'),
-      ('Commit Msg Helper', 'ovidai', 'AI commit messages following Conventional Commits.', 'Agent'),
-      ('Issue Triager', 'ovidai', 'Categorize and prioritize GitHub issues.', 'Agent'),
-      ('Release Notes', 'ovidai', 'Draft release notes from merged PRs.', 'Agent'),
+      (
+        'Regex Builder',
+        'ovidai',
+        'Natural language \u2192 regex with tests.',
+        'Tool',
+      ),
+      (
+        'SQL Formatter',
+        'ovidai',
+        'Pretty-print and optimize SQL queries.',
+        'Tool',
+      ),
+      (
+        'JSON Visualizer',
+        'ovidai',
+        'Paste JSON \u2192 interactive tree explorer.',
+        'Tool',
+      ),
+      (
+        'Env Manager',
+        'ovidai',
+        'Manage .env files across repos safely.',
+        'Tool',
+      ),
+      (
+        'Log Analyzer',
+        'ovidai',
+        'Parse and explain log files with patterns.',
+        'Tool',
+      ),
+      (
+        'Git Diff Explain',
+        'ovidai',
+        'AI explanation of what a diff actually does.',
+        'Tool',
+      ),
+      (
+        'File Converter',
+        'ovidai',
+        'Convert between formats: CSV/JSON/YAML/XML.',
+        'Tool',
+      ),
+      (
+        'QR Generator',
+        'ovidai',
+        'Generate QR codes for URLs, WiFi, contact cards.',
+        'Tool',
+      ),
+      (
+        'Password Vault',
+        'ovidai',
+        'Secure local password manager with autofill.',
+        'Tool',
+      ),
+      (
+        'SSH Key Manager',
+        'ovidai',
+        'Generate and manage SSH keys for servers.',
+        'Tool',
+      ),
+      (
+        'Cron Designer',
+        'ovidai',
+        'Visual cron schedule builder and explainer.',
+        'Tool',
+      ),
+      (
+        'Markdown Editor',
+        'ovidai',
+        'Live-preview markdown editor with export.',
+        'Tool',
+      ),
+      (
+        'Mermaid Diagrams',
+        'ovidai',
+        'Flowcharts, sequence diagrams from text.',
+        'Tool',
+      ),
+      (
+        'Excalidraw Bridge',
+        'excalidraw',
+        'Draw diagrams in Excalidraw, sync to repo.',
+        'Tool',
+      ),
+      (
+        'Color Palette Gen',
+        'ovidai',
+        'Generate accessible color palettes from descriptions.',
+        'Tool',
+      ),
+      (
+        'Icon Library',
+        'ovidai',
+        'Search 200k+ icons (Lucide, Material, Feather).',
+        'Tool',
+      ),
+      (
+        'Font Preview',
+        'ovidai',
+        'Preview Google Fonts with custom text.',
+        'Tool',
+      ),
+      (
+        'Code Review AI',
+        'ovidai',
+        'AI-powered code review with fix suggestions.',
+        'Agent',
+      ),
+      (
+        'Test Writer',
+        'ovidai',
+        'Generate unit tests for any function/class.',
+        'Agent',
+      ),
+      (
+        'README Writer',
+        'ovidai',
+        'Auto-generate professional README files.',
+        'Agent',
+      ),
+      (
+        'Changelog Gen',
+        'ovidai',
+        'Generate changelog from git history.',
+        'Agent',
+      ),
+      (
+        'Commit Msg Helper',
+        'ovidai',
+        'AI commit messages following Conventional Commits.',
+        'Agent',
+      ),
+      (
+        'Issue Triager',
+        'ovidai',
+        'Categorize and prioritize GitHub issues.',
+        'Agent',
+      ),
+      (
+        'Release Notes',
+        'ovidai',
+        'Draft release notes from merged PRs.',
+        'Agent',
+      ),
     ];
     plugins.addAll([
       for (final (n, a, d, c) in extra)

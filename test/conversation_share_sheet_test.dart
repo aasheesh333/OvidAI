@@ -9,6 +9,33 @@ import 'package:ovid_ai/ui/conversation_share_sheet.dart';
 import 'conversation_share_service_test.dart'
     show shareSession, shareReceipt, shareUrl;
 
+/// The AetherSheet redesign nests the pinned bottom action inside its own
+/// outer scroll view, so on the 800x600 test surface some controls sit below
+/// the fold. Scroll the target into view (handles both the sheet's outer
+/// scroll and the inner preview ListView) before tapping.
+Future<void> scrollAndTap(WidgetTester tester, String label) async {
+  final finder = find.text(label);
+  if (tester.any(finder)) {
+    await tester.ensureVisible(finder);
+  } else {
+    // Entries inside the sheet's preview ListView are built lazily, so an
+    // off-screen label may not be in the tree yet; scroll the inner list
+    // until it is. The AetherSheet wrapper adds its own outer scroll view,
+    // so target the inner ListView's Scrollable explicitly.
+    await tester.scrollUntilVisible(
+      finder,
+      150,
+      scrollable: find.descendant(
+        of: find.byType(ListView),
+        matching: find.byType(Scrollable),
+      ),
+    );
+  }
+  await tester.pumpAndSettle();
+  await tester.tap(finder);
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets(
     'rebuilding with a new account service cannot publish the old preview',
@@ -38,8 +65,7 @@ void main() {
       uid = 'bob';
       await tester.pumpWidget(host());
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Create link'));
-      await tester.pumpAndSettle();
+      await scrollAndTap(tester, 'Create link');
       expect(posts, 0);
       expect(find.textContaining('Account changed'), findsOneWidget);
     },
@@ -94,14 +120,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Create link'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Refresh'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Revoke'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Create link'));
-      await tester.pumpAndSettle();
+      await scrollAndTap(tester, 'Create link');
+      await scrollAndTap(tester, 'Refresh');
+      await scrollAndTap(tester, 'Revoke');
+      await scrollAndTap(tester, 'Create link');
       expect(find.text('Copy link'), findsOneWidget);
       expect(find.textContaining('already used'), findsNothing);
     },
@@ -162,13 +184,10 @@ void main() {
     expect(find.text('Hello'), findsOneWidget);
     expect(find.text('thinking secret'), findsNothing);
     expect(find.text('Copy link'), findsNothing);
-    await tester.tap(find.text('Create link'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Copy link'));
-    await tester.pumpAndSettle();
+    await scrollAndTap(tester, 'Create link');
+    await scrollAndTap(tester, 'Copy link');
     expect(copied, shareUrl);
-    await tester.tap(find.text('Revoke'));
-    await tester.pumpAndSettle();
+    await scrollAndTap(tester, 'Revoke');
     expect(revoked, true);
     expect(find.text('Copy link'), findsNothing);
   });
@@ -222,8 +241,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Create link'));
-    await tester.pumpAndSettle();
+    await scrollAndTap(tester, 'Create link');
     expect(find.text('Copy link'), findsNothing);
     expect(find.textContaining('unconfirmed'), findsOneWidget);
   });
@@ -252,11 +270,9 @@ void main() {
       );
       await tester.pumpAndSettle();
       session.messages.first.content = 'Later edit';
-      await tester.tap(find.text('Create link'));
-      await tester.pumpAndSettle();
+      await scrollAndTap(tester, 'Create link');
       expect(find.text('Copy link'), findsNothing);
-      await tester.tap(find.text('Create link'));
-      await tester.pumpAndSettle();
+      await scrollAndTap(tester, 'Create link');
       expect(bodies.length, 2);
       expect(bodies[0]['request_id'], bodies[1]['request_id']);
       expect((bodies[1]['messages'] as List).first['content'], 'Hello');
@@ -293,8 +309,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Copy link'), findsOneWidget);
-      await tester.tap(find.text('Revoke'));
-      await tester.pumpAndSettle();
+      await scrollAndTap(tester, 'Revoke');
       expect(find.text('Revoke'), findsOneWidget);
       expect(find.textContaining('unconfirmed'), findsOneWidget);
     },
@@ -328,10 +343,15 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+    // The AetherSheet wrapper adds its own outer scroll view; target the
+    // sheet's inner preview ListView explicitly.
     await tester.scrollUntilVisible(
       find.text('Answer'),
       150,
-      scrollable: find.byType(Scrollable),
+      scrollable: find.descendant(
+        of: find.byType(ListView),
+        matching: find.byType(Scrollable),
+      ),
     );
     await tester.pumpAndSettle();
     expect(find.text('Answer').hitTestable(), findsOneWidget);

@@ -42,6 +42,28 @@ class AuthProviders {
   };
   final List<AuthProviderCapability> enabled;
   bool isEnabled(String id) => enabled.any((p) => p.id == id);
+
+  /// Friendly label for any configured or legacy provider id.
+  ///
+  /// Resolves the same display name used by the auth picker (`Google`,
+  /// `Phone`, `GitHub`, …), including the legacy `password` provider which is
+  /// not a configurable social provider but can still appear in the signed-in
+  /// user's `providerData`. Unknown ids fall back to a Title-Cased slug.
+  static String labelFor(String id) {
+    switch (id) {
+      case 'google.com':
+        return 'Google';
+      case 'phone':
+        return 'Phone';
+      case 'password':
+        return 'Password (legacy)';
+    }
+    final social = _social[id];
+    if (social != null) return social;
+    final base = id.contains('.') ? id.split('.').first : id;
+    if (base.isEmpty) return id;
+    return base[0].toUpperCase() + base.substring(1);
+  }
 }
 
 const legacyAuthMigrationHelp =

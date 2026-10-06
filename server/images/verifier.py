@@ -6,6 +6,7 @@ budget authority. No second account/key store or independently mintable image ke
 import hmac
 import json
 from dataclasses import dataclass
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 import httpx
@@ -79,7 +80,7 @@ class VerifierAuth:
         return Identity(uid, key_id, tier)
 
 
-def mount_images(mint, service=None, *, admission=None, auth=None, private_backends=()):
+def mount_images(mint, service=None, *, admission=None, auth=None, private_backends=(), account_access=None):
     """admission(identity) is a context manager from the shared budget ledger.
 
     It yields (budget_window, remaining_budget_excluding_image_ledger). It must
@@ -119,8 +120,17 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
             return JSONResponse({'error': {'code': 'catalog_unavailable'}}, status_code=503)
 
     def execute(identity, request_id, operation, body):
-        with admission(identity) as (window, budget):
-            return service.execute(identity.uid, request_id, operation, body, budget, budget_window=window)
+        with account_access(identity) if account_access else nullcontext():
+            with admission(identity) as (window, budget):
+                return service.execute(identity.uid, request_id, operation, body, budget, budget_window=window)
+
+    def read(identity, request_id, result):
+        with account_access(identity) if account_access else nullcontext():
+            if request_id is None:
+                return service.catalog()
+            if result:
+                return service.ledger.replay(identity.uid, request_id)
+            return {'receipt': service.ledger.receipt(identity.uid, request_id)}
 
     async def handler(request: Request):
         try:
@@ -129,10 +139,9 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
             receipt_read = request.method == 'GET' and 'request_id' in request.path_params
             identity = await run_in_threadpool(receipt_authenticate if receipt_read else authenticate, request.headers)
             if request.method == 'GET':
-                if 'request_id' in request.path_params:
-                    receipt = await run_in_threadpool(service.ledger.receipt, identity.uid, request.path_params['request_id'])
-                    return JSONResponse({'receipt': receipt}, headers={'Cache-Control': 'no-store'})
-                return JSONResponse(service.catalog(), headers={'Cache-Control': 'no-store'})
+                result = await run_in_threadpool(read, identity, request.path_params.get('request_id'),
+                                                request.url.path.endswith('/result'))
+                return JSONResponse(result, headers={'Cache-Control': 'no-store'})
             if request.headers.get('content-type', '').split(';')[0].strip() != 'application/json':
                 raise ImageError(415, 'invalid_image_request')
             raw = bytearray()
@@ -160,6 +169,7 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
 
     mint.app.add_api_route('/v1/images/capabilities', handler, methods=['GET'])
     mint.app.add_api_route('/v1/images/requests/{request_id}', handler, methods=['GET'])
+    mint.app.add_api_route('/v1/images/requests/{request_id}/result', handler, methods=['GET'])
     mint.app.add_api_route('/v1/images/generations', handler, methods=['POST'])
     mint.app.add_api_route('/v1/images/edits', handler, methods=['POST'])
     mint.app.add_api_route('/v1/models', models, methods=['GET'])

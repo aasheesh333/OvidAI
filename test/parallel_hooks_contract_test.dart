@@ -257,7 +257,7 @@ printf '%s' '{"hookSpecificOutput":{"additionalContext":"ready"}}'
       .map((f) => f.readAsStringSync()).join(), isNot(contains('fixture-secret')));
   });
 
-  test('adapter rejects unsupported agent hooks and malformed declarations visibly', () async {
+  test('adapter accepts agent hooks and drops malformed declarations visibly', () async {
     final manifest = await fixture('unsupported', {
       'Stop': [{'hooks': [
         {'type': 'agent', 'prompt': 'use tools'},
@@ -265,8 +265,11 @@ printf '%s' '{"hookSpecificOutput":{"additionalContext":"ready"}}'
         {'type': 'prompt', 'command': 'wrong', 'prompt': 'right'},
       ]}],
     });
-    expect(manifest.hooks.map((h) => h.type), ['prompt']);
-    expect(manifest.hooks.single.payload, 'right');
+    expect(manifest.hooks.map((h) => h.type), ['agent', 'prompt']);
+    expect(
+      manifest.hooks.singleWhere((h) => h.type == 'prompt').payload,
+      'right',
+    );
     expect(manifest.compatibility.length, greaterThanOrEqualTo(2));
   });
 

@@ -5,6 +5,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'utility_sql.dart';
+import 'utility_limits.dart';
 
 /// Part A (NP2) pure-Dart utility capabilities: JSON Visualizer,
 /// Regex Builder, SQL Formatter, Cron Designer, and Color Palette Gen.
@@ -42,7 +44,15 @@ bool _optionalBool(Map<String, dynamic> args, String key, bool fallback) {
 /// user-input error ([FormatException], matching [_parseLength] style).
 int _parseIntArg(dynamic raw, String key, int fallback) {
   if (raw == null) return fallback;
-  if (raw is num) return raw.toInt();
+  if (raw is num) {
+    if (!raw.isFinite ||
+        raw != raw.roundToDouble() ||
+        raw > 9223372036854775807 ||
+        raw < -9223372036854775808) {
+      throw FormatException('Invalid $key: expected a finite integer.');
+    }
+    return raw.toInt();
+  }
   final parsed = int.tryParse(raw.toString().trim());
   if (parsed == null) {
     throw FormatException('Invalid $key "$raw": expected an integer.');
@@ -63,67 +73,75 @@ class JsonVisualizerCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'format',
-          description: 'Validate and pretty-print a JSON string.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'json_string': {'type': 'string'},
-              'indent': {'type': 'integer'},
-            },
-            'required': ['json_string'],
-          },
-        ),
-        NativePluginTool(
-          name: 'minify',
-          description: 'Strip whitespace from a JSON string.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'json_string': {'type': 'string'},
-            },
-            'required': ['json_string'],
-          },
-        ),
-        NativePluginTool(
-          name: 'query',
-          description:
-              'Navigate JSON with a dot-notated path (e.g. a.b.0.c).',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'json_string': {'type': 'string'},
-              'path': {'type': 'string'},
-            },
-            'required': ['json_string', 'path'],
-          },
-        ),
-        NativePluginTool(
-          name: 'stats',
-          description:
-              'Report key count, max depth, data types, and size of JSON.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'json_string': {'type': 'string'},
-            },
-            'required': ['json_string'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'format',
+      description: 'Validate and pretty-print a JSON string.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'json_string': {'type': 'string'},
+          'indent': {'type': 'integer'},
+        },
+        'required': ['json_string'],
+      },
+    ),
+    NativePluginTool(
+      name: 'minify',
+      description: 'Strip whitespace from a JSON string.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'json_string': {'type': 'string'},
+        },
+        'required': ['json_string'],
+      },
+    ),
+    NativePluginTool(
+      name: 'query',
+      description: 'Navigate JSON with a dot-notated path (e.g. a.b.0.c).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'json_string': {'type': 'string'},
+          'path': {'type': 'string'},
+        },
+        'required': ['json_string', 'path'],
+      },
+    ),
+    NativePluginTool(
+      name: 'stats',
+      description: 'Report key count, max depth, data types, and size of JSON.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'json_string': {'type': 'string'},
+        },
+        'required': ['json_string'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
+    checkUtilityInput(args);
+    return runBoundedUtility(
+      () => JsonVisualizerCapability()._execute(toolName, args),
+      cancellation: cancellation,
+    );
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'format':
         return _format(
@@ -145,6 +163,7 @@ class JsonVisualizerCapability implements NativePluginCapability {
   }
 
   dynamic _decode(String raw) {
+    checkUtilityJson(raw);
     try {
       return jsonDecode(raw);
     } on FormatException catch (e) {
@@ -153,6 +172,9 @@ class JsonVisualizerCapability implements NativePluginCapability {
   }
 
   String _format(String raw, int indent) {
+    if (indent < 0 || indent > 8) {
+      throw const FormatException('JSON indent limit: 0..8.');
+    }
     final value = _decode(raw);
     return JsonEncoder.withIndent(' ' * indent).convert(value);
   }
@@ -161,9 +183,10 @@ class JsonVisualizerCapability implements NativePluginCapability {
 
   String _query(String raw, String path) {
     dynamic current = _decode(raw);
-    final segments =
-        path.split('.').where((s) => s.isNotEmpty).toList();
-    if (segments.isEmpty) throw ArgumentError('Missing required argument: path');
+    final segments = path.split('.').where((s) => s.isNotEmpty).toList();
+    if (segments.isEmpty) {
+      throw ArgumentError('Missing required argument: path');
+    }
     for (final segment in segments) {
       if (current is Map) {
         if (!current.containsKey(segment)) {
@@ -210,12 +233,12 @@ class JsonVisualizerCapability implements NativePluginCapability {
       final type = node == null
           ? 'null'
           : node is String
-              ? 'string'
-              : node is bool
-                  ? 'boolean'
-                  : node is num
-                      ? 'number'
-                      : 'unknown';
+          ? 'string'
+          : node is bool
+          ? 'boolean'
+          : node is num
+          ? 'number'
+          : 'unknown';
       types[type] = (types[type] ?? 0) + 1;
       return 0;
     }
@@ -236,7 +259,8 @@ class JsonVisualizerCapability implements NativePluginCapability {
 
 class RegexBuilderCapability implements NativePluginCapability {
   static const _maxOutput = 1024 * 1024;
-  static const _limits = ' Limits: pattern 4096, text/replacement 65536 UTF-16 '
+  static const _limits =
+      ' Limits: pattern 4096, text/replacement 65536 UTF-16 '
       'code units, 1000 matches, 100 groups per match, output 1048576 code units; '
       'timeout_ms 1..2000 (default 500). Runs in a killed-on-deadline native '
       'isolate; web execution is unsupported.';
@@ -248,58 +272,56 @@ class RegexBuilderCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'test',
-          description:
-              'Test a regex against text; return matches + indices.$_limits',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'pattern': {'type': 'string'},
-              'text': {'type': 'string'},
-              'multiline': {'type': 'boolean'},
-              'case_sensitive': {'type': 'boolean'},
-              'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
-            },
-            'required': ['pattern', 'text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'replace',
-          description: 'Regex search and literal replace over text.$_limits',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'pattern': {'type': 'string'},
-              'replacement': {'type': 'string'},
-              'text': {'type': 'string'},
-              'multiline': {'type': 'boolean'},
-              'case_sensitive': {'type': 'boolean'},
-              'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
-            },
-            'required': ['pattern', 'replacement', 'text'],
-          },
-        ),
-        NativePluginTool(
-          name: 'explain',
-          description: 'Explain regex tokens in plain English.$_limits',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'pattern': {'type': 'string'},
-              'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
-            },
-            'required': ['pattern'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'test',
+      description:
+          'Test a regex against text; return matches + indices.$_limits',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'pattern': {'type': 'string'},
+          'text': {'type': 'string'},
+          'multiline': {'type': 'boolean'},
+          'case_sensitive': {'type': 'boolean'},
+          'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
+        },
+        'required': ['pattern', 'text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'replace',
+      description: 'Regex search and literal replace over text.$_limits',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'pattern': {'type': 'string'},
+          'replacement': {'type': 'string'},
+          'text': {'type': 'string'},
+          'multiline': {'type': 'boolean'},
+          'case_sensitive': {'type': 'boolean'},
+          'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
+        },
+        'required': ['pattern', 'replacement', 'text'],
+      },
+    ),
+    NativePluginTool(
+      name: 'explain',
+      description: 'Explain regex tokens in plain English.$_limits',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'pattern': {'type': 'string'},
+          'timeout_ms': {'type': 'integer', 'minimum': 1, 'maximum': 2000},
+        },
+        'required': ['pattern'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -310,8 +332,9 @@ class RegexBuilderCapability implements NativePluginCapability {
     }
     final pattern = _requireString(args, 'pattern');
     final text = toolName == 'explain' ? '' : _requireString(args, 'text');
-    final replacement =
-        toolName == 'replace' ? _requireString(args, 'replacement') : '';
+    final replacement = toolName == 'replace'
+        ? _requireString(args, 'replacement')
+        : '';
     for (final entry in {
       'pattern': (pattern, 4096),
       'text': (text, 65536),
@@ -342,37 +365,53 @@ class RegexBuilderCapability implements NativePluginCapability {
       if (result.isCompleted) return;
       if (message is List && message.length == 2 && message[0] == true) {
         result.complete(message[1] as String);
-      } else if (message is List && message.length == 2 && message[0] == false) {
+      } else if (message is List &&
+          message.length == 2 &&
+          message[0] == false) {
         result.completeError(FormatException(message[1] as String));
       } else {
-        result.completeError(StateError('Regex worker exited without a result.'));
+        result.completeError(
+          StateError('Regex worker exited without a result.'),
+        );
       }
     });
     final timer = Timer(Duration(milliseconds: timeout), () {
       if (!result.isCompleted) {
         worker?.kill(priority: Isolate.immediate);
-        result.completeError(FormatException(
-          'Regex time limit exceeded: $timeout ms; worker cancelled.',
-        ));
+        result.completeError(
+          FormatException(
+            'Regex time limit exceeded: $timeout ms; worker cancelled.',
+          ),
+        );
       }
     });
     // Attach the late-spawn cleanup as well: a deadline may fire during spawn.
-    unawaited(Isolate.spawn(_runWorker, [
-      port.sendPort,
-      toolName,
-      {
-        'pattern': pattern,
-        'text': text,
-        'replacement': replacement,
-        'multiline': _optionalBool(args, 'multiline', false),
-        'case_sensitive': _optionalBool(args, 'case_sensitive', true),
-      },
-    ], onError: port.sendPort, onExit: port.sendPort).then((isolate) {
-      worker = isolate;
-      if (result.isCompleted) isolate.kill(priority: Isolate.immediate);
-    }, onError: (Object error, StackTrace stack) {
-      if (!result.isCompleted) result.completeError(error, stack);
-    }));
+    unawaited(
+      Isolate.spawn(
+        _runWorker,
+        [
+          port.sendPort,
+          toolName,
+          {
+            'pattern': pattern,
+            'text': text,
+            'replacement': replacement,
+            'multiline': _optionalBool(args, 'multiline', false),
+            'case_sensitive': _optionalBool(args, 'case_sensitive', true),
+          },
+        ],
+        onError: port.sendPort,
+        onExit: port.sendPort,
+      ).then(
+        (isolate) {
+          worker = isolate;
+          if (result.isCompleted) isolate.kill(priority: Isolate.immediate);
+        },
+        onError: (Object error, StackTrace stack) {
+          if (!result.isCompleted) result.completeError(error, stack);
+        },
+      ),
+    );
     try {
       return await result.future;
     } finally {
@@ -391,7 +430,9 @@ class RegexBuilderCapability implements NativePluginCapability {
         message[2] as Map<String, dynamic>,
       );
       if (output.length > _maxOutput) {
-        throw FormatException('Regex output limit exceeded: $_maxOutput code units.');
+        throw FormatException(
+          'Regex output limit exceeded: $_maxOutput code units.',
+        );
       }
       port.send([true, output]);
     } on FormatException catch (error) {
@@ -446,10 +487,13 @@ class RegexBuilderCapability implements NativePluginCapability {
     var count = 0;
     void append(String value) {
       if (output.length + value.length > _maxOutput) {
-        throw FormatException('Regex output limit exceeded: $_maxOutput code units.');
+        throw FormatException(
+          'Regex output limit exceeded: $_maxOutput code units.',
+        );
       }
       output.write(value);
     }
+
     for (final m in regExp.allMatches(text)) {
       if (count >= 1000) {
         throw FormatException('Regex match limit exceeded: 1000.');
@@ -458,8 +502,10 @@ class RegexBuilderCapability implements NativePluginCapability {
         throw FormatException('Regex group limit exceeded: 100.');
       }
       if (count > 0) append(',');
-      append('{"match":${jsonEncode(m.group(0))},'
-          '"start":${m.start},"end":${m.end},"groups":[');
+      append(
+        '{"match":${jsonEncode(m.group(0))},'
+        '"start":${m.start},"end":${m.end},"groups":[',
+      );
       // Encode one capture at a time so overlapping captures cannot allocate
       // their entire expanded result before the output budget is checked.
       for (var i = 1; i <= m.groupCount; i++) {
@@ -486,10 +532,13 @@ class RegexBuilderCapability implements NativePluginCapability {
     var count = 0;
     void append(String value) {
       if (output.length + value.length > _maxOutput) {
-        throw FormatException('Regex output limit exceeded: $_maxOutput code units.');
+        throw FormatException(
+          'Regex output limit exceeded: $_maxOutput code units.',
+        );
       }
       output.write(value);
     }
+
     for (final match in regExp.allMatches(text)) {
       if (++count > 1000) {
         throw FormatException('Regex match limit exceeded: 1000.');
@@ -533,8 +582,12 @@ class RegexBuilderCapability implements NativePluginCapability {
       }
       if (c == '[') {
         final close = pattern.indexOf(']', i + 1);
-        final cls = close == -1 ? pattern.substring(i) : pattern.substring(i, close + 1);
-        lines.add("'$cls': character class matching one of the enclosed characters");
+        final cls = close == -1
+            ? pattern.substring(i)
+            : pattern.substring(i, close + 1);
+        lines.add(
+          "'$cls': character class matching one of the enclosed characters",
+        );
         i = close == -1 ? pattern.length : close + 1;
         continue;
       }
@@ -542,12 +595,13 @@ class RegexBuilderCapability implements NativePluginCapability {
         if (pattern.startsWith('(?<', i)) {
           final end = pattern.indexOf('>', i + 3);
           final name = end == -1 ? '' : pattern.substring(i + 3, end);
-          lines.add(
-            "'(?<$name>...)': named capturing group called \"$name\"",
-          );
+          lines.add("'(?<$name>...)': named capturing group called \"$name\"");
         } else if (pattern.startsWith('(?:', i)) {
-          lines.add("'(?:...)': non-capturing group (groups without capturing)");
-        } else if (pattern.startsWith('(?=', i) || pattern.startsWith('(?!', i)) {
+          lines.add(
+            "'(?:...)': non-capturing group (groups without capturing)",
+          );
+        } else if (pattern.startsWith('(?=', i) ||
+            pattern.startsWith('(?!', i)) {
           lines.add("'$c?...': lookahead group (zero-width assertion)");
         } else {
           lines.add("'(...)': capturing group (captures its match as group N)");
@@ -573,9 +627,13 @@ class RegexBuilderCapability implements NativePluginCapability {
           '?': 'zero or one time (optional)',
         };
         if (c == '?' && i > 0 && '{}*+?'.contains(pattern[i - 1])) {
-          lines.add("'$c' (after a quantifier): lazy quantifier modifier (match as few as possible)");
+          lines.add(
+            "'$c' (after a quantifier): lazy quantifier modifier (match as few as possible)",
+          );
         } else {
-          lines.add("'$c': quantifier repeating the previous token ${meaning[c]}");
+          lines.add(
+            "'$c': quantifier repeating the previous token ${meaning[c]}",
+          );
         }
         i++;
         continue;
@@ -618,12 +676,53 @@ class RegexBuilderCapability implements NativePluginCapability {
 
 class SqlFormatterCapability implements NativePluginCapability {
   static const _keywords = {
-    'SELECT', 'FROM', 'WHERE', 'HAVING', 'LIMIT', 'OFFSET', 'UNION',
-    'VALUES', 'SET', 'INSERT', 'INTO', 'UPDATE', 'DELETE', 'CREATE',
-    'TABLE', 'ALTER', 'DROP', 'ON', 'AND', 'OR', 'AS', 'ASC', 'DESC',
-    'DISTINCT', 'NOT', 'NULL', 'IN', 'IS', 'LIKE', 'BETWEEN', 'EXISTS',
-    'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'WITH', 'BY', 'GROUP',
-    'ORDER', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'FULL', 'CROSS',
+    'SELECT',
+    'FROM',
+    'WHERE',
+    'HAVING',
+    'LIMIT',
+    'OFFSET',
+    'UNION',
+    'VALUES',
+    'SET',
+    'INSERT',
+    'INTO',
+    'UPDATE',
+    'DELETE',
+    'CREATE',
+    'TABLE',
+    'ALTER',
+    'DROP',
+    'ON',
+    'AND',
+    'OR',
+    'AS',
+    'ASC',
+    'DESC',
+    'DISTINCT',
+    'NOT',
+    'NULL',
+    'IN',
+    'IS',
+    'LIKE',
+    'BETWEEN',
+    'EXISTS',
+    'CASE',
+    'WHEN',
+    'THEN',
+    'ELSE',
+    'END',
+    'WITH',
+    'BY',
+    'GROUP',
+    'ORDER',
+    'JOIN',
+    'LEFT',
+    'RIGHT',
+    'INNER',
+    'OUTER',
+    'FULL',
+    'CROSS',
   };
 
   @override
@@ -634,36 +733,48 @@ class SqlFormatterCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'format',
-          description: 'Pretty-print SQL with indented clauses.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'sql': {'type': 'string'},
-            },
-            'required': ['sql'],
+    NativePluginTool(
+      name: 'format',
+      description:
+          'Lexically format SQL preserving strings/comments/quoted '
+          'identifiers. Doubled quotes, backticks, brackets, dollar quotes '
+          'supported; backslash string escapes unsupported. Not syntax '
+          'validation. Input limit 262144 code units, parentheses depth 64.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'sql': {'type': 'string'},
+        },
+        'required': ['sql'],
+      },
+    ),
+    NativePluginTool(
+      name: 'validate',
+      description:
+          'Validate only SELECT [DISTINCT] atom [AS name], ... '
+          '[FROM name] [WHERE atom comparison atom [AND/OR ...]] [;]. '
+          'Atoms: names, qualified names, decimals, standard strings, '
+          'NULL/TRUE/FALSE or projection *. No functions/joins/subqueries/DDL. '
+          'Dialects: sqlite (default), postgres. No catalog/type validation; '
+          'unsupported grammar returns valid=false with explicit scope.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'sql': {'type': 'string'},
+          'dialect': {
+            'type': 'string',
+            'enum': ['sqlite', 'postgres'],
           },
-        ),
-        NativePluginTool(
-          name: 'validate',
-          description: 'Check SQL for balanced quotes/parens and structure.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'sql': {'type': 'string'},
-            },
-            'required': ['sql'],
-          },
-        ),
-      ];
+        },
+        'required': ['sql'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -671,9 +782,12 @@ class SqlFormatterCapability implements NativePluginCapability {
   Future<String> callTool(String toolName, Map<String, dynamic> args) async {
     switch (toolName) {
       case 'format':
-        return _format(_requireString(args, 'sql'));
+        return _formatTokens(_requireString(args, 'sql'));
       case 'validate':
-        return _validate(_requireString(args, 'sql'));
+        return _validateSubset(
+          _requireString(args, 'sql'),
+          args['dialect']?.toString() ?? 'sqlite',
+        );
       default:
         throw ArgumentError('Unknown tool: $toolName');
     }
@@ -688,9 +802,7 @@ class SqlFormatterCapability implements NativePluginCapability {
   }
 
   bool _isJoinToken(String token) {
-    const parts = {
-      'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'FULL', 'CROSS',
-    };
+    const parts = {'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'FULL', 'CROSS'};
     if (!token.contains(' ')) return parts.contains(token.toUpperCase());
     return token.toUpperCase().split(' ').every(parts.contains);
   }
@@ -699,141 +811,102 @@ class SqlFormatterCapability implements NativePluginCapability {
     final upper = token.toUpperCase();
     if (_isJoinToken(token)) return true;
     return {
-      'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING',
-      'LIMIT', 'OFFSET', 'UNION', 'VALUES', 'SET', 'INSERT', 'UPDATE',
-      'DELETE', 'CREATE',
+      'SELECT',
+      'FROM',
+      'WHERE',
+      'GROUP BY',
+      'ORDER BY',
+      'HAVING',
+      'LIMIT',
+      'OFFSET',
+      'UNION',
+      'VALUES',
+      'SET',
+      'INSERT',
+      'UPDATE',
+      'DELETE',
+      'CREATE',
     }.contains(upper);
   }
 
-  String _format(String sql) {
-    final raw = sql
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((s) => s.isNotEmpty)
-        .toList();
-    if (raw.isEmpty) throw ArgumentError('Missing required argument: sql');
-    // Combine multi-word keywords: ORDER/GROUP BY and JOIN phrases.
-    final tokens = <String>[];
-    var i = 0;
-    while (i < raw.length) {
-      final upper = raw[i].toUpperCase();
-      if ((upper == 'ORDER' || upper == 'GROUP') &&
-          i + 1 < raw.length &&
-          raw[i + 1].toUpperCase() == 'BY') {
-        tokens.add('$upper BY');
-        i += 2;
-        continue;
-      }
-      if ({
-        'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'CROSS', 'OUTER',
-      }.contains(upper)) {
-        final parts = <String>[];
-        while (i < raw.length &&
-            {
-              'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'CROSS', 'OUTER',
-            }.contains(raw[i].toUpperCase())) {
-          parts.add(raw[i].toUpperCase());
-          i++;
-        }
-        tokens.add(parts.join(' '));
-        continue;
-      }
-      tokens.add(raw[i]);
-      i++;
-    }
-
-    final lines = <String>[];
-    final current = StringBuffer();
-    void flush() {
-      if (current.isNotEmpty) {
-        lines.add(current.toString());
-        current.clear();
-      }
-    }
-
+  String _formatTokens(String sql) {
+    final tokens = lexUtilitySql(sql);
+    if (tokens.isEmpty) throw ArgumentError('Missing required argument: sql');
+    final out = StringBuffer();
+    var space = false;
+    var lineStart = true;
+    String? previousWord;
     for (final token in tokens) {
-      final upper = token.toUpperCase();
-      final display = _display(token);
-      if (_isLineStarter(token)) {
-        flush();
-        current.write(display);
-      } else if (upper == 'ON' || upper == 'AND' || upper == 'OR') {
-        flush();
-        current.write('  $display');
-      } else {
-        if (current.isEmpty) {
-          current.write(display);
-        } else {
-          current.write(' $display');
-        }
+      if (token.kind == 'space') {
+        space = true;
+        continue;
       }
+      final word = token.kind == 'word' ? token.upper : null;
+      final joinContinuation =
+          word != null &&
+          _isJoinToken(word) &&
+          previousWord != null &&
+          _isJoinToken(previousWord);
+      final indent = word == 'ON' || word == 'AND' || word == 'OR';
+      final newline =
+          word != null &&
+          !joinContinuation &&
+          (_isLineStarter(word) ||
+              word == 'ORDER' ||
+              word == 'GROUP' ||
+              indent);
+      if (newline && !lineStart) {
+        out.write('\n');
+        lineStart = true;
+      }
+      if (lineStart && indent) {
+        out.write('  ');
+      } else if (!lineStart && space) {
+        out.write(' ');
+      }
+      out.write(word == null ? token.text : _display(token.text));
+      lineStart = token.text.endsWith('\n') || token.text.endsWith('\r');
+      if (token.kind == 'comment' &&
+          token.text.startsWith('--') &&
+          !lineStart) {
+        out.write('\n');
+        lineStart = true;
+      }
+      space = false;
+      previousWord = word;
     }
-    flush();
-    return lines.join('\n');
+    return out.toString();
   }
 
-  String _validate(String sql) {
+  String _validateSubset(String sql, String dialect) {
     final errors = <String>[];
-    final trimmed = sql.trim();
-    if (trimmed.isEmpty) {
-      return jsonEncode({
-        'valid': false,
-        'errors': ['Empty SQL statement.'],
-      });
-    }
-    var parenDepth = 0;
-    String? quote;
-    var quoteStart = -1;
-    var idx = 0;
-    while (idx < trimmed.length) {
-      final c = trimmed[idx];
-      if (quote != null) {
-        if (c == quote) {
-          // SQL escapes a quote by doubling it ('').
-          if (idx + 1 < trimmed.length && trimmed[idx + 1] == quote) {
-            idx += 2;
-            continue;
-          }
-          quote = null;
-        }
-        idx++;
-        continue;
+    try {
+      if (!const {'sqlite', 'postgres'}.contains(dialect)) {
+        throw const FormatException(
+          'Unsupported dialect: use sqlite or postgres.',
+        );
       }
-      if (c == "'" || c == '"') {
-        quote = c;
-        quoteStart = idx;
-      } else if (c == '(') {
-        parenDepth++;
-      } else if (c == ')') {
-        parenDepth--;
-        if (parenDepth < 0) {
-          errors.add('Unbalanced parentheses: closing ")" without an opener.');
-          parenDepth = 0;
-        }
+      final tokens = lexUtilitySql(sql);
+      if (dialect == 'sqlite' &&
+          tokens.any(
+            (t) =>
+                t.kind == 'comment' &&
+                t.text.startsWith('/*') &&
+                t.text.indexOf('/*', 2) != -1,
+          )) {
+        throw const FormatException('SQLite does not support nested comments.');
       }
-      idx++;
+      UtilitySelectParser(tokens, dialect).parse();
+    } on FormatException catch (e) {
+      errors.add(e.message.toString());
     }
-    if (quote != null) {
-      errors.add(
-        'Unbalanced quote: ${quote == "'" ? 'single' : 'double'} quote '
-        'opened at position $quoteStart is never closed.',
-      );
-    }
-    if (parenDepth > 0) {
-      errors.add('Unbalanced parentheses: $parenDepth unclosed "(".');
-    }
-    final firstWord = RegExp(r'[A-Za-z]+').firstMatch(trimmed)?.group(0)?.toUpperCase();
-    const statementKeywords = {
-      'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'WITH', 'CREATE',
-      'DROP', 'ALTER', 'TRUNCATE', 'EXPLAIN',
-    };
-    if (firstWord == null || !statementKeywords.contains(firstWord)) {
-      errors.add(
-        'Unrecognized SQL statement: expected a leading keyword such as '
-        'SELECT, INSERT, UPDATE, or DELETE.',
-      );
-    }
-    return jsonEncode({'valid': errors.isEmpty, 'errors': errors});
+    return jsonEncode({
+      'valid': errors.isEmpty,
+      'errors': errors,
+      'scope': 'select_subset_syntax_only',
+      'dialect': dialect,
+      'status': errors.isEmpty ? 'supported' : 'invalid_or_unsupported',
+    });
   }
 }
 
@@ -842,13 +915,29 @@ class SqlFormatterCapability implements NativePluginCapability {
 // ---------------------------------------------------------------------------
 
 const _dowNames = [
-  'Sunday', 'Monday', 'Tuesday', 'Wednesday',
-  'Thursday', 'Friday', 'Saturday',
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
 ];
 
 const _monthNames = [
-  '', 'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
+  '',
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
 ];
 
 class _CronFields {
@@ -869,58 +958,80 @@ class CronDesignerCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'explain',
-          description: 'Explain a 5-part cron expression in plain English.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'expression': {'type': 'string'},
-            },
-            'required': ['expression'],
+    NativePluginTool(
+      name: 'explain',
+      description: 'Explain a 5-part cron expression in plain English.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'expression': {'type': 'string'},
+        },
+        'required': ['expression'],
+      },
+    ),
+    NativePluginTool(
+      name: 'build',
+      description: 'Generate a cron expression from structured parameters.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'frequency': {'type': 'string'},
+          'time': {'type': 'string'},
+          'days': {
+            'type': 'array',
+            'items': {'type': 'integer'},
           },
-        ),
-        NativePluginTool(
-          name: 'build',
-          description: 'Generate a cron expression from structured parameters.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'frequency': {'type': 'string'},
-              'time': {'type': 'string'},
-              'days': {
-                'type': 'array',
-                'items': {'type': 'integer'},
-              },
-            },
-            'required': ['frequency'],
-          },
-        ),
-        NativePluginTool(
-          name: 'next_runs',
-          description: 'Calculate upcoming run timestamps for an expression.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'expression': {'type': 'string'},
-              'count': {'type': 'integer'},
-            },
-            'required': ['expression'],
-          },
-        ),
-      ];
+        },
+        'required': ['frequency'],
+      },
+    ),
+    NativePluginTool(
+      name: 'next_runs',
+      description:
+          '5 numeric cron fields: lists, ascending ranges, */N and '
+          'N/S. DOM/DOW OR when both restricted, AND if either field '
+          'contains a wildcard item (including */N). '
+          'Exclusive start_time: YYYY-MM-DDTHH:MM:SS, optional 1..6 '
+          'fraction digits, then Z or +/-HH:MM (default now). '
+          'timezone: UTC (default), fixed +/-HH:MM, or device-local. '
+          'Named IANA zones unsupported. DST gaps skipped, folds run twice. '
+          'UTC output; explicit horizon_exhausted for partial results. '
+          'count 1..100, horizon_days 1..2928 (default 2928).',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'expression': {'type': 'string'},
+          'count': {'type': 'integer'},
+          'start_time': {'type': 'string'},
+          'timezone': {'type': 'string'},
+          'horizon_days': {'type': 'integer', 'minimum': 1, 'maximum': 2928},
+        },
+        'required': ['expression'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
+    checkUtilityInput(args);
+    return runBoundedUtility(
+      () => CronDesignerCapability()._execute(toolName, args),
+      cancellation: cancellation,
+    );
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'explain':
         return _explain(_requireString(args, 'expression'));
@@ -934,6 +1045,9 @@ class CronDesignerCapability implements NativePluginCapability {
         return _nextRuns(
           _requireString(args, 'expression'),
           _parseIntArg(args['count'], 'count', 5),
+          args['start_time']?.toString(),
+          args['timezone']?.toString() ?? 'UTC',
+          _parseIntArg(args['horizon_days'], 'horizon_days', 2928),
         );
       default:
         throw ArgumentError('Unknown tool: $toolName');
@@ -941,6 +1055,11 @@ class CronDesignerCapability implements NativePluginCapability {
   }
 
   _CronFields _parse(String expression) {
+    if (expression.length > 1024) {
+      throw const FormatException(
+        'Cron expression limit exceeded: 1024 code units.',
+      );
+    }
     final parts = expression
         .trim()
         .split(RegExp(r'\s+'))
@@ -991,11 +1110,7 @@ class CronDesignerCapability implements NativePluginCapability {
         }
         final lo = int.tryParse(ends[0]);
         final hi = int.tryParse(ends[1]);
-        if (lo == null ||
-            hi == null ||
-            lo < min ||
-            hi > max ||
-            lo > hi) {
+        if (lo == null || hi == null || lo < min || hi > max || lo > hi) {
           throw FormatException(
             'Invalid cron range "${ends[0]}-${ends[1]}": '
             'expected values between $min and $max.',
@@ -1017,8 +1132,7 @@ class CronDesignerCapability implements NativePluginCapability {
     for (final item in field.split(',')) {
       final stepSplit = item.split('/');
       final range = stepSplit[0];
-      final step =
-          stepSplit.length == 2 ? int.parse(stepSplit[1]) : 1;
+      final step = stepSplit.length == 2 ? int.parse(stepSplit[1]) : 1;
       var lo = min;
       var hi = max;
       var wholeRange = false;
@@ -1039,9 +1153,7 @@ class CronDesignerCapability implements NativePluginCapability {
       }
       if (wholeRange) {
         if ((value - min) % step == 0) return true;
-      } else if (value >= lo &&
-          value <= hi &&
-          (value - lo) % step == 0) {
+      } else if (value >= lo && value <= hi && (value - lo) % step == 0) {
         return true;
       }
     }
@@ -1055,12 +1167,15 @@ class CronDesignerCapability implements NativePluginCapability {
     final domMatch = _fieldMatches(fields.dom, candidate.day, 1, 31);
     final dowMatch =
         _fieldMatches(fields.dow, candidate.weekday % 7, 0, 7) ||
-            (fields.dow != '*' && _dowValueMatchesSunday7(fields, candidate));
-    if (fields.dom == '*' && fields.dow == '*') return true;
-    if (fields.dom == '*') return dowMatch;
-    if (fields.dow == '*') return domMatch;
+        (fields.dow != '*' && _dowValueMatchesSunday7(fields, candidate));
+    if (_containsWildcard(fields.dom) || _containsWildcard(fields.dow)) {
+      return domMatch && dowMatch;
+    }
     return domMatch || dowMatch;
   }
+
+  bool _containsWildcard(String field) =>
+      field.split(',').any((item) => item.startsWith('*'));
 
   bool _dowValueMatchesSunday7(_CronFields fields, DateTime candidate) {
     // Accept 7 as Sunday in addition to 0.
@@ -1068,8 +1183,7 @@ class CronDesignerCapability implements NativePluginCapability {
     for (final item in fields.dow.split(',')) {
       final stepSplit = item.split('/');
       final range = stepSplit[0];
-      final step =
-          stepSplit.length == 2 ? int.parse(stepSplit[1]) : 1;
+      final step = stepSplit.length == 2 ? int.parse(stepSplit[1]) : 1;
       if (range == '*') {
         if ((7 - 0) % step == 0) return true;
         continue;
@@ -1092,6 +1206,14 @@ class CronDesignerCapability implements NativePluginCapability {
 
   String _describeDow(String field) {
     if (field == '*') return 'every day of the week';
+    if (field.contains('/')) {
+      return [
+        for (var i = 0; i < 7; i++)
+          if (_fieldMatches(field, i, 0, 7) ||
+              i == 0 && _fieldMatches(field, 7, 0, 7))
+            _dowNames[i],
+      ].join(', ');
+    }
     final parts = <String>[];
     for (final item in field.split(',')) {
       final range = item.split('/')[0];
@@ -1119,6 +1241,10 @@ class CronDesignerCapability implements NativePluginCapability {
 
   String _describeMonth(String field) {
     if (field == '*') return '';
+    if (field.contains('/') || field.contains('*')) {
+      return 'in ${[for (var i = 1; i <= 12; i++)
+        if (_fieldMatches(field, i, 1, 12)) _monthNames[i]].join(', ')}';
+    }
     final parts = field.split(',').map((item) {
       final range = item.split('/')[0];
       if (range.contains('-')) {
@@ -1160,7 +1286,12 @@ class CronDesignerCapability implements NativePluginCapability {
     } else if (fields.dow == '*') {
       day = _describeDom(fields.dom);
     } else {
-      day = '${_describeDom(fields.dom)} and on ${_describeDow(fields.dow)}';
+      final conjunction =
+          _containsWildcard(fields.dom) || _containsWildcard(fields.dow)
+          ? 'and'
+          : 'or';
+      day =
+          '${_describeDom(fields.dom)} $conjunction on ${_describeDow(fields.dow)}';
     }
     final monthSuffix = month.isEmpty ? '' : ' $month';
     return 'Runs $time $day$monthSuffix '
@@ -1173,9 +1304,7 @@ class CronDesignerCapability implements NativePluginCapability {
     final raw = (time ?? '09:00').trim();
     final match = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(raw);
     if (match == null) {
-      throw FormatException(
-        'Invalid time "$raw": expected 24-hour HH:MM.',
-      );
+      throw FormatException('Invalid time "$raw": expected 24-hour HH:MM.');
     }
     final hour = int.parse(match.group(1)!);
     final minute = int.parse(match.group(2)!);
@@ -1188,22 +1317,40 @@ class CronDesignerCapability implements NativePluginCapability {
   }
 
   static const _dayNameToNumber = {
-    'sun': 0, 'sunday': 0,
-    'mon': 1, 'monday': 1,
-    'tue': 2, 'tues': 2, 'tuesday': 2,
-    'wed': 3, 'wednesday': 3,
-    'thu': 4, 'thur': 4, 'thurs': 4, 'thursday': 4,
-    'fri': 5, 'friday': 5,
-    'sat': 6, 'saturday': 6,
+    'sun': 0,
+    'sunday': 0,
+    'mon': 1,
+    'monday': 1,
+    'tue': 2,
+    'tues': 2,
+    'tuesday': 2,
+    'wed': 3,
+    'wednesday': 3,
+    'thu': 4,
+    'thur': 4,
+    'thurs': 4,
+    'thursday': 4,
+    'fri': 5,
+    'friday': 5,
+    'sat': 6,
+    'saturday': 6,
   };
 
   String _build(String frequency, String? time, List<dynamic> days) {
+    if (days.length > 31) {
+      throw const FormatException('Cron days limit exceeded: 31.');
+    }
     final t = _parseTime(time);
     final minute = t[0];
     final hour = t[1];
     List<String> dayNumbers() {
       return days.map((d) {
         if (d is num) {
+          if (!d.isFinite || d != d.toInt()) {
+            throw FormatException(
+              'Invalid day "$d": expected an integer weekday 0-7.',
+            );
+          }
           final n = d.toInt();
           if (n < 0 || n > 7) {
             throw FormatException(
@@ -1244,15 +1391,17 @@ class CronDesignerCapability implements NativePluginCapability {
         final dows = days.isEmpty ? ['1'] : dayNumbers();
         return '$minute $hour * * ${dows.join(',')}';
       case 'monthly':
-        final doms = days.isEmpty ? ['1'] : dayNumbers().map((d) {
-          final n = int.parse(d);
-          if (n < 1 || n > 31) {
-            throw FormatException(
-              'Invalid month day "$d": expected 1-31.',
-            );
-          }
-          return d;
-        }).toList();
+        final doms = days.isEmpty
+            ? ['1']
+            : days.map((d) {
+                final n = int.tryParse(d.toString());
+                if (n == null || n < 1 || n > 31) {
+                  throw FormatException(
+                    'Invalid month day "$d": expected 1-31.',
+                  );
+                }
+                return '$n';
+              }).toList();
         return '$minute $hour ${doms.join(',')} * *';
       default:
         throw ArgumentError(
@@ -1262,22 +1411,83 @@ class CronDesignerCapability implements NativePluginCapability {
     }
   }
 
-  String _nextRuns(String expression, int count) {
+  String _nextRuns(
+    String expression,
+    int count,
+    String? startTime,
+    String timezone,
+    int horizonDays,
+  ) {
     final fields = _parse(expression);
-    final wanted = count.clamp(1, 100);
-    var cursor = DateTime.now()
-        .toUtc()
+    if (count < 1 || count > 100 || horizonDays < 1 || horizonDays > 2928) {
+      throw const FormatException(
+        'Cron count must be 1..100 and horizon_days 1..2928.',
+      );
+    }
+    var offset = Duration.zero;
+    final local = timezone == 'device-local';
+    if (timezone != 'UTC' && !local) {
+      final match = RegExp(r'^([+-])(\d{2}):(\d{2})$').firstMatch(timezone);
+      if (match == null) {
+        throw UnsupportedError(
+          'Unsupported cron timezone; use UTC, +/-HH:MM or device-local.',
+        );
+      }
+      final hour = int.parse(match[2]!);
+      final minute = int.parse(match[3]!);
+      if (hour > 14 || minute > 59 || hour == 14 && minute != 0) {
+        throw const FormatException('Timezone offset must be within +/-14:00.');
+      }
+      offset = Duration(
+        minutes: (hour * 60 + minute) * (match[1] == '-' ? -1 : 1),
+      );
+    }
+    final start = startTime == null
+        ? DateTime.now().toUtc()
+        : parseUtilityInstant(startTime);
+    if (start.year < 1 || start.year > 9990) {
+      throw const FormatException('Cron start year must be 1..9990.');
+    }
+    var cursor = start
         .add(const Duration(minutes: 1))
         .copyWith(second: 0, millisecond: 0, microsecond: 0);
+    final end = start.add(Duration(days: horizonDays));
     final runs = <String>[];
-    // One leap-year of minute iterations is a safe upper bound: any valid
-    // expression with a yearly occurrence matches within 366 days.
-    const limit = 366 * 24 * 60;
-    for (var i = 0; i < limit && runs.length < wanted; i++) {
-      if (_matches(fields, cursor)) runs.add(cursor.toIso8601String());
+    final minutes = {
+      for (var i = 0; i < 60; i++)
+        if (_fieldMatches(fields.minute, i, 0, 59)) i,
+    };
+    final hours = {
+      for (var i = 0; i < 24; i++)
+        if (_fieldMatches(fields.hour, i, 0, 23)) i,
+    };
+    final months = {
+      for (var i = 1; i <= 12; i++)
+        if (_fieldMatches(fields.month, i, 1, 12)) i,
+    };
+    while (!cursor.isAfter(end) && runs.length < count) {
+      final wall = local ? cursor.toLocal() : cursor.add(offset);
+      if (!local &&
+          (!months.contains(wall.month) || !hours.contains(wall.hour))) {
+        cursor = cursor.add(Duration(minutes: 60 - wall.minute));
+        continue;
+      }
+      if (months.contains(wall.month) &&
+          hours.contains(wall.hour) &&
+          minutes.contains(wall.minute) &&
+          _matches(fields, wall)) {
+        runs.add(cursor.toIso8601String());
+      }
       cursor = cursor.add(const Duration(minutes: 1));
     }
-    return jsonEncode({'runs': runs});
+    return jsonEncode({
+      'runs': runs,
+      'complete': runs.length == count,
+      'reason': runs.length == count ? null : 'horizon_exhausted',
+      'horizon_end': end.toIso8601String(),
+      'timezone': timezone,
+      'dst_policy': 'skip_gaps_repeat_folds',
+    });
   }
 }
 
@@ -1308,37 +1518,35 @@ class ColorPaletteGenCapability implements NativePluginCapability {
 
   @override
   List<NativePluginTool> get tools => const [
-        NativePluginTool(
-          name: 'from_hex',
-          description: 'Generate complementary/analogous/triadic swatches.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'hex': {'type': 'string'},
-            },
-            'required': ['hex'],
-          },
-        ),
-        NativePluginTool(
-          name: 'contrast',
-          description: 'WCAG 2.1 contrast ratio between two hex colors.',
-          inputSchema: {
-            'type': 'object',
-            'properties': {
-              'hex1': {'type': 'string'},
-              'hex2': {'type': 'string'},
-            },
-            'required': ['hex1', 'hex2'],
-          },
-        ),
-      ];
+    NativePluginTool(
+      name: 'from_hex',
+      description: 'Generate complementary/analogous/triadic swatches.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'hex': {'type': 'string'},
+        },
+        'required': ['hex'],
+      },
+    ),
+    NativePluginTool(
+      name: 'contrast',
+      description: 'WCAG 2.1 contrast ratio between two hex colors.',
+      inputSchema: {
+        'type': 'object',
+        'properties': {
+          'hex1': {'type': 'string'},
+          'hex2': {'type': 'string'},
+        },
+        'required': ['hex1', 'hex2'],
+      },
+    ),
+  ];
 
   @override
   Future<void> configure(Map<String, String> values) async {
     if (values.isNotEmpty) {
-      throw ArgumentError(
-        'Plugin "$pluginName" has no configurable settings.',
-      );
+      throw ArgumentError('Plugin "$pluginName" has no configurable settings.');
     }
   }
 
@@ -1376,8 +1584,7 @@ class ColorPaletteGenCapability implements NativePluginCapability {
   }
 
   String _toHex(_Rgb rgb) {
-    String two(int v) =>
-        v.clamp(0, 255).toRadixString(16).padLeft(2, '0');
+    String two(int v) => v.clamp(0, 255).toRadixString(16).padLeft(2, '0');
     return '#${two(rgb.r)}${two(rgb.g)}${two(rgb.b)}';
   }
 
@@ -1451,7 +1658,9 @@ class ColorPaletteGenCapability implements NativePluginCapability {
   double _luminance(_Rgb rgb) {
     double linearize(int channel) {
       final c = channel / 255.0;
-      return c <= 0.03928 ? c / 12.92 : math.pow((c + 0.055) / 1.055, 2.4).toDouble();
+      return c <= 0.03928
+          ? c / 12.92
+          : math.pow((c + 0.055) / 1.055, 2.4).toDouble();
     }
 
     return 0.2126 * linearize(rgb.r) +

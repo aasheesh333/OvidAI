@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import '../core/github_service.dart';
+import 'widgets/aether_primitives.dart';
 
-/// GitHub login flow — shown as modal bottom sheet.
+/// GitHub login flow — shown as an Aether modal bottom sheet.
 /// Implements OAuth Device Flow (RFC 8628).
 ///
 /// States: idle → codeShown → polling → done
@@ -15,27 +17,30 @@ void showGithubLoginSheet(
 }) {
   showModalBottomSheet(
     context: context,
-    backgroundColor: Aether.surface,
+    backgroundColor: Colors.transparent,
     isScrollControlled: true,
+    useSafeArea: true,
     isDismissible: false,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
-    builder: (_) => const _GithubLoginSheet(),
+    builder: (_) => const GithubLoginSheet(),
   ).then((ok) {
     if (ok == true && onConnected != null) onConnected();
   });
 }
 
-class _GithubLoginSheet extends StatefulWidget {
-  const _GithubLoginSheet();
+class GithubLoginSheet extends StatefulWidget {
+  const GithubLoginSheet({super.key, this.client});
+
+  /// Optional HTTP client override for the device-flow requests. Production
+  /// callers leave this null; widget tests inject a mock.
+  final http.Client? client;
 
   @override
-  State<_GithubLoginSheet> createState() => _GithubLoginSheetState();
+  State<GithubLoginSheet> createState() => _GithubLoginSheetState();
 }
 
-class _GithubLoginSheetState extends State<_GithubLoginSheet> {
+class _GithubLoginSheetState extends State<GithubLoginSheet> {
   _State _state = _State.idle;
+  final _codeController = TextEditingController();
   String _userCode = '';
   String _verifyUri = '';
   String? _error;
@@ -53,6 +58,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
   void dispose() {
     _cancelled = true;
     _expiryTimer?.cancel();
+    _codeController.dispose();
     super.dispose();
   }
 
@@ -62,11 +68,14 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
     _error = null;
     _expiryTimer?.cancel();
     try {
-      final authorization = await GitHubService.I.startDeviceFlow();
+      final authorization = await GitHubService.I.startDeviceFlow(
+        client: widget.client,
+      );
       if (!mounted || _cancelled) return;
       _userCode = authorization.userCode;
       _verifyUri = authorization.verificationUri.toString();
       _expiresAt = DateTime.now().add(authorization.expiresIn);
+      _codeController.text = _userCode;
       setState(() => _state = _State.codeShown);
       _expiryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) setState(() {});
@@ -87,6 +96,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
         deviceCode: authorization.deviceCode,
         intervalSec: authorization.interval.inSeconds,
         maxWait: authorization.expiresIn,
+        client: widget.client,
         isCancelled: () => _cancelled,
       );
       if (!mounted || _cancelled) return;
@@ -120,65 +130,50 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
     return '$minutes:${(seconds % 60).toString().padLeft(2, '0')}';
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          20,
-          18,
-          20,
-          16 + MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _header(),
-            const SizedBox(height: 18),
-            switch (_state) {
-              _State.idle || _State.starting => _startingView(),
-              _State.codeShown => _codeView(),
-              _State.done => _doneView(),
-              _State.expired => _expiredView(),
-              _State.error => _errorView(),
-            },
-          ],
-        ),
+  Future<void> _openVerificationPage() async {
+    final uri = Uri.parse(
+      _verifyUri.isEmpty ? 'https://github.com/login/device' : _verifyUri,
+    );
+    // Open in the user's EXTERNAL browser — the device-flow verification
+    // page must not be trapped in the in-app WebView.
+    try {
+      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (launched) return;
+    } catch (_) {
+      // Platform launch failures use the same recoverable browser message.
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Could not open the browser.'),
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }
 
-  Widget _header() => Row(
-    children: [
-      Container(
-        width: 44,
-        height: 44,
-        decoration: BoxDecoration(
-          color: Aether.surfaceAlt,
-          borderRadius: BorderRadius.circular(13),
-          border: Border.all(color: Aether.hairlineStrong),
-        ),
-        child: Icon(Icons.hub_outlined, size: 22, color: Aether.text),
-      ),
-      const SizedBox(width: 14),
-      const Expanded(
-        child: Text(
-          'Connect GitHub',
-          style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
-        ),
-      ),
-      IconButton(
-        visualDensity: VisualDensity.compact,
-        icon: Icon(Icons.close, size: 18, color: Aether.textFaint),
-        onPressed: () {
-          _cancelled = true;
-          _expiryTimer?.cancel();
-          Navigator.pop(context);
+  void _cancel() {
+    _cancelled = true;
+    _expiryTimer?.cancel();
+    // Polling observes _cancelled and exits at its next checkpoint.
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AetherSheet(
+      title: 'Connect GitHub',
+      actions: [AetherGhostButton(label: 'Cancel', onPressed: _cancel)],
+      child: SingleChildScrollView(
+        child: switch (_state) {
+          _State.idle || _State.starting => _startingView(),
+          _State.codeShown => _codeView(),
+          _State.done => _doneView(),
+          _State.expired => _expiredView(),
+          _State.error => _errorView(),
         },
       ),
-    ],
-  );
+    );
+  }
 
   Widget _startingView() => const Padding(
     padding: EdgeInsets.symmetric(vertical: 28),
@@ -193,83 +188,34 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
 
   Widget _codeView() => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
+    mainAxisSize: MainAxisSize.min,
     children: [
-      Text(
-        'Open github.com/login/device on any browser and enter this code:',
-        style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+      const AetherSectionTitle(
+        eyebrow: 'GitHub OAuth',
+        subtitle:
+            'Open github.com/login/device on any browser and enter this code:',
       ),
       const SizedBox(height: 14),
-      Container(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-        decoration: BoxDecoration(
-          color: Aether.surfaceAlt,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Aether.accent.withValues(alpha: 0.4)),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            SelectableText(
-              _userCode,
-              style: TextStyle(
-                fontFamily: Aether.mono,
-                fontSize: 26,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 4,
-                color: Aether.accent,
-              ),
-            ),
-            const SizedBox(width: 12),
-            _CopyChip(text: _userCode),
-          ],
-        ),
+      // Keep the full server code visible at large text. The separate copy
+      // action remains interactive while the server-issued field is disabled.
+      AetherField(
+        label: 'One-time code',
+        controller: _codeController,
+        enabled: false,
+        maxLines: null,
       ),
-      const SizedBox(height: 12),
-      Row(
-        children: [
-          Expanded(
-            child: OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Aether.text,
-                padding: const EdgeInsets.symmetric(vertical: 11),
-                side: BorderSide(color: Aether.hairlineStrong),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(11),
-                ),
-              ),
-              icon: const Icon(Icons.open_in_new, size: 15),
-              label: const Text(
-                'Open github.com/login/device',
-                style: TextStyle(fontSize: 12),
-              ),
-              onPressed: () async {
-                final uri = Uri.parse(
-                  _verifyUri.isEmpty
-                      ? 'https://github.com/login/device'
-                      : _verifyUri,
-                );
-                // Open in the user's EXTERNAL browser — the device-flow
-                // verification page must not be trapped in the in-app
-                // WebView.
-                final launched = await launchUrl(
-                  uri,
-                  mode: LaunchMode.externalApplication,
-                );
-                if (!launched) {
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Could not open the browser.'),
-                      behavior: SnackBarBehavior.floating,
-                    ),
-                  );
-                }
-              },
-            ),
-          ),
-        ],
+      const SizedBox(height: 8),
+      Align(
+        alignment: Alignment.centerRight,
+        child: _CopyChip(text: _userCode),
       ),
-      const SizedBox(height: 18),
+      const SizedBox(height: 14),
+      AetherPrimaryButton(
+        label: 'Sign in',
+        icon: Icons.open_in_new,
+        onPressed: _openVerificationPage,
+      ),
+      const SizedBox(height: 16),
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
@@ -282,9 +228,11 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
             ),
           ),
           const SizedBox(width: 10),
-          Text(
-            'Waiting · $_remaining remaining',
-            style: TextStyle(fontSize: 12, color: Aether.textFaint),
+          Flexible(
+            child: Text(
+              'Waiting · $_remaining remaining',
+              style: AetherType.bodyMuted,
+            ),
           ),
         ],
       ),
@@ -295,6 +243,7 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
   Widget _doneView() => Padding(
     padding: const EdgeInsets.symmetric(vertical: 22),
     child: Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
         Container(
           width: 54,
@@ -302,7 +251,9 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
           decoration: BoxDecoration(
             color: Aether.successLight.withValues(alpha: 0.12),
             shape: BoxShape.circle,
-            border: Border.all(color: Aether.successLight.withValues(alpha: 0.5)),
+            border: Border.all(
+              color: Aether.successLight.withValues(alpha: 0.5),
+            ),
           ),
           child: Icon(
             Icons.check_rounded,
@@ -311,77 +262,57 @@ class _GithubLoginSheetState extends State<_GithubLoginSheet> {
           ),
         ),
         const SizedBox(height: 14),
-        const Text(
-          'GitHub connected',
-          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-        ),
+        Text('GitHub connected', style: AetherType.title),
         const SizedBox(height: 4),
         Text(
           GitHubService.I.login != null
               ? '@${GitHubService.I.login} — repos ready in Studio'
               : 'Your repos are now accessible.',
-          style: TextStyle(fontSize: 12, color: Aether.textMuted),
+          style: AetherType.bodyMuted,
         ),
         const SizedBox(height: 16),
-        FilledButton(
+        AetherPrimaryButton(
+          label: 'Continue',
           onPressed: () => Navigator.pop(context, true),
-          child: const Text('Continue'),
         ),
       ],
     ),
   );
 
   Widget _expiredView() => Column(
+    mainAxisSize: MainAxisSize.min,
     children: [
       Icon(Icons.timer_off_outlined, size: 36, color: Aether.warnLight),
       const SizedBox(height: 12),
-      const Text(
-        'Code expired',
-        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-      ),
+      Text('Code expired', style: AetherType.title),
       const SizedBox(height: 4),
-      Text(
-        'The device code expired. Try again.',
-        style: TextStyle(fontSize: 12, color: Aether.textMuted),
-      ),
+      Text('The device code expired. Try again.', style: AetherType.bodyMuted),
       const SizedBox(height: 16),
-      FilledButton(
+      AetherPrimaryButton(
+        label: 'Retry',
+        icon: Icons.refresh,
         onPressed: _start,
-        style: FilledButton.styleFrom(
-          backgroundColor: Aether.accent,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(11),
-          ),
-        ),
-        child: const Text('Retry'),
       ),
     ],
   );
 
   Widget _errorView() => Column(
+    mainAxisSize: MainAxisSize.min,
     children: [
       const Icon(Icons.error_outline, size: 36, color: Aether.danger),
       const SizedBox(height: 12),
-      const Text(
-        'Something went wrong',
-        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-      ),
+      Text('Something went wrong', style: AetherType.title),
       const SizedBox(height: 4),
       Text(
         _error ?? 'Unknown error',
         textAlign: TextAlign.center,
-        style: TextStyle(fontSize: 12, color: Aether.textMuted),
+        style: AetherType.bodyMuted,
       ),
       const SizedBox(height: 16),
-      FilledButton(
+      AetherPrimaryButton(
+        label: 'Retry',
+        icon: Icons.refresh,
         onPressed: _start,
-        style: FilledButton.styleFrom(
-          backgroundColor: Aether.accent,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(11),
-          ),
-        ),
-        child: const Text('Retry'),
       ),
     ],
   );
@@ -398,6 +329,14 @@ class _CopyChip extends StatefulWidget {
 
 class _CopyChipState extends State<_CopyChip> {
   bool copied = false;
+  Timer? _resetTimer;
+
+  @override
+  void dispose() {
+    _resetTimer?.cancel();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     // 44dp minimum target (the repo-wide touch invariant): the chip used to
@@ -407,9 +346,19 @@ class _CopyChipState extends State<_CopyChip> {
       child: InkWell(
         borderRadius: BorderRadius.circular(7),
         onTap: () async {
-          await Clipboard.setData(ClipboardData(text: widget.text));
+          try {
+            await Clipboard.setData(ClipboardData(text: widget.text));
+          } catch (_) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Could not copy code. Please retry.')),
+            );
+            return;
+          }
+          if (!mounted) return;
           setState(() => copied = true);
-          Future.delayed(const Duration(seconds: 2), () {
+          _resetTimer?.cancel();
+          _resetTimer = Timer(const Duration(seconds: 2), () {
             if (mounted) setState(() => copied = false);
           });
         },

@@ -22,6 +22,7 @@ import 'share_actions.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
 import 'sidebar.dart';
+import 'settings_screen.dart';
 import 'subagent_screen.dart';
 import 'transcript_model.dart';
 import 'chat_layout.dart';
@@ -37,6 +38,8 @@ import '../core/startup_coordinator.dart';
 import 'plugins_screen.dart';
 import 'startup_progress_panel.dart';
 import '../core/diag.dart';
+import '../core/ovid_cloud_service.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -1209,11 +1212,11 @@ class _ChatScreenState extends State<ChatScreen>
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Flexible(
+                   Flexible(
                     child: Text(
-                      s?.model == null
-                          ? 'Select model'
-                          : ovidModelLabel(s!.model),
+                       s?.model == null || s!.model.trim().isEmpty
+                           ? 'Select model'
+                           : ovidModelLabel(s.model),
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 14),
                     ),
@@ -1351,7 +1354,7 @@ class _ChatScreenState extends State<ChatScreen>
                 // Reserve most of a short viewport for the composer/docks so
                 // an expanded dashboard can never crowd them off-screen at
                 // large text scales. The panel still scrolls internally.
-                final panelCap = math.min(240.0, constraints.maxHeight * 0.35);
+                final panelCap = math.min(240.0, constraints.maxHeight * 0.25);
                 // Docks share the same centered content column as the
                 // transcript so the whole chat reads as one axis.
                 final dockColumn = Column(
@@ -1405,21 +1408,23 @@ class _ChatScreenState extends State<ChatScreen>
                     ConstrainedBox(
                       constraints: BoxConstraints(maxHeight: panelCap),
                       child: SingleChildScrollView(
-                        child: StartupProgressPanel(
-                          coordinator: widget.startupCoordinator,
-                          onOpenPlugins: (canonicalId) => _openPlugins(
-                            context,
-                            focusCanonicalId: canonicalId,
-                          ),
-                          onInstallSandbox: () => openStudio(context),
-                          sandboxInstalled: AppState.I.sandboxInstalled,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            StartupProgressPanel(
+                              coordinator: widget.startupCoordinator,
+                              onOpenPlugins: (canonicalId) => _openPlugins(
+                                context,
+                                focusCanonicalId: canonicalId,
+                              ),
+                              onInstallSandbox: () => openStudio(context),
+                              sandboxInstalled: AppState.I.sandboxInstalled,
+                            ),
+                            const _RuntimeInstallBanner(),
+                          ],
                         ),
                       ),
                     ),
-                    // Deferred first-launch runtime install (Node.js/Python
-                    // in the background). Own AnimatedBuilder on AppState so
-                    // installer progress never rebuilds the transcript.
-                    const _RuntimeInstallBanner(),
                     Expanded(
                       child: s == null || s.messages.isEmpty
                           ? const _EmptyState()
@@ -1665,16 +1670,24 @@ class _ChatScreenState extends State<ChatScreen>
                               ],
                             ),
                     ),
-                    Center(
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxWidth: layout.contentWidth,
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: constraints.maxHeight * 0.15,
+                      ),
+                      child: SingleChildScrollView(
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: layout.contentWidth,
+                            ),
+                            child: dockColumn,
+                          ),
                         ),
-                        child: dockColumn,
                       ),
                     ),
                     _InputBar(
                       layout: layout,
+                      availableHeight: constraints.maxHeight,
                       controller: _input,
                       focusNode: _inputFocus,
                       sessionId: s?.id,
@@ -2183,22 +2196,52 @@ class _ChatScreenState extends State<ChatScreen>
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.5,
-        minChildSize: 0.32,
-        maxChildSize: 0.92,
-        snap: true,
-        snapSizes: const [0.5, 0.92],
-        builder: (ctx, scrollController) =>
-            _ModelPickerSheet(scrollController: scrollController),
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
+        child: DraggableScrollableSheet(
+          initialChildSize:
+              MediaQuery.viewInsetsOf(sheetContext).bottom > 0 ||
+                  MediaQuery.textScalerOf(sheetContext).scale(14) > 20
+              ? 0.92
+              : 0.5,
+          minChildSize:
+              MediaQuery.viewInsetsOf(sheetContext).bottom > 0 ||
+                  MediaQuery.textScalerOf(sheetContext).scale(14) > 20
+              ? 0.6
+              : 0.32,
+          maxChildSize: 0.92,
+          snap: true,
+          snapSizes:
+              MediaQuery.viewInsetsOf(sheetContext).bottom > 0 ||
+                  MediaQuery.textScalerOf(sheetContext).scale(14) > 20
+              ? const [0.6, 0.92]
+              : const [0.5, 0.92],
+          builder: (ctx, scrollController) =>
+              _ModelPickerSheet(scrollController: scrollController),
+        ),
       ),
     );
   }
 }
 
-/// Half-sheet model picker — rounded top corners, search bar,
-/// drag handle to expand to fullscreen.
+/// Premium-polish model picker.
+///
+/// Visual language: an [AetherSheet] with a search [AetherField], one
+/// [AetherCard] per provider (header = [AetherType.label] eyebrow), each row
+/// an [_ModelTile] showing the model name, a `Manual`/`Auto` [AetherPill],
+/// and a check when selected. Empty catalogues get an [AetherEmptyState] with
+/// a Settings CTA; empty searches get a distinct message. Unconfigured
+/// providers surface in a bottom [AetherCard] notice. Ovid Cloud exposes a
+/// retry [AetherGhostButton] that calls [OvidCloudService.ensureConnected]
+/// with a sanitized status subtitle.
+///
+/// All selection behaviour (provider seed, model id, effort variant, recents,
+/// Studio/Agent integration) remains intact — the sheet still drives
+/// [AppState.setModel] via [_ModelTile].
 class _ModelPickerSheet extends StatefulWidget {
   final ScrollController scrollController;
   const _ModelPickerSheet({required this.scrollController});
@@ -2208,278 +2251,423 @@ class _ModelPickerSheet extends StatefulWidget {
 }
 
 class _ModelPickerSheetState extends State<_ModelPickerSheet> {
+  final TextEditingController _searchCtrl = TextEditingController();
   String _query = '';
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  /// Connection errors are already sanitized by OvidCloudService. Preserve
+  /// the full actionable message, including retry instructions.
+  String _cloudStatus(CloudConnectionState state) => switch (state.status) {
+    CloudConnectionStatus.idle =>
+      'Built-in account connection. Retry to connect — no API key needed.',
+    CloudConnectionStatus.connecting => 'Connecting your account…',
+    CloudConnectionStatus.loadingCatalog => 'Connected. Loading model catalog…',
+    CloudConnectionStatus.ready => 'Built-in · Connected',
+    CloudConnectionStatus.failed =>
+      (state.error == null || state.error!.trim().isEmpty)
+          ? 'Ovid Cloud connection failed. Tap Retry.'
+           : state.error!,
+  };
+
+  bool _matchesQuery(String q, String haystack) =>
+      q.isEmpty || haystack.toLowerCase().contains(q);
 
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
-    final q = _query.toLowerCase();
+    return AnimatedBuilder(
+      animation: Listenable.merge([app, OvidCloudService.I]),
+      builder: (_, _) {
+        final q = _query.toLowerCase();
+        final cloud = OvidCloudService.I;
+        final connection = cloud.connectionFor(app);
+        final managed = app.providerById(AppState.ovidCloudProviderId);
+        final showCloud =
+            managed != null &&
+            (q.isEmpty ||
+                _matchesQuery(q, managed.name) ||
+                (connection.status == CloudConnectionStatus.ready &&
+                    managed.models.any((m) => _matchesQuery(q, m))));
+        final configured = app.providers
+            .where((p) => p.id != AppState.ovidCloudProviderId)
+            .where((p) => p.hasKey && p.models.isNotEmpty)
+            .where(
+              (p) =>
+                  _matchesQuery(q, p.name) ||
+                  p.models.any((m) => _matchesQuery(q, m)),
+            )
+            .toList();
+        final unconfigured = app.providers
+            .where((p) => p.id != AppState.ovidCloudProviderId)
+            .where((p) => !p.hasKey && p.models.isNotEmpty)
+            .toList();
+        final unconfiguredMatchesSearch = unconfigured.any(
+          (p) =>
+              _matchesQuery(q, p.name) ||
+              p.models.any((m) => _matchesQuery(q, m)),
+        );
 
-    return Material(
-      color: Aether.surface,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-      child: Column(
-        children: [
-          // Drag handle
-          Container(
-            margin: const EdgeInsets.only(top: 10, bottom: 4),
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: Aether.hairlineStrong,
-              borderRadius: BorderRadius.circular(2),
-            ),
+        // Recents (current selection + prior selections), filtered by query &
+        // Ovid Cloud readiness.
+        final allRecents = <({String providerId, String model})>[];
+        final session = app.activeSession;
+        if (session != null &&
+            session.model.isNotEmpty &&
+            session.model != 'Select a provider') {
+          final pId = session.providerId;
+          if (pId != null && pId.isNotEmpty) {
+            allRecents.add((providerId: pId, model: session.model));
+          }
+        }
+        for (final r in app.recentModels) {
+          if (!allRecents.any(
+            (item) => item.providerId == r.providerId && item.model == r.model,
+          )) {
+            allRecents.add(r);
+          }
+        }
+        final recents = allRecents.where((r) {
+          final p = app.providerById(r.providerId);
+          if (p == null) return false;
+          if (p.id == AppState.ovidCloudProviderId &&
+              (connection.status != CloudConnectionStatus.ready ||
+                  !p.models.contains(r.model.split('·').first.trim()))) {
+            return false;
+          }
+          if (q.isEmpty) return true;
+          final baseModel = r.model.split('·').first.trim();
+          return _matchesQuery(q, baseModel) ||
+              _matchesQuery(q, r.model) ||
+              _matchesQuery(q, p.name);
+        }).toList();
+
+        final noConfiguredAtAll =
+            managed == null &&
+            app.providers
+                .where((p) => p.id != AppState.ovidCloudProviderId)
+                .where((p) => p.hasKey && p.models.isNotEmpty)
+                .isEmpty;
+        final searchMissed =
+            q.isNotEmpty &&
+            !showCloud &&
+            configured.isEmpty &&
+            recents.isEmpty &&
+            !unconfiguredMatchesSearch;
+
+        // The draggable controller must own the only vertical viewport. A
+        // generic sheet's outer scroller can otherwise obscure the last rows
+        // of this bounded catalogue behind its header and keyboard inset.
+        return Material(
+          color: Aether.surface,
+          borderRadius: const BorderRadius.vertical(
+            top: Radius.circular(AetherRadius.rXl),
           ),
-          const SizedBox(height: 10),
-          // Title + search
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 18),
-            child: Row(
-              children: [
-                const Text(
-                  'Select model',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                ),
-                const Spacer(),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(Icons.close, size: 18),
-                  onPressed: () => Navigator.pop(context),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 4, 18, 8),
-            child: TextField(
-              onChanged: (v) => setState(() => _query = v),
-              style: const TextStyle(fontSize: 13.5),
-              decoration: InputDecoration(
-                hintText: 'Search models or providers…',
-                prefixIcon: Icon(
-                  Icons.search,
-                  size: 17,
-                  color: Aether.textFaint,
-                ),
-                isDense: true,
-                filled: true,
-                fillColor: Aether.surfaceAlt,
-                contentPadding: const EdgeInsets.symmetric(vertical: 9),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Aether.hairline),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Aether.hairline),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Aether.accent),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
+          child: CustomScrollView(
+            key: const ValueKey('model-picker-list'),
+            controller: widget.scrollController,
+            // Search, notices and provider cards share the sheet's real scroll
+            // controller, including empty results. Keep normal lazy caching;
+            // search filters the catalogue data before rows are built.
+            slivers: [
+              SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Center(child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Aether.hairlineStrong,
+                        borderRadius: BorderRadius.circular(AetherRadius.rPill),
+                      ),
+                    )),
+                    const SizedBox(height: 14),
+                    Text('Select model', style: AetherType.h2),
+                    const SizedBox(height: 16),
+                  ],
                 ),
               ),
-            ),
-          ),
-          // Provider → model list
-          Expanded(
-            child: AnimatedBuilder(
-              animation: app,
-              builder: (_, _) {
-                // Only show providers that have an API key configured AND
-                // at least one model available. Providers without a key
-                // are collapsed into a single hint row at the bottom.
-                final configured = app.providers
-                    .where((p) => p.hasKey && p.models.isNotEmpty)
-                    .where(
-                      (p) =>
-                          q.isEmpty ||
-                          p.name.toLowerCase().contains(q) ||
-                          p.models.any((m) => m.toLowerCase().contains(q)),
-                    )
-                    .toList();
-                final unconfigured = app.providers
-                    .where((p) => !p.hasKey && p.models.isNotEmpty)
-                    .toList();
-                if (configured.isEmpty && unconfigured.isEmpty) {
-                  return Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Text(
-                        'No models yet.\nAdd a key in Settings → Providers and tap Fetch models.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          height: 1.6,
-                          color: Aether.textMuted,
-                        ),
-                      ),
-                    ),
-                  );
-                }
-                // A search that matches nothing should say so — otherwise
-                // the sheet shows only the hint row and looks broken.
-                if (q.isNotEmpty &&
-                    configured.isEmpty &&
-                    unconfigured.every(
-                      (p) =>
-                          !p.name.toLowerCase().contains(q) &&
-                          !p.models.any((m) => m.toLowerCase().contains(q)),
-                    )) {
-                  return Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Text(
-                        'No matches for "$_query".\nTry a different search.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          height: 1.6,
-                          color: Aether.textMuted,
-                        ),
-                      ),
-                    ),
-                  );
-                }
-                // Recent models: current selected model + all past selected models.
-                final allRecents = <({String providerId, String model})>[];
-                final session = app.activeSession;
-                if (session != null &&
-                    session.model.isNotEmpty &&
-                    session.model != 'Select a provider') {
-                  final pId = session.providerId;
-                  if (pId != null && pId.isNotEmpty) {
-                    allRecents.add((providerId: pId, model: session.model));
-                  }
-                }
-                for (final r in app.recentModels) {
-                  if (!allRecents.any(
-                    (item) =>
-                        item.providerId == r.providerId &&
-                        item.model == r.model,
-                  )) {
-                    allRecents.add(r);
-                  }
-                }
-                final recents = allRecents.where((r) {
-                  final p = app.providerById(r.providerId);
-                  if (p == null) return false;
-                  if (q.isEmpty) return true;
-                  final baseModel = r.model
-                      .split('·')
-                      .first
-                      .trim()
-                      .toLowerCase();
-                  return baseModel.contains(q) ||
-                      r.model.toLowerCase().contains(q) ||
-                      p.name.toLowerCase().contains(q);
-                }).toList();
-                final showRecents = recents.isNotEmpty;
-                return ListView.builder(
-                  controller: widget.scrollController,
-                  padding: const EdgeInsets.only(bottom: 20),
-                  itemCount:
-                      (showRecents ? 1 : 0) +
-                      configured.length +
-                      (unconfigured.isEmpty ? 0 : 1),
-                  itemBuilder: (_, i) {
-                    if (showRecents && i == 0) {
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(18, 14, 18, 4),
-                            child: Text(
-                              'Recent',
-                              style: TextStyle(
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w700,
-                                color: Aether.textMuted,
+              SliverToBoxAdapter(child:
+              AetherField(
+                key: const ValueKey('model-picker-search'),
+                label: 'Search',
+                showLabel: false,
+                hint: 'Search models or providers',
+                controller: _searchCtrl,
+                onChanged: (v) => setState(() => _query = v.trim()),
+                prefixIcon: Icon(
+                  Icons.search,
+                  size: 18,
+                  color: Aether.textFaint,
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 12,
+                ),
+              ),
+              ),
+              const SliverToBoxAdapter(child: SizedBox(height: 12)),
+              Builder(
+                  builder: (_) {
+                    // Branch 1: catalogue is empty and no search entered.
+                    if (noConfiguredAtAll && !showCloud && q.isEmpty) {
+                      return SliverToBoxAdapter(child: AetherEmptyState(
+                        icon: Icons.hub_outlined,
+                        title: 'No models configured',
+                        message:
+                            'Add a provider API key in Settings → Providers '
+                            'and tap Fetch models, or connect Ovid Cloud for a '
+                            'managed catalogue.',
+                        action: AetherPrimaryButton(
+                          label: 'Open Settings',
+                          icon: Icons.settings_outlined,
+                          onPressed: () {
+                            Navigator.pop(context);
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => const SettingsScreen(),
                               ),
-                            ),
-                          ),
-                          for (final r in recents)
-                            _ModelTile(
-                              providerId: r.providerId,
-                              model: r.model,
-                              isRecent: true,
-                            ),
-                        ],
-                      );
+                            );
+                          },
+                        ),
+                      ));
                     }
-                    final idx = showRecents ? i - 1 : i;
-                    if (idx < configured.length) {
-                      final p = configured[idx];
-                      final models = p.models
-                          .where(
-                            (m) =>
-                                q.isEmpty ||
-                                p.name.toLowerCase().contains(q) ||
-                                m.toLowerCase().contains(q),
-                          )
-                          .toList();
-                      if (models.isEmpty) return const SizedBox.shrink();
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(18, 14, 18, 4),
-                            child: Row(
-                              children: [
-                                Text(
-                                  p.name,
-                                  style: TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w700,
-                                    color: Aether.textMuted,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                if (p.isFree)
-                                  Tag(
-                                    'FREE',
-                                    color: Aether.successLight,
-                                    filled: true,
-                                  ),
-                                const SizedBox(width: 6),
-                                const Tag(
-                                  'KEY',
-                                  color: Aether.accent,
-                                  filled: true,
-                                ),
-                              ],
-                            ),
-                          ),
-                          for (final m in models)
-                            _ModelTile(providerId: p.id, model: m),
-                        ],
-                      );
+                    // Branch 2: query matched absolutely nothing.
+                    if (searchMissed) {
+                      return SliverToBoxAdapter(child: AetherEmptyState(
+                        icon: Icons.search_off_outlined,
+                        title: 'No matches',
+                        message:
+                            'Nothing matches "$_query" in your configured '
+                            'providers or models. Try a different search.',
+                      ));
                     }
-                    // Hint row for providers without keys.
-                    return Padding(
-                      padding: const EdgeInsets.fromLTRB(18, 20, 18, 8),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.key_off,
-                            size: 14,
-                            color: Aether.textFaint,
+                    return SliverList.list(
+                      children: [
+                        if (showCloud)
+                          _buildOvidCloudCard(
+                            context,
+                            app: app,
+                            cloud: cloud,
+                            connection: connection,
+                            managed: managed,
+                            q: q,
                           ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              '${unconfigured.map((p) => p.name).join(', ')} — add API keys in Settings → Providers to use these models.',
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                color: Aether.textFaint,
-                              ),
-                            ),
-                          ),
+                        if (recents.isNotEmpty) ...[
+                          const SizedBox(height: 12),
+                          _buildRecentsCard(context, app: app, recents: recents),
                         ],
-                      ),
+                        for (final p in configured) ...[
+                          const SizedBox(height: 12),
+                          _buildProviderCard(context, p: p, q: q),
+                        ],
+                        if (unconfiguredMatchesSearch) ...[
+                          const SizedBox(height: 12),
+                          _buildUnconfiguredNotice(context, unconfigured.where(
+                            (p) => _matchesQuery(q, p.name) ||
+                                p.models.any((m) => _matchesQuery(q, m)),
+                          ).toList()),
+                        ],
+                      ],
                     );
                   },
-                );
+              ),
+            ],
+          ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildOvidCloudCard(
+    BuildContext context, {
+    required AppState app,
+    required OvidCloudService cloud,
+    required CloudConnectionState connection,
+    required ProviderConfig managed,
+    required String q,
+  }) {
+    final ready = connection.status == CloudConnectionStatus.ready;
+    final filtered = managed.models
+        .where(
+          (m) => _matchesQuery(q, m) || _matchesQuery(q, managed.name),
+        )
+        .toList();
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            AetherStatusDot(
+              color: switch (connection.status) {
+                CloudConnectionStatus.ready => Aether.successLight,
+                CloudConnectionStatus.failed => Aether.dangerC,
+                CloudConnectionStatus.connecting ||
+                CloudConnectionStatus.loadingCatalog => Aether.accent,
+                CloudConnectionStatus.idle => Aether.textFaint,
               },
+              pulsing: connection.loading,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _cloudStatus(connection),
+                style: AetherType.bodyMuted,
+              ),
+            ),
+          ],
+        ),
+             if (!ready)
+               Align(
+                 alignment: Alignment.centerLeft,
+                 child:
+               AetherGhostButton(
+                 key: const ValueKey('cloud-connection-retry'),
+                label: connection.loading ? 'Retrying…' : 'Retry',
+                icon: Icons.refresh,
+                loading: connection.loading,
+                onPressed: connection.loading
+                    ? null
+                    : () => unawaited(cloud.ensureConnected(app: app)),
+               ),
+               ),
+        if (ready && filtered.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Divider(height: 1, thickness: 1, color: Aether.hairline),
+          const SizedBox(height: 4),
+          for (final model in filtered)
+            _ModelTile(providerId: managed.id, model: model),
+        ],
+      ],
+    );
+    return AetherCard(
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 10),
+      title: Wrap(
+        spacing: 8,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(managed.name, style: AetherType.title),
+          const AetherPill(label: 'MANAGED', color: Aether.accent),
+        ],
+      ),
+      child: body,
+    );
+  }
+
+  Widget _buildRecentsCard(
+    BuildContext context, {
+    required AppState app,
+    required List<({String providerId, String model})> recents,
+  }) {
+    return AetherCard(
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 8),
+      title: Row(
+        children: [
+          Text('Recent', style: AetherType.label),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final r in recents)
+            _ModelTile(
+              providerId: r.providerId,
+              model: r.model,
+              isRecent: true,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProviderCard(
+    BuildContext context, {
+    required ProviderConfig p,
+    required String q,
+  }) {
+    final models = p.models
+        .where((m) => _matchesQuery(q, m) || _matchesQuery(q, p.name))
+        .toList();
+    if (models.isEmpty) return const SizedBox.shrink();
+    return AetherCard(
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 8),
+      title: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(p.name, style: AetherType.title),
+          if (p.isFree) ...[
+            AetherPill(
+              label: 'FREE',
+              color: Aether.successLight,
+            ),
+          ],
+          const AetherPill(label: 'KEY', color: Aether.accent),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final m in models) _ModelTile(providerId: p.id, model: m),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUnconfiguredNotice(
+    BuildContext context,
+    List<ProviderConfig> unconfigured,
+  ) {
+    return AetherCard(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      color: Aether.surfaceAlt,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.key_off, size: 18, color: Aether.textFaint),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Providers awaiting a key', style: AetherType.label),
+                const SizedBox(height: 4),
+                Text(
+                  '${unconfigured.map((p) => p.name).join(', ')} — add API '
+                  'keys in Settings → Providers to use these models.',
+                  style: AetherType.caption,
+                ),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: AetherGhostButton(
+                    label: 'Open Settings',
+                    icon: Icons.settings_outlined,
+                    onPressed: () {
+                      Navigator.pop(context);
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const SettingsScreen(),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -2531,6 +2719,15 @@ class _ModelTile extends StatelessWidget {
     final provider = app.providerById(providerId);
     final providerName = provider?.name ?? providerId;
 
+    // Managed Ovid Cloud `auto` rows show an `Auto` pill — every other row
+    // (own-key provider or specific cloud model) is manual selection.
+    final isAutoRow =
+        providerId == AppState.ovidCloudProviderId &&
+        baseModel.toLowerCase() == 'auto';
+    final AetherPill modePill = isAutoRow
+        ? const AetherPill(label: 'Auto', color: Aether.accent)
+        : AetherPill(label: 'Manual', color: Aether.textMuted);
+
     Widget buildCurrentBadge() {
       return Container(
         margin: const EdgeInsets.only(right: 6),
@@ -2550,40 +2747,52 @@ class _ModelTile extends StatelessWidget {
       );
     }
 
+    Widget modelTitle() {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(ovidModelLabel(baseModel), style: const TextStyle(fontSize: 13.5)),
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [modePill, if (selected && isRecent) buildCurrentBadge()],
+          ),
+        ],
+      );
+    }
+
     if (!supportsEffort) {
-      return ListTile(
-        dense: true,
-        leading: Icon(
-          Icons.smart_toy_outlined,
-          size: 18,
-          color: selected ? Aether.accent : Aether.textMuted,
+      // Wrap in a transparent Material so splash/hover paints without the
+      // DecoratedBox of the enclosing AetherCard hiding it.
+      return Material(
+        color: Colors.transparent,
+        child: ListTile(
+          dense: true,
+          leading: Icon(
+            Icons.smart_toy_outlined,
+            size: 18,
+            color: selected ? Aether.accent : Aether.textMuted,
+          ),
+          title: modelTitle(),
+          subtitle: isRecent
+              ? Text(
+                  providerName,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: selected ? Aether.accent : Aether.textFaint,
+                  ),
+                )
+              : null,
+          trailing: selected
+              ? const Icon(Icons.check, size: 18, color: Aether.accent)
+              : null,
+          onTap: () {
+            app.setModel(providerId, model);
+            Navigator.pop(context);
+          },
         ),
-        title: Text(
-          ovidModelLabel(baseModel),
-          style: const TextStyle(fontSize: 13.5),
-        ),
-        subtitle: isRecent
-            ? Text(
-                providerName,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: selected ? Aether.accent : Aether.textFaint,
-                ),
-              )
-            : null,
-        trailing: selected
-            ? Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (isRecent) buildCurrentBadge(),
-                  const Icon(Icons.check, size: 18, color: Aether.accent),
-                ],
-              )
-            : null,
-        onTap: () {
-          app.setModel(providerId, model);
-          Navigator.pop(context);
-        },
       );
     }
 
@@ -2591,7 +2800,9 @@ class _ModelTile extends StatelessWidget {
         ? current.split('·').last.trim()
         : (model.contains('·') ? model.split('·').last.trim() : null);
 
-    return Theme(
+    return Material(
+      color: Colors.transparent,
+      child: Theme(
       data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
       child: ExpansionTile(
         dense: true,
@@ -2602,10 +2813,7 @@ class _ModelTile extends StatelessWidget {
           size: 18,
           color: selected ? Aether.accent : Aether.textMuted,
         ),
-        title: Text(
-          ovidModelLabel(baseModel),
-          style: const TextStyle(fontSize: 13.5),
-        ),
+        title: modelTitle(),
         subtitle: isRecent
             ? Text(
                 effortVariant != null
@@ -2625,15 +2833,6 @@ class _ModelTile extends StatelessWidget {
                       ),
                     )
                   : null),
-        trailing: selected
-            ? Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (isRecent) buildCurrentBadge(),
-                  const Icon(Icons.check, size: 18, color: Aether.accent),
-                ],
-              )
-            : null,
         children: [
           Wrap(
             spacing: 8,
@@ -2673,6 +2872,7 @@ class _ModelTile extends StatelessWidget {
             ],
           ),
         ],
+      ),
       ),
     );
   }
@@ -5180,6 +5380,7 @@ class _InputBar extends StatefulWidget {
   /// Shared width axis: the composer card is capped to [ChatLayout.composerWidth]
   /// and centered within the chat pane.
   final ChatLayout layout;
+  final double availableHeight;
   final VoidCallback onSend;
   const _InputBar({
     required this.controller,
@@ -5187,6 +5388,7 @@ class _InputBar extends StatefulWidget {
     required this.sessionId,
     required this.running,
     required this.layout,
+    required this.availableHeight,
     this.coordinator,
     this.locked = false,
     this.editingQueue = false,
@@ -5269,9 +5471,8 @@ class _InputBarState extends State<_InputBar> {
   }
 
   /// web-IDE rule: running + empty draft = Stop; running + draft = Send
-  /// (queue). The queue color (teal) signals "this goes to the queue",
-  /// distinct from the normal accent send.
-  static const _queueColor = Color(0xFF0E9F9F);
+  /// (queue). The primary send CTA and the danger Stop button handle the
+  /// visual signal in the Aether composer — no bespoke teal is needed.
 
   /// True while the composer is in slash mode (text starts with `/` and the
   /// first token has no space yet). A bare `/` counts — that is the whole
@@ -5855,29 +6056,40 @@ class _InputBarState extends State<_InputBar> {
         ),
         child: Container(
           key: const ValueKey('chat-composer-card'),
-          // composer card: text fills the FULL width on top; the
-          // toolbar (attach / mode chip / mic / send-stop) sits on its own
-          // row below — the text never shares a row with the mode icon.
-          padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
+          constraints: BoxConstraints(maxHeight: widget.availableHeight * 0.5),
+          // Aether composer surface: surfaceAlt fill, rLg radius, hairline
+          // border, soft elevation. Content fills top-to-bottom; the toolbar
+          // row sits beneath the field so the primary action is always
+          // reachable.
+          padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
           decoration: BoxDecoration(
             color: Aether.surfaceAlt,
-            borderRadius: BorderRadius.circular(22),
+            borderRadius: BorderRadius.circular(AetherRadius.rLg),
             border: Border.all(color: Aether.hairline),
+            boxShadow: AetherShadows.shadowS,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              Flexible(
+                fit: FlexFit.loose,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
               // ── Staged attachment preview chips (dismissible) ──
               const _AttachmentChip(),
               // ── Slash menu: opens on a bare `/`, fuzzy-ranked, grouped
               //    into Commands / Skills / MCP tools / Plugins ──
               if (suggestions.isNotEmpty)
                 Container(
-                  margin: const EdgeInsets.fromLTRB(6, 2, 6, 0),
-                  constraints: const BoxConstraints(maxHeight: 220),
+                  margin: const EdgeInsets.fromLTRB(4, 2, 4, 4),
+                  constraints: BoxConstraints(
+                    maxHeight: math.min(220, widget.availableHeight * 0.25),
+                  ),
                   decoration: BoxDecoration(
                     color: Aether.surface,
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
                     border: Border.all(color: Aether.hairline),
                   ),
                   child: ListView.builder(
@@ -5970,64 +6182,56 @@ class _InputBarState extends State<_InputBar> {
                     },
                   ),
                 ),
-              // ── Text area — full card width ──
-              TextField(
-                key: const ValueKey('chat-composer'),
+              // ── Composer field — AetherField, multiline, rLg surfaceAlt ──
+              AetherField(
+                fieldKey: const ValueKey('chat-composer'),
+                label: 'Message',
+                showLabel: false,
                 controller: controller,
                 focusNode: widget.focusNode,
-                minLines: 1,
-                maxLines: 5,
-                // Approval takeover: locked while a card awaits an answer.
                 enabled: !locked,
-                // composer: 16px input, 24px line-height.
-                style: const TextStyle(fontSize: 16, height: 24 / 16),
-                decoration: InputDecoration(
-                  hintText: locked
-                      ? 'Answer the approval card above first…'
-                      : 'Describe what you want to build…  / commands  @ agents',
-                  hintStyle: TextStyle(
-                    fontSize: 16,
-                    height: 24 / 16,
-                    // Explicit faint color so the hint reads as a hint and
-                    // is not overridden by the theme's default.
-                    color: Aether.textFaint,
-                  ),
-                  filled: false,
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  disabledBorder: InputBorder.none,
-                  contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
-                ),
+                maxLines: widget.availableHeight < 400 ? 2 : 5,
+                minLines: 1,
+                radius: AetherRadius.rLg,
+                hint: locked
+                    ? 'Answer the approval card above first…'
+                    : 'Describe what you want to build…  / commands  @ agents',
+                contentPadding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
                 onSubmitted: (_) {
                   if (!locked) onSend();
                 },
               ),
               const _ControlServiceNotice(),
               if (widget.editingQueue)
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'Editing queued message · original files retained',
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                          'Editing queued message · original files retained',
                       ),
-                    ),
-                    TextButton(
-                      onPressed: widget.onCancelQueueEdit,
-                      child: const Text('Keep as new draft'),
-                    ),
-                  ],
+                      AetherGhostButton(
+                        label: 'Keep as new draft',
+                        onPressed: widget.onCancelQueueEdit,
+                      ),
+                    ],
+                  ),
                 ),
-              // ── Toolbar row ──
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              // ── Toolbar row — attach · chips · mic · primary ──
               Row(
                 children: [
-                  IconButton(
+                  AetherGhostButton(
+                    label: 'Attach',
                     tooltip: 'Attach',
-                    icon: Icon(
-                      Icons.add_circle_outline,
-                      size: 22,
-                      color: Aether.textMuted,
-                    ),
+                    icon: Icons.add_circle_outline,
+                    iconOnly: true,
+                    iconSize: 40,
                     onPressed: () => _attachSheet(context),
                   ),
                   // The middle chips (workspace / plan / mode) scroll
@@ -6053,78 +6257,68 @@ class _InputBarState extends State<_InputBar> {
                     controller: controller,
                     onSend: (_) => widget.onSend(),
                   ),
-                  // ── Stateful primary button (web-IDE InputBar pattern) ──
+                  const SizedBox(width: 4),
+                  // ── Stateful primary / stop button (web-IDE InputBar pattern) ──
                   AnimatedBuilder(
                     animation: Listenable.merge([AgentService.I, controller]),
                     builder: (_, _) {
                       // Per-session run state (never leaked from other
                       // sessions — the multi-session blink fix).
-                      // `widget.sessionId` is read directly for the null
-                      // check: a field access is never type-promoted, so the
-                      // analyzer can see the check is real. The empty-string
-                      // fallback only feeds lookups that are already guarded
-                      // by [hasSession].
                       final sessionId = widget.sessionId ?? '';
                       final hasSession = widget.sessionId != null;
                       final runningNow =
                           hasSession && AgentService.I.busyFor(sessionId);
                       final hasDraft = controller.text.trim().isNotEmpty;
-                      final IconData icon;
                       final hasQueued =
                           hasSession &&
                           AgentService.I
                               .queuedMessagesFor(sessionId)
                               .isNotEmpty;
-                      final Color bg;
-                      final String tip;
-                      if (widget.editingQueue) {
-                        icon = Icons.check;
-                        bg = Aether.accent;
-                        tip = 'Save queued message';
-                      } else if (runningNow && !hasDraft) {
-                        // Running + empty → STOP (red). Stop only the current
-                        // session so other sessions remain isolated; queued
-                        // messages still send next.
-                        icon = Icons.stop_rounded;
-                        bg = Colors.redAccent;
-                        tip = hasQueued
-                            ? 'Stop session (next queued will run)'
-                            : 'Stop session';
-                      } else if (runningNow && hasDraft) {
-                        // Running + draft → SEND-TO-QUEUE (teal).
-                        icon = Icons.arrow_upward;
-                        bg = _queueColor;
-                        tip = 'Add to queue';
-                      } else {
-                        // Idle → SEND (accent).
-                        icon = Icons.arrow_upward;
-                        bg = Aether.accent;
-                        tip = 'Send';
+                      void stop() {
+                        if (hasSession) {
+                          AgentService.I.stopRequested(sessionId: sessionId);
+                        } else {
+                          AgentService.I.hardStopAll();
+                        }
                       }
-                      return Container(
-                        decoration: BoxDecoration(
-                          color: bg,
-                          shape: BoxShape.circle,
-                        ),
-                        child: IconButton(
-                          tooltip: tip,
-                          icon: Icon(icon, size: 18, color: Colors.white),
-                          onPressed: () {
-                            if (!widget.editingQueue &&
-                                runningNow &&
-                                !hasDraft) {
-                              if (hasSession) {
-                                AgentService.I.stopRequested(
-                                  sessionId: sessionId,
-                                );
-                              } else {
-                                AgentService.I.hardStopAll();
-                              }
-                            } else {
-                              onSend();
-                            }
-                          },
-                        ),
+
+                      if (widget.editingQueue) {
+                        return AetherPrimaryButton(
+                          label: 'Save',
+                          tooltip: 'Save queued message',
+                          icon: Icons.check,
+                          iconOnly: true,
+                          onPressed: onSend,
+                        );
+                      }
+                      if (runningNow && !hasDraft) {
+                        // STOP button appears while the agent is running.
+                        return AetherDangerButton(
+                          label: 'Stop',
+                          tooltip: hasQueued
+                              ? 'Stop session (next queued will run)'
+                              : 'Stop session',
+                          icon: Icons.stop_rounded,
+                          iconOnly: true,
+                          onPressed: stop,
+                        );
+                      }
+                      if (runningNow && hasDraft) {
+                        // Running + draft → send to queue — same primary CTA.
+                        return AetherPrimaryButton(
+                          label: 'Queue',
+                          tooltip: 'Add to queue',
+                          icon: Icons.arrow_upward,
+                          iconOnly: true,
+                          onPressed: onSend,
+                        );
+                      }
+                      return AetherPrimaryButton(
+                        label: 'Send',
+                        tooltip: 'Send',
+                        icon: Icons.arrow_upward,
+                        iconOnly: true,
+                        onPressed: hasDraft || locked ? onSend : onSend,
                       );
                     },
                   ),
@@ -6580,15 +6774,15 @@ class _QueueDock extends StatelessWidget {
                   children: [
                     Icon(Icons.queue_music, size: 13, color: Aether.textMuted),
                     const SizedBox(width: 6),
-                    Text(
+                    Expanded(child: Text(
                       '${queue.length} queued message${queue.length > 1 ? 's' : ''}',
                       style: TextStyle(
                         fontSize: 11.5,
                         fontWeight: FontWeight.w600,
                         color: Aether.textMuted,
                       ),
-                    ),
-                    const Spacer(),
+                    )),
+                    const SizedBox(width: 8),
                     GestureDetector(
                       onTap: () {
                         for (var i = queue.length - 1; i >= 0; i--) {
@@ -8529,10 +8723,8 @@ class _RuntimeInstallBanner extends StatelessWidget {
               ],
               if (app.runtimeInstallLine.isNotEmpty) ...[
                 const SizedBox(height: 5),
-                Text(
-                  app.runtimeInstallLine,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
+                  Text(
+                    app.runtimeInstallLine,
                   style: TextStyle(
                     fontFamily: Aether.mono,
                     fontSize: 10.5,

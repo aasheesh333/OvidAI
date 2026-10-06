@@ -33,12 +33,16 @@ class AgentNotificationService {
   bool backgroundStopped = false;
   String? backgroundConstraint;
   int _backgroundGeneration = 0;
+  bool _localStopPending = false;
   static const _stopKey = 'ovid_background_stopped';
 
   Future<void> refreshBackgroundState() async {
     final generation = _backgroundGeneration;
+    if (_localStopPending) return;
     try {
-      final state = await _channel.invokeMapMethod<String, dynamic>('backgroundState');
+      final state = await _channel.invokeMapMethod<String, dynamic>(
+        'backgroundState',
+      );
       if (generation != _backgroundGeneration) return;
       if (state != null) {
         backgroundStopped = state['stopped'] == true;
@@ -46,8 +50,11 @@ class AgentNotificationService {
         return;
       }
     } on MissingPluginException {
-      backgroundConstraint = 'Background alarms require Android; keep the app running.';
+      if (generation != _backgroundGeneration) return;
+      backgroundConstraint =
+          'Background alarms require Android; keep the app running.';
     } catch (e) {
+      if (generation != _backgroundGeneration) return;
       backgroundConstraint = 'Background service unavailable: $e';
     }
     final prefs = await SharedPreferences.getInstance();
@@ -57,43 +64,73 @@ class AgentNotificationService {
 
   Future<void> resumeBackground() async {
     final generation = ++_backgroundGeneration;
+    await _backgroundWrite;
+    if (generation != _backgroundGeneration) return;
     try {
       await _channel.invokeMethod('backgroundResume');
     } on MissingPluginException {
       // Foreground-only desktop runtime.
     }
-    final prefs = await SharedPreferences.getInstance();
     if (generation != _backgroundGeneration) return;
-    await prefs.setBool(_stopKey, false);
-    if (generation != _backgroundGeneration) return;
-    backgroundStopped = false;
-    backgroundConstraint = null;
-    agentIdle();
+    await _serializeBackgroundWrite(() async {
+      if (generation != _backgroundGeneration) return;
+      final prefs = await SharedPreferences.getInstance();
+      if (generation != _backgroundGeneration) return;
+      if (!await prefs.setBool(_stopKey, false)) {
+        throw StateError('Could not persist background Resume');
+      }
+      if (generation != _backgroundGeneration) return;
+      backgroundStopped = false;
+      _localStopPending = false;
+      backgroundConstraint = null;
+      agentIdle();
+    });
+  }
+
+  Future<void> _backgroundWrite = Future<void>.value();
+
+  Future<void> _serializeBackgroundWrite(Future<void> Function() write) {
+    final next = _backgroundWrite.then((_) => write());
+    _backgroundWrite = next.catchError((Object e) {
+      Diag.swallow('background.write', e);
+    });
+    return next;
   }
 
   Future<void> stopBackground() async {
-    ++_backgroundGeneration;
+    final generation = ++_backgroundGeneration;
     backgroundStopped = true;
+    _localStopPending = true;
     _debounce?.cancel();
     _committedGeneration = ++_issuedGeneration;
     _active = false;
     // Pause synchronously before awaiting native or session storage.
     final paused = AgentService.I.stopScheduledBackground();
     AgentService.I.cancelAllRuns();
-    await Future.wait([paused, _persistBackgroundStop()]);
+    final persisted = _persistBackgroundStop();
+    try {
+      await Future.wait([paused, persisted]);
+    } finally {
+      if (generation == _backgroundGeneration) _localStopPending = false;
+    }
   }
 
-  Future<void> _persistBackgroundStop() async {
-    try {
-      await _channel.invokeMethod('backgroundStop');
-    } on MissingPluginException {
-      // Also persist for non-Android runtimes.
-    } catch (e) {
-      Diag.swallow('background.stop', e);
-    }
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_stopKey, true);
-  }
+  Future<void> _persistBackgroundStop() =>
+    // Queue the native operation as well as preferences. Otherwise a delayed
+    // native Stop can enqueue its preferences write after a newer Resume.
+    _serializeBackgroundWrite(() async {
+      try {
+        await _channel.invokeMethod('backgroundStop');
+      } on MissingPluginException {
+        // Also persist for non-Android runtimes.
+      } catch (e) {
+        Diag.swallow('background.stop', e);
+      }
+      final prefs = await SharedPreferences.getInstance();
+      if (!await prefs.setBool(_stopKey, true)) {
+        throw StateError('Could not persist background Stop');
+      }
+    });
 
   /// Cooldown before a failure-disabled notifier re-arms itself. A permanent
   /// session-long disable meant one bad burst (e.g. transient native errors)
@@ -123,6 +160,7 @@ class AgentNotificationService {
     }
     return false;
   }
+
   Timer? _debounce;
   String? _displayedStopTargetSessionId;
   int _issuedGeneration = 0;
@@ -138,9 +176,7 @@ class AgentNotificationService {
   /// "stay present" intent, independent of the keep-alive toggle.
   bool _isControlModeActive() {
     try {
-      return AppState.I.sessions.any(
-        (s) => s.mode == AgentMode.control.name,
-      );
+      return AppState.I.sessions.any((s) => s.mode == AgentMode.control.name);
     } catch (_) {
       return false;
     }
@@ -185,6 +221,8 @@ class AgentNotificationService {
     backgroundStopped = false;
     backgroundConstraint = null;
     _backgroundGeneration = 0;
+    _localStopPending = false;
+    _backgroundWrite = Future<void>.value();
   }
 
   void Function()? _onExitCallback;
@@ -220,7 +258,7 @@ class AgentNotificationService {
           _onExitCallback!();
         }
       } else if (call.method == 'onScheduleWake') {
-        await AgentService.I.wakeSchedules();
+        if (!backgroundStopped) await AgentService.I.wakeSchedules();
       } else if (call.method == 'onBackgroundConstraint') {
         backgroundConstraint = call.arguments as String?;
         AppState.I.refresh();
@@ -255,7 +293,9 @@ class AgentNotificationService {
       if (st.isDenied || st.isPermanentlyDenied) {
         await Permission.notification.request();
       }
-    } catch (e) { Diag.swallow('agent_notification_service', e); }
+    } catch (e) {
+      Diag.swallow('agent_notification_service', e);
+    }
   }
 
   /// Start/update the foreground notification. Debounced + content-hashed

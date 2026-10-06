@@ -24,6 +24,7 @@ import 'studio_errors.dart';
 import 'studio_file_tree.dart';
 import 'studio_layout.dart';
 import 'studio_terminal_tabs.dart';
+import 'widgets/aether_primitives.dart';
 
 // Studio's panes live in their own libraries; re-exported so callers (and the
 // existing widget tests) keep reaching them through this one import.
@@ -570,7 +571,7 @@ class _StudioScreenState extends State<StudioScreen> {
     final hasFolder = current != null && current.isNotEmpty;
     final choice = await showStudioSheet<String>(
       context,
-      child: Column(
+      child: SingleChildScrollView(child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -591,7 +592,7 @@ class _StudioScreenState extends State<StudioScreen> {
           ),
           const SizedBox(height: 10),
         ],
-      ),
+      )),
     );
     if (!mounted || choice == null) return;
     if (choice == 'sandbox') {
@@ -814,8 +815,15 @@ class _StudioScreenState extends State<StudioScreen> {
           backgroundColor: Aether.bg,
           appBar: _appBar(repo, compactActions),
           body: SafeArea(
-            child: Column(
-              children: [
+            child: StudioPaneViewport(
+              // Keep the tab strip, a real editor viewport and terminal chrome
+              // reachable even under a long approval or the software keyboard.
+              minContentHeight: 122 + math.max(1.0,
+                  MediaQuery.textScalerOf(context).scale(1.0)) *
+                  (kStudioTapTarget + (_terminalCollapsedOverride == false
+                      ? StudioMetrics.collapsedBarHeight + StudioMetrics.commandRowHeight
+                      : StudioMetrics.collapsedBarHeight)),
+              chrome: [
                 // Graceful degradation: the sandbox may be missing here when
                 // the user skipped the first-open install or the prefix was
                 // wiped afterwards. Terminal commands already fail with a
@@ -840,6 +848,21 @@ class _StudioScreenState extends State<StudioScreen> {
                   onPickBranch: _pickBranch,
                   syncing: _syncing,
                 ),
+                // The approval banner mirrors AgentService.pendingApproval for
+                // the active session. Rendered as an AetherCard-warn so a
+                // run-blocking approval is impossible to miss — Approve resolves
+                // the gate, Decline rejects it. Both actions tick off the
+                // approval contract in agent_service.dart via approve().
+                _ApprovalBanner(
+                  onDecision: (ok) {
+                    final a = AgentService.I.pendingApproval;
+                    if (a == null) return;
+                    AgentService.I.approve(ok);
+                    if (!ok) {
+                      showStudioToast(context, 'Declined ${a.tool}');
+                    }
+                  },
+                ),
                 if (_syncError != null)
                   _SyncErrorBanner(
                     message: _syncError!,
@@ -856,8 +879,8 @@ class _StudioScreenState extends State<StudioScreen> {
                     label: _syncProgress ?? 'Syncing…',
                     fraction: _syncFraction,
                   ),
-                Expanded(child: LayoutBuilder(builder: _workspace)),
               ],
+              child: LayoutBuilder(builder: _workspace),
             ),
           ),
           ),
@@ -978,19 +1001,24 @@ class _StudioScreenState extends State<StudioScreen> {
     final showTree = _showFilesOverride ?? m.treeVisibleByDefault;
     final dockedWidth = m.clampTreeWidth(
       _treeWidthOverride ?? m.treeWidth,
-      regionWidth: c.maxWidth,
+      regionWidth: c.maxWidth - kStudioTapTarget,
     );
     // An explicit collapse wins; otherwise a viewport too short for both
     // panes collapses the terminal instead of squeezing the editor.
     final collapsed = _terminalCollapsedOverride ?? !m.terminalFits;
     // The collapsed bar is the terminal's header strip, whose height is
     // `44dp * text scale` — a flat 44dp would clip it at a large OS font size.
-    final terminalHeight = collapsed
+    final requestedTerminalHeight = collapsed
         ? StudioMetrics.collapsedBarHeight * m.textScale
         : m.resolveTerminalHeight(
             _terminalHeightOverride ?? m.terminalHeight,
             regionHeight: c.maxHeight,
           );
+    // A terminal dragged to its maximum still leaves the editor's tab strip
+    // and a scrollable content viewport. The outer viewport supplies this room
+    // when a short screen cannot hold both panes.
+    final terminalHeight = math.min(requestedTerminalHeight,
+        math.max(0.0, c.maxHeight - (kStudioTapTarget * m.textScale + 122)));
 
     final editor = Column(
       children: const [
@@ -1012,7 +1040,7 @@ class _StudioScreenState extends State<StudioScreen> {
             onDragDelta: (d) => setState(
               () => _treeWidthOverride = m.clampTreeWidth(
                 dockedWidth + d,
-                regionWidth: c.maxWidth,
+                regionWidth: c.maxWidth - kStudioTapTarget,
               ),
             ),
             onReset: () => setState(() => _treeWidthOverride = null),
@@ -1279,7 +1307,7 @@ class _OverflowRow extends StatelessWidget {
       children: [
         Icon(icon, size: 17, color: Aether.textMuted),
         const SizedBox(width: 10),
-        Text(label, style: const TextStyle(fontSize: 13.5)),
+        Expanded(child: Text(label, style: const TextStyle(fontSize: 13.5))),
       ],
     );
   }
@@ -1526,8 +1554,6 @@ class _SyncErrorBanner extends StatelessWidget {
                     if (detail != null && detail!.isNotEmpty)
                       Text(
                         detail!,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: kStudioMinFontSize,
                           color: Aether.textFaint,
@@ -1991,6 +2017,120 @@ class _Avatar extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Approval banner shown above the Studio workspace whenever the active
+/// session has a pending agent approval. Rendered as an [AetherCard] warn
+/// surface so a run-blocking gate stands out from informational banners
+/// (status/sync/clone progress). Approve resolves the pending gate via
+/// [AgentService.approve]; Decline rejects it. Questions and plan reviews
+/// are the agent's own structured sheets — this banner only surfaces plain
+/// tool approvals (summary + detail) so the Studio surface stays uncluttered.
+class _ApprovalBanner extends StatelessWidget {
+  const _ApprovalBanner({required this.onDecision});
+
+  final void Function(bool ok) onDecision;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (context, _) {
+        final a = AgentService.I.pendingApproval;
+        // Structured questions and plan reviews have their own dedicated UI
+        // (ask_user_question sheet, plan review card). The Studio banner is
+        // only for plain tool-approval prompts.
+        if (a == null || a.questions != null || a.planBody != null) {
+          return const SizedBox.shrink();
+        }
+        return Semantics(
+          liveRegion: true,
+          label: 'Approval required for ${a.tool}. ${a.summary}',
+          container: true,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+            child: AetherCard(
+              color: Aether.warnLight.withValues(alpha: 0.08),
+              padding: const EdgeInsets.all(14),
+              title: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Icon(Icons.verified_user_outlined,
+                      size: 16, color: Aether.warnLight),
+                  const Text('Approval required'),
+                  Text(
+                    a.tool.toUpperCase(),
+                    style: AetherType.label.copyWith(color: Aether.warnLight),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    a.summary.isEmpty
+                        ? 'The agent is waiting for your decision.'
+                        : a.summary,
+                    style: AetherType.body,
+                  ),
+                  if (a.detail.trim().isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Aether.surfaceAlt,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Aether.hairline),
+                      ),
+                      child: Text(
+                        a.detail,
+                        style: TextStyle(
+                          fontFamily: Aether.mono,
+                          fontFamilyFallback: kStudioMonoFallback,
+                          fontSize: 12,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      SizedBox(
+                        width: 140 * math.max(1.0,
+                            MediaQuery.textScalerOf(context).scale(1.0)),
+                        child: AetherGhostButton(
+                        label: 'Decline',
+                        icon: Icons.block,
+                        onPressed: () => onDecision(false),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 140 * math.max(1.0,
+                            MediaQuery.textScalerOf(context).scale(1.0)),
+                        child: AetherPrimaryButton(
+                        label: 'Approve',
+                        icon: Icons.check,
+                        onPressed: () => onDecision(true),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

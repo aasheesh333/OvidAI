@@ -61,8 +61,7 @@ void main() {
         'db_designer',
         'web_clipper',
       ]) {
-        final capability =
-            NativePluginRegistry.I.capabilityForSlug(slug)!;
+        final capability = NativePluginRegistry.I.capabilityForSlug(slug)!;
         await expectLater(
           capability.callTool('nope', {}),
           throwsA(isA<ArgumentError>()),
@@ -204,10 +203,7 @@ void main() {
       });
       final decoded = jsonDecode(out) as Map<String, dynamic>;
       expect(decoded['count'], 1);
-      expect(
-        ((decoded['results'] as List).first as Map)['value'],
-        'pic.png',
-      );
+      expect(((decoded['results'] as List).first as Map)['value'], 'pic.png');
     });
 
     test('extracts element text with contains_text filter', () async {
@@ -255,19 +251,14 @@ void main() {
         await library.callTool('get', {'title': 'Summarize'}),
         'Summarize this: {{text}}',
       );
-      final listed =
-          jsonDecode(await library.callTool('list', {})) as List;
-      expect(
-        listed.map((e) => (e as Map)['title']),
-        contains('Summarize'),
-      );
+      final listed = jsonDecode(await library.callTool('list', {})) as List;
+      expect(listed.map((e) => (e as Map)['title']), contains('Summarize'));
       await library.callTool('delete', {'title': 'Summarize'});
       await expectLater(
         library.callTool('get', {'title': 'Summarize'}),
         throwsA(isA<ArgumentError>()),
       );
-      final after =
-          jsonDecode(await library.callTool('list', {})) as List;
+      final after = jsonDecode(await library.callTool('list', {})) as List;
       expect(
         after.map((e) => (e as Map)['title']),
         isNot(contains('Summarize')),
@@ -286,12 +277,8 @@ void main() {
         'tags': ['writing'],
       });
       final filtered =
-          jsonDecode(await library.callTool('list', {'tag': 'code'}))
-              as List;
-      expect(
-        filtered.map((e) => (e as Map)['title']),
-        contains('Code Review'),
-      );
+          jsonDecode(await library.callTool('list', {'tag': 'code'})) as List;
+      expect(filtered.map((e) => (e as Map)['title']), contains('Code Review'));
       expect(
         filtered.map((e) => (e as Map)['title']),
         isNot(contains('Haiku')),
@@ -335,10 +322,7 @@ void main() {
         'You are helpful.',
       );
       final listed = jsonDecode(await fresh.callTool('list', {})) as List;
-      expect(
-        listed.map((e) => (e as Map)['title']),
-        contains('Persist Me'),
-      );
+      expect(listed.map((e) => (e as Map)['title']), contains('Persist Me'));
       await fresh.callTool('delete', {'title': 'Persist Me'});
       final reloaded = PromptLibraryCapability();
       await expectLater(
@@ -385,7 +369,7 @@ void main() {
       expect(out, contains('CREATE TABLE "teams"'));
       expect(out, contains('CREATE TABLE "users"'));
       expect(out, contains('PRIMARY KEY'));
-      expect(out, contains('REFERENCES teams(id)'));
+      expect(out, contains('REFERENCES "teams"("id")'));
     });
 
     test('generate_ddl emits SQLite DDL', () async {
@@ -423,8 +407,7 @@ void main() {
       expect((decoded['errors'] as List), isEmpty);
     });
 
-    test('validate_schema flags missing PK, bad types, dangling FK',
-        () async {
+    test('validate_schema flags missing PK, bad types, dangling FK', () async {
       const bad = '''
 {
   "tables": [
@@ -438,9 +421,7 @@ void main() {
   ]
 }
 ''';
-      final out = await designer.callTool('validate_schema', {
-        'schema': bad,
-      });
+      final out = await designer.callTool('validate_schema', {'schema': bad});
       final decoded = jsonDecode(out) as Map<String, dynamic>;
       expect(decoded['valid'], isFalse);
       final errors = (decoded['errors'] as List).join('\n');

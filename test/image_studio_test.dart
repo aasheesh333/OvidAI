@@ -7,6 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:ovid_ai/core/image_studio.dart';
+import 'package:ovid_ai/core/image_receipt_store.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 Future<Uint8List> picture() async {
   final recorder = ui.PictureRecorder();
@@ -26,6 +28,7 @@ Future<Uint8List> picture() async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => SharedPreferences.setMockInitialValues({}));
 
   test('local resize/crop decode real content and enforce bounds', () async {
     final bytes = await picture();
@@ -61,6 +64,9 @@ void main() {
       final dir = await Directory.systemTemp.createTemp('image-studio-');
       addTearDown(() => dir.delete(recursive: true));
       final studio = ImageStudio(
+        receiptStore: ImageReceiptStore(
+          preferences: SharedPreferences.getInstance,
+        ),
         client: MockClient((request) async {
           if (request.method == 'GET') {
             return http.Response(
@@ -79,9 +85,19 @@ void main() {
           expect(body['image'], 'data:image/png;base64,${base64Encode(bytes)}');
           expect(body['model'], 'ovid-image');
           expect(request.headers['idempotency-key'], 'test-request-1234');
+          final pending = (await ImageReceiptStore(
+            preferences: SharedPreferences.getInstance,
+          ).list('fixture')).single;
           return http.Response(
             jsonEncode({
               'model': 'ovid-image',
+              'receipt': {
+                'account_id': 'fixture',
+                'request_id': pending.requestId,
+                'fingerprint': pending.fingerprint,
+                'state': 'confirmed',
+                'charged': '0.030',
+              },
               'data': [
                 {'b64_json': base64Encode(bytes), 'mime_type': 'image/png'},
               ],
@@ -90,6 +106,7 @@ void main() {
           );
         }),
       );
+      studio.bindAccount('fixture');
       await studio.refresh({'Authorization': 'Bearer fixture'});
       final output = await studio.infer(
         prompt: 'edit',

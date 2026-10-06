@@ -134,14 +134,20 @@ Implemented cleanup adapters:
    login timestamps) remains for idempotency and anti-resurrection. No email/photo
    or key tokens remain after completion. Decide retention before production.
 
-**Missing image/share cleanup integration:** the account cleanup chain does not
-call an external image-service/object-store deletion adapter or the shares
-repository's `delete_account(uid)` hook. SQL/Redis/key cleanup alone does not
-establish deletion of image assets, image-service metadata, or share snapshots.
-End-to-end account cleanup remains incomplete and an activation blocker; it
-requires owned, idempotent adapters wired to the actual deployed stores and
-integration verification. The current `deleted` checkpoint describes only this
-module's implemented cleanup chain.
+**Configured image/share integration:** `runtime.build()` now requires
+`ACCOUNT_STORE_CONFIG` and composes the gateway with the authoritative local
+image ledger and share repository. Durable `data:images` and `data:shares` stages
+call their idempotent `delete_account(uid)` hooks before `data`/Auth completion.
+In-progress legacy rows with aggregate `data` still run these new required stages.
+Persisted store UUIDs bind cleanup context to the selected authorities; a different
+configured identity on retry fails before any further effects. Local image cleanup
+removes replay/private cost and fences the UID, retaining minimal accounting and
+unresolved reservation tombstones. This does not delete provider-side images,
+external object stores, SQLite free pages/WAL, backups or proxy caches.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the mandatory inventory, provisioning,
+application/router factory, retention timer, migration and exact host commands.
+No default SQLite path or empty newly-created store can satisfy normal startup.
 
 `ACCOUNT_CLEANUP_MANIFEST` is a JSON file reviewed against the deployed schema:
 `{"scopes":[...]}`. Each scope has `table`, `column`, `kind` (`uid` or `token`) and
@@ -196,20 +202,24 @@ not modify a nonexistent tracked mint module or the live `/opt` implementation.
    Complete and review the LiteLLM/app cleanup manifest; validate key block/delete,
    cache eviction, missing-key retry semantics and foreign-key ordering for the
    deployed LiteLLM release (`main-latest` is not a pinned contract). Supply and
-   verify the missing external image cleanup adapter before activation.
+    verify configured image/share authority paths and provider/backup retention
+    before activation.
 4. Integrate all gateway/quota/write fences above, validate cancellation races
    against staging Firebase and SQL, and define backup/telemetry retention.
 5. Install dependencies from `requirements.txt` in a dedicated runtime. Configure
    protected environment: `ACCOUNT_DATABASE_URL`, `LITELLM_DATABASE_URL`,
    `ACCOUNT_CLEANUP_MANIFEST`, `FIREBASE_PROJECT_ID`, `ACCOUNT_FIREBASE_APP_IDS`,
-   `LITELLM_BASE`, `LITELLM_MASTER_KEY`, `REDIS_URL` and ADC credentials.
+    `LITELLM_BASE`, `LITELLM_MASTER_KEY`, `REDIS_URL`, `ACCOUNT_STORE_CONFIG`,
+    `SHARE_BASE_URL` and ADC credentials.
 6. Only after these checks set `ACCOUNT_ACTIVATED=true`; run API with
    `uvicorn server.account.runtime:create_app --factory` on a private interface.
    Route only `/account/*` through Caddy and apply existing abuse/rate limiting.
 7. Install the provided systemd worker service/timer under a least-privilege
    `ovid-account` OS user. `Persistent=true` plus durable due scanning catches up
    after restart. Alert on worker failure/overdue records. API and worker must use
-   the same account database. Paths in units assume `/srv/ovid-account`.
+    the same account database and provisioned image/share stores. Units require
+    explicit host drop-ins; no installation/storage paths are assumed. Install
+    the bounded image/share retention timer as described in DEPLOYMENT.md.
 8. Build with `OVID_ACCOUNT_ENABLED=true` only when the above is active. Missing
    server/attestation then blocks account entry; no fake cancellation fallback.
 

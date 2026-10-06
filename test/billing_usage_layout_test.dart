@@ -204,7 +204,10 @@ void main() {
         hasPricedModel: true,
       );
       await pump(tester, ProviderUsageScreen(provider: provider), 320);
-      await tester.scrollUntilVisible(find.text('MODEL'), 150);
+      await tester.scrollUntilVisible(
+        find.text('custom-model-with-a-long-name'),
+        150,
+      );
       expectNoInternalCopy(tester);
       expect(tester.takeException(), isNull);
     },

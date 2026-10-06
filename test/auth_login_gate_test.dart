@@ -91,18 +91,85 @@ void main() {
       expect(find.text('Account check failed'), findsOneWidget);
       expect(find.text('Protected app'), findsNothing);
       expect(binds, 0);
-      await tester.tap(find.text('Retry account check'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Retry'));
       await tester.pumpAndSettle();
       expect(find.text('Protected app'), findsOneWidget);
       expect(binds, 1);
+      service.notifyListeners();
+      await tester.pumpAndSettle();
+      expect(binds, 1, reason: 'Repeated auth events must not rebind cloud.');
       service.isSignedIn = false;
       service.accountReady = false;
       service.notifyListeners();
       await tester.pumpAndSettle();
       expect(find.text('Protected app'), findsNothing);
       expect(find.text('Continue with Google'), findsOneWidget);
+      expect(binds, 1, reason: 'Signing out must not start a cloud bind.');
       await tester.pumpWidget(const SizedBox());
       service.dispose();
     },
   );
+
+  for (final available in [false, true]) {
+    testWidgets('gate recovery actions fit a short viewport: $available', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(320, 280);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final service = GateService()
+        ..isAvailable = available
+        ..isSignedIn = available
+        ..accountError = 'Account check failed';
+      service.initialization.complete();
+      var binds = 0;
+      await tester.pumpWidget(MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            textScaler: const TextScaler.linear(1.3),
+          ),
+          child: child!,
+        ),
+        home: LoginGate(
+          service: service,
+          bindCloud: () async { binds++; },
+          child: const Text('Protected app'),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Protected app'), findsNothing);
+      expect(binds, 0);
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Retry'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(FilledButton, 'Retry').hitTestable(), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      service.dispose();
+    });
+  }
+
+  testWidgets('signout removes the first-login welcome and its timer', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final service = GateService()
+      ..isAvailable = true
+      ..isSignedIn = true
+      ..accountReady = true;
+    service.initialization.complete();
+    await tester.pumpWidget(MaterialApp(home: LoginGate(
+      service: service,
+      bindCloud: () async {},
+      child: const Text('Protected app'),
+    )));
+    await tester.pumpAndSettle();
+    expect(find.text('Welcome to Ovid'), findsOneWidget);
+    service.isSignedIn = false;
+    service.accountReady = false;
+    service.notifyListeners();
+    await tester.pumpAndSettle();
+    expect(find.text('Welcome to Ovid'), findsNothing);
+    expect(find.text('Protected app'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    service.dispose();
+  });
 }

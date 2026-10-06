@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/plugin_manifest.dart';
 import '../core/plugin_permissions.dart';
 import '../core/theme.dart';
+import 'widgets/aether_primitives.dart';
 
 /// One consolidated capability + dependency approval per plugin install
 /// (design spec §5.1): lists every inferred capability with its reason
@@ -21,13 +22,11 @@ Future<bool?> showPluginPermissionSheet(
 }) {
   return showModalBottomSheet<bool>(
     context: context,
-    backgroundColor: Aether.surface,
+    backgroundColor: Colors.transparent,
     isScrollControlled: true,
+    useSafeArea: true,
     isDismissible: false,
     enableDrag: false,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
     builder: (_) => _PluginPermissionSheet(manifest: manifest),
   );
 }
@@ -84,21 +83,35 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
   Widget build(BuildContext context) {
     final explanations = explainCapabilities(widget.manifest);
     final deps = widget.manifest.dependencies.packages;
-    final sheet = SafeArea(
+    final version = widget.manifest.version;
+    final id = widget.manifest.id;
+
+    return PopScope(
+      canPop: !_saving,
       child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          20,
-          18,
-          20,
-          16 + MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.8,
+        padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+        // Scroll the chrome too: a keyboard and large text can leave less
+        // room than the title and actions alone need.
+        child: SingleChildScrollView(
+          child: MediaQuery.removeViewInsets(
+            context: context,
+            removeBottom: true,
+          child: AetherSheet(
+        title: 'Grant plugin access',
+        actions: [
+          AetherGhostButton(
+            label: 'Cancel',
+            onPressed: _saving ? null : () => Navigator.pop(context, false),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          AetherPrimaryButton(
+            label: 'Accept',
+            loading: _saving,
+            onPressed: _saving ? null : _accept,
+          ),
+        ],
+        child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Row(
                 children: [
@@ -107,7 +120,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                     height: 44,
                     decoration: BoxDecoration(
                       color: Aether.surfaceAlt,
-                      borderRadius: BorderRadius.circular(13),
+                      borderRadius: BorderRadius.circular(AetherRadius.rMd),
                       border: Border.all(color: Aether.hairlineStrong),
                     ),
                     child: Icon(
@@ -121,21 +134,14 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          'Grant plugin access',
-                          style: TextStyle(
-                            fontSize: 16.5,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
+                        Text(widget.manifest.name, style: AetherType.title),
                         const SizedBox(height: 2),
                         Text(
-                          '${widget.manifest.name} ${widget.manifest.version.isEmpty ? '' : '· ${widget.manifest.version}'}'
-                          '${widget.manifest.id.isEmpty ? '' : ' · ${widget.manifest.id}'}',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: Aether.textFaint,
-                          ),
+                          [
+                            if (version.isNotEmpty) 'v$version',
+                            if (id.isNotEmpty) id,
+                          ].join(' · '),
+                          style: AetherType.caption,
                         ),
                       ],
                     ),
@@ -143,162 +149,104 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                 ],
               ),
               const SizedBox(height: 16),
-              Flexible(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+              if (explanations.isEmpty)
+                AetherCard(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (explanations.isEmpty)
-                        Text(
+                      Icon(
+                        Icons.verified_outlined,
+                        size: 18,
+                        color: Aether.successLight,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
                           'This plugin requests no special capabilities.',
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            color: Aether.textMuted,
-                          ),
-                        )
-                      else ...[
-                        Text(
-                          'CAPABILITIES',
-                          style: TextStyle(
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 1,
-                            color: Aether.textFaint,
-                          ),
+                          style: AetherType.body,
                         ),
-                        const SizedBox(height: 8),
-                        for (final e in explanations)
-                          _CapabilityRow(explanation: e),
-                      ],
-                      if (deps.isNotEmpty) ...[
-                        const SizedBox(height: 14),
-                        Text(
-                          'DEPENDENCIES',
-                          style: TextStyle(
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 1,
-                            color: Aether.textFaint,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        for (final d in deps)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Icon(
-                                  d.required
-                                      ? Icons.download_outlined
-                                      : Icons.download_done_outlined,
-                                  size: 14,
-                                  color: Aether.textFaint,
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text.rich(
-                                    TextSpan(
-                                      children: [
-                                        TextSpan(
-                                          text: d.name,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        TextSpan(
-                                          text:
-                                              ' ${d.versionSpec.isEmpty ? '' : d.versionSpec} '
-                                              '(${d.kind.name}'
-                                              '${d.required ? '' : ', optional'})',
-                                          style: TextStyle(
-                                            color: Aether.textMuted,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    style: const TextStyle(fontSize: 12.5),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
-                      const SizedBox(height: 6),
-                      Text(
-                        'Approve once for this exact plugin version. Secrets '
-                        'stay in secure storage; you can revoke anytime from '
-                        'plugin settings.',
-                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
                       ),
                     ],
                   ),
-                ),
-              ),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Aether.text,
-                        padding: const EdgeInsets.symmetric(vertical: 13),
-                        side: BorderSide(color: Aether.hairlineStrong),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      onPressed: _saving
-                          ? null
-                          : () => Navigator.pop(context, false),
-                      child: const Text(
-                        'Cancel',
-                        style: TextStyle(fontSize: 13.5),
-                      ),
-                    ),
+                )
+              else ...[
+                AetherSectionTitle(eyebrow: 'Capabilities'),
+                const SizedBox(height: 8),
+                for (final e in explanations)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _CapabilityRow(explanation: e),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Aether.accent,
-                        padding: const EdgeInsets.symmetric(vertical: 13),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      onPressed: _saving ? null : _accept,
-                      child: _saving
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text(
-                              'Accept',
-                              style: TextStyle(fontSize: 13.5),
+              ],
+              if (deps.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                AetherSectionTitle(eyebrow: 'Dependencies'),
+                const SizedBox(height: 8),
+                AetherCard(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (var i = 0; i < deps.length; i++) ...[
+                        if (i > 0) const SizedBox(height: 8),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              deps[i].required
+                                  ? Icons.download_outlined
+                                  : Icons.download_done_outlined,
+                              size: 16,
+                              color: Aether.textMuted,
                             ),
-                    ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text.rich(
+                                TextSpan(
+                                  children: [
+                                    TextSpan(
+                                      text: deps[i].name,
+                                      style: AetherType.body.copyWith(
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    TextSpan(
+                                      text:
+                                          ' ${deps[i].versionSpec} '
+                                          '(${deps[i].kind.name}'
+                                          '${deps[i].required ? '' : ', optional'})',
+                                      style: AetherType.bodyMuted,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
                   ),
-                ],
+                ),
+              ],
+              const SizedBox(height: 12),
+              Text(
+                'Approve once for this exact plugin version. Secrets stay in secure storage; you can revoke anytime from plugin settings.',
+                style: AetherType.caption.copyWith(height: 1.5),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 10),
                 Text(
                   _error!,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    color: Aether.danger,
-                    height: 1.4,
-                  ),
+                  style: AetherType.body.copyWith(color: Aether.dangerC),
                 ),
               ],
             ],
+        ),
+      ),
           ),
         ),
       ),
     );
-    return PopScope(canPop: !_saving, child: sheet);
   }
 }
 
@@ -310,61 +258,50 @@ class _CapabilityRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final e = explanation;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: Aether.surfaceAlt,
-          borderRadius: BorderRadius.circular(11),
-          border: Border.all(color: Aether.hairline),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(_iconFor(e.capability), size: 16, color: Aether.accent),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    e.capability.name,
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    e.reason,
-                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
-                  ),
-                  if (e.environmentNames.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        'variables: ${e.environmentNames.join(', ')}',
-                        style: TextStyle(fontSize: 11, color: Aether.textMuted),
-                      ),
-                    ),
-                  if (e.sourcePath.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        e.sourcePath,
-                        style: TextStyle(
-                          fontFamily: Aether.mono,
-                          fontSize: 10.5,
-                          color: Aether.textFaint,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
+    return AetherCard(
+      padding: const EdgeInsets.all(12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: Aether.accent.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(AetherRadius.rSm),
             ),
-          ],
-        ),
+            child: Icon(_iconFor(e.capability), size: 16, color: Aether.accent),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  e.capability.name,
+                  style: AetherType.body.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 2),
+                Text(e.reason, style: AetherType.bodyMuted),
+                if (e.environmentNames.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      'variables: ${e.environmentNames.join(', ')}',
+                      style: AetherType.caption,
+                    ),
+                  ),
+                if (e.sourcePath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      e.sourcePath,
+                      style: AetherType.mono.copyWith(color: Aether.textFaint),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

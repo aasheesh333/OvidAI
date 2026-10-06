@@ -2,6 +2,7 @@
 
 import html
 import re
+from contextlib import nullcontext
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
@@ -56,7 +57,7 @@ class ShareRoute(APIRoute):
         return handle
 
 
-def router(repository, verify_uid, base_url):
+def router(repository, verify_uid, base_url, *, admission=None):
     """verify_uid(token, attestation) -> verified nonanonymous UID or raises.
 
     Inject a synchronous adapter using the account architecture's verifier and
@@ -81,7 +82,7 @@ def router(repository, verify_uid, base_url):
             raise
         except Exception:
             raise HTTPException(401, 'invalid_authentication') from None
-        if not isinstance(uid, str) or not uid.strip():
+        if admission is None and (not isinstance(uid, str) or not uid.strip()):
             raise HTTPException(401, 'invalid_identity')
         return uid
 
@@ -90,15 +91,18 @@ def router(repository, verify_uid, base_url):
 
     @routes.post('/shares', status_code=201)
     def create(body: CreateShare, uid=Depends(owner)):
-        return receipt(repository.create(uid, body.model_dump()))
+        with admission(uid) if admission else nullcontext(uid) as admitted_uid:
+            return receipt(repository.create(admitted_uid, body.model_dump()))
 
     @routes.get('/shares')
     def list_shares(session_id: str | None = Query(default=None, max_length=128), uid=Depends(owner)):
-        return {'shares': [receipt(row) for row in repository.list(uid, session_id)]}
+        with admission(uid) if admission else nullcontext(uid) as admitted_uid:
+            return {'shares': [receipt(row) for row in repository.list(admitted_uid, session_id)]}
 
     @routes.delete('/shares/{token}', status_code=204)
     def revoke(token: str, uid=Depends(owner)):
-        repository.revoke(uid, token)
+        with admission(uid) if admission else nullcontext(uid) as admitted_uid:
+            repository.revoke(admitted_uid, token)
         return Response(status_code=204)
 
     @routes.get('/s/{token}', response_class=HTMLResponse)

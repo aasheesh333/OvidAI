@@ -41,6 +41,19 @@ class MintOutcome {
   bool get ok => status == MintStatus.ok;
 }
 
+enum CloudConnectionStatus { idle, connecting, loadingCatalog, ready, failed }
+
+/// Ephemeral, account/credential-scoped status; never persisted with a key.
+class CloudConnectionState {
+  const CloudConnectionState(this.status, {this.error, this.mintStatus});
+  final CloudConnectionStatus status;
+  final String? error;
+  final MintStatus? mintStatus;
+  bool get loading =>
+      status == CloudConnectionStatus.connecting ||
+      status == CloudConnectionStatus.loadingCatalog;
+}
+
 /// Talks to the Ovid Cloud mint endpoint and wires the returned per-user key
 /// into the built-in "Ovid Cloud" provider.
 ///
@@ -66,6 +79,91 @@ class OvidCloudService extends ChangeNotifier {
   Object? _keyIdentity;
   ProviderConfig? _keyProvider;
   String? _boundKey;
+  String? _boundBaseUrl;
+  _CloudRequestScope? _connectionScope;
+  CloudConnectionState _connection = const CloudConnectionState(
+    CloudConnectionStatus.idle,
+  );
+  _CloudRequestScope? _recoveryScope;
+  Future<MintOutcome>? _recoveryFlight;
+
+  CloudConnectionState connectionFor(AppState state) {
+    final scope = _connectionScope;
+    if (scope == null || !identical(scope.state, state) || !scope.isCurrent) {
+      return const CloudConnectionState(CloudConnectionStatus.idle);
+    }
+    return _connection;
+  }
+
+  void _publishConnection(
+    _CloudRequestScope scope,
+    CloudConnectionState value,
+  ) {
+    if (!scope.isCurrent) return;
+    // Publication is revision-fenced, but an accepted snapshot stays valid
+    // across a later failed upgrade with the same account and credentials.
+    _connectionScope = _CloudRequestScope(this, scope.state);
+    _connection = value;
+    notifyListeners();
+  }
+
+  /// Login, explicit Retry and resume share one flight for the current owner.
+  /// A catalog failure keeps its bound key and retries only the catalog.
+  Future<MintOutcome> ensureConnected({AppState? app, http.Client? client}) {
+    final state = app ?? AppState.I;
+    _authChanged();
+    final pending = _recoveryScope;
+    if (_recoveryFlight != null &&
+        pending != null &&
+        identical(pending.state, state) &&
+        pending.isCurrent) {
+      return _recoveryFlight!;
+    }
+    if (connectionFor(state).status == CloudConnectionStatus.ready) {
+      return Future.value(const MintOutcome(MintStatus.ok));
+    }
+    final scope = _CloudRequestScope(this, state);
+    _recoveryScope = scope;
+    late final Future<MintOutcome> flight;
+    flight =
+        _serializeMutation(state, () async {
+          if (!scope.isCurrent) {
+            return const MintOutcome(
+              MintStatus.rejected,
+              message:
+                  'Account or cloud provider changed. Retry for the current account.',
+            );
+          }
+          if (_keyIdentity == scope.identity &&
+              identical(_keyProvider, scope.provider) &&
+              _boundKey == scope.key &&
+              _boundBaseUrl == scope.baseUrl &&
+              scope.key.isNotEmpty) {
+            final c = client ?? _newClient();
+            try {
+              await _refreshModels(scope, c);
+              scope.check();
+              return const MintOutcome(MintStatus.ok);
+            } on CloudUsageException catch (e) {
+              return MintOutcome(MintStatus.rejected, message: e.message);
+            } finally {
+              if (client == null) c.close();
+            }
+          }
+          return _mint(state, client);
+        }, const MintOutcome(MintStatus.rejected)).whenComplete(() {
+          if (identical(_recoveryFlight, flight)) {
+            _recoveryFlight = null;
+            _recoveryScope = null;
+          }
+        });
+    _recoveryFlight = flight;
+    _publishConnection(
+      scope,
+      const CloudConnectionState(CloudConnectionStatus.connecting),
+    );
+    return flight;
+  }
 
   String? get confirmedTier =>
       _confirmedIdentity == accountIdentity ? _confirmedTier : null;
@@ -195,6 +293,17 @@ class OvidCloudService extends ChangeNotifier {
   /// behind ALLOW_TEST_UPGRADE; a real payment webhook replaces it later.
   static const String upgradeUrl = 'https://cloud.dhanuksoftwares.com/upgrade';
 
+  /// Test seam: force a specific [CloudConnectionState] for [state] without
+  /// going through the mint/retry round-trip. Lets widget tests exercise the
+  /// `ready`/`failed`/`idle` branches of surfaces that read [connectionFor]
+  /// (picker, provider cards, cloud banners).
+  @visibleForTesting
+  void setConnectionForTest(AppState state, CloudConnectionState value) {
+    _connectionScope = _CloudRequestScope(this, state);
+    _connection = value;
+    notifyListeners();
+  }
+
   /// Test seams.
   @visibleForTesting
   static Future<String?> Function()? get idTokenOverrideForTest =>
@@ -264,6 +373,29 @@ class OvidCloudService extends ChangeNotifier {
       state,
       isLatest: () => revision == _mutationRevision,
     );
+    _publishConnection(
+      scope,
+      const CloudConnectionState(CloudConnectionStatus.connecting),
+    );
+    final outcome = await _requestMint(state, client, scope);
+    if (!outcome.ok) {
+      _publishConnection(
+        scope,
+        CloudConnectionState(
+          CloudConnectionStatus.failed,
+          error: outcome.message,
+          mintStatus: outcome.status,
+        ),
+      );
+    }
+    return outcome;
+  }
+
+  Future<MintOutcome> _requestMint(
+    AppState state,
+    http.Client? client,
+    _CloudRequestScope scope,
+  ) async {
     final c = client ?? _newClient();
     try {
       final headers = await _headers(scope);
@@ -315,6 +447,16 @@ class OvidCloudService extends ChangeNotifier {
             : MintStatus.rejected,
         message: e.message,
       );
+    } on FormatException {
+      return const MintOutcome(
+        MintStatus.unavailable,
+        message: 'Ovid Cloud returned an invalid connection response. Retry.',
+      );
+    } on TypeError {
+      return const MintOutcome(
+        MintStatus.unavailable,
+        message: 'Ovid Cloud returned an invalid connection response. Retry.',
+      );
     } catch (e) {
       Diag.swallow('ovid_cloud.bind', e);
       return const MintOutcome(
@@ -337,14 +479,29 @@ class OvidCloudService extends ChangeNotifier {
     if (provider == null) {
       throw const CloudUsageException('Ovid Cloud provider is unavailable.');
     }
+    final recovery = _recoveryScope;
+    final ownsRecovery =
+        recovery != null &&
+        identical(recovery.state, state) &&
+        recovery.isCurrent;
     if (r.baseUrl.isNotEmpty) provider.baseUrl = r.baseUrl;
     scope.baseUrl = provider.baseUrl;
     scope.key = r.key;
-    await state.updateProviderApiKey(provider, r.key);
+    if (ownsRecovery) {
+      recovery.key = scope.key;
+      recovery.baseUrl = scope.baseUrl;
+    }
+    final binding = state.updateProviderApiKey(provider, r.key);
+    _publishConnection(
+      scope,
+      const CloudConnectionState(CloudConnectionStatus.connecting),
+    );
+    await binding;
     scope.check();
     _keyIdentity = accountIdentity;
     _keyProvider = provider;
     _boundKey = r.key;
+    _boundBaseUrl = scope.baseUrl;
     _confirmTier(r.tier);
     state.setOvidCloudTier(r.tier);
     scope.check();
@@ -369,7 +526,16 @@ class OvidCloudService extends ChangeNotifier {
     http.Client client,
   ) async {
     scope.check();
-    if (scope.provider == null || scope.baseUrl.isEmpty) return;
+    if (scope.provider == null || scope.baseUrl.isEmpty) {
+      _publishConnection(
+        scope,
+        const CloudConnectionState(
+          CloudConnectionStatus.failed,
+          error: 'Ovid Cloud provider is unavailable. Retry.',
+        ),
+      );
+      return;
+    }
     // An upgrade may finish before this account's mint. Never refresh models
     // with a persisted key whose account ownership has not been confirmed.
     if (_keyIdentity != scope.identity ||
@@ -377,6 +543,14 @@ class OvidCloudService extends ChangeNotifier {
         _boundKey != scope.key) {
       return;
     }
+    _publishConnection(
+      scope,
+      const CloudConnectionState(CloudConnectionStatus.loadingCatalog),
+    );
+    void failed(String message) => _publishConnection(
+      scope,
+      CloudConnectionState(CloudConnectionStatus.failed, error: message),
+    );
     try {
       final base = scope.baseUrl.endsWith('/')
           ? scope.baseUrl
@@ -390,26 +564,53 @@ class OvidCloudService extends ChangeNotifier {
           )
           .timeout(const Duration(seconds: 15));
       scope.check();
-      if (res.statusCode != 200) return;
+      if (res.statusCode != 200) {
+        // An expired/revoked scoped key requires re-verification on Retry.
+        if (res.statusCode == 401 || res.statusCode == 403) _keyIdentity = null;
+        failed(
+          'Ovid Cloud model catalog unavailable (${res.statusCode}). Retry.',
+        );
+        return;
+      }
       final body = jsonDecode(res.body);
       final rows = body is Map ? body['data'] ?? body['models'] : null;
-      if (rows is! List) return;
-      final ids = <String>{
-        for (final row in rows)
-          if (row is! Map ||
-              (row['output_modality'] != 'image' &&
-                  row['id'] != ImageStudio.alias))
-            (row is Map ? row['id'] ?? row['name'] ?? '' : row).toString(),
-      }..remove('');
-      if (ids.isEmpty) return;
+      if (rows is! List) throw const FormatException();
+      final ids = <String>{};
+      for (final row in rows) {
+        if (row is Map &&
+            (row['output_modality'] == 'image' ||
+                row['id'] == ImageStudio.alias)) {
+          continue;
+        }
+        final id = row is Map ? row['id'] ?? row['name'] : row;
+        if (id is! String || id.trim().isEmpty) {
+          throw const FormatException();
+        }
+        ids.add(id.trim());
+      }
+      if (ids.isEmpty) {
+        failed(
+          'Ovid Cloud returned no chat models. Retry to refresh the catalog.',
+        );
+        return;
+      }
       scope.provider!.models
         ..clear()
         ..addAll({'auto', ...ids});
       scope.state.reconcileProviderModels(AppState.ovidCloudProviderId);
+      _publishConnection(
+        scope,
+        const CloudConnectionState(CloudConnectionStatus.ready),
+      );
     } on CloudUsageException {
       rethrow;
+    } on FormatException {
+      failed('Ovid Cloud returned an invalid model catalog. Retry.');
     } catch (e) {
       Diag.swallow('ovid_cloud.models', e);
+      failed(
+        'Could not load Ovid Cloud models. Check your connection and retry.',
+      );
     }
   }
 
@@ -538,6 +739,15 @@ class _CloudRequestScope {
   final bool Function()? isLatest;
   late String key;
   late String baseUrl;
+
+  bool get isCurrent {
+    try {
+      check();
+      return true;
+    } on CloudUsageException {
+      return false;
+    }
+  }
 
   void check() {
     if (identity != service.accountIdentity ||

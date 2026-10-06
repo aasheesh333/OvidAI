@@ -247,8 +247,21 @@ void main() {
       // with no OS dialog, no permission check, and no conditional grant.
       final start = agentSrc.indexOf('Future<void> _onGeoRequest(');
       expect(start, greaterThan(-1));
-      final body = agentSrc.substring(start, start + 4000);
-      expect(body, contains('geoPayloadFromFix(const {}, denied: true)'));
+      final end = agentSrc.indexOf('\n  /// Builds the', start);
+      expect(end, greaterThan(start));
+      final body = agentSrc.substring(start, end);
+      // Pin the denied payload assignment, allowing formatter whitespace and
+      // an optional trailing argument comma. A grant/conditional value still
+      // fails; comments or a call in a neighboring method cannot satisfy it.
+      final code = body.replaceAll(RegExp(r'//[^\n]*'), '');
+      expect(
+        RegExp(
+          r'final\s+Map\s*<\s*String\s*,\s*Object\s*\?\s*>\s+payload\s*=\s*'
+          r'geoPayloadFromFix\s*\(\s*const\s*\{\s*\}\s*,\s*'
+          r'denied\s*:\s*true\s*,?\s*\)\s*;',
+        ).allMatches(code),
+        hasLength(1),
+      );
     });
 
     test('the decision is visible to the agent and the user', () {

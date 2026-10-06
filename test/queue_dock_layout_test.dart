@@ -114,12 +114,19 @@ void main() {
       matching: find.byType(SingleChildScrollView),
     );
     // ...find it via the queued text instead: the rows must live under a
-    // SingleChildScrollView.
+    // SingleChildScrollView. The Aether chat layout wraps the whole dock
+    // column in its own capped scroller, so the rows now have two scrollable
+    // ancestors (the dock's and their own rows region) — what matters is
+    // that a scrollable rows region exists, pinned by the caps below.
     final rowsScroller = find.ancestor(
       of: find.text(queued.first),
       matching: find.byType(SingleChildScrollView),
     );
-    expect(rowsScroller, findsOneWidget);
+    expect(
+      rowsScroller.evaluate().length,
+      greaterThanOrEqualTo(1),
+      reason: 'queue rows must live under a scrollable region',
+    );
     expect(scroller, findsNothing);
 
     // ...and that scrollable is capped to a fraction of the 900px viewport.

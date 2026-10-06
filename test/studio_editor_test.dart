@@ -389,7 +389,9 @@ void main() {
 
     testWidgets('the caret position is reported as Ln/Col', (tester) async {
       AgentService.I.openStudioFile('a.dart', 'one\ntwo\nthree');
-      await pumpEditor(tester);
+      // The header hides the readout below its 760dp "roomy" breakpoint, so
+      // this test needs a surface wide enough for the readout to render.
+      await pumpEditor(tester, width: 800);
 
       expect(find.textContaining('Ln 1, Col 1'), findsOneWidget);
 

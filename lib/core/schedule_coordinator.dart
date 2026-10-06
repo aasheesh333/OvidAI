@@ -13,11 +13,15 @@ class ScheduleResult {
   final String? error;
   final bool safeToRetry;
   const ScheduleResult.completed()
-    : status = 'completed', error = null, safeToRetry = false;
+    : status = 'completed',
+      error = null,
+      safeToRetry = false;
   const ScheduleResult.failed(this.error)
-    : status = 'failed', safeToRetry = false;
+    : status = 'failed',
+      safeToRetry = false;
   const ScheduleResult.retryable(this.error)
-    : status = 'failed', safeToRetry = true;
+    : status = 'failed',
+      safeToRetry = true;
 }
 
 /// At-most-once automatic dispatch of each occurrence. External effects cannot
@@ -34,21 +38,33 @@ class ScheduleCoordinator {
   bool _ticking = false;
   bool get dispatching => _ticking;
   final Set<String> _activeSessions = {};
+  final Set<Map<String, dynamic>> _activeTasks = Set.identity();
   final Set<Future<void>> _executions = {};
   final _random = Random.secure();
 
   ScheduleCoordinator({
-    required this.entries, required this.clock, required this.persist,
-    required this.isBusy, required this.execute, required this.cancel,
+    required this.entries,
+    required this.clock,
+    required this.persist,
+    required this.isBusy,
+    required this.execute,
+    required this.cancel,
     required this.changed,
   });
 
   Map<String, dynamic> create(Map<String, dynamic> args) {
     final prompt = (args['prompt'] as String? ?? '').trim();
     if (prompt.isEmpty) throw const FormatException('prompt is required');
-    if (['after_seconds', 'at', 'every_seconds', 'daily_at']
-        .where((k) => args[k] != null).length != 1) {
-      throw const FormatException('Supply exactly one of after_seconds, at, every_seconds, daily_at');
+    if ([
+          'after_seconds',
+          'at',
+          'every_seconds',
+          'daily_at',
+        ].where((k) => args[k] != null).length !=
+        1) {
+      throw const FormatException(
+        'Supply exactly one of after_seconds, at, every_seconds, daily_at',
+      );
     }
     final retries = args['max_retries'] ?? 0;
     if (retries is! int || retries < 0 || retries > 3) {
@@ -61,7 +77,9 @@ class ScheduleCoordinator {
     final daily = args['daily_at'] as String?;
     if (daily != null) {
       if (!RegExp(r'^(?:[01]\d|2[0-3]):[0-5]\d$').hasMatch(daily)) {
-        throw const FormatException('daily_at must be HH:mm, device-local time');
+        throw const FormatException(
+          'daily_at must be HH:mm, device-local time',
+        );
       }
       due = nextDaily(daily, now);
     } else if (args['at'] != null) {
@@ -69,32 +87,46 @@ class ScheduleCoordinator {
     } else {
       final seconds = every ?? after;
       if (seconds is! int || seconds < (every != null ? 300 : 1)) {
-        throw const FormatException('every_seconds must be ≥300; after_seconds must be ≥1');
+        throw const FormatException(
+          'every_seconds must be ≥300; after_seconds must be ≥1',
+        );
       }
       due = now.add(Duration(seconds: seconds));
     }
     return {
       'id': 'sch-${now.microsecondsSinceEpoch}-${_random.nextInt(1 << 32)}',
-      'prompt': prompt, 'fireAt': due.toUtc().toIso8601String(),
-      'every': every, 'dailyAt': daily,
+      'prompt': prompt,
+      'fireAt': due.toUtc().toIso8601String(),
+      'every': every,
+      'dailyAt': daily,
       'timezone': daily != null ? 'device-local' : 'fixed-instant',
       'zoneOffset': now.toLocal().timeZoneOffset.inMinutes,
       if (daily != null) 'localDate': _calendarDate(due),
       'status': stopped ? 'paused' : 'pending',
       if (stopped) 'error': 'Background execution stopped by user',
-      'maxRetries': retries, 'attempt': 0,
+      'maxRetries': retries,
+      'attempt': 0,
     };
   }
 
   static DateTime parseDate(String value) {
-    final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::([0-5]\d)(?:\.\d{1,6})?)?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$').firstMatch(value);
-    if (m == null) throw const FormatException('Use YYYY-MM-DD HH:mm or ISO-8601 with offset');
+    final m = RegExp(
+      r'^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::([0-5]\d)(?:\.\d{1,6})?)?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$',
+    ).firstMatch(value);
+    if (m == null) {
+      throw const FormatException(
+        'Use YYYY-MM-DD HH:mm or ISO-8601 with offset',
+      );
+    }
     final year = int.parse(m[1]!);
     final month = int.parse(m[2]!);
     final day = int.parse(m[3]!);
     final date = DateTime.utc(year, month, day);
-    if (date.year != year || date.month != month || date.day != day ||
-        int.parse(m[4]!) > 23 || int.parse(m[5]!) > 59) {
+    if (date.year != year ||
+        date.month != month ||
+        date.day != day ||
+        int.parse(m[4]!) > 23 ||
+        int.parse(m[5]!) > 59) {
       throw const FormatException('Invalid calendar date/time');
     }
     return DateTime.parse(value.replaceAll(' ', 'T'));
@@ -105,7 +137,13 @@ class ScheduleCoordinator {
     final local = after.toLocal();
     var next = DateTime(local.year, local.month, local.day, parts[0], parts[1]);
     if (!next.isAfter(after)) {
-      next = DateTime(local.year, local.month, local.day + 1, parts[0], parts[1]);
+      next = DateTime(
+        local.year,
+        local.month,
+        local.day + 1,
+        parts[0],
+        parts[1],
+      );
     }
     return next;
   }
@@ -116,7 +154,9 @@ class ScheduleCoordinator {
   }
 
   DateTime? _due(Map<String, dynamic> t) {
-    if (t['dailyAt'] != null && t['localDate'] != null && (t['attempt'] ?? 0) == 0) {
+    if (t['dailyAt'] != null &&
+        t['localDate'] != null &&
+        (t['attempt'] ?? 0) == 0) {
       // Reinterpret the saved calendar date in the current device timezone.
       // DST offsets are resolved by DateTime for THAT date, not today's offset.
       return DateTime.tryParse('${t['localDate']}T${t['dailyAt']}:00');
@@ -132,7 +172,8 @@ class ScheduleCoordinator {
       t['attempt'] ??= 0;
       if (t['status'] == 'running') {
         t['status'] = 'paused';
-        t['error'] = 'Execution interrupted; outcome unknown. Review before resuming.';
+        t['error'] =
+            'Execution interrupted; outcome unknown. Review before resuming.';
       } else if (stopped && t['status'] == 'pending') {
         t['status'] = 'paused';
         t['error'] = 'Background execution stopped by user';
@@ -140,9 +181,11 @@ class ScheduleCoordinator {
       final due = DateTime.tryParse(t['fireAt'] as String? ?? '');
       final every = t['every'];
       final daily = t['dailyAt'];
-      final validRecurrence = (every == null || (every is int && every >= 300)) &&
-          (daily == null || (daily is String &&
-              RegExp(r'^(?:[01]\d|2[0-3]):[0-5]\d$').hasMatch(daily)));
+      final validRecurrence =
+          (every == null || (every is int && every >= 300)) &&
+          (daily == null ||
+              (daily is String &&
+                  RegExp(r'^(?:[01]\d|2[0-3]):[0-5]\d$').hasMatch(daily)));
       if (due == null || !validRecurrence) {
         t['status'] = 'paused';
         t['error'] = 'Invalid saved date/recurrence; edit this schedule';
@@ -159,7 +202,8 @@ class ScheduleCoordinator {
     DateTime? next;
     for (final e in entries()) {
       if ((e.task['status'] ?? 'pending') != 'pending' ||
-          isBusy(e.sessionId) || _activeSessions.contains(e.sessionId)) {
+          isBusy(e.sessionId) ||
+          _activeSessions.contains(e.sessionId)) {
         continue;
       }
       final due = _due(e.task);
@@ -176,36 +220,46 @@ class ScheduleCoordinator {
         if (stopped) break;
         final t = entry.task;
         if ((t['status'] ?? 'pending') != 'pending' ||
-            isBusy(entry.sessionId) || _activeSessions.contains(entry.sessionId)) {
+            isBusy(entry.sessionId) ||
+            _activeSessions.contains(entry.sessionId)) {
           continue;
         }
         final now = clock();
         final due = _due(t);
-        if (t['dailyAt'] != null && due != null &&
+        if (t['dailyAt'] != null &&
+            due != null &&
             t['zoneOffset'] != now.toLocal().timeZoneOffset.inMinutes) {
           t['fireAt'] = due.toUtc().toIso8601String();
           t['zoneOffset'] = now.toLocal().timeZoneOffset.inMinutes;
           await _save();
         }
+        // Stop/cancel may have run while the timezone correction was saved.
+        if (stopped || (t['status'] ?? 'pending') != 'pending') continue;
         if (due == null || due.isAfter(now)) continue;
-        final claim = '${t['id']}/${due.toUtc().toIso8601String()}/${t['attempt'] ?? 0}';
+        final claim =
+            '${t['id']}/${due.toUtc().toIso8601String()}/${t['attempt'] ?? 0}';
         t['runId'] = claim;
         t['occurrenceAt'] ??= due.toUtc().toIso8601String();
         t['status'] = 'running';
         t['startedAt'] = now.toUtc().toIso8601String();
         t.remove('error');
         _activeSessions.add(entry.sessionId);
+        _activeTasks.add(t);
         try {
           await _save();
         } catch (e) {
           _activeSessions.remove(entry.sessionId);
-          t['status'] = 'paused';
-          t['error'] = 'Could not persist execution claim: $e';
+          _activeTasks.remove(t);
+          if (!stopped && t['status'] == 'running') {
+            t['status'] = 'paused';
+            t['error'] = 'Could not persist execution claim: $e';
+          }
           changed();
           continue;
         }
         if (stopped || t['status'] != 'running' || !_owns(entry, claim)) {
           _activeSessions.remove(entry.sessionId);
+          _activeTasks.remove(t);
           continue;
         }
         final future = _run(entry, claim);
@@ -218,9 +272,13 @@ class ScheduleCoordinator {
     }
   }
 
-  bool _owns(ScheduleEntry e, String claim) => entries().any((current) =>
-      current.sessionId == e.sessionId && identical(current.task, e.task) &&
-      current.task['runId'] == claim && current.task['status'] == 'running');
+  bool _owns(ScheduleEntry e, String claim, {bool requireRunning = true}) => entries().any(
+    (current) =>
+        current.sessionId == e.sessionId &&
+        identical(current.task, e.task) &&
+        current.task['runId'] == claim &&
+        (!requireRunning || current.task['status'] == 'running'),
+  );
 
   Future<void> _run(ScheduleEntry entry, String claim) async {
     final t = entry.task;
@@ -236,20 +294,30 @@ class ScheduleCoordinator {
       t['finishedAt'] = clock().toUtc().toIso8601String();
       t['error'] = result.error;
       final attempt = (t['attempt'] as num?)?.toInt() ?? 0;
-      if (result.safeToRetry && attempt < ((t['maxRetries'] as num?)?.toInt() ?? 0)) {
+      if (result.safeToRetry &&
+          attempt < ((t['maxRetries'] as num?)?.toInt() ?? 0)) {
         t['attempt'] = attempt + 1;
-        t['fireAt'] = clock().add(Duration(seconds: 30 * (1 << attempt)))
-            .toUtc().toIso8601String();
+        t['fireAt'] = clock()
+            .add(Duration(seconds: 30 * (1 << attempt)))
+            .toUtc()
+            .toIso8601String();
         t['status'] = 'pending';
-      } else if (result.status == 'completed' && (t['every'] != null || t['dailyAt'] != null)) {
+      } else if (result.status == 'completed' &&
+          (t['every'] != null || t['dailyAt'] != null)) {
         final DateTime next;
         if (t['dailyAt'] != null) {
           next = nextDaily(t['dailyAt'] as String, clock());
         } else {
           final anchor = DateTime.parse(t['occurrenceAt'] as String);
           final interval = (t['every'] as num).toInt();
-          next = anchor.add(Duration(seconds: interval *
-              (max(0, clock().difference(anchor).inSeconds) ~/ interval + 1)));
+          next = anchor.add(
+            Duration(
+              seconds:
+                  interval *
+                  (max(0, clock().difference(anchor).inSeconds) ~/ interval +
+                      1),
+            ),
+          );
         }
         t['fireAt'] = next.toUtc().toIso8601String();
         if (t['dailyAt'] != null) t['localDate'] = _calendarDate(next);
@@ -261,9 +329,15 @@ class ScheduleCoordinator {
       }
       await _save();
     } catch (e) {
-      t['status'] = 'paused';
-      t['error'] = 'Result persistence failed; review outcome before resuming: $e';
+      if (!stopped &&
+          !['paused', 'cancelled'].contains(t['status']) &&
+          _owns(entry, claim, requireRunning: false)) {
+        t['status'] = 'paused';
+        t['error'] =
+            'Result persistence failed; review outcome before resuming: $e';
+      }
     } finally {
+      _activeTasks.remove(t);
       _activeSessions.remove(entry.sessionId);
       changed();
     }
@@ -272,8 +346,9 @@ class ScheduleCoordinator {
   Future<void> stop() async {
     stopped = true;
     for (final e in entries()) {
-      if (['pending', 'running'].contains(e.task['status'] ?? 'pending')) {
-        final running = e.task['status'] == 'running';
+      if (['pending', 'running'].contains(e.task['status'] ?? 'pending') ||
+          _activeTasks.contains(e.task)) {
+        final running = _activeTasks.contains(e.task);
         e.task['status'] = 'paused';
         e.task['error'] = 'Background execution stopped by user';
         if (running) cancel(e.sessionId);
@@ -292,7 +367,9 @@ class ScheduleCoordinator {
 
   Future<void> resumeTask(ScheduleEntry e) async {
     if (stopped) throw StateError('Resume background execution first');
-    if (_activeSessions.contains(e.sessionId)) throw StateError('Previous run is still stopping');
+    if (_activeSessions.contains(e.sessionId)) {
+      throw StateError('Previous run is still stopping');
+    }
     e.task['status'] = 'pending';
     e.task['attempt'] = 0;
     e.task.remove('error');
@@ -307,6 +384,8 @@ class ScheduleCoordinator {
   }
 
   Future<void> settle() async {
-    while (_executions.isNotEmpty) { await Future.wait(List.of(_executions)); }
+    while (_executions.isNotEmpty) {
+      await Future.wait(List.of(_executions));
+    }
   }
 }

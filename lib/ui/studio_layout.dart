@@ -65,6 +65,44 @@ const Key studioTreeScrimKey = Key('studio-tree-scrim');
 const Key studioTerminalHandleKey = Key('studio-terminal-handle');
 const Key studioRepoBarKey = Key('studio-repo-bar');
 
+/// Let variable-height chrome scroll when it would otherwise consume a pane.
+/// The content fills the remaining viewport and retains a usable minimum; this
+/// also keeps the editor reachable below long approval / conflict details.
+class StudioPaneViewport extends StatelessWidget {
+  const StudioPaneViewport({
+    required this.chrome,
+    required this.child,
+    this.minContentHeight = 120,
+    super.key,
+  });
+
+  final List<Widget> chrome;
+  final Widget child;
+  final double minContentHeight;
+
+  @override
+  Widget build(BuildContext context) => CustomScrollView(
+    primary: false,
+    slivers: [
+      SliverToBoxAdapter(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: chrome,
+        ),
+      ),
+      SliverLayoutBuilder(builder: (context, constraints) {
+        return SliverToBoxAdapter(
+          child: SizedBox(
+            height: math.max(minContentHeight,
+                constraints.viewportMainAxisExtent - constraints.precedingScrollExtent),
+            child: child,
+          ),
+        );
+      }),
+    ],
+  );
+}
+
 /// Pulls the `done / total` pair out of a [RepoCache.sync] progress line.
 ///
 /// `RepoCache.sync` reports `synced 25 / 400 files` every 25 files; Studio

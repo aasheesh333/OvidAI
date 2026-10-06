@@ -211,6 +211,10 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     final chat = ChatScreen(startupCoordinator: widget.startupCoordinator);
 
     return Scaffold(
+      backgroundColor: Aether.bg,
+      // The inner chat Scaffold owns keyboard avoidance. Resizing both shells
+      // subtracts the same inset twice and crowds out the composer.
+      resizeToAvoidBottomInset: false,
       drawer: wide
           ? null
           : Drawer(
@@ -226,7 +230,11 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
                 ? Row(
                     children: [
                       const SessionsSidebar(isDrawer: false),
-                      const VerticalDivider(width: 1),
+                      VerticalDivider(
+                        width: 1,
+                        thickness: 1,
+                        color: Aether.hairline,
+                      ),
                       Expanded(child: chat),
                     ],
                   )

@@ -5,10 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=ovid-account
-WorkingDirectory=/srv/ovid-account
-EnvironmentFile=/etc/ovid-account/runtime.env
-ExecStart=/srv/ovid-account/venv/bin/python -m server.account.worker
+# Deployment MUST supply User, WorkingDirectory, EnvironmentFile, ExecStart,
+# and ReadWritePaths using a drop-in. No guessed host paths are supplied.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

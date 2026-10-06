@@ -3,6 +3,72 @@ import 'dart:convert';
 import 'dart:io';
 import 'diag.dart';
 
+/// Linux/Android descendant cleanup without signalling a shared process group.
+/// Freeze each verified ancestor before discovering children, so it cannot fork
+/// behind the traversal. Birth times prevent stale registry entries targeting a
+/// reused PID. Native pidfds/cgroups are still needed for adversarial escape or
+/// descendants reparented before Stop; never guess ownership by UID/name.
+class OwnedProcessTree {
+  OwnedProcessTree(this.process) : _birth = _stat(process.pid)?.birth;
+  final Process process;
+  final String? _birth;
+  bool _killed = false;
+
+  static ({int parent, String birth})? _stat(int pid) {
+    try {
+      final text = File('/proc/$pid/stat').readAsStringSync();
+      final fields = text.substring(text.lastIndexOf(')') + 2).split(' ');
+      return (parent: int.parse(fields[1]), birth: fields[19]);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void kill() {
+    if (_killed) return;
+    _killed = true;
+    if (_birth == null) {
+      process.kill(ProcessSignal.sigkill);
+      return;
+    }
+    final owned = <int, String>{};
+    void freeze(int id, String birth) {
+      if (id == pid || _stat(id)?.birth != birth) return;
+      if (Process.killPid(id, ProcessSignal.sigstop)) owned[id] = birth;
+    }
+
+    try {
+      freeze(process.pid, _birth);
+      var found = true;
+      while (found && owned.isNotEmpty) {
+        found = false;
+        for (final entry in Directory('/proc').listSync()) {
+          final id = int.tryParse(entry.path.split('/').last);
+          if (id == null || owned.containsKey(id)) continue;
+          final stat = _stat(id);
+          if (stat != null &&
+              owned.containsKey(stat.parent) &&
+              _stat(stat.parent)?.birth == owned[stat.parent]) {
+            freeze(id, stat.birth);
+            found = found || owned.containsKey(id);
+          }
+        }
+      }
+    } catch (e) {
+      Diag.swallow('process.tree', e);
+    } finally {
+      for (final entry in owned.entries.toList().reversed) {
+        if (_stat(entry.key)?.birth == entry.value) {
+          Process.killPid(entry.key, ProcessSignal.sigkill);
+        }
+      }
+      if (_stat(process.pid)?.birth == _birth) {
+        process.kill(ProcessSignal.sigkill);
+      }
+    }
+  }
+}
+
 /// F1 (the sandbox persistent-PTY parity): one long-lived bash process per session
 /// inside the sandbox. `run_shell` with `persistent: true` goes through
 /// this, so `cd`, exported vars and exported functions PERSIST between the
@@ -13,7 +79,7 @@ import 'diag.dart';
 /// stdout for a unique per-command marker. Output between markers is
 /// the command's real stdout (+ stderr text lifted to stdout).
 class PtyShell {
-  PtyShell._(this._proc) {
+  PtyShell._(this._proc) : _tree = OwnedProcessTree(_proc) {
     _sub = _proc.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
@@ -26,11 +92,11 @@ class PtyShell {
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .listen((l) {
-      _emit('[stderr] $l');
-      final waiting = _waiting;
-      if (waiting == null || waiting.isCompleted) return;
-      _buffer.writeln('[stderr] $l');
-    }, onError: (_) {});
+          _emit('[stderr] $l');
+          final waiting = _waiting;
+          if (waiting == null || waiting.isCompleted) return;
+          _buffer.writeln('[stderr] $l');
+        }, onError: (_) {});
     // Surface process death: close the output sink so subscribers get
     // onDone, and fail any in-flight run instead of hanging it forever.
     unawaited(_proc.exitCode.whenComplete(_onExit));
@@ -40,6 +106,8 @@ class PtyShell {
   }
 
   final Process _proc;
+  final OwnedProcessTree _tree;
+  Future<void>? _closing;
   late final StreamSubscription<String> _sub;
   late final StreamSubscription<String> _subErr;
   final StringBuffer _buffer = StringBuffer();
@@ -128,6 +196,7 @@ class PtyShell {
   /// Run [cmd] in this persistent shell; returns "rc=N\n<output>".
   Future<String> run(String cmd, {int timeoutSeconds = 60}) async {
     if (_dead) return 'PTY dead — start a fresh persistent shell';
+    if (_waiting != null) return 'PTY busy — command already running';
     final id = _nextId++;
     final marker = '__OVID_DONE_${id}__';
     _buffer.clear();
@@ -135,37 +204,43 @@ class PtyShell {
     _waiting = completer;
     _marker = marker;
     try {
-      _proc.stdin.writeln(
-        '$cmd; __rc=\$?; echo "$marker:\$__rc"',
-      );
-      _proc.stdin.flush();
+      _proc.stdin.writeln('$cmd; __rc=\$?; echo "$marker:\$__rc"');
+      // write() is queued on IOSink; awaiting flush can stall indefinitely
+      // on a shell whose stdin pipe is full while it is waiting on a child.
     } catch (_) {
-      _dead = true;
+      unawaited(close());
       return 'PTY died while writing command';
     }
     try {
-      return await completer.future
-          .timeout(Duration(seconds: timeoutSeconds));
+      return await completer.future.timeout(Duration(seconds: timeoutSeconds));
     } on TimeoutException {
-      _dead = true;
-      try {
-        _proc.kill(ProcessSignal.sigkill);
-      } catch (e) { Diag.swallow('pty_service', e); }
+      unawaited(close());
       return 'PTY command timed out (${timeoutSeconds}s)';
     }
   }
 
-  Future<void> close() async {
+  Future<void> close() => _closing ??= _close();
+
+  Future<void> _close() async {
     _dead = true;
+    final waiting = _waiting;
+    _waiting = null;
+    if (waiting != null && !waiting.isCompleted) waiting.complete('PTY closed');
+    _tree.kill();
     try {
       await _sub.cancel();
       await _subErr.cancel();
-      _proc.kill(ProcessSignal.sigkill);
-    } catch (e) { Diag.swallow('pty_service', e); }
+      await _proc.exitCode;
+    } catch (e) {
+      Diag.swallow('pty_service', e);
+    }
     if (!_outCtrl.isClosed) {
       try {
-        await _outCtrl.close();
-      } catch (e) { Diag.swallow('pty_service', e); }
+        // A paused UI subscriber must not hold process teardown hostage.
+        unawaited(_outCtrl.close());
+      } catch (e) {
+        Diag.swallow('pty_service', e);
+      }
     }
   }
 }
@@ -185,6 +260,8 @@ class PtyPool {
   static const String studioOwner = 'studio';
 
   final Map<String, PtyShell> _shells = {};
+  final Map<String, Future<PtyShell?>> _pending = {};
+  final Map<String, Object> _owners = {};
 
   /// NUL-delimited so `('a', 'b')` never collides with `('ab', '')`, and
   /// owner-prefixed so agent and studio namespaces never collide.
@@ -200,10 +277,25 @@ class PtyPool {
     final key = _key(owner, sessionId, tab);
     final existing = _shells[key];
     if (existing != null && !existing.isDead) return existing;
-    final shell = await PtyShell.start(spawner);
-    if (shell == null) return null;
-    _shells[key] = shell;
-    return shell;
+    final pending = _pending[key];
+    if (pending != null) return pending;
+    final generation = Object();
+    _owners[key] = generation;
+    final future = () async {
+      try {
+        final shell = await PtyShell.start(spawner);
+        if (!identical(_owners[key], generation)) {
+          await shell?.close();
+          return null;
+        }
+        if (shell != null) _shells[key] = shell;
+        return shell;
+      } finally {
+        if (identical(_owners[key], generation)) _pending.remove(key);
+      }
+    }();
+    _pending[key] = future;
+    return future;
   }
 
   /// Agent panic stop: kill every agent-owned shell (Studio tabs survive).
@@ -222,7 +314,10 @@ class PtyPool {
     String tab = 'agent',
     String owner = agentOwner,
   }) async {
-    final s = _shells.remove(_key(owner, sessionId, tab));
+    final key = _key(owner, sessionId, tab);
+    _owners.remove(key);
+    _pending.remove(key);
+    final s = _shells.remove(key);
     if (s != null) await s.close();
   }
 
@@ -234,7 +329,11 @@ class PtyPool {
   }
 
   Future<void> _discardWhere(bool Function(String key) match) async {
-    final keys = _shells.keys.where(match).toList();
+    final keys = {..._shells.keys, ..._pending.keys}.where(match).toList();
+    for (final k in keys) {
+      _owners.remove(k);
+      _pending.remove(k);
+    }
     for (final k in keys) {
       final s = _shells.remove(k);
       if (s != null) await s.close();

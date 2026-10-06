@@ -1,7 +1,7 @@
 # W12 hosted conversation shares
 
-Standalone FastAPI router and SQLite repository. **Not mounted or deployed by
-this change.** No live share endpoint is assumed. The app's session actions menu
+Standalone FastAPI router and SQLite repository, now composed by the configured
+account application factory. **Not deployed.** No live share endpoint is assumed. The app's session actions menu
 opens a frozen preview; create is unavailable without `OVID_SHARE_BASE_URL`.
 
 ## Integration contract
@@ -89,13 +89,18 @@ Defaults: 30-day expiry, 500 messages, 20,000 Unicode characters per message,
 even if maintenance is delayed. Minimal ownership/idempotency receipts persist
 until account cleanup. Revocation clears the content but retains its receipt.
 
-**Account integration still required:** call `repository.delete_account(uid)`
-from the account worker's retryable data-cleanup stage after the durable deletion
-fence and before Firebase identity deletion. It atomically erases every owned
+**Configured account integration:** `server.account.runtime.build()` now calls
+`repository.delete_account(uid)` in the durable `data:shares` stage after the
+deletion fence and before Firebase identity deletion. It atomically erases every owned
 share and records a permanent UID tombstone, preventing in-flight verified
 creates from restoring data. The method is idempotent; do not call it on logout
 or during the cancellable deletion grace period. The host admission callback
 must also reject fenced/deleting accounts before this cleanup stage begins.
+`server.shares.runtime.mount_shares` supplies that composition and holds the
+account lock through the entire owner operation; `runtime.create_app()` mounts
+the configured HTTPS base's path prefix. `server.account.retention` supplies
+bounded expiry sweeps. See [deployment commands](../account/DEPLOYMENT.md) for
+mandatory authoritative store configuration, provisioning and repeatable timers.
 
 ## Public content boundary
 

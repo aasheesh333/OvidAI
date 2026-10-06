@@ -5,27 +5,60 @@ import '../core/sandbox_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'sandbox_setup.dart';
+import 'settings_action_widgets.dart';
+import 'widgets/aether_primitives.dart';
 
 /// Device health — a 0–100 capability score with a per-item breakdown of
-/// exactly what's missing and why. Repair re-runs the sandbox runtime
-/// installer (with apt TLS self-heal). Mirrors the "diagnostics" view.
+/// exactly what's missing and why. Repair uses the signed runtime worker.
+///
+/// REDESIGN (wave 2 UI): the premium Aether primitives from
+/// `lib/ui/widgets/aether_primitives.dart` carry the layout; runtime wiring
+/// to [HealthService.I] and the hard-reset path to [SandboxService.I] is
+/// preserved verbatim (no new logic, no owner contract changes).
 class HealthScreen extends StatefulWidget {
-  const HealthScreen({super.key});
+  /// Optional service injection seam for widget tests. Production code
+  /// defaults to the global [HealthService.I] singleton — the runtime
+  /// probe wiring is unchanged.
+  final HealthService? service;
+  const HealthScreen({super.key, this.service});
   @override
   State<HealthScreen> createState() => _HealthScreenState();
 }
 
 class _HealthScreenState extends State<HealthScreen> {
+  late final HealthService _health = widget.service ?? HealthService.I;
   final List<String> _repairLog = [];
   bool _repairing = false;
   bool _resetting = false;
+  String? _checkError;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      HealthService.I.runChecks();
+      // Guard against the post-frame callback firing after the widget has
+      // been disposed (e.g. the gate immediately popped by a parent route).
+      // HealthService is the source of truth and is safe to invoke, but we
+      // skip to avoid racing a cancelled probe against a torn-down state.
+      if (!mounted) return;
+      _runChecks();
     });
+  }
+
+  Future<void> _runChecks() async {
+    if (_repairing || _resetting || _health.repairing || _health.checking) return;
+    setState(() => _checkError = null);
+    try {
+      await _health.runChecks();
+    } catch (e) {
+      if (mounted) setState(() => _checkError = 'Health checks failed: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    if (_repairing && _health.repairing) _health.cancelRepair();
+    super.dispose();
   }
 
   /// PR47/K6: hard reset — delete the whole sandbox prefix + reinstall from
@@ -33,6 +66,7 @@ class _HealthScreenState extends State<HealthScreen> {
   /// progress). Points the user at a healthy state even when self-heal
   /// saturates on older/corrupt installs.
   Future<void> _hardResetSandbox() async {
+    if (_resetting || _repairing || _health.repairing || _health.checking) return;
     setState(() => _resetting = true);
     _repairLog.add('ovid: deleting sandbox prefix…');
     setState(() {});
@@ -46,8 +80,10 @@ class _HealthScreenState extends State<HealthScreen> {
           builder: (_) => const SandboxSetupScreen(gateMode: true),
         ),
       );
-      // Back from the gate — the sandbox should be installed again.
-      await HealthService.I.runChecks();
+      // Back from the gate — the sandbox should be installed again. Skip
+      // re-probing if this screen has been disposed while the gate was up.
+      if (!mounted) return;
+      await _health.runChecks();
     } catch (e) {
       _repairLog.add('ovid: reset failed: $e');
       if (mounted) setState(() {});
@@ -65,12 +101,37 @@ class _HealthScreenState extends State<HealthScreen> {
       : Aether.dangerC;
 
   String _scoreLabel(int s) => s >= 90
-      ? 'Everything works — full agent capabilities.'
+      ? 'Most scored checks pass. Review each result below.'
       : s >= 70
-      ? 'Mostly working — a few tools are unavailable.'
+      ? 'Some capabilities are unavailable.'
       : s >= 45
-      ? 'Degraded — many agent tools will fail.'
-      : 'Critical — the agent can barely run tools here.';
+      ? 'Several capability checks need attention.'
+      : 'Many capability checks are unavailable.';
+
+  Future<void> _runRepair() async {
+    if (_repairing || _resetting || _health.repairing || _health.checking) return;
+    setState(() {
+      _repairing = true;
+      _repairLog.clear();
+    });
+    try {
+      await _health.repair((l) {
+        if (!mounted) return;
+        setState(() {
+          _repairLog.add(l);
+          if (_repairLog.length > 100) _repairLog.removeAt(0);
+        });
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => _repairLog.add('repair failed: $e'));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _repairing = false);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -81,413 +142,519 @@ class _HealthScreenState extends State<HealthScreen> {
         title: const Text('Device health'),
       ),
       body: AnimatedBuilder(
-        animation: Listenable.merge([HealthService.I, AppState.I]),
+        animation: Listenable.merge([_health, AppState.I]),
         builder: (_, _) {
-          final report = HealthService.I.lastReport;
-          final checking = HealthService.I.checking;
-          if (report == null || checking) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(40),
-                child: Column(
+          final report = _health.lastReport;
+          final checking = _health.checking;
+          if (_checkError != null && report == null) {
+            return ListView(padding: const EdgeInsets.all(24), children: [
+              Text(_checkError!, style: AetherType.body),
+              const SizedBox(height: 12),
+              SettingsActionButton(label: 'Re-run checks', onPressed: _runChecks),
+            ]);
+          }
+          if (report == null) {
+            return const _ProbingState();
+          }
+          return _buildBody(context, report, checking);
+        },
+      ),
+    );
+  }
+
+  Widget _buildBody(BuildContext context, HealthReport report, bool checking) {
+    final score = report.score;
+    final color = _scoreColor(score);
+    final services = AppState.I.serviceStatus;
+    final busy = _repairing || _resetting || _health.repairing || checking;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+      children: [
+        if (checking) const LinearProgressIndicator(semanticsLabel: 'Checking device health'),
+        if (_checkError != null) ...[
+          Text(_checkError!, style: AetherType.body),
+          const SizedBox(height: 12),
+        ],
+        // ── Overall summary ──
+        _ScoreSummaryCard(
+          score: score,
+          color: color,
+          label: _scoreLabel(score),
+          totalChecks: report.checks.length,
+          failedChecks: report.failed.length,
+        ),
+
+        // ── Runtime health (per-check breakdown) ──
+        const SizedBox(height: 20),
+        const AetherSectionTitle(
+          eyebrow: 'Runtime health',
+          subtitle: 'Version and configuration probes do not verify network access or every tool operation.',
+        ),
+        const SizedBox(height: 12),
+        if (report.anyRepairable && _health.repairWorker != null) ...[
+          _RepairBanner(
+            color: color,
+            repairing: _repairing || _health.repairing,
+            onRepair: busy ? null : _runRepair,
+          ),
+          const SizedBox(height: 12),
+        ],
+        if (_health.repairing) ...[
+          SettingsActionButton(
+            label: _health.cancellationRequested ? 'Waiting for worker to stop…' : 'Cancel repair',
+            onPressed: _health.cancellationRequested ? null : _health.cancelRepair,
+          ),
+          const SizedBox(height: 12),
+        ],
+        if (report.anyRepairable && _health.repairWorker == null)
+          Text('Targeted repair unavailable: no runtime worker is connected.', style: AetherType.bodyMuted),
+        for (final c in report.checks) ...[
+          _HealthCheckCard(check: c),
+          const SizedBox(height: 8),
+        ],
+
+        if (_repairLog.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          _RepairLogCard(lines: _repairLog),
+        ],
+
+        // ── Services (MCP & plugins) ──
+        if (services.isNotEmpty) ...[
+          const SizedBox(height: 20),
+          AetherSectionTitle(
+            eyebrow: 'Services',
+            subtitle:
+                '${services.values.where((s) => s.health == ServiceHealth.working).length} of ${services.length} working',
+          ),
+          const SizedBox(height: 12),
+          for (final entry in services.entries) ...[
+            _ServiceCard(
+              name: entry.key,
+              status: entry.value,
+              onRetry: busy ? null : _runChecks,
+            ),
+            const SizedBox(height: 8),
+          ],
+        ],
+
+        // ── Danger / reset / re-run ──
+        const SizedBox(height: 20),
+        _DangerActionsCard(
+          resetting: _resetting,
+          onReset: busy ? null : _hardResetSandbox,
+          onReRun: busy ? null : _runChecks,
+        ),
+      ],
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Internal premium building blocks
+// ──────────────────────────────────────────────────────────────────────────
+
+class _ProbingState extends StatelessWidget {
+  const _ProbingState();
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        child: Padding(
+        padding: const EdgeInsets.all(40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: 26,
+              height: 26,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Aether.accent,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'Probing device capabilities…',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+          ],
+        ),
+      ),
+      ),
+    );
+  }
+}
+
+class _ScoreSummaryCard extends StatelessWidget {
+  final int score;
+  final Color color;
+  final String label;
+  final int totalChecks;
+  final int failedChecks;
+  const _ScoreSummaryCard({
+    required this.score,
+    required this.color,
+    required this.label,
+    required this.totalChecks,
+    required this.failedChecks,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AetherCard(
+      title: const Text('Overall health'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 78 * (MediaQuery.textScalerOf(context).scale(24) / 24),
+            height: 78 * (MediaQuery.textScalerOf(context).scale(24) / 24),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                SizedBox.expand(
+                  child: CircularProgressIndicator(
+                    value: score / 100,
+                    strokeWidth: 6,
+                    strokeCap: StrokeCap.round,
+                    backgroundColor: Aether.hairline,
+                    valueColor: AlwaysStoppedAnimation(color),
+                  ),
+                ),
+                Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const SizedBox(
-                      width: 26,
-                      height: 26,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Aether.accent,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
                     Text(
-                      'Probing device capabilities…',
-                      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-          final score = report.score;
-          final color = _scoreColor(score);
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
-            children: [
-              // ── Score header ──
-              Container(
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: Aether.surface,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Aether.hairline),
-                ),
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 74,
-                      height: 74,
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          SizedBox.expand(
-                            child: CircularProgressIndicator(
-                              value: score / 100,
-                              strokeWidth: 6,
-                              strokeCap: StrokeCap.round,
-                              backgroundColor: Aether.hairline,
-                              valueColor: AlwaysStoppedAnimation(color),
-                            ),
-                          ),
-                          Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                '$score',
-                                style: TextStyle(
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.w800,
-                                  color: color,
-                                  height: 1,
-                                ),
-                              ),
-                              Text(
-                                'of 100',
-                                style: TextStyle(
-                                  fontSize: 9.5,
-                                  color: Aether.textFaint,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
+                      '$score',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w800,
+                        color: color,
+                        height: 1,
                       ),
                     ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _scoreLabel(score),
-                            style: TextStyle(
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w600,
-                              height: 1.35,
-                              color: Aether.text,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            '${report.failed.length} of ${report.checks.length} check(s) failing',
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              color: Aether.textFaint,
-                            ),
-                          ),
-                        ],
+                    Text(
+                      'of 100',
+                      style: TextStyle(
+                        fontSize: 9.5,
+                        color: Aether.textFaint,
                       ),
                     ),
                   ],
                 ),
-              ),
-
-              // ── Services Health (MCP & Plugins) ──
-              if (AppState.I.serviceStatus.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: Aether.surface,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: Aether.hairline),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Text(
-                            'SERVICES',
-                            style: TextStyle(
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1.2,
-                              color: Aether.textFaint,
-                            ),
-                          ),
-                          const Spacer(),
-                          Text(
-                            '${AppState.I.serviceStatus.values.where((s) => s.health == ServiceHealth.working).length}/${AppState.I.serviceStatus.length} working',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Aether.textFaint,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      for (final entry in AppState.I.serviceStatus.entries)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: Row(
-                            children: [
-                              if (entry.value.health ==
-                                  ServiceHealth.connecting)
-                                const SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Aether.accent,
-                                  ),
-                                )
-                              else if (entry.value.health ==
-                                  ServiceHealth.working)
-                                Icon(
-                                  Icons.check_circle_outline,
-                                  size: 16,
-                                  color: Aether.successLight,
-                                )
-                              else
-                                Tooltip(
-                                  message: entry.value.detail,
-                                  child: Icon(
-                                    Icons.error_outline,
-                                    size: 16,
-                                    color: Aether.dangerC,
-                                  ),
-                                ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  entry.key,
-                                  style: const TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                              if (entry.value.detail.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 8),
-                                  child: Text(
-                                    entry.value.detail,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: Aether.textMuted,
-                                    ),
-                                  ),
-                                ),
-                              Text(
-                                entry.value.health.name.toUpperCase(),
-                                style: TextStyle(
-                                  fontSize: 10.5,
-                                  fontFamily: Aether.mono,
-                                  fontWeight: FontWeight.w600,
-                                  color:
-                                      entry.value.health ==
-                                          ServiceHealth.working
-                                      ? Aether.successLight
-                                      : entry.value.health ==
-                                            ServiceHealth.connecting
-                                      ? Aether.accent
-                                      : Aether.dangerC,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: AetherType.title,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '$failedChecks of $totalChecks check(s) failing',
+                  style: AetherType.caption,
                 ),
               ],
+          ),
+        ],
+      ),
+    );
+  }
+}
 
-              // ── Repair CTA (when a sandbox item fails) ──
-              if (report.anyRepairable) ...[
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: color,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  onPressed: _repairing
-                      ? null
-                      : () async {
-                          setState(() {
-                            _repairing = true;
-                            _repairLog.clear();
-                          });
-                          try {
-                            await HealthService.I.repair((l) {
-                              if (!mounted) return;
-                              setState(() => _repairLog.add(l));
-                            });
-                          } catch (e) {
-                            if (mounted) {
-                              setState(
-                                () => _repairLog.add('repair failed: $e'),
-                              );
-                            }
-                          } finally {
-                            if (mounted) {
-                              setState(() => _repairing = false);
-                            }
-                          }
-                        },
-                  icon: Icon(
-                    _repairing
-                        ? Icons.hourglass_top_outlined
-                        : Icons.build_circle_outlined,
-                    size: 17,
-                  ),
-                  label: Text(
-                    _repairing
-                        ? 'Repairing… do not close'
-                        : 'Repair — install missing packages (apt)',
-                    style: const TextStyle(fontSize: 13.5),
-                  ),
+class _RepairBanner extends StatelessWidget {
+  final Color color;
+  final bool repairing;
+  final VoidCallback? onRepair;
+  const _RepairBanner({
+    required this.color,
+    required this.repairing,
+    required this.onRepair,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AetherCard(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Icon(
+            Icons.build_circle_outlined,
+            size: 20,
+            color: color,
+          ),
+          const SizedBox(height: 12),
+          Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  repairing
+                      ? 'Repair in progress'
+                      : 'Repair available',
+                  style: AetherType.title,
                 ),
-                if (_repairLog.isNotEmpty)
-                  Container(
-                    margin: const EdgeInsets.only(top: 8),
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Aether.surfaceAlt,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Aether.hairline),
-                    ),
-                    constraints: const BoxConstraints(maxHeight: 180),
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: [
-                        for (final l in _repairLog.reversed.toList())
-                          Text(
-                            l,
-                            style: TextStyle(
-                              fontFamily: Aether.mono,
-                              fontSize: 11,
-                              height: 1.5,
-                              color: Aether.textMuted,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
+                const SizedBox(height: 2),
+                Text(
+                  repairing
+                      ? 'Installing signed packages and re-running executable checks…'
+                      : 'Repair failed, supported runtimes using signed packages.',
+                  style: AetherType.caption,
+                ),
               ],
+          ),
+          const SizedBox(height: 12),
+          SettingsActionButton(
+            label: repairing ? 'Repairing…' : 'Repair',
+            icon: Icons.build_outlined,
+            primary: true,
+            onPressed: onRepair,
+          ),
+          if (repairing) ...[
+            const SizedBox(height: 12),
+            const LinearProgressIndicator(semanticsLabel: 'Runtime repair in progress'),
+          ],
+        ],
+      ),
+    );
+  }
+}
 
-              // ── Per-check list (every failure names its reason) ──
+class _RepairLogCard extends StatelessWidget {
+  final List<String> lines;
+  const _RepairLogCard({required this.lines});
+  @override
+  Widget build(BuildContext context) {
+    return AetherCard(
+      title: const Text('Repair log'),
+      padding: const EdgeInsets.all(16),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 180),
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            for (final l in lines.reversed.toList())
               Padding(
-                padding: const EdgeInsets.fromLTRB(4, 18, 4, 8),
+                padding: const EdgeInsets.symmetric(vertical: 2),
                 child: Text(
-                  'BREAKDOWN — why this score',
+                  l,
                   style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.2,
-                    color: Aether.textFaint,
+                    fontFamily: Aether.mono,
+                    fontSize: 11,
+                    height: 1.5,
+                    color: Aether.textMuted,
                   ),
                 ),
               ),
-              for (final c in report.checks)
-                Container(
-                  margin: const EdgeInsets.only(bottom: 6),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Aether.surface,
-                    borderRadius: BorderRadius.circular(11),
-                    border: Border.all(color: Aether.hairline),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(
-                        c.ok ? Icons.check_circle_outline : Icons.error_outline,
-                        size: 17,
-                        color: c.ok ? Aether.successLight : Aether.dangerC,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HealthCheckCard extends StatelessWidget {
+  final HealthCheck check;
+  const _HealthCheckCard({required this.check});
+
+  Color get _dotColor {
+    if (check.ok) return Aether.success;
+    switch (check.status) {
+      case HealthStatus.denied:
+      case HealthStatus.unsupported:
+      case HealthStatus.failed:
+        return Aether.danger;
+      case HealthStatus.missing:
+      case HealthStatus.missingConfiguration:
+        return Aether.warn;
+      case HealthStatus.available:
+        return Aether.success;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AetherCard(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: AetherStatusDot(color: _dotColor, size: 10),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        check.name,
+                        style: AetherType.title,
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              c.name,
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: Aether.text,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              c.detail,
-                              style: TextStyle(
-                                fontSize: 11,
-                                height: 1.4,
-                                color: c.ok
-                                    ? Aether.textFaint
-                                    : Aether.textMuted,
-                              ),
-                            ),
-                          ],
-                        ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '+${check.points}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontFamily: Aether.mono,
+                        color: check.ok
+                            ? Aether.successLight
+                            : Aether.textFaint,
                       ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '+${c.points}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontFamily: Aether.mono,
-                          color: c.ok ? Aether.successLight : Aether.textFaint,
-                        ),
-                      ),
-                    ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  check.detail,
+                  style: AetherType.caption.copyWith(
+                    color: check.ok ? Aether.textFaint : Aether.textMuted,
                   ),
                 ),
-              const SizedBox(height: 10),
-              // PR47/K6: Hard reset — a broken sandbox (bad clone, stuck
-              // stale state, orphaned apt processes) wants a full wipe and
-              // re-extraction. Deleting the whole prefix and re-running the
-              // setup gate is the only honest way to prove the ground.
-              Center(
-                child: TextButton.icon(
-                  onPressed: _resetting ? null : _hardResetSandbox,
-                  icon: Icon(
-                    _resetting
-                        ? Icons.hourglass_top_outlined
-                        : Icons.delete_sweep_outlined,
-                    size: 15,
-                    color: Aether.dangerC,
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ServiceCard extends StatelessWidget {
+  final String name;
+  final ServiceStatus status;
+  final VoidCallback? onRetry;
+  const _ServiceCard({
+    required this.name,
+    required this.status,
+    required this.onRetry,
+  });
+
+  Color get _dotColor {
+    switch (status.health) {
+      case ServiceHealth.working:
+        return Aether.success;
+      case ServiceHealth.connecting:
+        return Aether.warn;
+      case ServiceHealth.failed:
+        return Aether.danger;
+    }
+  }
+
+  String get _lastCheckCaption {
+    final detail = status.detail.trim();
+    final t = status.updatedAt;
+    final hh = t.hour.toString().padLeft(2, '0');
+    final mm = t.minute.toString().padLeft(2, '0');
+    final time = 'last check $hh:$mm';
+    if (detail.isEmpty) return time;
+    return '$time · $detail';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final connecting = status.health == ServiceHealth.connecting;
+    return AetherCard(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: connecting
+                ? const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Aether.accent,
+                    ),
+                  )
+                : AetherStatusDot(
+                    color: _dotColor,
+                    size: 10,
+                    // REDESIGN (wave 2 UI): pulsing on failed services kept
+                    // the ticker alive forever and broke pumpAndSettle in the
+                    // widget tests. The red tint + 'Retry' CTA now carry the
+                    // "needs attention" affordance on their own.
+                    pulsing: false,
                   ),
-                  label: Text(
-                    _resetting
-                        ? 'Resetting sandbox…'
-                        : 'Hard reset the sandbox (deletes + reinstalls)',
-                    style: TextStyle(fontSize: 12.5, color: Aether.dangerC),
-                  ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(name, style: AetherType.title),
+                const SizedBox(height: 2),
+                Text(
+                  _lastCheckCaption,
+                  style: AetherType.caption,
                 ),
-              ),
-              Center(
-                child: TextButton.icon(
-                  onPressed: HealthService.I.runChecks,
-                  icon: Icon(Icons.refresh, size: 15, color: Aether.accent),
-                  label: Text(
-                    'Re-run checks',
-                    style: TextStyle(fontSize: 12.5, color: Aether.accent),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          AetherGhostButton(
+            label: 'Retry',
+            onPressed: connecting ? null : onRetry,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DangerActionsCard extends StatelessWidget {
+  final bool resetting;
+  final VoidCallback? onReset;
+  final VoidCallback? onReRun;
+  const _DangerActionsCard({
+    required this.resetting,
+    required this.onReset,
+    required this.onReRun,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // PR47/K6: Hard reset — a broken sandbox (bad clone, stuck stale state,
+    // orphaned apt processes) wants a full wipe and re-extraction. Deleting
+    // the whole prefix and re-running the setup gate is the only honest way
+    // to prove the ground.
+    return AetherCard(
+      title: const Text('Diagnostics'),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SettingsActionButton(
+            label: 'Re-run checks',
+            icon: Icons.refresh,
+            onPressed: onReRun,
+          ),
+          const SizedBox(height: 10),
+          SettingsActionButton(
+            label: resetting
+                ? 'Resetting sandbox…'
+                : 'Hard reset the sandbox',
+            icon: Icons.delete_sweep_outlined,
+            danger: true,
+            onPressed: onReset,
+          ),
+        ],
       ),
     );
   }

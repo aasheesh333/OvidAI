@@ -333,8 +333,8 @@ void main() {
       await tester.pump();
       expect(
         tester
-            .widget<OutlinedButton>(
-              find.widgetWithText(OutlinedButton, 'Cancel'),
+            .widget<TextButton>(
+              find.widgetWithText(TextButton, 'Cancel'),
             )
             .onPressed,
         isNull,
@@ -348,6 +348,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(returned, isFalse);
       expect(find.textContaining('Could not save'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, 'Cancel'))
+            .onPressed,
+        isNotNull,
+      );
       expect(
         await store.load(manifest.id, pluginManifestDigest(manifest)),
         isNull,

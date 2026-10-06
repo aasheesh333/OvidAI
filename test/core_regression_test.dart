@@ -7330,8 +7330,19 @@ block</pre>
       expect(src, contains('## Critical Context'));
       expect(src, contains('## Next Step'));
       // Overflow rebuild + budget-boundary rebuild reuse the shared
-      // assembly (never drop the checkpoint).
-      expect(src, contains('buildRequestMessages(s, sys'));
+      // assembly (never drop the checkpoint). Wave2 routes both through
+      // the local requestMessages() wrapper around
+      // buildRequestMessages(s, sys, …).
+      expect(
+        RegExp(r'buildRequestMessages\(\s*s,\s*sys,').hasMatch(src),
+        isTrue,
+        reason: 'shared assembly still called with (s, sys)',
+      );
+      expect(
+        RegExp(r'\.\.addAll\(requestMessages\(\)\)').allMatches(src).length,
+        greaterThanOrEqualTo(2),
+        reason: 'overflow + budget rebuilds both reuse the shared assembly',
+      );
     });
   });
 
@@ -7709,8 +7720,10 @@ block</pre>
           "make binutils '",
         ),
       );
-      // deb fallback wanted list (PR30).
-      expect(src, contains("'curl',\n          'zlib',"));
+      // deb fallback wanted list (PR30): wave2 replaced the curl/.deb
+      // direct fetch with the signed ovid-pkg package graph, which
+      // installs the SAME pkgs list — so zlib still rides the fallback.
+      expect(src, contains('ovid-pkg install \$pkgs'));
       // Force-rotate after each failed update attempt.
       expect(src, contains('[apt] rotated to'));
     });
@@ -8862,15 +8875,10 @@ block</pre>
           "        'ripgrep openssh rsync jq unzip tmux gh'",
         ),
       );
-      // Deb-direct fallback (apt-https-broken devices) carries the same set.
-      expect(src, contains("'ripgrep', // PR38: real Linux CLI parity"));
-      expect(
-        src,
-        contains(
-          "'openssh',\n          'rsync',\n          'jq',\n"
-          "          'unzip',\n          'tmux',",
-        ),
-      );
+      // Signed ovid-pkg fallback (wave2 package graph — replaced the old
+      // deb-direct fetch on apt-https-broken devices) installs the SAME
+      // pkgs list, so the CLI set rides the fallback path too.
+      expect(src, contains('ovid-pkg install \$pkgs'));
     });
 
     test('clang is deliberately NOT in the eager install (too big)', () {
@@ -8892,8 +8900,10 @@ block</pre>
       expect(
         src,
         contains(
-          "'bash', 'node', 'npm', 'python', 'git', 'curl',\n"
-          "      'rg', 'ssh', 'rsync', 'jq', 'unzip', 'tmux',",
+          "const bins = [\n      'bash',\n      'node',\n      'npm',\n"
+          "      'python',\n      'git',\n      'curl',\n      'rg',\n"
+          "      'ssh',\n      'rsync',\n      'jq',\n      'unzip',\n"
+          "      'tmux',\n    ];",
         ),
       );
     });
@@ -8992,22 +9002,32 @@ block</pre>
 
     test('Health screen surfaces the new CLI tools with Repair wired', () {
       final src = File('lib/core/health_service.dart').readAsStringSync();
-      for (final name in [
-        'ripgrep (rg)',
-        'openssh (ssh/scp/sftp)',
-        'rsync',
-        'jq',
-        'unzip',
-        'tmux',
+      // Wave2: the checks are a data-driven (id, name, points, probe)
+      // table instead of per-check HealthCheck literals.
+      for (final entry in [
+        "('rg', 'ripgrep (rg)'",
+        "('ssh', 'OpenSSH'",
+        "('rsync', 'rsync'",
+        "('jq', 'jq'",
+        "('unzip', 'unzip'",
+        "('tmux', 'tmux'",
       ]) {
-        expect(src, contains("name: '$name'"));
+        expect(src, contains(entry));
       }
-      // Every new check stays Repair-eligible (same button fixes it).
-      final i = src.indexOf("name: 'ripgrep (rg)'");
-      final j = src.indexOf("name: 'tmux'");
-      expect(i, greaterThan(0));
-      expect(j, greaterThan(i));
-      expect(src.substring(i, j + 200), isNot(contains('repairable: false')));
+      // Every new check stays Repair-eligible: the repair package map
+      // carries a signed-installer package per tool and the repairable
+      // computation consults it (same Repair button fixes them).
+      for (final mapping in [
+        "'rg': 'ripgrep'",
+        "'ssh': 'openssh'",
+        "'rsync': 'rsync'",
+        "'jq': 'jq'",
+        "'unzip': 'unzip'",
+        "'tmux': 'tmux'",
+      ]) {
+        expect(src, contains(mapping));
+      }
+      expect(src, contains('_repairPackagesByTarget.containsKey(id)'));
     });
   });
 
@@ -10595,7 +10615,9 @@ url = "https://api.example.com/mcp"
       expect(src, contains('Future<void> _hardResetSandbox()'));
       expect(src, contains('SandboxService.I.uninstall()'));
       expect(src, contains('SandboxSetupScreen(gateMode: true)'));
-      expect(src, contains('Hard reset the sandbox (deletes + reinstalls)'));
+      // Wave2 label (with a busy variant while the reset runs).
+      expect(src, contains("'Hard reset the sandbox'"));
+      expect(src, contains("'Resetting sandbox…'"));
     });
 
     test('K7: SandboxSetupScreen has error view with retry and terminal', () {
@@ -12692,9 +12714,20 @@ You are an expert security auditor reviewing code for vulnerabilities.
           );
           await tester.pump();
 
+          // Wave2 redesign: the services section sits BELOW the runtime
+          // checks list, so with a full report it starts off-screen (the
+          // ListView builds children lazily) — scroll it into view first.
+          // The per-service status text ('WORKING') is gone; the wave2
+          // surface is the section subtitle ('N of M working') plus the
+          // per-card status dot + Retry action.
+          await tester.scrollUntilVisible(
+            find.text('SERVICES'),
+            300,
+            scrollable: find.byType(Scrollable).first,
+          );
           expect(find.text('SERVICES'), findsOneWidget);
           expect(find.text('mcp:test_health'), findsOneWidget);
-          expect(find.text('WORKING'), findsOneWidget);
+          expect(find.text('1 of 1 working'), findsOneWidget);
         });
       });
     });
@@ -21071,10 +21104,10 @@ cwd = 'tools'
         // popped chooser's repo field may still animate out, so the sheet
         // line is matched exactly).
         expect(find.text('Grant plugin access'), findsOneWidget);
-        expect(
-          find.text('Cancel Kit · 1.0.0 · p11org/cancel-kit'),
-          findsOneWidget,
-        );
+        // Wave2 sheet redesign: the manifest name is the title row and the
+        // version/id ride the caption line (`v<version> · <id>`).
+        expect(find.text('Cancel Kit'), findsOneWidget);
+        expect(find.text('v1.0.0 · p11org/cancel-kit'), findsOneWidget);
         await tester.ensureVisible(find.text('Cancel'));
         for (var i = 0; i < 20; i++) {
           await tester.pump(const Duration(milliseconds: 100));

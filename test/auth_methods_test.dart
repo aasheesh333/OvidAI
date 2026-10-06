@@ -6,6 +6,15 @@ import 'package:ovid_ai/core/auth_phone_flow.dart';
 import 'package:ovid_ai/core/auth_providers.dart';
 import 'package:ovid_ai/ui/auth_methods.dart';
 import 'package:ovid_ai/ui/auth_screen.dart';
+import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
+
+Finder get _phoneNumberField => find.descendant(
+  of: find.descendant(
+    of: find.byType(AuthPhoneDialog),
+    matching: find.widgetWithText(AetherField, 'Phone number'),
+  ),
+  matching: find.byType(TextField),
+);
 
 void main() {
   for (final width in [320.0, 360.0, 390.0, 411.0]) {
@@ -84,8 +93,9 @@ void main() {
         );
         await tester.tap(find.text('Continue with Phone'));
         await tester.pumpAndSettle();
+        expect(find.byType(AuthPhoneDialog), findsOneWidget);
         await tester.enterText(
-          find.widgetWithText(TextField, 'Phone number'),
+          _phoneNumberField,
           '+14155550100',
         );
         await tester.tap(find.text('Send code'));
@@ -104,7 +114,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(applied, 0);
-        expect(find.text('Verify phone'), findsNothing);
+        expect(find.byType(AuthPhoneDialog), findsNothing);
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());
         showPicker.dispose();
@@ -189,23 +199,30 @@ void main() {
     );
     await tester.tap(find.text('Continue with Phone'));
     await tester.pumpAndSettle();
+    expect(find.byType(AuthPhoneDialog), findsOneWidget);
     await tester.enterText(
-      find.widgetWithText(TextField, 'Phone number'),
+      _phoneNumberField,
       '+14155550100',
     );
     await tester.tap(find.text('Send code'));
     await tester.pump();
     callbacks.codeSent('manual', 123);
     await tester.pump();
-    await tester.enterText(
-      find.widgetWithText(TextField, 'SMS code'),
-      '123456',
+    final otpCells = find.descendant(
+      of: find.byType(AuthPhoneDialog),
+      matching: find.byType(TextField),
     );
+    // The phone-number field is first; the segmented OTP owns the next six.
+    expect(otpCells, findsNWidgets(7));
+    const code = '123456';
+    for (var i = 0; i < code.length; i++) {
+      await tester.enterText(otpCells.at(i + 1), code[i]);
+    }
     await tester.tap(find.text('Verify code'));
     await tester.pumpAndSettle();
     expect(applied, 1);
     expect(success, 1);
-    expect(find.text('SMS code'), findsNothing);
+    expect(find.byType(AuthPhoneDialog), findsNothing);
   });
 
   testWidgets('closing phone dialog discards late automatic completion', (
@@ -235,8 +252,9 @@ void main() {
     );
     await tester.tap(find.text('Link Phone'));
     await tester.pumpAndSettle();
+    expect(find.byType(AuthPhoneDialog), findsOneWidget);
     await tester.enterText(
-      find.widgetWithText(TextField, 'Phone number'),
+      _phoneNumberField,
       '+14155550100',
     );
     await tester.tap(find.text('Send code'));
@@ -248,6 +266,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(applied, 0);
+    expect(find.byType(AuthPhoneDialog), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }
