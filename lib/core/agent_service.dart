@@ -1194,8 +1194,9 @@ class AgentService extends ChangeNotifier {
         : (_runResolved.activeRunId != null
               ? overlayStateRunning
               : overlayStateIdle);
-    if (!_runChainStale && next != _overlayState)
+    if (!_runChainStale && next != _overlayState) {
       unawaited(setOverlayState(next));
+    }
   }
 
   /// Approvals waiting in sessions OTHER than the foreground one.
@@ -2359,8 +2360,9 @@ class AgentService extends ChangeNotifier {
     final ownedRun = _runs[sessionId];
     try {
       if (!identical(accountToken, AppState.I.sessionAccountToken) ||
-          !AppState.I.sessionAccountReady)
+          !AppState.I.sessionAccountReady) {
         return;
+      }
       var target = AppState.I.sessionById(sessionId);
       if (target == null) {
         // Session deleted — NEVER fire the queued message into whatever
@@ -4128,8 +4130,9 @@ class AgentService extends ChangeNotifier {
     Map<String, Object?> payload,
   ) async {
     final controller = tab.controller;
-    if (controller == null)
+    if (controller == null) {
       return; // Tab torn down while the fix was in flight.
+    }
     try {
       await controller.runJavaScript(geoReplyJs(id, payload));
     } catch (e) {
@@ -4802,8 +4805,9 @@ if (!window.__ovidBlankHooked) {
     final sessionId = _currentRunKey();
     final repo = sessionRepoFull;
     final folder = AppState.I.activeSession?.workspaceFolder;
-    if (sessionId.isEmpty || ((repo == null || repo.isEmpty) && folder == null))
+    if (sessionId.isEmpty || ((repo == null || repo.isEmpty) && folder == null)) {
       return;
+    }
     if (RepoCache.I.isReady &&
         RepoCache.I.repoFull == repo &&
         RepoCache.I.defaultBranch == sessionBranch &&
@@ -4866,12 +4870,14 @@ if (!window.__ovidBlankHooked) {
       throw StateError('Studio save superseded by an edit or workspace change');
     }
     final safe = workspaceFilePath(work, path);
-    if (safe == null)
+    if (safe == null) {
       throw StateError('Path escapes workspace or uses a symlink: $path');
+    }
     final file = File(safe);
     file.parent.createSync(recursive: true);
-    if (workspaceFilePath(work, path) != safe)
+    if (workspaceFilePath(work, path) != safe) {
       throw StateError('Workspace path changed while saving: $path');
+    }
     file.writeAsStringSync(content);
     st.fileBuffer[path] = content;
     if (!st.openFiles.contains(path)) st.openFiles.add(path);
@@ -4996,8 +5002,9 @@ if (!window.__ovidBlankHooked) {
         // Size guard: don't slurp huge binaries into the editor.
         if (f.lengthSync() > 2 * 1024 * 1024) continue;
         final content = await f.readAsString();
-        if (!owns(path) || f.lastModifiedSync().millisecondsSinceEpoch != mtime)
+        if (!owns(path) || f.lastModifiedSync().millisecondsSinceEpoch != mtime) {
           continue;
+        }
         st.syncedMtime[path] = mtime;
         if (content != st.fileBuffer[path]) {
           st.fileBuffer[path] = content;
@@ -5360,8 +5367,9 @@ user which one instead of assuming this one.''';
   Future<void> _mirrorToDisk(String path, String content) async {
     final work = await _sessionWorkDir();
     final safe = workspaceFilePath(work, path);
-    if (safe == null)
+    if (safe == null) {
       throw StateError('Path escapes workspace or uses a symlink: $path');
+    }
     final f = File(safe);
     f.parent.createSync(recursive: true);
     if (workspaceFilePath(work, path) != safe) {
@@ -10676,8 +10684,9 @@ ${await _agentsMdBlock()}
     }
     final expanded =
         submittedPrompt != null && originalPrompt != submittedPrompt;
-    if (expanded && submittedMessage != null)
+    if (expanded && submittedMessage != null) {
       fullTextMessages.add(submittedMessage);
+    }
     List<Map<String, dynamic>> requestMessages() {
       final rows = buildRequestMessages(
         s,
@@ -11813,8 +11822,9 @@ ${await _agentsMdBlock()}
       for (final recent in AppState.I.recentModels) {
         if (targets.length >= 3) break;
         if (recent.providerId == sessionProvider.id) continue;
-        if (targets.any((t) => t.route.providerId == recent.providerId))
+        if (targets.any((t) => t.route.providerId == recent.providerId)) {
           continue;
+        }
         final rp = AppState.I.providerById(recent.providerId);
         if (rp == null || !rp.isConfigured) continue;
         targets.add((label: rp.id, route: _RequestRoute(rp, recent.model)));
@@ -15934,8 +15944,9 @@ ${await _agentsMdBlock()}
 
       case 'commit':
         final message = (args['message'] ?? 'Ovid agent update') as String;
-        if (!_ownsRepoCache)
+        if (!_ownsRepoCache) {
           return 'repo binding changed. call repo_sync first.';
+        }
         // An unbound, empty session has no remote identity to reconcile.
         // Bound sessions still recover durable intents even without drafts.
         if (RepoCache.I.repoFull == null && !RepoCache.I.hasPending) {
@@ -15944,8 +15955,9 @@ ${await _agentsMdBlock()}
         // Recovery is read-only and must run even after restart without drafts.
         try {
           final recovered = await RepoCache.I.reconcilePending();
-          if (recovered != null)
+          if (recovered != null) {
             return 'confirmed prior atomic commit ${RepoCache.I.lastCommit?.commitSha} ($recovered files); no new mutation';
+          }
         } catch (e) {
           return 'commit reconciliation required: $e';
         }
@@ -18875,8 +18887,9 @@ ${await _agentsMdBlock()}
       // is the largest avoidable slice of the "control mode is very slow" report.
       // The guard only ever needed the package name, so ask for exactly that.
       final packageName = await device.foregroundPackage();
-      if (_runChainStale)
+      if (_runChainStale) {
         return DeviceControlService.cancelledSupersededMessage;
+      }
       if (packageName == null || packageName.trim().isEmpty) {
         return 'DENIED: Ovid could not verify the live foreground app. Retry device_read before acting.';
       }
@@ -20385,8 +20398,9 @@ ${await _agentsMdBlock()}
 
   /// One deadline, no polling and no model calls when no task is due.
   void _startScheduleTimer() {
-    if (!_schedulesReady || _scheduleTimerPaused || schedules.dispatching)
+    if (!_schedulesReady || _scheduleTimerPaused || schedules.dispatching) {
       return;
+    }
     final next = schedules.nextWake;
     if (next == _armedSchedule && (_scheduleTimer?.isActive ?? false)) return;
     _scheduleTimer?.cancel();
@@ -20442,8 +20456,9 @@ ${await _agentsMdBlock()}
     ScheduleEntry entry,
     Map<String, dynamic> args,
   ) async {
-    if (entry.task['status'] == 'running')
+    if (entry.task['status'] == 'running') {
       throw StateError('Pause the task before editing');
+    }
     final replacement = schedules.create(args);
     replacement['id'] = entry.task['id'];
     final old = Map<String, dynamic>.of(entry.task);
@@ -20482,8 +20497,9 @@ ${await _agentsMdBlock()}
         s.model == 'Select a provider') {
       return const ScheduleResult.retryable('Provider/model setup required');
     }
-    if (busyFor(s.id))
+    if (busyFor(s.id)) {
       return const ScheduleResult.retryable('Session became busy');
+    }
     if (schedules.stopped || entry.task['status'] != 'running') {
       return const ScheduleResult.failed('Stopped before execution');
     }
@@ -20781,8 +20797,9 @@ ${await _agentsMdBlock()}
       }
       final store = await app.prepareMemory();
       // Recheck after async initialization so a deleted chat cannot resurrect.
-      if (app.memoryOwner(current.id) != owner)
+      if (app.memoryOwner(current.id) != owner) {
         throw StateError('Memory ownership changed.');
+      }
       final key = scope == 'global' ? null : owner;
       final file = args['file'] as String? ?? 'MEMORY.md';
       if (tool == 'memory_save') {
@@ -21610,8 +21627,9 @@ ${await _agentsMdBlock()}
   String _handleInterruptAgent(Map<String, dynamic> args) {
     final id = args['agent_id'] as String;
     final sub = _subagents[id];
-    if (sub == null || !_canManageSubagent(sub))
+    if (sub == null || !_canManageSubagent(sub)) {
       return 'Subagent $id not found.';
+    }
     if (sub.finished) return 'Subagent $id already finished.';
     interruptSubagentTree(sub.sessionId);
     _emit('think', 'interrupted subagent $id');
