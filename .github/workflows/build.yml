@@ -118,14 +118,50 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # Release-candidate signing is available whenever the keystore secret is set.
+      # Signed release artifacts build on every push when the keystore secret is
+      # present (target 28, sideload / release-candidate). The manual
+      # `production_release` dispatch instead enforces the API 36 Play floor.
+      - name: Detect release signing availability
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "release_signing=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Prepare release signing
+        if: env.release_signing == 'true' && inputs.production_release != true
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          set -euo pipefail
+          # release_prepare.py refuses to overwrite; drop the push-time
+          # google-services.json plus any stale signing inputs first.
+          rm -f android/release-keystore.jks android/keystore.properties android/app/google-services.json
+          keystore="$(mktemp)"
+          trap 'rm -f "$keystore"' EXIT
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$keystore"
+          fingerprint="$(keytool -list -v -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" \
+            | sed -n 's/.*SHA256: *//p' | head -n1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          if [ -z "$fingerprint" ]; then
+            echo "Unable to compute keystore certificate SHA-256" >&2
+            exit 1
+          fi
+          export ANDROID_SIGNING_CERT_SHA256="$fingerprint"
+          echo "ANDROID_SIGNING_CERT_SHA256=$fingerprint" >> "$GITHUB_ENV"
+          python3 tool/release_prepare.py
+
       - name: Free disk before release build
-        if: inputs.production_release == true
+        if: env.release_signing == 'true'
         run: |
           # The release build recompiles everything; the debug build's
           # intermediates plus the NDK toolchain leave the runner tight on
           # space (llvm-strip once died with "No space left on device").
-          # Drop only regenerable intermediates — the debug APK itself is
-          # already uploaded above.
           rm -rf build/app/intermediates build/app/tmp build/app/kotlin
           df -h /
 
@@ -135,25 +171,26 @@ jobs:
         run: ./gradlew :app:validateProductionReleaseSigning --no-daemon
 
       - name: Build signed release APK + AAB
-        if: inputs.production_release == true
+        if: env.release_signing == 'true'
         run: |
           flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
           flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
 
-      # The production contract requires API 36. The current target28 runtime
-      # is architecture-blocked; do not lower this gate to publish it.
-      - name: Gate production APK and AAB
-        if: inputs.production_release == true
+      # Push (release candidate): signed, non-debuggable, target 28, NOT Play
+      # qualified. Manual production_release: enforces the API 36 Play floor.
+      - name: Gate release artifacts
+        if: env.release_signing == 'true'
         env:
           ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: |
+          if [ "${{ inputs.production_release }}" = "true" ]; then mode=production; target=36; else mode=release; target=28; fi
           status=0
-          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-release.apk --mode production --expected-target 36 --output build/release-inventory/release-apk.json || status=1
-          python3 tool/release_inventory.py build/app/outputs/bundle/release/app-release.aab --mode production --expected-target 36 --output build/release-inventory/release-aab.json || status=1
+          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-release.apk --mode "$mode" --expected-target "$target" --output build/release-inventory/release-apk.json || status=1
+          python3 tool/release_inventory.py build/app/outputs/bundle/release/app-release.aab --mode "$mode" --expected-target "$target" --output build/release-inventory/release-aab.json || status=1
           exit "$status"
 
       - name: Upload release APK
-        if: inputs.production_release == true
+        if: env.release_signing == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Ovid-APK-release
@@ -161,13 +198,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload release AAB (static gates only; not Play qualified)
-        if: inputs.production_release == true
+      - name: Upload release AAB (static gates only; not Play qualified on push)
+        if: env.release_signing == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Ovid-AAB-release
           path: build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: error
+          retention-days: 30
           retention-days: 30
 
       - name: Upload release inventory and native test evidence
@@ -182,7 +220,7 @@ jobs:
           retention-days: 30
 
       - name: Remove injected release credentials
-        if: always() && inputs.production_release == true
+        if: always() && (inputs.production_release == true || env.release_signing == 'true')
         run: rm -f android/keystore.properties android/release-keystore.jks android/app/google-services.json
 
       # NOTE: `--split-debug-info=build/symbols` produces Dart deobfuscation

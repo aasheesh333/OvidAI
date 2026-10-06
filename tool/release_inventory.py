@@ -2,8 +2,12 @@
 """Inspect built APK/AAB bytes, never infer native type from a .so suffix.
 
 Debug gates require valid structure/ABI/signature and the expected target. Release
-gates additionally require target API 36+, pin the signer and enforce 64-bit LOAD/RELRO plus APK ZIP
-alignment. None of these static checks establishes device or Play qualification.
+candidate (release) and production gates additionally require a non-debuggable
+manifest and enforce 64-bit LOAD/RELRO plus APK ZIP alignment. Production gates
+further require target API 36+ and pin the signer to a required certificate
+SHA-256; release-candidate gates honor --expected-target (e.g. 28) and accept any
+non-debug signer, verifying a pinned certificate only when one is supplied. None of
+these static checks establishes device or Play qualification.
 """
 import argparse
 import hashlib
@@ -140,16 +144,18 @@ def inspect_native(source, kind, expected_abis):
     return result
 
 
-def check_apk_signer(text, expected, production):
+def check_apk_signer(text, expected, production, release=False):
     fingerprints = re.findall(r'Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)', text)
     fingerprints = [f.lower() for f in fingerprints]
     if not fingerprints:
         raise ValueError('no verified signer certificates')
-    if production:
+    if production or release:
         if re.search(r'CN\s*=\s*Android Debug', text, re.I):
             raise ValueError('debug certificate is forbidden for production')
-        expected = expected.replace(':', '').lower()
-        if not re.fullmatch('[0-9a-f]{64}', expected) or set(fingerprints) != {expected}:
+        pinned = expected.replace(':', '').lower()
+        # Production always pins; a release candidate pins only when a digest is supplied.
+        if (production or pinned) and (not re.fullmatch('[0-9a-f]{64}', pinned)
+                                       or set(fingerprints) != {pinned}):
             raise ValueError('production signer does not match required certificate SHA-256')
     return fingerprints
 
@@ -259,7 +265,7 @@ def apk_manifest(path, tools):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('artifact', type=Path)
-    parser.add_argument('--mode', choices=('debug', 'production'), required=True)
+    parser.add_argument('--mode', choices=('debug', 'production', 'release'), required=True)
     parser.add_argument('--expected-abis', default=','.join(ABIS))
     parser.add_argument('--expected-target', type=int, required=True)
     parser.add_argument('--expected-min', type=int, default=23)
@@ -268,6 +274,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     production = args.mode == 'production'
+    release = args.mode == 'release'
+    strict = production or release
     report = {'schema': 1, 'artifact': str(args.artifact), 'mode': args.mode,
               'source_revision': os.environ.get('GITHUB_SHA'), 'errors': [],
               'qualification': 'static inventory only; no device, split-delivery or Play approval evidence'}
@@ -281,7 +289,7 @@ def main():
         native = inspect_native(args.artifact, kind, set(args.expected_abis.split(',')))
         report['native'] = native
         report['errors'].extend(native['errors'])
-        if production:
+        if strict:
             report['errors'].extend(native['alignment_errors'])
         if kind == 'apk':
             report['manifest'] = apk_manifest(args.artifact, args.build_tools)
@@ -292,8 +300,8 @@ def main():
         manifest = report['manifest']
         if manifest['package'] != 'com.dhanuk.ovidai' or manifest['min_sdk'] != args.expected_min or manifest['target_sdk'] != args.expected_target:
             report['errors'].append('artifact package/minSdk/targetSdk differs from explicit inventory contract')
-        if production and manifest['debuggable']:
-            report['errors'].append('production manifest is debuggable')
+        if strict and manifest['debuggable']:
+            report['errors'].append(f'{args.mode} manifest is debuggable')
         # A target-only bump cannot establish policy/runtime eligibility.
         report['target_policy'] = {'observed_target': manifest['target_sdk'],
                                    'api36_floor_met': manifest['target_sdk'] >= 36,
@@ -303,12 +311,13 @@ def main():
         try:
             if production and not re.fullmatch('[0-9a-f]{64}', args.certificate_sha256.replace(':', '').lower()):
                 raise ValueError('required production certificate SHA-256 is absent/invalid')
+            pinned = args.certificate_sha256 if (production or (release and args.certificate_sha256.strip())) else '-'
             if kind == 'apk':
                 signer = command([args.build_tools / 'apksigner', 'verify', '--verbose', '--print-certs', args.artifact])
-                report['signers_sha256'] = check_apk_signer(signer, args.certificate_sha256, production)
+                report['signers_sha256'] = check_apk_signer(signer, args.certificate_sha256, production, release)
             else:
                 signer = command(['java', Path(__file__).with_name('release_verify_bundle.java'),
-                                  args.artifact, args.certificate_sha256 if production else '-'])
+                                  args.artifact, pinned])
                 report['signers_sha256'] = json.loads(signer)
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
             report['errors'].append(f'signing: {error}')
@@ -318,7 +327,7 @@ def main():
                 report['zip_alignment'] = '16 KB check passed'
             except (ValueError, OSError, subprocess.TimeoutExpired) as error:
                 report['zip_alignment'] = str(error)
-                if production:
+                if strict:
                     report['errors'].append(f'ZIP alignment: {error}')
     except (ValueError, OSError, KeyError, StopIteration, struct.error, zipfile.BadZipFile, subprocess.TimeoutExpired) as error:
         report['errors'].append(f'inventory: {error}')

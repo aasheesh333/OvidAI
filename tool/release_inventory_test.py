@@ -162,12 +162,14 @@ class ReleaseInventoryTest(unittest.TestCase):
                 self.inspect([('lib/arm64-v8a/libflutter.so', elf()),
                               ('lib/arm64-v8a/libflutter.so', elf())])
 
-    def run_bundle_gate(self, target=36, certificate='a' * 64, mode='production'):
+    def run_bundle_gate(self, target=36, certificate='a' * 64, mode='production',
+                        manifest_target=None, debuggable=None):
+        manifest_target = target if manifest_target is None else manifest_target
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / 'fixture.aab'
             output = Path(directory) / 'report.json'
             artifact.write_bytes(archive([
-                ('base/manifest/AndroidManifest.xml', manifest_proto(target)),
+                ('base/manifest/AndroidManifest.xml', manifest_proto(manifest_target, debuggable)),
                 ('base/lib/arm64-v8a/libflutter.so', elf()),
                 ('base/lib/arm64-v8a/libovid_bootstrap.so', archive([('bin/bash', elf())])),
             ]))
@@ -202,6 +204,42 @@ class ReleaseInventoryTest(unittest.TestCase):
         code, report = self.run_bundle_gate(target=28, certificate='', mode='debug')
         self.assertEqual(code, 0)
         self.assertFalse(report['target_policy']['api36_floor_met'])
+
+    def test_release_candidate_accepts_target_28_non_debug_signed(self):
+        code, report = self.run_bundle_gate(target=28, certificate='a' * 64, mode='release')
+        self.assertEqual(code, 0)
+        self.assertFalse(report['target_policy']['api36_floor_met'])
+        self.assertFalse(report['target_policy']['play_qualified'])
+
+    def test_release_candidate_accepts_any_non_debug_signer_without_pin(self):
+        code, report = self.run_bundle_gate(target=28, certificate='', mode='release')
+        self.assertEqual(code, 0)
+
+    def test_release_candidate_rejects_debuggable_manifest(self):
+        code, report = self.run_bundle_gate(target=28, certificate='a' * 64,
+                                            mode='release', debuggable=b'\x01')
+        self.assertEqual(code, 1)
+        self.assertTrue(any('debuggable' in error for error in report['errors']))
+
+    def test_release_candidate_rejects_wrong_target(self):
+        code, report = self.run_bundle_gate(target=28, certificate='a' * 64,
+                                            mode='release', manifest_target=27)
+        self.assertEqual(code, 1)
+        self.assertTrue(any('inventory contract' in error for error in report['errors']))
+
+    def test_release_mode_rejects_debug_signer_and_honors_optional_pin(self):
+        debug = ('Signer #1 certificate DN: CN=Android Debug, O=Android, C=US\n'
+                 'Signer #1 certificate SHA-256 digest: ' + 'a' * 64)
+        with self.assertRaisesRegex(ValueError, 'debug'):
+            self.gate.check_apk_signer(debug, '', production=False, release=True)
+        release = ('Signer #1 certificate DN: CN=Release\n'
+                   'Signer #1 certificate SHA-256 digest: ' + 'a' * 64)
+        self.assertEqual(self.gate.check_apk_signer(release, '', production=False, release=True),
+                         ['a' * 64])
+        self.assertEqual(self.gate.check_apk_signer(release, 'a' * 64, production=False, release=True),
+                         ['a' * 64])
+        with self.assertRaises(ValueError):
+            self.gate.check_apk_signer(release, 'b' * 64, production=False, release=True)
 
     def test_compiled_aapt_boolean_marks_bundle_debuggable(self):
         # XmlAttribute.compiled_item -> Item.prim -> Primitive.boolean_value;
