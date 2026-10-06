@@ -427,11 +427,6 @@ void main() {
           }),
         )..bindAccount('alice');
         await studio.loadReceipts();
-        final recovered = Completer<void>();
-        var publications = 0;
-        studio.addListener(() {
-          if (++publications == 2) recovered.complete();
-        });
         await tester.pumpWidget(
           MaterialApp(
             home: Scaffold(
@@ -442,10 +437,38 @@ void main() {
             ),
           ),
         );
+        // A pending receipt's single context action is the read-only status
+        // check; recovery is offered only once accounting is confirmed.
+        expect(find.text('Recover image'), findsNothing);
+        final checked = Completer<void>();
+        void onChecked() {
+          if (studio.receipts.any(
+                (r) => r.requestId == _id && r.receipt?.charged == _charge,
+              ) &&
+              !checked.isCompleted) {
+            checked.complete();
+          }
+        }
+
+        studio.addListener(onChecked);
+        await tester.tap(find.text('Check status'));
+        await checked.future;
+        studio.removeListener(onChecked);
+        await tester.pump();
+        // The check is read-only: one status GET, exact money, no image.
+        expect(paths, ['/v1/images/requests/$_id']);
+        expect(find.text('Exact charge: $_charge'), findsOneWidget);
+        expect(find.byType(Image), findsNothing);
+        final recovered = Completer<void>();
+        var publications = 0;
+        studio.addListener(() {
+          if (++publications == 2) recovered.complete();
+        });
         await tester.tap(find.text('Recover image'));
         await recovered.future;
         await tester.pumpAndSettle();
         expect(paths, [
+          '/v1/images/requests/$_id',
           '/v1/images/requests/$_id',
           '/v1/images/requests/$_id/result',
         ]);

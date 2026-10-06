@@ -437,6 +437,30 @@ void main() {
       studio.removeListener(onLoaded);
       await tester.pump();
       expect(find.text('Charge: not confirmed'), findsOneWidget);
+      // An unconfirmed receipt's single context action is the read-only
+      // status check; recovery is not offered before accounting settles.
+      expect(find.text('Recover image'), findsNothing);
+      final checked = Completer<void>();
+      void onChecked() {
+        if (studio.receipts.any(
+          (r) => r.requestId == _request && r.receipt?.charged == _charge,
+        ) && !checked.isCompleted) {
+          checked.complete();
+        }
+      }
+      studio.addListener(onChecked);
+      await _reveal(tester, find.text('Check status'));
+      await tester.tap(find.text('Check status'));
+      await checked.future;
+      studio.removeListener(onChecked);
+      await tester.pump();
+      // The check is read-only: one status GET, exact money, no image claim.
+      expect(paths, ['/v1/images/requests/$_request']);
+      expect(find.text('Exact charge: $_charge'), findsOneWidget);
+      expect(find.textContaining('Image bytes are unavailable'),
+          findsOneWidget);
+      expect(find.byType(Image), findsNothing);
+      // Settled accounting switches the one action to image recovery.
       final recovered = Completer<void>();
       var publications = 0;
       studio.addListener(() {
@@ -448,6 +472,7 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(paths, [
+        '/v1/images/requests/$_request',
         '/v1/images/requests/$_request',
         '/v1/images/requests/$_request/result',
       ]);

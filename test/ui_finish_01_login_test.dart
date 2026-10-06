@@ -177,9 +177,14 @@ void main() {
       ..lastDeletionReceipt = AccountDeletion(
           'pending', DateTime.utc(2026, 10, 6, 13, 45), 'deletion-request');
     await _pumpGate(tester, service, size: const Size(360, 640), scale: 2);
-    await _reveal(tester, find.text('Account deletion pending'));
+    // v2-16: the gate now renders the shared DeletionPendingBanner (the same
+    // widget the account panel uses) instead of a bespoke banner.
+    expect(find.byType(DeletionPendingBanner), findsOneWidget);
+    await _reveal(tester, find.text('Deletion requested'));
     await _reveal(tester, find.textContaining('2026-10-06'));
-    expect(find.textContaining('13:45:00.000 UTC'), findsOneWidget);
+    // The receipt's server deadline is rendered verbatim, annotated as UTC.
+    expect(find.textContaining('13:45:00.000Z'), findsOneWidget);
+    expect(find.textContaining('(UTC)'), findsOneWidget);
     await _reveal(tester, find.textContaining('Sign in before then to cancel.'));
     await _reveal(tester, find.text('Continue with Google'));
     await tester.tap(find.text('Continue with Google'));

@@ -70,7 +70,9 @@ void main() {
           ),
         ),
       );
-      expect(find.textContaining('pending'), findsOneWidget);
+      expect(find.text('PENDING'), findsOneWidget);
+      // A pending receipt's single context action is the read-only check.
+      expect(find.text('Recover image'), findsNothing);
       await tester.tap(find.text('Check status'));
       await tester.pumpAndSettle();
       expect(reads, 1);
@@ -171,7 +173,10 @@ Future<void> _checkConflictingStatus(WidgetTester tester) async {
       ),
     ),
   );
-  await tester.tap(find.text('Check status'));
+  // The receipt is already confirmed, so the panel's single context action
+  // is recovery; its status re-verification stays a read-only GET.
+  expect(find.text('Check status'), findsNothing);
+  await tester.tap(find.text('Recover image'));
   await tester.pumpAndSettle();
   expect(
     find.text('Exact charge: 0.0370370367037037036703703703670'),

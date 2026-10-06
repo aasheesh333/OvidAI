@@ -15,15 +15,53 @@ import 'widgets/aether_primitives.dart';
 /// `AgentNotificationService.stopBackground` / `AgentService.resumeScheduledBackground`
 /// background toggle. Status strings {pending, running, paused, failed,
 /// completed, cancelled} remain the source of truth.
-class ScheduleScreen extends StatefulWidget {
+///
+/// The body is the reusable [ScheduleTasksView], also embedded by the
+/// Activity hub (which hides this screen's status strip — the hub carries
+/// the single strip instead).
+class ScheduleScreen extends StatelessWidget {
   final String sessionId;
   const ScheduleScreen({super.key, required this.sessionId});
 
   @override
-  State<ScheduleScreen> createState() => _ScheduleScreenState();
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (context, _) {
+        final session = AppState.I.sessionById(sessionId);
+        return Scaffold(
+          backgroundColor: Aether.bg,
+          appBar: AppBar(
+            title: Text('Schedule \u00B7 ${session?.title ?? 'session'}'),
+          ),
+          body: ScheduleTasksView(sessionId: sessionId),
+        );
+      },
+    );
+  }
 }
 
-class _ScheduleScreenState extends State<ScheduleScreen> {
+/// The scheduled-tasks list: optional background-execution status strip plus
+/// one premium card per task (status pill, one-line recurrence/next-run
+/// summary, details behind a disclosure, one action menu).
+///
+/// Embedded standalone by [ScheduleScreen] and, with
+/// [showStatusStrip] off, by the Activity hub's Schedules tab so the hub
+/// shows one status strip instead of stacked banners.
+class ScheduleTasksView extends StatefulWidget {
+  final String sessionId;
+  final bool showStatusStrip;
+  const ScheduleTasksView({
+    super.key,
+    required this.sessionId,
+    this.showStatusStrip = true,
+  });
+
+  @override
+  State<ScheduleTasksView> createState() => _ScheduleTasksViewState();
+}
+
+class _ScheduleTasksViewState extends State<ScheduleTasksView> {
   // No periodic ticker: countdown text refreshes on any state change via the
   // AnimatedBuilder on AppState+AgentService. A tick-based refresh would make
   // pumpAndSettle in widget tests spin forever by scheduling a new frame
@@ -55,43 +93,39 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         final backgroundStopped =
             agent.schedules.stopped || AgentNotificationService.I.backgroundStopped;
 
-        return Scaffold(
-          backgroundColor: Aether.bg,
-          appBar: AppBar(
-            title: Text('Schedule \u00B7 ${session?.title ?? 'session'}'),
-          ),
-          body: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-            children: [
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+          children: [
+            if (widget.showStatusStrip) ...[
               _statusStrip(context, backgroundStopped),
               const SizedBox(height: 20),
-              const AetherSectionTitle(eyebrow: 'Scheduled tasks'),
-              const SizedBox(height: 12),
-              if (tasks.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 32),
-                  child: AetherEmptyState(
-                    icon: Icons.schedule,
-                    title: 'No scheduled tasks',
-                    message:
-                        'Ask the agent to schedule a daily, recurring, or one-off task.',
-                  ),
-                )
-              else
-                for (final task in tasks) ...[
-                  _TaskCard(
-                    key: ValueKey(task['id'] ?? task),
-                    entry: ScheduleEntry(widget.sessionId, task),
-                    onEdit: () => _edit(
-                      context,
-                      ScheduleEntry(widget.sessionId, task),
-                    ),
-                    onAction: _action,
-                  ),
-                  const SizedBox(height: 12),
-                ],
             ],
-          ),
+            const AetherSectionTitle(eyebrow: 'Scheduled tasks'),
+            const SizedBox(height: 12),
+            if (tasks.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 32),
+                child: AetherEmptyState(
+                  icon: Icons.schedule,
+                  title: 'No scheduled tasks',
+                  message:
+                      'Ask the agent to schedule a daily, recurring, or one-off task.',
+                ),
+              )
+            else
+              for (final task in tasks) ...[
+                _TaskCard(
+                  key: ValueKey(task['id'] ?? task),
+                  entry: ScheduleEntry(widget.sessionId, task),
+                  onEdit: () => _edit(
+                    context,
+                    ScheduleEntry(widget.sessionId, task),
+                  ),
+                  onAction: _action,
+                ),
+                const SizedBox(height: 12),
+              ],
+          ],
         );
       },
     );

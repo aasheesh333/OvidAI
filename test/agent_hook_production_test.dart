@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/hook_service.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
@@ -15,17 +16,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Production agent-hook wiring decision.
 ///
-/// The tool-capable [AgentHookEvaluator] is deliberately left null in
-/// `AgentService`. A safe wiring needs a bounded, cancellable, publication-free
-/// tool loop with an approval channel addressable to a specific evaluation.
-/// None of those exist on the current dispatch path:
+/// The tool-capable [AgentHookEvaluator] IS wired in `AgentService` (v2-22):
+/// the closure audit's blockers were resolved by `_evaluateAgentHookQuietly`,
+/// a bounded, cancellable, publication-free tool loop in which
 ///
-/// * `_dispatch` publishes run accounting, session-ledger entries and chat
-///   text (`_runResolved.steps`, `tool_start`/`tool_end`, `_emit`).
-/// * `_askUser` parks an approval on the active session's run bucket, which no
-///   UI watches for a detached evaluation.
-/// * Per-evaluation cancellation is only partially threaded (the native/MCP
-///   token is keyed by run/session, not by evaluation).
+/// * the evaluation runs detached in a Dart Zone carrying its own run
+///   bucket, so `_dispatch` accounting, session-ledger entries and chat text
+///   (`_emit`) never publish for an evaluation;
+/// * interactive approvals fail safe (deny) instead of parking a card on the
+///   active session's run bucket;
+/// * per-evaluation cancellation is threaded through the evaluation's OWN
+///   transport owner, sandbox process key and [UtilityCancellation] token.
+///
+/// These tests pin that wiring seam and its fail-open/quiet behaviour.
 ///
 /// See `docs/superpowers/audits/2026-10-06-agent-hooks-closure.md` and
 /// `docs/superpowers/audits/2026-10-06-partial-closure.md` §C.
@@ -110,16 +113,50 @@ void main() {
       .map((f) => f.readAsStringSync())
       .join();
 
-  test('production AgentService leaves the tool-capable evaluator unwired', () {
+  test('production AgentService wires the tool-capable evaluator to the '
+      'bounded quiet loop', () {
     final source = File('lib/core/agent_service.dart').readAsStringSync();
     expect(
-      RegExp(r'agentHookEvaluator\s*=').hasMatch(source),
-      isFalse,
+      RegExp(
+        r'agentHookEvaluator\s*=\s*_evaluateAgentHookQuietly',
+      ).hasMatch(source),
+      isTrue,
       reason:
-          'A safe wiring needs per-evaluation cancellation, detached '
-          'approvals and a publication-free dispatch before it may be '
-          'assigned (2026-10-06-agent-hooks-closure.md).',
+          'Per-evaluation cancellation, detached approvals and a '
+          'publication-free dispatch exist now, so the evaluator is wired — '
+          'exclusively to the bounded, cancellable, quiet loop '
+          '(2026-10-06-agent-hooks-closure.md).',
     );
+  });
+
+  test('the wired production evaluator fails open and stays quiet when it '
+      'cannot decide', () async {
+    await agentHookFixture('wired-fail-open');
+    var promptCalls = 0;
+    hooks.promptHookEvaluator = (_, _) async {
+      promptCalls++;
+      return '{"decision":"block"}';
+    };
+    // The production seam — the same assignment the AgentService constructor
+    // performs. resetForTest deliberately does NOT clear agentHookEvaluator
+    // (the constructor wires it once in production), so this test must
+    // unwind its own wiring to keep the suite order-independent.
+    AgentService.I.wireAgentHookEvaluatorForTest();
+    addTearDown(() => hooks.agentHookEvaluator = null);
+    final session = AppState.I.sessions.firstWhere((s) => s.id == sid);
+    final before = session.messages.length;
+    // No provider is configured for the fixture session, so the wired
+    // evaluator cannot produce a verdict and must fail OPEN…
+    final stop = await hooks.fireStop(sid).timeout(
+      const Duration(seconds: 10),
+    );
+    expect(stop.stopAllowed, isTrue);
+    // …without ever consulting the prompt evaluator…
+    expect(promptCalls, 0);
+    // …without the unwired-path ledger note (the evaluator WAS wired)…
+    expect(ledgerText(), isNot(contains('AgentHookEvaluator unavailable')));
+    // …and without publishing anything to the chat transcript.
+    expect(session.messages.length, before);
   });
 
   test('production AgentService still wires the prompt evaluator', () {

@@ -17,9 +17,23 @@ import 'widgets/aether_primitives.dart';
 /// underlying [MemoryStore] enforces the per-file 32 KiB and per-scope 32-file
 /// caps no matter what the UI attempts.
 ///
+/// Premium anatomy (v2):
+///   * App bar owns the chrome: a primary `Save` action and a quiet `Reload`
+///     text action. The old bottom action bar and FAB are gone.
+///   * Exactly one primary add action on the page (`Add memory`); the
+///     file-level affordances (`Add file`, `Import .md`) live as quiet ghost
+///     actions in the files header, and every entry point opens the same
+///     single filename sheet.
+///   * The editor owns the remaining space; each file row keeps its pin glyph
+///     with Edit / Delete behind the row overflow menu.
+///   * A calm centered empty state when the scope lists no files.
+///   * The dirty-guard [PopScope] is unchanged.
+///
 /// The legacy widget keys and visible labels (`memory-content`, `Save`,
-/// `Add file`, `Add`, `Import .md`, `memory-filename`, `Cancel`) are preserved
-/// so `test/memory_screen_test.dart` keeps asserting the same real behavior.
+/// `Add file`, `Add`, `Import .md`, `memory-filename`, `Cancel`, `Reload`)
+/// are preserved so `test/memory_screen_test.dart`,
+/// `test/ui_redesign/memory_screen_test.dart` and
+/// `test/ui_finish_14_tools_test.dart` keep asserting the same real behavior.
 ///
 /// Note on pinning/deletion/export: the [MemoryStore] has no pin, per-file
 /// delete, or export API. The pin glyph reflects the one fact the store does
@@ -256,6 +270,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
   Widget build(BuildContext context) {
     final scopeValue = _owner == null ? 'global' : 'session';
     final showSessionOption = _sessionId != null;
+    final hasFiles = _files.isNotEmpty;
+    final canEdit = _enabled && hasFiles;
 
     return PopScope(
       canPop: !_dirty,
@@ -269,7 +285,22 @@ class _MemoryScreenState extends State<MemoryScreen> {
       },
       child: Scaffold(
         backgroundColor: Aether.bg,
-        appBar: AppBar(title: const Text('Memories')),
+        appBar: AppBar(
+          title: const Text('Memories'),
+          actions: [
+            Center(
+              child: AetherPrimaryButton(
+                label: 'Save',
+                onPressed: canEdit ? _save : null,
+              ),
+            ),
+            AetherGhostButton(
+              label: 'Reload',
+              onPressed: canEdit ? _reload : null,
+            ),
+            const SizedBox(width: AetherSpacing.space2),
+          ],
+        ),
         body: SingleChildScrollView(
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: const EdgeInsets.fromLTRB(
@@ -285,9 +316,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
             const AetherSectionTitle(
               eyebrow: 'Memories',
               subtitle:
-                  'Global memory is shared across your chats. Session memory '
-                  'belongs to this chat and its child agents. 32 files per '
-                  'scope · 32 KiB per file.',
+                  'Markdown notes shared across chats or scoped to one. '
+                  '32 files per scope · 32 KiB per file.',
             ),
             const SizedBox(height: AetherSpacing.space4),
             if (showSessionOption) ...[
@@ -328,91 +358,80 @@ class _MemoryScreenState extends State<MemoryScreen> {
               AetherSecondaryButton(label: 'Retry', onPressed: _initialize),
             if (_busy)
               const LinearProgressIndicator(semanticsLabel: 'Importing memory'),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Wrap(
-                spacing: AetherSpacing.space2,
-                runSpacing: AetherSpacing.space2,
-                children: [
-                  AetherSecondaryButton(
-                    label: 'Add file',
-                    icon: Icons.note_add_outlined,
-                    onPressed: _enabled ? () => _add() : null,
-                  ),
-                  AetherSecondaryButton(
-                    label: 'Import .md',
-                    icon: Icons.file_upload_outlined,
-                    onPressed: _enabled ? _import : null,
-                  ),
-                ],
+            if (!hasFiles)
+              _buildEmptyState()
+            else ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: AetherPrimaryButton(
+                  label: 'Add memory',
+                  icon: Icons.add,
+                  onPressed: _enabled ? () => _add() : null,
+                ),
               ),
-            ),
-            const SizedBox(height: AetherSpacing.space3),
-            _buildFileList(),
-            if (_files.isNotEmpty) ...[
+              const SizedBox(height: AetherSpacing.space4),
+              _buildFilesHeader(),
+              const SizedBox(height: AetherSpacing.space2),
+              _buildFileList(),
               const SizedBox(height: AetherSpacing.space4),
               _buildEditorCard(),
             ],
             ],
           ),
         ),
-        bottomNavigationBar: _files.isEmpty
-            ? null
-            : SafeArea(
-                child: Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    AetherSpacing.space4,
-                    AetherSpacing.space2,
-                    AetherSpacing.space4,
-                    AetherSpacing.space3 + MediaQuery.viewInsetsOf(context).bottom,
-                  ),
-                   child: Wrap(
-                     spacing: AetherSpacing.space2,
-                     runSpacing: AetherSpacing.space2,
-                     children: [
-                      AetherPrimaryButton(
-                        label: 'Save',
-                        icon: Icons.check,
-                        onPressed: _enabled ? _save : null,
-                      ),
-                      AetherGhostButton(
-                        label: 'Reload',
-                        onPressed: _enabled ? _reload : null,
-                      ),
-                      AetherPrimaryButton(
-                        label: 'Add memory',
-                        icon: Icons.add,
-                        onPressed: _enabled ? () => _add() : null,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-        floatingActionButton: _files.isEmpty
-            ? AetherPrimaryButton(
-                label: 'Add memory',
-                icon: Icons.add,
-                onPressed: _enabled ? () => _add() : null,
-              )
-            : null,
-        floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
       ),
     );
   }
 
-  Widget _buildFileList() {
-    if (_files.isEmpty) {
-      return AetherEmptyState(
-        icon: Icons.note_alt_outlined,
-        title: 'No memories yet',
-        message: 'Add a Markdown note to seed your personal memory.',
-        action: AetherPrimaryButton(
-          label: 'Add memory',
-          icon: Icons.add,
-          onPressed: _enabled ? () => _add() : null,
+  /// Calm centered empty state with exactly one way forward.
+  Widget _buildEmptyState() {
+    return AetherEmptyState(
+      icon: Icons.note_alt_outlined,
+      title: 'No memories yet',
+      message: 'Your saved Markdown notes will live here.',
+      action: AetherPrimaryButton(
+        label: 'Add memory',
+        icon: Icons.add,
+        onPressed: _enabled ? () => _add() : null,
+      ),
+    );
+  }
+
+  /// Quiet file-level affordances flanking the list caption. [OverflowBar]
+  /// stacks the actions under the caption on narrow/large-text layouts.
+  Widget _buildFilesHeader() {
+    return OverflowBar(
+      alignment: MainAxisAlignment.spaceBetween,
+      overflowAlignment: OverflowBarAlignment.start,
+      spacing: AetherSpacing.space2,
+      overflowSpacing: AetherSpacing.space1,
+      children: [
+        Text(
+          'FILES',
+          style: AetherType.label.copyWith(
+            letterSpacing: 1.4,
+            color: Aether.textFaint,
+          ),
         ),
-      );
-    }
+        Wrap(
+          spacing: AetherSpacing.space1,
+          runSpacing: AetherSpacing.space1,
+          children: [
+            AetherGhostButton(
+              label: 'Add file',
+              onPressed: _enabled ? () => _add() : null,
+            ),
+            AetherGhostButton(
+              label: 'Import .md',
+              onPressed: _enabled ? _import : null,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFileList() {
     final rows = <Widget>[];
     for (var i = 0; i < _files.length; i++) {
       if (i > 0) {
@@ -479,8 +498,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
               key: const Key('memory-content'),
               controller: _content,
               enabled: _enabled,
-              minLines: 6,
-              maxLines: 12,
+              minLines: 10,
+              maxLines: 20,
               textAlignVertical: TextAlignVertical.top,
               onChanged: (_) => setState(() {}),
               style: AetherType.body.copyWith(fontFamily: 'JetBrainsMono'),

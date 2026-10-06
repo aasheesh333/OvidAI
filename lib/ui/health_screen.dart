@@ -8,13 +8,23 @@ import 'sandbox_setup.dart';
 import 'settings_action_widgets.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Device health — a 0–100 capability score with a per-item breakdown of
-/// exactly what's missing and why. Repair uses the signed runtime worker.
+/// Device health — the ONE health surface.
 ///
-/// REDESIGN (wave 2 UI): the premium Aether primitives from
-/// `lib/ui/widgets/aether_primitives.dart` carry the layout; runtime wiring
-/// to [HealthService.I] and the hard-reset path to [SandboxService.I] is
-/// preserved verbatim (no new logic, no owner contract changes).
+/// The two former health screens (`HealthScreen` and the settings-only
+/// `SettingsHealthScreen`) are merged here:
+///   * 0–100 capability score ring with a plain-language summary;
+///   * per-runtime check breakdown;
+///   * TARGETED repair — tick the failed, repairable runtimes and fix just
+///     those via the signed, cancellable worker;
+///   * MCP/plugin service status with per-service retry;
+///   * the destructive sandbox hard reset tucked behind an Advanced
+///     disclosure so it is never one accidental tap away.
+///
+/// All runtime wiring is preserved verbatim from both predecessors:
+/// [HealthService.runChecks] on open, targeted [HealthService.repair] with
+/// the dispose-time `cancelRepair` guard, and the PR47/K6 hard reset via
+/// [SandboxService.I.uninstall] + the setup gate. `SettingsHealthScreen`
+/// remains as a source-compatible alias in `settings_health_screen.dart`.
 class HealthScreen extends StatefulWidget {
   /// Optional service injection seam for widget tests. Production code
   /// defaults to the global [HealthService.I] singleton — the runtime
@@ -28,9 +38,11 @@ class HealthScreen extends StatefulWidget {
 class _HealthScreenState extends State<HealthScreen> {
   late final HealthService _health = widget.service ?? HealthService.I;
   final List<String> _repairLog = [];
+  final Set<String> _selected = {};
   bool _repairing = false;
   bool _resetting = false;
   String? _checkError;
+  String? _result;
 
   @override
   void initState() {
@@ -45,11 +57,23 @@ class _HealthScreenState extends State<HealthScreen> {
     });
   }
 
+  bool get _busy =>
+      _repairing || _resetting || _health.repairing || _health.checking;
+
   Future<void> _runChecks() async {
-    if (_repairing || _resetting || _health.repairing || _health.checking) return;
-    setState(() => _checkError = null);
+    if (_busy) return;
+    setState(() {
+      _checkError = null;
+      _result = null;
+    });
     try {
-      await _health.runChecks();
+      final report = await _health.runChecks();
+      if (mounted) {
+        // Keep only the still-relevant selections: failed AND repairable.
+        setState(() => _selected.retainAll(
+          report.failed.where((c) => c.repairable).map((c) => c.id),
+        ));
+      }
     } catch (e) {
       if (mounted) setState(() => _checkError = 'Health checks failed: $e');
     }
@@ -61,12 +85,52 @@ class _HealthScreenState extends State<HealthScreen> {
     super.dispose();
   }
 
+  /// Targeted repair — fixes only the failed, repairable runtimes the user
+  /// ticked, via the signed cancellable worker.
+  Future<void> _runRepair() async {
+    if (_busy || _selected.isEmpty) return;
+    setState(() {
+      _repairing = true;
+      _result = null;
+      _repairLog.clear();
+    });
+    try {
+      await _health.repair((l) {
+        if (!mounted) return;
+        setState(() {
+          _repairLog.add(l);
+          if (_repairLog.length > 100) _repairLog.removeAt(0);
+        });
+      }, targets: Set.of(_selected));
+      if (mounted) {
+        setState(() {
+          _result = 'Selected runtime checks now pass.';
+          _selected.clear();
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _result = '$e');
+    } finally {
+      if (mounted) setState(() => _repairing = false);
+    }
+  }
+
+  void _toggle(String id, bool value) {
+    setState(() {
+      if (value) {
+        _selected.add(id);
+      } else {
+        _selected.remove(id);
+      }
+    });
+  }
+
   /// PR47/K6: hard reset — delete the whole sandbox prefix + reinstall from
   /// the bundled bootstrap in the SHELL (SandboxSetupScreen drives its own
   /// progress). Points the user at a healthy state even when self-heal
   /// saturates on older/corrupt installs.
   Future<void> _hardResetSandbox() async {
-    if (_resetting || _repairing || _health.repairing || _health.checking) return;
+    if (_busy) return;
     setState(() => _resetting = true);
     _repairLog.add('ovid: deleting sandbox prefix…');
     setState(() {});
@@ -108,31 +172,6 @@ class _HealthScreenState extends State<HealthScreen> {
       ? 'Several capability checks need attention.'
       : 'Many capability checks are unavailable.';
 
-  Future<void> _runRepair() async {
-    if (_repairing || _resetting || _health.repairing || _health.checking) return;
-    setState(() {
-      _repairing = true;
-      _repairLog.clear();
-    });
-    try {
-      await _health.repair((l) {
-        if (!mounted) return;
-        setState(() {
-          _repairLog.add(l);
-          if (_repairLog.length > 100) _repairLog.removeAt(0);
-        });
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() => _repairLog.add('repair failed: $e'));
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _repairing = false);
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -166,7 +205,7 @@ class _HealthScreenState extends State<HealthScreen> {
     final score = report.score;
     final color = _scoreColor(score);
     final services = AppState.I.serviceStatus;
-    final busy = _repairing || _resetting || _health.repairing || checking;
+    final busy = _busy;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
       children: [
@@ -184,32 +223,36 @@ class _HealthScreenState extends State<HealthScreen> {
           failedChecks: report.failed.length,
         ),
 
-        // ── Runtime health (per-check breakdown) ──
+        // ── Runtime health (per-check breakdown + targeted repair) ──
         const SizedBox(height: 20),
         const AetherSectionTitle(
           eyebrow: 'Runtime health',
           subtitle: 'Version and configuration probes do not verify network access or every tool operation.',
         ),
         const SizedBox(height: 12),
-        if (report.anyRepairable && _health.repairWorker != null) ...[
-          _RepairBanner(
-            color: color,
-            repairing: _repairing || _health.repairing,
-            onRepair: busy ? null : _runRepair,
+        if (_health.repairWorker == null)
+          const _NoWorkerCard()
+        else
+          _RepairControls(
+            busy: busy,
+            repairing: _health.repairing,
+            cancellationRequested: _health.cancellationRequested,
+            canRepair: !checking && _selected.isNotEmpty,
+            onRepair: _runRepair,
+            onCancel: _health.cancelRepair,
           ),
+        if (_result != null) ...[
           const SizedBox(height: 12),
+          _ResultCard(message: _result!),
         ],
-        if (_health.repairing) ...[
-          SettingsActionButton(
-            label: _health.cancellationRequested ? 'Waiting for worker to stop…' : 'Cancel repair',
-            onPressed: _health.cancellationRequested ? null : _health.cancelRepair,
-          ),
-          const SizedBox(height: 12),
-        ],
-        if (report.anyRepairable && _health.repairWorker == null)
-          Text('Targeted repair unavailable: no runtime worker is connected.', style: AetherType.bodyMuted),
+        const SizedBox(height: 12),
         for (final c in report.checks) ...[
-          _HealthCheckCard(check: c),
+          _HealthCheckCard(
+            check: c,
+            selectable: c.repairable && _health.repairWorker != null,
+            selected: _selected.contains(c.id),
+            onChanged: busy ? null : _toggle,
+          ),
           const SizedBox(height: 8),
         ],
 
@@ -237,12 +280,17 @@ class _HealthScreenState extends State<HealthScreen> {
           ],
         ],
 
-        // ── Danger / reset / re-run ──
+        // ── Re-run + destructive recovery (behind Advanced) ──
+        const SizedBox(height: 12),
+        SettingsActionButton(
+          label: 'Re-run checks',
+          icon: Icons.refresh,
+          onPressed: busy ? null : _runChecks,
+        ),
         const SizedBox(height: 20),
-        _DangerActionsCard(
+        _AdvancedCard(
           resetting: _resetting,
           onReset: busy ? null : _hardResetSandbox,
-          onReRun: busy ? null : _runChecks,
         ),
       ],
     );
@@ -367,14 +415,43 @@ class _ScoreSummaryCard extends StatelessWidget {
   }
 }
 
-class _RepairBanner extends StatelessWidget {
-  final Color color;
+class _NoWorkerCard extends StatelessWidget {
+  const _NoWorkerCard();
+  @override
+  Widget build(BuildContext context) {
+    return AetherCard(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline, size: 20, color: Aether.textFaint),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'Targeted repair unavailable in this build: no cancellable runtime worker is connected. Open Studio for installation options.',
+              style: AetherType.bodyMuted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RepairControls extends StatelessWidget {
+  final bool busy;
   final bool repairing;
-  final VoidCallback? onRepair;
-  const _RepairBanner({
-    required this.color,
+  final bool cancellationRequested;
+  final bool canRepair;
+  final VoidCallback onRepair;
+  final VoidCallback onCancel;
+  const _RepairControls({
+    required this.busy,
     required this.repairing,
+    required this.cancellationRequested,
+    required this.canRepair,
     required this.onRepair,
+    required this.onCancel,
   });
 
   @override
@@ -384,43 +461,68 @@ class _RepairBanner extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Icon(
-            Icons.build_circle_outlined,
-            size: 20,
-            color: color,
-          ),
-          const SizedBox(height: 12),
           Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  repairing
+                  busy
                       ? 'Repair in progress'
-                      : 'Repair available',
+                      : (canRepair
+                          ? 'Ready to repair'
+                          : 'Select runtimes to repair'),
                   style: AetherType.title,
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  repairing
-                      ? 'Installing signed packages and re-running executable checks…'
-                      : 'Repair failed, supported runtimes using signed packages.',
+                  canRepair
+                      ? 'Only failed, repairable runtimes can be selected.'
+                      : 'Tick a failed runtime below to enable repair.',
                   style: AetherType.caption,
                 ),
               ],
           ),
           const SizedBox(height: 12),
-          SettingsActionButton(
-            label: repairing ? 'Repairing…' : 'Repair',
-            icon: Icons.build_outlined,
-            primary: true,
-            onPressed: onRepair,
-          ),
-          if (repairing) ...[
-            const SizedBox(height: 12),
-            const LinearProgressIndicator(semanticsLabel: 'Runtime repair in progress'),
-          ],
+          if (repairing)
+            SettingsActionButton(
+              label: cancellationRequested
+                  ? 'Waiting for worker to stop…'
+                  : 'Cancel repair',
+              onPressed: cancellationRequested ? null : onCancel,
+            )
+          else
+            SettingsActionButton(
+              label: 'Repair selected runtimes',
+              icon: Icons.build_outlined,
+              primary: true,
+              onPressed: busy || !canRepair ? null : onRepair,
+            ),
+          // NOTE: no indeterminate progress bar here — a perpetual animation
+          // would keep pumpAndSettle alive forever in the cancellation
+          // flows; the cancel/waiting label already carries the busy state.
         ],
+      ),
+    );
+  }
+}
+
+class _ResultCard extends StatelessWidget {
+  final String message;
+  const _ResultCard({required this.message});
+  @override
+  Widget build(BuildContext context) {
+    return AetherCard(
+      padding: const EdgeInsets.all(14),
+      child: Semantics(
+        liveRegion: true,
+        child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline, size: 18, color: Aether.textFaint),
+          const SizedBox(width: 10),
+          Expanded(child: Text(message, style: AetherType.bodyMuted)),
+        ],
+        ),
       ),
     );
   }
@@ -461,7 +563,15 @@ class _RepairLogCard extends StatelessWidget {
 
 class _HealthCheckCard extends StatelessWidget {
   final HealthCheck check;
-  const _HealthCheckCard({required this.check});
+  final bool selectable;
+  final bool selected;
+  final void Function(String id, bool value)? onChanged;
+  const _HealthCheckCard({
+    required this.check,
+    required this.selectable,
+    required this.selected,
+    required this.onChanged,
+  });
 
   Color get _dotColor {
     if (check.ok) return Aether.success;
@@ -526,6 +636,18 @@ class _HealthCheckCard extends StatelessWidget {
               ],
             ),
           ),
+          if (selectable) ...[
+            const SizedBox(width: 8),
+            Semantics(
+              label: 'Select ${check.name} for repair',
+              child: Checkbox(
+              value: selected,
+              onChanged: onChanged == null
+                  ? null
+                  : (v) => onChanged!(check.id, v == true),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -618,14 +740,14 @@ class _ServiceCard extends StatelessWidget {
   }
 }
 
-class _DangerActionsCard extends StatelessWidget {
+/// Advanced disclosure — the destructive sandbox recovery lives here so the
+/// primary health surface stays calm. Expanded on demand only.
+class _AdvancedCard extends StatelessWidget {
   final bool resetting;
   final VoidCallback? onReset;
-  final VoidCallback? onReRun;
-  const _DangerActionsCard({
+  const _AdvancedCard({
     required this.resetting,
     required this.onReset,
-    required this.onReRun,
   });
 
   @override
@@ -635,26 +757,47 @@ class _DangerActionsCard extends StatelessWidget {
     // the whole prefix and re-running the setup gate is the only honest way
     // to prove the ground.
     return AetherCard(
-      title: const Text('Diagnostics'),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SettingsActionButton(
-            label: 'Re-run checks',
-            icon: Icons.refresh,
-            onPressed: onReRun,
+      padding: EdgeInsets.zero,
+      child: Theme(
+        // ExpansionTile paints hairlines above/below when expanded; the card
+        // border already carries the separation, so keep it calm.
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+          title: const Text(
+            'Advanced',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
           ),
-          const SizedBox(height: 10),
-          SettingsActionButton(
-            label: resetting
-                ? 'Resetting sandbox…'
-                : 'Hard reset the sandbox',
-            icon: Icons.delete_sweep_outlined,
-            danger: true,
-            onPressed: onReset,
+          subtitle: Text(
+            'Destructive recovery actions',
+            style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
           ),
-        ],
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Wipes the Linux sandbox and reinstalls it from the bundled '
+                'bootstrap. Chats and settings are untouched.',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  height: 1.5,
+                  color: Aether.textFaint,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            SettingsActionButton(
+              label: resetting
+                  ? 'Resetting sandbox…'
+                  : 'Hard reset the sandbox',
+              icon: Icons.delete_sweep_outlined,
+              danger: true,
+              onPressed: onReset,
+            ),
+          ],
+        ),
       ),
     );
   }

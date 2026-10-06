@@ -55,7 +55,17 @@ void main() {
     (tester) async {
       SharedPreferences.setMockInitialValues({});
       AppState.I.memoryEnabled = true;
+      // v2-08 IA: the Memory switch lives on the 'Privacy & autonomy'
+      // sub-page, pushed from the settings root nav row.
+      Future<void> openPrivacyAutonomy() async {
+        final row = find.text('Privacy & autonomy');
+        await tester.scrollUntilVisible(row, 300);
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+      }
+
       await tester.pumpWidget(const MaterialApp(home: SettingsScreen()));
+      await openPrivacyAutonomy();
       final memory = find.widgetWithText(SettingsSwitchTile, 'Memory');
       await tester.scrollUntilVisible(memory, 300);
       final memorySwitch = find.descendant(
@@ -72,6 +82,7 @@ void main() {
       );
       await tester.pumpWidget(const SizedBox());
       await tester.pumpWidget(const MaterialApp(home: SettingsScreen()));
+      await openPrivacyAutonomy();
       await tester.scrollUntilVisible(memory, 300);
       expect(
         tester

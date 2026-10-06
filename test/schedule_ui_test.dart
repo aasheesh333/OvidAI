@@ -44,20 +44,30 @@ void main() {
     AppState.resetTestInstance();
   });
 
-  testWidgets('Schedule is above Trajectory and opens active session tasks',
-      (tester) async {
+  testWidgets('Schedule sits below the Activity (trajectory) hub and opens '
+      'active session tasks', (tester) async {
     await tester.pumpWidget(MaterialApp(home: Scaffold(
       body: MediaQuery(
         data: const MediaQueryData(textScaler: TextScaler.linear(.7)),
         child: const SessionsSidebar(),
       ),
     )));
+    // v2 nav band: Chat / Studio / Activity / … / Schedule / Settings. The
+    // Activity hub (its caption keeps the legacy "Trajectory — event ledger"
+    // name) now leads the band; Schedule follows below it.
     expect(
-      tester.getTopLeft(find.text('Schedule')).dy,
-      lessThan(
-        tester.getTopLeft(find.text('Trajectory — event ledger')).dy,
-      ),
+      tester.getTopLeft(find.text('Activity')).dy,
+      lessThan(tester.getTopLeft(find.text('Schedule')).dy),
     );
+    expect(
+      tester.getTopLeft(find.text('Trajectory — event ledger')).dy,
+      lessThan(tester.getTopLeft(find.text('Schedule')).dy),
+    );
+    // The v2 band has more rows than the old footer, so Schedule starts
+    // below the fold of the sidebar's CustomScrollView — bring it into the
+    // viewport first, otherwise the tap is a silent off-screen miss.
+    await tester.ensureVisible(find.text('Schedule'));
+    await tester.pump();
     await tester.tap(find.text('Schedule'));
     // Route transition + initial frame; pumpAndSettle would spin on the
     // pulsing status dot of the destination screen.

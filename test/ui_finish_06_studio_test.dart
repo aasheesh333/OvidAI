@@ -150,10 +150,17 @@ void main() {
         EnginePhase.sendSemanticsUpdate, const Duration(seconds: 2));
     await tester.tap(find.byTooltip('Toggle files'));
     await tester.pump();
-    await tester.tap(find.text('lib'));
+    // The v2-09 tree breadcrumb renders the active path's segments, so the
+    // folder row must be tapped by its path tooltip (the breadcrumb segment
+    // has none).
+    await tester.tap(find.descendant(
+        of: find.byType(StudioFileTree), matching: find.byTooltip('lib')));
     await tester.pump();
+    // Same breadcrumb collision as the folder row: the file node is the
+    // tree row whose tooltip is the full path.
     final file = find.descendant(
-        of: find.byType(StudioFileTree), matching: find.text('main.dart'));
+        of: find.byType(StudioFileTree),
+        matching: find.byTooltip('lib/main.dart'));
     await reveal(tester, file);
     await tester.tap(file);
     await tester.pump();
@@ -211,7 +218,11 @@ void main() {
 
   testWidgets('populated Studio visual review capture', (tester) async {
     await pumpStudio(tester, const Size(1024, 768), 1);
-    await tester.tap(find.text('lib'));
+    // The v2-09 tree breadcrumb renders the active path's segments, so the
+    // folder row must be tapped by its path tooltip (the breadcrumb segment
+    // has none).
+    await tester.tap(find.descendant(
+        of: find.byType(StudioFileTree), matching: find.byTooltip('lib')));
     await tester.pump(const Duration(milliseconds: 150));
     expect(find.byKey(studioTreePaneKey), findsOneWidget);
     expect(tester.widget<TextField>(find.byKey(studioEditorFieldKey))

@@ -8,16 +8,18 @@ import 'widgets/aether_primitives.dart';
 
 /// Settings → Permissions.
 ///
-/// A premium-styled surface over the strict permission model:
+/// A premium-styled surface over the strict permission model, organised into
+/// three calm sections with one-line explainers:
 ///
-/// * **Autonomy** — the policy the agent runs under. Today the only state
-///   backing autonomy is the legacy "all-sessions" grant list, which is
+/// * **Session autonomy** — the policy the agent runs under. Today the only
+///   state backing autonomy is the legacy "all-sessions" grant list, which is
 ///   intentionally **ignored** at runtime. The section still renders so the
 ///   user can see and clean up those stale entries. Nothing here mutates
 ///   runtime policy.
-/// * **Granted scopes** — allow/deny decisions THIS session holds, with full
-///   scope descriptions and revoke actions that preserve the recursive/
-///   exact-path and host/path distinctions in [PermissionGrant].
+/// * **Granted scopes** — allow/deny decisions THIS session holds, each with
+///   a status pill, its exact coverage, and a confirmed revoke action that
+///   preserves the recursive/exact-path and host/path distinctions in
+///   [PermissionGrant].
 /// * **Pending requests** — reserved for interactive approval prompts routed
 ///   through the main overlay. The permissions screen is a passive viewer of
 ///   the current state and does not host active prompts, so this section
@@ -53,46 +55,45 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
           final sessionGrants = _currentSessionGrants();
           return SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const AetherSectionTitle(
-                  eyebrow: 'Autonomy',
-                  subtitle:
-                      'How much the agent may decide on its own. Legacy '
-                      'all-sessions grants from older builds are listed as '
-                      'inert and can be removed; the agent never consults '
-                      'them at runtime.',
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 760),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const AetherSectionTitle(
+                      eyebrow: 'Autonomy',
+                      subtitle: 'What the agent may decide on its own here.',
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
+                    _AutonomyCard(
+                      legacy: legacy,
+                      onRevoke: (g) => _revokeGlobal(context, g),
+                    ),
+                    const SizedBox(height: AetherSpacing.space6),
+                    const AetherSectionTitle(
+                      eyebrow: 'Granted scopes',
+                      subtitle:
+                          'Allow and Deny decisions remembered for this '
+                          'conversation.',
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
+                    _GrantedScopesCard(
+                      grants: sessionGrants,
+                      onRevoke: (g) => _revokeSession(context, g),
+                    ),
+                    const SizedBox(height: AetherSpacing.space6),
+                    const AetherSectionTitle(
+                      eyebrow: 'Pending requests',
+                      subtitle:
+                          'Live approvals appear in the chat overlay, not '
+                          'here.',
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
+                    const _PendingRequestsCard(),
+                  ],
                 ),
-                const SizedBox(height: 12),
-                _AutonomyCard(
-                  legacy: legacy,
-                  onRevoke: (g) => _revokeGlobal(context, g),
-                ),
-                const SizedBox(height: 24),
-                const AetherSectionTitle(
-                  eyebrow: 'Granted scopes',
-                  subtitle:
-                      'Decisions apply across modes in THIS conversation. '
-                      'They persist across restarts and are removed when the '
-                      'session is deleted.',
-                ),
-                const SizedBox(height: 12),
-                _GrantedScopesCard(
-                  grants: sessionGrants,
-                  onRevoke: (g) => _revokeSession(context, g),
-                ),
-                const SizedBox(height: 24),
-                const AetherSectionTitle(
-                  eyebrow: 'Pending requests',
-                  subtitle:
-                      'Interactive approval prompts appear in the chat '
-                      'overlay as the agent runs. This panel shows no live '
-                      'requests on its own.',
-                ),
-                const SizedBox(height: 12),
-                const _PendingRequestsCard(),
-              ],
+              ),
             ),
           );
         },
@@ -148,8 +149,8 @@ List<PermissionGrant> _currentSessionGrants() {
       .toList();
 }
 
-/// Autonomy card. Explains session scope and, if any, renders
-/// a per-row list of legacy all-sessions grants with a revoke affordance.
+/// Autonomy card. One-line policy explainer plus, when present, the legacy
+/// all-sessions grant list with per-row status pills and revoke actions.
 class _AutonomyCard extends StatelessWidget {
   const _AutonomyCard({required this.legacy, required this.onRevoke});
 
@@ -159,67 +160,38 @@ class _AutonomyCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AetherCard(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AetherSpacing.space4),
+      title: const Text('Session autonomy'),
+      trailing: AetherPill(
+        label: 'SESSION ONLY',
+        color: Aether.accentC,
+        icon: Icons.shield_outlined,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Agent autonomy', style: AetherType.title),
-          const SizedBox(height: 8),
-          Wrap(
-            children: [
-              _PermissionScopeBadge(
-                label: 'SESSION ONLY',
-                color: Aether.accentC,
-                icon: Icons.shield_outlined,
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
           Text(
-            'In workspace-confined modes, the agent asks before accessing '
-            'paths outside its workspace or hosts outside the allowlist, '
-            'unless a session decision already applies. Full Access mode has '
-            'different access rules. Remembered decisions belong only to '
-            'the owning session; mode-specific restrictions still apply.',
+            'The agent asks before paths outside the workspace or hosts off '
+            'the allowlist; remembered decisions stay in this conversation.',
             style: AetherType.bodyMuted,
           ),
-          const SizedBox(height: 16),
-          _AutonomyMode(
-            label: 'Workspace boundaries',
-            description:
-                'Workspace-confined modes enforce path boundaries and a '
-                'network allowlist, with session decisions for extra access.',
-            active: true,
-          ),
-          const SizedBox(height: 8),
-          _AutonomyMode(
-            label: 'Session decisions',
-            description:
-                'Remembered Allow, Always allow, and Deny decisions apply to '
-                'this conversation only.',
-            active: true,
-          ),
-          const SizedBox(height: 8),
-          _AutonomyMode(
-            label: 'All sessions (ignored)',
-            description:
-                'Older builds could grant globally. These grants are no '
-                'longer consulted and only appear below so they can be '
-                'cleared.',
-            active: false,
-          ),
           if (legacy.isNotEmpty) ...[
-            const SizedBox(height: 16),
+            const SizedBox(height: AetherSpacing.space4),
             Divider(height: 1, thickness: 1, color: Aether.hairline),
-            const SizedBox(height: 12),
+            const SizedBox(height: AetherSpacing.space3),
             Text(
               'Legacy all-sessions grants',
               style: AetherType.label.copyWith(color: Aether.textMuted),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: AetherSpacing.space1),
+            Text(
+              'From older builds — ignored at runtime; safe to remove.',
+              style: AetherType.caption,
+            ),
+            const SizedBox(height: AetherSpacing.space2),
             for (final g in legacy)
               Padding(
-                padding: const EdgeInsets.only(bottom: 6),
+                padding: const EdgeInsets.only(bottom: AetherSpacing.space2),
                 child: _GrantRow(
                   grant: g,
                   global: true,
@@ -233,101 +205,9 @@ class _AutonomyCard extends StatelessWidget {
   }
 }
 
-/// Wrapping a badge does not constrain its label; the inner text must flex.
-class _PermissionScopeBadge extends StatelessWidget {
-  const _PermissionScopeBadge({
-    required this.label,
-    required this.color,
-    required this.icon,
-  });
-
-  final String label;
-  final Color color;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(AetherRadius.rMd),
-        border: Border.all(color: color.withValues(alpha: 0.4)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 12, color: color),
-          const SizedBox(width: 4),
-          Flexible(
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.6,
-                color: color,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AutonomyMode extends StatelessWidget {
-  const _AutonomyMode({
-    required this.label,
-    required this.description,
-    required this.active,
-  });
-
-  final String label;
-  final String description;
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = active ? Aether.accentC : Aether.textFaint;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: active ? Aether.accent.withValues(alpha: 0.06) : Aether.surfaceAlt,
-        borderRadius: BorderRadius.circular(AetherRadius.rMd),
-        border: Border.all(
-          color: active ? Aether.accent.withValues(alpha: 0.4) : Aether.hairline,
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            active ? Icons.info_outline : Icons.history,
-            size: 16,
-            color: c,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: AetherType.body.copyWith(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 2),
-                Text(description, style: AetherType.caption),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Granted scopes retain the full value, coverage description and revoke action.
+/// Granted scopes retain the full value, a status pill, the exact coverage
+/// and a confirmed revoke action. The empty state is a designed
+/// [AetherEmptyState], not a bare text line.
 class _GrantedScopesCard extends StatelessWidget {
   const _GrantedScopesCard({required this.grants, required this.onRevoke});
 
@@ -337,47 +217,25 @@ class _GrantedScopesCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (grants.isEmpty) {
-      return AetherCard(
-        padding: const EdgeInsets.all(20),
-        child: Row(
-          children: [
-            Icon(Icons.verified_user_outlined, size: 20, color: Aether.textFaint),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                'No decisions for this session yet. File and host access '
-                'appear here after Allow, Always allow, or Deny.',
-                style: AetherType.bodyMuted,
-              ),
-            ),
-          ],
+      return const AetherCard(
+        padding: EdgeInsets.zero,
+        child: AetherEmptyState(
+          icon: Icons.verified_user_outlined,
+          title: 'No decisions for this session yet',
+          message: 'Allow or Deny in chat and the decision appears here.',
         ),
       );
     }
 
     return AetherCard(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AetherSpacing.space4),
+      title: Text('${grants.length} grant${grants.length == 1 ? '' : 's'}'),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            '${grants.length} grant${grants.length == 1 ? '' : 's'}',
-            style: AetherType.title,
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            children: [
-              _PermissionScopeBadge(
-                label: 'THIS SESSION',
-                color: Aether.textMuted,
-                icon: Icons.chat_bubble_outline,
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
           for (final g in grants)
             Padding(
-              padding: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.only(bottom: AetherSpacing.space2),
               child: _GrantRow(grant: g, global: false, onRevoke: () => onRevoke(g)),
             ),
         ],
@@ -386,7 +244,9 @@ class _GrantedScopesCard extends StatelessWidget {
   }
 }
 
-/// Readable scope details with an explicit, confirmed revoke action.
+/// One grant: kind icon, exact target, coverage line, status pill, and a
+/// confirmed revoke action. The pill carries the decision state so the row
+/// stays one scannable line instead of a prose sentence.
 class _GrantRow extends StatelessWidget {
   const _GrantRow({
     required this.grant,
@@ -404,13 +264,18 @@ class _GrantRow extends StatelessWidget {
     final icon = isPath
         ? (grant.recursive ? Icons.folder_outlined : Icons.description_outlined)
         : Icons.public_outlined;
-    final subtitle =
-        '${isPath ? (grant.recursive ? 'Directory and descendants' : 'Exact path') : 'Host and subdomains, all ports and paths'} · '
-        '${grant.isDeny ? 'denied' : 'allowed'} · '
-        '${global ? 'legacy (not applied)' : 'this session, all modes'}';
+    final pillLabel = global
+        ? 'LEGACY'
+        : (grant.isDeny ? 'DENIED' : 'ALLOWED');
+    final pillColor = global
+        ? Aether.textMuted
+        : (grant.isDeny ? Aether.dangerC : Aether.successC);
+    final coverage = isPath
+        ? (grant.recursive ? 'Directory and descendants' : 'Exact path')
+        : 'Host and subdomains, all ports and paths';
 
     return Container(
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(AetherSpacing.space3),
       decoration: BoxDecoration(
         color: Aether.surfaceAlt,
         borderRadius: BorderRadius.circular(AetherRadius.rMd),
@@ -419,54 +284,70 @@ class _GrantRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(
-            icon,
-            size: 18,
-            color: grant.isDeny ? Aether.dangerC : Aether.accentC,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _label(grant),
-            style: AetherType.body.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 2),
-          Text(subtitle, style: AetherType.caption),
-          Tooltip(
-            message: 'Revoke',
-            child: TextButton.icon(
-            key: ValueKey('revoke-${global ? 'global' : 'session'}-${grant.kind}-${grant.value}'),
-            icon: const Icon(Icons.delete_outline, size: 18),
-            label: const Text('Revoke'),
-            onPressed: () async {
-              final confirm = await showDialog<bool>(
-                context: context,
-                builder: (d) => AlertDialog(
-                  scrollable: true,
-                  backgroundColor: Aether.surface,
-                  title: const Text(
-                    'Revoke grant?',
-                    style: TextStyle(fontSize: 15),
-                  ),
-                  content: Text(
-                    global
-                        ? 'Remove the legacy entry for ${_label(grant)}? It is already ignored at runtime.'
-                        : 'Remove the saved decision for ${_label(grant)}? Future access follows the current mode and any remaining session decisions.',
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                  actions: [
-                    TextButton(
-                      child: const Text('Cancel'),
-                      onPressed: () => Navigator.of(d).pop(false),
-                    ),
-                    TextButton(
-                      child: const Text('Revoke'),
-                      onPressed: () => Navigator.of(d).pop(true),
-                    ),
-                  ],
+          Row(
+            children: [
+              Icon(
+                icon,
+                size: 16,
+                color: grant.isDeny ? Aether.dangerC : Aether.accentC,
+              ),
+              const SizedBox(width: AetherSpacing.space2),
+              Expanded(
+                child: Text(
+                  _target(grant),
+                  style: AetherType.body.copyWith(fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
                 ),
-              );
-              if (confirm == true) await onRevoke();
-            },
+              ),
+              const SizedBox(width: AetherSpacing.space2),
+              AetherPill(label: pillLabel, color: pillColor),
+            ],
+          ),
+          const SizedBox(height: AetherSpacing.space1),
+          Padding(
+            padding: const EdgeInsets.only(left: 24),
+            child: Text(coverage, style: AetherType.caption),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 12),
+            child: Tooltip(
+              message: 'Revoke',
+              child: TextButton.icon(
+                key: ValueKey('revoke-${global ? 'global' : 'session'}-${grant.kind}-${grant.value}'),
+                style: TextButton.styleFrom(foregroundColor: Aether.dangerC),
+                icon: const Icon(Icons.delete_outline, size: 18),
+                label: const Text('Revoke'),
+                onPressed: () async {
+                  final confirm = await showDialog<bool>(
+                    context: context,
+                    builder: (d) => AlertDialog(
+                      scrollable: true,
+                      backgroundColor: Aether.surface,
+                      title: const Text(
+                        'Revoke grant?',
+                        style: TextStyle(fontSize: 15),
+                      ),
+                      content: Text(
+                        global
+                            ? 'Remove the legacy entry for ${_label(grant)}? It is already ignored at runtime.'
+                            : 'Remove the saved decision for ${_label(grant)}? Future access follows the current mode and any remaining session decisions.',
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      actions: [
+                        TextButton(
+                          child: const Text('Cancel'),
+                          onPressed: () => Navigator.of(d).pop(false),
+                        ),
+                        TextButton(
+                          child: const Text('Revoke'),
+                          onPressed: () => Navigator.of(d).pop(true),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (confirm == true) await onRevoke();
+                },
+              ),
             ),
           ),
         ],
@@ -476,35 +357,30 @@ class _GrantRow extends StatelessWidget {
 }
 
 /// Pending-requests card. The permissions screen is a passive viewer of
-/// persisted state. There is no pending-request feed backing this panel.
+/// persisted state. There is no pending-request feed backing this panel, so
+/// it states where prompts actually appear and offers no fake controls.
 class _PendingRequestsCard extends StatelessWidget {
   const _PendingRequestsCard();
 
   @override
   Widget build(BuildContext context) {
     return AetherCard(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text('Approval prompts appear in chat', style: AetherType.title),
-          const SizedBox(height: 12),
-          Text(
-            'When the agent needs access the overlay will prompt you. '
-            'Respond there. Remembered file and host decisions appear in '
-            'Granted scopes above.',
-            style: AetherType.bodyMuted,
-          ),
-        ],
+      padding: const EdgeInsets.all(AetherSpacing.space4),
+      title: const Text('Approval prompts appear in chat'),
+      child: Text(
+        'Respond in the overlay; remembered decisions appear under Granted '
+        'scopes.',
+        style: AetherType.bodyMuted,
       ),
     );
   }
 }
 
+/// The grant target without a decision suffix — the row title.
+String _target(PermissionGrant g) =>
+    g.kind == PermissionGrant.kindPath ? 'path ${g.value}' : 'host ${g.value}';
+
 String _label(PermissionGrant g) {
-  final what = g.kind == PermissionGrant.kindPath
-      ? 'path ${g.value}'
-      : 'host ${g.value}';
   final deny = g.isDeny ? ' · denied' : '';
-  return '$what$deny';
+  return '${_target(g)}$deny';
 }

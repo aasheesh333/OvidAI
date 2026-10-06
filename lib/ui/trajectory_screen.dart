@@ -12,6 +12,10 @@ import 'widgets/aether_primitives.dart';
 /// every turn / tool / checkpoint / recovery record from the append-only
 /// ledger, with per-record detail (tokens, duration, data). The summary
 /// strip carries the stats projection (turns, steps, wall time, top tools).
+///
+/// The body is the reusable [TrajectoryEventsView], also embedded by the
+/// Activity hub's Events tab; this screen only adds the app bar with the
+/// reload action.
 class TrajectoryScreen extends StatefulWidget {
   final String sessionId;
   const TrajectoryScreen({super.key, required this.sessionId});
@@ -21,6 +25,53 @@ class TrajectoryScreen extends StatefulWidget {
 }
 
 class _TrajectoryScreenState extends State<TrajectoryScreen> {
+  final _viewKey = GlobalKey<TrajectoryEventsViewState>();
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppState.I.sessionById(widget.sessionId);
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: Tooltip(
+          message: 'Trajectory · ${s?.title ?? 'session'}',
+          child: Text(
+            'Trajectory · ${s?.title ?? 'session'}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14),
+          ),
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Reload ledger',
+            icon: const Icon(Icons.refresh, size: 19),
+            onPressed: () => _viewKey.currentState?.reload(),
+          ),
+        ],
+      ),
+      body: TrajectoryEventsView(
+        key: _viewKey,
+        sessionId: widget.sessionId,
+      ),
+    );
+  }
+}
+
+/// The event-ledger list: stats projection card plus one premium card per
+/// record (mono timestamp, `#seq · title`, one-line detail, JSON behind a
+/// disclosure dialog). Owns its own load lifecycle — used standalone by
+/// [TrajectoryScreen] and embedded by the Activity hub's Events tab.
+class TrajectoryEventsView extends StatefulWidget {
+  final String sessionId;
+  const TrajectoryEventsView({super.key, required this.sessionId});
+
+  @override
+  State<TrajectoryEventsView> createState() => TrajectoryEventsViewState();
+}
+
+class TrajectoryEventsViewState extends State<TrajectoryEventsView> {
   List<Map<String, dynamic>> _events = [];
   SessionProjection? _proj;
   bool _loading = true;
@@ -31,6 +82,9 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     super.initState();
     _load();
   }
+
+  /// Re-read the ledger from disk (the app-bar reload contract).
+  Future<void> reload() => _load();
 
   Future<void> _load() async {
     setState(() {
@@ -126,41 +180,19 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final s = AppState.I.sessionById(widget.sessionId);
     final p = _proj;
-    return Scaffold(
-      backgroundColor: Aether.bg,
-      appBar: AppBar(
-        leading: const BackButton(),
-        title: Tooltip(
-          message: 'Trajectory · ${s?.title ?? 'session'}',
-          child: Text(
-            'Trajectory · ${s?.title ?? 'session'}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 14),
-          ),
-        ),
-        actions: [
-          IconButton(
-            tooltip: 'Reload ledger',
-            icon: const Icon(Icons.refresh, size: 19),
-            onPressed: _loading ? null : _load,
-          ),
-        ],
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator(strokeWidth: 1.6))
-          : _error != null
-          ? SingleChildScrollView(
-              child: AetherEmptyState(
-                icon: Icons.error_outline,
-                title: 'Could not load ledger',
-                message: _error,
-                action: AetherSecondaryButton(label: 'Retry', onPressed: _load),
-              ),
-            )
-          : CustomScrollView(
+    return _loading
+        ? const Center(child: CircularProgressIndicator(strokeWidth: 1.6))
+        : _error != null
+        ? SingleChildScrollView(
+            child: AetherEmptyState(
+              icon: Icons.error_outline,
+              title: 'Could not load ledger',
+              message: _error,
+              action: AetherSecondaryButton(label: 'Retry', onPressed: _load),
+            ),
+          )
+        : CustomScrollView(
               slivers: [
                 if (p != null && p.turns > 0)
                   SliverToBoxAdapter(child: Padding(
@@ -294,7 +326,6 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                         )),
                 SliverToBoxAdapter(child: SizedBox(height: MediaQuery.paddingOf(context).bottom)),
               ],
-            ),
-    );
+            );
   }
 }

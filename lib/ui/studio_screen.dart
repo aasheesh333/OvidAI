@@ -106,10 +106,15 @@ String? repoFullNameOf(Map<String, dynamic> repo) {
 /// user's connected GitHub repo, real editable editor with per-session
 /// buffers, agent-visible tabs, and a live Ubuntu sandbox terminal.
 ///
-/// The user never sees OS or infra details. Connection state is a labelled,
-/// differently-shaped badge in the app bar (signed in / checking / signed
-/// out); repo plumbing failures are translated by [StudioFailure] into one
-/// human sentence, with the raw text demoted to a secondary line.
+/// The user never sees OS or infra details. The chrome is ONE calm status
+/// bar — `repo@branch · sync state · Ln:Col` — with a status dot only when
+/// attention is needed and a details sheet on tap; the sandbox-missing
+/// banner and the approval card stay inline because they are actionable
+/// safety surfaces. The app bar is slim (back + title + commit + overflow)
+/// with avatar and auth merged into one account chip (signed in / checking /
+/// signed out — each a different silhouette, never colour-only). Repo
+/// plumbing failures are translated by [StudioFailure] into one human
+/// sentence, with the raw text demoted to a secondary segment.
 ///
 /// The layout is breakpoint-driven ([StudioMetrics]): below 840dp the file
 /// tree stops being docked, below 600dp it becomes an overlay and the app bar
@@ -764,8 +769,6 @@ class _StudioScreenState extends State<StudioScreen> {
         _manageWorkspaceFolder();
       case 'sync':
         _autoSync();
-      case 'commit':
-        _commitPending();
     }
   }
 
@@ -828,7 +831,7 @@ class _StudioScreenState extends State<StudioScreen> {
                 // the user skipped the first-open install or the prefix was
                 // wiped afterwards. Terminal commands already fail with a
                 // friendly "open Studio" error; this banner makes the fix one
-                // tap.
+                // tap. Highest priority: it stays its own actionable banner.
                 AnimatedBuilder(
                   animation: AppState.I,
                   builder: (context, _) {
@@ -841,12 +844,28 @@ class _StudioScreenState extends State<StudioScreen> {
                     );
                   },
                 ),
-                _RepoBar(
+                // ONE calm status bar — `repo@branch · sync state · Ln:Col`.
+                // It absorbs the old repo bar, sync progress, sync error and
+                // clone status banners: steady state is a single quiet line,
+                // a status dot appears only when attention is needed, and the
+                // details (change repo/branch, retry or dismiss a failed
+                // sync) live in the sheet opened by tapping the bar.
+                _StudioStatusBar(
                   repo: repo,
                   branch: _branch,
-                  onPick: _pickRepo,
-                  onPickBranch: _pickBranch,
                   syncing: _syncing,
+                  syncLabel: _syncProgress,
+                  syncFraction: _syncFraction,
+                  syncError: _syncError,
+                  syncErrorDetail: _syncErrorDetail,
+                  cloneStatus: _cloneStatus,
+                  onPickRepo: _pickRepo,
+                  onPickBranch: _pickBranch,
+                  onRetrySync: _syncing ? null : _autoSync,
+                  onDismissSyncError: () => setState(() {
+                    _syncError = null;
+                    _syncErrorDetail = null;
+                  }),
                 ),
                 // The approval banner mirrors AgentService.pendingApproval for
                 // the active session. Rendered as an AetherCard-warn so a
@@ -863,22 +882,6 @@ class _StudioScreenState extends State<StudioScreen> {
                     }
                   },
                 ),
-                if (_syncError != null)
-                  _SyncErrorBanner(
-                    message: _syncError!,
-                    detail: _syncErrorDetail,
-                    onRetry: _syncing ? null : _autoSync,
-                    onDismiss: () => setState(() {
-                      _syncError = null;
-                      _syncErrorDetail = null;
-                    }),
-                  ),
-                if (_cloneStatus != null) _StatusBanner(_cloneStatus!),
-                if (_syncing)
-                  _SyncProgressBanner(
-                    label: _syncProgress ?? 'Syncing…',
-                    fraction: _syncFraction,
-                  ),
               ],
               child: LayoutBuilder(builder: _workspace),
             ),
@@ -904,9 +907,10 @@ class _StudioScreenState extends State<StudioScreen> {
         ),
       ),
       actions: [
-        // Working-folder control: the only place to change/clear a pinned
-        // folder (the chat chip just opens Studio). Folded into the overflow
-        // menu below 600dp so back + title + account never collide.
+        // Slim bar anatomy: back + title + commit + overflow, with the
+        // avatar/auth folded into one account chip. Below 600dp the
+        // secondary actions (working folder, sync) fold into the ⋮ menu so
+        // back + title + the primaries never collide.
         StudioIconButton(
           icon: showFiles ? Icons.folder_open : Icons.folder_outlined,
           tooltip: 'Toggle files',
@@ -927,7 +931,9 @@ class _StudioScreenState extends State<StudioScreen> {
             color: Aether.accent,
             onPressed: _syncing ? null : _autoSync,
           ),
-        if (!compactActions && repo != null)
+        // Commit is the primary Studio action — it stays on the bar at
+        // every width instead of folding into the menu.
+        if (repo != null)
           StudioIconButton(
             icon: Icons.cloud_upload_outlined,
             tooltip: _committing
@@ -959,17 +965,6 @@ class _StudioScreenState extends State<StudioScreen> {
                     label: _syncing ? 'Syncing…' : 'Sync repo',
                    ),
                  ),
-               if (repo != null)
-                 PopupMenuItem(
-                   value: 'commit',
-                   enabled: !_committing,
-                   child: _OverflowRow(
-                     icon: Icons.cloud_upload_outlined,
-                     label: _committing
-                         ? 'Committing…'
-                         : 'Commit ${RepoCache.I.dirtyCount} file(s)',
-                   ),
-                 ),
             ],
             child: SizedBox(
               width: kStudioTapTarget,
@@ -983,9 +978,8 @@ class _StudioScreenState extends State<StudioScreen> {
               ),
             ),
           ),
-        // ── GitHub account chip + sign out ──
+        // ── One account chip: avatar + auth state merged ──
         _AccountChip(compact: compactActions),
-        const _AuthBadge(),
         const SizedBox(width: 4),
       ],
     );
@@ -1351,105 +1345,464 @@ class _SandboxMissingBanner extends StatelessWidget {
   }
 }
 
-/// Repo + branch binding bar.
+/// One calm status bar — `repo@branch · sync state · Ln:Col`.
+///
+/// Replaces the stacked chrome banners (repo bar, sync progress, sync error,
+/// clone status) with a single line. The steady state is quiet text; a status
+/// dot ([_AttentionDot]) appears only when something needs the user — a failed
+/// sync or a pending approval. Tapping the bar opens a details sheet with the
+/// real actions (change repository, change branch, retry/dismiss a failed
+/// sync); the branch label stays a direct button because switching branches
+/// is a primary Studio workflow. An active sync keeps its thin progress line
+/// under the bar, and progress/failures are still announced as live regions.
 ///
 /// Takes a nullable [repo]: the old version was handed `_repo ?? 'Connect a
 /// repo'` and then compared against that literal to decide styling and
 /// behaviour, so a repository actually named "Connect a repo" would have
 /// rendered as the disconnected state.
-class _RepoBar extends StatelessWidget {
-  final String? repo;
-  final String? branch;
-  final VoidCallback onPick;
-  final VoidCallback onPickBranch;
-  final bool syncing;
-  const _RepoBar({
+class _StudioStatusBar extends StatefulWidget {
+  const _StudioStatusBar({
     required this.repo,
     required this.branch,
-    required this.onPick,
-    required this.onPickBranch,
     required this.syncing,
+    required this.syncLabel,
+    required this.syncFraction,
+    required this.syncError,
+    required this.syncErrorDetail,
+    required this.cloneStatus,
+    required this.onPickRepo,
+    required this.onPickBranch,
+    required this.onRetrySync,
+    required this.onDismissSyncError,
   });
+
+  final String? repo;
+  final String? branch;
+  final bool syncing;
+
+  /// Live sync progress line (from RepoCache.sync's onLine), e.g.
+  /// "Syncing files · 25 / 400".
+  final String? syncLabel;
+  final double? syncFraction;
+  final String? syncError;
+  final String? syncErrorDetail;
+  final String? cloneStatus;
+  final VoidCallback onPickRepo;
+  final VoidCallback onPickBranch;
+  final VoidCallback? onRetrySync;
+  final VoidCallback onDismissSyncError;
+
+  @override
+  State<_StudioStatusBar> createState() => _StudioStatusBarState();
+}
+
+class _StudioStatusBarState extends State<_StudioStatusBar> {
+  /// The code field's controller, found by walking the tree for
+  /// [studioEditorFieldKey]. The editor owns the caret; the bar mirrors its
+  /// line:column without the editor knowing the bar exists.
+  TextEditingController? _editorCtrl;
+
+  /// The file path the editor was last resolved against — an agent run
+  /// notifies [AgentService] constantly, and only a file open/switch/close
+  /// can change the code field's controller.
+  String? _lastActivePath;
+  bool _resolveQueued = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _lastActivePath = AgentService.I.activeFilePath;
+    // A file open/switch/close rebuilds the code field on the next frame.
+    AgentService.I.addListener(_onAgentChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _resolveEditor();
+    });
+  }
+
+  @override
+  void dispose() {
+    AgentService.I.removeListener(_onAgentChanged);
+    _editorCtrl?.removeListener(_onEditorChanged);
+    super.dispose();
+  }
+
+  void _onAgentChanged() {
+    if (AgentService.I.activeFilePath == _lastActivePath || _resolveQueued) {
+      return;
+    }
+    _lastActivePath = AgentService.I.activeFilePath;
+    _resolveQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _resolveQueued = false;
+      if (mounted) _resolveEditor();
+    });
+  }
+
+  void _onEditorChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _resolveEditor() {
+    TextEditingController? found;
+    Element? root;
+    context.visitAncestorElements((e) {
+      root = e;
+      return true;
+    });
+    void walk(Element e) {
+      if (found != null) return;
+      final w = e.widget;
+      if (w is TextField && w.key == studioEditorFieldKey) {
+        found = w.controller;
+        return;
+      }
+      e.visitChildren(walk);
+    }
+
+    final r = root;
+    if (r != null) walk(r);
+    if (identical(found, _editorCtrl)) return;
+    _editorCtrl?.removeListener(_onEditorChanged);
+    _editorCtrl = found;
+    _editorCtrl?.addListener(_onEditorChanged);
+    if (mounted) setState(() {});
+  }
+
+  /// 1-based (line, column) of the caret — the same math as the editor
+  /// header's readout. Null when no file is open.
+  ({int line, int column})? get _cursor {
+    final ctrl = _editorCtrl;
+    if (ctrl == null) return null;
+    try {
+      final text = ctrl.text;
+      final offset = ctrl.selection.isValid
+          ? ctrl.selection.start.clamp(0, text.length)
+          : 0;
+      final before = text.substring(0, offset);
+      final lastBreak = before.lastIndexOf('\n');
+      return (
+        line: '\n'.allMatches(before).length + 1,
+        column: offset - lastBreak,
+      );
+    } catch (_) {
+      // The editor disposed the buffer mid-frame (file closed).
+      return null;
+    }
+  }
+
+  /// The sync-state segment: live progress while syncing, the clone/branch
+  /// status while rebinding, the failure (human message + demoted detail)
+  /// afterwards, and a quiet "Synced" in the steady state.
+  String get _syncText {
+    if (widget.syncing) return widget.syncLabel ?? 'Syncing…';
+    final clone = widget.cloneStatus;
+    if (clone != null) return clone;
+    final error = widget.syncError;
+    if (error != null) {
+      final detail = widget.syncErrorDetail;
+      return (detail == null || detail.isEmpty) ? error : '$error · $detail';
+    }
+    final repo = widget.repo;
+    if (repo != null && repo.isNotEmpty) return 'Synced';
+    return '';
+  }
+
+  /// The live-region announcement while work is in flight; the steady state
+  /// stays silent so a screen reader is not nagged by "Synced".
+  String? get _liveLabel {
+    if (widget.syncing) return widget.syncLabel ?? 'Syncing…';
+    return widget.cloneStatus;
+  }
+
+  void _openDetails(BuildContext context) {
+    final repo = widget.repo;
+    final connected = repo != null && repo.isNotEmpty;
+    final branch = widget.branch;
+    final error = widget.syncError;
+    showStudioSheet<void>(
+      context,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          StudioSheetHeader(
+            title: 'Workspace status',
+            subtitle:
+                connected ? '$repo@${branch ?? ''}' : 'No repository connected',
+          ),
+          StudioSheetTile(
+            icon: Icons.hub_outlined,
+            iconColor: Aether.accent,
+            title: connected ? repo : 'Connect a repository',
+            subtitle:
+                connected ? 'Change repository' : 'Sign in and pick a repo',
+            onTap: () {
+              Navigator.pop(context);
+              widget.onPickRepo();
+            },
+          ),
+          if (connected && branch != null && branch.isNotEmpty)
+            StudioSheetTile(
+              icon: Icons.call_split,
+              title: 'Branch: $branch',
+              subtitle: 'Change branch',
+              onTap: () {
+                Navigator.pop(context);
+                widget.onPickBranch();
+              },
+            ),
+          if (widget.syncing)
+            StudioSheetTile(
+              icon: Icons.sync_rounded,
+              title: widget.syncLabel ?? 'Syncing…',
+              subtitle: 'Sync in progress',
+              onTap: null,
+            )
+          else if (widget.cloneStatus != null)
+            StudioSheetTile(
+              icon: Icons.sync_rounded,
+              title: widget.cloneStatus!,
+              onTap: null,
+            )
+          else if (error != null) ...[
+            StudioSheetTile(
+              icon: Icons.cloud_off_outlined,
+              iconColor: Aether.warnLight,
+              title: error,
+              subtitle: widget.syncErrorDetail,
+              onTap: null,
+            ),
+            StudioSheetTile(
+              icon: Icons.refresh,
+              iconColor: Aether.accent,
+              title: 'Retry sync',
+              onTap: widget.onRetrySync == null
+                  ? null
+                  : () {
+                      Navigator.pop(context);
+                      widget.onRetrySync!();
+                    },
+            ),
+            StudioSheetTile(
+              icon: Icons.close,
+              title: 'Dismiss',
+              onTap: () {
+                Navigator.pop(context);
+                widget.onDismissSyncError();
+              },
+            ),
+          ] else if (connected)
+            StudioSheetTile(
+              icon: Icons.sync_rounded,
+              iconColor: Aether.accent,
+              title: 'Sync repo',
+              subtitle: 'Pull the latest files from GitHub',
+              onTap: () {
+                Navigator.pop(context);
+                widget.onRetrySync?.call();
+              },
+            ),
+          const SizedBox(height: 10),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final connected = repo != null && repo!.isNotEmpty;
+    final repo = widget.repo;
+    final connected = repo != null && repo.isNotEmpty;
+    final branch = widget.branch;
     final scale = MediaQuery.textScalerOf(context).scale(1.0);
+    final cursor = _cursor;
+    final syncText = _syncText;
+    final liveLabel = _liveLabel;
+    final failed = widget.syncError != null && !widget.syncing;
     return Semantics(
       label: connected
           ? 'Connected to $repo, branch $branch'
           : 'No repository connected',
       container: true,
-      child: Container(
-        key: studioRepoBarKey,
-        constraints: BoxConstraints(minHeight: 48 * math.max(1.0, scale)),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: Aether.surface,
-          border: Border(bottom: BorderSide(color: Aether.hairline)),
-        ),
-        child: LayoutBuilder(
-          builder: (context, c) {
-            // The GITHUB tag is decoration; it is the first thing to go so the
-            // repo name and the two real controls survive a narrow viewport at
-            // a large OS text scale.
-            final roomy = c.maxWidth >= 520;
-            return Row(
+      child: Material(
+        color: Aether.surface,
+        child: InkWell(
+          onTap: () => _openDetails(context),
+          child: Container(
+            key: studioRepoBarKey,
+            constraints: BoxConstraints(
+              minHeight: kStudioTapTarget * math.max(1.0, scale),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: Aether.hairline)),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.hub_outlined, size: 16, color: Aether.textMuted),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    connected ? repo! : 'Connect a repo',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: connected ? Aether.text : Aether.textFaint,
-                    ),
-                  ),
-                ),
-                if (connected && roomy) ...[
-                  const SizedBox(width: 6),
-                  Tag('GITHUB', color: Aether.textMuted),
-                ],
-                if (connected && branch != null && branch!.isNotEmpty)
-                  Flexible(
-                    child: _BarButton(
-                      tooltip: 'Change branch',
-                      icon: Icons.call_split,
-                      label: branch!,
-                      onTap: onPickBranch,
-                    ),
-                  ),
-                if (syncing) ...[
-                  const SizedBox(width: 6),
-                  Semantics(
-                    liveRegion: true,
-                    label: 'Syncing',
-                    child: const SizedBox(
-                      width: 13,
-                      height: 13,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: Aether.accent,
+                Row(
+                  children: [
+                    // The status dot — drawn only when attention is needed.
+                    _AttentionDot(failed: failed),
+                    if (!connected) ...[
+                      Expanded(
+                        child: Text(
+                          'Connect a repo',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                      ),
+                      _BarButton(
+                        tooltip: 'Connect a repository',
+                        label: 'Connect',
+                        onTap: widget.onPickRepo,
+                        accent: true,
+                      ),
+                    ] else ...[
+                      Flexible(
+                        child: Text(
+                          repo,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            color: Aether.text,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        '@',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                      if (branch != null && branch.isNotEmpty)
+                        Flexible(
+                          child: _BarButton(
+                            tooltip: 'Change branch',
+                            icon: Icons.call_split,
+                            label: branch,
+                            onTap: widget.onPickBranch,
+                          ),
+                        ),
+                    ],
+                    if (syncText.isNotEmpty) ...[
+                      if (widget.syncing || widget.cloneStatus != null) ...[
+                        const SizedBox(
+                          width: 13,
+                          height: 13,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            color: Aether.accent,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      Expanded(
+                        child: Semantics(
+                          liveRegion: liveLabel != null,
+                          label: liveLabel,
+                          child: Text(
+                            ' · $syncText',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: failed
+                                  ? Aether.warnLight
+                                  : Aether.textMuted,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (cursor != null)
+                      Flexible(
+                        child: Text(
+                          ' · Ln ${cursor.line}:${cursor.column}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontFamily: Aether.mono,
+                            fontFamilyFallback: kStudioMonoFallback,
+                            fontSize: 12,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                      ),
+                    Semantics(
+                      button: true,
+                      label: 'Workspace details',
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          minWidth: kStudioTapTarget,
+                          minHeight: kStudioTapTarget,
+                        ),
+                        child: Center(
+                          child: Icon(
+                            Icons.expand_more,
+                            size: 16,
+                            color: Aether.textFaint,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ],
-                _BarButton(
-                  tooltip:
-                      connected ? 'Change repository' : 'Connect a repository',
-                  label: connected ? 'Change' : 'Connect',
-                  onTap: onPick,
-                  accent: true,
+                  ],
                 ),
+                if (widget.syncing)
+                  LinearProgressIndicator(
+                    value: widget.syncFraction,
+                    minHeight: 2,
+                    backgroundColor: Colors.transparent,
+                    color: Aether.accent,
+                  ),
               ],
-            );
-          },
+            ),
+          ),
         ),
       ),
+    );
+  }
+}
+
+/// The bar's status dot. Calm means quiet: nothing is drawn in the steady
+/// state — the dot appears only when a sync failure or a pending approval
+/// needs the user, and the details live one tap away.
+class _AttentionDot extends StatelessWidget {
+  const _AttentionDot({required this.failed});
+
+  /// True when the last sync failed (the bar already knows); the approval
+  /// half is read live from [AgentService].
+  final bool failed;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AgentService.I,
+      builder: (context, _) {
+        if (!failed && AgentService.I.pendingApproval == null) {
+          return const SizedBox.shrink();
+        }
+        return Semantics(
+          label: 'Workspace needs attention',
+          child: Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: Aether.warnLight,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1503,242 +1856,6 @@ class _BarButton extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Sync failure: a human sentence, with the raw text demoted to a secondary
-/// line and a retry that is a real 44dp target.
-class _SyncErrorBanner extends StatelessWidget {
-  const _SyncErrorBanner({
-    required this.message,
-    required this.detail,
-    required this.onRetry,
-    required this.onDismiss,
-  });
-
-  final String message;
-  final String? detail;
-  final VoidCallback? onRetry;
-  final VoidCallback onDismiss;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      liveRegion: true,
-      label: 'Sync failed. $message',
-      container: true,
-      child: Container(
-        width: double.infinity,
-        color: Aether.warnLight.withValues(alpha: 0.12),
-        padding: const EdgeInsets.only(left: 12, right: 2, top: 2, bottom: 2),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Icon(Icons.cloud_off_outlined, size: 16, color: Aether.warnLight),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      message,
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: Aether.warnLight,
-                      ),
-                    ),
-                    if (detail != null && detail!.isNotEmpty)
-                      Text(
-                        detail!,
-                        style: TextStyle(
-                          fontSize: kStudioMinFontSize,
-                          color: Aether.textFaint,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            StudioIconButton(
-              icon: Icons.refresh,
-              tooltip: 'Retry sync',
-              iconSize: 18,
-              onPressed: onRetry,
-            ),
-            StudioIconButton(
-              icon: Icons.close,
-              tooltip: 'Dismiss',
-              iconSize: 16,
-              onPressed: onDismiss,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Live sync progress. Replaces "an 11px spinner for several minutes".
-class _SyncProgressBanner extends StatelessWidget {
-  const _SyncProgressBanner({required this.label, required this.fraction});
-
-  final String label;
-  final double? fraction;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      liveRegion: true,
-      label: label,
-      container: true,
-      child: Container(
-        width: double.infinity,
-        color: Aether.accent.withValues(alpha: 0.10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
-              child: Row(
-                children: [
-                  const SizedBox(
-                    width: 13,
-                    height: 13,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 1.5,
-                      color: Aether.accent,
-                    ),
-                  ),
-                  const SizedBox(width: 9),
-                  Expanded(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 12, color: Aether.text),
-                    ),
-                  ),
-                  if (fraction != null)
-                    Text(
-                      '${(fraction! * 100).round()}%',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontFamily: Aether.mono,
-                        fontFamilyFallback: kStudioMonoFallback,
-                        color: Aether.textMuted,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            LinearProgressIndicator(
-              value: fraction,
-              minHeight: 2,
-              backgroundColor: Colors.transparent,
-              color: Aether.accent,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _StatusBanner extends StatelessWidget {
-  const _StatusBanner(this.label);
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      liveRegion: true,
-      label: label,
-      container: true,
-      child: Container(
-        width: double.infinity,
-        color: Aether.accent.withValues(alpha: 0.12),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        child: Row(
-          children: [
-            const SizedBox(
-              width: 13,
-              height: 13,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            const SizedBox(width: 9),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: Aether.text),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// GitHub connection state.
-///
-/// This used to be a bare 9×9px colour-only dot: green/amber/red with no
-/// shape, no text and no semantics, so it was invisible to a screen reader
-/// and unreadable for anyone with a colour vision deficiency. Each state now
-/// has its own silhouette, a semantics label and a tooltip.
-class _AuthBadge extends StatelessWidget {
-  const _AuthBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: GitHubService.I,
-      builder: (context, _) {
-        final gh = GitHubService.I;
-        final loggedIn = gh.isLoggedIn;
-        // A storage read that FAILED, or a restore still in flight, is
-        // not a sign-out — the token is on disk and a retry may recover
-        // it seconds later. Showing red here told the user they had been
-        // logged out when the app merely could not read the key yet,
-        // which is exactly the "Studio keeps logging me out" report.
-        final unknown =
-            !loggedIn && (gh.restoreFailed || gh.isInitializing);
-
-        final IconData icon;
-        final Color color;
-        final String label;
-        if (loggedIn) {
-          icon = Icons.check_circle;
-          color = Aether.successLight;
-          label = 'Signed in to GitHub';
-        } else if (unknown) {
-          icon = Icons.hourglass_top;
-          color = Aether.warnLight;
-          label = 'Checking your GitHub sign-in…';
-        } else {
-          icon = Icons.cancel;
-          color = Aether.dangerC;
-          label = 'Not signed in to GitHub';
-        }
-
-        return Semantics(
-          liveRegion: true,
-          label: label,
-          child: Tooltip(
-            message: label,
-            child: SizedBox(
-              width: 30,
-              height: kStudioTapTarget,
-              child: Center(child: Icon(icon, size: 16, color: color)),
-            ),
-          ),
-        );
-      },
     );
   }
 }
@@ -1815,12 +1932,18 @@ class StudioBranchSheet extends StatelessWidget {
   }
 }
 
-/// ── GitHub account chip with avatar, login name, and sign-out menu ──
+/// ── One account chip: avatar, login name, auth state and sign-out menu ──
+///
+/// The app bar used to carry a separate avatar chip and a colour-coded auth
+/// badge; they are one control now. Signed in: the avatar wears a small
+/// state badge and the chip opens the account menu. Signed out (or still
+/// checking): the chip IS the state icon — a different silhouette per state,
+/// never colour-only — and tapping it starts sign-in.
 class _AccountChip extends StatelessWidget {
   const _AccountChip({required this.compact});
 
   /// Below 600dp the chip drops its login text and chevron: the app bar has
-  /// back + title + tree toggle + overflow + auth badge to fit as well.
+  /// back + title + tree toggle + commit + overflow to fit as well.
   final bool compact;
 
   @override
@@ -1830,7 +1953,22 @@ class _AccountChip extends StatelessWidget {
       builder: (_, _) {
         final gh = GitHubService.I;
         if (!gh.isLoggedIn) {
-          return const SizedBox.shrink();
+          // A storage read that FAILED, or a restore still in flight, is
+          // not a sign-out — the token is on disk and a retry may recover
+          // it seconds later. Showing red here told the user they had been
+          // logged out when the app merely could not read the key yet,
+          // which is exactly the "Studio keeps logging me out" report.
+          final unknown = gh.restoreFailed || gh.isInitializing;
+          return StudioIconButton(
+            icon: unknown ? Icons.hourglass_top : Icons.cancel,
+            tooltip: unknown
+                ? 'Checking your GitHub sign-in…'
+                : 'Not signed in to GitHub',
+            iconSize: 16,
+            color: unknown ? Aether.warnLight : Aether.dangerC,
+            onPressed:
+                unknown ? null : () => showGithubLoginSheet(context),
+          );
         }
         return PopupMenuButton<String>(
           tooltip: 'GitHub account',
@@ -1900,7 +2038,30 @@ class _AccountChip extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _Avatar(url: gh.avatarUrl, size: 20),
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        _Avatar(url: gh.avatarUrl, size: 20),
+                        // The merged auth badge: its own shape, a semantics
+                        // label and a tooltip — never a bare colour dot.
+                        Positioned(
+                          right: -3,
+                          bottom: -3,
+                          child: Tooltip(
+                            message: 'Signed in to GitHub',
+                            child: Semantics(
+                              liveRegion: true,
+                              label: 'Signed in to GitHub',
+                              child: Icon(
+                                Icons.check_circle,
+                                size: 10,
+                                color: Aether.successLight,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                     if (!compact) ...[
                       const SizedBox(width: 6),
                       Flexible(

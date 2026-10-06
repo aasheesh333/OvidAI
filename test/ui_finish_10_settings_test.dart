@@ -137,14 +137,24 @@ void main() {
       await tester.tap(find.text('Light'));
       await tester.pumpAndSettle();
       expect((await SharedPreferences.getInstance()).getString('ovid_theme_mode'), 'light');
+      // v2-08 IA: the Memory switch lives on the Privacy & autonomy sub-page.
+      await reveal(tester, find.text('Privacy & autonomy'));
+      await tester.tap(find.text('Privacy & autonomy'));
+      await tester.pumpAndSettle();
       final memory = find.widgetWithText(SettingsSwitchTile, 'Memory');
       await reveal(tester, memory);
       final before = app.memoryEnabled;
       await tester.tap(find.descendant(of: memory, matching: find.byType(Switch)));
       await tester.pumpAndSettle();
       expect((await SharedPreferences.getInstance()).getBool('ovid_memory_enabled'), !before);
-      await reveal(tester, find.text('Backup'));
-      await tester.tap(find.text('Backup'));
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      // v2-08 IA: backup lives behind the Data & backup sub-page.
+      await reveal(tester, find.text('Data & backup'));
+      await tester.tap(find.text('Data & backup'));
+      await tester.pumpAndSettle();
+      await reveal(tester, find.text('Backup & export'));
+      await tester.tap(find.text('Backup & export'));
       await tester.pumpAndSettle();
       expect(find.byType(SettingsBackupScreen), findsOneWidget);
       await reveal(tester, find.text('Restore as new sessions'));
@@ -352,8 +362,15 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Overall health'), findsOneWidget);
       expect(tester.takeException(), isNull);
-      await reveal(tester, find.text('Hard reset the sandbox'));
+      await reveal(tester, find.text('Re-run checks'));
       expect(find.text('Re-run checks'), findsOneWidget);
+      // The destructive hard reset lives behind the Advanced disclosure in
+      // the merged health screen — expand it before driving the action.
+      await reveal(tester, find.text('Advanced'));
+      await tester.tap(find.text('Advanced'));
+      await tester.pumpAndSettle();
+      await reveal(tester, find.text('Hard reset the sandbox'));
+      expect(find.text('Hard reset the sandbox'), findsOneWidget);
       expect(find.text('Repair'), findsNothing);
       await tester.pumpWidget(const SizedBox());
       health.dispose();
@@ -363,6 +380,10 @@ void main() {
   testWidgets('preset duplicate fields and cancel remain reachable above keyboard', (tester) async {
     viewport(tester, const Size(360, 640));
     await tester.pumpWidget(host(const SettingsScreen(), scale: 2));
+    // v2-08 IA: Agent presets lives on the Models sub-page.
+    await reveal(tester, find.text('Models'));
+    await tester.tap(find.text('Models'));
+    await tester.pumpAndSettle();
     await reveal(tester, find.text('Agent presets'));
     await tester.tap(find.text('Agent presets'));
     await tester.pumpAndSettle();
