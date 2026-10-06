@@ -206,7 +206,6 @@ jobs:
           path: build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: error
           retention-days: 30
-          retention-days: 30
 
       - name: Upload release inventory and native test evidence
         if: always()
