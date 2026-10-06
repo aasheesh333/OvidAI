@@ -930,6 +930,17 @@ abstract class _BackendCapability extends RestApiCapability {
 
   http.Client _http() => _injected ?? (_lazyClient ??= http.Client());
 
+  /// Builds the inner [RestApiCapability] that actually performs the request.
+  ///
+  /// Exposed as an overridable seam so tests can substitute a recorder and
+  /// assert the wrapper forwards its `cancellation` token to the inner call
+  /// (the production construction is unchanged).
+  RestApiCapability buildRestApiCapability(
+    RestServiceDescriptor descriptor, {
+    http.Client? client,
+  }) =>
+      RestApiCapability(descriptor, client: client);
+
   Future<Map<String, String>> _stored() =>
       NativePluginConfigStore.I.readAll(
         pluginName: pluginName,
@@ -1159,9 +1170,10 @@ class FirebaseCapability extends _BackendCapability {
         newArgs['fp$i'] = segments[i];
       }
     }
-    return RestApiCapability(descriptor, client: _http()).callTool(
+    return buildRestApiCapability(descriptor, client: _http()).callTool(
       toolName,
       newArgs,
+      cancellation: cancellation,
     );
   }
 }
@@ -1230,9 +1242,10 @@ class SupabaseCapability extends _BackendCapability {
     final inner = _http();
     final client =
         secret.isEmpty ? inner : _HeaderClient(inner, {'apikey': secret});
-    return RestApiCapability(descriptor, client: client).callTool(
+    return buildRestApiCapability(descriptor, client: client).callTool(
       toolName,
       newArgs,
+      cancellation: cancellation,
     );
   }
 }
@@ -1260,9 +1273,10 @@ class AirtableCapability extends _BackendCapability {
         'fields': _asJsonMap(args['fields_json'], 'fields_json'),
       };
     }
-    return RestApiCapability(descriptor, client: _http()).callTool(
+    return buildRestApiCapability(descriptor, client: _http()).callTool(
       toolName,
       newArgs,
+      cancellation: cancellation,
     );
   }
 }
@@ -1289,10 +1303,10 @@ class AppwriteCapability extends _BackendCapability {
     final projectId = (stored['project_id'] ?? '').trim();
     if (projectId.isEmpty) return _missingConfig('project_id');
     final descriptor = _withBase(this.descriptor, base);
-    return RestApiCapability(
+    return buildRestApiCapability(
       descriptor,
       client: _HeaderClient(_http(), {'X-Appwrite-Project': projectId}),
-    ).callTool(toolName, args);
+    ).callTool(toolName, args, cancellation: cancellation);
   }
 }
 
@@ -1319,10 +1333,10 @@ class PocketBaseCapability extends _BackendCapability {
     if (toolName == 'list_records') {
       newArgs.putIfAbsent('page', () => 1);
     }
-    return RestApiCapability(
+    return buildRestApiCapability(
       _withBase(descriptor, base),
       client: _http(),
-    ).callTool(toolName, newArgs);
+    ).callTool(toolName, newArgs, cancellation: cancellation);
   }
 }
 
@@ -1377,10 +1391,10 @@ class VectorDbCapability extends _BackendCapability {
     } else if (toolName == 'stats') {
       newArgs['body'] = <String, dynamic>{};
     }
-    return RestApiCapability(
+    return buildRestApiCapability(
       _withBase(descriptor, base),
       client: _http(),
-    ).callTool(toolName, newArgs);
+    ).callTool(toolName, newArgs, cancellation: cancellation);
   }
 }
 
@@ -1425,10 +1439,10 @@ class MongoDbCapability extends _BackendCapability {
       body['document'] = _asJsonMap(args['doc_json'], 'doc_json');
     }
     newArgs['body'] = body;
-    return RestApiCapability(
+    return buildRestApiCapability(
       _withBase(descriptor, base),
       client: _http(),
-    ).callTool(toolName, newArgs);
+    ).callTool(toolName, newArgs, cancellation: cancellation);
   }
 }
 

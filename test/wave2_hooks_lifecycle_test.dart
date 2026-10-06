@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -37,6 +38,10 @@ void main() {
 
   List<Map<String, dynamic>> command(String text) => [{
     'hooks': [{'type': 'command', 'command': text}],
+  }];
+
+  List<Map<String, dynamic>> agentHook(String prompt, {int? timeout}) => [{
+    'hooks': [{'type': 'agent', 'prompt': prompt, 'timeout': ?timeout}],
   }];
 
   void replace(NormalizedPluginManifest manifest) {
@@ -257,5 +262,72 @@ void main() {
     expect(remaining(), lessThan(150));
     for (var i = 0; i < 10 && remaining() > 0; i++) { await hooks.loadEnabled(); }
     expect(remaining(), 0);
+  });
+
+  test('agent evaluation is cancelled and fenced when the session ends', () async {
+    await fixture('agent-end', {'Stop': agentHook('check')});
+    final entered = Completer<void>();
+    final release = Completer<AgentHookVerdict?>();
+    Future<bool>? signal;
+    hooks.agentHookEvaluator = (e) {
+      signal = e.isCancelled;
+      entered.complete();
+      return release.future;
+    };
+    final pending = hooks.fireStop(sid);
+    await entered.future;
+    await hooks.fire('session_end', sid);
+    expect(await signal!.timeout(const Duration(seconds: 2)), isTrue);
+    release.complete(AgentHookVerdict.block('late'));
+    expect(
+      (await pending.timeout(const Duration(seconds: 2))).stopAllowed,
+      isTrue,
+    );
+    await Future<void>.delayed(Duration.zero);
+  });
+
+  test('agent timeout fails open with a ledger note and signals isCancelled', () async {
+    await fixture('agent-timeout', {'Stop': agentHook('slow', timeout: 1)});
+    Future<bool>? signal;
+    hooks.agentHookEvaluator = (e) {
+      signal = e.isCancelled;
+      return Completer<AgentHookVerdict?>().future;
+    };
+    expect((await hooks.fireStop(sid)).stopAllowed, isTrue);
+    expect(await signal!.timeout(const Duration(seconds: 2)), isTrue);
+    await SessionLedger.I.flush(sid);
+    expect(
+      Directory('${temp.path}/ledger')
+          .listSync()
+          .whereType<File>()
+          .map((f) => f.readAsStringSync())
+          .join(),
+      contains('timed out (fail-open)'),
+    );
+  });
+
+  test('agent cancellation token is delivered before the fence settles', () async {
+    final m = await fixture('agent-token', {'Stop': agentHook('check')});
+    final entered = Completer<void>();
+    final release = Completer<AgentHookVerdict?>();
+    Future<void>? cancelled;
+    Future<bool>? signal;
+    hooks.agentHookEvaluator = (e) {
+      cancelled = e.cancelled;
+      signal = e.isCancelled;
+      entered.complete();
+      return release.future;
+    };
+    final pending = hooks.fireStop(sid);
+    await entered.future;
+    final uninstall = PluginRuntimeManager.I.uninstall(m.id);
+    try {
+      await cancelled!.timeout(const Duration(seconds: 2));
+      expect(await signal!.timeout(const Duration(seconds: 2)), isTrue);
+      expect((await pending.timeout(const Duration(seconds: 2))).stopAllowed, isTrue);
+    } finally {
+      release.complete(AgentHookVerdict.block('late'));
+      await uninstall;
+    }
   });
 }

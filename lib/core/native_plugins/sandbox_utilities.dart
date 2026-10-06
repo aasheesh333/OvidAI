@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -15,15 +17,110 @@ typedef SandboxRunner =
       Duration? timeout,
     });
 
+/// Cancellation-aware sibling of [SandboxRunner]. Because extra optional
+/// named parameters are contravariant-safe, any function of this shape is
+/// assignable to [SandboxRunner] — so existing fake runners keep compiling
+/// while [defaultSandboxRunner] opts into prompt cancellation. Capabilities
+/// detect it at runtime (`runner is CancellableSandboxRunner`) and forward
+/// the caller's [UtilityCancellation] only when it is safe to do so.
+typedef CancellableSandboxRunner =
+    Future<String> Function(
+      List<String> args, {
+      String? cwd,
+      Duration? timeout,
+      UtilityCancellation? cancellation,
+    });
+
+/// Zone key carrying the active [UtilityCancellation] through a `callTool`
+/// invocation so the [SandboxRunner] getter can bind it without threading
+/// the token through every private helper.
+const _cancellationZoneKey = #ovidSandboxUtilityCancellation;
+
+UtilityCancellation? get _zoneCancellation =>
+    Zone.current[_cancellationZoneKey] as UtilityCancellation?;
+
+/// Monotonic tag for per-invocation process scopes (see
+/// [defaultSandboxRunner]) so cancellation kills exactly one call's process
+/// tree and nothing else.
+int _utilityCallSeq = 0;
+
+FormatException _cancelledError() =>
+    const FormatException('Utility operation cancelled.');
+
+/// Binds [runner] to the active cancellation token. When no token is in the
+/// zone the runner is returned untouched, so behavior is identical to the
+/// pre-cancellation code path.
+SandboxRunner _bindCancellation(SandboxRunner runner) {
+  final cancellation = _zoneCancellation;
+  if (cancellation == null) return runner;
+  return (List<String> args, {String? cwd, Duration? timeout}) =>
+      _runCancellable(
+        runner,
+        args,
+        cwd: cwd,
+        timeout: timeout,
+        cancellation: cancellation,
+      );
+}
+
+/// Runs [runner] and aborts promptly on [cancellation]. A cancellable runner
+/// receives the token (and is expected to stop its own work); any other
+/// runner is still raced so the caller never waits past the cancel signal.
+Future<String> _runCancellable(
+  SandboxRunner runner,
+  List<String> args, {
+  String? cwd,
+  Duration? timeout,
+  required UtilityCancellation cancellation,
+}) {
+  if (cancellation.isCancelled) {
+    return Future<String>.error(_cancelledError());
+  }
+  final work = runner is CancellableSandboxRunner
+      ? runner(args, cwd: cwd, timeout: timeout, cancellation: cancellation)
+      : runner(args, cwd: cwd, timeout: timeout);
+  final result = Completer<String>();
+  cancellation.whenCancelled.then((_) {
+    if (!result.isCompleted) result.completeError(_cancelledError());
+  });
+  work.then(
+    (value) {
+      if (!result.isCompleted) result.complete(value);
+    },
+    onError: (Object e, StackTrace s) {
+      if (!result.isCompleted) result.completeError(e, s);
+    },
+  );
+  return result.future;
+}
+
 Future<String> defaultSandboxRunner(
   List<String> args, {
   String? cwd,
   Duration? timeout,
-}) =>
-    SandboxService.I.exec(
-      args,
-      cwd: cwd,
-    ).timeout(timeout ?? const Duration(seconds: 60));
+  UtilityCancellation? cancellation,
+}) {
+  final limit = timeout ?? const Duration(seconds: 60);
+  if (cancellation == null) {
+    return SandboxService.I.exec(args, cwd: cwd).timeout(limit);
+  }
+  // Bind the exec to a per-invocation process scope so cancellation can
+  // SIGKILL exactly the OS process (and its descendants) this call spawned.
+  final callKey = 'sandbox-utility-${++_utilityCallSeq}';
+  return SandboxService.I.withProcessScope(
+    () {
+      final pending = SandboxService.I.exec(args, cwd: cwd).timeout(limit);
+      void stop() => SandboxService.I.killCallProcesses(callKey);
+      if (cancellation.isCancelled) {
+        stop();
+      } else {
+        cancellation.whenCancelled.then((_) => stop());
+      }
+      return pending;
+    },
+    callKey: callKey,
+  );
+}
 
 /// Registers every sandbox-backed capability
 /// (Shell History, Git Workbench, PDF Tools).
@@ -66,12 +163,14 @@ class ShellHistoryCapability implements NativePluginCapability {
   ShellHistoryCapability({
     SandboxRunner? runner,
     bool Function()? isSandboxInstalled,
-  })  : _runner = runner ?? defaultSandboxRunner,
+  })  : _rawRunner = runner ?? defaultSandboxRunner,
         _isSandboxInstalled =
             isSandboxInstalled ?? (() => SandboxService.I.isInstalled);
 
-  final SandboxRunner _runner;
+  final SandboxRunner _rawRunner;
   final bool Function() _isSandboxInstalled;
+
+  SandboxRunner get _runner => _bindCancellation(_rawRunner);
 
   static const _notInstalledMessage =
       'Sandbox is not installed — open Studio once to install it, then retry.';
@@ -121,6 +220,13 @@ class ShellHistoryCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    if (cancellation != null) {
+      if (cancellation.isCancelled) throw _cancelledError();
+      return runZoned(
+        () => callTool(toolName, args),
+        zoneValues: {_cancellationZoneKey: cancellation},
+      );
+    }
     if (!_isSandboxInstalled()) return _notInstalledMessage;
     switch (toolName) {
       case 'search':
@@ -207,12 +313,14 @@ class GitWorkbenchCapability implements NativePluginCapability {
   GitWorkbenchCapability({
     SandboxRunner? runner,
     bool Function()? isSandboxInstalled,
-  })  : _runner = runner ?? defaultSandboxRunner,
+  })  : _rawRunner = runner ?? defaultSandboxRunner,
         _isSandboxInstalled =
             isSandboxInstalled ?? (() => SandboxService.I.isInstalled);
 
-  final SandboxRunner _runner;
+  final SandboxRunner _rawRunner;
   final bool Function() _isSandboxInstalled;
+
+  SandboxRunner get _runner => _bindCancellation(_rawRunner);
 
   static const _notInstalledMessage =
       'Sandbox is not installed — open Studio once to install it, then retry.';
@@ -325,6 +433,13 @@ class GitWorkbenchCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    if (cancellation != null) {
+      if (cancellation.isCancelled) throw _cancelledError();
+      return runZoned(
+        () => callTool(toolName, args),
+        zoneValues: {_cancellationZoneKey: cancellation},
+      );
+    }
     if (!_isSandboxInstalled()) return _notInstalledMessage;
     switch (toolName) {
       case 'status':
@@ -461,12 +576,14 @@ class PdfToolsCapability implements NativePluginCapability {
   PdfToolsCapability({
     SandboxRunner? runner,
     bool Function()? isSandboxInstalled,
-  })  : _runner = runner ?? defaultSandboxRunner,
+  })  : _rawRunner = runner ?? defaultSandboxRunner,
         _isSandboxInstalled =
             isSandboxInstalled ?? (() => SandboxService.I.isInstalled);
 
-  final SandboxRunner _runner;
+  final SandboxRunner _rawRunner;
   final bool Function() _isSandboxInstalled;
+
+  SandboxRunner get _runner => _bindCancellation(_rawRunner);
 
   static const _notInstalledMessage =
       'Sandbox is not installed — open Studio once to install it, then retry.';
@@ -648,6 +765,13 @@ class PdfToolsCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    if (cancellation != null) {
+      if (cancellation.isCancelled) throw _cancelledError();
+      return runZoned(
+        () => callTool(toolName, args),
+        zoneValues: {_cancellationZoneKey: cancellation},
+      );
+    }
     if (!_isSandboxInstalled()) return _notInstalledMessage;
     switch (toolName) {
       case 'merge':

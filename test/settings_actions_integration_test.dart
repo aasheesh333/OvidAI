@@ -375,15 +375,23 @@ void main() {
     expect(SettingsActions.resetAll, isNotNull);
     final report = await SettingsActions.resetAll!();
 
-    // Stores with a readback probe are genuinely cleared and reported complete.
+    // Every canonical store now has a readback probe, so the reset is verified
+    // complete — never merely "delete did not throw".
     expect(
       report.completed,
-      containsAll(['sessions', 'memory', 'account', 'image-receipts']),
+      containsAll([
+        'sessions',
+        'search',
+        'ledger',
+        'memory',
+        'account',
+        'image-receipts',
+        'shares',
+      ]),
     );
-    // Stores without a readback API are reported unsupported, never success.
-    expect(report.failures.keys, containsAll(['search', 'ledger', 'shares']));
-    expect(report.verifiedComplete, isFalse);
-    expect(report.success, isFalse);
+    expect(report.failures.keys, isEmpty);
+    expect(report.verifiedComplete, isTrue);
+    expect(report.success, isTrue);
 
     // The verified stores really are empty after the reset.
     await prefs.reload();

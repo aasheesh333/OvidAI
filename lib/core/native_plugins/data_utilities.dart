@@ -60,6 +60,17 @@ int _parseIntArg(dynamic raw, String key, int fallback) {
   return parsed;
 }
 
+/// Aborts a utility call whose [cancellation] token has already fired.
+///
+/// Mirrors the preflight check in [runBoundedUtility] so synchronous utilities
+/// (SQL format/validate, color palette) honour Stop before doing any work.
+/// A null token is a no-op, preserving the uncancellable behavior.
+void _throwIfCancelled(UtilityCancellation? cancellation) {
+  if (cancellation?.isCancelled ?? false) {
+    throw const FormatException('Utility operation cancelled.');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // JSON Visualizer
 // ---------------------------------------------------------------------------
@@ -135,6 +146,7 @@ class JsonVisualizerCapability implements NativePluginCapability {
     UtilityCancellation? cancellation,
   }) async {
     checkUtilityInput(args);
+    _throwIfCancelled(cancellation);
     return runBoundedUtility(
       () => JsonVisualizerCapability()._execute(toolName, args),
       cancellation: cancellation,
@@ -362,9 +374,16 @@ class RegexBuilderCapability implements NativePluginCapability {
         'Bounded regex execution requires native isolates; web is unsupported.',
       );
     }
+    _throwIfCancelled(cancellation);
     final port = ReceivePort();
     final result = Completer<String>();
     Isolate? worker;
+    void stop(String message) {
+      if (result.isCompleted) return;
+      worker?.kill(priority: Isolate.immediate);
+      result.completeError(FormatException(message));
+    }
+
     final subscription = port.listen((dynamic message) {
       if (result.isCompleted) return;
       if (message is List && message.length == 2 && message[0] == true) {
@@ -379,16 +398,11 @@ class RegexBuilderCapability implements NativePluginCapability {
         );
       }
     });
-    final timer = Timer(Duration(milliseconds: timeout), () {
-      if (!result.isCompleted) {
-        worker?.kill(priority: Isolate.immediate);
-        result.completeError(
-          FormatException(
-            'Regex time limit exceeded: $timeout ms; worker cancelled.',
-          ),
-        );
-      }
-    });
+    final timer = Timer(
+      Duration(milliseconds: timeout),
+      () => stop('Regex time limit exceeded: $timeout ms; worker cancelled.'),
+    );
+    cancellation?.whenCancelled.then((_) => stop('Utility operation cancelled.'));
     // Attach the late-spawn cleanup as well: a deadline may fire during spawn.
     unawaited(
       Isolate.spawn(
@@ -788,6 +802,7 @@ class SqlFormatterCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    _throwIfCancelled(cancellation);
     switch (toolName) {
       case 'format':
         return _formatTokens(_requireString(args, 'sql'));
@@ -1033,6 +1048,7 @@ class CronDesignerCapability implements NativePluginCapability {
     UtilityCancellation? cancellation,
   }) async {
     checkUtilityInput(args);
+    _throwIfCancelled(cancellation);
     return runBoundedUtility(
       () => CronDesignerCapability()._execute(toolName, args),
       cancellation: cancellation,
@@ -1564,6 +1580,7 @@ class ColorPaletteGenCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    _throwIfCancelled(cancellation);
     switch (toolName) {
       case 'from_hex':
         return _fromHex(_requireString(args, 'hex'));

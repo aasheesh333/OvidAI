@@ -435,6 +435,25 @@ class FirebaseService extends ChangeNotifier {
     }
   }
 
+  /// Barrier-safe local sign-out for the all-store reset.
+  ///
+  /// Clears the local account state (identity, user, account session, image
+  /// ownership) and notifies listeners, but never awaits
+  /// [AppState.transitionSessionAccount]. The public [signOut] cannot run inside
+  /// the settings barrier: its guest transition captures the in-progress
+  /// `_settingsOperation` and awaits the very barrier that is calling it, which
+  /// deadlocks. The reset owner invokes this instead and wipes the AppState
+  /// session namespace directly.
+  Future<void> signOutLocal() async {
+    _identity.cancelPending();
+    _identity.observeUser(null);
+    _authRevision++;
+    ImageStudio.I.bindAccount(null);
+    _accountSession.clear();
+    _user = null;
+    notifyListeners();
+  }
+
   /// Lightweight analytics event — only fires when consent is given.
   Future<void> logEvent(String name, [Map<String, Object>? params]) async {
     if (!_available || !_consentGiven) return;

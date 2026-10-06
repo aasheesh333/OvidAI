@@ -851,7 +851,11 @@ class StripeCapability extends _AiMediaCapability {
     }
 
     final cap = RestApiCapability(descriptor, client: client);
-    return await cap.callTool(toolName, cleanArgs);
+    return await cap.callTool(
+      toolName,
+      cleanArgs,
+      cancellation: cancellation,
+    );
   }
 }
 

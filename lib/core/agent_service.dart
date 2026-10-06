@@ -939,6 +939,16 @@ class AgentService extends ChangeNotifier {
             return null; // fail open
           }
         };
+    // The tool-capable agent-hook evaluator (HookService's `agentHookEvaluator`
+    // field) stays null in production on purpose. Wiring it safely needs a
+    // bounded, cancellable, publication-free tool loop plus an approval channel
+    // addressable to a specific evaluation — none of which the current dispatch
+    // path provides (`_dispatch` publishes run accounting/ledger/chat text, and
+    // `_askUser` parks approvals on the active session's bucket). See
+    // docs/superpowers/audits/2026-10-06-agent-hooks-closure.md and
+    // docs/superpowers/audits/2026-10-06-partial-closure.md §C. Agent hooks
+    // therefore fail open with an honest ledger note; they must never fall back
+    // to the prompt evaluator above.
     // 2. User-initiated stops always win over Stop-hook vetoes. This is the
     //    run bucket's passive cancel flag — never stopRequested() itself
     //    (that method PERFORMS the stop).

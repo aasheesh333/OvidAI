@@ -140,6 +140,16 @@ Uri _requireHttpUrl(String raw, String key) {
   return uri;
 }
 
+/// Aborts a quick, non-isolated tool step when the caller has already
+/// cancelled. Long CPU-bound work is run through [runBoundedUtility] and
+/// network work through [boundedUtilityRequest], both of which abort
+/// promptly on their own; this covers the remaining in-line steps.
+void _throwIfCancelled(UtilityCancellation? cancellation) {
+  if (cancellation?.isCancelled ?? false) {
+    throw const FormatException('Utility operation cancelled.');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Minimal PNG encoder (grayscale, 8-bit) for QR output
 // ---------------------------------------------------------------------------
@@ -253,6 +263,14 @@ class QrGeneratorCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    checkUtilityInput(args);
+    return runBoundedUtility(
+      () => QrGeneratorCapability()._execute(toolName, args),
+      cancellation: cancellation,
+    );
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'generate':
         return _generate(
@@ -474,21 +492,38 @@ class SshKeyManagerCapability implements NativePluginCapability {
   }) async {
     switch (toolName) {
       case 'generate':
-        return _generate(
-          (args['type']?.toString() ?? 'ed25519').trim().toLowerCase(),
+        return runBoundedUtility(
+          () => SshKeyManagerCapability()._generate(
+            (args['type']?.toString() ?? 'ed25519').trim().toLowerCase(),
+          ),
+          cancellation: cancellation,
+        );
+      case 'fingerprint':
+        return runBoundedUtility(
+          () => SshKeyManagerCapability()._fingerprint(
+            _requireString(args, 'public_key'),
+          ),
+          cancellation: cancellation,
         );
       case 'save':
-        return _save(
+        _throwIfCancelled(cancellation);
+        final saved = await _save(
           _requireNonBlank(args, 'name'),
           _requireString(args, 'private_key'),
           _requireString(args, 'public_key'),
         );
+        _throwIfCancelled(cancellation);
+        return saved;
       case 'get':
-        return _get(_requireNonBlank(args, 'name'));
+        _throwIfCancelled(cancellation);
+        final got = await _get(_requireNonBlank(args, 'name'));
+        _throwIfCancelled(cancellation);
+        return got;
       case 'list':
-        return _list();
-      case 'fingerprint':
-        return _fingerprint(_requireString(args, 'public_key'));
+        _throwIfCancelled(cancellation);
+        final listed = await _list();
+        _throwIfCancelled(cancellation);
+        return listed;
       default:
         throw ArgumentError('Unknown tool: $toolName');
     }
@@ -718,10 +753,27 @@ class MermaidDiagramsCapability implements NativePluginCapability {
     UtilityCancellation? cancellation,
   }) async {
     switch (toolName) {
+      case 'render':
+        return _render(
+          _requireString(args, 'text'),
+          _timeoutSeconds(args),
+          cancellation,
+        );
+      case 'validate':
+      case 'export':
+        return runBoundedUtility(
+          () => MermaidDiagramsCapability()._execute(toolName, args),
+          cancellation: cancellation,
+        );
+      default:
+        throw ArgumentError('Unknown tool: $toolName');
+    }
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
+    switch (toolName) {
       case 'validate':
         return _validate(_requireString(args, 'text'));
-      case 'render':
-        return _render(_requireString(args, 'text'), _timeoutSeconds(args));
       case 'export':
         return _export(_requireString(args, 'text'));
       default:
@@ -790,7 +842,11 @@ class MermaidDiagramsCapability implements NativePluginCapability {
     return jsonEncode({'valid': errors.isEmpty, 'errors': errors});
   }
 
-  Future<String> _render(String text, int timeoutSeconds) async {
+  Future<String> _render(
+    String text,
+    int timeoutSeconds,
+    UtilityCancellation? cancellation,
+  ) async {
     if (text.trim().isEmpty) {
       throw ArgumentError('Missing required argument: text');
     }
@@ -804,6 +860,7 @@ class MermaidDiagramsCapability implements NativePluginCapability {
         headers: {'Content-Type': 'text/plain', 'Accept': 'image/svg+xml'},
         body: text,
         timeoutSeconds: timeoutSeconds,
+        cancellation: cancellation,
       );
     } on TimeoutException {
       return 'Mermaid render is offline: the request to kroki.io timed out '
@@ -904,6 +961,13 @@ class ExcalidrawBridgeCapability implements NativePluginCapability {
     UtilityCancellation? cancellation,
   }) async {
     checkUtilityInput(args);
+    return runBoundedUtility(
+      () => ExcalidrawBridgeCapability()._execute(toolName, args),
+      cancellation: cancellation,
+    );
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'stats':
         return _stats(_requireString(args, 'json_text'));
@@ -1046,13 +1110,19 @@ class IconLibraryCapability implements NativePluginCapability {
           _requireNonBlank(args, 'query'),
           _parseIntArg(args['limit'], 'limit', 20).clamp(1, 100),
           _timeoutSeconds(args),
+          cancellation,
         );
       default:
         throw ArgumentError('Unknown tool: $toolName');
     }
   }
 
-  Future<String> _search(String query, int limit, int timeoutSeconds) async {
+  Future<String> _search(
+    String query,
+    int limit,
+    int timeoutSeconds,
+    UtilityCancellation? cancellation,
+  ) async {
     final uri = Uri.https('api.iconify.design', '/search', {
       'query': query.trim(),
       'limit': '$limit',
@@ -1064,6 +1134,7 @@ class IconLibraryCapability implements NativePluginCapability {
         'GET',
         uri,
         timeoutSeconds: timeoutSeconds,
+        cancellation: cancellation,
       );
     } on TimeoutException {
       return 'Icon search is offline: the request to api.iconify.design '
@@ -1186,8 +1257,13 @@ class FontPreviewCapability implements NativePluginCapability {
   }) async {
     switch (toolName) {
       case 'search':
-        return _search(_requireNonBlank(args, 'query'), _timeoutSeconds(args));
+        return _search(
+          _requireNonBlank(args, 'query'),
+          _timeoutSeconds(args),
+          cancellation,
+        );
       case 'preview_url':
+        _throwIfCancelled(cancellation);
         return _previewUrl(
           _requireNonBlank(args, 'family'),
           args['text']?.toString() ?? '',
@@ -1197,7 +1273,11 @@ class FontPreviewCapability implements NativePluginCapability {
     }
   }
 
-  Future<String> _search(String query, int timeoutSeconds) async {
+  Future<String> _search(
+    String query,
+    int timeoutSeconds,
+    UtilityCancellation? cancellation,
+  ) async {
     final uri = Uri.parse(
       'https://www.googleapis.com/fonts/v1/webfonts?sort=alpha',
     );
@@ -1208,6 +1288,7 @@ class FontPreviewCapability implements NativePluginCapability {
         'GET',
         uri,
         timeoutSeconds: timeoutSeconds,
+        cancellation: cancellation,
       );
     } on TimeoutException {
       return 'Font search is offline: the request to www.googleapis.com '
@@ -1336,19 +1417,26 @@ class AudioNotesCapability implements NativePluginCapability {
         return _transcribe(
           _requireString(args, 'audio_url'),
           _timeoutSeconds(args),
+          cancellation,
         );
       default:
         throw ArgumentError('Unknown tool: $toolName');
     }
   }
 
-  Future<String> _transcribe(String audioUrl, int timeoutSeconds) async {
+  Future<String> _transcribe(
+    String audioUrl,
+    int timeoutSeconds,
+    UtilityCancellation? cancellation,
+  ) async {
+    _throwIfCancelled(cancellation);
     final uri = _requireHttpUrl(audioUrl, 'audio_url');
     final apiKey = await NativePluginConfigStore.I.read(
       pluginName: pluginName,
       key: 'openai_api_key',
       secret: true,
     );
+    _throwIfCancelled(cancellation);
     if ((apiKey ?? '').trim().isEmpty) {
       return 'Configure OpenAI API key first: open the Configure sheet for '
           '"Audio Notes" and save "openai_api_key".';
@@ -1365,6 +1453,7 @@ class AudioNotesCapability implements NativePluginCapability {
         },
         body: jsonEncode({'model': 'whisper-1', 'url': uri.toString()}),
         timeoutSeconds: timeoutSeconds,
+        cancellation: cancellation,
       );
     } on TimeoutException {
       return 'Audio transcription is offline: the request to '
@@ -1435,11 +1524,14 @@ class ScreenAwarenessCapability implements NativePluginCapability {
       throw ArgumentError('Unknown tool "$toolName" for $pluginName.');
     }
     // Reads screen directly via the device accessibility service bridge
+    _throwIfCancelled(cancellation);
     try {
       final full = args['full'] == true;
       final raw = await DeviceControlService.I.read(full: full);
+      _throwIfCancelled(cancellation);
       return _trimOutput(raw);
     } catch (e) {
+      if (cancellation?.isCancelled ?? false) rethrow;
       return 'Could not read screen: $e. Ensure Control mode and Accessibility service are enabled.';
     }
   }

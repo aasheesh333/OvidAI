@@ -86,12 +86,7 @@ extension _SettingsStateIntegration on AppState {
           name: ResetStoreKind.search.id,
           onStage: () async {},
           onDelete: () => SessionSearch.I.clear(),
-          onVerifyDeleted: () async {
-            throw UnsupportedError(
-              'SessionSearch.clear() exposes no row-count/emptiness readback; '
-              'add a probe before this store can be reported verified.',
-            );
-          },
+          onVerifyDeleted: () => SessionSearch.I.isEmpty(),
         ),
         ResetStoreKind.ledger: FunctionalResetStore(
           name: ResetStoreKind.ledger.id,
@@ -106,12 +101,7 @@ extension _SettingsStateIntegration on AppState {
               await SessionLedger.I.delete(id);
             }
           },
-          onVerifyDeleted: () async {
-            throw UnsupportedError(
-              'SessionLedger exposes no root enumeration; add an emptiness/'
-              'enumeration probe before this store can be reported verified.',
-            );
-          },
+          onVerifyDeleted: () => SessionLedger.I.isEmpty(),
         ),
         ResetStoreKind.memory: FunctionalResetStore(
           name: ResetStoreKind.memory.id,
@@ -123,13 +113,15 @@ extension _SettingsStateIntegration on AppState {
         ResetStoreKind.account: FunctionalResetStore(
           name: ResetStoreKind.account.id,
           onStage: () async {},
-          // Sign-out cannot run inside this barrier: FirebaseService.signOut
-          // awaits AppState.transitionSessionAccount, which awaits this very
-          // barrier's `_settingsOperation` and would deadlock. Report the store
-          // truthfully instead of faking a sign-out. `isSignedIn` is read back
-          // directly because `accountReady` also folds in the barrier's own
-          // session-account fence and would otherwise verify as empty.
-          onDelete: () async {},
+          // Barrier-safe local sign-out: FirebaseService.signOutLocal() performs
+          // the local sign-out side effects WITHOUT awaiting
+          // AppState.transitionSessionAccount (which awaits this barrier's
+          // `_settingsOperation` and would deadlock). Server-side deletion is a
+          // separate, explicitly-requested flow.
+          onDelete: () => FirebaseService.I.signOutLocal(),
+          // `isSignedIn` is read back directly because `accountReady` also folds
+          // in the barrier's own session-account fence and would otherwise
+          // verify as empty.
           onVerifyDeleted: () async => !FirebaseService.I.isSignedIn,
         ),
         ResetStoreKind.imageReceipts: FunctionalResetStore(
@@ -150,14 +142,17 @@ extension _SettingsStateIntegration on AppState {
         ResetStoreKind.shares: FunctionalResetStore(
           name: ResetStoreKind.shares.id,
           onStage: () async {},
-          onDelete: () async {},
-          onVerifyDeleted: () async {
-            throw UnsupportedError(
-              'Conversation shares (server) and per-session browser profiles '
-              'expose no single owner readback; add an emptiness probe before '
-              'this store can be reported verified.',
-            );
+          // Local reset covers the app-owned local state: per-session browser
+          // profiles and the local share cache. Server-side conversation
+          // shares are deleted by the account lifecycle, not a device reset.
+          onDelete: () async {
+            await SessionBrowserProfiles.I.deleteAll();
+            await ConversationShareService.production().clearLocal();
           },
+          onVerifyDeleted: () async =>
+              (await SessionBrowserProfiles.I.profileCount()) == 0 &&
+              (await ConversationShareService.production().localShareCount()) ==
+                  0,
         ),
       });
       await coordinator.prepare();

@@ -111,13 +111,16 @@ class ApiTesterCapability implements NativePluginCapability {
   }) async {
     switch (toolName) {
       case 'request':
-        return _request(args);
+        return _request(args, cancellation);
       default:
         throw ArgumentError('Unknown tool: $toolName');
     }
   }
 
-  Future<String> _request(Map<String, dynamic> args) async {
+  Future<String> _request(
+    Map<String, dynamic> args,
+    UtilityCancellation? cancellation,
+  ) async {
     checkUtilityInput(args);
     final rawUrl = _requireString(args, 'url');
     final uri = Uri.tryParse(rawUrl.trim());
@@ -177,6 +180,7 @@ class ApiTesterCapability implements NativePluginCapability {
         headers: headers,
         body: body,
         timeoutSeconds: timeoutSeconds,
+        cancellation: cancellation,
       );
     } on FormatException {
       rethrow;
@@ -1307,13 +1311,18 @@ class WebClipperCapability implements NativePluginCapability {
         return _clip(
           _requireString(args, 'url'),
           _parseDoubleArg(args['timeout_seconds'], 'timeout_seconds', 10.0),
+          cancellation,
         );
       default:
         throw ArgumentError('Unknown tool: $toolName');
     }
   }
 
-  Future<String> _clip(String rawUrl, double timeoutSeconds) async {
+  Future<String> _clip(
+    String rawUrl,
+    double timeoutSeconds,
+    UtilityCancellation? cancellation,
+  ) async {
     final uri = Uri.tryParse(rawUrl.trim());
     if (uri == null ||
         !uri.hasScheme ||
@@ -1336,6 +1345,7 @@ class WebClipperCapability implements NativePluginCapability {
         uri,
         timeoutSeconds: timeoutSeconds,
         maxBytes: 262144,
+        cancellation: cancellation,
       );
     } catch (e) {
       throw FormatException('Failed to fetch "$rawUrl": $e');

@@ -194,6 +194,21 @@ class ConversationShareService {
     await _call('DELETE', '/shares/$id');
   }
 
+  /// Local share state owned by this service, for the verified all-store reset.
+  ///
+  /// This service is deliberately stateless: [create] returns the parsed
+  /// [ConversationShare] to its caller, [list] re-reads the server, and nothing
+  /// is cached here. There are no share receipts, IDs, tokens, or per-session
+  /// browser profiles held locally, so the truthful local count is always zero.
+  /// Server-side shares are owned by the share server; deleting them is a
+  /// separate owner's responsibility and is intentionally not attempted here.
+  Future<int> localShareCount() async => 0;
+
+  /// Clears local share state owned by this service. It owns none (see
+  /// [localShareCount]), so this is a documented no-op. It never issues a
+  /// server DELETE: remote share deletion belongs to the server share owner.
+  Future<void> clearLocal() async {}
+
   ConversationShare _parse(dynamic data, String sessionId) {
     try {
       final id = data['id'] as String;

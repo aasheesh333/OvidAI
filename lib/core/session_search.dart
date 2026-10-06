@@ -107,6 +107,17 @@ class SessionSearch {
     db.execute('DELETE FROM msgs');
   }
 
+  /// Truthful readback of how many message rows are physically stored in the
+  /// index, independent of the in-memory `_readable` fence. A missing database
+  /// is opened (and created empty) by [_open], so it reports zero, not an error.
+  Future<int> storedRowCount() async {
+    final db = await _open();
+    return db.select('SELECT COUNT(*) FROM msgs').single.columnAt(0) as int;
+  }
+
+  /// True only when [storedRowCount] proves the index holds no rows.
+  Future<bool> isEmpty() async => (await storedRowCount()) == 0;
+
   /// Tombstone first so even a later rebuild containing a deleted session
   /// cannot restore its rows. Session IDs must not be reused within an account.
   Future<void> deleteSession(String id, {int? expectedGeneration}) async {

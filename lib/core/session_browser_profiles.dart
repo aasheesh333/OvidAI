@@ -263,11 +263,51 @@ class SessionBrowserProfiles extends ChangeNotifier {
   /// Profile names the WebView provider currently holds.
   Future<List<String>> listProfiles() async {
     try {
-      final names = await _channel.invokeMethod<List<Object?>>('listProfiles');
-      return (names ?? const <Object?>[]).whereType<String>().toList();
+      return await _providerProfiles();
     } catch (_) {
       return const <String>[];
     }
+  }
+
+  /// Like [listProfiles] but lets a provider failure propagate.
+  ///
+  /// The verified all-store reset needs a readback that cannot lie: swallowing
+  /// an error as an empty list would report a dead provider as "nothing stored"
+  /// and a reset could claim success over profiles that still exist.
+  Future<List<String>> _providerProfiles() async {
+    final names = await _channel.invokeMethod<List<Object?>>('listProfiles');
+    return (names ?? const <Object?>[]).whereType<String>().toList();
+  }
+
+  /// Number of per-session browser profiles the provider currently holds.
+  ///
+  /// Readback for the verified all-store reset. An unsupported WebView
+  /// (Android-only, or <125) genuinely has no per-session jars and truthfully
+  /// reports zero; a provider that is present but fails THROWS rather than
+  /// reading as empty.
+  Future<int> profileCount() async {
+    if (!await probe()) return 0;
+    return (await _providerProfiles()).length;
+  }
+
+  /// True when no per-session browser profile is stored.
+  Future<bool> isEmpty() async => await profileCount() == 0;
+
+  /// Remove every stored per-session browser profile.
+  ///
+  /// The all-store reset calls this and then reads [isEmpty] back to prove the
+  /// profiles are gone. Each profile is deleted through [deleteProfile], so a
+  /// refusal by a live WebView is still queued for the next launch (the retry
+  /// guarantee is preserved). Every session's remembered origins are cleared
+  /// too — they are per-session browser data, and leaving them behind would let
+  /// the readback call the store empty while visit records survived.
+  Future<void> deleteAll() async {
+    if (await probe()) {
+      for (final name in await _providerProfiles()) {
+        await deleteProfile(name);
+      }
+    }
+    await forgetOrigins();
   }
 
   /// Delete a profile (its cookies and web storage).

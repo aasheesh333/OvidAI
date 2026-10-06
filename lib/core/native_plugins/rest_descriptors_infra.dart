@@ -698,6 +698,17 @@ abstract class _InfraCapability implements NativePluginCapability {
     );
   }
 
+  /// Builds the inner [RestApiCapability] that actually performs the request.
+  ///
+  /// Exposed as an overridable seam so tests can substitute a recorder and
+  /// assert the wrapper forwards its `cancellation` token to the inner call
+  /// (the production construction is unchanged).
+  RestApiCapability buildRestApiCapability(
+    RestServiceDescriptor descriptor, {
+    http.Client? client,
+  }) =>
+      RestApiCapability(descriptor, client: client);
+
   String missingCredError() {
     return 'Configure ${descriptor.credentialLabel} first: use catalog_configure_plugin '
         'or Settings -> Plugins -> $pluginName to save "${descriptor.credentialKey}".';
@@ -733,8 +744,8 @@ class VercelMcpCapability extends _InfraCapability {
       cleanArgs['limit'] = cleanArgs['limit'].toString();
     }
 
-    final cap = RestApiCapability(descriptor, client: _clientOverride);
-    return await cap.callTool(toolName, cleanArgs);
+    final cap = buildRestApiCapability(descriptor, client: _clientOverride);
+    return await cap.callTool(toolName, cleanArgs, cancellation: cancellation);
   }
 }
 
@@ -776,8 +787,8 @@ class VercelDeployCapability extends _InfraCapability {
       }
     }
 
-    final cap = RestApiCapability(descriptor, client: _clientOverride);
-    return await cap.callTool(toolName, cleanArgs);
+    final cap = buildRestApiCapability(descriptor, client: _clientOverride);
+    return await cap.callTool(toolName, cleanArgs, cancellation: cancellation);
   }
 }
 
@@ -819,8 +830,8 @@ class RailwayCapability extends _InfraCapability {
       };
     }
 
-    final cap = RestApiCapability(descriptor, client: _clientOverride);
-    return await cap.callTool(toolName, cleanArgs);
+    final cap = buildRestApiCapability(descriptor, client: _clientOverride);
+    return await cap.callTool(toolName, cleanArgs, cancellation: cancellation);
   }
 }
 
@@ -843,8 +854,8 @@ class HerokuCapability extends _InfraCapability {
     final client = _HeaderClient(_clientOverride ?? http.Client(), {
       'Accept': 'application/vnd.heroku+json; version=3',
     });
-    final cap = RestApiCapability(descriptor, client: client);
-    return await cap.callTool(toolName, args);
+    final cap = buildRestApiCapability(descriptor, client: client);
+    return await cap.callTool(toolName, args, cancellation: cancellation);
   }
 }
 
@@ -873,8 +884,8 @@ class CloudflareCapability extends _InfraCapability {
       };
     }
 
-    final cap = RestApiCapability(descriptor, client: _clientOverride);
-    return await cap.callTool(toolName, cleanArgs);
+    final cap = buildRestApiCapability(descriptor, client: _clientOverride);
+    return await cap.callTool(toolName, cleanArgs, cancellation: cancellation);
   }
 }
 
@@ -960,8 +971,8 @@ class DockerCapability extends _InfraCapability {
     );
 
     try {
-      final cap = RestApiCapability(desc, client: _clientOverride);
-      return await cap.callTool(toolName, cleanArgs);
+      final cap = buildRestApiCapability(desc, client: _clientOverride);
+      return await cap.callTool(toolName, cleanArgs, cancellation: cancellation);
     } catch (e) {
       if (e is http.ClientException || e.toString().contains('Connection refused')) {
         final shownHost = hostOnly.isNotEmpty ? hostOnly : configuredHost;
@@ -1022,8 +1033,8 @@ class KubernetesCapability extends _InfraCapability {
       tools: descriptor.tools,
     );
 
-    final cap = RestApiCapability(desc, client: _clientOverride);
-    return await cap.callTool(toolName, cleanArgs);
+    final cap = buildRestApiCapability(desc, client: _clientOverride);
+    return await cap.callTool(toolName, cleanArgs, cancellation: cancellation);
   }
 }
 
@@ -1063,8 +1074,8 @@ class TerraformCapability extends _InfraCapability {
       };
     }
 
-    final cap = RestApiCapability(descriptor, client: _clientOverride);
-    return await cap.callTool(toolName, cleanArgs);
+    final cap = buildRestApiCapability(descriptor, client: _clientOverride);
+    return await cap.callTool(toolName, cleanArgs, cancellation: cancellation);
   }
 }
 
@@ -1174,8 +1185,8 @@ class MakeCapability extends _InfraCapability {
       tools: descriptor.tools,
     );
 
-    final cap = RestApiCapability(desc, client: _clientOverride);
-    return await cap.callTool(toolName, cleanArgs);
+    final cap = buildRestApiCapability(desc, client: _clientOverride);
+    return await cap.callTool(toolName, cleanArgs, cancellation: cancellation);
   }
 }
 

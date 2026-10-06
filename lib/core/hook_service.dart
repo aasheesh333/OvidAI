@@ -43,6 +43,7 @@ class AgentHookEvaluation {
     required this.approvedTools,
     required this.budget,
     required this.cancelled,
+    required this.isCancelled,
   });
 
   /// Hook rule text. The redacted event stdin JSON is in [context]['stdin'].
@@ -59,8 +60,18 @@ class AgentHookEvaluation {
   /// Hard evaluation budget; results after it is exceeded are dropped.
   final Duration budget;
 
-  /// Completes when this evaluation is fenced (or once it settles).
+  /// Completes when this evaluation is fenced (or once it settles). It is the
+  /// raw fence signal: it also completes on a normal verdict. Use
+  /// [isCancelled] to tell a fence apart from successful completion.
   final Future<void> cancelled;
+
+  /// Explicit cancellation signal. Completes `true` when this evaluation was
+  /// aborted rather than completed — plugin removed/re-registered, hooks
+  /// disabled, the session ended, or the budget expired — and `false` when the
+  /// evaluator settled on its own. Unlike [cancelled], a normal verdict leaves
+  /// this `false`, so a wired evaluator can safely bridge it into per-tool
+  /// cancellation tokens without cancelling them after a successful verdict.
+  final Future<bool> isCancelled;
 }
 
 /// Parsed decision of an agent-type hook evaluation. [decision] is
@@ -84,6 +95,12 @@ class AgentHookVerdict {
 /// it is NEVER routed through [PromptHookEvaluator] — reusing the
 /// prompt-only evaluator would misrepresent agent semantics. Null
 /// verdict, timeout, throw or any fence fails OPEN with a ledger note.
+///
+/// The evaluator is quiet: its only output is the returned
+/// [AgentHookVerdict]. It must not publish to the chat transcript or the
+/// session ledger; its tool activity belongs in the hook ledger HookService
+/// already writes. Cancellation arrives via
+/// [AgentHookEvaluation.cancelled] / [AgentHookEvaluation.isCancelled].
 typedef AgentHookEvaluator =
     Future<AgentHookVerdict?> Function(AgentHookEvaluation evaluation);
 
@@ -348,7 +365,9 @@ class HookService extends ChangeNotifier {
   /// wires only prompt hooks; production integration still needs a bounded
   /// agent loop that enforces
   /// [AgentHookEvaluation.approvedTools], its permission policy and
-  /// [AgentHookEvaluation.cancelled].
+  /// [AgentHookEvaluation.cancelled] / [AgentHookEvaluation.isCancelled].
+  /// The evaluator is quiet — it returns only an [AgentHookVerdict] and never
+  /// publishes to the chat transcript.
   /// Null (default) = agent hooks are skipped fail-open with a ledger
   /// note. Never fall back to [promptHookEvaluator]: agent semantics
   /// require tool scope and cancellation that a prompt cannot honestly
@@ -723,35 +742,44 @@ class HookService extends ChangeNotifier {
 
   static int _chainDepth() => Zone.current[_depthKey] as int? ?? 0;
 
-  // In-flight agent evaluations, fenced as (pluginId, sessionId, completer).
-  // Fencing completes the completer so a wired evaluator can stop work; any
-  // result that arrives after the fence is dropped (fail-open).
-  final List<(String, String, Completer<void>)> _agentEvals = [];
+  // In-flight agent evaluations, fenced as (pluginId, sessionId, state).
+  // Fencing completes the state's fence so a wired evaluator can stop work;
+  // any result that arrives after the fence is dropped (fail-open). The
+  // explicit `isCancelled` completer distinguishes an aborted evaluation
+  // (fence or budget expiry) from one that settled on its own.
+  final List<_AgentEvalState> _agentEvals = [];
 
   static final Object _agentFenced = Object();
   static final Object _agentTimedOut = Object();
 
-  Completer<void> _beginAgentEval(String pluginId, String sessionId) {
-    final fence = Completer<void>();
-    _agentEvals.add((pluginId, sessionId, fence));
-    return fence;
+  _AgentEvalState _beginAgentEval(String pluginId, String sessionId) {
+    final state = _AgentEvalState(pluginId, sessionId);
+    _agentEvals.add(state);
+    return state;
   }
 
-  void _endAgentEval(Completer<void> fence) {
-    _agentEvals.removeWhere((e) => identical(e.$3, fence));
-    if (!fence.isCompleted) fence.complete();
+  /// Ends [state]. [fenced] is true for a real abort (registration/disable/
+  /// session-end fence or budget expiry) and false for normal settlement.
+  /// `fenced` is sticky: a later normal end cannot clear an abort.
+  void _endAgentEval(_AgentEvalState state, {required bool fenced}) {
+    _agentEvals.remove(state);
+    if (fenced) state.fenced = true;
+    if (!state.fence.isCompleted) state.fence.complete();
+    if (!state.cancelSignal.isCompleted) {
+      state.cancelSignal.complete(state.fenced);
+    }
   }
 
   void _fenceAgentEvals({String? pluginId, String? sessionId}) {
     final matched = _agentEvals
         .where(
           (e) =>
-              (pluginId == null || e.$1 == pluginId) &&
-              (sessionId == null || e.$2 == sessionId),
+              (pluginId == null || e.pluginId == pluginId) &&
+              (sessionId == null || e.sessionId == sessionId),
         )
         .toList();
     for (final e in matched) {
-      _endAgentEval(e.$3);
+      _endAgentEval(e, fenced: true);
     }
   }
 
@@ -1947,6 +1975,9 @@ class HookService extends ChangeNotifier {
       endingEnv = _envFiles.putIfAbsent(sessionId, () => {});
       _sessionContextEpochs[sessionId] =
           (_sessionContextEpochs[sessionId] ?? 0) + 1;
+      // A session generation just ended: promptly cancel any in-flight agent
+      // evaluation for it instead of only dropping the late verdict.
+      _fenceAgentEvals(sessionId: sessionId);
       _endingSessions[sessionId] = (
         endToken,
         _sessionContextEpochs[sessionId]!,
@@ -2162,7 +2193,7 @@ class HookService extends ChangeNotifier {
               )
               .toSet()
         : <String>{};
-    final fence = _beginAgentEval(pluginId, sessionId);
+    final eval = _beginAgentEval(pluginId, sessionId);
     final budget = Duration(
       seconds: hook.timeoutS <= 0 ? 120 : hook.timeoutS.clamp(1, maxTimeoutS),
     );
@@ -2179,11 +2210,12 @@ class HookService extends ChangeNotifier {
         },
         approvedTools: Set.unmodifiable(tools),
         budget: budget,
-        cancelled: fence.future,
+        cancelled: eval.fence.future,
+        isCancelled: eval.cancelSignal.future,
       );
       final verdict = await Future.any<Object?>([
         evaluator(evaluation),
-        fence.future.then((_) => _agentFenced),
+        eval.fence.future.then((_) => _agentFenced),
         Future<Object?>.delayed(budget, () => _agentTimedOut),
       ]);
       if (verdict == _agentFenced ||
@@ -2191,6 +2223,9 @@ class HookService extends ChangeNotifier {
         return null;
       }
       if (verdict == _agentTimedOut) {
+        // The budget expired: abandon the evaluation and explicitly signal
+        // cancellation so a still-running evaluator can stop its work.
+        _endAgentEval(eval, fenced: true);
         await _ledger(sessionId, 'hook/result', {
           ...record,
           'ok': false,
@@ -2224,7 +2259,7 @@ class HookService extends ChangeNotifier {
       }
       return null;
     } finally {
-      _endAgentEval(fence);
+      _endAgentEval(eval, fenced: false);
     }
   }
 
@@ -3338,4 +3373,19 @@ class HookService extends ChangeNotifier {
       bypassPermission: bypassPermission,
     );
   }
+}
+
+/// Bookkeeping for one in-flight agent evaluation. [fence] is the raw
+/// completion signal ([AgentHookEvaluation.cancelled]); [cancelSignal] is the
+/// explicit abort signal ([AgentHookEvaluation.isCancelled]), completed with
+/// true on a fence/budget expiry and false on normal settlement. [fenced] is
+/// sticky so a normal end racing a fence cannot report a completed run.
+class _AgentEvalState {
+  _AgentEvalState(this.pluginId, this.sessionId);
+
+  final String pluginId;
+  final String sessionId;
+  final Completer<void> fence = Completer<void>();
+  final Completer<bool> cancelSignal = Completer<bool>();
+  bool fenced = false;
 }

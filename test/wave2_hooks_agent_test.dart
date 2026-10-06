@@ -287,4 +287,64 @@ void main() {
     final res = await pending.timeout(const Duration(seconds: 2));
     expect(res.stopAllowed, isTrue);
   });
+
+  test('explicit isCancelled signal stays false when the evaluator settles on time', () async {
+    await fixture('signal-ok', {'Stop': agentHook('check')});
+    Future<bool>? signal;
+    hooks.agentHookEvaluator = (e) async {
+      signal = e.isCancelled;
+      return AgentHookVerdict.approve('done');
+    };
+    final stop = await hooks.fireStop(sid);
+    expect(stop.stopAllowed, isTrue);
+    expect(await signal!.timeout(const Duration(seconds: 2)), isFalse);
+  });
+
+  test('explicit isCancelled signal completes true on a same-object fence', () async {
+    final m = await fixture('signal-fence', {'Stop': agentHook('check')});
+    final entered = Completer<void>();
+    final release = Completer<AgentHookVerdict?>();
+    Future<bool>? signal;
+    hooks.agentHookEvaluator = (e) {
+      signal = e.isCancelled;
+      entered.complete();
+      return release.future;
+    };
+    final pending = hooks.fireStop(sid);
+    await entered.future;
+    replace(m);
+    expect(await signal!.timeout(const Duration(seconds: 2)), isTrue);
+    release.complete(AgentHookVerdict.block('late'));
+    expect(
+      (await pending.timeout(const Duration(seconds: 2))).stopAllowed,
+      isTrue,
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(hooks.isPluginTripped(m.id, sid), isFalse);
+  });
+
+  test('explicit isCancelled signal completes true when the budget expires', () async {
+    await fixture('signal-timeout', {'Stop': agentHook('slow', timeout: 1)});
+    Future<bool>? signal;
+    hooks.agentHookEvaluator = (e) {
+      signal = e.isCancelled;
+      return Completer<AgentHookVerdict?>().future;
+    };
+    expect((await hooks.fireStop(sid)).stopAllowed, isTrue);
+    expect(await signal!.timeout(const Duration(seconds: 2)), isTrue);
+  });
+
+  test('agent evaluation is quiet: a verdict never publishes to the chat transcript', () async {
+    await fixture('quiet', {'UserPromptSubmit': agentHook('review')});
+    hooks.agentHookEvaluator = (_) async => AgentHookVerdict.block('denied');
+    final session = AppState.I.sessions.firstWhere((s) => s.id == sid);
+    final before = session.messages.length;
+    final result = await hooks.fireDetailed(
+      'UserPromptSubmit',
+      sid,
+      payload: {'prompt': 'hi'},
+    );
+    expect(result.promptBlockReason, 'denied');
+    expect(session.messages.length, before);
+  });
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -38,6 +39,41 @@ bool _optionalBool(Map<String, dynamic> args, String key, bool fallback) {
   if (value == null) return fallback;
   if (value is bool) return value;
   return value.toString().toLowerCase() == 'true';
+}
+
+/// Runs [operation], honoring [cancellation] before and after it. Platform
+/// storage calls (secure storage) cannot be moved to a killed-on-deadline
+/// isolate, so this races the operation against the token and fails promptly
+/// once it is cancelled. A null token preserves the original behavior.
+Future<String> _runPlatformUtility(
+  Future<String> Function() operation,
+  UtilityCancellation? cancellation,
+) {
+  if (cancellation == null) return operation();
+  if (cancellation.isCancelled) {
+    return Future<String>.error(
+      const FormatException('Utility operation cancelled.'),
+    );
+  }
+  final result = Completer<String>();
+  unawaited(
+    cancellation.whenCancelled.then((_) {
+      if (!result.isCompleted) {
+        result.completeError(
+          const FormatException('Utility operation cancelled.'),
+        );
+      }
+    }),
+  );
+  operation().then(
+    (value) {
+      if (!result.isCompleted) result.complete(value);
+    },
+    onError: (Object error, StackTrace stack) {
+      if (!result.isCompleted) result.completeError(error, stack);
+    },
+  );
+  return result.future;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,24 +520,39 @@ class PasswordVaultCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    checkUtilityInput(args);
     switch (toolName) {
       case 'generate':
-        return _generate(
-          _parseLength(args['length']),
-          _optionalBool(args, 'uppercase', true),
-          _optionalBool(args, 'lowercase', true),
-          _optionalBool(args, 'numbers', true),
-          _optionalBool(args, 'symbols', true),
+        final length = _parseLength(args['length']);
+        final uppercase = _optionalBool(args, 'uppercase', true);
+        final lowercase = _optionalBool(args, 'lowercase', true);
+        final numbers = _optionalBool(args, 'numbers', true);
+        final symbols = _optionalBool(args, 'symbols', true);
+        return runBoundedUtility(
+          () => _generatePassword(
+            length,
+            uppercase,
+            lowercase,
+            numbers,
+            symbols,
+          ),
+          cancellation: cancellation,
         );
       case 'store':
-        return _store(
-          _requireString(args, 'key'),
-          _requireString(args, 'secret'),
+        return _runPlatformUtility(
+          () => _store(
+            _requireString(args, 'key'),
+            _requireString(args, 'secret'),
+          ),
+          cancellation,
         );
       case 'get':
-        return _get(_requireString(args, 'key'));
+        return _runPlatformUtility(
+          () => _get(_requireString(args, 'key')),
+          cancellation,
+        );
       case 'list':
-        return _list();
+        return _runPlatformUtility(_list, cancellation);
       default:
         throw ArgumentError('Unknown tool: $toolName');
     }
@@ -518,7 +569,7 @@ class PasswordVaultCapability implements NativePluginCapability {
     return parsed;
   }
 
-  String _generate(
+  static String _generatePassword(
     int length,
     bool uppercase,
     bool lowercase,
@@ -657,6 +708,14 @@ class EnvManagerCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    checkUtilityInput(args);
+    return runBoundedUtility(
+      () => EnvManagerCapability()._execute(toolName, args),
+      cancellation: cancellation,
+    );
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'parse':
         return jsonEncode(_parseEnvMap(_requireString(args, 'env_content')));
@@ -861,6 +920,14 @@ class LogAnalyzerCapability implements NativePluginCapability {
     Map<String, dynamic> args, {
     UtilityCancellation? cancellation,
   }) async {
+    checkUtilityInput(args);
+    return runBoundedUtility(
+      () => LogAnalyzerCapability()._execute(toolName, args),
+      cancellation: cancellation,
+    );
+  }
+
+  String _execute(String toolName, Map<String, dynamic> args) {
     switch (toolName) {
       case 'parse':
         return _parse(_requireString(args, 'log_text'));

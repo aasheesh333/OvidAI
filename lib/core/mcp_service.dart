@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'github_service.dart';
@@ -2747,7 +2748,44 @@ class McpService {
     return _freeze(payload) as Map<String, dynamic>;
   }
 
+  /// Race [future] against [cancellation]: whichever settles first wins. A
+  /// cancellation resolves the call with [McpRpcResult.cancelled] immediately
+  /// instead of waiting on a stalled server, while the original future is
+  /// still consumed so a late completion/error can never go unhandled.
+  static Future<McpRpcResult> _withCancellation(
+    Future<McpRpcResult> future,
+    UtilityCancellation? cancellation,
+  ) {
+    if (cancellation == null) return future;
+    if (cancellation.isCancelled) {
+      return Future.value(const McpRpcResult.cancelled());
+    }
+    final completer = Completer<McpRpcResult>();
+    unawaited(
+      cancellation.whenCancelled.then((_) {
+        if (!completer.isCompleted) {
+          completer.complete(const McpRpcResult.cancelled());
+        }
+      }),
+    );
+    unawaited(
+      future.then(
+        (result) {
+          if (!completer.isCompleted) completer.complete(result);
+        },
+        onError: (Object error, StackTrace stack) {
+          if (!completer.isCompleted) completer.completeError(error, stack);
+        },
+      ),
+    );
+    return completer.future;
+  }
+
   /// Call a tool on a connected server. Returns the text result.
+  ///
+  /// [cancellation] aborts an in-flight call the moment the token fires (a
+  /// user Stop): the caller returns a cancellation error without waiting for
+  /// the server, while the underlying transport still winds itself down.
   ///
   /// Server errors (JSON-RPC error, `isError: true`, timeout, dead process)
   /// come back as an explicit `MCP error: …` string so the model knows the
@@ -2758,7 +2796,11 @@ class McpService {
     String toolName,
     Map<String, dynamic> args, {
     Duration? timeout,
+    UtilityCancellation? cancellation,
   }) async {
+    if (cancellation?.isCancelled ?? false) {
+      return 'MCP error: "$toolName" on "$serverName" was cancelled.';
+    }
     final key = _keyForName(serverName);
     final rs = _running[key];
     if (rs == null) {
@@ -2768,8 +2810,8 @@ class McpService {
           '${_lastDeathOf(key)}';
     }
     final effectiveTimeout = _effectiveToolTimeout(rs.server, timeout);
-    final res = rs.server.transport == 'http'
-        ? await _rpcHttp(
+    final pending = rs.server.transport == 'http'
+        ? _rpcHttp(
             rs,
             'tools/call',
             {'name': toolName, 'arguments': args},
@@ -2777,18 +2819,22 @@ class McpService {
             cancelOnTimeout: true,
           )
         : rs.server.transport == 'sse'
-        ? await _rpcSse(
+        ? _rpcSse(
             rs,
             'tools/call',
             {'name': toolName, 'arguments': args},
             timeout: effectiveTimeout,
           )
         : rs.server.transport == 'native'
-        ? await _callNativeTool(rs, toolName, args, timeout: effectiveTimeout)
-        : await _rpc(rs, 'tools/call', {
+        ? _callNativeTool(rs, toolName, args, timeout: effectiveTimeout)
+        : _rpc(rs, 'tools/call', {
             'name': toolName,
             'arguments': args,
           }, timeout: effectiveTimeout);
+    final res = await _withCancellation(pending, cancellation);
+    if (res.isCancelled) {
+      return 'MCP error: "$toolName" on "$serverName" was cancelled.';
+    }
     if (rs.sseDestinationFailure != null) {
       return 'MCP error: ${rs.sseDestinationFailure}';
     }
@@ -2874,6 +2920,8 @@ class McpService {
   static Future<String> callToolForTest({
     required List<String> replies,
     String method = 'tools/call',
+    Duration? timeout,
+    UtilityCancellation? cancellation,
   }) async {
     final harness = _McpTestHarness(replies);
     final svc = McpService._();
@@ -2898,7 +2946,13 @@ class McpService {
       }),
     );
     try {
-      return await svc.callTool('test-server', 'tool', {});
+      return await svc.callTool(
+        'test-server',
+        'tool',
+        {},
+        timeout: timeout,
+        cancellation: cancellation,
+      );
     } finally {
       await harness.dispose();
     }
@@ -3315,19 +3369,40 @@ class McpRpcResult {
   final dynamic value;
   final String? error;
   final bool isTimeout;
-  const McpRpcResult._ok(this.value) : error = null, isTimeout = false;
+  final bool isCancelled;
+  const McpRpcResult._ok(this.value)
+    : error = null,
+      isTimeout = false,
+      isCancelled = false;
   const McpRpcResult._error(String e)
     : value = null,
       error = e,
-      isTimeout = false;
-  const McpRpcResult._timeout() : value = null, error = null, isTimeout = true;
-
-  const McpRpcResult.ok(this.value) : error = null, isTimeout = false;
+      isTimeout = false,
+      isCancelled = false;
+  const McpRpcResult._timeout()
+    : value = null,
+      error = null,
+      isTimeout = true,
+      isCancelled = false;
+  const McpRpcResult.ok(this.value)
+    : error = null,
+      isTimeout = false,
+      isCancelled = false;
   const McpRpcResult.error(String e)
     : value = null,
       error = e,
-      isTimeout = false;
-  const McpRpcResult.timeout() : value = null, error = null, isTimeout = true;
+      isTimeout = false,
+      isCancelled = false;
+  const McpRpcResult.timeout()
+    : value = null,
+      error = null,
+      isTimeout = true,
+      isCancelled = false;
+  const McpRpcResult.cancelled()
+    : value = null,
+      error = null,
+      isTimeout = false,
+      isCancelled = true;
 
   bool get isError => error != null;
 }

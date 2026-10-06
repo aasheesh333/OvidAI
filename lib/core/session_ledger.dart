@@ -398,6 +398,46 @@ class SessionLedger {
     });
   }
 
+  static const String _ledgerSuffix = '.jsonl';
+
+  /// Every session id with an on-disk ledger in this storage root, derived by
+  /// enumerating the ledger directory itself (never an in-memory index), so the
+  /// verified all-store reset can read back exactly what [delete] unlinks.
+  /// Deletion markers and unrelated files are ignored. Digest-named ledgers
+  /// (`v2.<sha256>`) are omitted because the hash is one-way — the original id
+  /// cannot be reconstructed — while [isEmpty] still reports the root non-empty
+  /// so such leftovers can never be mistaken for a completed reset.
+  Future<Set<String>> storedSessionIds() async {
+    final root = await _dir();
+    if (!await root.exists()) return <String>{};
+    final ids = <String>{};
+    await for (final entity in root.list()) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      if (!name.endsWith(_ledgerSuffix)) continue;
+      final stem = name.substring(0, name.length - _ledgerSuffix.length);
+      if (stem.startsWith('v2.')) continue;
+      ids.add(stem);
+    }
+    return ids;
+  }
+
+  /// True when this storage root holds no session ledger at all. The verified
+  /// reset calls this after [delete]ing every known id; it fails closed (false)
+  /// for any leftover, including digest-named files that [storedSessionIds]
+  /// cannot attribute back to a session id.
+  Future<bool> isEmpty() async {
+    final root = await _dir();
+    if (!await root.exists()) return true;
+    await for (final entity in root.list()) {
+      if (entity is File &&
+          entity.uri.pathSegments.last.endsWith(_ledgerSuffix)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /// Legacy close-and-remove operation; a later append may start fresh.
   /// Retained for existing callers/fixtures. Use [delete] for explicit session
   /// deletion; close never removes its durable tombstone.

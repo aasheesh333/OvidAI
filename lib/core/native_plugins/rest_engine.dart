@@ -306,19 +306,29 @@ class RestApiCapability implements NativePluginCapability {
     }
     http.Response response;
     try {
-      final request = http.Request(method, uri);
-      request.headers.addAll(headers);
-      if (body != null) request.body = body;
-      final streamed = await _client.send(request).timeout(
-            Duration(seconds: timeoutSeconds),
-          );
-      response = await http.Response.fromStream(streamed);
+      response = await _sendWithCancellation(
+        method: method,
+        uri: uri,
+        headers: headers,
+        body: body,
+        timeoutSeconds: timeoutSeconds,
+        cancellation: cancellation,
+      );
     } on TimeoutException {
       throw FormatException(
         'Request to $uri timed out after $timeoutSeconds seconds.',
       );
     } catch (e) {
+      // A cancellation that lands while the request is in flight (or just
+      // after the response arrives) must surface as cancellation, never as
+      // a generic HTTP failure.
+      if (cancellation?.isCancelled ?? false) {
+        throw const FormatException('Utility operation cancelled.');
+      }
       throw FormatException('HTTP request failed: $e');
+    }
+    if (cancellation?.isCancelled ?? false) {
+      throw const FormatException('Utility operation cancelled.');
     }
     if (response.statusCode >= 200 && response.statusCode < 300) {
       return _trimOutput(response.body);
@@ -327,6 +337,90 @@ class RestApiCapability implements NativePluginCapability {
     // error payload, e.g. Slack's {"ok":false,…}); the status line keeps
     // success/failure unambiguous.
     return _trimOutput('HTTP ${response.statusCode}\n${response.body}');
+  }
+
+  /// Sends [method] to [uri] and collects the full response, honouring
+  /// [cancellation]: an already-cancelled token fails before sending, and a
+  /// token that cancels mid-flight aborts the request (via
+  /// [http.AbortableRequest] for real clients) and cancels the response
+  /// subscription so the call returns promptly instead of waiting out the
+  /// timeout. With a `null` token this is the plain request path.
+  Future<http.Response> _sendWithCancellation({
+    required String method,
+    required Uri uri,
+    required Map<String, String> headers,
+    required String? body,
+    required int timeoutSeconds,
+    UtilityCancellation? cancellation,
+  }) {
+    if (cancellation?.isCancelled ?? false) {
+      return Future.error(
+        const FormatException('Utility operation cancelled.'),
+      );
+    }
+    final abort = Completer<void>();
+    final request = http.AbortableRequest(
+      method,
+      uri,
+      abortTrigger: abort.future,
+    );
+    request.headers.addAll(headers);
+    if (body != null) request.body = body;
+
+    final result = Completer<http.Response>();
+    StreamSubscription<List<int>>? subscription;
+    final bytes = <int>[];
+    void stop(Object error, [StackTrace? stack]) {
+      if (result.isCompleted) return;
+      if (!abort.isCompleted) abort.complete();
+      unawaited(subscription?.cancel());
+      result.completeError(error, stack);
+    }
+
+    final timer = Timer(
+      Duration(seconds: timeoutSeconds),
+      () => stop(
+        TimeoutException(
+          'Request to $uri timed out after $timeoutSeconds seconds.',
+        ),
+      ),
+    );
+    cancellation?.whenCancelled.then((_) {
+      stop(const FormatException('Utility operation cancelled.'));
+    });
+    unawaited(
+      _client.send(request).then(
+        (streamed) {
+          if (result.isCompleted) {
+            unawaited(streamed.stream.listen((_) {}).cancel());
+            return;
+          }
+          subscription = streamed.stream.listen(
+            (chunk) {
+              if (!result.isCompleted) bytes.addAll(chunk);
+            },
+            onError: stop,
+            onDone: () {
+              if (result.isCompleted) return;
+              result.complete(
+                http.Response.bytes(
+                  bytes,
+                  streamed.statusCode,
+                  headers: streamed.headers,
+                  request: request,
+                ),
+              );
+            },
+            cancelOnError: true,
+          );
+        },
+        onError: stop,
+      ),
+    );
+    return result.future.whenComplete(() async {
+      timer.cancel();
+      await subscription?.cancel();
+    });
   }
 
   RestToolDef _findTool(String toolName) {

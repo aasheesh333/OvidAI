@@ -652,7 +652,7 @@ abstract class _HostRoutedCapability extends RestApiCapability {
         return RestApiCapability(
           descriptor,
           client: _client,
-        ).callTool(toolName, args);
+        ).callTool(toolName, args, cancellation: cancellation);
       }
       final label = configFields
           .firstWhere((field) => field.key == 'host',
@@ -664,7 +664,7 @@ abstract class _HostRoutedCapability extends RestApiCapability {
     return RestApiCapability(
       _withBase(descriptor, 'https://$host$baseSuffix'),
       client: _client,
-    ).callTool(toolName, args);
+    ).callTool(toolName, args, cancellation: cancellation);
   }
 }
 
@@ -737,7 +737,7 @@ class BitbucketCapability extends RestApiCapability {
     final delegate = token.isNotEmpty
         ? RestApiCapability(descriptor, client: _client)
         : RestApiCapability(_bitbucketBasic, client: _client);
-    return delegate.callTool(toolName, args);
+    return delegate.callTool(toolName, args, cancellation: cancellation);
   }
 }
 
@@ -769,6 +769,10 @@ class TrelloCapability extends RestApiCapability {
       return 'Configure $label first: open the Configure sheet for '
           '"$pluginName" and save "api_key".';
     }
-    return super.callTool(toolName, {...args, 'key': key});
+    return super.callTool(
+      toolName,
+      {...args, 'key': key},
+      cancellation: cancellation,
+    );
   }
 }
