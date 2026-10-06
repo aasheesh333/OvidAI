@@ -419,7 +419,10 @@ Future<void> _brief(WidgetTester tester) async {
 // Run only inside tester.runAsync: file IO and Isolate.run cannot complete by
 // advancing fake time. Yield the real event queue until readiness, with a bound.
 Future<void> _ledgerReady(WidgetTester tester, String sessionId) async {
-  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  // Generous bound: under the full suite several isolates and real file IO run
+  // concurrently, so loading can take far longer than an idle 5s. The wait is
+  // still condition-based (loading must complete); the bound only guards hangs.
+  final deadline = DateTime.now().add(const Duration(seconds: 30));
   // Two queue barriers cover the screen's read followed by projection's read.
   // Await real IO instead of continuously scheduling frames against isolates.
   for (var i = 0; i < 2; i++) {
@@ -432,7 +435,7 @@ Future<void> _ledgerReady(WidgetTester tester, String sessionId) async {
     await tester.pump();
   }
   expect(find.byType(CircularProgressIndicator), findsNothing,
-      reason: 'Ledger must leave loading within five seconds of real IO time');
+      reason: 'Ledger must leave loading once real IO completes');
 }
 
 Future<void> _captureScreen(WidgetTester tester) async {

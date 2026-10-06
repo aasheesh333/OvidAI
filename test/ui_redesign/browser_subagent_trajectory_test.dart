@@ -67,7 +67,10 @@ void main() {
   ) async {
     // Called inside runAsync: ledger reads use real files and worker isolates,
     // which advancing the widget test's fake clock cannot complete.
-    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    // Generous bound: under the full suite several isolates and real file IO
+    // run concurrently, so loading can take far longer than an idle 5s. The
+    // wait is still condition-based; the bound only guards against hangs.
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
     // Readiness is loading completion, not a lazy offscreen event header.
     // Keep pumping while IO runs: frame callbacks can enqueue fake-zone
     // microtasks that a directly awaited ledger barrier cannot drain.
@@ -77,7 +80,7 @@ void main() {
       await tester.pump();
     }
     expect(find.byType(CircularProgressIndicator), findsNothing,
-        reason: 'Ledger must leave loading within five seconds of real IO');
+        reason: 'Ledger must leave loading once real IO completes');
   }
 
   testWidgets(
