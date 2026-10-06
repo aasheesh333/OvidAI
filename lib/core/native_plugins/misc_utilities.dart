@@ -248,7 +248,11 @@ class QrGeneratorCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'generate':
         return _generate(
@@ -463,7 +467,11 @@ class SshKeyManagerCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'generate':
         return _generate(
@@ -704,7 +712,11 @@ class MermaidDiagramsCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'validate':
         return _validate(_requireString(args, 'text'));
@@ -886,7 +898,11 @@ class ExcalidrawBridgeCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     checkUtilityInput(args);
     switch (toolName) {
       case 'stats':
@@ -1019,7 +1035,11 @@ class IconLibraryCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'search':
         return _search(
@@ -1159,7 +1179,11 @@ class FontPreviewCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'search':
         return _search(_requireNonBlank(args, 'query'), _timeoutSeconds(args));
@@ -1302,7 +1326,11 @@ class AudioNotesCapability implements NativePluginCapability {
       .save(pluginName: pluginName, fields: configFields, values: values);
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'transcribe':
         return _transcribe(
@@ -1398,7 +1426,11 @@ class ScreenAwarenessCapability implements NativePluginCapability {
   Future<void> configure(Map<String, String> values) async {}
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     if (toolName != 'read_screen') {
       throw ArgumentError('Unknown tool "$toolName" for $pluginName.');
     }

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/rest_engine.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import '../diag.dart';
 
 /// Deploy & infra integrations batch (NP4 Task 6, spec §4.4): declarative
@@ -716,7 +717,11 @@ class VercelMcpCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final token = await readConfig(descriptor.credentialKey);
     if (token == null || token.isEmpty) return missingCredError();
 
@@ -741,7 +746,11 @@ class VercelDeployCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final token = await readConfig(descriptor.credentialKey);
     if (token == null || token.isEmpty) return missingCredError();
 
@@ -780,7 +789,11 @@ class RailwayCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final token = await readConfig(descriptor.credentialKey);
     if (token == null || token.isEmpty) return missingCredError();
 
@@ -819,7 +832,11 @@ class HerokuCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final token = await readConfig(descriptor.credentialKey);
     if (token == null || token.isEmpty) return missingCredError();
 
@@ -839,7 +856,11 @@ class CloudflareCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final token = await readConfig(descriptor.credentialKey);
     if (token == null || token.isEmpty) return missingCredError();
 
@@ -882,7 +903,11 @@ class DockerCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final configuredHost = (await readConfig('docker_host'))?.trim();
     final apiVersion = (await readConfig('api_version'))?.trim() ?? 'v1.43';
 
@@ -956,7 +981,11 @@ class KubernetesCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final apiServer = (await readConfig('api_server'))?.trim();
     if (apiServer == null || apiServer.isEmpty) {
       return missingConfigError('Kubernetes API server', 'api_server');
@@ -1006,7 +1035,11 @@ class TerraformCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final token = await readConfig(descriptor.credentialKey);
     if (token == null || token.isEmpty) return missingCredError();
 
@@ -1043,7 +1076,11 @@ class ZapierCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     if (toolName == 'trigger_with_url') {
       final url = args['url']?.toString() ?? '';
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -1095,7 +1132,11 @@ class MakeCapability extends _InfraCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final token = await readConfig(descriptor.credentialKey);
     if (token == null || token.isEmpty) return missingCredError();
 

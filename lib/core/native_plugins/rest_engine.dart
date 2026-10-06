@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 
 /// Declarative REST framework + special engines (NP4 Task 1).
 ///
@@ -254,7 +255,11 @@ class RestApiCapability implements NativePluginCapability {
       );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final def = _findTool(toolName);
     for (final key in def.required) {
       final value = args[key];

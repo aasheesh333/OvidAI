@@ -4,9 +4,10 @@ part of 'state.dart';
 extension _SettingsStateIntegration on AppState {
   void _bindSettingsActions() {
     SettingsActions.bindOwner(
-      // The existing Settings UI treats a non-null callback as READY. Legacy
-      // best-effort deletion cannot satisfy its verified all-store contract.
-      reset: null,
+      // The verified all-store reset runs under the same barrier as restore and
+      // reports per-store readback truth; it never claims success for a store
+      // whose storage it cannot read back.
+      reset: _resetAllData,
       restore: () {
         final account = _sessionAccountToken;
         return (backup, ids) => _withSettingsBarrier(
@@ -23,6 +24,170 @@ extension _SettingsStateIntegration on AppState {
         !_sessionAccountReady) {
       throw StateError('Account changed or is not ready. No restore published.');
     }
+  }
+
+  /// Verified all-store reset. Runs under the settings barrier so producers are
+  /// fenced and pending writes drained, stages every canonical store without
+  /// destroying data, then commits and reads each store back. A store whose
+  /// owner exposes no readback API is reported unsupported rather than claimed
+  /// as complete.
+  Future<SettingsResetResult> _resetAllData() async {
+    final account = _sessionAccountToken;
+    final result = await _withSettingsBarrier(account, (token) async {
+      _checkSettingsOwner(token);
+      final ledgerIds = <String>{};
+      final workspaceIds = <String>{};
+      final receipts = ImageReceiptStore();
+      final receiptAccount = ImageStudio.I.accountId;
+      final coordinator = ResetCoordinator.canonical({
+        ResetStoreKind.sessions: FunctionalResetStore(
+          name: ResetStoreKind.sessions.id,
+          onStage: () async {
+            workspaceIds
+              ..clear()
+              ..addAll([
+                for (final session in sessions)
+                  if (session.sandboxId != null &&
+                      session.sandboxId!.isNotEmpty)
+                    session.sandboxId!,
+              ]);
+          },
+          onDelete: () async {
+            // Workspaces first: a failed workspace delete aborts before the
+            // durable transcript rows are removed, so the store is reported
+            // failed rather than silently half-reset.
+            for (final sandboxId in workspaceIds) {
+              await _workspaceDeleter(sandboxId);
+            }
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.remove(_accountKey(AppState._kSessions));
+            await prefs.remove(_accountKey(AppState._kActive));
+            await prefs.remove(_accountKey(AppState._kSessionBootstrap));
+            await prefs.reload();
+            _clearDeferredSessions();
+            sessions.clear();
+            activeSessionId = null;
+            _dirtySessionIds.clear();
+            _notifiedDeletedSessionIds.clear();
+            _invalidateSessionPersistenceCache();
+            refresh();
+          },
+          onVerifyDeleted: () async {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.reload();
+            final rows = prefs.getStringList(_accountKey(AppState._kSessions));
+            return (rows == null || rows.isEmpty) &&
+                sessions.isEmpty &&
+                _deferredSessionJson == null &&
+                activeSessionId == null;
+          },
+        ),
+        ResetStoreKind.search: FunctionalResetStore(
+          name: ResetStoreKind.search.id,
+          onStage: () async {},
+          onDelete: () => SessionSearch.I.clear(),
+          onVerifyDeleted: () async {
+            throw UnsupportedError(
+              'SessionSearch.clear() exposes no row-count/emptiness readback; '
+              'add a probe before this store can be reported verified.',
+            );
+          },
+        ),
+        ResetStoreKind.ledger: FunctionalResetStore(
+          name: ResetStoreKind.ledger.id,
+          onStage: () async {
+            ledgerIds
+              ..clear()
+              ..addAll(sessions.map((session) => session.id))
+              ..addAll(_deferredLedgerSessionIds());
+          },
+          onDelete: () async {
+            for (final id in ledgerIds) {
+              await SessionLedger.I.delete(id);
+            }
+          },
+          onVerifyDeleted: () async {
+            throw UnsupportedError(
+              'SessionLedger exposes no root enumeration; add an emptiness/'
+              'enumeration probe before this store can be reported verified.',
+            );
+          },
+        ),
+        ResetStoreKind.memory: FunctionalResetStore(
+          name: ResetStoreKind.memory.id,
+          onStage: () async {},
+          onDelete: () async => (await _openMemoryStore()).deleteAll(),
+          onVerifyDeleted: () async =>
+              !(await _openMemoryStore()).root.existsSync(),
+        ),
+        ResetStoreKind.account: FunctionalResetStore(
+          name: ResetStoreKind.account.id,
+          onStage: () async {},
+          // Sign-out cannot run inside this barrier: FirebaseService.signOut
+          // awaits AppState.transitionSessionAccount, which awaits this very
+          // barrier's `_settingsOperation` and would deadlock. Report the store
+          // truthfully instead of faking a sign-out. `isSignedIn` is read back
+          // directly because `accountReady` also folds in the barrier's own
+          // session-account fence and would otherwise verify as empty.
+          onDelete: () async {},
+          onVerifyDeleted: () async => !FirebaseService.I.isSignedIn,
+        ),
+        ResetStoreKind.imageReceipts: FunctionalResetStore(
+          name: ResetStoreKind.imageReceipts.id,
+          onStage: () async {},
+          onDelete: () async {
+            if (receiptAccount != null && receiptAccount.isNotEmpty) {
+              await receipts.redactAccount(receiptAccount);
+            }
+          },
+          onVerifyDeleted: () async {
+            if (receiptAccount == null || receiptAccount.isEmpty) return true;
+            return (await receipts.list(
+              receiptAccount,
+            )).every((row) => row.receipt == null);
+          },
+        ),
+        ResetStoreKind.shares: FunctionalResetStore(
+          name: ResetStoreKind.shares.id,
+          onStage: () async {},
+          onDelete: () async {},
+          onVerifyDeleted: () async {
+            throw UnsupportedError(
+              'Conversation shares (server) and per-session browser profiles '
+              'expose no single owner readback; add an emptiness probe before '
+              'this store can be reported verified.',
+            );
+          },
+        ),
+      });
+      await coordinator.prepare();
+      return (await coordinator.commit()).toSettingsResult();
+    });
+    // Restore a usable empty chat after a verified session wipe, mirroring the
+    // legacy reset. Kept outside the barrier so the fresh root is not itself a
+    // reset store and is never read back as residual data.
+    if (result.completed.contains(ResetStoreKind.sessions.id)) {
+      try {
+        _ensureActiveSession();
+        refresh();
+      } catch (e) {
+        Diag.swallow('state', e);
+      }
+    }
+    return result;
+  }
+
+  Set<String> _deferredLedgerSessionIds() {
+    final ids = <String>{};
+    for (final raw in _deferredSessionJson ?? const <String>[]) {
+      try {
+        final id = (jsonDecode(raw) as Map<String, dynamic>)['id'];
+        if (id is String && id.isNotEmpty) ids.add(id);
+      } catch (_) {
+        // A malformed deferred row is not a ledger owner.
+      }
+    }
+    return ids;
   }
 
   Future<T> _withSettingsBarrier<T>(
@@ -71,6 +236,12 @@ extension _SettingsStateIntegration on AppState {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
     _checkSettingsOwner(token);
+    // Capture every allowlisted setting before any transcript write so a failed
+    // settings apply (or a later transcript rollback) can restore it exactly.
+    final previousSettings = <String, Object?>{
+      for (final settingKey in SettingsBackupService.settingsAllowlist)
+        settingKey: prefs.get(settingKey),
+    };
     final key = _accountKey(AppState._kSessions);
     final oldRows = prefs.getStringList(key);
     final liveBefore = _sessionJsonForPersistence();
@@ -204,6 +375,31 @@ extension _SettingsStateIntegration on AppState {
       writeAttempted = true;
       await _writeRestoreRows(prefs, key, rows);
       checkUnchanged();
+      // Settings commit shares the transcript publication's rollback boundary:
+      // `_writeRestoreRows` verified its own readback first, and a settings
+      // failure self-rolls back every touched key before the catch below
+      // restores the transcript rows. Transcript-only archives (empty
+      // `settings`) never enter this branch, preserving version-1 exports.
+      if (backup.settings.isNotEmpty) {
+        await SettingsBackupService.applySettingsAtomically(
+          snapshot: backup.settings,
+          previous: previousSettings,
+          write: (settingKey, value) async {
+            final accepted = switch (value) {
+              null => await prefs.remove(settingKey),
+              final bool v => await prefs.setBool(settingKey, v),
+              final int v => await prefs.setInt(settingKey, v),
+              final double v => await prefs.setDouble(settingKey, v),
+              final String v => await prefs.setString(settingKey, v),
+              _ => throw StateError('Unsupported setting value.'),
+            };
+            await prefs.reload();
+            if (!accepted || prefs.get(settingKey) != value) {
+              throw StateError('Setting storage write/readback failed.');
+            }
+          },
+        );
+      }
       sessions.addAll(imported);
       _sessionNamespaceLoaded = true;
       keepCopies = true;

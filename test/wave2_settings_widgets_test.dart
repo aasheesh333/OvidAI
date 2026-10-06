@@ -134,6 +134,11 @@ void main() {
   testWidgets(
     'reset without owner is disabled, partial result never says all deleted',
     (tester) async {
+      // AppState now binds the verified reset owner on construction; clear it
+      // to exercise the no-owner (unavailable) screen state explicitly.
+      final boundReset = SettingsActions.resetAll;
+      addTearDown(() => SettingsActions.resetAll = boundReset);
+      SettingsActions.resetAll = null;
       await tester.pumpWidget(const MaterialApp(home: SettingsResetScreen()));
       expect(
         tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,

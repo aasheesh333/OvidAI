@@ -1,6 +1,7 @@
 import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/rest_engine.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 
 /// Dev-platform integrations batch (NP4 Task 4, spec §4.2): declarative
 /// [RestServiceDescriptor]s for GitLab, Bitbucket, Jira, Trello, Linear,
@@ -636,7 +637,11 @@ abstract class _HostRoutedCapability extends RestApiCapability {
   final bool requireHost;
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final stored = await NativePluginConfigStore.I.readAll(
       pluginName: pluginName,
       fields: configFields,
@@ -719,7 +724,11 @@ class BitbucketCapability extends RestApiCapability {
       ];
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final stored = await NativePluginConfigStore.I.readAll(
       pluginName: pluginName,
       fields: configFields,
@@ -742,7 +751,11 @@ class TrelloCapability extends RestApiCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final stored = await NativePluginConfigStore.I.readAll(
       pluginName: pluginName,
       fields: configFields,

@@ -215,7 +215,12 @@ void main() {
     // Integrated 2026-10-03: 10,929 tokens / 43,717 JSON chars. The added
     // session_read schema, scoped search authorization, scheduler fields and
     // render_html contract account for the growth; no capability is removed.
-    expect(approxTokens, lessThan(11300));
+    // Integrated 2026-10-06: 11,836 tokens. Wiring the MCP catalog tools
+    // (catalog_mcp_list_prompts/list_resources/list_resource_templates/
+    // get_prompt/read_resource) exposes MCP prompts+resources to the model,
+    // which was previously unreachable; the +~900 tokens are worth the
+    // capability. Ceiling raised accordingly; still no capability removed.
+    expect(approxTokens, lessThan(12200));
   });
 
   test('no advertised tool description is truncated', () {

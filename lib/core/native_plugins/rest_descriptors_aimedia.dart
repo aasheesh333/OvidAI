@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/prompt_framework.dart';
 import 'package:ovid_ai/core/native_plugins/rest_engine.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import '../diag.dart';
 
 /// AI, media & productivity integrations batch (NP4 Task 7, spec §4.5):
@@ -404,7 +405,11 @@ class DalleCapability extends _AiMediaCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     if (toolName != 'generate_image') {
       throw ArgumentError('Unknown tool: $toolName for plugin "$pluginName".');
     }
@@ -472,7 +477,11 @@ class ElevenLabsCapability extends _AiMediaCapability {
   static const int maxInputChars = 2000;
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final apiKey = await readConfig(descriptor.credentialKey);
     if (apiKey == null || apiKey.trim().isEmpty) return missingCredError();
 
@@ -556,7 +565,11 @@ class NotionSyncCapability extends _AiMediaCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final apiKey = await readConfig(descriptor.credentialKey);
     if (apiKey == null || apiKey.trim().isEmpty) return missingCredError();
 
@@ -683,7 +696,11 @@ class GoogleDriveCapability extends _AiMediaCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final token = await readConfig(descriptor.credentialKey);
     if (token == null || token.trim().isEmpty) return missingCredError();
 
@@ -802,7 +819,11 @@ class StripeCapability extends _AiMediaCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     final key = await readConfig(descriptor.credentialKey);
     if (key == null || key.trim().isEmpty) return missingCredError();
 
@@ -846,7 +867,11 @@ class YouTubeSummarizerCapability extends _AiMediaCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     if (toolName != 'get_details') {
       throw ArgumentError('Unknown tool: $toolName for plugin "$pluginName".');
     }

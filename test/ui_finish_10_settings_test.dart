@@ -205,8 +205,13 @@ void main() {
     expect(find.textContaining('No data restored'), findsOneWidget);
   });
 
-  testWidgets('reset stays unavailable and partial result remains truthful at 2x', (tester) async {
+  testWidgets('reset stays unavailable when unbound and partial result remains truthful at 2x', (tester) async {
     viewport(tester, const Size(360, 640));
+    // AppState now binds the verified reset owner on construction; clear it so
+    // this case still covers the genuinely-unavailable state, then restore.
+    final boundReset = SettingsActions.resetAll;
+    addTearDown(() => SettingsActions.resetAll = boundReset);
+    SettingsActions.resetAll = null;
     await tester.pumpWidget(host(const SettingsResetScreen(), scale: 2));
     await reveal(tester, find.text('Delete all data'));
     expect(tester.widget<FilledButton>(find.byType(FilledButton)).onPressed, isNull);

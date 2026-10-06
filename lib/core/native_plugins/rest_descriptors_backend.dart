@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:ovid_ai/core/native_plugin.dart';
 import 'package:ovid_ai/core/native_plugins/rest_engine.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -1119,7 +1120,11 @@ class FirebaseCapability extends _BackendCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final stored = await _stored();
     final projectId = (stored['project_id'] ?? '').trim();
@@ -1172,7 +1177,11 @@ class SupabaseCapability extends _BackendCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final stored = await _stored();
     final base = _cleanBaseUrl(stored['base_url'] ?? '');
@@ -1239,7 +1248,11 @@ class AirtableCapability extends _BackendCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final newArgs = Map<String, dynamic>.from(args);
     if (toolName == 'create_record' || toolName == 'update_record') {
@@ -1264,7 +1277,11 @@ class AppwriteCapability extends _BackendCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final stored = await _stored();
     final base = _cleanBaseUrl(stored['endpoint'] ?? '');
@@ -1289,7 +1306,11 @@ class PocketBaseCapability extends _BackendCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final stored = await _stored();
     final base = _cleanBaseUrl(stored['base_url'] ?? '');
@@ -1315,7 +1336,11 @@ class VectorDbCapability extends _BackendCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final stored = await _stored();
     final base = _cleanBaseUrl(stored['index_host'] ?? '');
@@ -1370,7 +1395,11 @@ class MongoDbCapability extends _BackendCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final stored = await _stored();
     final base = _cleanBaseUrl(stored['data_api_base'] ?? '');
@@ -1415,7 +1444,11 @@ class S3Capability extends _BackendCapability {
         );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final stored = await _stored();
     final secret = (stored['secret_access_key'] ?? '').trim();
@@ -1725,7 +1758,11 @@ class RedisCapability extends _BackendCapability {
   final RespSocketFactory? _socketOverride;
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final timeoutSeconds = RestApiCapability.resolveTimeoutSeconds(args);
     final stored = await _stored();
@@ -1972,7 +2009,11 @@ class ObsidianCapability extends _BackendCapability {
   final ObsidianVaultAccessProbe _accessProbe;
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     _toolDef(toolName);
     final stored = await _stored();
     final root = (stored['vault_root'] ?? '').trim();

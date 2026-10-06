@@ -479,7 +479,11 @@ class PasswordVaultCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'generate':
         return _generate(
@@ -648,7 +652,11 @@ class EnvManagerCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'parse':
         return jsonEncode(_parseEnvMap(_requireString(args, 'env_content')));
@@ -848,7 +856,11 @@ class LogAnalyzerCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'parse':
         return _parse(_requireString(args, 'log_text'));

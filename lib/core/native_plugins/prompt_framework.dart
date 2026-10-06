@@ -1,4 +1,5 @@
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 
 /// Marker interface for prompt-backed native plugin capabilities (NP5).
 ///
@@ -20,7 +21,11 @@ abstract class NativePromptCapability implements NativePluginCapability {
   /// Default callTool: prompt tools execute ONLY through the agent's
   /// runPromptTool path (needs a live model + session).
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async =>
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async =>
       'Plugin "$pluginName" runs its tools through the agent — call '
       'plugin__<slug>__$toolName in chat, not directly.';
 }

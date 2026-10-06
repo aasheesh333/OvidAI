@@ -27,6 +27,7 @@ import 'github_service.dart';
 import 'repo_cache.dart';
 import 'workspace_files.dart';
 import 'mcp_service.dart';
+import 'mcp_catalog_tools.dart';
 import 'session_ledger.dart';
 import 'session_search.dart';
 import 'session_browser_profiles.dart';
@@ -38,6 +39,7 @@ import 'html_artifact.dart';
 import 'plugin_manifest.dart';
 import 'native_plugin.dart';
 import 'native_plugins/prompt_framework.dart';
+import 'native_plugins/utility_cancellation_bridge.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_runtime.dart';
@@ -2206,6 +2208,11 @@ class AgentService extends ChangeNotifier {
     if (runKey.isNotEmpty) {
       try {
         SandboxService.I.killRunProcesses(runKey);
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
+      try {
+        UtilityCancellationBridge.I.signalStop(runKey);
       } catch (e) {
         Diag.swallow('agent_service', e);
       }
@@ -6232,7 +6239,9 @@ user which one instead of assuming this one.''';
   }
 
   List<Map<String, dynamic>> get _tools {
-    final tools = <Map<String, dynamic>>[];
+    final tools = <Map<String, dynamic>>[
+      ...McpCatalogTools.I.toolSpecs,
+    ];
     final app = AppState.I;
     // Plugin contributions resolve by the RUNNING session id — never the
     // foreground session (spec §7 session scoping at roster resolution).
@@ -13987,6 +13996,8 @@ ${await _agentsMdBlock()}
               : 'No matches for "$q2" in memories + this session. (Enable "Share session memory" in Settings to search across chats.)';
         }
         return hits.join('\n');
+      case String() when McpCatalogTools.I.handles(name):
+        return await McpCatalogTools.I.dispatch(name, args);
       case String() when name.startsWith('mcp__'):
         // Real discovered MCP tool call: mcp__<server>__<tool>.
         // The tool schema came from tools/list (McpService.connectedTools).
@@ -14154,7 +14165,17 @@ ${await _agentsMdBlock()}
         if (capability is NativePromptCapability) {
           return runPromptTool(capability, toolName, cleanArgs);
         }
-        return await capability.callTool(toolName, cleanArgs);
+        final runKey = _runSession?.id ?? '';
+        final cancellation = UtilityCancellationBridge.I.open(runKey);
+        try {
+          return await capability.callTool(
+            toolName,
+            cleanArgs,
+            cancellation: cancellation,
+          );
+        } finally {
+          UtilityCancellationBridge.I.close(runKey, cancellation);
+        }
       case String() when name.startsWith('plugin_'):
         // Canonical namespaced contribution (spec §4.4) — resolved through
         // the registry and enforced for the RUNNING session: another

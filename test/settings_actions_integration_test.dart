@@ -325,16 +325,75 @@ void main() {
     expect(prefs.getStringList('ovid_sessions'), hasLength(2));
   });
 
-  test('unsupported all-store reset is unavailable and preserves user data', () async {
-    final saved = prefs.getStringList('ovid_sessions');
-    final file = File('${root.path}/user-file')..writeAsStringSync('keep');
-    // This is the existing UI capability gate: a callback would advertise READY.
-    expect(SettingsActions.resetAll, isNull);
+  test('restore applies the allowlisted settings snapshot with the transcripts', () async {
+    await prefs.setString('ovid_theme_mode', 'light');
+    await prefs.setBool('ovid_keep_alive', false);
+    await prefs.setBool('ovid_show_reasoning', true);
+    final bytes = await SettingsBackupService(attachmentRoots: [root]).export([
+      ChatSession(
+        id: 'existing', title: 'Imported', model: 'untrusted',
+        messages: [Message(role: 'user', content: 'Imported transcript')],
+      ),
+    ], settings: {'ovid_theme_mode': 'dark', 'ovid_keep_alive': true});
+    await boundService().restore(bytes, root);
     await prefs.reload();
+    expect(prefs.getString('ovid_theme_mode'), 'dark');
+    expect(prefs.getBool('ovid_keep_alive'), true);
+    // The snapshot is a full allowlist section: an allowlisted key absent from
+    // it is removed, while non-allowlisted app state is untouched.
+    expect(prefs.getBool('ovid_show_reasoning'), isNull);
+    expect(prefs.getString('ovid_session_bootstrap_v1'), 'original snapshot');
+    expect(app.sessions, hasLength(2));
+  });
+
+  test('failed settings apply rolls back settings and transcripts together', () async {
+    await prefs.setString('ovid_theme_mode', 'light');
+    await prefs.setBool('ovid_keep_alive', true);
+    final saved = prefs.getStringList('ovid_sessions');
+    backend.beforeWrite = (key, value) async =>
+        !(key == 'flutter.ovid_theme_mode' && value == 'dark');
+    final bytes = await SettingsBackupService(attachmentRoots: [root]).export([
+      ChatSession(
+        id: 'existing', title: 'Imported', model: 'untrusted',
+        messages: [Message(role: 'user', content: 'Imported transcript')],
+      ),
+    ], settings: {'ovid_theme_mode': 'dark'});
+    await expectLater(boundService().restore(bytes, root), throwsStateError);
+    await prefs.reload();
+    expect(prefs.getString('ovid_theme_mode'), 'light');
+    expect(prefs.getBool('ovid_keep_alive'), true);
     expect(prefs.getStringList('ovid_sessions'), saved);
-    expect(prefs.getBool('show_reasoning'), false);
+    expect(app.sessions.map((s) => s.id), ['existing']);
+  });
+
+  test('wired all-store reset clears verifiable stores and reports the rest truthfully', () async {
+    memory.save(null, 'MEMORY.md', 'Forget global', mode: 'append');
+    memory.save('existing', 'MEMORY.md', 'Forget session', mode: 'append');
+    await prefs.setString('ovid_memories', 'invalid json');
+    final file = File('${root.path}/user-file')..writeAsStringSync('keep');
+
+    expect(SettingsActions.resetAll, isNotNull);
+    final report = await SettingsActions.resetAll!();
+
+    // Stores with a readback probe are genuinely cleared and reported complete.
+    expect(
+      report.completed,
+      containsAll(['sessions', 'memory', 'account', 'image-receipts']),
+    );
+    // Stores without a readback API are reported unsupported, never success.
+    expect(report.failures.keys, containsAll(['search', 'ledger', 'shares']));
+    expect(report.verifiedComplete, isFalse);
+    expect(report.success, isFalse);
+
+    // The verified stores really are empty after the reset.
+    await prefs.reload();
+    expect(prefs.getStringList('ovid_sessions'), isNull);
+    expect(prefs.getString('ovid_active_session'), isNull);
+    expect(prefs.getString('ovid_session_bootstrap_v1'), isNull);
+    expect(memory.root.existsSync(), isFalse);
+    expect(app.sessions.any((s) => s.id == 'existing'), isFalse);
+    // A user file outside app-owned stores is never touched.
     expect(file.readAsStringSync(), 'keep');
-    expect(app.sessions.single.title, 'Keep me');
   });
 
   test('legacy deleteAllData still clears memory preferences and sessions', () async {
@@ -353,6 +412,6 @@ void main() {
     expect(app.activeSession!.messages, isEmpty);
     expect(prefs.getStringList('ovid_sessions')!.map(
         (raw) => jsonDecode(raw)['id']), [app.activeSessionId]);
-    expect(SettingsActions.resetAll, isNull);
+    expect(SettingsActions.resetAll, isNotNull);
   });
 }

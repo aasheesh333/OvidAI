@@ -326,7 +326,11 @@ class RegexBuilderCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     if (!const {'test', 'replace', 'explain'}.contains(toolName)) {
       throw ArgumentError('Unknown tool: $toolName');
     }
@@ -779,7 +783,11 @@ class SqlFormatterCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'format':
         return _formatTokens(_requireString(args, 'sql'));
@@ -1551,7 +1559,11 @@ class ColorPaletteGenCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     switch (toolName) {
       case 'from_hex':
         return _fromHex(_requireString(args, 'hex'));

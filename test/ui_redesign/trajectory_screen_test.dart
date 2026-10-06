@@ -60,18 +60,23 @@ void main() {
   Widget host(Widget child) =>
       MaterialApp(theme: Aether.theme(), home: child);
 
-  Future<void> pumpUntilTrajectoryReady(
-    WidgetTester tester,
-    Finder ready,
-  ) async {
+  Future<void> pumpUntilTrajectoryReady(WidgetTester tester) async {
     // Called inside runAsync: ledger reads use real files and worker isolates,
     // which advancing the widget test's fake clock cannot complete.
-    final deadline = DateTime.now().add(const Duration(seconds: 5));
-    while (ready.evaluate().isEmpty && DateTime.now().isBefore(deadline)) {
+    // Generous bound: under the full suite several isolates and real file IO
+    // run concurrently, so loading can take far longer than an idle 5s. The
+    // wait is still condition-based; the bound only guards against hangs.
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    // Readiness is loading completion, not a lazy offscreen event header.
+    // Keep pumping while IO runs: frame callbacks can enqueue fake-zone
+    // microtasks that a directly awaited ledger barrier cannot drain.
+    while (find.byType(CircularProgressIndicator).evaluate().isNotEmpty &&
+        DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
       await tester.pump();
     }
-    expect(ready, findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing,
+        reason: 'Ledger must leave loading once real IO completes');
   }
 
   testWidgets('empty ledger renders AetherEmptyState and no event cards', (
@@ -80,10 +85,7 @@ void main() {
     final session = addSession('wave2-ui-traj-smoke-empty', 'Empty');
     await tester.runAsync(() async {
       await tester.pumpWidget(host(TrajectoryScreen(sessionId: session.id)));
-      await pumpUntilTrajectoryReady(
-        tester,
-        find.byKey(const ValueKey('trajectory-empty')),
-      );
+      await pumpUntilTrajectoryReady(tester);
     });
 
     expect(find.byKey(const ValueKey('trajectory-empty')), findsOneWidget);
@@ -124,11 +126,17 @@ void main() {
         });
 
         await tester.pumpWidget(host(TrajectoryScreen(sessionId: session.id)));
-        await pumpUntilTrajectoryReady(
-          tester,
-          find.byKey(const ValueKey('trajectory-events-title')),
-        );
+        await pumpUntilTrajectoryReady(tester);
       });
+
+      final eventsTitle = find.byKey(
+        const ValueKey('trajectory-events-title'),
+      );
+      await tester.scrollUntilVisible(eventsTitle, 180,
+          scrollable: find.byType(Scrollable).first);
+      await tester.pump();
+      await tester.ensureVisible(eventsTitle);
+      await tester.pump();
 
       // App bar keeps the ledger playback route identity.
       expect(find.text('Trajectory · With events'), findsOneWidget);
@@ -176,7 +184,7 @@ void main() {
       await SessionLedger.I.append(session.id, 'note', {});
 
       await tester.pumpWidget(host(TrajectoryScreen(sessionId: session.id)));
-      await pumpUntilTrajectoryReady(tester, find.text('#1 · Note'));
+      await pumpUntilTrajectoryReady(tester);
     });
     expect(find.text('#1 · Note'), findsOneWidget);
     expect(find.byType(AetherCard), findsNWidgets(1));
@@ -185,7 +193,8 @@ void main() {
     await tester.runAsync(() async {
       await SessionLedger.I.append(session.id, 'note', {});
       await tester.tap(find.byTooltip('Reload ledger'));
-      await pumpUntilTrajectoryReady(tester, find.text('#2 · Note'));
+      await tester.pump();
+      await pumpUntilTrajectoryReady(tester);
     });
 
     expect(find.text('#2 · Note'), findsOneWidget);

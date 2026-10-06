@@ -2,6 +2,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -52,7 +53,11 @@ class _FakeJsonCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     lastTool = toolName;
     lastArgs = Map<String, dynamic>.from(args);
     return 'ok:$toolName:${args['json_string'] ?? ''}';
@@ -79,7 +84,11 @@ class _FakeNoConfigCapability implements NativePluginCapability {
   }
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async =>
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async =>
       'ok';
 }
 

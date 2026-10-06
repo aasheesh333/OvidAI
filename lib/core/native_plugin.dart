@@ -1,6 +1,7 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'native_plugins/utility_limits.dart';
 import 'secure_store.dart';
 
 /// A single tool exposed by a native plugin capability.
@@ -41,7 +42,11 @@ abstract class NativePluginCapability {
   List<NativePluginConfigField> get configFields;
   List<NativePluginTool> get tools;
   Future<void> configure(Map<String, String> values);
-  Future<String> callTool(String toolName, Map<String, dynamic> args);
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  });
 }
 
 /// Persistent configuration storage for native plugin capabilities.

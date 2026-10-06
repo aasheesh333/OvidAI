@@ -1,4 +1,5 @@
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
 
 /// Part 1 (NP3) sandbox-backed capability: Shell History.
@@ -115,7 +116,11 @@ class ShellHistoryCapability implements NativePluginCapability {
   Future<void> configure(Map<String, String> values) async {}
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     if (!_isSandboxInstalled()) return _notInstalledMessage;
     switch (toolName) {
       case 'search':
@@ -315,7 +320,11 @@ class GitWorkbenchCapability implements NativePluginCapability {
       );
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     if (!_isSandboxInstalled()) return _notInstalledMessage;
     switch (toolName) {
       case 'status':
@@ -634,7 +643,11 @@ class PdfToolsCapability implements NativePluginCapability {
   Future<void> configure(Map<String, String> values) async {}
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async {
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async {
     if (!_isSandboxInstalled()) return _notInstalledMessage;
     switch (toolName) {
       case 'merge':

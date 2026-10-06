@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/native_plugin.dart';
+import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart';
 
@@ -18,7 +19,11 @@ class _TestNativeCapability implements NativePluginCapability {
   Future<void> configure(Map<String, String> values) async {}
 
   @override
-  Future<String> callTool(String toolName, Map<String, dynamic> args) async =>
+  Future<String> callTool(
+    String toolName,
+    Map<String, dynamic> args, {
+    UtilityCancellation? cancellation,
+  }) async =>
       'ok:$toolName';
 }
 
