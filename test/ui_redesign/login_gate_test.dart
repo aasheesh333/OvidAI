@@ -7,6 +7,7 @@ import 'package:ovid_ai/core/account_service.dart';
 import 'package:ovid_ai/core/auth_providers.dart';
 import 'package:ovid_ai/core/firebase_service.dart';
 import 'package:ovid_ai/ui/login_gate.dart';
+import 'package:ovid_ai/ui/widgets/ovid_mark.dart';
 
 /// Fake FirebaseService — same pattern as test/auth_login_gate_test.dart. All
 /// state fields are mutable so tests can drive transitions, and no real
@@ -81,7 +82,7 @@ void main() {
     );
     // Initial frame — splash should be up.
     await tester.pump();
-    expect(find.text('Ovid'), findsOneWidget);
+    expect(find.byType(OvidWordmark), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(find.text('Protected app'), findsNothing);
 
@@ -171,7 +172,7 @@ void main() {
       expect(service.signOutCalls, 1);
       // Signed out → login screen is up (also features the wordmark).
       expect(find.text('Protected app'), findsNothing);
-      expect(find.text('Ovid'), findsOneWidget);
+      expect(find.byType(OvidWordmark), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox());
       service.dispose();
@@ -202,7 +203,7 @@ void main() {
 
     // Protected child is painted (overlay is non-modal; both are present).
     expect(find.text('Protected app'), findsOneWidget);
-    expect(find.text('Welcome to Ovid'), findsOneWidget);
+    expect(find.text('Welcome to Ovid Si'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, "Let's go"), findsOneWidget);
 
     // Let the 5s auto-dismiss timer fire so we don't tear down the widget
@@ -233,13 +234,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Welcome to Ovid'), findsOneWidget);
+    expect(find.text('Welcome to Ovid Si'), findsOneWidget);
 
     // Advance past the 5s auto-dismiss and let the overlay unmount.
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
 
-    expect(find.text('Welcome to Ovid'), findsNothing);
+    expect(find.text('Welcome to Ovid Si'), findsNothing);
     expect(find.text('Protected app'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());

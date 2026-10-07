@@ -220,9 +220,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   onPressed: () => Navigator.pop(context),
                 ),
           title: Tooltip(
-            message: hideClose ? 'Setting up Ovid — one time' : 'Setting up sandbox',
+            message: hideClose ? 'Setting up Ovid Si — one time' : 'Setting up sandbox',
             child: Text(
-              hideClose ? 'Setting up Ovid — one time' : 'Setting up sandbox',
+              hideClose ? 'Setting up Ovid Si — one time' : 'Setting up sandbox',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),

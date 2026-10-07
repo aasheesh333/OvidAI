@@ -11,6 +11,7 @@ import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/auth_methods.dart';
 import 'package:ovid_ai/ui/login_gate.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
+import 'package:ovid_ai/ui/widgets/ovid_mark.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth_login_gate_test.dart' show GateService;
@@ -148,7 +149,7 @@ void main() {
         final service = _LoginService()..isAvailable = true;
         await _pumpGate(tester, service,
             size: viewport.size, scale: viewport.scale);
-        expect(find.text('Ovid'), findsOneWidget);
+        expect(find.byType(OvidWordmark), findsOneWidget);
         expect(find.textContaining('new account is created automatically'),
             findsOneWidget);
         expect(find.byType(TextField), findsNothing);
@@ -236,7 +237,7 @@ void main() {
       await _pumpGate(tester, service,
           size: const Size(360, 640), scale: 2,
           bindCloud: () async { binds++; });
-      expect(find.text('Ovid'), findsOneWidget);
+      expect(find.byType(OvidWordmark), findsOneWidget);
       expect(find.text('Protected app'), findsNothing);
       expect(binds, 0);
       await _reveal(tester, find.widgetWithText(FilledButton, 'Retry'));
@@ -294,18 +295,18 @@ void main() {
       tester.view.viewInsets = const FakeViewPadding(bottom: 280);
       await tester.pump(const Duration(milliseconds: 400));
       final card = find.ancestor(
-          of: find.text('Welcome to Ovid'), matching: find.byType(AetherCard));
+          of: find.text('Welcome to Ovid Si'), matching: find.byType(AetherCard));
       expect(tester.getSize(card).width, lessThanOrEqualTo(420));
       expect(tester.getRect(card).center.dx, closeTo(size.width / 2, 1));
       await _reveal(tester, find.text("Let's go"));
       expect(tester.getRect(find.text("Let's go")).bottom,
           lessThanOrEqualTo(size.height - 280));
       await tester.pump(const Duration(seconds: 6));
-      expect(find.text('Welcome to Ovid'), findsOneWidget,
+      expect(find.text('Welcome to Ovid Si'), findsOneWidget,
           reason: 'Accessible navigation needs time to read and dismiss.');
       await tester.tap(find.text("Let's go"));
       await tester.pump();
-      expect(find.text('Welcome to Ovid'), findsNothing);
+      expect(find.text('Welcome to Ovid Si'), findsNothing);
       expect(find.text('Protected app'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });

@@ -644,7 +644,7 @@ class _StudioScreenState extends State<StudioScreen> {
     if (!mounted) return null;
     if (!writable) {
       _toast(
-        'That folder is read-only for Ovid — grant All Files Access or pick '
+        'That folder is read-only for Ovid Si — grant All Files Access or pick '
         'another folder.',
       );
       return null;

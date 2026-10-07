@@ -9,6 +9,7 @@ import '../core/theme.dart';
 import '../core/auth_identity.dart';
 import 'auth_methods.dart';
 import 'widgets/aether_primitives.dart';
+import 'widgets/ovid_mark.dart';
 
 /// Mandatory Firebase sign-in gate with server account acknowledgement.
 ///
@@ -158,11 +159,11 @@ class _SplashScreenState extends State<_SplashScreen>
     super.initState();
     _anim = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1600),
+      duration: const Duration(milliseconds: 3000),
     );
     _fade = CurvedAnimation(
       parent: _anim,
-      curve: const Interval(0, 0.4, curve: Curves.easeOut),
+      curve: const Interval(0.55, 0.85, curve: Curves.easeOut),
     );
     _anim.repeat();
   }
@@ -178,97 +179,55 @@ class _SplashScreenState extends State<_SplashScreen>
     return Scaffold(
       backgroundColor: Aether.bg,
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            FadeTransition(
-              opacity: _fade,
-              child: Text(
-                'Ovid',
-                style: AetherType.display.copyWith(
-                  letterSpacing: -0.5,
-                  fontSize: 44,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Brand loop: logo + name reveal (ring draws, agent square pops,
+              // then the wordmark fades in) — 3 s, like the brand guidelines.
+              OvidMarkAnimated(
+                size: 104,
+                animation: OvidMarkAnimation.reveal,
+                variant: Aether.dark
+                    ? OvidMarkVariant.reversed
+                    : OvidMarkVariant.primary,
+              ),
+              const SizedBox(height: AetherSpacing.space6),
+              FadeTransition(
+                opacity: _fade,
+                child: OvidWordmark(size: 34, onDark: Aether.dark),
+              ),
+              const SizedBox(height: AetherSpacing.space3),
+              FadeTransition(
+                opacity: _fade,
+                child: Text(
+                  Aether.tagline.toUpperCase(),
+                  style: AetherType.caption.copyWith(letterSpacing: 2.4),
                 ),
               ),
-            ),
-            const SizedBox(height: AetherSpacing.space6),
-            // Animated accent-gradient underline progress indicator.
-            SizedBox(
-              width: 140,
-              height: 3,
-              child: AnimatedBuilder(
-                animation: _anim,
-                builder: (context, _) {
-                  final t = _anim.value;
-                  return CustomPaint(
-                    painter: _AccentUnderlinePainter(progress: t),
-                    size: const Size(140, 3),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: AetherSpacing.space4),
-            // Semantic spinner so tests + accessibility tools can locate the
-            // loading affordance (the gradient underline is decorative).
-            SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  Aether.accent.withValues(alpha: 0.6),
+              const SizedBox(height: AetherSpacing.space8),
+              // Semantic spinner so tests + accessibility tools can locate the
+              // loading affordance (the mark is decorative).
+              SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    Aether.accent.withValues(alpha: 0.6),
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-class _AccentUnderlinePainter extends CustomPainter {
-  _AccentUnderlinePainter({required this.progress});
-  final double progress;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final base = Paint()
-      ..color = Aether.hairline
-      ..strokeWidth = size.height
-      ..strokeCap = StrokeCap.round;
-    canvas.drawLine(
-      Offset(0, size.height / 2),
-      Offset(size.width, size.height / 2),
-      base,
-    );
-    // Moving accent-gradient segment traversing the underline.
-    final segmentWidth = size.width * 0.4;
-    final travel = size.width + segmentWidth;
-    final x = -segmentWidth + progress * travel;
-    final rect = Rect.fromLTWH(x, 0, segmentWidth, size.height);
-    final shader = LinearGradient(
-      colors: [
-        Aether.accent.withValues(alpha: 0.0),
-        Aether.accent,
-        Aether.accent.withValues(alpha: 0.0),
-      ],
-    ).createShader(rect);
-    final grad = Paint()
-      ..shader = shader
-      ..strokeWidth = size.height
-      ..strokeCap = StrokeCap.round;
-    canvas.drawLine(
-      Offset(x, size.height / 2),
-      Offset(x + segmentWidth, size.height / 2),
-      grad,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _AccentUnderlinePainter old) =>
-      old.progress != progress;
-}
+// (Splash underline painter removed with the Ovid Si rebrand — the mark
+// animation carries the loading affordance now.)
 
 // ---------------------------------------------------------------------------
 // Unavailable screen — Firebase not configured in this build.
@@ -350,7 +309,10 @@ class _AccountNotReadyScreen extends StatelessWidget {
                     const SizedBox(height: AetherSpacing.space5),
                     Semantics(
                       header: true,
-                      child: Text('Confirming your account', style: AetherType.h2),
+                      child: Text(
+                        'Confirming your account',
+                        style: AetherType.h2,
+                      ),
                     ),
                     const SizedBox(height: AetherSpacing.space3),
                     Text(
@@ -513,7 +475,9 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
   Widget build(BuildContext context) {
     return Positioned.fill(
       child: Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(context).bottom,
+        ),
         child: SafeArea(
           minimum: const EdgeInsets.all(AetherSpacing.space4),
           child: Align(
@@ -534,7 +498,7 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
                             mainAxisSize: MainAxisSize.min,
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              Text('Welcome to Ovid', style: AetherType.h2),
+                              Text('Welcome to Ovid Si', style: AetherType.h2),
                               const SizedBox(height: AetherSpacing.space2),
                               Text(
                                 'Explore your available models, create agents, '
@@ -572,10 +536,9 @@ class _GateWordmark extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Semantics(
     header: true,
-    child: Text(
-      'Ovid',
-      textAlign: TextAlign.center,
-      style: AetherType.display.copyWith(fontSize: 44, letterSpacing: -0.5),
+    label: Aether.brandName,
+    child: Center(
+      child: OvidLockup(markSize: 42, textSize: 28, onDark: Aether.dark),
     ),
   );
 }
@@ -595,114 +558,95 @@ class _LoginScreen extends StatelessWidget {
         .replaceFirst('Z', ' UTC');
     return Scaffold(
       backgroundColor: Aether.bg,
-      body: Stack(
-        children: [
-          // Gradient wash behind the top third of the screen.
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: IgnorePointer(
-              child: AetherGradientHeader(
-                height: MediaQuery.of(context).size.height / 3,
-                child: const SizedBox.shrink(),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: ListView(
+              shrinkWrap: true,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: const EdgeInsets.fromLTRB(
+                AetherSpacing.space4,
+                AetherSpacing.space7,
+                AetherSpacing.space4,
+                AetherSpacing.space6,
               ),
-            ),
-          ),
-          SafeArea(
-            child: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 420),
-                child: ListView(
-                  shrinkWrap: true,
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
-                  padding: const EdgeInsets.fromLTRB(
-                    AetherSpacing.space4,
-                    AetherSpacing.space7,
-                    AetherSpacing.space4,
-                    AetherSpacing.space6,
+              children: [
+                // Brand lockup + tagline.
+                const _GateWordmark(),
+                const SizedBox(height: AetherSpacing.space3),
+                Center(
+                  child: Text(
+                    Aether.tagline,
+                    style: TextStyle(
+                      fontSize: 14,
+                      height: 1.4,
+                      color: Aether.textMuted,
+                    ),
+                    textAlign: TextAlign.center,
                   ),
-                  children: [
-                    // Wordmark + tagline.
-                    const _GateWordmark(),
-                    const SizedBox(height: AetherSpacing.space3),
-                    Center(
-                      child: Text(
-                        'Your AI, grounded on your data',
-                        style: TextStyle(
-                          fontSize: 14,
-                          height: 1.4,
-                          color: Aether.textMuted,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ),
-                    const SizedBox(height: AetherSpacing.space7),
-                    if (pending) ...[
-                      AetherCard(
-                        color: Aether.warn.withValues(alpha: 0.10),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'Account deletion pending',
-                              style: AetherType.title,
-                            ),
-                            const SizedBox(height: AetherSpacing.space2),
-                            Text(
-                              'Deletion was requested on the server.',
-                              style: AetherType.bodyMuted,
-                            ),
-                            if (deadline != null) ...[
-                              const SizedBox(height: AetherSpacing.space2),
-                              Text(
-                                'Scheduled after\n$deadline',
-                                style: AetherType.body,
-                              ),
-                              const SizedBox(height: AetherSpacing.space2),
-                              Text(
-                                'Sign in before then to cancel.',
-                                style: AetherType.bodyMuted,
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: AetherSpacing.space5),
-                    ],
-                    AetherCard(
-                      padding: const EdgeInsets.all(AetherSpacing.space4),
-                      title: const Text('Sign in or create an account'),
-                      child: AuthMethods(
-                        providers: service.authProviders,
-                        intent: AuthIntent.signIn,
-                        social: (id) => service.authenticateSocial(
-                          id,
-                          AuthIntent.signIn,
-                        ),
-                        phone: () => service.createPhoneFlow(AuthIntent.signIn),
-                      ),
-                    ),
-                    const SizedBox(height: AetherSpacing.space6),
-                    Text(
-                      'By continuing you agree to use Ovid responsibly. '
-                      'Abuse, automated farming, or sharing accounts may '
-                      'lead to suspension.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 13,
-                        height: 1.5,
-                        color: Aether.textMuted,
-                      ),
-                    ),
-                  ],
                 ),
-              ),
+                const SizedBox(height: AetherSpacing.space7),
+                if (pending) ...[
+                  AetherCard(
+                    color: Aether.warn.withValues(alpha: 0.10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Account deletion pending',
+                          style: AetherType.title,
+                        ),
+                        const SizedBox(height: AetherSpacing.space2),
+                        Text(
+                          'Deletion was requested on the server.',
+                          style: AetherType.bodyMuted,
+                        ),
+                        if (deadline != null) ...[
+                          const SizedBox(height: AetherSpacing.space2),
+                          Text(
+                            'Scheduled after\n$deadline',
+                            style: AetherType.body,
+                          ),
+                          const SizedBox(height: AetherSpacing.space2),
+                          Text(
+                            'Sign in before then to cancel.',
+                            style: AetherType.bodyMuted,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: AetherSpacing.space5),
+                ],
+                AetherCard(
+                  padding: const EdgeInsets.all(AetherSpacing.space4),
+                  title: const Text('Sign in or create an account'),
+                  child: AuthMethods(
+                    providers: service.authProviders,
+                    intent: AuthIntent.signIn,
+                    social: (id) =>
+                        service.authenticateSocial(id, AuthIntent.signIn),
+                    phone: () => service.createPhoneFlow(AuthIntent.signIn),
+                  ),
+                ),
+                const SizedBox(height: AetherSpacing.space6),
+                Text(
+                  'By continuing you agree to use Ovid responsibly. '
+                  'Abuse, automated farming, or sharing accounts may '
+                  'lead to suspension.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 13,
+                    height: 1.5,
+                    color: Aether.textMuted,
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }

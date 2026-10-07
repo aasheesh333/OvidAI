@@ -14,6 +14,7 @@ import 'package:ovid_ai/ui/profile_avatar.dart';
 import 'package:ovid_ai/ui/sidebar.dart';
 import 'package:ovid_ai/ui/startup_progress_panel.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
+import 'package:ovid_ai/ui/widgets/ovid_mark.dart';
 
 /// Lightweight startup task used to seed the coordinator with a single
 /// running item so the Aether polish on [StartupProgressPanel] has
@@ -75,7 +76,7 @@ void main() {
       await pumpSidebar(tester);
 
       // Brand wordmark still named "Ovid".
-      expect(find.text('Ovid'), findsOneWidget);
+      expect(find.byType(OvidWordmark), findsOneWidget);
 
       // "New session" preserved as the AetherPrimaryButton label.
       expect(find.text('New session'), findsOneWidget);

@@ -7742,7 +7742,7 @@ class _StudioFolderChip extends StatelessWidget {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'That folder is read-only for Ovid — grant All Files Access or pick another folder.',
+            'That folder is read-only for Ovid Si — grant All Files Access or pick another folder.',
           ),
           behavior: SnackBarBehavior.floating,
         ),

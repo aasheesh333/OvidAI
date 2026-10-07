@@ -5,6 +5,7 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/sidebar.dart';
+import 'package:ovid_ai/ui/widgets/ovid_mark.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Binding user revision (2026-09-24): the session sidebar shows NO repo
@@ -84,7 +85,7 @@ void main() {
     // Original headings are intact (the doc-comment contract above:
     // brand wordmark, primary CTA, search hint, SESSIONS section). In the
     // Aether redesign the search heading is the search field's hint text.
-    expect(find.text('Ovid'), findsOneWidget);
+    expect(find.byType(OvidWordmark), findsOneWidget);
     expect(find.text('New session'), findsOneWidget);
     expect(find.text('Search sessions'), findsOneWidget);
     expect(find.text('SESSIONS'), findsOneWidget);

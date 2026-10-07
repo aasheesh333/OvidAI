@@ -33,6 +33,7 @@ import 'plugins_screen.dart';
 import 'usage_screen.dart';
 import 'widgets/aether_primitives.dart';
 import '../core/diag.dart';
+import 'widgets/ovid_mark.dart';
 
 /// Settings hub — Aether premium reskin.
 ///
@@ -59,19 +60,13 @@ class SettingsScreen extends StatelessWidget {
           const _SectionGap(),
           const AetherSectionTitle(eyebrow: 'Account'),
           const SizedBox(height: 10),
-          AetherCard(
-            padding: EdgeInsets.zero,
-            child: _accountHeader(context),
-          ),
+          AetherCard(padding: EdgeInsets.zero, child: _accountHeader(context)),
 
           // ── Appearance ────────────────────────────────────────────────
           const _SectionGap(),
           const AetherSectionTitle(eyebrow: 'Appearance'),
           const SizedBox(height: 10),
-          const AetherCard(
-            padding: EdgeInsets.zero,
-            child: _ThemeToggle(),
-          ),
+          const AetherCard(padding: EdgeInsets.zero, child: _ThemeToggle()),
 
           // ── Models ────────────────────────────────────────────────────
           const _SectionGap(),
@@ -155,8 +150,7 @@ class SettingsScreen extends StatelessWidget {
                   title: 'Memory',
                   subtitleOn:
                       'ON — personal and current-chat memory context & tools',
-                  subtitleOff:
-                      'OFF — saved memory context & tools disabled',
+                  subtitleOff: 'OFF — saved memory context & tools disabled',
                   getter: _getMemoryEnabled,
                   setter: _setMemoryEnabled,
                 ),
@@ -231,8 +225,7 @@ class SettingsScreen extends StatelessWidget {
           const _SectionGap(),
           const AetherSectionTitle(
             eyebrow: 'Backup',
-            subtitle:
-                'Export, import, inspect and clear app-owned data.',
+            subtitle: 'Export, import, inspect and clear app-owned data.',
           ),
           const SizedBox(height: 10),
           AetherCard(
@@ -275,8 +268,7 @@ class SettingsScreen extends StatelessWidget {
           const _SectionGap(),
           const AetherSectionTitle(
             eyebrow: 'Health',
-            subtitle:
-                'Per-runtime probes and configuration repair.',
+            subtitle: 'Per-runtime probes and configuration repair.',
           ),
           const SizedBox(height: 10),
           AetherCard(
@@ -409,19 +401,12 @@ class SettingsScreen extends StatelessWidget {
                         signedIn
                             ? (fb.email ?? 'Signed in')
                             : 'Sign in to your account',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Aether.textFaint,
-                        ),
+                        style: TextStyle(fontSize: 12, color: Aether.textFaint),
                       ),
                     ],
                   ),
                 ),
-                Icon(
-                  Icons.chevron_right,
-                  size: 18,
-                  color: Aether.textFaint,
-                ),
+                Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
               ],
             );
           },
@@ -447,8 +432,9 @@ class SettingsScreen extends StatelessWidget {
           style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
         ),
         trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
-        onTap: () =>
-            Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen)),
+        onTap: () => Navigator.of(
+          context,
+        ).push(MaterialPageRoute(builder: (_) => screen)),
       ),
     );
   }
@@ -465,17 +451,13 @@ class SettingsScreen extends StatelessWidget {
     Widget screen, {
     required String actionLabel,
   }) {
-    void push() => Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => screen));
+    void push() =>
+        Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen));
     return InkWell(
       onTap: push,
       borderRadius: BorderRadius.circular(AetherRadius.rSm),
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: 4,
-          vertical: 10,
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
         child: Row(
           children: [
             Icon(icon, size: 20, color: Aether.textMuted),
@@ -1130,64 +1112,77 @@ class _ThemeToggle extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(children: [Icon(
-                mode == 'system'
-                    ? Icons.brightness_auto_outlined
-                    : mode == 'light'
-                    ? Icons.light_mode_outlined
-                    : Icons.dark_mode_outlined,
-                size: 20,
-                color: Aether.textMuted,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('Theme', style: AetherType.body),
-                    const SizedBox(height: 2),
-                    Text(
-                      mode == 'system'
-                          ? 'Follow system — ${app.lightTheme ? 'currently light' : 'currently dark'}'
-                          : mode == 'light'
-                          ? 'Light — bright surfaces'
-                          : 'Dark (default)',
-                      style: AetherType.caption,
-                    ),
-                  ],
-                ),
-              ),
-              ]),
-              const SizedBox(height: 12),
-              LayoutBuilder(builder: (context, constraints) {
-                final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
-                void change(String v) => _savePreference(
-                  context, 'ovid_theme_mode', v, () => app.setThemeMode(v));
-                if (constraints.maxWidth < 250 * scale) {
-                  return Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final option in const [('system', 'Auto'), ('light', 'Light'), ('dark', 'Dark')])
-                        ChoiceChip(
-                          label: Text(option.$2),
-                          selected: mode == option.$1,
-                          onSelected: (_) => change(option.$1),
+              Row(
+                children: [
+                  Icon(
+                    mode == 'system'
+                        ? Icons.brightness_auto_outlined
+                        : mode == 'light'
+                        ? Icons.light_mode_outlined
+                        : Icons.dark_mode_outlined,
+                    size: 20,
+                    color: Aether.textMuted,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('Theme', style: AetherType.body),
+                        const SizedBox(height: 2),
+                        Text(
+                          mode == 'system'
+                              ? 'Follow system — ${app.lightTheme ? 'currently light' : 'currently dark'}'
+                              : mode == 'light'
+                              ? 'Light — bright surfaces'
+                              : 'Dark (default)',
+                          style: AetherType.caption,
                         ),
-                    ],
-                  );
-                }
-                return AetherSegmentedControl<String>(
-                value: mode,
-                options: const [
-                  (value: 'system', label: 'Auto', icon: null),
-                  (value: 'light', label: 'Light', icon: null),
-                  (value: 'dark', label: 'Dark', icon: null),
+                      ],
+                    ),
+                  ),
                 ],
-                onChanged: change,
-              );
-              }),
+              ),
+              const SizedBox(height: 12),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+                  void change(String v) => _savePreference(
+                    context,
+                    'ovid_theme_mode',
+                    v,
+                    () => app.setThemeMode(v),
+                  );
+                  if (constraints.maxWidth < 250 * scale) {
+                    return Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final option in const [
+                          ('system', 'Auto'),
+                          ('light', 'Light'),
+                          ('dark', 'Dark'),
+                        ])
+                          ChoiceChip(
+                            label: Text(option.$2),
+                            selected: mode == option.$1,
+                            onSelected: (_) => change(option.$1),
+                          ),
+                      ],
+                    );
+                  }
+                  return AetherSegmentedControl<String>(
+                    value: mode,
+                    options: const [
+                      (value: 'system', label: 'Auto', icon: null),
+                      (value: 'light', label: 'Light', icon: null),
+                      (value: 'dark', label: 'Dark', icon: null),
+                    ],
+                    onChanged: change,
+                  );
+                },
+              ),
             ],
           ),
         );
@@ -1205,7 +1200,8 @@ class _TimeoutScreen extends StatelessWidget {
       backgroundColor: Aether.bg,
       appBar: AppBar(
         leading: const BackButton(),
-        toolbarHeight: kToolbarHeight * (MediaQuery.textScalerOf(context).scale(20) / 20),
+        toolbarHeight:
+            kToolbarHeight * (MediaQuery.textScalerOf(context).scale(20) / 20),
         title: const Text('AI response timeout'),
       ),
       body: AnimatedBuilder(
@@ -1567,16 +1563,7 @@ class _AboutScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
-          Center(
-            child: Text(
-              'Ovid',
-              style: TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.w700,
-                color: Aether.text,
-              ),
-            ),
-          ),
+          Center(child: const OvidWordmark(size: 24)),
           const SizedBox(height: 6),
           Center(
             child: Text(
@@ -1924,35 +1911,39 @@ class _SkillsScreenState extends State<SkillsScreen> {
       child: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(vertical: 24),
         child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.auto_fix_high_outlined, size: 40, color: Aether.textFaint),
-          const SizedBox(height: 12),
-          const Text(
-            'No skills yet',
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 6),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 40),
-            child: Text(
-              'Upload .md skill files. The agent can then call them in any '
-              'chat with the skill tool, or you can type /name directly.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 12,
-                height: 1.5,
-                color: Aether.textFaint,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.auto_fix_high_outlined,
+              size: 40,
+              color: Aether.textFaint,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'No skills yet',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 40),
+              child: Text(
+                'Upload .md skill files. The agent can then call them in any '
+                'chat with the skill tool, or you can type /name directly.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.5,
+                  color: Aether.textFaint,
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 16),
-          FilledButton.icon(
-            onPressed: _upload,
-            icon: const Icon(Icons.upload_file_outlined, size: 18),
-            label: const Text('Upload .md skill'),
-          ),
-        ],
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: _upload,
+              icon: const Icon(Icons.upload_file_outlined, size: 18),
+              label: const Text('Upload .md skill'),
+            ),
+          ],
         ),
       ),
     );

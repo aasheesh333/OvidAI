@@ -1,45 +1,53 @@
 import 'package:flutter/material.dart';
 
-/// OvidAI design system — restrained monochrome theme with a single
-/// muted indigo accent. Professional, calm, "no color noise".
+/// Ovid Si design system — flat Paper/Ink surfaces with a single Signal Red
+/// accent that belongs to the agent. Calm, confident, "no colour noise".
 /// Light/dark switchable: [Aether.dark] flips the whole palette; UI code
-/// reads the same names either way (the design system light/dark preference parity).
+/// reads the same names either way (light/dark preference parity).
+///
+/// Brand (docs: Ovid Si brand guidelines v2): Paper #F4F1EA, Ink #1B1B1B,
+/// Signal Red #E5484D, Stone #8A867D. Red appears in one place only — the
+/// agent. Balance Paper/Ink 90%, Signal Red 10%. No gradients or glow.
 class Aether {
   Aether._();
 
-  /// true = dark (default), false = light.  Set before runApp and on
-  /// toggle; call sites pick up the new palette on next rebuild.
-  static bool dark = true;
+  /// Brand name and tagline (launcher, splash, about, share).
+  static const brandName = 'Ovid Si';
+  static const tagline = 'Chat. Code. Create.';
 
-  // ── Dark palette ──
-  // Values aligned to the captured reference ramp
-  // (docs/superpowers/reference/2026-09-13-dsh-web-visual-reference.md).
-  static const _bgD = Color(0xFF151517);
-  static const _surfaceD = Color(0xFF232324);
-  static const _surfaceAltD = Color(0xFF2C2C2E);
-  static const _surfaceRaisedD = Color(0xFF353638);
-  // VISIBILITY (2026-09-27): _hairlineD was byte-identical to _surfaceD
-  // (both 0xFF232324), so every `Border.all(color: Aether.hairline)` on a
-  // card drew at 1.00:1 contrast — no visible edge at all on 82 call sites.
-  // Raised to a step that reads on surface AND surfaceRaised.
-  static const _hairlineD = Color(0xFF3A3A40);
-  static const _hairlineStrongD = Color(0xFF4A4A54);
-  static const _textD = Color(0xFFF9FAFB);
-  static const _textMutedD = Color(0xFFADB2B8);
-  static const _textFaintD = Color(0xFF81858C);
-  static const _codeBgD = Color(0xFF1B1B1C);
+  /// The brand mark colours (independent of light/dark for the mark itself).
+  static const paper = Color(0xFFF4F1EA);
+  static const ink = Color(0xFF1B1B1B);
+  static const signalRed = Color(0xFFE5484D);
+  static const stone = Color(0xFF8A867D);
 
-  // ── Light palette ──
-  static const _bgL = Color(0xFFFAFAFA);
+  /// true = dark (Ink), false = light (Paper). Paper is the default brand
+  /// surface; call sites pick up the new palette on next rebuild.
+  static bool dark = false;
+
+  // ── Dark palette (Ink) ──
+  static const _bgD = Color(0xFF141414);
+  static const _surfaceD = Color(0xFF1E1E1E);
+  static const _surfaceAltD = Color(0xFF262626);
+  static const _surfaceRaisedD = Color(0xFF303030);
+  static const _hairlineD = Color(0xFF333333);
+  static const _hairlineStrongD = Color(0xFF454545);
+  static const _textD = Color(0xFFF4F1EA);
+  static const _textMutedD = Color(0xFFA8A49B);
+  static const _textFaintD = Color(0xFF8A867D);
+  static const _codeBgD = Color(0xFF1A1A1A);
+
+  // ── Light palette (Paper) ──
+  static const _bgL = Color(0xFFF4F1EA);
   static const _surfaceL = Color(0xFFFFFFFF);
-  static const _surfaceAltL = Color(0xFFF2F2F5);
-  static const _surfaceRaisedL = Color(0xFFE9E9EE);
-  static const _hairlineL = Color(0xFFE2E2E8);
-  static const _hairlineStrongL = Color(0xFFCFCFD8);
-  static const _textL = Color(0xFF0F1115);
-  static const _textMutedL = Color(0xFF545557);
-  static const _textFaintL = Color(0xFF5B5F66);
-  static const _codeBgL = Color(0xFFF5F5F5);
+  static const _surfaceAltL = Color(0xFFEDE9DF);
+  static const _surfaceRaisedL = Color(0xFFE4DFD3);
+  static const _hairlineL = Color(0xFFDCD7CB);
+  static const _hairlineStrongL = Color(0xFFC4BEB0);
+  static const _textL = Color(0xFF1B1B1B);
+  static const _textMutedL = Color(0xFF6B675E);
+  static const _textFaintL = Color(0xFF8A867D);
+  static const _codeBgL = Color(0xFFEDE9DF);
 
   static Color get bg => dark ? _bgD : _bgL;
   static Color get surface => dark ? _surfaceD : _surfaceL;
@@ -55,18 +63,25 @@ class Aether {
   /// Fenced code-block background (distinct from the card surface).
   static Color get codeBg => dark ? _codeBgD : _codeBgL;
 
-  static const accent = Color(0xFF679EFE);
-  static const accentSoft = Color(0x1F679EFE);
+  /// Signal Red — the agent. One accent, used deliberately.
+  static const accent = signalRed;
+  static const accentSoft = Color(0x1FE5484D);
   static const success = Color(0xFF22C55E);
   static const warn = Color(0xFFF59E0B);
-  static const danger = Color(0xFFF25A5A);
+  static const danger = signalRed;
 
-  // Light-mode readable variants for links/chips/buttons on white surfaces.
-  static Color get accentC => dark ? accent : const Color(0xFF2563EB);
+  // Light-mode readable variants for links/chips/buttons on paper surfaces.
+  static Color get accentC => dark ? accent : const Color(0xFFC0292E);
   static Color get successC => dark ? success : const Color(0xFF1FA05F);
-  static Color get dangerC => dark ? danger : const Color(0xFFD23B33);
+  static Color get dangerC => dark ? danger : const Color(0xFFC0292E);
   static Color get successLight => dark ? success : const Color(0xFF15803D);
   static Color get warnLight => dark ? warn : const Color(0xFFB45309);
+
+  /// Brand motion: UI feedback 200–300 ms, ambient 1–3 s.
+  static const ease = Cubic(0.2, 0.8, 0.2, 1);
+  static const motionFast = Duration(milliseconds: 220);
+  static const motionBase = Duration(milliseconds: 280);
+  static const motionSlow = Duration(milliseconds: 420);
 
   static const mono = 'JetBrainsMono';
 

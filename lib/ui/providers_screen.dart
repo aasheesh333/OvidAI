@@ -65,7 +65,7 @@ class ProvidersScreen extends StatelessWidget {
               const AetherSectionTitle(
                 eyebrow: 'Ovid Cloud',
                 subtitle:
-                    'Managed by Ovid — one plan, every model. No key to copy.',
+                    'Managed by Ovid Si — one plan, every model. No key to copy.',
               ),
               const SizedBox(height: 12),
               if (ovidCloud != null) _OvidCloudTile(provider: ovidCloud),

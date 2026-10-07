@@ -45,7 +45,7 @@
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.BODY_SENSORS" />
     <application
-        android:label="Ovid"
+        android:label="Ovid Si"
         android:name="${applicationName}"
         android:allowBackup="false"
         android:usesCleartextTraffic="false"

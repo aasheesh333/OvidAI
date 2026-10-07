@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ovid Si mark: the ring (workspace) + Signal Red agent square, inside the
+     66dp adaptive-icon safe zone of the 108x108 canvas. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1B1B1B"
+        android:strokeWidth="8.5"
+        android:strokeLineJoin="round"
+        android:pathData="M39.86,21 L68.14,21 A18.86,18.86 0 0 1 87,39.86 L87,68.14 A18.86,18.86 0 0 1 68.14,87 L39.86,87 A18.86,18.86 0 0 1 21,68.14 L21,39.86 A18.86,18.86 0 0 1 39.86,21 Z" />
+    <path
+        android:fillColor="#E5484D"
+        android:pathData="M51,46.3 L56.7,46.3 A4.7,4.7 0 0 1 61.4,51 L61.4,56.7 A4.7,4.7 0 0 1 56.7,61.4 L51,61.4 A4.7,4.7 0 0 1 46.3,56.7 L46.3,51 A4.7,4.7 0 0 1 51,46.3 Z" />
+</vector>

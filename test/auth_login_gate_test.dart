@@ -162,12 +162,12 @@ void main() {
       child: const Text('Protected app'),
     )));
     await tester.pumpAndSettle();
-    expect(find.text('Welcome to Ovid'), findsOneWidget);
+    expect(find.text('Welcome to Ovid Si'), findsOneWidget);
     service.isSignedIn = false;
     service.accountReady = false;
     service.notifyListeners();
     await tester.pumpAndSettle();
-    expect(find.text('Welcome to Ovid'), findsNothing);
+    expect(find.text('Welcome to Ovid Si'), findsNothing);
     expect(find.text('Protected app'), findsNothing);
     await tester.pumpWidget(const SizedBox());
     service.dispose();

@@ -76,16 +76,18 @@ class AetherType {
   AetherType._();
 
   static TextStyle get display => TextStyle(
-    fontSize: 28,
+    fontSize: 34,
     fontWeight: FontWeight.w700,
-    height: 1.1,
+    height: 1.05,
+    letterSpacing: -1.0,
     color: Aether.text,
   );
 
   static TextStyle get h1 => TextStyle(
     fontSize: 22,
-    fontWeight: FontWeight.w700,
+    fontWeight: FontWeight.w600,
     height: 1.2,
+    letterSpacing: -0.4,
     color: Aether.text,
   );
 

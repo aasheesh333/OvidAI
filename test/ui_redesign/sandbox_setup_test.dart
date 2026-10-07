@@ -294,7 +294,7 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('Setting up Ovid — one time'), findsOneWidget);
+      expect(find.text('Setting up Ovid Si — one time'), findsOneWidget);
       expect(find.text('Install sandbox'), findsNothing);
       expect(coordinator.status, StudioSetupStatus.running);
       expect(installs, 1);
