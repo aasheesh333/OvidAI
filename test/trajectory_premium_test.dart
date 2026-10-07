@@ -97,6 +97,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('Existing timeline'), findsOneWidget);
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
   });
 }

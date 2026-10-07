@@ -38,13 +38,14 @@ void main() {
   test('a successful mint binds the key, tier and Auto model', () async {
     final app = AppState.I;
     final client = MockClient((request) async {
+      expect(request.url.host, 'api.ovidsi.com');
       if (request.url.path == '/mint') {
         expect(request.headers['Authorization'], 'Bearer fake-id-token');
         return http.Response(
           jsonEncode({
             'key': 'sk-user-abc',
             'tier': '7x',
-            'base_url': 'https://cloud.dhanuksoftwares.com/v1',
+            'base_url': 'https://api.ovidsi.com/v1',
           }),
           200,
         );
@@ -73,6 +74,34 @@ void main() {
     expect(app.ovidCloudTier, '7x');
     expect(app.ovidCloudIsPaid, isTrue);
     client.close();
+  });
+
+  test('persisted Ovid Cloud URLs migrate host without changing the route', () {
+    final cloud = ProviderConfig(
+      id: AppState.ovidCloudProviderId,
+      name: 'Ovid Cloud',
+      description: 'Managed Ovid Cloud provider',
+      baseUrl: 'https://api.ovidsi.com/v1',
+    );
+    cloud.applyPersistedJson({
+      'baseUrl': 'https://cloud.dhanuksoftwares.com/v1/models?region=us',
+    });
+    expect(
+      cloud.baseUrl,
+      'https://api.ovidsi.com/v1/models?region=us',
+    );
+    expect(Uri.parse(cloud.baseUrl).host, 'api.ovidsi.com');
+
+    final generic = ProviderConfig(
+      id: 'custom-provider',
+      name: 'Custom',
+      description: 'User provider',
+      baseUrl: 'https://example.com/v1',
+    );
+    generic.applyPersistedJson({
+      'baseUrl': 'https://cloud.dhanuksoftwares.com/custom',
+    });
+    expect(generic.baseUrl, 'https://cloud.dhanuksoftwares.com/custom');
   });
 
   test('free limit reached returns a distinct status, no key stored', () async {

@@ -279,16 +279,16 @@ class OvidCloudService extends ChangeNotifier {
   /// Default mint endpoint. Points at the same gateway host as the Ovid Cloud
   /// provider's base URL; `/mint` is served (behind Cloudflare) by the VPS
   /// verifier that checks the Firebase ID token + App Check token.
-  static const String mintUrl = 'https://cloud.dhanuksoftwares.com/mint';
+  static const String mintUrl = 'https://api.ovidsi.com/mint';
 
   /// Server-authoritative usage endpoint. Usage is read from the server (the
   /// source of truth), NOT computed on the device — so it is identical across
   /// a user's devices and a reverse engineer cannot fake or inflate it.
-  static const String usageUrl = 'https://cloud.dhanuksoftwares.com/usage';
+  static const String usageUrl = 'https://api.ovidsi.com/usage';
 
   /// TEST-only upgrade endpoint (the "Pay now" button). The server gates it
   /// behind ALLOW_TEST_UPGRADE; a real payment webhook replaces it later.
-  static const String upgradeUrl = 'https://cloud.dhanuksoftwares.com/upgrade';
+  static const String upgradeUrl = 'https://api.ovidsi.com/upgrade';
 
   /// Test seam: force a specific [CloudConnectionState] for [state] without
   /// going through the mint/retry round-trip. Lets widget tests exercise the

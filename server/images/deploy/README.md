@@ -102,7 +102,7 @@ request is recorded `unknown` rather than fabricating a charge.
 ```sh
 # Public capability route must be 401 (unauthenticated), not 404.
 curl -s -o /dev/null -w '%{http_code}\n' \
-  https://cloud.dhanuksoftwares.com/v1/images/capabilities
+  https://api.ovidsi.com/v1/images/capabilities
 
 # Mint logs show the discovered image models.
 docker compose logs mint | grep 'Ovid images mounted'

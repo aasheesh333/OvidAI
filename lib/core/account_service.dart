@@ -64,7 +64,7 @@ class AccountService {
   final Future<String?> Function() appCheck;
   final String? Function()? currentUid;
   final http.Client? client;
-  static const _base = 'https://cloud.dhanuksoftwares.com/account';
+  static const _base = 'https://api.ovidsi.com/account';
 
   Future<AccountDeletion> status() => _call('/deletion', get: true);
   Future<AccountDeletion> requestDeletion(String requestId) =>

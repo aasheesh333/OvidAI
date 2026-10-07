@@ -171,7 +171,12 @@ class ProviderConfig {
 
   /// Merge a persisted provider row (used by [AppState.loadProviderState]).
   void applyPersistedJson(Map<String, dynamic> entry) {
-    baseUrl = entry['baseUrl'] as String? ?? baseUrl;
+    final persistedBaseUrl = entry['baseUrl'] as String?;
+    if (persistedBaseUrl != null) {
+      baseUrl = id == AppState.ovidCloudProviderId
+          ? _normalizeOvidCloudBaseUrl(persistedBaseUrl)
+          : persistedBaseUrl;
+    }
     final fmt = entry['apiFormat'];
     if (fmt is String && fmt.isNotEmpty) apiFormat = ApiFormat.parse(fmt);
     final raw = entry['visionOverrides'];
@@ -182,6 +187,12 @@ class ProviderConfig {
         if (v is bool) _visionOverrides[e.key.toString()] = v;
       }
     }
+  }
+
+  static String _normalizeOvidCloudBaseUrl(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.host != 'cloud.dhanuksoftwares.com') return value;
+    return uri.replace(host: 'api.ovidsi.com').toString();
   }
 
   ProviderConfig({
@@ -8979,7 +8990,7 @@ class AppState extends ChangeNotifier {
             'API key to manage.',
         // Public gateway (behind Cloudflare → LiteLLM). The real provider
         // base URLs/keys live server-side only; the app never sees them.
-        baseUrl: 'https://cloud.dhanuksoftwares.com/v1',
+        baseUrl: 'https://api.ovidsi.com/v1',
         isFree: true,
         // Model list is fetched live from the gateway's /v1/models, so models
         // the owner adds in the LiteLLM dashboard appear here automatically.

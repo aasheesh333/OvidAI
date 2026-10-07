@@ -132,7 +132,7 @@ class ImageStudio extends ChangeNotifier {
   static const alias = 'ovid-image';
   static const maxBytes = 16 * 1024 * 1024;
   static const sizes = ['1024x1024', '1536x1024', '1024x1536', '2048x2048'];
-  static const _base = 'https://cloud.dhanuksoftwares.com/v1/images';
+  static const _base = 'https://api.ovidsi.com/v1/images';
   Map<String, List<String>> _operations = {};
   DateTime? _refreshed;
 

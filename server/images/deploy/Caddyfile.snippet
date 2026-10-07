@@ -1,11 +1,11 @@
 # Ovid gateway — Caddy route for the image service + masked model catalog.
 #
 # These blocks MUST appear before the LiteLLM `/v1/*` catch-all in
-# cloud.dhanuksoftwares.com, so image and catalog traffic reaches the mint app
+# api.ovidsi.com, so image and catalog traffic reaches the mint app
 # (127.0.0.1:8090) instead of LiteLLM (127.0.0.1:4000). Everything else under
 # /v1/* (chat, embeddings, ...) keeps going to LiteLLM.
 #
-# Paste inside the `cloud.dhanuksoftwares.com { ... }` site block:
+# Paste inside the `api.ovidsi.com { ... }` site block:
 
 	# Ovid image service + masked model catalog → mint verifier (must precede
 	# the LiteLLM /v1/* rule). The image routes are mounted on the mint app.
