@@ -254,14 +254,7 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
             'the browser was redirected to.',
       ),
       const SizedBox(height: 14),
-      AetherField(
-        label: 'Authorization URL',
-        controller: _authUrlController,
-        enabled: false,
-        maxLines: 3,
-        fieldKey: const ValueKey('mcp-oauth-auth-url'),
-      ),
-      const SizedBox(height: 8),
+      // Show the URL once: the selectable card also provides copy support.
       _CopyableUrl(url: _authUrlController.text),
       const SizedBox(height: 12),
       AetherPrimaryButton(

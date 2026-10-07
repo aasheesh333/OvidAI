@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
+import 'package:ovid_ai/ui/chat_screen.dart';
 import 'package:ovid_ai/ui/subagent_screen.dart';
 
 void main() {
@@ -52,12 +53,19 @@ void main() {
     await tester.pump();
 
     expect(find.byTooltip('Jump to latest'), findsNothing);
-    await tester.drag(find.byType(Scrollable).last, const Offset(0, 500));
+    await tester.drag(
+      find.descendant(
+        of: find.byType(ChatTranscript),
+        matching: find.byType(Scrollable),
+      ).first,
+      const Offset(0, 500),
+    );
     await tester.pump();
     expect(find.byTooltip('Jump to latest'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Jump to latest'));
-    await tester.pumpAndSettle();
+    // The running status dot pulses continuously; the jump itself is immediate.
+    await tester.pump();
     expect(find.byTooltip('Jump to latest'), findsNothing);
   });
 }

@@ -652,7 +652,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 ),
                 const SizedBox(height: 20),
                 Text(
-                  _partial ? 'Sandbox core ready' : 'Sandbox verified',
+                  _partial ? 'Sandbox core ready' : 'Sandbox ready',
                   style: AetherType.h2,
                 ),
                 const SizedBox(height: 8),

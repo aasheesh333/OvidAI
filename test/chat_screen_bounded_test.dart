@@ -240,6 +240,7 @@ void main() {
         );
         await pumpChat(tester);
         await tester.enterText(composer, '/boundedwait');
+        await tester.pump();
         await tester.tap(find.byTooltip('Send'));
         if (switchSession) await switchTo(tester, b);
         await tester.enterText(composer, 'Keep this draft');
@@ -266,6 +267,7 @@ void main() {
     );
     await pumpChat(tester);
     await tester.enterText(composer, '/boundedkeep');
+    await tester.pump();
     await tester.tap(find.byTooltip('Send'));
     await tester.pump();
     expect(draft(tester), '/boundedkeep');
@@ -388,6 +390,7 @@ void main() {
     );
     await pumpChat(tester);
     await tester.enterText(composer, '/boundedcursor');
+    await tester.pump();
     await tester.tap(find.byTooltip('Send'));
     tester.widget<TextField>(composer).controller!.selection =
         const TextSelection.collapsed(offset: 2);
@@ -410,6 +413,7 @@ void main() {
     );
     await pumpChat(tester);
     await tester.enterText(composer, '/boundedretype');
+    await tester.pump();
     await tester.tap(find.byTooltip('Send'));
     await tester.enterText(composer, 'Something new');
     await tester.enterText(composer, '/boundedretype');
@@ -572,6 +576,7 @@ void main() {
     );
     await pumpChat(tester);
     await tester.enterText(composer, '/boundeddispose');
+    await tester.pump();
     await tester.tap(find.byTooltip('Send'));
     await tester.pumpWidget(const SizedBox.shrink());
     result.complete(const CommandResult());

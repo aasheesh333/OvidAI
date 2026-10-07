@@ -179,6 +179,7 @@ void main() {
       await pumpChat(tester);
 
       await tester.enterText(find.byType(TextField).first, '/permission');
+      await tester.pump();
       await tester.tap(find.byTooltip('Send'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));

@@ -51,6 +51,21 @@ void main() {
   testWidgets('premium receipt hierarchy and copy feedback are visible', (
     tester,
   ) async {
+    String? clipboardText;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          clipboardText = (call.arguments as Map)['text'] as String;
+        }
+        if (call.method == 'Clipboard.getData') {
+          return {'text': clipboardText};
+        }
+        return null;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
     final studio = await _studio();
     await tester.pumpWidget(
       MaterialApp(
@@ -70,7 +85,7 @@ void main() {
     expect(find.text('Image result unavailable'), findsOneWidget);
 
     await tester.tap(find.text('Copy request ID'));
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(find.text('Request ID copied'), findsOneWidget);
     expect(
       (await Clipboard.getData(Clipboard.kTextPlain))?.text,

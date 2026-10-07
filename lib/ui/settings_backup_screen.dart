@@ -34,7 +34,8 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       await action();
     } catch (e) {
       if (mounted) {
-        setState(() => _status = '$operation failed. No data was changed. $e');
+        setState(() => _status =
+            'Operation failed during $operation. No data was changed. $e');
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -108,7 +109,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       if (mounted) {
         setState(
           () => _status =
-              'Restore complete: transcripts restored as new, inactive sessions '
+            'Transcripts restored: new, inactive sessions '
               'in the current account.',
         );
       }
@@ -118,7 +119,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
         if (mounted) {
           setState(
             () => _status =
-                'Import validation complete: ${staged.sessions.length} transcript(s), '
+                'Archive valid: ${staged.sessions.length} transcript(s), '
                 '${staged.attachments.length} portable attachment(s). No data restored.',
           );
         }
@@ -148,15 +149,18 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
           ),
           const SizedBox(height: 12),
           Semantics(
+            container: true,
             liveRegion: true,
             label: 'Backup status: ${_busy ? '$_operation in progress' : _exported != null ? 'Archive ready to share' : 'Ready to export'}',
-            child: Text(
+            child: ExcludeSemantics(
+              child: Text(
               _busy
                   ? '$_operation in progress…'
                   : _exported != null
                   ? 'Archive ready to share'
                   : 'Ready to export',
               style: AetherType.label,
+              ),
             ),
           ),
           const SizedBox(height: 12),
@@ -214,6 +218,8 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
               const SizedBox(height: 8),
               Text('Import validates an archive without changing your chats.',
                 style: AetherType.caption),
+              const SizedBox(height: 4),
+              Text('View backup files', style: AetherType.caption),
               const SizedBox(height: 8),
               Text(
                 'Restore transcript archive as new inactive sessions: transcript-only data '

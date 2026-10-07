@@ -275,7 +275,7 @@ class _UnavailableScreen extends StatelessWidget {
                        header: true,
                        liveRegion: true,
                        child: Text(
-                         'Sign-in setup unavailable',
+                         'Sign-in is unavailable in this build.',
                          style: AetherType.title,
                          textAlign: TextAlign.center,
                        ),

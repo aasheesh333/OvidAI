@@ -142,7 +142,11 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
   }
 
   @override
-  Widget build(BuildContext context) => Column(
+  Widget build(BuildContext context) => SingleChildScrollView(
+    child: _buildReceipts(),
+  );
+
+  Widget _buildReceipts() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     mainAxisSize: MainAxisSize.min,
     children: [
@@ -263,7 +267,7 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
                  )
                else
                  _resultFallback(
-                   'Image result unavailable. Recover checks the existing request and never submits a replacement paid job.',
+                   'Recover checks the existing request and never submits a replacement paid job.',
                  ),
                AetherGhostButton(
                  label: _busy[record.requestId] == 'recover'
@@ -299,7 +303,7 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
   );
 
   Widget _sectionLabel(String label) => Text(
-    label.toUpperCase(),
+    label,
     style: AetherType.caption.copyWith(
       color: Aether.textMuted,
       fontWeight: FontWeight.w700,
@@ -320,7 +324,15 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
       children: [
         Icon(Icons.image_not_supported_outlined, color: Aether.textMuted),
         const SizedBox(width: 8),
-        Expanded(child: Text(message, style: AetherType.bodyMuted)),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Image result unavailable', style: AetherType.body),
+              Text(message, style: AetherType.bodyMuted),
+            ],
+          ),
+        ),
       ],
     ),
   );

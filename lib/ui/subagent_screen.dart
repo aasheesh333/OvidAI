@@ -208,9 +208,8 @@ class _SubagentScreenState extends State<SubagentScreen> {
                          Positioned(
                            right: 12,
                            bottom: 12,
-                           child: Semantics(
-                             button: true,
-                             label: 'Jump to latest',
+                           child: Tooltip(
+                             message: 'Jump to latest',
                              child: Material(
                                color: Aether.surface,
                                elevation: 2,

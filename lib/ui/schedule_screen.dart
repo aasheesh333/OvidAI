@@ -295,7 +295,8 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                 controller: _prompt,
                 enabled: !_saving,
                 errorText: _promptError,
-                maxLines: 4,
+                // Keep the primary action reachable on compact viewports.
+                maxLines: 2,
               ),
               const SizedBox(height: 16),
               Text('Recurrence', style: AetherType.label),
@@ -539,7 +540,7 @@ class _TaskCardState extends State<_TaskCard> {
           case 'resume':
             _runAction(() => agent.schedules.resumeTask(widget.entry));
           case 'cancel':
-            _confirmCancel(context, agent);
+            _runAction(() => agent.schedules.cancelTask(widget.entry));
         }
       },
     );
@@ -558,29 +559,6 @@ class _TaskCardState extends State<_TaskCard> {
       if (mounted) setState(() => _feedback = 'Could not update schedule: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _confirmCancel(BuildContext context, AgentService agent) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Cancel scheduled task?'),
-        content: const Text('This keeps the task in history but stops future runs.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Keep task'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Cancel task'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true) {
-      await _runAction(() => agent.schedules.cancelTask(widget.entry));
     }
   }
 
