@@ -10,6 +10,23 @@ import '../core/theme.dart';
 import '../core/agent_service.dart';
 import 'widgets/aether_primitives.dart';
 
+/// Turns address-bar input into a web URL when it looks like a host, while
+/// leaving explicit schemes untouched so AgentService can enforce its scheme
+/// safety policy. Everything else remains a search query.
+@visibleForTesting
+String normalizeBrowserUrl(String input) {
+  final value = input.trim();
+  if (value.isEmpty) return '';
+  final hostLike = RegExp(
+    r'^(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?(?:[/?#].*)?$',
+    caseSensitive: false,
+  ).hasMatch(value);
+  if (hostLike) return 'https://$value';
+  final parsed = Uri.tryParse(value);
+  if (parsed?.scheme.isNotEmpty == true) return value;
+  return 'https://www.google.com/search?q=${Uri.encodeComponent(value)}';
+}
+
 @visibleForTesting
 Widget Function(BrowserTab tab)? browserWebViewBuilderForTest;
 
@@ -26,8 +43,9 @@ class BrowserScreen extends StatefulWidget {
 
   /// Push the browser, optionally navigating the active tab to [url].
   static Future<void> open(BuildContext context, {String? url}) async {
-    await Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => BrowserScreen(openUrl: url)));
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => BrowserScreen(openUrl: url)));
   }
 
   @override
@@ -44,6 +62,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // tab-key navigation and screen-reader-driven focus do the right thing too.
   final FocusNode _urlFocus = FocusNode();
   bool _editingUrl = false;
+  bool _canGoBack = false;
+  bool _canGoForward = false;
 
   @override
   void initState() {
@@ -51,19 +71,21 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final agent = _agent;
     // Route openUrl: same domain → navigate active tab; new domain → new tab.
     if (widget.openUrl != null) {
+      final requestedUrl = normalizeBrowserUrl(widget.openUrl!);
       final active = agent.browserTabs.isNotEmpty
           ? agent.browserTabs[agent.activeTabIndex]
           : null;
       if (active == null) {
-        agent.newBrowserTab(widget.openUrl!);
-      } else if (_sameHost(active.url, widget.openUrl!)) {
-        unawaited(agent.navigateTab(active, widget.openUrl!));
+        agent.newBrowserTab(requestedUrl);
+      } else if (_sameHost(active.url, requestedUrl)) {
+        unawaited(agent.navigateTab(active, requestedUrl));
       } else {
-        agent.newBrowserTab(widget.openUrl!);
+        agent.newBrowserTab(requestedUrl);
       }
     }
     agent.addListener(_onAgentChanged);
     _urlFocus.addListener(_onUrlFocusChanged);
+    unawaited(_refreshHistoryAvailability());
     // Omnibar initial value.
     final t = agent.browserTabs.isNotEmpty
         ? agent.browserTabs[agent.activeTabIndex]
@@ -94,6 +116,27 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _url.text = _omnibarText(tab);
     }
     setState(() {});
+    unawaited(_refreshHistoryAvailability());
+  }
+
+  Future<void> _refreshHistoryAvailability() async {
+    final controller = _activeTab?.controller;
+    if (controller == null) {
+      if (!mounted || (_canGoBack == false && _canGoForward == false)) return;
+      setState(() {
+        _canGoBack = false;
+        _canGoForward = false;
+      });
+      return;
+    }
+    final back = await controller.canGoBack();
+    final forward = await controller.canGoForward();
+    if (!mounted) return;
+    if (_canGoBack == back && _canGoForward == forward) return;
+    setState(() {
+      _canGoBack = back;
+      _canGoForward = forward;
+    });
   }
 
   /// Launch [url] in the device's real browser (e.g. Chrome).
@@ -163,13 +206,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   void _nav(String url) {
-    var u = url.trim();
+    final u = normalizeBrowserUrl(url);
     if (u.isEmpty) return;
-    if (!u.startsWith('http://') && !u.startsWith('https://')) {
-      u = 'https://www.google.com/search?q=${Uri.encodeComponent(u)}';
-    }
     final tab = _activeTab;
-    if (tab == null) return;
+    if (tab == null) {
+      _agent.newBrowserTab(u);
+      return;
+    }
     unawaited(_agent.navigateTab(tab, u));
   }
 
@@ -217,6 +260,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final controller = tab == null || browserWebViewBuilderForTest != null
         ? tab?.controller
         : agent.controllerForTab(tab);
+    if (controller != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_refreshHistoryAvailability());
+      });
+    }
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
@@ -346,7 +394,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
               builder: (context, constraints) {
                 final narrow = constraints.maxWidth < 600;
                 final fieldHeight = math.max(
-                  48.0, textScaler.scale(14) * 1.5 + 24,
+                  48.0,
+                  textScaler.scale(14) * 1.5 + 24,
                 );
                 final navigation = <Widget>[
                   AetherGhostButton(
@@ -356,11 +405,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     icon: Icons.arrow_back_ios_new,
                     iconOnly: true,
                     iconSize: 48,
-                    onPressed: () async {
-                      if (await controller?.canGoBack() ?? false) {
-                        await controller!.goBack();
-                      }
-                    },
+                    onPressed: controller == null
+                        ? null
+                        : () async {
+                            if (await controller.canGoBack()) {
+                              await controller.goBack();
+                              unawaited(_refreshHistoryAvailability());
+                            }
+                          },
                   ),
                   AetherGhostButton(
                     key: const ValueKey('browser-forward'),
@@ -369,11 +421,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     icon: Icons.arrow_forward_ios,
                     iconOnly: true,
                     iconSize: 48,
-                    onPressed: () async {
-                      if (await controller?.canGoForward() ?? false) {
-                        await controller!.goForward();
-                      }
-                    },
+                    onPressed: controller == null
+                        ? null
+                        : () async {
+                            if (await controller.canGoForward()) {
+                              await controller.goForward();
+                              unawaited(_refreshHistoryAvailability());
+                            }
+                          },
                   ),
                   AetherGhostButton(
                     key: const ValueKey('browser-reload'),
@@ -438,16 +493,25 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(6, 10, 6, 8),
                     child: narrow
-                        ? Column(children: [
-                            Row(children: [Expanded(child: address), go]),
-                            Row(children: navigation),
-                          ])
-                        : Row(children: [
-                            ...navigation,
-                            const SizedBox(width: 4),
-                            Expanded(child: address),
-                            go,
-                          ]),
+                        ? Column(
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(child: address),
+                                  go,
+                                ],
+                              ),
+                              Row(children: navigation),
+                            ],
+                          )
+                        : Row(
+                            children: [
+                              ...navigation,
+                              const SizedBox(width: 4),
+                              Expanded(child: address),
+                              go,
+                            ],
+                          ),
                   ),
                 );
               },
@@ -521,26 +585,38 @@ class _BrowserScreenState extends State<BrowserScreen> {
             // into the phone screen and asked to *pretend*. See
             // [_SizedBrowserView] for why the old approach could never work.
             Expanded(
-              child: IndexedStack(
-                index: agent.activeTabIndex,
-                children: [
-                  for (final t in agent.browserTabs)
-                    _SizedBrowserView(
-                      // Key on the tab's STABLE id, not its URL:
-                      // in-page navigation (t.url changes constantly)
-                      // must not tear down and recreate the platform
-                      // view. desktopMode stays in the key because the
-                      // controller is intentionally recreated on toggle.
-                      key: ValueKey('tab_${t.id}_${t.desktopMode}'),
-                      tab: t,
-                      child:
-                          browserWebViewBuilderForTest?.call(t) ??
-                          WebViewWidget(
-                            controller: agent.controllerForTab(t),
+              child: agent.browserTabs.isEmpty
+                  ? Center(
+                      child: AetherGhostButton(
+                        key: const ValueKey('browser-open-new-tab'),
+                        label: 'Open new tab',
+                        tooltip: 'Open new tab',
+                        icon: Icons.add,
+                        onPressed: () {
+                          agent.newBrowserTab();
+                        },
+                      ),
+                    )
+                  : IndexedStack(
+                      index: agent.activeTabIndex,
+                      children: [
+                        for (final t in agent.browserTabs)
+                          _SizedBrowserView(
+                            // Key on the tab's STABLE id, not its URL:
+                            // in-page navigation (t.url changes constantly)
+                            // must not tear down and recreate the platform
+                            // view. desktopMode stays in the key because the
+                            // controller is intentionally recreated on toggle.
+                            key: ValueKey('tab_${t.id}_${t.desktopMode}'),
+                            tab: t,
+                            child:
+                                browserWebViewBuilderForTest?.call(t) ??
+                                WebViewWidget(
+                                  controller: agent.controllerForTab(t),
+                                ),
                           ),
+                      ],
                     ),
-                ],
-              ),
             ),
           ],
         ),
@@ -593,11 +669,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 /// overflow. The horizontal pan surface and persistent scrollbar expose the
 /// overflow width; vertical document scrolling remains owned by the WebView.
 class _SizedBrowserView extends StatefulWidget {
-  const _SizedBrowserView({
-    super.key,
-    required this.tab,
-    required this.child,
-  });
+  const _SizedBrowserView({super.key, required this.tab, required this.child});
 
   final BrowserTab tab;
   final Widget child;
@@ -690,9 +762,7 @@ class _AgentDot extends StatelessWidget {
     // State was encoded by COLOUR ALONE on a 10px dot: colour-blind users could
     // not tell "agent is driving this tab" from "idle", and a screen reader had
     // nothing to announce. The label travels with the dot now.
-    final label = busy
-        ? 'Agent is driving this tab'
-        : 'Agent idle on this tab';
+    final label = busy ? 'Agent is driving this tab' : 'Agent idle on this tab';
     return Semantics(
       label: label,
       child: Tooltip(
@@ -709,7 +779,6 @@ class _AgentDot extends StatelessWidget {
     );
   }
 }
-
 
 /// Auth-origin classification retained for callers. Navigation never displays
 /// a proactive sign-in notice. Opening externally does not transfer cookies
@@ -874,7 +943,12 @@ class _PopupNotice extends StatelessWidget {
               ],
             );
           }
-          return Row(children: [Expanded(child: description), actions]);
+          return Row(
+            children: [
+              Expanded(child: description),
+              actions,
+            ],
+          );
         },
       ),
     );

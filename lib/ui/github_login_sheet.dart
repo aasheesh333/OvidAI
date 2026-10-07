@@ -205,6 +205,10 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
         maxLines: null,
       ),
       const SizedBox(height: 8),
+      _UrlCopyRow(
+        url: _verifyUri.isEmpty ? 'https://github.com/login/device' : _verifyUri,
+      ),
+      const SizedBox(height: 8),
       Align(
         alignment: Alignment.centerRight,
         child: _CopyChip(text: _userCode),
@@ -229,10 +233,14 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
           ),
           const SizedBox(width: 10),
           Flexible(
-            child: Text(
-              'Waiting · $_remaining remaining',
-              style: AetherType.bodyMuted,
-            ),
+           child: Semantics(
+             liveRegion: true,
+             label: 'GitHub sign-in status: waiting, $_remaining remaining',
+             child: Text(
+               'Waiting for sign-in · $_remaining remaining',
+               style: AetherType.bodyMuted,
+             ),
+           ),
           ),
         ],
       ),
@@ -322,9 +330,34 @@ enum _State { idle, starting, codeShown, done, expired, error }
 
 class _CopyChip extends StatefulWidget {
   final String text;
-  const _CopyChip({required this.text});
+  final String label;
+  const _CopyChip({required this.text, this.label = 'Copy code'});
   @override
   State<_CopyChip> createState() => _CopyChipState();
+}
+
+class _UrlCopyRow extends StatelessWidget {
+  const _UrlCopyRow({required this.url});
+
+  final String url;
+
+  @override
+  Widget build(BuildContext context) => AetherCard(
+    padding: const EdgeInsets.all(12),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Semantics(
+            label: 'Verification URL. Selectable text.',
+            child: SelectableText(url, style: AetherType.mono),
+          ),
+        ),
+        const SizedBox(width: 8),
+        _CopyChip(text: url, label: 'Copy URL'),
+      ],
+    ),
+  );
 }
 
 class _CopyChipState extends State<_CopyChip> {
@@ -377,11 +410,11 @@ class _CopyChipState extends State<_CopyChip> {
                 color: copied ? Aether.successLight : Aether.textFaint,
               ),
               const SizedBox(width: 5),
-              Semantics(
-                button: true,
-                label: copied ? 'Code copied' : 'Copy code',
-                child: Text(
-                  copied ? 'Copied' : 'Copy',
+               Semantics(
+                 button: true,
+                 label: copied ? '${widget.label} copied' : widget.label,
+                 child: Text(
+                   copied ? 'Copied' : widget.label,
                   style: TextStyle(
                     fontSize: 12,
                     color: copied ? Aether.successLight : Aether.textFaint,

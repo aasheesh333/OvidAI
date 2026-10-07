@@ -224,21 +224,33 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
             ),
       body: Column(
         children: [
-          if (_persistWarned) const _PersistWarningBanner(),
+          if (_persistWarned)
+            SafeArea(
+              bottom: false,
+              child: Semantics(
+                liveRegion: true,
+                child: _PersistWarningBanner(),
+              ),
+            ),
           Expanded(
-            child: wide
-                ? Row(
-                    children: [
-                      const SessionsSidebar(isDrawer: false),
-                      VerticalDivider(
-                        width: 1,
-                        thickness: 1,
-                        color: Aether.hairline,
-                      ),
-                      Expanded(child: chat),
-                    ],
-                  )
-                : chat,
+            child: Row(
+              children: [
+                if (wide) ...[
+                  const SessionsSidebar(isDrawer: false),
+                  VerticalDivider(
+                    width: 1,
+                    thickness: 1,
+                    color: Aether.hairline,
+                  ),
+                ],
+                Expanded(
+                  child: KeyedSubtree(
+                    key: const ValueKey('shell-chat-screen'),
+                    child: chat,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),

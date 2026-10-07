@@ -1,6 +1,7 @@
 """Router factory: verified UID callback and real deployment origin are required."""
 
 import html
+import os
 import re
 from contextlib import nullcontext
 from urllib.parse import urlsplit
@@ -71,6 +72,21 @@ def router(repository, verify_uid, base_url, *, admission=None):
             (parsed.path and not re.fullmatch(r'(?:/[A-Za-z0-9_-]+)+', parsed.path))):
         raise ValueError('A configured HTTPS deployment base URL is required')
     routes = APIRouter(tags=['shares'], route_class=ShareRoute)
+
+    @routes.get('/.well-known/assetlinks.json')
+    def asset_links():
+        fingerprint = os.environ.get('OVID_ANDROID_RELEASE_CERT_SHA256', '').strip()
+        package_name = os.environ.get('OVID_ANDROID_PACKAGE_NAME', 'com.dhanuk.ovidai').strip()
+        if not fingerprint or not re.fullmatch(r'(?:[0-9A-Fa-f]{2}:?){32}', fingerprint):
+            return JSONResponse({'detail': 'android_release_fingerprint_not_configured'}, status_code=503)
+        return JSONResponse([{
+            'relation': ['delegate_permission/common.handle_all_urls'],
+            'target': {
+                'namespace': 'android_app',
+                'package_name': package_name,
+                'sha256_cert_fingerprints': [fingerprint.upper()],
+            },
+        }])
 
     def owner(authorization: str = Header(default=''),
               x_firebase_appcheck: str = Header(default='')):

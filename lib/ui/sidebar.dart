@@ -39,6 +39,15 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
   String _query = '';
   final TextEditingController _searchController = TextEditingController();
 
+  Future<void> _navigateFromSidebar(
+    BuildContext context,
+    WidgetBuilder builder,
+  ) async {
+    if (widget.isDrawer) await Navigator.maybePop(context);
+    if (!context.mounted) return;
+    await Navigator.of(context).push(MaterialPageRoute(builder: builder));
+  }
+
   @override
   void dispose() {
     _searchController.dispose();
@@ -226,11 +235,10 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             label: 'Schedule',
                             enabled: hasSession,
                             onTap: hasSession
-                                ? () => Navigator.of(context).push(
-                                    MaterialPageRoute(
-                                      builder: (_) => ScheduleScreen(
-                                        sessionId: app.activeSessionId!,
-                                      ),
+                                ? () => _navigateFromSidebar(
+                                    context,
+                                    (_) => ScheduleScreen(
+                                      sessionId: app.activeSessionId!,
                                     ),
                                   )
                                 : null,
@@ -246,11 +254,9 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             onTap: hasSession
                                 ? () {
                                     final sid = app.activeSessionId ?? '';
-                                    Navigator.of(context).push(
-                                      MaterialPageRoute(
-                                        builder: (_) =>
-                                            TrajectoryScreen(sessionId: sid),
-                                      ),
+                                    return _navigateFromSidebar(
+                                      context,
+                                      (_) => TrajectoryScreen(sessionId: sid),
                                     );
                                   }
                                 : null,
@@ -260,10 +266,9 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             icon: Icons.settings_outlined,
                             label: 'Settings',
                             enabled: true,
-                            onTap: () => Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) => const SettingsScreen(),
-                              ),
+                            onTap: () => _navigateFromSidebar(
+                              context,
+                              (_) => const SettingsScreen(),
                             ),
                           ),
                           const SizedBox(height: 6),
@@ -668,18 +673,35 @@ class _SessionTileState extends State<_SessionTile> {
   /// confirmed; the caller performs the deletion.
   Future<bool> _askDeleteConfirmed(BuildContext context) async {
     final session = widget.session;
-    // Deleting a running chat stops its agent — say so in the dialog.
-    final running = AgentService.I.busyFor(session.id);
+    final app = AppState.I;
+    final descendants = app.descendantsOf(session.id);
+    final doomed = [session, ...descendants];
+    final runningDescendantCount = descendants
+        .where((candidate) => AgentService.I.busyFor(candidate.id))
+        .length;
+    final runningRoot = AgentService.I.busyFor(session.id);
+    final sandboxCount = doomed
+        .map((candidate) => candidate.sandboxId ?? candidate.id)
+        .toSet()
+        .length;
+    final details = <String>[
+      if (descendants.isNotEmpty)
+        '${descendants.length} child session${descendants.length == 1 ? '' : 's'}',
+      if (sandboxCount > 0)
+        '$sandboxCount sandbox workspace${sandboxCount == 1 ? '' : 's'}',
+      if (runningRoot) 'the running chat will be stopped',
+      if (runningDescendantCount > 0)
+        '$runningDescendantCount running descendant${runningDescendantCount == 1 ? '' : 's'} will be stopped',
+    ];
+    final impact = details.isEmpty
+        ? 'This chat cannot be recovered.'
+        : 'This will permanently delete ${details.join(', ')}. '
+              'This chat cannot be recovered.';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text('Delete ${session.title}?'),
-        content: Text(
-          running
-              ? 'This chat is running — deleting it stops the agent. '
-                    'This chat cannot be recovered.'
-              : 'This chat cannot be recovered.',
-        ),
+        content: Text(impact),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
@@ -782,39 +804,54 @@ class _SessionTileState extends State<_SessionTile> {
   void _rename(BuildContext context) {
     final session = widget.session;
     final c = TextEditingController(text: session.title);
-    void save(String value) {
-      AppState.I.renameSession(session.id, value.trim());
-      Navigator.pop(context);
-    }
+    String? errorText;
 
     // Dialog controllers were leaked: each rename left a TextEditingController
     // (and its listeners plus platform text-input resources) alive forever.
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text(
-          'Rename session',
-          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-        ),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          style: const TextStyle(fontSize: 14),
-          // The IME action key used to be a dead end: it showed a return key
-          // that did nothing, so the user had to reach for Save.
-          textInputAction: TextInputAction.done,
-          onSubmitted: save,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => save(c.text),
-            child: const Text('Save', style: TextStyle(color: Aether.accent)),
-          ),
-        ],
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (_, setDialogState) {
+          void save(String value) {
+            final title = value.trim();
+            if (title.isEmpty) {
+              setDialogState(() => errorText = 'Session name cannot be empty');
+              return;
+            }
+            AppState.I.renameSession(session.id, title);
+            Navigator.pop(dialogContext);
+          }
+
+          return AlertDialog(
+            title: const Text(
+              'Rename session',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            ),
+            content: TextField(
+              controller: c,
+              autofocus: true,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(errorText: errorText),
+              // The IME action key used to be a dead end: it showed a return key
+              // that did nothing, so the user had to reach for Save.
+              textInputAction: TextInputAction.done,
+              onSubmitted: save,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => save(c.text),
+                child: const Text(
+                  'Save',
+                  style: TextStyle(color: Aether.accent),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     ).whenComplete(c.dispose);
   }

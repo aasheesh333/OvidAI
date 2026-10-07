@@ -23,6 +23,8 @@ Future<String?> Function(String providerId)? removeCustomProviderForTest;
 @visibleForTesting
 Future<String?> Function(ProviderConfig provider)? fetchProviderModelsForTest;
 
+enum _FetchState { idle, busy, success, error, empty }
+
 /// Premium Providers screen — managed Ovid Cloud + BYOK providers.
 ///
 /// This is a visual-only redesign over an unchanged state contract:
@@ -183,18 +185,21 @@ class _ProviderTile extends StatefulWidget {
 class _ProviderTileState extends State<_ProviderTile> {
   ProviderConfig get provider => widget.provider;
   bool _fetching = false;
+  _FetchState _fetchState = _FetchState.idle;
   String? _fetchResult;
 
   Color get _statusColor {
-    if (provider.hasKey) return Aether.successLight;
+    if (!provider.requiresApiKey) return Aether.successLight;
+    if (provider.hasKey) return Aether.accent;
     if (provider.isFree) return Aether.accent;
     return Aether.textFaint;
   }
 
   String get _statusLabel {
-    if (provider.hasKey) return 'Connected';
-    if (provider.isFree) return 'Free tier — key required';
-    return 'Not connected';
+    if (!provider.requiresApiKey) return 'Connected · no key required';
+    if (provider.hasKey) return 'Key saved · not verified';
+    if (provider.isFree) return 'No key saved · key required';
+    return 'Not connected · key required';
   }
 
   Future<void> _confirmRemove(BuildContext context) async {
@@ -232,7 +237,8 @@ class _ProviderTileState extends State<_ProviderTile> {
     if (_fetching) return;
     setState(() {
       _fetching = true;
-      _fetchResult = null;
+      _fetchState = _FetchState.busy;
+      _fetchResult = 'Fetching models…';
     });
     try {
       final override = fetchProviderModelsForTest;
@@ -240,20 +246,32 @@ class _ProviderTileState extends State<_ProviderTile> {
         final err = await override(provider);
         if (!mounted) return;
         AppState.I.reconcileProviderModels(provider.id);
-        _fetchResult = err ?? (provider.models.isEmpty
-            ? 'No models returned. You can add a model manually in Edit.'
-            : '${provider.models.length} models fetched ✓');
+        if (err != null) {
+          _fetchState = _FetchState.error;
+          _fetchResult = err;
+        } else if (provider.models.isEmpty) {
+          _fetchState = _FetchState.empty;
+          _fetchResult =
+              'No models returned. You can add a model manually in Edit.';
+        } else {
+          _fetchState = _FetchState.success;
+          _fetchResult = '${provider.models.length} models available ✓';
+        }
         return;
       }
       var url = provider.baseUrl;
       if (!url.endsWith('/')) url += '/';
       final uri = Uri.parse('${url}models');
       final cleanKey = provider.cleanApiKey;
+      final isAnthropic = provider.effectiveApiFormat == ApiFormat.anthropic;
       final res = await http
           .get(
             uri,
             headers: {
-              if (cleanKey.isNotEmpty) 'Authorization': 'Bearer $cleanKey',
+              if (isAnthropic && cleanKey.isNotEmpty) 'x-api-key': cleanKey,
+              if (isAnthropic) 'anthropic-version': '2023-06-01',
+              if (!isAnthropic && cleanKey.isNotEmpty)
+                'Authorization': 'Bearer $cleanKey',
             },
           )
           .timeout(const Duration(seconds: 15));
@@ -275,10 +293,16 @@ class _ProviderTileState extends State<_ProviderTile> {
           }
         }
         AppState.I.reconcileProviderModels(provider.id);
-        _fetchResult = ids.isEmpty
-            ? 'No models returned. You can add a model manually in Edit.'
-            : '${ids.length} models fetched ✓';
+        if (ids.isEmpty) {
+          _fetchState = _FetchState.empty;
+          _fetchResult =
+              'No models returned. Existing models were kept; you can add one manually in Edit.';
+        } else {
+          _fetchState = _FetchState.success;
+          _fetchResult = '${ids.length} models fetched and merged ✓';
+        }
       } else {
+        _fetchState = _FetchState.error;
         _fetchResult = 'Failed: HTTP ${res.statusCode} — check key/URL';
       }
     } catch (e) {
@@ -291,6 +315,7 @@ class _ProviderTileState extends State<_ProviderTile> {
       } else {
         msg = 'Fetch failed: $e';
       }
+      _fetchState = _FetchState.error;
       _fetchResult = msg;
     } finally {
       if (mounted) setState(() => _fetching = false);
@@ -412,7 +437,32 @@ class _ProviderTileState extends State<_ProviderTile> {
               liveRegion: true,
               child: Padding(
                 padding: const EdgeInsets.only(top: 8, right: 8),
-                child: Text(_fetchResult!, style: AetherType.bodyMuted),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      _fetchState == _FetchState.busy
+                          ? Icons.sync
+                          : _fetchState == _FetchState.success
+                          ? Icons.check_circle_outline
+                          : _fetchState == _FetchState.empty
+                          ? Icons.info_outline
+                          : Icons.error_outline,
+                      size: 17,
+                      color: _fetchState == _FetchState.busy
+                          ? Aether.accent
+                          : _fetchState == _FetchState.success
+                          ? Aether.successLight
+                          : _fetchState == _FetchState.empty
+                          ? Aether.textMuted
+                          : Aether.dangerC,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(_fetchResult!, style: AetherType.bodyMuted),
+                    ),
+                  ],
+                ),
               ),
             ),
           if (provider.models.isNotEmpty) ...[

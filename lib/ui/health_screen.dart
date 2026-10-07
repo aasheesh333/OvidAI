@@ -31,6 +31,7 @@ class _HealthScreenState extends State<HealthScreen> {
   bool _repairing = false;
   bool _resetting = false;
   String? _checkError;
+  String? _repairFeedback;
 
   @override
   void initState() {
@@ -100,19 +101,12 @@ class _HealthScreenState extends State<HealthScreen> {
       ? Aether.warnLight
       : Aether.dangerC;
 
-  String _scoreLabel(int s) => s >= 90
-      ? 'Most scored checks pass. Review each result below.'
-      : s >= 70
-      ? 'Some capabilities are unavailable.'
-      : s >= 45
-      ? 'Several capability checks need attention.'
-      : 'Many capability checks are unavailable.';
-
   Future<void> _runRepair() async {
     if (_repairing || _resetting || _health.repairing || _health.checking) return;
     setState(() {
       _repairing = true;
       _repairLog.clear();
+      _repairFeedback = null;
     });
     try {
       await _health.repair((l) {
@@ -122,15 +116,43 @@ class _HealthScreenState extends State<HealthScreen> {
           if (_repairLog.length > 100) _repairLog.removeAt(0);
         });
       });
+      if (mounted) setState(() => _repairFeedback = 'Repair completed successfully.');
+    } on HealthRepairCancelled {
+      if (mounted) {
+        setState(() => _repairFeedback = 'Repair cancelled. Re-run checks to confirm the current state.');
+      }
     } catch (e) {
       if (mounted) {
-        setState(() => _repairLog.add('repair failed: $e'));
+        setState(() => _repairFeedback = 'Repair failed: $e');
       }
     } finally {
       if (mounted) {
         setState(() => _repairing = false);
       }
     }
+  }
+
+  Future<void> _confirmHardReset() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset the sandbox?'),
+        content: const Text(
+          'This deletes the sandbox prefix and opens setup again. Existing app data outside the sandbox is not affected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Reset sandbox'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) await _hardResetSandbox();
   }
 
   @override
@@ -179,10 +201,16 @@ class _HealthScreenState extends State<HealthScreen> {
         _ScoreSummaryCard(
           score: score,
           color: color,
-          label: _scoreLabel(score),
+          label: report.failed.isEmpty ? 'All checks passed' : 'Needs attention',
           totalChecks: report.checks.length,
           failedChecks: report.failed.length,
         ),
+        if (_repairFeedback != null) ...[
+          const SizedBox(height: 12),
+          Semantics(liveRegion: true, child: AetherCard(
+            child: Text(_repairFeedback!, style: AetherType.body),
+          )),
+        ],
 
         // ── Runtime health (per-check breakdown) ──
         const SizedBox(height: 20),
@@ -241,7 +269,7 @@ class _HealthScreenState extends State<HealthScreen> {
         const SizedBox(height: 20),
         _DangerActionsCard(
           resetting: _resetting,
-          onReset: busy ? null : _hardResetSandbox,
+          onReset: busy ? null : _confirmHardReset,
           onReRun: busy ? null : _runChecks,
         ),
       ],
@@ -356,7 +384,7 @@ class _ScoreSummaryCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  '$failedChecks of $totalChecks check(s) failing',
+                  '${totalChecks - failedChecks} passed · $failedChecks failed · $totalChecks checks',
                   style: AetherType.caption,
                 ),
               ],
@@ -404,7 +432,7 @@ class _RepairBanner extends StatelessWidget {
                 Text(
                   repairing
                       ? 'Installing signed packages and re-running executable checks…'
-                      : 'Repair failed, supported runtimes using signed packages.',
+                      : 'Repair supported runtimes with failed checks using signed packages.',
                   style: AetherType.caption,
                 ),
               ],
@@ -518,6 +546,17 @@ class _HealthCheckCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
+                  switch (check.status) {
+                    HealthStatus.available => 'Available',
+                    HealthStatus.missingConfiguration => 'Missing configuration',
+                    HealthStatus.missing => 'Missing',
+                    HealthStatus.denied => 'Permission denied',
+                    HealthStatus.unsupported => 'Unsupported',
+                    HealthStatus.failed => 'Failed',
+                  },
+                  style: AetherType.caption.copyWith(color: _dotColor),
+                ),
+                Text(
                   check.detail,
                   style: AetherType.caption.copyWith(
                     color: check.ok ? Aether.textFaint : Aether.textMuted,
@@ -599,6 +638,11 @@ class _ServiceCard extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(name, style: AetherType.title),
+                Text(switch (status.health) {
+                  ServiceHealth.working => 'Working',
+                  ServiceHealth.connecting => 'Connecting',
+                  ServiceHealth.failed => 'Failed',
+                }, style: AetherType.caption.copyWith(color: _dotColor)),
                 const SizedBox(height: 2),
                 Text(
                   _lastCheckCaption,

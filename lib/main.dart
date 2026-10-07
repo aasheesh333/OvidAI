@@ -11,6 +11,18 @@ import 'ui/shell.dart';
 import 'core/share_link_resolver.dart';
 import 'ui/shared_conversation_screen.dart';
 
+final appNavigatorKey = GlobalKey<NavigatorState>();
+
+bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
+  final route = ShareLinkResolver.route(uri);
+  final navigator = navigatorKey.currentState;
+  if (route is! ShareViewerRoute || navigator == null) return false;
+  navigator.push(MaterialPageRoute(
+    builder: (_) => SharedConversationScreen(token: route.token),
+  ));
+  return true;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Coalesce session writes in production; tests keep the zero-window default.
@@ -54,6 +66,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   final _links = AppLinks();
   final _resolver = ShareLinkResolver();
   StreamSubscription<Uri>? _linkSubscription;
+  final _openedTokens = <String>{};
+  final _pendingTokens = <String>{};
 
   @override
   void initState() {
@@ -65,20 +79,46 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   }
 
   Future<void> _restoreAndListenForLinks() async {
-    final initial = await _links.getInitialLink();
-    if (initial != null) _openShare(initial);
-    _linkSubscription = _links.uriLinkStream.listen(_openShare);
-    final deferred = await _resolver.restoreDeferred();
-    if (deferred != null && mounted) _openShare(Uri.parse('https://ovidsi.com/s/${deferred.token}'));
+    // Subscribe first: platform startup calls can await indefinitely or fail on
+    // platforms without an App Links implementation.
+    _linkSubscription = _links.uriLinkStream.listen(
+      _openShare,
+      onError: (Object error, StackTrace stack) {},
+    );
+    try {
+      await _resolver.readInstallReferrer();
+    } catch (_) {}
+    try {
+      final initial = await _links.getInitialLink();
+      if (initial != null) _openShare(initial);
+    } catch (_) {}
+    try {
+      final deferred = await _resolver.restoreDeferred();
+      if (deferred != null) {
+        _openShare(Uri.parse('${ShareLinkResolver.canonicalOrigin}/s/${deferred.token}'));
+      }
+    } catch (_) {}
   }
 
   void _openShare(Uri uri) {
     final route = ShareLinkResolver.route(uri);
-    if (route is! ShareViewerRoute || !mounted) return;
+    if (route is! ShareViewerRoute || !mounted ||
+        _openedTokens.contains(route.token) ||
+        !_pendingTokens.add(route.token)) {
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => SharedConversationScreen(token: route.token),
-      ));
+      if (!mounted || _openedTokens.contains(route.token)) {
+        _pendingTokens.remove(route.token);
+        return;
+      }
+      if (openShareWithNavigator(appNavigatorKey, uri)) {
+        _pendingTokens.remove(route.token);
+        _openedTokens.add(route.token);
+      } else {
+        _pendingTokens.remove(route.token);
+        _openShare(uri);
+      }
     });
   }
 
@@ -123,6 +163,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Ovid',
+      navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: Aether.theme(),
       home: const LoginGate(child: OvidShell()),

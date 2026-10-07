@@ -38,12 +38,34 @@ class _SubagentScreenState extends State<SubagentScreen> {
   final _scroll = ScrollController();
   bool _sending = false;
   bool _firstJumpDone = false;
+  bool _showJumpFab = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
 
   @override
   void dispose() {
+    _scroll.removeListener(_onScroll);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    final awayFromLatest = position.maxScrollExtent - position.pixels > 24;
+    if (awayFromLatest == _showJumpFab || !mounted) return;
+    setState(() => _showJumpFab = awayFromLatest);
+  }
+
+  void _jumpToLatest() {
+    if (!_scroll.hasClients) return;
+    _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    if (mounted) setState(() => _showJumpFab = false);
   }
 
   void _jumpToBottom() {
@@ -160,32 +182,70 @@ class _SubagentScreenState extends State<SubagentScreen> {
               children: [
                 _Lineage(sessionId: s.id),
                 _StatusStrip(session: s, state: state, sub: sub),
-                Expanded(
-                  child: s.messages.isEmpty
-                      ? Center(
-                          child: Text(
-                            running ? 'Starting…' : 'No activity recorded.',
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              color: Aether.textFaint,
-                            ),
-                          ),
-                        )
-                      : ChatTranscript(
-                          session: s,
-                          scrollController: _scroll,
-                          typing: running,
-                        ),
-                ),
+                 Expanded(
+                   child: Stack(
+                     children: [
+                       Positioned.fill(
+                         child: s.messages.isEmpty
+                             ? Center(
+                                 child: Text(
+                                   running
+                                       ? 'Starting…'
+                                       : 'No activity recorded.',
+                                   style: TextStyle(
+                                     fontSize: 12.5,
+                                     color: Aether.textFaint,
+                                   ),
+                                 ),
+                               )
+                             : ChatTranscript(
+                                 session: s,
+                                 scrollController: _scroll,
+                                 typing: running,
+                               ),
+                       ),
+                       if (_showJumpFab)
+                         Positioned(
+                           right: 12,
+                           bottom: 12,
+                           child: Semantics(
+                             button: true,
+                             label: 'Jump to latest',
+                             child: Material(
+                               color: Aether.surface,
+                               elevation: 2,
+                               borderRadius: BorderRadius.circular(20),
+                               child: InkWell(
+                                 onTap: _jumpToLatest,
+                                 borderRadius: BorderRadius.circular(20),
+                                 child: const Padding(
+                                   padding: EdgeInsets.symmetric(
+                                     horizontal: 10,
+                                     vertical: 6,
+                                   ),
+                                   child: Icon(
+                                     Icons.arrow_downward,
+                                     size: 16,
+                                     color: Aether.accent,
+                                   ),
+                                 ),
+                               ),
+                             ),
+                           ),
+                         ),
+                     ],
+                   ),
+                 ),
                 _Composer(
                   maxLines: MediaQuery.sizeOf(context).height -
                               MediaQuery.viewInsetsOf(context).bottom < 480
                       ? 2
                       : 4,
-                  controller: _input,
-                  continuable: continuable,
-                  running: running,
-                  sending: _sending,
+                   controller: _input,
+                   continuable: continuable,
+                   running: running,
+                   state: state,
+                   sending: _sending,
                   onSend: _send,
                   onStop: () => agent.stopSubagentRun(s.id),
                 ),
@@ -354,6 +414,7 @@ class _Composer extends StatelessWidget {
   final TextEditingController controller;
   final bool continuable;
   final bool running;
+  final String state;
   final bool sending;
   final VoidCallback onSend;
   final VoidCallback onStop;
@@ -362,6 +423,7 @@ class _Composer extends StatelessWidget {
     required this.controller,
     required this.continuable,
     required this.running,
+    required this.state,
     required this.sending,
     required this.onSend,
     required this.onStop,
@@ -384,10 +446,16 @@ class _Composer extends StatelessWidget {
             Icon(Icons.history_toggle_off, size: 15, color: Aether.textFaint),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
+             child: Text(
                 running
                     ? 'This agent runs to completion — it takes no follow-ups.'
-                    : 'Completed execution record — read only.',
+                    : switch (state) {
+                        'failed' =>
+                          'This agent failed — read the transcript for details.',
+                        'stopped' || 'stopping' =>
+                          'This agent was stopped — no follow-ups were sent.',
+                        _ => 'Completed execution record — read only.',
+                      },
                 style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
               ),
             ),

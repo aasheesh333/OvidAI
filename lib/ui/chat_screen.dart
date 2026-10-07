@@ -1187,7 +1187,7 @@ class _ChatScreenState extends State<ChatScreen>
   Widget build(BuildContext context) {
     final app = AppState.I;
     return AnimatedBuilder(
-      animation: app,
+      animation: Listenable.merge([app, AgentService.I]),
       builder: (_, _) {
         final s = app.activeSession;
         // Restore the draft that belongs to THIS session — never leak
@@ -1361,6 +1361,7 @@ class _ChatScreenState extends State<ChatScreen>
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    const _ApprovalDock(),
                     const _GoalBar(),
                     const _TodoDock(),
                     const _StatsLine(),
@@ -1396,7 +1397,6 @@ class _ChatScreenState extends State<ChatScreen>
                         _inputFocus.requestFocus();
                       },
                     ),
-                    const _ApprovalDock(),
                   ],
                 );
                 return Column(
@@ -1672,15 +1672,23 @@ class _ChatScreenState extends State<ChatScreen>
                     ),
                     ConstrainedBox(
                       constraints: BoxConstraints(
-                        maxHeight: constraints.maxHeight * 0.15,
+                        maxHeight: constraints.maxHeight *
+                            (AgentService.I.pendingApproval != null ? 0.25 : 0.15),
                       ),
                       child: SingleChildScrollView(
+                        // A new request starts at the top, even if the user
+                        // previously scrolled through queued work.
+                        key: ObjectKey(AgentService.I.pendingApproval),
                         child: Center(
                           child: ConstrainedBox(
                             constraints: BoxConstraints(
                               maxWidth: layout.contentWidth,
                             ),
-                            child: dockColumn,
+                            // Blocking decisions take priority over passive
+                            // status and queued work in this bounded area.
+                            child: AgentService.I.pendingApproval != null
+                                ? const _ApprovalDock()
+                                : dockColumn,
                           ),
                         ),
                       ),
@@ -5470,10 +5478,6 @@ class _InputBarState extends State<_InputBar> {
     if (mounted) setState(() {});
   }
 
-  /// web-IDE rule: running + empty draft = Stop; running + draft = Send
-  /// (queue). The primary send CTA and the danger Stop button handle the
-  /// visual signal in the Aether composer — no bespoke teal is needed.
-
   /// True while the composer is in slash mode (text starts with `/` and the
   /// first token has no space yet). A bare `/` counts — that is the whole
   /// point of the menu.
@@ -6282,43 +6286,54 @@ class _InputBarState extends State<_InputBar> {
                         }
                       }
 
-                      if (widget.editingQueue) {
-                        return AetherPrimaryButton(
-                          label: 'Save',
-                          tooltip: 'Save queued message',
-                          icon: Icons.check,
-                          iconOnly: true,
-                          onPressed: onSend,
-                        );
-                      }
-                      if (runningNow && !hasDraft) {
-                        // STOP button appears while the agent is running.
-                        return AetherDangerButton(
-                          label: 'Stop',
-                          tooltip: hasQueued
-                              ? 'Stop session (next queued will run)'
-                              : 'Stop session',
-                          icon: Icons.stop_rounded,
-                          iconOnly: true,
-                          onPressed: stop,
-                        );
-                      }
-                      if (runningNow && hasDraft) {
-                        // Running + draft → send to queue — same primary CTA.
-                        return AetherPrimaryButton(
-                          label: 'Queue',
-                          tooltip: 'Add to queue',
-                          icon: Icons.arrow_upward,
-                          iconOnly: true,
-                          onPressed: onSend,
-                        );
-                      }
-                      return AetherPrimaryButton(
-                        label: 'Send',
-                        tooltip: 'Send',
-                        icon: Icons.arrow_upward,
-                        iconOnly: true,
-                        onPressed: hasDraft || locked ? onSend : onSend,
+                      // Match the existing submission handler: files alone
+                      // are not a submission, and queue edits retain their
+                      // original attachments rather than newly staged files.
+                      final canSubmit = hasSession &&
+                          AppState.I.activeSessionId == sessionId &&
+                          hasDraft &&
+                          !locked &&
+                          AgentService.I.pendingApproval == null &&
+                          (!widget.editingQueue ||
+                              AgentService.I.pendingAttachments.isEmpty);
+                      final interrupt = AppState.I.sendWhileBusyInterrupt;
+                      final actionLabel = widget.editingQueue
+                          ? 'Save'
+                          : runningNow
+                          ? (interrupt ? 'Interrupt and send' : 'Queue')
+                          : 'Send';
+                      final actionTooltip = widget.editingQueue
+                          ? 'Save queued message'
+                          : runningNow && !interrupt
+                          ? 'Add to queue'
+                          : actionLabel;
+                      return Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Stop remains independent of the draft/save action.
+                          if (runningNow)
+                            AetherDangerButton(
+                              label: 'Stop',
+                              tooltip: hasQueued
+                                  ? 'Stop session (next queued will run)'
+                                  : 'Stop session',
+                              icon: Icons.stop_rounded,
+                              iconOnly: true,
+                              onPressed: stop,
+                            ),
+                          if (!runningNow || hasDraft || widget.editingQueue) ...[
+                            if (runningNow) const SizedBox(width: 4),
+                            AetherPrimaryButton(
+                              label: actionLabel,
+                              tooltip: actionTooltip,
+                              icon: widget.editingQueue
+                                  ? Icons.check
+                                  : Icons.arrow_upward,
+                              iconOnly: true,
+                              onPressed: canSubmit ? onSend : null,
+                            ),
+                          ],
+                        ],
                       );
                     },
                   ),

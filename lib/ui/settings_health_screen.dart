@@ -41,9 +41,11 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
     try {
       final report = await _health.runChecks();
       if (mounted) {
-        setState(() => _selected.retainAll(
-          report.failed.where((c) => c.repairable).map((c) => c.id),
-        ));
+        setState(
+          () => _selected.retainAll(
+            report.failed.where((c) => c.repairable).map((c) => c.id),
+          ),
+        );
       }
     } catch (_) {
       if (mounted) setState(() => _result = 'Health checks failed. Retry.');
@@ -57,7 +59,12 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
   }
 
   Future<void> _repair() async {
-    if (_starting || _health.repairing || _health.checking || _selected.isEmpty) return;
+    if (_starting ||
+        _health.repairing ||
+        _health.checking ||
+        _selected.isEmpty) {
+      return;
+    }
     setState(() {
       _starting = true;
       _result = null;
@@ -74,12 +81,17 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
       }, targets: Set.of(_selected));
       if (mounted) {
         setState(() {
-          _result = 'Selected runtime checks now pass.';
+          _result = 'Repair complete: selected runtime checks now pass.';
           _selected.clear();
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _result = '$e');
+      if (mounted) {
+        final message = e is HealthRepairCancelled
+            ? 'Repair cancelled: ${e.toString().replaceFirst('HealthRepairCancelled: ', '')}'
+            : 'Repair failed: $e';
+        setState(() => _result = message);
+      }
     } finally {
       if (mounted) setState(() => _starting = false);
     }
@@ -113,6 +125,18 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
         builder: (_, _) {
           final report = _health.lastReport;
           final busy = _starting || _health.repairing;
+          final checks = report?.checks ?? const <HealthCheck>[];
+          final available = checks.where((check) => check.ok).length;
+          final attention = checks
+              .where(
+                (check) =>
+                    !check.ok &&
+                    (check.status == HealthStatus.missing ||
+                        check.status == HealthStatus.missingConfiguration),
+              )
+              .length;
+          final unavailable = checks.length - available - attention;
+          final repairable = checks.where((check) => check.repairable).length;
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
             children: [
@@ -123,6 +147,9 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
                   color: _scoreColor(report.score),
                   totalChecks: report.checks.length,
                   failedChecks: report.failed.length,
+                  availableChecks: available,
+                  attentionChecks: attention,
+                  unavailableChecks: unavailable,
                 ),
               if (_health.checking) ...[
                 const SizedBox(height: 12),
@@ -145,7 +172,9 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
                   busy: busy,
                   repairing: _health.repairing,
                   cancellationRequested: _health.cancellationRequested,
-                   canRepair: !_health.checking && _selected.isNotEmpty,
+                  canRepair: !_health.checking && _selected.isNotEmpty,
+                  selectedCount: _selected.length,
+                  repairableCount: repairable,
                   onRepair: _repair,
                   onCancel: _health.cancelRepair,
                 ),
@@ -160,10 +189,9 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
               for (final check in report?.checks ?? <HealthCheck>[]) ...[
                 _HealthCheckCard(
                   check: check,
-                  selectable:
-                      check.repairable && _health.repairWorker != null,
+                  selectable: check.repairable && _health.repairWorker != null,
                   selected: _selected.contains(check.id),
-                   onChanged: busy || _health.checking ? null : _toggle,
+                  onChanged: busy || _health.checking ? null : _toggle,
                 ),
                 const SizedBox(height: 8),
               ],
@@ -197,11 +225,17 @@ class _ScoreSummaryCard extends StatelessWidget {
   final Color color;
   final int totalChecks;
   final int failedChecks;
+  final int availableChecks;
+  final int attentionChecks;
+  final int unavailableChecks;
   const _ScoreSummaryCard({
     required this.score,
     required this.color,
     required this.totalChecks,
     required this.failedChecks,
+    required this.availableChecks,
+    required this.attentionChecks,
+    required this.unavailableChecks,
   });
 
   @override
@@ -239,13 +273,38 @@ class _ScoreSummaryCard extends StatelessWidget {
           ),
           const SizedBox(height: 14),
           Text(
-              '$failedChecks of $totalChecks checks unavailable',
-              style: AetherType.title,
+            '$totalChecks of $totalChecks checks completed',
+            style: AetherType.title,
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 12,
+            runSpacing: 4,
+            children: [
+              _SummaryCount(label: 'Available', count: availableChecks),
+              _SummaryCount(label: 'Needs attention', count: attentionChecks),
+              _SummaryCount(label: 'Unavailable', count: unavailableChecks),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '$failedChecks of $totalChecks checks need attention or recovery.',
+            style: AetherType.caption,
           ),
         ],
       ),
     );
   }
+}
+
+class _SummaryCount extends StatelessWidget {
+  final String label;
+  final int count;
+  const _SummaryCount({required this.label, required this.count});
+
+  @override
+  Widget build(BuildContext context) =>
+      Text('$label: $count', style: AetherType.caption);
 }
 
 class _NoWorkerCard extends StatelessWidget {
@@ -275,6 +334,8 @@ class _RepairControls extends StatelessWidget {
   final bool repairing;
   final bool cancellationRequested;
   final bool canRepair;
+  final int selectedCount;
+  final int repairableCount;
   final VoidCallback onRepair;
   final VoidCallback onCancel;
   const _RepairControls({
@@ -282,6 +343,8 @@ class _RepairControls extends StatelessWidget {
     required this.repairing,
     required this.cancellationRequested,
     required this.canRepair,
+    required this.selectedCount,
+    required this.repairableCount,
     required this.onRepair,
     required this.onCancel,
   });
@@ -294,25 +357,30 @@ class _RepairControls extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  busy
-                      ? 'Repair in progress'
-                      : (canRepair
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                busy
+                    ? 'Repair in progress'
+                    : (canRepair
                           ? 'Ready to repair'
                           : 'Select runtimes to repair'),
-                  style: AetherType.title,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  canRepair
-                      ? 'Only repairable, failed runtimes can be selected.'
-                      : 'Tick a failed runtime below to enable Repair.',
-                  style: AetherType.caption,
-                ),
-              ],
+                style: AetherType.title,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                canRepair
+                    ? 'Only repairable, failed runtimes can be selected.'
+                    : 'Tick a failed runtime below to enable Repair.',
+                style: AetherType.caption,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            '$selectedCount selected · $repairableCount repairable',
+            style: AetherType.caption,
           ),
           const SizedBox(height: 12),
           if (repairing)
@@ -345,12 +413,12 @@ class _ResultCard extends StatelessWidget {
       child: Semantics(
         liveRegion: true,
         child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.info_outline, size: 18, color: Aether.textFaint),
-          const SizedBox(width: 10),
-          Expanded(child: Text(message, style: AetherType.bodyMuted)),
-        ],
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.info_outline, size: 18, color: Aether.textFaint),
+            const SizedBox(width: 10),
+            Expanded(child: Text(message, style: AetherType.bodyMuted)),
+          ],
         ),
       ),
     );
@@ -445,10 +513,10 @@ class _HealthCheckCard extends StatelessWidget {
             Semantics(
               label: 'Select ${check.name} for repair',
               child: Checkbox(
-              value: selected,
-              onChanged: onChanged == null
-                  ? null
-                  : (v) => onChanged!(check.id, v == true),
+                value: selected,
+                onChanged: onChanged == null
+                    ? null
+                    : (v) => onChanged!(check.id, v == true),
               ),
             ),
           ],

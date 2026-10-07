@@ -235,11 +235,48 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
               ),
               if (_error != null) ...[
                 const SizedBox(height: 10),
-                Text(
-                  _error!,
-                  style: AetherType.body.copyWith(color: Aether.dangerC),
+                Semantics(
+                  liveRegion: true,
+                  label: _error,
+                  child: AetherCard(
+                    color: Aether.danger.withValues(alpha: 0.08),
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(Icons.error_outline, color: Aether.danger),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _error!,
+                            style: AetherType.body.copyWith(color: Aether.dangerC),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ],
+              const SizedBox(height: 14),
+              AetherCard(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.info_outline, size: 18, color: Aether.accent),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Access summary: this grant applies to ${explanations.length} '
+                        'capabilit${explanations.length == 1 ? 'y' : 'ies'} and '
+                        '${widget.manifest.mcpServers.length} MCP server(s). '
+                        'Each item below shows the manifest path that requested it.',
+                        style: AetherType.bodyMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ],
         ),
       ),

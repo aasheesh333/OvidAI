@@ -5940,6 +5940,30 @@ class AppState extends ChangeNotifier {
     return branch;
   }
 
+  ChatSession? importSharedMessages(String sessionId, List<Message> safe) {
+    if (safe.isEmpty) return null;
+    final existing = sessions.where((session) => session.id == sessionId).firstOrNull;
+    final imported = existing ?? ChatSession(
+      id: sessionId,
+      title: 'Shared conversation',
+      model: lastSelectedModel.isEmpty ? 'Select a provider' : lastSelectedModel,
+      providerId: lastSelectedProviderId ??
+          (lastSelectedModel.isEmpty ? null : _inferProviderId(lastSelectedModel)),
+    );
+    if (existing == null) sessions.insert(0, imported);
+    for (final message in safe) {
+      final duplicate = imported.messages.any(
+        (old) => old.role == message.role && old.content == message.content,
+      );
+      if (!duplicate) imported.messages.add(message);
+    }
+    activeSessionId = imported.id;
+    onSessionSwitched?.call(imported.id);
+    notifyListeners();
+    persistSessions();
+    return imported;
+  }
+
   /// Ensure a session's workspace dir exists (mention menu + agent runs
   /// both rely on it). Best-effort + async — never blocks UI.
   void _warmWorkspace(String sessionId) {

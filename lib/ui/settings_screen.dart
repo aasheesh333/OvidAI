@@ -167,9 +167,9 @@ class SettingsScreen extends StatelessWidget {
                 _hairline(),
                 const _SettingsSwitchTile(
                   icon: Icons.auto_awesome,
-                  title: 'Reasoning mode',
-                  subtitleOn: 'ON — show thinking before answers',
-                  subtitleOff: 'OFF — hide thinking, answers only',
+                  title: 'Show reasoning',
+                  subtitleOn: 'ON — show reasoning before answers',
+                  subtitleOff: 'OFF — hide reasoning, answers only',
                   getter: _getShowReasoning,
                   setter: _setShowReasoning,
                 ),
@@ -488,6 +488,16 @@ class SettingsScreen extends StatelessWidget {
       Divider(height: 1, thickness: 1, color: Aether.hairline);
 
   Widget _privacyPolicyTile(BuildContext context) {
+    Future<void> openPrivacyPolicy() async {
+      final uri = Uri.tryParse('https://dhanuk.page.gd/ovid/');
+      if (uri != null) {
+        await import_url_launcher.launchUrl(
+          uri,
+          mode: import_url_launcher.LaunchMode.externalApplication,
+        );
+      }
+    }
+
     return ListTile(
       dense: true,
       leading: Icon(
@@ -515,6 +525,13 @@ class SettingsScreen extends StatelessWidget {
             TextButton(
               onPressed: () => Navigator.pop(d),
               child: const Text('Close'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(d);
+                openPrivacyPolicy();
+              },
+              child: const Text('Open policy'),
             ),
           ],
         ),
@@ -609,14 +626,15 @@ class _DeviceIntegrityTile extends StatelessWidget {
       builder: (_, _) {
         final s = app.deviceSecurity;
         final compromised = app.deviceEnvironmentCompromised;
-        final String detail;
-        if (!app.securityChecked) {
-          detail = 'Checking device integrity…';
-        } else if (![
+        final complete = [
           'isRooted',
           'isHookingFrameworkPresent',
           'isDebuggerAttached',
-        ].every((key) => s[key] is bool)) {
+        ].every((key) => s[key] is bool);
+        final String detail;
+        if (!app.securityChecked) {
+          detail = 'Checking device integrity…';
+        } else if (!complete) {
           detail =
               'Integrity check unavailable — this device has not supplied a complete probe result.';
         } else if (!compromised) {
@@ -632,11 +650,17 @@ class _DeviceIntegrityTile extends StatelessWidget {
         return ListTile(
           dense: true,
           leading: Icon(
-            compromised
+            !app.securityChecked || !complete
+                ? Icons.help_outline
+                : compromised
                 ? Icons.gpp_maybe_outlined
                 : Icons.verified_user_outlined,
             size: 19,
-            color: compromised ? Aether.warnLight : Aether.successLight,
+            color: !app.securityChecked || !complete
+                ? Aether.textMuted
+                : compromised
+                ? Aether.warnLight
+                : Aether.successLight,
           ),
           title: const Text('Device integrity', style: TextStyle(fontSize: 14)),
           subtitle: Text(
@@ -1543,27 +1567,9 @@ class _AboutScreen extends StatelessWidget {
         children: [
           const SizedBox(height: 24),
           Center(
-            child: Container(
-              width: 72,
-              height: 72,
-              decoration: BoxDecoration(
-                color: Aether.accent,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Center(
-                child: Text(
-                  'O',
-                  style: TextStyle(
-                    fontSize: 36,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-            ),
+            child: OvidLockup(markSize: 72, textSize: 30),
           ),
           const SizedBox(height: 20),
-          Center(child: const OvidWordmark(size: 24)),
           const SizedBox(height: 6),
           Center(
             child: Text(
@@ -2055,7 +2061,7 @@ class _PresetsScreen extends StatelessWidget {
                   isCustom: customIds.contains(preset.id),
                   onDuplicate: () => _duplicate(context, preset),
                   onDelete: customIds.contains(preset.id)
-                      ? () => AppState.I.deleteCustomPreset(preset.id)
+                      ? () => _confirmDelete(context, preset)
                       : null,
                   onUpdate: (updated) => AppState.I.saveCustomPreset(updated),
                 ),
@@ -2064,6 +2070,35 @@ class _PresetsScreen extends StatelessWidget {
         },
       ),
     );
+  }
+
+  Future<void> _confirmDelete(BuildContext context, AgentPreset preset) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete custom preset?'),
+        content: Text(
+          'Delete "${preset.label}"? This removes the saved custom preset. '
+          'Built-in presets are not affected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              'Delete',
+              style: TextStyle(color: Aether.danger),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await AppState.I.deleteCustomPreset(preset.id);
+    }
   }
 }
 
@@ -2178,14 +2213,17 @@ class _PresetTileState extends State<_PresetTile> {
                 ),
                 if (p.model != null ||
                     p.temperature != null ||
-                    p.planAllowedTools.isNotEmpty) ...[
+                    p.planAllowedTools.isNotEmpty ||
+                    isCustom) ...[
                   const SizedBox(height: 2),
                   Text(
                     [
                       if (p.model != null) 'model: ${p.model}',
                       if (p.temperature != null) 'temp: ${p.temperature}',
                       if (p.planAllowedTools.isNotEmpty)
-                        'plan tools: ${p.planAllowedTools.length}',
+                        'plan allowlist: ${p.planAllowedTools.length} selected',
+                      if (p.planAllowedTools.isEmpty)
+                        'plan allowlist: built-in policy',
                     ].join(' · '),
                     style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                   ),

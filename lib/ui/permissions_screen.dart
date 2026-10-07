@@ -104,15 +104,31 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
     BuildContext context,
     PermissionGrant grant,
   ) async {
+    final siblings = AppState.I.globalPermissionGrants
+        .where((g) => g.kind == grant.kind && g.value == grant.value)
+        .toList();
+    if (!_isSingleGrantIdentity(siblings, grant)) {
+      _showRevokeMessage(
+        context,
+        'Not revoked: another saved decision has the same scope. This screen cannot safely remove only the selected identity.',
+      );
+      return;
+    }
+
     final ok = await AppState.I.revokeGlobalPermissionGrant(
       grant.kind,
       grant.value,
     );
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(ok ? 'Revoked: ${_label(grant)}' : 'Nothing to revoke'),
-      ),
+    final remaining = AppState.I.globalPermissionGrants.any(
+      (g) => _sameGrantIdentity(g, grant),
+    );
+    _showRevokeMessage(
+      context,
+      ok && !remaining
+          ? 'Removed from current settings: ${_label(grant)}. Persistence is not confirmed; retry if it returns after reopening.'
+          : 'No durable change confirmed for ${_label(grant)}. Retry.',
+      retry: () => _revokeGlobal(context, grant),
     );
     if (mounted) setState(() {});
   }
@@ -121,20 +137,51 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
     BuildContext context,
     PermissionGrant grant,
   ) async {
+    final session = AgentService.I.currentSession;
     // A confirmation can remain open while the selected conversation changes.
     // Do not let its old row revoke an identically named scope in the new one.
-    if (AgentService.I.currentSession?.grants.contains(grant) != true) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('This decision is no longer in the current session.')),
+    if (session == null ||
+        session.id != grant.sessionId ||
+        !_isSingleGrantIdentity(
+          session.grants
+              .where((g) => g.kind == grant.kind && g.value == grant.value)
+              .toList(),
+          grant,
+        )) {
+      _showRevokeMessage(
+        context,
+        'Not revoked: this decision is no longer the uniquely selected grant in the current session.',
       );
       return;
     }
     await AgentService.I.revokeSessionPermissionGrant(grant);
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
+    final remaining = AgentService.I.currentSession?.grants.any(
+      (g) => _sameGrantIdentity(g, grant),
+    ) ?? true;
+    _showRevokeMessage(
       context,
-    ).showSnackBar(SnackBar(content: Text('Revoked: ${_label(grant)}')));
+      !remaining
+          ? 'Removed from the current session: ${_label(grant)}. Persistence is not confirmed; retry if it returns after reopening.'
+          : 'No durable change confirmed for ${_label(grant)}. Retry.',
+      retry: () => _revokeSession(context, grant),
+    );
     if (mounted) setState(() {});
+  }
+
+  void _showRevokeMessage(
+    BuildContext context,
+    String message, {
+    VoidCallback? retry,
+  }) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: retry == null
+            ? null
+            : SnackBarAction(label: 'Retry', onPressed: retry),
+      ),
+    );
   }
 }
 
@@ -144,9 +191,30 @@ List<PermissionGrant> _currentSessionGrants() {
   final session = AgentService.I.currentSession;
   if (session == null) return const [];
   return session.grants
-      .where((g) => g.scope != PermissionGrant.scopeGlobal)
+      .where(
+        (g) =>
+            g.scope == PermissionGrant.scopeSession &&
+            g.sessionId == session.id,
+      )
       .toList();
 }
+
+bool _isSingleGrantIdentity(
+  List<PermissionGrant> candidates,
+  PermissionGrant selected,
+) =>
+    candidates.length == 1 &&
+    candidates.every((g) => _sameGrantIdentity(g, selected));
+
+bool _sameGrantIdentity(PermissionGrant a, PermissionGrant b) =>
+    a.kind == b.kind &&
+    a.value == b.value &&
+    a.scope == b.scope &&
+    a.sessionId == b.sessionId &&
+    a.mode == b.mode &&
+    a.decision == b.decision &&
+    a.recursive == b.recursive &&
+    a.grantedAt == b.grantedAt;
 
 /// Autonomy card. Explains session scope and, if any, renders
 /// a per-row list of legacy all-sessions grants with a revoke affordance.
@@ -434,10 +502,12 @@ class _GrantRow extends StatelessWidget {
           Tooltip(
             message: 'Revoke',
             child: TextButton.icon(
-            key: ValueKey('revoke-${global ? 'global' : 'session'}-${grant.kind}-${grant.value}'),
-            icon: const Icon(Icons.delete_outline, size: 18),
-            label: const Text('Revoke'),
-            onPressed: () async {
+              key: ValueKey(
+                'revoke-${global ? 'global' : 'session'}-${_grantIdentityKey(grant)}',
+              ),
+              icon: const Icon(Icons.delete_outline, size: 18),
+              label: const Text('Revoke'),
+              onPressed: () async {
               final confirm = await showDialog<bool>(
                 context: context,
                 builder: (d) => AlertDialog(
@@ -466,7 +536,7 @@ class _GrantRow extends StatelessWidget {
                 ),
               );
               if (confirm == true) await onRevoke();
-            },
+              },
             ),
           ),
         ],
@@ -508,3 +578,7 @@ String _label(PermissionGrant g) {
   final deny = g.isDeny ? ' · denied' : '';
   return '$what$deny';
 }
+
+String _grantIdentityKey(PermissionGrant g) =>
+    '${g.kind}|${g.value}|${g.scope}|${g.sessionId}|${g.mode}|'
+    '${g.decision}|${g.recursive}|${g.grantedAt.microsecondsSinceEpoch}';

@@ -52,6 +52,7 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
   /// True while Firebase.initializeApp is in flight. The splash screen is
   /// shown until this drops to false — no child frame leaks through.
   bool _initializing = true;
+  bool _initializationRetrying = false;
 
   @override
   void initState() {
@@ -62,13 +63,20 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
   }
 
   Future<void> _kickFirebaseInit() async {
+    if (_initializationRetrying) return;
+    if (!_initializing) {
+      setState(() => _initializationRetrying = true);
+    }
     try {
       await _firebase.initialize();
     } catch (_) {
       // Missing configuration is shown below; no anonymous bypass.
     }
     if (!mounted) return;
-    setState(() => _initializing = false);
+    setState(() {
+      _initializing = false;
+      _initializationRetrying = false;
+    });
     _onAuth();
   }
 
@@ -122,7 +130,10 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
         final fb = _firebase;
         // Firebase not configured in this build → no anonymous bypass.
         if (!fb.isAvailable) {
-          return _UnavailableScreen(onRetry: _kickFirebaseInit);
+          return _UnavailableScreen(
+            onRetry: _kickFirebaseInit,
+            retrying: _initializationRetrying,
+          );
         }
         // ── State 3: authenticated ──
         if (fb.isSignedIn) {
@@ -176,6 +187,7 @@ class _SplashScreenState extends State<_SplashScreen>
 
   @override
   Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     return Scaffold(
       backgroundColor: Aether.bg,
       body: Center(
@@ -194,12 +206,16 @@ class _SplashScreenState extends State<_SplashScreen>
               ),
               const SizedBox(height: AetherSpacing.space6),
               FadeTransition(
-                opacity: _fade,
+                opacity: reducedMotion
+                    ? const AlwaysStoppedAnimation<double>(1)
+                    : _fade,
                 child: OvidWordmark(size: 34, onDark: Aether.dark),
               ),
               const SizedBox(height: AetherSpacing.space3),
               FadeTransition(
-                opacity: _fade,
+                opacity: reducedMotion
+                    ? const AlwaysStoppedAnimation<double>(1)
+                    : _fade,
                 child: Text(
                   Aether.tagline.toUpperCase(),
                   style: AetherType.caption.copyWith(letterSpacing: 2.4),
@@ -234,8 +250,9 @@ class _SplashScreenState extends State<_SplashScreen>
 // ---------------------------------------------------------------------------
 
 class _UnavailableScreen extends StatelessWidget {
-  const _UnavailableScreen({required this.onRetry});
+  const _UnavailableScreen({required this.onRetry, required this.retrying});
   final VoidCallback onRetry;
+  final bool retrying;
 
   @override
   Widget build(BuildContext context) {
@@ -254,21 +271,29 @@ class _UnavailableScreen extends StatelessWidget {
                   children: [
                     const _GateWordmark(),
                     const SizedBox(height: AetherSpacing.space5),
-                    Text(
-                      'Sign-in is unavailable in this build.',
-                      style: AetherType.title,
-                      textAlign: TextAlign.center,
+                     Semantics(
+                       header: true,
+                       liveRegion: true,
+                       child: Text(
+                         'Sign-in setup unavailable',
+                         style: AetherType.title,
+                         textAlign: TextAlign.center,
+                       ),
                     ),
                     const SizedBox(height: AetherSpacing.space3),
                     Text(
-                      'Firebase authentication is not configured. Retry to '
-                      'reinitialize, or restart the app once configuration is '
-                      'available.',
+                       'Ovid could not initialize sign-in for this app. Retry '
+                       'to check again, or restart after configuration is '
+                       'available.',
                       style: AetherType.bodyMuted,
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: AetherSpacing.space5),
-                    AetherPrimaryButton(label: 'Retry', onPressed: onRetry),
+                     AetherPrimaryButton(
+                       label: retrying ? 'Retrying…' : 'Retry',
+                       loading: retrying,
+                       onPressed: retrying ? null : onRetry,
+                     ),
                   ],
                 ),
               ),
@@ -285,13 +310,31 @@ class _UnavailableScreen extends StatelessWidget {
 // failed.
 // ---------------------------------------------------------------------------
 
-class _AccountNotReadyScreen extends StatelessWidget {
+class _AccountNotReadyScreen extends StatefulWidget {
   const _AccountNotReadyScreen({required this.service});
   final FirebaseService service;
 
   @override
+  State<_AccountNotReadyScreen> createState() => _AccountNotReadyScreenState();
+}
+
+class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
+  bool _retrying = false;
+
+  Future<void> _retry() async {
+    if (_retrying) return;
+    setState(() => _retrying = true);
+    try {
+      await widget.service.retryAccountLogin();
+    } finally {
+      if (mounted) setState(() => _retrying = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final error = service.accountError;
+    final error = widget.service.accountError;
+    final checking = error == null && !_retrying;
     return Scaffold(
       backgroundColor: Aether.bg,
       body: SafeArea(
@@ -307,22 +350,30 @@ class _AccountNotReadyScreen extends StatelessWidget {
                   children: [
                     const _GateWordmark(),
                     const SizedBox(height: AetherSpacing.space5),
-                    Semantics(
-                      header: true,
-                      child: Text(
-                        'Confirming your account',
-                        style: AetherType.h2,
-                      ),
+                     Semantics(
+                       header: true,
+                       liveRegion: true,
+                       child: Text(
+                         checking || _retrying
+                             ? 'Confirming your account'
+                             : 'Account check needs attention',
+                         style: AetherType.h2,
+                       ),
                     ),
                     const SizedBox(height: AetherSpacing.space3),
                     Text(
-                      error ??
-                          'Checking your account with the Ovid service. '
-                              'This usually takes a moment.',
+                        _retrying
+                            ? 'Retrying the account check. Please wait.'
+                            : error == null
+                            ? 'Checking your account with the Ovid service. '
+                                'This usually takes a moment.'
+                           : 'Ovid could not confirm your account right now. '
+                               'Retry the account check or sign out and use '
+                               'another sign-in method.',
                       style: AetherType.bodyMuted,
                     ),
                     const SizedBox(height: AetherSpacing.space5),
-                    if (error == null)
+                    if (checking)
                       Center(
                         child: SizedBox(
                           width: 24,
@@ -335,18 +386,21 @@ class _AccountNotReadyScreen extends StatelessWidget {
                             ),
                           ),
                         ),
-                      )
-                    else ...[
-                      AetherPrimaryButton(
-                        label: 'Retry',
-                        onPressed: service.retryAccountLogin,
                       ),
-                      const SizedBox(height: AetherSpacing.space2),
-                      AetherGhostButton(
-                        label: 'Sign out',
-                        onPressed: service.signOut,
-                      ),
-                    ],
+                    AetherPrimaryButton(
+                      label: checking
+                          ? 'Checking…'
+                          : _retrying
+                          ? 'Retrying…'
+                          : 'Retry',
+                      loading: checking || _retrying,
+                      onPressed: checking || _retrying ? null : _retry,
+                    ),
+                    const SizedBox(height: AetherSpacing.space2),
+                    AetherGhostButton(
+                      label: 'Sign out',
+                      onPressed: widget.service.signOut,
+                    ),
                   ],
                 ),
               ),
@@ -417,14 +471,23 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
   }
 
   void _showWelcomeOverlay() {
+    if (!mounted || _welcomeEntry != null) return;
     final overlay = Overlay.of(context, rootOverlay: true);
     final entry = _welcomeEntry = OverlayEntry(
-      builder: (_) => _WelcomeBanner(onDismiss: _removeWelcome),
+      builder: (_) => _WelcomeBanner(
+        onDismiss: _removeWelcome,
+        onInteraction: _cancelWelcomeAutoDismiss,
+      ),
     );
     overlay.insert(entry);
     if (!MediaQuery.accessibleNavigationOf(context)) {
       _autoDismiss = Timer(const Duration(seconds: 5), _removeWelcome);
     }
+  }
+
+  void _cancelWelcomeAutoDismiss() {
+    _autoDismiss?.cancel();
+    _autoDismiss = null;
   }
 
   @override
@@ -437,8 +500,12 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
 }
 
 class _WelcomeBanner extends StatefulWidget {
-  const _WelcomeBanner({required this.onDismiss});
+  const _WelcomeBanner({
+    required this.onDismiss,
+    required this.onInteraction,
+  });
   final VoidCallback onDismiss;
+  final VoidCallback onInteraction;
 
   @override
   State<_WelcomeBanner> createState() => _WelcomeBannerState();
@@ -473,6 +540,7 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
 
   @override
   Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     return Positioned.fill(
       child: Padding(
         padding: EdgeInsets.only(
@@ -484,46 +552,72 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
             alignment: Alignment.bottomCenter,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 420),
-              child: SlideTransition(
-                position: _slide,
-                child: FadeTransition(
-                  opacity: _fade,
-                  child: SingleChildScrollView(
-                    child: GestureDetector(
-                      onTap: widget.onDismiss,
-                      child: Semantics(
-                        liveRegion: true,
-                        child: AetherCard(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              Text('Welcome to Ovid Si', style: AetherType.h2),
-                              const SizedBox(height: AetherSpacing.space2),
-                              Text(
-                                'Explore your available models, create agents, '
-                                'and browse the web.',
-                                style: AetherType.bodyMuted,
-                              ),
-                              const SizedBox(height: AetherSpacing.space4),
-                              AetherPrimaryButton(
-                                label: "Let's go",
-                                onPressed: widget.onDismiss,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
+               child: reducedMotion
+                   ? _WelcomeContent(
+                       onDismiss: widget.onDismiss,
+                       onInteraction: widget.onInteraction,
+                     )
+                   : SlideTransition(
+                 position: _slide,
+                 child: FadeTransition(
+                   opacity: _fade,
+                    child: _WelcomeContent(
+                      onDismiss: widget.onDismiss,
+                      onInteraction: widget.onInteraction,
                     ),
-                  ),
-                ),
-              ),
+                 ),
+               ),
             ),
           ),
         ),
       ),
     );
   }
+}
+
+class _WelcomeContent extends StatelessWidget {
+  const _WelcomeContent({
+    required this.onDismiss,
+    required this.onInteraction,
+  });
+  final VoidCallback onDismiss;
+  final VoidCallback onInteraction;
+
+  @override
+  Widget build(BuildContext context) => Listener(
+    onPointerDown: (_) => onInteraction(),
+    child: SingleChildScrollView(
+      child: Semantics(
+        liveRegion: true,
+        child: AetherCard(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Semantics(
+                header: true,
+                liveRegion: true,
+                child: Text('Welcome to Ovid Si', style: AetherType.h2),
+              ),
+              const SizedBox(height: AetherSpacing.space2),
+              Text(
+                'Explore your available models, create agents, and browse the web.',
+                style: AetherType.bodyMuted,
+              ),
+              const SizedBox(height: AetherSpacing.space4),
+              AetherPrimaryButton(
+                label: "Let's go",
+                onPressed: () {
+                  onInteraction();
+                  onDismiss();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -622,7 +716,11 @@ class _LoginScreen extends StatelessWidget {
                 ],
                 AetherCard(
                   padding: const EdgeInsets.all(AetherSpacing.space4),
-                  title: const Text('Sign in or create an account'),
+                  title: Semantics(
+                    header: true,
+                    liveRegion: true,
+                    child: Text('Sign in or create an account'),
+                  ),
                   child: AuthMethods(
                     providers: service.authProviders,
                     intent: AuthIntent.signIn,

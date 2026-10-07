@@ -31,6 +31,8 @@ class AuthScreen extends StatefulWidget {
 
 class _AuthScreenState extends State<AuthScreen> {
   late final FirebaseService _firebase = widget.service ?? FirebaseService.I;
+  bool _signingOut = false;
+  String? _signOutError;
 
   Future<String?> _verifyIdentity(FirebaseService fb) async {
     if (fb.reauthProviders.isEmpty) return legacyAuthMigrationHelp;
@@ -99,28 +101,66 @@ class _AuthScreenState extends State<AuthScreen> {
 
   Future<void> _editName(FirebaseService fb) async {
     final ctrl = TextEditingController(text: fb.displayName ?? '');
+    String? error;
+    bool busy = false;
     final name = await showDialog<String>(
       context: context,
-      builder: (d) => AlertDialog(
-        backgroundColor: Aether.surface,
-        title: const Text('Edit name', style: TextStyle(fontSize: 16)),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          textCapitalization: TextCapitalization.words,
-          decoration: const InputDecoration(hintText: 'Your name'),
-          onSubmitted: (v) => Navigator.pop(d, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(d, ctrl.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
+      builder: (d) => StatefulBuilder(
+        builder: (d, update) {
+          Future<void> save() async {
+            final value = ctrl.text.trim();
+            if (value.isEmpty) {
+              update(() => error = 'Enter a name.');
+              return;
+            }
+            update(() {
+              busy = true;
+              error = null;
+            });
+            final saveError = await fb.updateDisplayName(value);
+            if (!d.mounted) return;
+            if (saveError != null) {
+              update(() {
+                busy = false;
+                error = saveError;
+              });
+              return;
+            }
+            Navigator.pop(d, value);
+          }
+
+          return AlertDialog(
+            backgroundColor: Aether.surface,
+            title: const Text('Edit name', style: TextStyle(fontSize: 16)),
+            content: TextField(
+              controller: ctrl,
+              autofocus: true,
+              enabled: !busy,
+              textCapitalization: TextCapitalization.words,
+              decoration: InputDecoration(
+                hintText: 'Your name',
+                errorText: error,
+              ),
+              onSubmitted: (_) => save(),
+            ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.pop(d),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: busy ? null : save,
+                child: busy
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Save'),
+              ),
+            ],
+          );
+        },
       ),
     );
     // Defer disposal until after the dialog's reverse transition completes.
@@ -128,11 +168,26 @@ class _AuthScreenState extends State<AuthScreen> {
     // disposing synchronously causes "used after being disposed" assertions.
     WidgetsBinding.instance.addPostFrameCallback((_) => ctrl.dispose());
     if (name == null || name.isEmpty) return;
-    final error = await fb.updateDisplayName(name);
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(error ?? 'Name updated.')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Name updated.')),
+    );
+  }
+
+  Future<void> _signOut(FirebaseService fb) async {
+    if (_signingOut) return;
+    setState(() {
+      _signingOut = true;
+      _signOutError = null;
+    });
+    try {
+      await fb.signOut();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _signOutError = 'Could not sign out: $error');
+    } finally {
+      if (mounted) setState(() => _signingOut = false);
+    }
   }
 
   // ───────────────────────────────────────────────────────── signed-in ──
@@ -317,11 +372,19 @@ class _AuthScreenState extends State<AuthScreen> {
                   requestDeletion: fb.requestAccountDeletion,
                 ),
                 signOut: AetherDangerButton(
-                  label: 'Sign out',
+                  label: _signingOut ? 'Signing out…' : 'Sign out',
                   icon: Icons.logout,
-                  onPressed: () => fb.signOut(),
+                  loading: _signingOut,
+                  onPressed: _signingOut ? null : () => _signOut(fb),
                 ),
               ),
+              if (_signOutError != null) ...[
+                const SizedBox(height: AetherSpacing.space2),
+                Text(
+                  _signOutError!,
+                  style: AetherType.body.copyWith(color: Aether.dangerC),
+                ),
+              ],
               const SizedBox(height: AetherSpacing.space6),
             ],
           ),

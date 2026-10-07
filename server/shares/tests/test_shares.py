@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 
@@ -43,6 +44,23 @@ class SharesTest(unittest.TestCase):
         self.assertEqual(self.client.delete('/shares/' + share['id'], headers=bob).status_code, 404)
         self.assertEqual(len(self.client.get('/shares?session_id=session-1', headers=self.headers).json()['shares']), 1)
         self.assertEqual(self.client.get('/shares?session_id=other', headers=self.headers).json(), {'shares': []})
+
+    def test_json_snapshot_contains_session_id_and_html_has_install_fallback(self):
+        share = self.create().json()
+        snapshot = self.client.get('/s/' + share['id'] + '.json')
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertEqual(snapshot.json()['session_id'], 'session-1')
+        html = self.client.get('/s/' + share['id']).text
+        self.assertIn('Open in Ovid Si', html)
+
+    def test_assetlinks_requires_real_configured_certificate(self):
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(self.client.get('/.well-known/assetlinks.json').status_code, 503)
+        fingerprint = 'AA:' * 31 + 'AA'
+        with patch.dict('os.environ', {'OVID_ANDROID_RELEASE_CERT_SHA256': fingerprint}):
+            response = self.client.get('/.well-known/assetlinks.json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]['target']['sha256_cert_fingerprints'], [fingerprint])
 
     def test_public_escape_no_cache_revoke_and_restart(self):
         share = self.create().json()

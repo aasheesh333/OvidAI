@@ -121,9 +121,13 @@ class ShareRepository:
 
     def public(self, token):
         with self._connection() as db:
-            row = db.execute('SELECT snapshot FROM shares WHERE token=? AND revoked=0 AND expires_at>?',
+            row = db.execute('SELECT snapshot, session_id FROM shares WHERE token=? AND revoked=0 AND expires_at>?',
                              (token, self.clock())).fetchone()
-            return json.loads(row['snapshot']) if row and row['snapshot'] else None
+            if not row or not row['snapshot']:
+                return None
+            snapshot = json.loads(row['snapshot'])
+            snapshot['session_id'] = row['session_id']
+            return snapshot
 
     def revoke(self, uid, token):
         with self._connection(write=True) as db:

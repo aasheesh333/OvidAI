@@ -1,4 +1,5 @@
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
 
 class ShareLink {
   const ShareLink(this.token);
@@ -42,7 +43,9 @@ class SharedPreferencesDeferredShareStore implements DeferredShareStore {
   Future<String?> take() async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString(key);
-    if (token != null) await prefs.remove(key);
+    if (token != null) {
+      await prefs.remove(key);
+    }
     return token;
   }
 }
@@ -67,13 +70,22 @@ class ShareLinkResolver {
     : store = store ?? const SharedPreferencesDeferredShareStore();
 
   static final _token = RegExp(r'^[A-Za-z0-9_-]{43}$');
+  static const canonicalOrigin = String.fromEnvironment(
+    'OVID_PUBLIC_SHARE_ORIGIN',
+    defaultValue: 'https://ovidsi.com',
+  );
   final DeferredShareStore store;
+  static const _native = MethodChannel('ovid/native');
 
   static ShareLink? parse(Uri uri) {
-    if (uri.scheme != 'https' || uri.host != 'ovidsi.com' ||
+    final origin = Uri.tryParse(canonicalOrigin);
+    if (origin == null || uri.scheme != origin.scheme || uri.host != origin.host ||
+        uri.port != origin.port ||
         uri.userInfo.isNotEmpty || uri.query.isNotEmpty ||
         uri.fragment.isNotEmpty || uri.pathSegments.length != 2 ||
-        uri.pathSegments.first != 's') return null;
+        uri.pathSegments.first != 's') {
+      return null;
+    }
     final token = uri.pathSegments.last;
     return _token.hasMatch(token) ? ShareLink(token) : null;
   }
@@ -84,6 +96,28 @@ class ShareLinkResolver {
   }
 
   Future<void> saveDeferred(ShareLink share) => store.write(share.token);
+
+  Future<void> saveInstallReferrer(String? referrer) async {
+    if (referrer == null || referrer.isEmpty) return;
+    try {
+      final token = Uri.splitQueryString(referrer)['share_token'];
+      if (token != null && _token.hasMatch(token)) {
+        await store.write(token);
+      }
+    } on FormatException {
+      // Ignore malformed Play payloads; never persist unvalidated input.
+    }
+  }
+
+  Future<void> readInstallReferrer() async {
+    try {
+      await saveInstallReferrer(await _native.invokeMethod<String>('getInstallReferrer'));
+    } on MissingPluginException {
+      // Web, desktop, and builds without Play services have no referrer API.
+    } on PlatformException {
+      // Referrer retrieval is best effort; the web fallback remains usable.
+    }
+  }
 
   Future<ShareLink?> restoreDeferred() async {
     final token = await store.take();

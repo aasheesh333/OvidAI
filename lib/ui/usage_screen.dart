@@ -254,7 +254,7 @@ class UsageScreen extends StatelessWidget {
                 child: const AetherSectionTitle(
                   eyebrow: 'By provider',
                   subtitle:
-                      'Local measured usage · other providers (BYOK & free).',
+                      'All-time measured usage · other providers (BYOK & free).',
                 ),
               ),
 
@@ -361,14 +361,13 @@ class _LocalTotalsStrip extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          'Other providers · measured on this device',
-          style: AetherType.caption,
-        ),
+        Text('All-time measured usage', style: AetherType.caption),
         const SizedBox(height: 8),
         AetherCard(
           padding: const EdgeInsets.all(16),
-          child: Row(children: [_stat('Today’s tokens', _fmtTok(todayTokens))]),
+          child: Row(
+            children: [_stat('Today · measured tokens', _fmtTok(todayTokens))],
+          ),
         ),
         const SizedBox(height: 10),
         Container(
@@ -649,92 +648,122 @@ class _ProviderCardState extends State<_ProviderCard> {
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => ProviderUsageScreen(provider: p)),
       ),
-      child: AetherCard(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
+      child: Stack(
+        children: [
+          AetherCard(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: p.color.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
-                    border: Border.all(color: p.color.withValues(alpha: 0.25)),
-                  ),
-                  alignment: Alignment.center,
-                  child: Icon(p.icon, size: 18, color: p.color),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(p.providerName, style: AetherType.title),
-                      const SizedBox(height: 4),
-                      AetherPill(
-                        label: p.tier,
-                        color: p.tier == 'FREE'
-                            ? Aether.success
-                            : Aether.textMuted,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(
-              countsLine,
-              style: AetherType.bodyMuted.copyWith(
-                fontFamily: Aether.mono,
-                fontSize: 12,
-              ),
-            ),
-            if (p.models.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton.icon(
-                  label: Text(
-                    _expanded
-                        ? 'Hide models'
-                        : 'Show ${p.models.length} model${p.models.length == 1 ? '' : 's'}',
-                  ),
-                  icon: Icon(_expanded ? Icons.expand_less : Icons.expand_more),
-                  onPressed: () => setState(() => _expanded = !_expanded),
-                ),
-              ),
-              if (_expanded) ...[
-                const SizedBox(height: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Aether.surfaceAlt,
-                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
-                    border: Border.all(color: Aether.hairline),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      for (final m in p.models)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: _ModelCounts(model: m),
+                Row(
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: p.color.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                        border: Border.all(
+                          color: p.color.withValues(alpha: 0.25),
                         ),
-                    ],
+                      ),
+                      alignment: Alignment.center,
+                      child: Icon(p.icon, size: 18, color: p.color),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(p.providerName, style: AetherType.title),
+                          const SizedBox(height: 4),
+                          AetherPill(
+                            label: p.tier,
+                            color: p.tier == 'FREE'
+                                ? Aether.success
+                                : Aether.textMuted,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  countsLine,
+                  style: AetherType.bodyMuted.copyWith(
+                    fontFamily: Aether.mono,
+                    fontSize: 12,
                   ),
                 ),
+                if (p.models.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      label: Text(
+                        _expanded
+                            ? 'Hide models'
+                            : 'Show ${p.models.length} model${p.models.length == 1 ? '' : 's'}',
+                      ),
+                      icon: Icon(
+                        _expanded ? Icons.expand_less : Icons.expand_more,
+                      ),
+                      onPressed: () => setState(() => _expanded = !_expanded),
+                    ),
+                  ),
+                  if (_expanded) ...[
+                    const SizedBox(height: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Aether.surfaceAlt,
+                        borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                        border: Border.all(color: Aether.hairline),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (final m in p.models)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: _ModelCounts(model: m),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
               ],
-            ],
-          ],
-        ),
+            ),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: Tooltip(
+              message: 'View provider details',
+              child: Semantics(
+                button: true,
+                label: 'View provider details',
+                child: InkWell(
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => ProviderUsageScreen(provider: p),
+                    ),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.all(8),
+                    child: Icon(Icons.open_in_new, size: 18),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -917,7 +946,7 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
             ),
           ),
 
-          const _SectionLabel('LAST 14 DAYS'),
+          const _SectionLabel('LAST 14 DAYS · ACTIVITY SCOPE'),
           if (!hasTrend)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 18),
@@ -927,74 +956,65 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
               ),
             )
           else
-          Container(
-            key: const ValueKey('usage-activity-chart'),
-            margin: const EdgeInsets.symmetric(horizontal: 16),
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
-            decoration: BoxDecoration(
-              color: Aether.surface,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Aether.hairline),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Daily measured tokens · relative to busiest day',
-                  style: AetherType.caption,
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  height: 72,
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      for (var i = 0; i < daily.length; i++)
-                        Expanded(
-                          child: Semantics(
-                            label:
-                                '${today.subtract(Duration(days: 13 - i)).toIso8601String().split('T').first}: ${daily[i]} tokens',
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 2.5,
-                              ),
-                              child: FractionallySizedBox(
-                                heightFactor: daily[i] / maxTokens,
-                                alignment: Alignment.bottomCenter,
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: p.color.withValues(
-                                      alpha: 0.35 + daily[i] / maxTokens * 0.5,
-                                    ),
-                                    borderRadius: BorderRadius.circular(3),
-                                  ),
-                                ),
-                              ),
+            Container(
+              key: const ValueKey('usage-activity-chart'),
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+              decoration: BoxDecoration(
+                color: Aether.surface,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Aether.hairline),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Last 14 days · measured tokens · relative to busiest day',
+                    style: AetherType.caption,
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 72,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        for (var i = 0; i < daily.length; i++)
+                          Expanded(
+                            child: _ChartPoint(
+                              date: today.subtract(Duration(days: 13 - i)),
+                              tokens: daily[i],
+                              maxTokens: maxTokens,
+                              color: p.color,
                             ),
                           ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    alignment: WrapAlignment.spaceBetween,
+                    spacing: 16,
+                    runSpacing: 4,
+                    children: [
+                      Text(
+                        '13 days ago',
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          color: Aether.textFaint,
                         ),
+                      ),
+                      Text(
+                        'Today',
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          color: Aether.textFaint,
+                        ),
+                      ),
                     ],
                   ),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  spacing: 16,
-                  runSpacing: 4,
-                  children: [
-                    Text(
-                      '13 days ago',
-                      style: TextStyle(fontSize: 9.5, color: Aether.textFaint),
-                    ),
-                    Text(
-                      'Today',
-                      style: TextStyle(fontSize: 9.5, color: Aether.textFaint),
-                    ),
-                  ],
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
 
           const _SectionLabel('PER MODEL'),
           if (p.models.isEmpty)
@@ -1043,10 +1063,7 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
           ),
         ),
         const SizedBox(height: 3),
-        Text(
-          label,
-          style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-        ),
+        Text(label, style: TextStyle(fontSize: 10.5, color: Aether.textFaint)),
       ],
     );
   }
@@ -1068,4 +1085,46 @@ class _SectionLabel extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _ChartPoint extends StatelessWidget {
+  const _ChartPoint({
+    required this.date,
+    required this.tokens,
+    required this.maxTokens,
+    required this.color,
+  });
+
+  final DateTime date;
+  final int tokens;
+  final int maxTokens;
+  final Color color;
+
+  String get _dateLabel => date.toIso8601String().split('T').first;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = '$_dateLabel: $tokens tokens';
+    return Semantics(
+      button: true,
+      label: label,
+      hint: 'Double tap to hear this day’s measured token value',
+      onTap: () => ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(label))),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2.5),
+        child: FractionallySizedBox(
+          heightFactor: tokens / maxTokens,
+          alignment: Alignment.bottomCenter,
+          child: Container(
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.35 + tokens / maxTokens * 0.5),
+              borderRadius: BorderRadius.circular(3),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

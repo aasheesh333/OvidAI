@@ -110,6 +110,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   int get _phase => _setup.phase;
   double get _phaseProgress => _setup.phaseProgress;
   bool get _done => _setup.status == StudioSetupStatus.ready || _partial;
+  bool get _verified => _setup.status == StudioSetupStatus.ready;
   bool get _partial => _setup.status == StudioSetupStatus.partial;
   String? get _error => _setup.error;
   bool get _unsupported => _setup.status == StudioSetupStatus.unsupported;
@@ -154,7 +155,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
 
   Future<void> _runInstall() async {
     await _setup.start(coreOnly: widget.gateMode);
-    if (!mounted || !widget.gateMode || !_done) return;
+    if (!mounted || !widget.gateMode || !_verified) return;
     // Preserve the Health hard-reset handoff only while its route is current.
     await Future<void>.delayed(const Duration(milliseconds: 1200));
     if (!mounted || _navigated || ModalRoute.of(context)?.isCurrent != true) {
@@ -168,9 +169,11 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   }
 
   double get _overall {
-    if (_done) return 1;
-    // 7 phases of equal weight — coarse but monotonic. Phase progress is
-    // the real byte/tar count reported by the service.
+    if (_verified) return 1;
+    // Phases are equal-weighted — coarse but monotonic. Phase progress is
+    // the real byte/tar count reported by the service. A partial result is
+    // intentionally not presented as 100% complete: final verification did
+    // not pass for every requested capability.
     return ((_phase + _phaseProgress) / _phaseNames.length).clamp(0.0, 1.0);
   }
 
@@ -193,7 +196,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   /// phases, the phase the installer is currently inside (or the phase that
   /// was active when it failed), then everything still queued.
   _StepState _stepState(int index) {
-    if (_done) return _StepState.done;
+    if (_verified) return _StepState.done;
     if (_error != null) {
       if (index < _phase) return _StepState.done;
       if (index == _phase) return _StepState.failed;
@@ -203,6 +206,13 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
     if (index == _phase) return _StepState.active;
     return _StepState.pending;
   }
+
+  String _stepStatusLabel(_StepState state) => switch (state) {
+    _StepState.done => 'Verified',
+    _StepState.active => 'In progress',
+    _StepState.failed => 'Needs attention',
+    _StepState.pending => 'Queued',
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -251,35 +261,50 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   /// while a job is running and becomes available on failure.
   Widget _stepCard(int index) {
     final state = _stepState(index);
+    final statusLabel = _stepStatusLabel(state);
     final (color, pulsing) = switch (state) {
       _StepState.done => (Aether.success, false),
       _StepState.active => (Aether.accent, true),
       _StepState.failed => (Aether.danger, false),
       _StepState.pending => (Aether.textFaint, false),
     };
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: AetherCard(
-        padding: const EdgeInsets.fromLTRB(14, 4, 6, 4),
-        child: Row(
-          children: [
-            AetherStatusDot(color: color, size: 10, pulsing: pulsing),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                _phaseNames[index],
-                style: AetherType.title.copyWith(
-                  color: state == _StepState.pending ? Aether.textMuted : null,
+    return Semantics(
+      container: true,
+      liveRegion: state == _StepState.active || state == _StepState.failed,
+      label: '${_phaseNames[index]}: $statusLabel',
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: AetherCard(
+          padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+          child: Row(
+            children: [
+              AetherStatusDot(color: color, size: 10, pulsing: pulsing),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _phaseNames[index],
+                      style: AetherType.title.copyWith(
+                        color: state == _StepState.pending
+                            ? Aether.textMuted
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(statusLabel, style: AetherType.caption.copyWith(color: color)),
+                  ],
                 ),
               ),
-            ),
-            AetherGhostButton(
-              label: 'Repair',
-              onPressed: _setup.running
-                  ? null
-                  : () => unawaited(_runInstall()),
-            ),
-          ],
+              AetherGhostButton(
+                label: 'Repair',
+                onPressed: _setup.running
+                    ? null
+                    : () => unawaited(_runInstall()),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -344,6 +369,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
 
   Widget _progressView() {
     final idx = _phase.clamp(0, _phaseNames.length - 1);
+    final verifying = _phaseNames[idx].startsWith('Verifying');
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       child: Column(
@@ -362,13 +388,20 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   ),
                 ),
                 const SizedBox(width: 10),
-                Expanded(child: Text(_phaseNames[idx])),
+                Expanded(
+                  child: Text(
+                    verifying ? 'Verifying setup' : _phaseNames[idx],
+                  ),
+                ),
               ],
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text('Step ${idx + 1} of ${_phaseNames.length}', style: AetherType.caption),
+                Text(
+                  'Step ${idx + 1} of ${_phaseNames.length} · ${verifying ? 'Verification' : 'Setup'}',
+                  style: AetherType.caption,
+                ),
                 const SizedBox(height: 8),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(6),
@@ -383,7 +416,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 Row(
                   children: [
                     Text(
-                      '${(_overall * 100).toStringAsFixed(1)}%',
+                      '${(_overall * 100).toStringAsFixed(1)}% ${_verified ? 'verified' : 'verification'}',
                       style: const TextStyle(
                         fontSize: 11.5,
                         fontWeight: FontWeight.w700,
@@ -537,7 +570,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             // Chat, providers and the browser all work without the
             // sandbox — only the on-device terminal/Studio needs it.
             _SetupPrimaryButton(
-              label: 'Continue without sandbox',
+              label: 'Continue to chat without sandbox',
               icon: Icons.chat_bubble_outline,
               onPressed: () async {
                 await AppState.I.setSandboxSkipped(true);
@@ -608,22 +641,24 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                         ),
                       ),
                       child: Icon(
-                        Icons.check_rounded,
+                        _partial
+                            ? Icons.warning_amber_rounded
+                            : Icons.check_rounded,
                         size: 38,
-                        color: Aether.successLight,
+                        color: _partial ? Aether.accent : Aether.successLight,
                       ),
                     ),
                   ),
                 ),
                 const SizedBox(height: 20),
                 Text(
-                  _partial ? 'Sandbox core ready' : 'Sandbox ready',
+                  _partial ? 'Sandbox core ready' : 'Sandbox verified',
                   style: AetherType.h2,
                 ),
                 const SizedBox(height: 8),
                 Text(
                   _partial
-                      ? _error!
+                      ? '${_error!} Runtime verification is incomplete.'
                       : _setup.coreOnly
                       ? 'Native sandbox core is ready. Set up runtime tools from Studio.'
                       : 'Native sandbox and Node.js, Python, Git and supporting runtime tools verified.',
@@ -634,7 +669,12 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                Text('Took $_elapsedLabel', style: AetherType.caption),
+                Text(
+                  _partial
+                      ? 'Core verified · runtime verification incomplete'
+                      : 'Took $_elapsedLabel',
+                  style: AetherType.caption,
+                ),
                 const SizedBox(height: 18),
                 Wrap(
                   spacing: 8,
@@ -647,7 +687,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     ),
                     _SetupBadge(
                       label: _partial || _setup.coreOnly
-                          ? 'RUNTIMES INCOMPLETE'
+                          ? 'RUNTIMES NOT VERIFIED'
                           : 'RUNTIMES VERIFIED',
                       color: Aether.textMuted,
                       filled: false,

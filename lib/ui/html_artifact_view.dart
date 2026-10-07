@@ -64,6 +64,8 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
   bool _exiting = false;
   bool _canPop = false;
   bool _tickerEnabled = true;
+  String? _copiedSection;
+  Timer? _copyFeedbackTimer;
 
   @override
   void initState() {
@@ -124,6 +126,16 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
     setState(() {
       _generation++;
       if (retry) _failure = null;
+    });
+  }
+
+  Future<void> _copySource(String section, String value) async {
+    await Clipboard.setData(ClipboardData(text: value));
+    if (!mounted) return;
+    _copyFeedbackTimer?.cancel();
+    setState(() => _copiedSection = section);
+    _copyFeedbackTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copiedSection = null);
     });
   }
 
@@ -279,6 +291,7 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
 
   @override
   void dispose() {
+    _copyFeedbackTimer?.cancel();
     unawaited(_stop());
     _removeFullscreen();
     WidgetsBinding.instance.removeObserver(this);
@@ -322,6 +335,87 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
     );
   }
 
+  Widget _sourceSection({
+    required String label,
+    required String value,
+  }) {
+    final copied = _copiedSection == label;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Aether.surface.withValues(alpha: .55),
+        borderRadius: BorderRadius.circular(AetherRadius.rMd),
+        border: Border.all(color: Aether.textMuted.withValues(alpha: .22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 8, 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    label,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: .5,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: copied ? '$label copied' : 'Copy $label',
+                  icon: Icon(copied ? Icons.check : Icons.copy, size: 18),
+                  onPressed: () => _copySource(label, value),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: SelectableText(
+              value,
+              style: const TextStyle(fontFamily: 'JetBrainsMono', fontSize: 12),
+            ),
+          ),
+          if (copied)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: Semantics(
+                liveRegion: true,
+                child: Text(
+                  '$label copied',
+                  style: TextStyle(fontSize: 12, color: Aether.accent),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _status(String message) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+      child: Semantics(
+        liveRegion: true,
+        child: Row(
+          children: [
+            Icon(Icons.circle, size: 8, color: Aether.accent),
+            const SizedBox(width: 8),
+            Text('Preview status', style: AetherType.caption),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(message, style: AetherType.caption),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final artifact = widget.artifact;
@@ -342,9 +436,13 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
     if (_source) {
       preview = SingleChildScrollView(
         padding: const EdgeInsets.all(12),
-        child: SelectableText(
-          '${artifact.html}\n\n/* CSS */\n${artifact.css}\n\n// JavaScript\n${artifact.javascript}',
-          style: const TextStyle(fontFamily: 'JetBrainsMono', fontSize: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _sourceSection(label: 'HTML', value: artifact.html),
+            _sourceSection(label: 'CSS', value: artifact.css),
+            _sourceSection(label: 'JavaScript', value: artifact.javascript),
+          ],
         ),
       );
     } else if (_failure != null) {
@@ -384,6 +482,21 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
         onPlatformViewCreated: (id) => _created(id, generation),
       );
     }
+    final status = _source
+        ? 'Source inspection'
+        : _failure != null
+        ? 'Preview unavailable'
+        : !supported
+        ? 'Android preview unavailable'
+        : !_foreground
+        ? 'Paused while app is backgrounded'
+        : !_tickerEnabled
+        ? 'Paused while preview is inactive'
+        : _expanded
+        ? 'Preview open in fullscreen'
+        : _collapsed
+        ? 'Preview collapsed'
+        : 'Ready';
     final controls = Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
       runSpacing: 4,
@@ -456,6 +569,7 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 controls,
+                _status(status),
                 Expanded(child: preview),
               ],
             ),
@@ -488,6 +602,7 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   controls,
+                  _status(status),
                   const SizedBox(height: 4),
                   SizedBox(height: height, child: preview),
                 ],

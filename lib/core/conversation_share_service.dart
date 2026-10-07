@@ -48,6 +48,29 @@ class ConversationSnapshot {
   factory ConversationSnapshot.fromJson(String sessionId, List<SharedMessage> messages) =>
       ConversationSnapshot._(sessionId, messages);
 
+  factory ConversationSnapshot.fromJsonMap(Map<String, dynamic> data) {
+    final sessionId = data['session_id'];
+    final rows = data['messages'];
+    if (sessionId is! String || sessionId.isEmpty || rows is! List) {
+      throw const FormatException('invalid share snapshot');
+    }
+    final messages = <SharedMessage>[];
+    for (final row in rows) {
+      if (row is! Map) continue;
+      final role = row['role'];
+      final content = row['content'];
+      if ((role == 'user' || role == 'assistant') && content is String) {
+        final message = SharedMessage(role, content);
+        if (content.trim().isNotEmpty && !_privateText.hasMatch(content)) {
+          messages.add(message);
+        }
+      }
+    }
+    return ConversationSnapshot._(sessionId, messages);
+  }
+
+  List<SharedMessage> get importableMessages => messages;
+
   factory ConversationSnapshot.fromSession(ChatSession session) {
     final messages = <SharedMessage>[];
     if (!session.isSubagent) {
@@ -98,6 +121,7 @@ class ConversationShare {
 class ConversationShareService {
   ConversationShareService({
     this.baseUrl = const String.fromEnvironment('OVID_SHARE_BASE_URL'),
+    this.publicOrigin,
     required this.idToken,
     this.appCheck,
     this.currentUid,
@@ -106,6 +130,10 @@ class ConversationShareService {
 
   factory ConversationShareService.production() => ConversationShareService(
     idToken: () => FirebaseService.I.getIdToken(),
+    publicOrigin: const String.fromEnvironment(
+      'OVID_PUBLIC_SHARE_ORIGIN',
+      defaultValue: 'https://ovidsi.com',
+    ),
     appCheck: _cloudAppCheck.getToken,
     currentUid: () =>
         FirebaseService.I.accountReady ? FirebaseService.I.uid : null,
@@ -116,6 +144,7 @@ class ConversationShareService {
     activatedByFirebase: () => FirebaseService.I.accountService.enabled,
   );
   final String baseUrl;
+  final String? publicOrigin;
   final Future<String?> Function() idToken;
   final Future<String?> Function()? appCheck;
   final String? Function()? currentUid;
@@ -217,6 +246,18 @@ class ConversationShareService {
     return sessionId;
   }
 
+  Future<ConversationSnapshot> publicSnapshot(String id) async {
+    if (!_tokenPattern.hasMatch(id)) {
+      throw const ConversationShareException('Invalid share ID.');
+    }
+    final data = await _publicCall('/s/$id.json');
+    try {
+      return ConversationSnapshot.fromJsonMap(data);
+    } catch (_) {
+      throw const ConversationShareException('The shared snapshot is invalid.');
+    }
+  }
+
   /// Local share state owned by this service, for the verified all-store reset.
   ///
   /// This service is deliberately stateless: [create] returns the parsed
@@ -241,7 +282,7 @@ class ConversationShareService {
       final requestId = data['request_id'] as String?;
       if (!_tokenPattern.hasMatch(id) ||
           data['session_id'] != sessionId ||
-          url.toString() != '${_base!}/s/$id' ||
+       url.toString() != '${(publicOrigin ?? _base!).toString().replaceFirst(RegExp(r'/+$'), '')}/s/$id' ||
           !created.isFinite ||
           !expires.isFinite ||
           expires <= created ||
@@ -267,6 +308,31 @@ class ConversationShareService {
       throw const ConversationShareException(
         'The share server returned an invalid link. Creation is unconfirmed; refresh existing links.',
       );
+    }
+  }
+
+  Future<Map<String, dynamic>> _publicCall(String path) async {
+    final configuredBase = publicOrigin ?? _base?.toString() ?? '';
+    final base = Uri.tryParse(
+      configuredBase.replaceFirst(RegExp(r'/+$'), ''),
+    );
+    if (base == null || base.scheme != 'https' || base.host.isEmpty ||
+        base.userInfo.isNotEmpty || base.hasQuery || base.hasFragment) {
+      throw const ConversationShareException('Sharing is unavailable: public origin is not configured.');
+    }
+    final transport = client ?? http.Client();
+    try {
+      final response = await transport.get(Uri.parse('${base.toString()}$path')).timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200) {
+        throw const ConversationShareException('This link is unavailable or expired.');
+      }
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } on ConversationShareException {
+      rethrow;
+    } catch (_) {
+      throw const ConversationShareException('Could not load the shared snapshot.');
+    } finally {
+      if (client == null) transport.close();
     }
   }
 

@@ -274,15 +274,15 @@ class _StudioScreenState extends State<StudioScreen> {
     });
   }
 
-  Future<void> _autoSync() async {
+  Future<bool> _autoSync() async {
     final repo = _repo;
     final session = AppState.I.activeSession;
     final folder = session?.workspaceFolder;
     if (_syncing) {
       _resyncRequested = true;
-      return;
+      return false;
     }
-    if (repo == null && folder == null) return;
+    if (repo == null && folder == null) return false;
     setState(() {
       _syncing = true;
       _syncError = null;
@@ -314,12 +314,14 @@ class _StudioScreenState extends State<StudioScreen> {
     } catch (e) {
       failure = StudioFailure.of(e);
     }
-    if (!mounted) return;
+    if (!mounted) return false;
+    var succeeded = failure == null;
     setState(() {
       _syncing = false;
       _syncProgress = null;
       _syncFraction = null;
     });
+    if (failure != null) succeeded = false;
     if (failure != null && binding == RepoCache.I.bindingGeneration &&
         syncOperation == RepoCache.I.syncOperation && workspaceKey == _workspaceKey) {
       // A missing branch/ref must surface, not be swallowed — and the previous
@@ -329,12 +331,14 @@ class _StudioScreenState extends State<StudioScreen> {
         _syncError = failure!.message;
         _syncErrorDetail = failure.detail;
       });
+      succeeded = false;
       showStudioToast(context, failure.message, error: true);
     }
     if (_resyncRequested) {
       _resyncRequested = false;
-      await _autoSync();
+      succeeded = await _autoSync();
     }
+    return succeeded;
   }
 
   /// After a repo+branch is picked, ask where this chat's working copy
@@ -611,8 +615,8 @@ class _StudioScreenState extends State<StudioScreen> {
     if (!mounted || path == null || session == null) return;
     await (await GlobalRepoRegistry.instance()).unbindSession(session.sandboxId ?? session.id);
     AppState.I.setSessionWorkspaceFolder(path, sessionId: session.id);
-    await _autoSync();
-    _toast('Working folder: ${path.split('/').last}');
+    final synced = await _autoSync();
+    if (synced) _toast('Working folder: ${path.split('/').last}');
   }
 
   /// The one folder-pick path: device picker (or the test seam), existence
@@ -685,15 +689,20 @@ class _StudioScreenState extends State<StudioScreen> {
     final session = AppState.I.activeSession;
     if (session == null) return;
     if (!GitHubService.I.isLoggedIn) {
-      showGithubLoginSheet(context);
+      _showGithubRequired();
       return;
     }
     try {
-      final repos = await GitHubService.I.listRepos();
+      List<Map<String, dynamic>> repos = const [];
       if (!mounted) return;
       final picked = await showStudioSheet<String>(
         context,
-        child: StudioRepoSheet(repos: repos),
+        child: StudioRepoSheet(
+          loader: () async {
+            repos = await GitHubService.I.listRepos();
+            return repos;
+          },
+        ),
       );
       if (picked == null) return;
       final pickedRepo = repos.firstWhere(
@@ -725,18 +734,24 @@ class _StudioScreenState extends State<StudioScreen> {
   Future<void> _pickBranch() async {
     final session = AppState.I.activeSession;
     final repo = _repo;
-    if (repo == null || session == null || !GitHubService.I.isLoggedIn) return;
+    if (repo == null || session == null) return;
+    if (!GitHubService.I.isLoggedIn) {
+      await _showGithubRequired();
+      return;
+    }
     final parts = repo.split('/');
     if (parts.length != 2 || parts.any((p) => p.isEmpty)) return;
     try {
       final lister =
           studioListBranchesOverrideForTest ?? GitHubService.I.listBranches;
-      final branches = await lister(parts[0], parts[1]);
       if (!mounted) return;
       final current = AgentService.I.sessionBranch;
       final picked = await showStudioSheet<String>(
         context,
-        child: StudioBranchSheet(branches: branches, current: current),
+        child: StudioBranchSheet(
+          current: current,
+          loader: () => lister(parts[0], parts[1]),
+        ),
       );
       if (picked != null && picked != current) {
         setState(() => _cloneStatus = 'Switching to $picked …');
@@ -748,6 +763,40 @@ class _StudioScreenState extends State<StudioScreen> {
       _fail(e, 'Branch switch failed');
     } finally {
       if (mounted) setState(() => _cloneStatus = null);
+    }
+  }
+
+  Future<void> _showGithubRequired() async {
+    if (!mounted) return;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Connect GitHub'),
+        content: const Text(
+          'You need to be signed in to choose a repository branch. '
+          'Try restoring your saved sign-in or connect GitHub again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, 'retry'),
+            child: const Text('Try again'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, 'signin'),
+            child: const Text('Sign in'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'retry') {
+      await GitHubService.I.retryRestoreFromUi();
+      if (!mounted) return;
+      if (!GitHubService.I.isLoggedIn) {
+        showStudioToast(context, 'GitHub sign-in could not be restored.', error: true);
+      }
+    } else if (action == 'signin') {
+      (studioLoginPromptOverrideForTest ?? showGithubLoginSheet)(context);
     }
   }
 
@@ -1746,18 +1795,30 @@ class _AuthBadge extends StatelessWidget {
 /// The repository picker sheet. Public so the null-tolerance of the payload
 /// can be tested without a network round-trip.
 class StudioRepoSheet extends StatelessWidget {
-  const StudioRepoSheet({required this.repos, super.key});
+  const StudioRepoSheet({this.repos, this.loader, super.key})
+      : assert(repos != null || loader != null);
 
-  final List<Map<String, dynamic>> repos;
+  final List<Map<String, dynamic>>? repos;
+  final Future<List<Map<String, dynamic>>> Function()? loader;
 
   @override
   Widget build(BuildContext context) {
+    if (repos != null) return _repoList(context, repos!);
+    return _AsyncPickerSheet<Map<String, dynamic>>(
+      title: 'Your repositories',
+      loader: loader!,
+      emptyMessage: 'No repositories are available for this account.',
+      itemBuilder: (context, repo) => _RepoTile(repo: repo),
+    );
+  }
+
+  Widget _repoList(BuildContext context, List<Map<String, dynamic>> values) {
     return ListView(
       shrinkWrap: true,
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
         const StudioSheetHeader(title: 'Your repositories'),
-        for (final r in repos) _RepoTile(repo: r),
+        for (final r in values) _RepoTile(repo: r),
         const SizedBox(height: 10),
       ],
     );
@@ -1786,22 +1847,35 @@ class _RepoTile extends StatelessWidget {
 /// The branch picker sheet.
 class StudioBranchSheet extends StatelessWidget {
   const StudioBranchSheet({
-    required this.branches,
+    this.branches,
     required this.current,
+    this.loader,
     super.key,
-  });
+  }) : assert(branches != null || loader != null);
 
-  final List<String> branches;
+  final List<String>? branches;
   final String current;
+  final Future<List<String>> Function()? loader;
 
   @override
   Widget build(BuildContext context) {
+    if (branches == null) {
+      return _AsyncPickerSheet<String>(
+        title: 'Branches',
+        loader: loader!,
+        emptyMessage: 'No branches were returned for this repository.',
+        itemBuilder: (context, branch) => _BranchTile(
+          branch: branch,
+          current: current,
+        ),
+      );
+    }
     return ListView(
       shrinkWrap: true,
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
         const StudioSheetHeader(title: 'Branches'),
-        for (final b in branches)
+        for (final b in branches!)
           StudioSheetTile(
             icon: b == current ? Icons.radio_button_checked : Icons.call_split,
             iconColor: b == current ? Aether.accent : Aether.textMuted,
@@ -1809,6 +1883,111 @@ class StudioBranchSheet extends StatelessWidget {
             selected: b == current,
             onTap: () => Navigator.pop(context, b),
           ),
+        const SizedBox(height: 10),
+      ],
+    );
+  }
+}
+
+class _BranchTile extends StatelessWidget {
+  const _BranchTile({required this.branch, required this.current});
+  final String branch;
+  final String current;
+
+  @override
+  Widget build(BuildContext context) {
+    return StudioSheetTile(
+      icon: branch == current ? Icons.radio_button_checked : Icons.call_split,
+      iconColor: branch == current ? Aether.accent : Aether.textMuted,
+      title: branch,
+      selected: branch == current,
+      onTap: () => Navigator.pop(context, branch),
+    );
+  }
+}
+
+class _AsyncPickerSheet<T> extends StatefulWidget {
+  const _AsyncPickerSheet({
+    required this.title,
+    required this.loader,
+    required this.emptyMessage,
+    required this.itemBuilder,
+  });
+
+  final String title;
+  final Future<List<T>> Function() loader;
+  final String emptyMessage;
+  final Widget Function(BuildContext context, T value) itemBuilder;
+
+  @override
+  State<_AsyncPickerSheet<T>> createState() => _AsyncPickerSheetState<T>();
+}
+
+class _AsyncPickerSheetState<T> extends State<_AsyncPickerSheet<T>> {
+  List<T>? _values;
+  Object? _error;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (_loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final values = await widget.loader();
+      if (mounted) setState(() => _values = values);
+    } catch (e) {
+      if (mounted) setState(() => _error = e);
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final values = _values;
+    return ListView(
+      shrinkWrap: true,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        StudioSheetHeader(title: widget.title),
+        if (_loading && values == null)
+          const Padding(
+            padding: EdgeInsets.all(28),
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (_error != null && values == null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('Could not load this list. Check your connection and try again.'),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: _loading ? null : _load,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                ),
+              ],
+            ),
+          )
+        else if (values == null || values.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+            child: Text(widget.emptyMessage),
+          )
+        else ...[
+          for (final value in values) widget.itemBuilder(context, value),
+          if (_loading) const LinearProgressIndicator(minHeight: 2),
+        ],
         const SizedBox(height: 10),
       ],
     );

@@ -86,7 +86,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                       context,
                       ScheduleEntry(widget.sessionId, task),
                     ),
-                    onAction: _action,
                   ),
                   const SizedBox(height: 12),
                 ],
@@ -192,6 +191,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
   late final TextEditingController _time;
   late String _kind;
   late int _retries;
+  late final Map<String, String> _draftTimes;
   String? _error;
   String? _promptError;
   String? _timeError;
@@ -210,6 +210,11 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
     _time = TextEditingController(
       text: '${t['dailyAt'] ?? t['every'] ?? t['fireAt'] ?? ''}',
     );
+    _draftTimes = {
+      'daily_at': t['dailyAt']?.toString() ?? '',
+      'every_seconds': t['every']?.toString() ?? '',
+      'at': t['fireAt']?.toString() ?? '',
+    };
     final maxRetries = (t['maxRetries'] as int?) ?? 0;
     _retries = maxRetries.clamp(0, 3);
   }
@@ -309,8 +314,9 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                       selected: _kind == option.value,
                       onSelected: _saving ? null : (_) => setState(() {
                         if (_kind == option.value) return;
+                        _draftTimes[_kind] = _time.text;
                         _kind = option.value;
-                        _time.clear();
+                        _time.text = _draftTimes[_kind] ?? '';
                         _timeError = null;
                         _error = null;
                       }),
@@ -324,6 +330,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                 controller: _time,
                 enabled: !_saving,
                 errorText: _timeError,
+                onChanged: (_) => setState(() {}),
                 keyboardType: _kind == 'every_seconds'
                     ? TextInputType.number
                     : _kind == 'daily_at' ? TextInputType.datetime : TextInputType.text,
@@ -332,6 +339,14 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                   'every_seconds' => 'Fixed interval; minimum 300 seconds (5 minutes).',
                   _ => 'Device-local time unless you include Z or an offset, e.g. +05:30. Past times are due immediately.',
                 },
+              ),
+              const SizedBox(height: 8),
+              Text('Preview', style: AetherType.label),
+              const SizedBox(height: 4),
+              Text(
+                _previewLabel(),
+                key: const ValueKey('schedule-preview'),
+                style: AetherType.caption,
               ),
               const SizedBox(height: 16),
               AetherStepper(
@@ -381,22 +396,27 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
       ),
     );
   }
+
+  String _previewLabel() {
+    final value = _time.text.trim();
+    if (value.isEmpty) return 'Enter a value to preview the next run.';
+    return switch (_kind) {
+      'daily_at' => 'Runs daily at $value in device-local time.',
+      'every_seconds' => 'Runs every $value seconds after the next save.',
+      _ => 'Runs once at $value.',
+    };
+  }
 }
 
 /// A card representing a single scheduled task.
 class _TaskCard extends StatefulWidget {
   final ScheduleEntry entry;
   final VoidCallback onEdit;
-  final Future<void> Function(
-    BuildContext context,
-    Future<void> Function() action,
-  ) onAction;
 
   const _TaskCard({
     super.key,
     required this.entry,
     required this.onEdit,
-    required this.onAction,
   });
 
   @override
@@ -405,6 +425,8 @@ class _TaskCard extends StatefulWidget {
 
 class _TaskCardState extends State<_TaskCard> {
   bool _expanded = false;
+  bool _busy = false;
+  String? _feedback;
 
   @override
   Widget build(BuildContext context) {
@@ -436,11 +458,33 @@ class _TaskCardState extends State<_TaskCard> {
               style: AetherType.title, maxLines: 2, overflow: TextOverflow.ellipsis),
           const SizedBox(height: 10),
           Text(_prettyRecurrence(t), style: AetherType.bodyMuted),
+          if (status == 'failed' || status == 'paused') ...[
+            const SizedBox(height: 8),
+            Text(
+              status == 'failed' ? 'Recovery needed' : 'Paused · recovery available',
+              style: TextStyle(color: _statusColor(status), fontWeight: FontWeight.w600),
+            ),
+            if (t['error'] != null)
+              Text('${t['error']}', style: AetherType.caption),
+          ],
           const SizedBox(height: 4),
           Text(
             _secondary(status, next, t),
             style: AetherType.bodyMuted,
           ),
+          if (_busy) ...[
+            const SizedBox(height: 8),
+            const LinearProgressIndicator(minHeight: 2),
+            const SizedBox(height: 6),
+            Text('Updating schedule…', style: AetherType.caption),
+          ],
+          if (_feedback != null) ...[
+            const SizedBox(height: 8),
+            Semantics(
+              liveRegion: true,
+              child: Text(_feedback!, style: AetherType.caption),
+            ),
+          ],
           const SizedBox(height: 8),
           Align(
             alignment: Alignment.centerLeft,
@@ -491,23 +535,53 @@ class _TaskCardState extends State<_TaskCard> {
           case 'edit':
             widget.onEdit();
           case 'pause':
-            widget.onAction(
-              context,
-              () => agent.schedules.cancelTask(widget.entry, pause: true),
-            );
+            _runAction(() => agent.schedules.cancelTask(widget.entry, pause: true));
           case 'resume':
-            widget.onAction(
-              context,
-              () => agent.schedules.resumeTask(widget.entry),
-            );
+            _runAction(() => agent.schedules.resumeTask(widget.entry));
           case 'cancel':
-            widget.onAction(
-              context,
-              () => agent.schedules.cancelTask(widget.entry),
-            );
+            _confirmCancel(context, agent);
         }
       },
     );
+  }
+
+  Future<void> _runAction(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _feedback = null;
+    });
+    try {
+      await action();
+      if (mounted) setState(() => _feedback = 'Schedule updated.');
+    } catch (e) {
+      if (mounted) setState(() => _feedback = 'Could not update schedule: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _confirmCancel(BuildContext context, AgentService agent) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cancel scheduled task?'),
+        content: const Text('This keeps the task in history but stops future runs.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep task'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Cancel task'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await _runAction(() => agent.schedules.cancelTask(widget.entry));
+    }
   }
 
   Widget _details(Map<String, dynamic> t) {

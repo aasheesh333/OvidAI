@@ -196,10 +196,27 @@ class _OvidMarkAnimatedState extends State<OvidMarkAnimated>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _updateMotionPreference();
+  }
+
+  @override
+  void didUpdateWidget(covariant OvidMarkAnimated oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.animation != widget.animation) {
+      _c.duration = _duration;
+      _c.reset();
+      _updateMotionPreference();
+    }
+  }
+
+  void _updateMotionPreference() {
     final reduce = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     if (reduce) {
       _c.stop();
-      _c.value = 0;
+      // The static reduced-motion branch paints the complete mark. Keep the
+      // controller complete too so a preference toggle never exposes a
+      // partially drawn frame.
+      _c.value = 1;
     } else if (!_c.isAnimating) {
       _c.repeat();
     }
@@ -220,6 +237,10 @@ class _OvidMarkAnimatedState extends State<OvidMarkAnimated>
       OvidMarkVariant.monoBlack => (Aether.ink, Aether.ink),
       OvidMarkVariant.monoWhite => (Aether.paper, Aether.paper),
     };
+    final reduce = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    if (reduce) {
+      return OvidMark(size: widget.size, variant: widget.variant);
+    }
     return SizedBox(
       width: widget.size,
       height: widget.size,
@@ -321,5 +342,8 @@ class _OvidMarkAnimatedPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_OvidMarkAnimatedPainter old) =>
-      old.t != t || old.ring != ring || old.dot != dot;
+      old.t != t ||
+      old.ring != ring ||
+      old.dot != dot ||
+      old.animation != animation;
 }

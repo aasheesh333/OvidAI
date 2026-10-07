@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/theme.dart';
@@ -41,6 +42,8 @@ Future<bool?> showMcpOAuthSheet(
     isScrollControlled: true,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
+    isDismissible: false,
+    enableDrag: false,
     builder: (_) => McpOAuthSheet(
       serverKey: serverKey,
       serverName: serverName,
@@ -78,6 +81,8 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
   String? _authorizationUrl;
   String? _beginError;
   String? _callbackError;
+  String _phase = 'Starting authorization';
+  bool _cancelled = false;
 
   @override
   void initState() {
@@ -93,23 +98,27 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
   }
 
   Future<void> _begin() async {
+    _cancelled = false;
     setState(() {
       _loading = true;
       _beginError = null;
+      _phase = 'Starting authorization';
     });
     try {
       final url = await widget.service.beginAuthorization(widget.serverKey);
-      if (!mounted) return;
+      if (!mounted || _cancelled) return;
       _authUrlController.text = url;
       setState(() {
         _authorizationUrl = url;
         _loading = false;
+        _phase = 'Authorization link ready';
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _beginError = '$e';
         _loading = false;
+        _phase = 'Authorization could not start';
       });
     }
   }
@@ -117,13 +126,19 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
   Future<void> _openBrowser() async {
     final url = _authorizationUrl;
     if (url == null) return;
+    setState(() => _phase = 'Opening authorization link');
     var launched = false;
     try {
       launched = await widget.launcher(Uri.parse(url));
     } catch (_) {
       launched = false;
     }
-    if (!mounted || launched) return;
+    if (!mounted) return;
+    if (launched) {
+      setState(() => _phase = 'Browser opened — waiting for callback');
+      return;
+    }
+    setState(() => _phase = 'Browser could not open — copy the link below');
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Could not open the browser.'),
@@ -143,38 +158,50 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
     setState(() {
       _completing = true;
       _callbackError = null;
+      _phase = 'Completing authorization';
     });
     try {
       await widget.service.completeAuthorization(widget.serverKey, callback);
       if (!mounted) return;
+      setState(() => _phase = 'Authorization complete');
       Navigator.pop(context, true);
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _completing = false;
         _callbackError = 'Could not complete authorization: $e';
+        _phase = 'Completion failed — review the callback and retry';
       });
     }
   }
 
   void _cancel() {
+    _cancelled = true;
     widget.service.cancelAuthorization(widget.serverKey);
     Navigator.pop(context, false);
   }
 
   @override
   Widget build(BuildContext context) {
-    return AetherSheet(
-      title: 'Authorize ${widget.serverName}',
-      actions: [
-        AetherGhostButton(
-          key: const ValueKey('mcp-oauth-cancel'),
-          label: 'Cancel',
-          onPressed: _completing ? null : _cancel,
-        ),
-      ],
-      child: SingleChildScrollView(
-        child: _loading
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && !_completing) _cancel();
+      },
+      child: AetherSheet(
+        title: 'Authorize ${widget.serverName}',
+        actions: [
+          AetherGhostButton(
+            key: const ValueKey('mcp-oauth-cancel'),
+            label: 'Cancel',
+            onPressed: _completing ? null : _cancel,
+          ),
+        ],
+        child: SingleChildScrollView(
+          child: Semantics(
+            liveRegion: true,
+            label: _phase,
+            child: _loading
             ? const Padding(
                 padding: EdgeInsets.symmetric(vertical: 28),
                 child: Center(
@@ -188,6 +215,8 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
             : _beginError != null
             ? _errorView()
             : _readyView(),
+          ),
+        ),
       ),
     );
   }
@@ -232,6 +261,8 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
         maxLines: 3,
         fieldKey: const ValueKey('mcp-oauth-auth-url'),
       ),
+      const SizedBox(height: 8),
+      _CopyableUrl(url: _authUrlController.text),
       const SizedBox(height: 12),
       AetherPrimaryButton(
         key: const ValueKey('mcp-oauth-open-browser'),
@@ -266,5 +297,40 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
         onPressed: _completing ? null : _complete,
       ),
     ],
+  );
+}
+
+class _CopyableUrl extends StatelessWidget {
+  const _CopyableUrl({required this.url});
+
+  final String url;
+
+  @override
+  Widget build(BuildContext context) => AetherCard(
+    padding: const EdgeInsets.all(12),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: SelectableText(
+            url,
+            semanticsLabel: 'Selectable authorization URL',
+            style: AetherType.mono,
+          ),
+        ),
+        IconButton(
+          tooltip: 'Copy authorization URL',
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: url));
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Authorization URL copied.')),
+              );
+            }
+          },
+          icon: const Icon(Icons.copy_outlined),
+        ),
+      ],
+    ),
   );
 }

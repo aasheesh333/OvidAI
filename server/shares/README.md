@@ -140,3 +140,15 @@ External gate: mount/proxy routes, wire verified account admission and cleanup,
 schedule expired-content maintenance, configure persistent storage/cache policy,
 then verify real Firebase/App Check, anonymous open, and revoke against the actual
 public deployment. Mocked endpoints and local tests do not prove hosting.
+# Share deployment
+
+The resolver must expose `/.well-known/assetlinks.json` from the public share
+origin. Set `OVID_ANDROID_RELEASE_CERT_SHA256` to the real colon-separated
+SHA-256 fingerprint for the production signing certificate before deployment;
+the endpoint returns 503 until it is configured and never invents a
+fingerprint. `OVID_ANDROID_PACKAGE_NAME` defaults to `com.dhanuk.ovidai`.
+
+The web fallback links to Google Play with the validated share token in the
+Play Install Referrer payload. It does not claim reliable automatic install
+detection; users can open the app after installation and the native referrer
+bridge restores the token when Play provides it.

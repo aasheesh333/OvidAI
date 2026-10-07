@@ -20,24 +20,28 @@ class SettingsBackupScreen extends StatefulWidget {
 class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
   bool _busy = false;
   String? _status;
+  String _operation = 'Backup';
   File? _exported;
 
-  Future<void> _run(Future<void> Function() action) async {
+  Future<void> _run(String operation, Future<void> Function() action) async {
     if (_busy) return;
     setState(() {
       _busy = true;
+      _operation = operation;
       _status = null;
     });
     try {
       await action();
     } catch (e) {
-      if (mounted) setState(() => _status = 'Operation failed: $e');
+      if (mounted) {
+        setState(() => _status = '$operation failed. No data was changed. $e');
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _export() => _run(() async {
+  Future<void> _export() => _run('Export', () async {
     final support = await getApplicationSupportDirectory();
     // Only known attachment roots; never export arbitrary app documents,
     // secure storage, external folders, or a recursively discovered tree.
@@ -58,12 +62,13 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       setState(() {
         _exported = file;
         _status =
-            'Archive created. Use Share / save to copy it out of the app cache.';
+            'Export complete. The transcript-only ZIP archive is ready to share or save.';
       });
     }
   });
 
-  Future<void> _import({required bool restore}) => _run(() async {
+  Future<void> _import({required bool restore}) =>
+      _run(restore ? 'Restore' : 'Validate import', () async {
     // Capture ownership before the picker and all IO: an account handoff while
     // choosing a file must not redirect the import into the next account.
     final publisher = restore ? SettingsActions.restorePublisher : null;
@@ -102,7 +107,9 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       await service.restore(bytes, temp);
       if (mounted) {
         setState(
-          () => _status = 'Transcripts restored as new, inactive sessions.',
+          () => _status =
+              'Restore complete: transcripts restored as new, inactive sessions '
+              'in the current account.',
         );
       }
     } else {
@@ -111,7 +118,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
         if (mounted) {
           setState(
             () => _status =
-                'Archive valid: ${staged.sessions.length} transcript(s), '
+                'Import validation complete: ${staged.sessions.length} transcript(s), '
                 '${staged.attachments.length} portable attachment(s). No data restored.',
           );
         }
@@ -140,8 +147,21 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
             subtitle: 'Portable, versioned transcript archive.',
           ),
           const SizedBox(height: 12),
+          Semantics(
+            liveRegion: true,
+            label: 'Backup status: ${_busy ? '$_operation in progress' : _exported != null ? 'Archive ready to share' : 'Ready to export'}',
+            child: Text(
+              _busy
+                  ? '$_operation in progress…'
+                  : _exported != null
+                  ? 'Archive ready to share'
+                  : 'Ready to export',
+              style: AetherType.label,
+            ),
+          ),
+          const SizedBox(height: 12),
           AetherCard(
-            title: const Text('Export summary'),
+            title: const Text('Export-ready archive'),
             trailing: const AetherPill(
               label: 'V1',
               color: Aether.accent,
@@ -150,14 +170,14 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Version 1 exports completed text, reasoning and compacted transcript rows. '
+                  'Transcript-only export: completed text, reasoning and compacted transcript rows. '
                   'It excludes settings, credentials, grants, schedules, tool output, generated images, '
                   'HTML artifacts and running turns. This is not a full app backup.',
                   style: AetherType.body,
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  'Attachments: regular files inside approved app workspace roots only; '
+                  'File summary: regular attachments inside approved app workspace roots only; '
                   '$attLimit MiB each, ${SettingsBackupService.maxAttachments} total. '
                   'Missing, external or oversized files are marked unavailable. '
                   'Archive limit: $mibLimit MiB; transcript manifest: '
@@ -169,7 +189,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
                 const SizedBox(height: 10),
                 Text(
                   'Chat text and attachments may contain secrets you put in them. Their contents are not redacted. '
-                  'Archives are unencrypted, stored ZIP entries only; modified/compressed or legacy JSON archives cannot be restored.',
+                  'The export is a ZIP archive with unencrypted stored entries. Modified, compressed or legacy JSON archives cannot be restored.',
                   style: AetherType.bodyMuted,
                 ),
               ],
@@ -195,12 +215,18 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
               Text('Import validates an archive without changing your chats.',
                 style: AetherType.caption),
               const SizedBox(height: 8),
+              Text(
+                'Restore transcript archive as new inactive sessions: transcript-only data '
+                'is published atomically for the current account. It never merges into existing chats.',
+                style: AetherType.caption,
+              ),
+              const SizedBox(height: 8),
               SettingsActionButton(
-                label: 'View backup files',
-                icon: Icons.folder_open_outlined,
+                label: 'Share archive',
+                icon: Icons.share_outlined,
                 onPressed: _busy || _exported == null
                     ? null
-                    : () => _run(() async {
+                    : () => _run('Share', () async {
                         await NativeShare.file(_exported!.path);
                         if (mounted) {
                           setState(
@@ -211,7 +237,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
                       }),
               ),
               const SizedBox(height: 8),
-              Text('View backup files opens Share / save for the archive you just exported.',
+              Text('Share archive opens Share / save for the archive you just exported.',
                 style: AetherType.caption),
             ],
           ),
@@ -232,11 +258,17 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
           ],
           if (_busy) ...[
             const SizedBox(height: 12),
-            const LinearProgressIndicator(semanticsLabel: 'Backup operation in progress'),
+            LinearProgressIndicator(
+              semanticsLabel: '$_operation in progress',
+            ),
           ],
           if (_status != null) ...[
             const SizedBox(height: 16),
-            SelectableText(_status!, style: AetherType.body),
+            Semantics(
+              liveRegion: true,
+              label: 'Backup status: $_status',
+              child: SelectableText(_status!, style: AetherType.body),
+            ),
           ],
         ],
       ),

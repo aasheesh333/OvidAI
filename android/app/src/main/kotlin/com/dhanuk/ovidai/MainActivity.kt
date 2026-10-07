@@ -33,6 +33,7 @@ import java.io.FileOutputStream
 import java.net.URLConnection
 import java.util.concurrent.Executors
 import java.util.zip.ZipFile
+import com.android.installreferrer.api.InstallReferrerClient
 
 internal data class InstalledBootstrap(
     val bytes: ByteArray? = null,
@@ -622,6 +623,37 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "backgroundState" -> result.success(BackgroundScheduleState.state(applicationContext))
+                    "getInstallReferrer" -> {
+                        val referrer = InstallReferrerClient.newBuilder(this).build()
+                        var completed = false
+                        fun complete(value: String?) {
+                            if (completed) return
+                            completed = true
+                            runCatching { referrer.endConnection() }
+                            result.success(value)
+                        }
+                        try {
+                            referrer.startConnection(object : InstallReferrerClient.InstallReferrerStateListener {
+                                override fun onInstallReferrerSetupFinished(responseCode: Int) {
+                                    if (responseCode == InstallReferrerClient.InstallReferrerResponse.OK) {
+                                        try {
+                                            complete(referrer.installReferrer.installReferrer)
+                                        } catch (_: Exception) {
+                                            complete(null)
+                                        }
+                                    } else {
+                                        complete(null)
+                                    }
+                                }
+
+                                override fun onInstallReferrerServiceDisconnected() {
+                                    complete(null)
+                                }
+                            })
+                        } catch (_: Exception) {
+                            complete(null)
+                        }
+                    }
                     "backgroundStop" -> {
                         BackgroundScheduleState.stop(applicationContext)
                         result.success(true)

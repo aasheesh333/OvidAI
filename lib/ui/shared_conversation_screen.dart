@@ -1,12 +1,9 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 
 import '../core/conversation_share_service.dart';
 import '../core/firebase_service.dart';
-import '../core/share_link_resolver.dart';
 import '../core/theme.dart';
+import '../core/state.dart';
 import 'auth_screen.dart';
 import 'widgets/aether_primitives.dart';
 
@@ -20,34 +17,57 @@ class SharedConversationScreen extends StatefulWidget {
 
 class _SharedConversationScreenState extends State<SharedConversationScreen> {
   late final Future<ConversationSnapshot> _snapshot = _load();
+  late final String _forkRequestId = ConversationShareService.newRequestId();
   bool _busy = false;
   String? _error;
 
   Future<ConversationSnapshot> _load() async {
-    final response = await http.get(Uri.parse(
-      'https://ovidsi.com/s/${widget.token}.json',
-    ));
-    if (response.statusCode != 200) throw const FormatException('unavailable');
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    final messages = (data['messages'] as List).map((row) {
-      final value = row as Map<String, dynamic>;
-      return SharedMessage(value['role'] as String, value['content'] as String);
-    }).toList();
-    return ConversationSnapshot.fromJson(data['session_id'] as String, messages);
+    return ConversationShareService.production().publicSnapshot(widget.token);
   }
 
   Future<void> _continue() async {
     if (_busy) return;
+    final uidBeforeAuth = FirebaseService.I.uid;
     if (!FirebaseService.I.isSignedIn) {
-      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AuthScreen()));
-      if (!mounted || !FirebaseService.I.isSignedIn) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const AuthScreen()),
+      );
+      if (!mounted || !FirebaseService.I.isSignedIn) {
+        return;
+      }
+    }
+    final uidAtFork = FirebaseService.I.uid;
+    if (uidAtFork == null ||
+        (uidBeforeAuth != null && uidBeforeAuth != uidAtFork)) {
+      return;
     }
     setState(() { _busy = true; _error = null; });
+    final accountToken = AppState.I.sessionAccountToken;
+    bool accountIsCurrent() =>
+        identical(accountToken, AppState.I.sessionAccountToken) &&
+        FirebaseService.I.uid == uidAtFork;
     try {
+      final snapshot = await _snapshot;
+      if (!accountIsCurrent()) {
+        throw const ConversationShareException('Account changed. Please reopen the shared link.');
+      }
       final id = await ConversationShareService.production().fork(
         widget.token,
-        requestId: ConversationShareService.newRequestId(),
+        requestId: _forkRequestId,
       );
+      if (!accountIsCurrent()) {
+        throw const ConversationShareException('Account changed. Please reopen the shared link.');
+      }
+      final imported = AppState.I.importSharedMessages(
+        id,
+        [
+          for (final message in snapshot.importableMessages)
+            Message(role: message.role, content: message.content),
+        ],
+      );
+      if (imported == null) {
+        throw const ConversationShareException('This shared snapshot has no importable messages.');
+      }
       if (mounted) Navigator.of(context).pop(id);
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());

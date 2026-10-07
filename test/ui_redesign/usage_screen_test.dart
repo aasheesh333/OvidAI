@@ -150,7 +150,7 @@ void main() {
       expect(find.text('Ovid Cloud'), findsOneWidget);
       expect(find.text('30'), findsOneWidget);
       expect(find.text('20 in · 10 out'), findsOneWidget);
-      expect(find.text('1 requests · 20 in · 10 out'), findsOneWidget);
+       expect(find.text('1 requests · 20 in · 10 out'), findsOneWidget);
 
       final toggle = find.text('Show 1 model').hitTestable();
       await tester.scrollUntilVisible(toggle, 150);

@@ -390,12 +390,14 @@ class _PlanCard extends StatelessWidget {
             )
           else if (isFree)
             Text('Included with your account', style: AetherType.bodyMuted)
-          else if (isBelow || currentRank < 0)
+          else if (currentRank >= 0 && isBelow)
             _UpgradeButton(
               plan: plan,
               ghost: true,
               label: 'Change plan',
             )
+          else if (currentRank < 0)
+            Text('Plan status unavailable', style: AetherType.bodyMuted)
           else
             _UpgradeButton(
               plan: plan,
