@@ -212,59 +212,41 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   48.0,
                   textScaler.scale(14) * 1.5 + 24,
                 );
-                // Nav icons live INSIDE the URL field's right edge as one
-                // compact trailing group — no 48px column on the left, so the
-                // band stays short and the address owns the width.
-                Widget navAction(String keyName, String tip, IconData icon,
-                        VoidCallback? onTap) =>
-                    Tooltip(
-                      key: ValueKey(keyName),
-                      message: tip,
-                      child: InkWell(
-                        onTap: onTap,
-                        customBorder: const CircleBorder(),
-                        child: Semantics(
-                          button: true,
-                          label: tip,
-                          child: Padding(
-                            padding: const EdgeInsets.all(9),
-                            child: Icon(
-                              icon,
-                              size: 17,
-                              color: onTap == null
-                                  ? Aether.textFaint
-                                  : Aether.textMuted,
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
                 final navigation = <Widget>[
-                  navAction(
-                    'browser-back',
-                    'Back',
-                    Icons.arrow_back_ios_new,
-                    () async {
+                  AetherGhostButton(
+                    key: const ValueKey('browser-back'),
+                    label: 'Back',
+                    tooltip: 'Back',
+                    icon: Icons.arrow_back_ios_new,
+                    iconOnly: true,
+                    iconSize: 48,
+                    onPressed: () async {
                       if (await controller?.canGoBack() ?? false) {
                         await controller!.goBack();
                       }
                     },
                   ),
-                  navAction(
-                    'browser-forward',
-                    'Forward',
-                    Icons.arrow_forward_ios,
-                    () async {
+                  AetherGhostButton(
+                    key: const ValueKey('browser-forward'),
+                    label: 'Forward',
+                    tooltip: 'Forward',
+                    icon: Icons.arrow_forward_ios,
+                    iconOnly: true,
+                    iconSize: 48,
+                    onPressed: () async {
                       if (await controller?.canGoForward() ?? false) {
                         await controller!.goForward();
                       }
                     },
                   ),
-                  navAction(
-                    'browser-reload',
-                    'Reload',
-                    Icons.refresh,
-                    () {
+                  AetherGhostButton(
+                    key: const ValueKey('browser-reload'),
+                    label: 'Reload',
+                    tooltip: 'Reload',
+                    icon: Icons.refresh,
+                    iconOnly: true,
+                    iconSize: 48,
+                    onPressed: () {
                       final t = _activeTab;
                       final lp = t?.localPreviewPath;
                       if (t != null && lp != null) {
@@ -302,10 +284,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                           : Aether.textFaint,
                     ),
                   ),
-                  suffix: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: navigation,
-                  ),
                   onSubmitted: (value) {
                     _nav(value);
                     _endUrlEditing();
@@ -323,12 +301,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 // omnibar's second line on narrow layouts.
                 final secondary = <Widget>[
                   IconButton(
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.all(6),
-                    constraints: const BoxConstraints(
-                      minWidth: 36,
-                      minHeight: 36,
-                    ),
                     tooltip: tab?.desktopMode == true
                         ? 'Switch to mobile view'
                         : 'Switch to desktop view',
@@ -350,12 +322,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                           },
                   ),
                   IconButton(
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.all(6),
-                    constraints: const BoxConstraints(
-                      minWidth: 36,
-                      minHeight: 36,
-                    ),
                     tooltip: 'Open in browser',
                     icon: Icon(
                       Icons.open_in_new,
@@ -367,12 +333,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                         : () => _openInExternalBrowser(tab.url),
                   ),
                   IconButton(
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.all(6),
-                    constraints: const BoxConstraints(
-                      minWidth: 36,
-                      minHeight: 36,
-                    ),
                     tooltip: 'New tab',
                     icon: Icon(Icons.add, size: 19, color: Aether.textMuted),
                     onPressed: () {
@@ -382,24 +342,28 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                 ];
                 return AetherGradientHeader(
-                  height: math.max(fieldHeight, 48) + 18 + (narrow ? 42 : 0),
+                  height: fieldHeight + 20 + (narrow ? 48 : 0),
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
+                    padding: const EdgeInsets.fromLTRB(6, 10, 6, 8),
                     child: narrow
                         ? Column(
                             children: [
                               Row(
                                 children: [Expanded(child: address), go],
                               ),
-                              const SizedBox(height: 2),
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: secondary,
+                                children: [
+                                  ...navigation,
+                                  const Spacer(),
+                                  ...secondary,
+                                ],
                               ),
                             ],
                           )
                         : Row(
                             children: [
+                              ...navigation,
+                              const SizedBox(width: 4),
                               Expanded(child: address),
                               go,
                               ...secondary,

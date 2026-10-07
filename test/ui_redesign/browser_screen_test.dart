@@ -69,11 +69,11 @@ void main() {
         find.descendant(of: header, matching: find.byType(AetherField)),
         findsOneWidget,
       );
-      // Back / forward / reload are compact inline nav actions inside the URL
-      // field; Go is the single Aether ghost button in the gradient header.
+      // Back / forward / reload / go are all Aether ghost icon buttons
+      // sitting inside the gradient header.
       expect(
         find.descendant(of: header, matching: find.byType(AetherGhostButton)),
-        findsOneWidget,
+        findsNWidgets(4),
       );
 
       // Stable keys the older suites (and screen readers) navigate by.
@@ -121,7 +121,7 @@ void main() {
 
     expect(find.bySemanticsLabel('Close tab'), findsNWidgets(2));
     // One ghost button per nav action still, strip did not add more.
-    expect(find.byType(AetherGhostButton), findsOneWidget);
+    expect(find.byType(AetherGhostButton), findsNWidgets(4));
     expect(tester.takeException(), isNull);
   });
 

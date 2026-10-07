@@ -131,8 +131,8 @@ void main() {
     AgentService.I.browserTabs.add(tab);
     await pumpBrowser(tester);
 
-    // ONE omnibar: one gradient header band holding the only address field,
-    // the inline nav actions (back/forward/reload inside the field), and Go.
+    // ONE omnibar: one gradient header band holding the only address field
+    // and the four nav ghost buttons.
     final header = find.byType(AetherGradientHeader);
     expect(header, findsOneWidget);
     expect(find.byType(TextField), findsOneWidget);
@@ -142,7 +142,7 @@ void main() {
     );
     expect(
       find.descendant(of: header, matching: find.byType(AetherGhostButton)),
-      findsOneWidget, // only Go; nav icons are compact inline actions
+      findsNWidgets(4),
     );
     expect(find.byKey(const ValueKey('browser-back')), findsOneWidget);
     expect(find.byKey(const ValueKey('browser-forward')), findsOneWidget);
