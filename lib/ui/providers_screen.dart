@@ -198,7 +198,7 @@ class _ProviderTileState extends State<_ProviderTile> {
   String get _statusLabel {
     if (!provider.requiresApiKey) return 'Connected · no key required';
     if (provider.hasKey) return 'Key saved · not verified';
-    if (provider.isFree) return 'No key saved · key required';
+    if (provider.isFree) return 'Free tier — key required';
     return 'Not connected · key required';
   }
 
@@ -255,7 +255,7 @@ class _ProviderTileState extends State<_ProviderTile> {
               'No models returned. You can add a model manually in Edit.';
         } else {
           _fetchState = _FetchState.success;
-          _fetchResult = '${provider.models.length} models available ✓';
+          _fetchResult = '${provider.models.length} models fetched ✓';
         }
         return;
       }

@@ -401,15 +401,14 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
       child: Semantics(
         liveRegion: true,
-        child: Row(
+        child: Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          runSpacing: 4,
           children: [
             Icon(Icons.circle, size: 8, color: Aether.accent),
-            const SizedBox(width: 8),
             Text('Preview status', style: AetherType.caption),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(message, style: AetherType.caption),
-            ),
+            Text(message, style: AetherType.caption),
           ],
         ),
       ),

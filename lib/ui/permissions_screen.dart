@@ -150,7 +150,7 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
         )) {
       _showRevokeMessage(
         context,
-        'Not revoked: this decision is no longer the uniquely selected grant in the current session.',
+        'This decision is no longer in the current session.',
       );
       return;
     }
@@ -503,7 +503,7 @@ class _GrantRow extends StatelessWidget {
             message: 'Revoke',
             child: TextButton.icon(
               key: ValueKey(
-                'revoke-${global ? 'global' : 'session'}-${_grantIdentityKey(grant)}',
+                'revoke-${global ? 'global' : 'session'}-${grant.kind}-${grant.value}',
               ),
               icon: const Icon(Icons.delete_outline, size: 18),
               label: const Text('Revoke'),
@@ -578,7 +578,3 @@ String _label(PermissionGrant g) {
   final deny = g.isDeny ? ' · denied' : '';
   return '$what$deny';
 }
-
-String _grantIdentityKey(PermissionGrant g) =>
-    '${g.kind}|${g.value}|${g.scope}|${g.sessionId}|${g.mode}|'
-    '${g.decision}|${g.recursive}|${g.grantedAt.microsecondsSinceEpoch}';

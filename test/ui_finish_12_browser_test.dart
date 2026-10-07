@@ -187,8 +187,10 @@ void main() {
         expect(find.byTooltip('View source').hitTestable(), findsOneWidget);
         await tester.tap(find.byTooltip('View source'));
         await tester.pump();
-        expect(find.byType(SelectableText), findsOneWidget);
+        expect(find.byType(SelectableText), findsNWidgets(3));
         expect(find.textContaining('<p>Saved source marker</p>'), findsOneWidget);
+        expect(find.text('p { color: red; }'), findsOneWidget);
+        expect(find.text('console.log("saved script");'), findsOneWidget);
         await tester.tap(find.byTooltip('Show preview'));
         await tester.pump();
         expect(find.byType(SelectableText), findsNothing);

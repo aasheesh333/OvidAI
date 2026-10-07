@@ -118,7 +118,8 @@ void main() {
     await tester.pumpWidget(
       host(HtmlArtifact.create('owner', {'html': '<b>hello</b>'})),
     );
-    expect(find.textContaining('Android'), findsOneWidget);
+    expect(find.textContaining('Interactive preview requires Android.'), findsOneWidget);
+    expect(find.text('Android preview unavailable'), findsOneWidget);
     await tester.tap(find.byTooltip('View source'));
     await tester.pumpAndSettle();
     expect(find.textContaining('<b>hello</b>'), findsOneWidget);

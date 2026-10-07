@@ -83,12 +83,12 @@ void main() {
     await tester.tap(find.widgetWithText(AetherGhostButton, 'View source'));
     await tester.pump();
 
-    // Label flips and the artifact source is shown as selectable text.
+    // Each source section is selectable and appears only once.
     expect(
       find.widgetWithText(AetherGhostButton, 'Show preview'),
       findsOneWidget,
     );
-    expect(find.byType(SelectableText), findsOneWidget);
+    expect(find.byType(SelectableText), findsNWidgets(3));
     expect(find.textContaining('<p>Hello marker</p>'), findsOneWidget);
     expect(find.textContaining('p { color: red; }'), findsOneWidget);
     expect(find.textContaining('void main() {}'), findsOneWidget);

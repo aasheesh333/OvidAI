@@ -44,16 +44,35 @@ void main() {
   }, variant: linux);
 
   testWidgets('copying a source section exposes live feedback', (tester) async {
+    String? clipboardText;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          clipboardText = (call.arguments as Map)['text'] as String;
+        }
+        return null;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
     await pumpArtifact(tester);
 
     await tester.tap(find.byTooltip('Copy CSS'));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
+    expect(clipboardText, 'main { color: red; }');
     expect(find.text('CSS copied'), findsOneWidget);
     expect(
-      await Clipboard.getData(Clipboard.kTextPlain),
-      isNotNull,
+      tester.widget<Semantics>(find.ancestor(
+        of: find.text('CSS copied'),
+        matching: find.byType(Semantics),
+      ).first).properties.liveRegion,
+      isTrue,
     );
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.text('CSS copied'), findsNothing);
+    expect(find.byTooltip('Copy CSS'), findsOneWidget);
   }, variant: linux);
 
   testWidgets('unsupported preview keeps a visible non-blocking lifecycle status',
@@ -68,7 +87,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Preview status'), findsOneWidget);
-    expect(find.text('Interactive preview requires Android.'), findsOneWidget);
+    expect(find.textContaining('Interactive preview requires Android.'), findsOneWidget);
     expect(find.byTooltip('View source'), findsOneWidget);
   }, variant: linux);
 }
