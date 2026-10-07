@@ -91,19 +91,18 @@ void main() {
     client.close();
   });
 
-  test('a blank provider token blocks the mint before transport', () async {
+  test('a blank provider token omits the optional header and reaches the gateway', () async {
     OvidCloudService.appCheckTokenProvider = () async => '   ';
     var requests = 0;
     final client = MockClient((_) async {
       requests++;
-      return http.Response('{"key":"should-not-arrive"}', 200);
+      return http.Response('{"key":"gateway-key"}', 200);
     });
 
     final outcome = await OvidCloudService.I.bindOvidCloud(client: client);
 
-    expect(outcome.ok, isFalse);
-    expect(outcome.message, contains('App Check'));
-    expect(requests, 0);
+    expect(outcome.ok, isTrue);
+    expect(requests, greaterThan(0));
     client.close();
   });
 

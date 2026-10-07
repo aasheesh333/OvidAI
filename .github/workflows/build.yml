@@ -118,15 +118,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # Release-candidate signing is available whenever the keystore secret is set.
-      # Signed release artifacts build on every push when the keystore secret is
-      # present (target 28, sideload / release-candidate). The manual
-      # `production_release` dispatch instead enforces the API 36 Play floor.
+      # Release artifacts are intentionally manual. Building the signed APK and
+      # AAB on every branch push duplicates the full Android compilation and
+      # made ordinary validation take roughly 20 minutes instead of 10.
       - name: Detect release signing availability
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
+          if [ -n "$KEYSTORE_B64" ] && [ "${{ inputs.production_release }}" = "true" ]; then
             echo "release_signing=true" >> "$GITHUB_ENV"
           fi
 
@@ -176,8 +175,7 @@ jobs:
           flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
           flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
 
-      # Push (release candidate): signed, non-debuggable, target 28, NOT Play
-      # qualified. Manual production_release: enforces the API 36 Play floor.
+      # Manual production_release enforces the API 36 Play floor.
       - name: Gate release artifacts
         if: env.release_signing == 'true'
         env:

@@ -250,16 +250,13 @@ class OvidCloudService extends ChangeNotifier {
       final token = override != null
           ? await override()
           : await _appCheck.getToken();
-      if (token == null || token.trim().isEmpty) {
-        throw const CloudUsageException(
-          'App Check could not verify this app. Restart the app and retry.',
-        );
-      }
-      return token;
+      // App Check is enforced by the gateway when enabled. Keep client-side
+      // attestation best-effort so sideloaded/dev builds can still reach a
+      // gateway configured with APPCHECK_ENABLED=false; the server remains
+      // authoritative if attestation is required.
+      return token?.trim() ?? '';
     } catch (_) {
-      throw const CloudUsageException(
-        'App Check could not verify this app. Restart the app and retry.',
-      );
+      return '';
     }
   }
 

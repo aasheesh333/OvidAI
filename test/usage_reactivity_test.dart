@@ -99,7 +99,7 @@ void main() {
     });
   }
 
-  test('missing App Check fails clearly before mint transport', () async {
+  test('missing App Check is optional when the gateway does not require it', () async {
     OvidCloudService.appCheckTokenProvider = () async => null;
     var calls = 0;
     final client = MockClient((_) async {
@@ -107,9 +107,8 @@ void main() {
       return http.Response('{"key":"unverified"}', 200);
     });
     final result = await OvidCloudService.I.bindOvidCloud(client: client);
-    expect(result.ok, isFalse);
-    expect(result.message, contains('App Check'));
-    expect(calls, 0);
+    expect(result.ok, isTrue);
+    expect(calls, greaterThan(0));
     client.close();
   });
 

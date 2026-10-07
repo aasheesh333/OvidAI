@@ -296,26 +296,19 @@ void main() {
   }
 
   test(
-    'failed attestation and mint statuses are sanitized and retryable',
+    'unavailable attestation is optional and mint statuses remain retryable',
     () async {
       var calls = 0;
       final client = MockClient((_) async {
         calls++;
-        return mint();
+        return http.Response('gateway unavailable', 503);
       });
       OvidCloudService.appCheckTokenProvider = () async =>
           throw StateError('private token');
       final failed = await OvidCloudService.I.ensureConnected(client: client);
       expect(failed.ok, isFalse);
-      expect(calls, 0);
-      expect(
-        OvidCloudService.I.connectionFor(AppState.I).error,
-        contains('App Check'),
-      );
-      expect(
-        OvidCloudService.I.connectionFor(AppState.I).error,
-        isNot(contains('private')),
-      );
+      expect(failed.status, MintStatus.unavailable);
+      expect(calls, greaterThan(0));
       client.close();
       OvidCloudService.appCheckTokenProvider = () async => 'attestation';
       for (final entry in {
