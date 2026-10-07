@@ -122,38 +122,21 @@ void main() {
     expect(ledgerText(), contains('AgentHookEvaluator'));
   });
 
-  test('production wiring assigns the tool-capable evaluator to the bounded, quiet, fail-open loop', () {
-    // v2-22 closed the gap this pin used to guard: per-evaluation
-    // cancellation, detached approvals and a publication-free dispatch now
-    // exist, so the evaluator IS wired. The contract is now WHERE it points
-    // and HOW the wired loop behaves.
+  test('production wiring keeps the tool-capable evaluator honestly unassigned', () {
     final source = File('lib/core/agent_service.dart').readAsStringSync();
     expect(
-      RegExp(r'agentHookEvaluator\s*=\s*_evaluateAgentHookQuietly')
-          .hasMatch(source),
-      isTrue,
+      RegExp(r'agentHookEvaluator\s*=').hasMatch(source),
+      isFalse,
       reason:
-          'the tool-capable evaluator may only be wired to the bounded, '
-          'cancellable, quiet loop '
-          '(docs/superpowers/audits/2026-10-06-agent-hooks-closure.md).',
+          'AgentService must not wire the tool-capable evaluator until '
+          'per-evaluation cancellation, detached approvals and publication-free '
+          'dispatch exist (docs/superpowers/audits/2026-10-06-agent-hooks-closure.md).',
     );
     expect(
       RegExp(r'promptHookEvaluator\s*=').hasMatch(source),
       isTrue,
       reason: 'prompt hooks are wired; agent hooks must never reuse them.',
     );
-    // BOUNDED — the tool loop is round-capped inside the HookService budget.
-    expect(source, contains('const maxToolRounds = 8'));
-    expect(source, contains('DateTime.now().add(evaluation.budget)'));
-    // QUIET — nothing streams into the transcript; the loop runs detached
-    // from any session run bucket.
-    expect(source, contains('streamToTranscript: false'));
-    expect(source, contains('_hookEvalCtxKey: ctx'));
-    expect(source, contains('_runCtxKey: null'));
-    // CANCELLABLE — the explicit signal aborts the evaluation's own bucket.
-    expect(source, contains('evaluation.isCancelled.then'));
-    // FAIL-OPEN — any failure (or no verdict) lets the event through.
-    expect(source, contains('return null; // fail open'));
   });
 
   test('agent verdicts decide gates and stops without the prompt evaluator', () async {

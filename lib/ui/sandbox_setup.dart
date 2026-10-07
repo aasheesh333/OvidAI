@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
 import '../core/state.dart';
-import '../core/router.dart';
 import '../core/sandbox_service.dart';
 import '../core/studio_setup_coordinator.dart';
 import 'studio_screen.dart';
@@ -13,71 +12,39 @@ import 'widgets/aether_primitives.dart';
 
 /// First open asks for install approval. Subsequent opens attach to any
 /// active/unfinished job, even if the core has become available meanwhile.
-///
-/// DETERMINISTIC (v2-13): the whole decision runs through ONE resolver —
-/// [resolveStudioDestination] — which lands in exactly ONE place per state
-/// (install/attention/first-open → [SandboxSetupScreen]; ready →
-/// [StudioScreen]). There is no split sync/async decision tree and no
-/// 3-outcome completion callback: inputs are gathered once, the pure gate
-/// ([determineStudioRoute]) decides, and the single resulting route is
-/// PUSHED — the stack is never wiped here; replacing or clearing routes
-/// stays behind explicit user actions inside the screens.
 void openStudio(BuildContext context) {
-  // Collapse double taps during the disk probe: one resolution, one push.
-  if (_studioOpening) return;
-  _studioOpening = true;
-  unawaited(() async {
-    try {
-      final destination = await resolveStudioDestination();
-      if (!context.mounted) return;
-      unawaited(
-        Navigator.of(
-          context,
-        ).push(MaterialPageRoute(builder: (_) => destination)),
-      );
-    } finally {
-      _studioOpening = false;
-    }
-  }());
-}
-
-bool _studioOpening = false;
-
-/// The ONE Studio destination for the current state, computed in a single
-/// pass. A completed core-only job (Health hard reset) is forgotten first —
-/// it is not proof the full Studio toolchain exists. First-open and
-/// needs-attention states short-circuit before the disk probe (approval
-/// comes before any install decision); otherwise the probe decides between
-/// Studio and the install flow, and the job state is re-read after the
-/// probe because a banner retry may have started while it ran.
-Future<Widget> resolveStudioDestination() async {
   final setup = StudioSetupCoordinator.I;
   if (setup.coreOnly && setup.status == StudioSetupStatus.ready) {
     setup.forgetCompleted();
   }
-  final firstOpenDone = AppState.I.studioFirstOpenDone;
-  if (!firstOpenDone || setup.needsAttention) {
-    return studioScreenFor(
-      determineStudioRoute(
-        firstOpenDone: firstOpenDone,
-        needsAttention: setup.needsAttention,
-        sandboxInstalled: AppState.I.sandboxInstalled,
+  if (setup.needsAttention || !AppState.I.studioFirstOpenDone) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SandboxSetupScreen(
+          studioFirstOpen: !AppState.I.studioFirstOpenDone,
+        ),
       ),
     );
+    return;
   }
-  final installed = await SandboxService.I.checkExisting();
-  AppState.I.sandboxInstalled = installed;
-  final attention = setup.needsAttention;
-  // A completed job is not proof that a wiped core still exists — but a
-  // retained failure/partial state is never forgotten here.
-  if (!installed && !attention) setup.forgetCompleted();
-  return studioScreenFor(
-    determineStudioRoute(
-      firstOpenDone: true,
-      needsAttention: attention,
-      sandboxInstalled: installed,
-    ),
-  );
+  SandboxService.I.checkExisting().then((installed) {
+    AppState.I.sandboxInstalled = installed;
+    if (!context.mounted) return;
+    if (setup.needsAttention) {
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const SandboxSetupScreen()));
+    } else if (installed) {
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const StudioScreen()));
+    } else {
+      setup.forgetCompleted();
+      Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const SandboxSetupScreen()));
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -92,23 +59,10 @@ Future<Widget> resolveStudioDestination() async {
 // AetherCard-framed approval/error/done panels. The install flow, kernel
 // checks, approval/permission gates, gate-mode hand-off and every copy
 // string are preserved verbatim (no new logic, no coordinator changes).
-//
-// ONBOARDING (v2-13): first-open completion consolidates into one guided
-// "Connect repo" step — Session clone preselected (the sensible default),
-// Local folder clone under a collapsed Advanced options section, and one
-// clear action (Open Studio) that hands off to Studio with the one-time
-// post-install GitHub prompt. Repair/partial/gate completions keep the
-// classic done panel. Approval copy is a single calm paragraph; every state
-// (empty/progress/error) keeps exactly one primary action.
 // ---------------------------------------------------------------------------
 
 /// Per-step visual state derived from the coordinator's phase/status.
 enum _StepState { done, active, failed, pending }
-
-/// Where a connected repo's working copy lives. Session clone is the
-/// preselected sensible default on the Connect repo step; Local folder
-/// clone sits under the collapsed Advanced options.
-enum _CloneTarget { session, local }
 
 class SandboxSetupScreen extends StatefulWidget {
   /// Health-screen hard reset has already been approved: start a core-only
@@ -163,11 +117,6 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   // "Start chatting" button must not push the shell twice.
   bool _navigated = false;
   Timer? _ticker;
-
-  /// Connect repo step: Session clone is preselected; Advanced options
-  /// (Local folder clone) start collapsed.
-  _CloneTarget _connectTarget = _CloneTarget.session;
-  bool _connectAdvancedOpen = false;
 
   int get _elapsedSec => _setup.elapsed.inSeconds;
 
@@ -358,8 +307,16 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 Text('Set up Studio', style: AetherType.h2),
                 const SizedBox(height: 12),
                 Text(
-                  'Install the on-device sandbox with Node.js, Python and tools. '
-                  'One time, a few minutes — you can keep chatting while it runs.',
+                  'Install the on-device sandbox and download Node.js, Python, and supporting tools. '
+                  'This uses network data and device storage and may take several minutes. '
+                  'Any existing sandbox core will be kept.',
+                  textAlign: TextAlign.center,
+                  style: AetherType.bodyMuted,
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  'You can go Back and chat during setup. Reopen Studio to see progress. '
+                  'Keep Ovid running; setup cannot continue if the app process is closed.',
                   textAlign: TextAlign.center,
                   style: AetherType.bodyMuted,
                 ),
@@ -624,12 +581,6 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   }
 
   Widget _doneView() {
-    // First-open completion consolidates onboarding into the guided Connect
-    // repo step. Partial toolchains and gate-mode completions keep the
-    // classic done panel (its runtime retry / Start chatting contracts).
-    if (widget.studioFirstOpen && !widget.gateMode && !_partial) {
-      return _connectRepoView();
-    }
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(28),
@@ -640,7 +591,30 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _successIcon(),
+                TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0, end: 1),
+                  duration: const Duration(milliseconds: 450),
+                  curve: Curves.elasticOut,
+                  builder: (_, v, _) => Transform.scale(
+                    scale: v,
+                    child: Container(
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        color: Aether.successLight.withValues(alpha: 0.12),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: Aether.successLight.withValues(alpha: 0.5),
+                        ),
+                      ),
+                      child: Icon(
+                        Icons.check_rounded,
+                        size: 38,
+                        color: Aether.successLight,
+                      ),
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 20),
                 Text(
                   _partial ? 'Sandbox core ready' : 'Sandbox ready',
@@ -737,224 +711,6 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  /// Calm success marker shared by the done panel and the Connect repo step.
-  Widget _successIcon() {
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0, end: 1),
-      duration: const Duration(milliseconds: 450),
-      curve: Curves.elasticOut,
-      builder: (_, v, _) => Transform.scale(
-        scale: v,
-        child: Container(
-          width: 72,
-          height: 72,
-          decoration: BoxDecoration(
-            color: Aether.successLight.withValues(alpha: 0.12),
-            shape: BoxShape.circle,
-            border: Border.all(
-              color: Aether.successLight.withValues(alpha: 0.5),
-            ),
-          ),
-          child: Icon(
-            Icons.check_rounded,
-            size: 38,
-            color: Aether.successLight,
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ── First-open onboarding: one guided Connect repo step ─────────────────
-  //
-  // Session clone is preselected (the sensible default — clone once into
-  // Ovid storage, reused by future sessions); Local folder clone sits under
-  // the collapsed Advanced options. The single action opens Studio, which
-  // owns the actual sign-in/repo-pick/clone flow, with the one-time
-  // post-install GitHub prompt wired.
-
-  Widget _connectRepoView() {
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(28),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 440),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Center(child: _successIcon()),
-              const SizedBox(height: 20),
-              Text(
-                'Sandbox ready',
-                style: AetherType.h2,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Connect a repo to start building.',
-                textAlign: TextAlign.center,
-                style: AetherType.bodyMuted,
-              ),
-              const SizedBox(height: 24),
-              Text('Connect repo', style: AetherType.title),
-              const SizedBox(height: 10),
-              _connectOption(
-                key: const ValueKey('connectRepo.sessionClone'),
-                title: 'Session clone',
-                subtitle: 'Clone once into Ovid storage — '
-                    'reused by future sessions.',
-                badge: 'Default',
-                selected: _connectTarget == _CloneTarget.session,
-                onTap: () =>
-                    setState(() => _connectTarget = _CloneTarget.session),
-              ),
-              Semantics(
-                container: true,
-                button: true,
-                expanded: _connectAdvancedOpen,
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(AetherRadius.rMd),
-                  onTap: () => setState(
-                    () => _connectAdvancedOpen = !_connectAdvancedOpen,
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 4,
-                      vertical: 10,
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          _connectAdvancedOpen
-                              ? Icons.expand_less
-                              : Icons.expand_more,
-                          size: 18,
-                          color: Aether.textMuted,
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            'Advanced options',
-                            style: AetherType.label,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              if (_connectAdvancedOpen)
-                _connectOption(
-                  key: const ValueKey('connectRepo.localClone'),
-                  title: 'Local folder clone',
-                  subtitle: 'Pick a device folder; the repo is cloned '
-                      'into a subfolder.',
-                  selected: _connectTarget == _CloneTarget.local,
-                  onTap: () =>
-                      setState(() => _connectTarget = _CloneTarget.local),
-                ),
-              const SizedBox(height: 22),
-              _SetupPrimaryButton(
-                label: 'Open Studio',
-                icon: Icons.code,
-                onPressed: _openStudioAfterSetup,
-              ),
-              const SizedBox(height: 4),
-              AetherGhostButton(
-                label: 'Back to chat',
-                onPressed: () => Navigator.pop(context),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// One selectable clone-target card: a radio-style check conveys the
-  /// selection (Session clone is preselected), an optional pill marks the
-  /// recommended default.
-  Widget _connectOption({
-    required Key key,
-    required String title,
-    required String subtitle,
-    required bool selected,
-    required VoidCallback onTap,
-    String? badge,
-  }) {
-    return Semantics(
-      container: true,
-      button: true,
-      selected: selected,
-      child: AetherCard(
-        key: key,
-        padding: EdgeInsets.zero,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(AetherRadius.rLg),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 1),
-                  child: Icon(
-                    selected
-                        ? Icons.check_circle_rounded
-                        : Icons.circle_outlined,
-                    size: 20,
-                    color: selected ? Aether.accent : Aether.textFaint,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          Text(title, style: AetherType.title),
-                          if (badge != null)
-                            AetherPill(label: badge, color: Aether.accent),
-                        ],
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        subtitle,
-                        style: AetherType.bodyMuted.copyWith(
-                          fontSize: 12.5,
-                          height: 1.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// The Connect repo step's one action: replace this route with Studio
-  /// (user-confirmed — never a stack wipe) and fire the one-time
-  /// post-install GitHub login prompt from Studio's side.
-  void _openStudioAfterSetup() {
-    if (_navigated) return;
-    _navigated = true;
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(
-        builder: (_) => const StudioScreen(postInstallGithubPrompt: true),
       ),
     );
   }

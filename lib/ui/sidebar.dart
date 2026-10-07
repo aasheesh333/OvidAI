@@ -5,55 +5,12 @@ import '../core/firebase_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/agent_service.dart';
-import 'billing_screen.dart';
-import 'memory_screen.dart';
 import 'profile_avatar.dart';
+import 'settings_screen.dart';
 import 'trajectory_screen.dart';
 import 'schedule_screen.dart';
 import 'conversation_share_sheet.dart';
 import 'widgets/aether_primitives.dart';
-
-/// Decoupled push targets for destinations whose screens sit OUTSIDE the
-/// sidebar's compilable import graph. The sidebar is intentionally a
-/// leaf library: importing Studio/Plugins/Settings here would drag the
-/// whole Studio terminal stack into every sidebar widget test. Instead
-/// [OvidShell] — which already imports those screens — registers the
-/// real push closures once at startup, and the nav rows call
-/// [SidebarNav.push]. Before registration (sidebar-only tests, or a
-/// ChatScreen built without the shell) a tap is a safe no-op: the row
-/// still renders and stays enabled.
-typedef SidebarNavPush = void Function(BuildContext context);
-
-final class SidebarNav {
-  SidebarNav._();
-
-  /// Studio (code & terminal) — registered by the shell via `openStudio`.
-  static const studio = 'studio';
-
-  /// Plugins & marketplaces.
-  static const plugins = 'plugins';
-
-  /// Settings root.
-  static const settings = 'settings';
-
-  static final Map<String, SidebarNavPush> _pushers = {};
-
-  /// Registers [push] for [destination]. Called once by the shell.
-  static void register(String destination, SidebarNavPush push) {
-    _pushers[destination] = push;
-  }
-
-  /// Pushes [destination] when a pusher is registered; no-op otherwise.
-  static void push(BuildContext context, String destination) {
-    _pushers[destination]?.call(context);
-  }
-
-  /// Test seam: forget every registration.
-  @visibleForTesting
-  static void debugClear() {
-    _pushers.clear();
-  }
-}
 
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
@@ -65,17 +22,6 @@ final class SidebarNav {
 /// "New chat" affordance is now [AetherPrimaryButton]. All existing
 /// semantics (string labels, tooltips, keys, swipe/rename behaviour) are
 /// preserved so sidebar regression suites keep passing.
-///
-/// 2026-10-06 v2 nav restructure: the footer is now ONE consistent
-/// ghost-row navigation band with the six destinations — Chat, Studio,
-/// Activity (the trajectory event ledger), Library (memories), Money
-/// (plans & billing), Plugins — plus Schedule and Settings. Every row is
-/// the same [_SidebarNavRow] (icon disc + label + chevron, hover tint on
-/// wide pointers). Session-gated rows never disable silently: the
-/// chevron swaps to a visible "Needs a chat" marker and the tooltip
-/// explains why. The narrow-screen [Drawer] that hosts this sidebar is
-/// declared exactly once — inside ChatScreen's own Scaffold; the shell
-/// only embeds the sidebar directly in wide mode.
 class SessionsSidebar extends StatefulWidget {
   /// True when hosted inside a [Drawer] (narrow screens). In wide mode the
   /// sidebar is embedded directly in a Row — there popping the route would
@@ -259,114 +205,60 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
             Divider(height: 1, thickness: 1, color: Aether.hairline),
             const SizedBox(height: 4),
 
-            // ── Destination nav band (v2, 2026-10-06) ──────────────────
-            // Chat / Studio / Activity / Library / Money / Plugins plus
-            // Schedule and Settings — every row is the same compact ghost
-            // nav row ([_SidebarNavRow]), so the footer reads as a single
-            // consistent navigation band instead of bespoke rows. Gated
-            // destinations (Activity, Schedule) explain their disabled
-            // state instead of silently greying out.
+            // Schedule / Trajectory / Settings — all three render as the
+            // same compact ghost nav row, so the footer reads as a single
+            // consistent navigation band instead of three bespoke rows.
             AnimatedBuilder(
               animation: app,
               builder: (_, _) {
-                final sid = app.activeSessionId;
-                final hasSession = sid != null;
-                void push(Widget screen) {
-                  Navigator.of(
-                    context,
-                  ).push(MaterialPageRoute(builder: (_) => screen));
-                }
-
+                final hasSession = app.activeSessionId != null;
                 return Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Chat — home destination. Narrow: the drawer IS a
-                    // route, so closing it reveals the chat. Wide: pop any
-                    // pushed screen back to the embedded chat.
                     _SidebarNavRow(
-                      navKey: const ValueKey('sidebar-nav-chat'),
-                      icon: Icons.chat_bubble_outline,
-                      label: 'Chat',
-                      enabled: true,
-                      onTap: () {
-                        if (widget.isDrawer) {
-                          Navigator.maybePop(context);
-                        } else {
-                          Navigator.of(
-                            context,
-                          ).popUntil((route) => route.isFirst);
-                        }
-                      },
-                    ),
-                    // Studio/Plugins/Settings push through [SidebarNav]:
-                    // their screens live outside this library's compilable
-                    // graph; the shell registers the real closures.
-                    _SidebarNavRow(
-                      navKey: const ValueKey('sidebar-nav-studio'),
-                      icon: Icons.code,
-                      label: 'Studio',
-                      enabled: true,
-                      onTap: () => SidebarNav.push(context, SidebarNav.studio),
-                    ),
-                    // Activity — the trajectory event ledger (PR27/B2:
-                    // trajectory lives in the sidebar footer, not the chat
-                    // header). The caption keeps the legacy label so the
-                    // destination is self-describing; the row is gated on
-                    // an active session because pushing with an empty id
-                    // lands on a confusing empty ledger.
-                    _SidebarNavRow(
-                      navKey: const ValueKey('sidebar-nav-activity'),
-                      icon: Icons.timeline_outlined,
-                      label: 'Activity',
-                      caption: 'Trajectory — event ledger',
-                      enabled: hasSession,
-                      disabledHint: 'Start a chat to view activity',
-                      onTap: hasSession
-                          ? () => push(TrajectoryScreen(sessionId: sid))
-                          : null,
-                    ),
-                    _SidebarNavRow(
-                      navKey: const ValueKey('sidebar-nav-library'),
-                      icon: Icons.menu_book_outlined,
-                      label: 'Library',
-                      enabled: true,
-                      onTap: () => push(const MemoryScreen()),
-                    ),
-                    // Money — plans & billing (mirrors the canonical
-                    // `/money` route in lib/core/router.dart).
-                    _SidebarNavRow(
-                      navKey: const ValueKey('sidebar-nav-money'),
-                      icon: Icons.payments_outlined,
-                      label: 'Money',
-                      enabled: true,
-                      onTap: () => push(const BillingScreen()),
-                    ),
-                    _SidebarNavRow(
-                      navKey: const ValueKey('sidebar-nav-plugins'),
-                      icon: Icons.extension_outlined,
-                      label: 'Plugins',
-                      enabled: true,
-                      onTap: () =>
-                          SidebarNav.push(context, SidebarNav.plugins),
-                    ),
-                    _SidebarNavRow(
-                      navKey: const ValueKey('sidebar-nav-schedule'),
                       icon: Icons.schedule_outlined,
                       label: 'Schedule',
                       enabled: hasSession,
-                      disabledHint: 'Start a chat to schedule runs',
                       onTap: hasSession
-                          ? () => push(ScheduleScreen(sessionId: sid))
+                          ? () => Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => ScheduleScreen(
+                                    sessionId: app.activeSessionId!,
+                                  ),
+                                ),
+                              )
+                          : null,
+                    ),
+                    // PR27/B2: trajectory moved here from the chat header
+                    // (the header keeps only jobs + studio + browser).
+                    // Disabled when there is no active session — pushing
+                    // with an empty id lands on a confusing empty ledger.
+                    _SidebarNavRow(
+                      icon: Icons.timeline_outlined,
+                      label: 'Trajectory — event ledger',
+                      enabled: hasSession,
+                      onTap: hasSession
+                          ? () {
+                              final sid = app.activeSessionId ?? '';
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      TrajectoryScreen(sessionId: sid),
+                                ),
+                              );
+                            }
                           : null,
                     ),
                     // Settings at the very bottom — DeepSeek style.
                     _SidebarNavRow(
-                      navKey: const ValueKey('sidebar-nav-settings'),
                       icon: Icons.settings_outlined,
                       label: 'Settings',
                       enabled: true,
-                      onTap: () =>
-                          SidebarNav.push(context, SidebarNav.settings),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const SettingsScreen(),
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 6),
                   ],
@@ -552,26 +444,15 @@ class _PlanPill extends StatelessWidget {
   }
 }
 
-/// Compact ghost nav row shared by every destination in the footer band
-/// (Chat / Studio / Activity / Library / Money / Plugins / Schedule /
-/// Settings). The row keeps the DeepSeek-style icon disc, honours Aether
-/// hover tinting via Material/InkWell (the wide-pointer hover highlight),
-/// and dims when disabled.
-///
-/// Disabled is never silent: the trailing chevron swaps to a visible
-/// "Needs a chat" marker and the tooltip carries [disabledHint], so the
-/// enabled state is always explained. An optional [caption] renders a
-/// second, quieter line under the label (Activity uses it to keep the
-/// legacy "Trajectory — event ledger" name visible).
+/// Compact ghost nav row shared by Schedule / Trajectory / Settings. The
+/// row keeps the DeepSeek-style icon disc, honours Aether hover tinting
+/// via Material/InkWell, and dims when disabled.
 class _SidebarNavRow extends StatelessWidget {
   const _SidebarNavRow({
     required this.icon,
     required this.label,
     required this.enabled,
     required this.onTap,
-    this.navKey,
-    this.caption,
-    this.disabledHint,
   });
 
   final IconData icon;
@@ -579,92 +460,45 @@ class _SidebarNavRow extends StatelessWidget {
   final bool enabled;
   final VoidCallback? onTap;
 
-  /// Finder key stamped on the row's [InkWell] so tests can assert the
-  /// enabled state (`onTap != null`) per destination.
-  final Key? navKey;
-
-  /// Optional second line under the label (e.g. the legacy ledger name).
-  final String? caption;
-
-  /// Why the row is disabled — surfaced via tooltip and, when disabled,
-  /// a visible trailing marker. Null means "never disabled".
-  final String? disabledHint;
-
   @override
   Widget build(BuildContext context) {
     final fg = enabled ? Aether.textMuted : Aether.textFaint;
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 2, 8, 2),
-      child: Tooltip(
-        message: enabled ? (caption ?? label) : (disabledHint ?? label),
-        waitDuration: const Duration(milliseconds: 500),
-        child: Material(
-          color: Colors.transparent,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
           borderRadius: BorderRadius.circular(10),
-          child: InkWell(
-            key: navKey,
-            borderRadius: BorderRadius.circular(10),
-            hoverColor: Aether.surfaceAlt,
-            onTap: enabled ? onTap : null,
-            child: Opacity(
-              opacity: enabled ? 1.0 : 0.55,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 9,
-                ),
-                child: Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 13,
-                      backgroundColor: Aether.surfaceRaised,
-                      child: Icon(icon, size: 15, color: fg),
+          hoverColor: Aether.surfaceAlt,
+          onTap: enabled ? onTap : null,
+          child: Opacity(
+            opacity: enabled ? 1.0 : 0.5,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 13,
+                    backgroundColor: Aether.surfaceRaised,
+                    child: Icon(icon, size: 15, color: fg),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: TextStyle(fontSize: 13, color: fg),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 13, color: fg),
-                          ),
-                          if (caption != null) ...[
-                            const SizedBox(height: 1),
-                            Text(
-                              caption!,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 10.5,
-                                color: Aether.textFaint,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    if (!enabled && disabledHint != null)
-                      Text(
-                        'Needs a chat',
-                        maxLines: 1,
-                        style: TextStyle(
-                          fontSize: 9.5,
-                          fontWeight: FontWeight.w600,
-                          color: Aether.textFaint,
-                        ),
-                      )
-                    else
-                      Icon(
-                        Icons.chevron_right,
-                        size: 16,
-                        color: Aether.textFaint,
-                      ),
-                  ],
-                ),
+                  ),
+                  Icon(
+                    Icons.chevron_right,
+                    size: 16,
+                    color: Aether.textFaint,
+                  ),
+                ],
               ),
             ),
           ),

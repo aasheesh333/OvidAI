@@ -322,154 +322,6 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
     );
   }
 
-  /// Chrome heading: the artifact title with the sandbox guarantee folded
-  /// into one quiet status caption (the old bordered pill is gone).
-  Widget _chromeHeading(HtmlArtifact artifact) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(artifact.title, style: AetherType.title),
-        const SizedBox(height: 2),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.lock_outline, size: 11, color: Aether.textFaint),
-            const SizedBox(width: 4),
-            // Flexible keeps the caption inside the chrome at enlarged text
-            // sizes: it wraps to a second line instead of pushing the row
-            // past the card edge.
-            Flexible(
-              child: Text(
-                'OFFLINE SANDBOX',
-                style: AetherType.caption.copyWith(
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: .8,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  /// The single chrome action group: collapse (inline only), the
-  /// source/preview toggle and expand/exit. Source and expand hide while the
-  /// inline card is collapsed, leaving title + collapse as the whole chrome.
-  Widget _chromeActions() {
-    return Wrap(
-      alignment: WrapAlignment.end,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: 4,
-      runSpacing: 4,
-      children: [
-        if (!widget._fullscreen)
-          IconButton(
-            tooltip: _collapsed ? 'Open artifact' : 'Collapse artifact',
-            icon: Icon(
-              _collapsed ? Icons.expand_more : Icons.expand_less,
-              size: 20,
-              color: Aether.textMuted,
-            ),
-            onPressed: () {
-              _collapsed = !_collapsed;
-              _refresh();
-            },
-          ),
-        if (widget._fullscreen || !_collapsed) ...[
-          _control(
-            label: _source ? 'Show preview' : 'View source',
-            icon: _source ? Icons.preview_outlined : Icons.code,
-            onPressed: () {
-              _source = !_source;
-              _refresh();
-            },
-          ),
-          _control(
-            label: widget._fullscreen ? 'Exit fullscreen' : 'Expand preview',
-            icon: widget._fullscreen
-                ? Icons.fullscreen_exit
-                : Icons.fullscreen,
-            onPressed: _expanded
-                ? null
-                : widget._fullscreen
-                ? _exitFullscreen
-                : _expand,
-          ),
-        ],
-      ],
-    );
-  }
-
-  /// Rounded hairline frame shared by the live preview and the source sheet
-  /// so the content region keeps one shape in every state. The native view
-  /// is deliberately not clipped: platform-view clipping costs a composition
-  /// pass and its rectangular surface already meets the border cleanly.
-  Widget _framed({required Widget child, Color? background, bool clip = false}) {
-    return Container(
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(AetherRadius.rMd),
-        border: Border.all(color: Aether.hairline),
-      ),
-      clipBehavior: clip ? Clip.antiAlias : Clip.none,
-      child: child,
-    );
-  }
-
-  Widget _preview(HtmlArtifact artifact, bool supported, int generation) {
-    if (_source) {
-      return _framed(
-        background: Aether.codeBg,
-        clip: true,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(12),
-          child: SelectableText(
-            '${artifact.html}\n\n/* CSS */\n${artifact.css}\n\n// JavaScript\n${artifact.javascript}',
-            style: const TextStyle(fontFamily: 'JetBrainsMono', fontSize: 12),
-          ),
-        ),
-      );
-    }
-    final failure = _failure;
-    if (failure != null) {
-      return _PreviewPlaceholder(
-        icon: Icons.error_outline,
-        title: failure,
-        live: true,
-        action: AetherGhostButton(
-          label: 'Retry',
-          icon: Icons.refresh,
-          onPressed: () => _refresh(retry: true),
-        ),
-      );
-    }
-    if (!supported) {
-      return const _PreviewPlaceholder(
-        icon: Icons.phone_android_outlined,
-        title: 'Interactive preview requires Android.',
-        message: 'Use View source to inspect this saved artifact.',
-      );
-    }
-    if (!_foreground || !_tickerEnabled || _expanded || _collapsed) {
-      return _PreviewPlaceholder(
-        icon: _expanded ? Icons.fullscreen : Icons.pause_circle_outline,
-        title: _expanded ? 'Preview open in fullscreen.' : 'Preview paused.',
-      );
-    }
-    return _framed(
-      child: AndroidView(
-        key: ValueKey('${widget.sessionId}:${artifact.id}:$generation'),
-        viewType: 'ovid/html-artifact',
-        creationParams: {'document': artifact.sandboxDocument},
-        creationParamsCodec: const StandardMessageCodec(),
-        layoutDirection: TextDirection.ltr,
-        onPlatformViewCreated: (id) => _created(id, generation),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final artifact = widget.artifact;
@@ -486,6 +338,96 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
       160.0,
       math.min(artifact.height.toDouble(), math.max(160.0, viewport * .75)),
     );
+    Widget preview;
+    if (_source) {
+      preview = SingleChildScrollView(
+        padding: const EdgeInsets.all(12),
+        child: SelectableText(
+          '${artifact.html}\n\n/* CSS */\n${artifact.css}\n\n// JavaScript\n${artifact.javascript}',
+          style: const TextStyle(fontFamily: 'JetBrainsMono', fontSize: 12),
+        ),
+      );
+    } else if (_failure != null) {
+      preview = SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Semantics(liveRegion: true, child: Text(_failure!)),
+            const Text(
+              'Retry the preview or use View source to inspect the saved artifact.',
+            ),
+            TextButton(
+              onPressed: () => _refresh(retry: true),
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      );
+    } else if (!supported) {
+      preview = const SingleChildScrollView(
+        padding: EdgeInsets.all(12),
+        child: Text(
+          'Interactive preview requires Android. Use View source to inspect this saved artifact.',
+        ),
+      );
+    } else if (!_foreground || !_tickerEnabled || _expanded || _collapsed) {
+      preview = Text(
+        _expanded ? 'Preview open in fullscreen.' : 'Preview paused.',
+      );
+    } else {
+      preview = AndroidView(
+        key: ValueKey('${widget.sessionId}:${artifact.id}:$generation'),
+        viewType: 'ovid/html-artifact',
+        creationParams: {'document': artifact.sandboxDocument},
+        creationParamsCodec: const StandardMessageCodec(),
+        layoutDirection: TextDirection.ltr,
+        onPlatformViewCreated: (id) => _created(id, generation),
+      );
+    }
+    final controls = Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      runSpacing: 4,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AetherRadius.rPill),
+              border: Border.all(color: Aether.textMuted.withValues(alpha: .4)),
+            ),
+            child: Text(
+              'OFFLINE SANDBOX',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: .6,
+                color: Aether.textMuted,
+              ),
+            ),
+          ),
+        ),
+        _control(
+          label: _source ? 'Show preview' : 'View source',
+          icon: _source ? Icons.preview_outlined : Icons.code,
+          onPressed: () {
+            _source = !_source;
+            _refresh();
+          },
+        ),
+        _control(
+          label: widget._fullscreen ? 'Exit fullscreen' : 'Expand preview',
+          icon: widget._fullscreen
+              ? Icons.fullscreen_exit
+              : Icons.fullscreen,
+          onPressed: _expanded
+              ? null
+              : widget._fullscreen
+              ? _exitFullscreen
+              : _expand,
+        ),
+      ],
+    );
     if (widget._fullscreen) {
       return PopScope<void>(
         canPop: _canPop,
@@ -493,122 +435,63 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
           if (!didPop) unawaited(_exitFullscreen());
         },
         child: Scaffold(
+          appBar: AppBar(
+            toolbarHeight: math.max(
+              56,
+              MediaQuery.textScalerOf(context).scale(15) * 2.8 + 16,
+            ),
+            title: Tooltip(
+              message: artifact.title,
+              child: Text(
+                artifact.title,
+                style: AetherType.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            leading: BackButton(onPressed: _exitFullscreen),
+          ),
           body: SafeArea(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                  child: OverflowBar(
-                    alignment: MainAxisAlignment.spaceBetween,
-                    overflowAlignment: OverflowBarAlignment.start,
-                    spacing: 12,
-                    overflowSpacing: 8,
-                    children: [
-                      _chromeHeading(artifact),
-                      _chromeActions(),
-                    ],
-                  ),
-                ),
-                Divider(height: 1, thickness: 1, color: Aether.hairline),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: _preview(artifact, supported, generation),
-                  ),
-                ),
+                controls,
+                Expanded(child: preview),
               ],
             ),
           ),
         ),
       );
     }
-    // Inline: Aether card host. One chrome row in the card header; the body
-    // below it is collapsible.
+    // Inline: Aether card host with a collapsible preview body.
+    final collapseBtn = IconButton(
+      tooltip: _collapsed ? 'Open artifact' : 'Collapse artifact',
+      icon: Icon(_collapsed ? Icons.expand_more : Icons.expand_less),
+      onPressed: () {
+        _collapsed = !_collapsed;
+        _refresh();
+      },
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: AetherCard(
         padding: const EdgeInsets.all(12),
-        title: _chromeHeading(artifact),
-        trailing: _chromeActions(),
+        title: Text(
+          artifact.title,
+          style: AetherType.title,
+        ),
+        trailing: collapseBtn,
         child: _collapsed
             ? const SizedBox.shrink()
-            : SizedBox(
-                height: height,
-                child: _preview(artifact, supported, generation),
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  controls,
+                  const SizedBox(height: 4),
+                  SizedBox(height: height, child: preview),
+                ],
               ),
-      ),
-    );
-  }
-}
-
-/// The one empty-state recipe for every non-running preview: load failure,
-/// unsupported platform, background pause and fullscreen relocation share a
-/// soft framed surface, a quiet circled icon and a centered title. [action]
-/// carries the single recovery affordance (retry) where one exists.
-class _PreviewPlaceholder extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String? message;
-  final Widget? action;
-  final bool live;
-
-  const _PreviewPlaceholder({
-    required this.icon,
-    required this.title,
-    this.message,
-    this.action,
-    this.live = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Aether.surfaceAlt,
-        borderRadius: BorderRadius.circular(AetherRadius.rMd),
-        border: Border.all(color: Aether.hairline),
-      ),
-      child: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(AetherSpacing.space4),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: Aether.surfaceRaised,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Aether.hairline),
-                ),
-                child: Icon(icon, size: 20, color: Aether.textFaint),
-              ),
-              const SizedBox(height: 10),
-              Semantics(
-                liveRegion: live,
-                child: Text(
-                  title,
-                  style: AetherType.title,
-                  textAlign: TextAlign.center,
-                ),
-              ),
-              if (message != null) ...[
-                const SizedBox(height: 4),
-                Text(
-                  message!,
-                  style: AetherType.caption,
-                  textAlign: TextAlign.center,
-                ),
-              ],
-              if (action != null) ...[
-                const SizedBox(height: 8),
-                action!,
-              ],
-            ],
-          ),
-        ),
       ),
     );
   }

@@ -7,9 +7,8 @@ import 'package:http/http.dart' as http;
 import '../core/model_limits.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
-import 'money_screen.dart';
+import 'billing_screen.dart';
 import 'widgets/aether_primitives.dart';
-import 'widgets/aether_v2.dart';
 
 /// Test seam: when non-null, overrides [ProviderConfig] delete routing used by
 /// the overflow Remove action. Tests inject this to assert that the UI calls
@@ -28,15 +27,12 @@ Future<String?> Function(ProviderConfig provider)? fetchProviderModelsForTest;
 ///
 /// This is a visual-only redesign over an unchanged state contract:
 ///
-/// * Managed Ovid Cloud always surfaces at the top as a calm tile: plan pill,
-///   sign-in caption, and a 'Manage plan' route into [MoneyScreen]. Its
-///   base URL and secret stay server-side.
-/// * BYOK providers (built-in + user-added) render as [AetherCard] tiles with
-///   exactly one status pill (connected / key required / not connected), the
-///   model count, and the actions the user actually performs on a provider:
-///   fetch models, set/clear the API key via the unified [AetherSecretField],
-///   and an overflow menu for edit (base URL / API format / models) and
-///   remove (custom rows only).
+/// * Managed Ovid Cloud always surfaces at the top with a 'Manage plan' route
+///   into [BillingScreen]. Its base URL and secret stay server-side.
+/// * BYOK providers (built-in + user-added) render as [AetherCard] tiles.
+///   Each tile exposes the four operations the user actually performs on a
+///   provider: fetch models, set/clear the API key, edit (base URL / API
+///   format / enable or disable models), and remove (for custom rows only).
 /// * Every mutation routes through [AppState] — [addCustomProvider],
 ///   [updateProviderApiKey], [updateProviderBaseUrlChecked],
 ///   [updateProviderApiFormat], [addProviderModel], [removeProviderModel],
@@ -63,56 +59,52 @@ class ProvidersScreen extends StatelessWidget {
           final byok = app.providers
               .where((p) => p.id != AppState.ovidCloudProviderId)
               .toList();
-          // Cap the reading width on tablets/desktop so tiles stay calm.
-          return Align(
-            alignment: Alignment.topCenter,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 720),
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-                children: [
-                  const AetherSectionTitle(
-                    eyebrow: 'Ovid Cloud',
-                    subtitle: 'Managed by Ovid — one plan, every model.',
-                  ),
-                  const SizedBox(height: 12),
-                  if (ovidCloud != null) _OvidCloudTile(provider: ovidCloud),
-                  const SizedBox(height: 24),
-                  const AetherSectionTitle(
-                    eyebrow: 'Your providers',
-                    subtitle:
-                        'Bring your own key. Keys stay on this device, in '
-                        'secure storage.',
-                  ),
-                  const SizedBox(height: 12),
-                  if (byok.isEmpty)
-                    AetherEmptyState(
-                      icon: Icons.key_outlined,
-                      title: 'No providers yet',
-                      message:
-                          'Add an [OI]-compatible endpoint to use its models '
-                          'in chat.',
-                      action: FilledButton.icon(
-                        label: const Text('Add provider'),
-                        icon: const Icon(Icons.add),
-                        onPressed: () => addProviderSheet(context),
-                      ),
-                    )
-                  else ...[
-                    for (final p in byok) ...[
-                      _ProviderTile(key: ValueKey(p.id), provider: p),
-                      const SizedBox(height: 10),
-                    ],
-                    const SizedBox(height: 4),
-                    OutlinedButton.icon(
-                      label: const Text('Add custom provider'),
-                      icon: const Icon(Icons.add),
-                      onPressed: () => addProviderSheet(context),
-                    ),
-                  ],
-                ],
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+            children: [
+              const AetherSectionTitle(
+                eyebrow: 'Ovid Cloud',
+                subtitle:
+                    'Managed by Ovid — one plan, every model. No key to copy.',
               ),
-            ),
+              const SizedBox(height: 12),
+              if (ovidCloud != null) _OvidCloudTile(provider: ovidCloud),
+              const SizedBox(height: 24),
+              const AetherSectionTitle(
+                eyebrow: 'Your providers',
+                subtitle:
+                    'Bring your own key. Keys are stored securely on this '
+                    'device and sent to your provider to authenticate requests. '
+                    'Free tiers still need their own key.',
+              ),
+              const SizedBox(height: 12),
+              if (byok.isEmpty)
+                AetherEmptyState(
+                  icon: Icons.cloud_queue_outlined,
+                  title: 'No providers yet',
+                  message:
+                      'Add an [OI]-compatible endpoint — Together, Groq, '
+                      'OpenRouter, or your own gateway — to use its models in '
+                      'chat.',
+                  action: FilledButton.icon(
+                    label: const Text('Add provider'),
+                    icon: const Icon(Icons.add),
+                    onPressed: () => addProviderSheet(context),
+                  ),
+                )
+              else ...[
+                for (final p in byok) ...[
+                  _ProviderTile(key: ValueKey(p.id), provider: p),
+                  const SizedBox(height: 10),
+                ],
+                const SizedBox(height: 4),
+                OutlinedButton.icon(
+                  label: const Text('Add custom provider'),
+                  icon: const Icon(Icons.add),
+                  onPressed: () => addProviderSheet(context),
+                ),
+              ],
+            ],
           );
         },
       ),
@@ -120,10 +112,10 @@ class ProvidersScreen extends StatelessWidget {
   }
 }
 
-/// Managed Ovid Cloud tile. The plan pill reflects the current tier; the
-/// trailing 'Manage plan' button opens [MoneyScreen] where the user can
-/// review allowance and change plan. The base URL is intentionally not
-/// shown — the gateway address is a server-side detail.
+/// Managed Ovid Cloud tile. Status pill reflects the current plan tier; the
+/// trailing 'Manage plan' button opens [BillingScreen] where the user can
+/// mint/revoke the gateway token. The base URL is intentionally not shown —
+/// the gateway address is a server-side detail.
 class _OvidCloudTile extends StatelessWidget {
   final ProviderConfig provider;
   const _OvidCloudTile({required this.provider});
@@ -131,12 +123,14 @@ class _OvidCloudTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
+    final tier = app.ovidCloudTier;
     final paid = app.ovidCloudIsPaid;
-    final signedIn = provider.hasKey;
+    final connected = provider.hasKey;
+    final statusLabel = paid ? tier.toUpperCase() : 'FREE';
+    final statusColor = paid ? Aether.accent : Aether.successLight;
     return AetherCard(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+      padding: const EdgeInsets.all(16),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
@@ -144,37 +138,29 @@ class _OvidCloudTile extends StatelessWidget {
             children: [
               _IconChip(label: 'OC', color: Aether.accent),
               const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(provider.name, style: AetherType.title),
-                    const SizedBox(height: 4),
-                    Text(
-                      signedIn
-                          ? 'Signed in · ${provider.models.length} models'
-                          : 'Sign in to activate',
-                      style: AetherType.caption,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              AetherPill(
-                label: paid ? app.ovidCloudTier.toUpperCase() : 'FREE',
-                color: paid ? Aether.accent : Aether.successLight,
-              ),
+              Expanded(child: Text(provider.name, style: AetherType.title)),
             ],
           ),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              label: const Text('Manage plan'),
-              icon: const Icon(Icons.open_in_new, size: 16),
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(builder: (_) => const MoneyScreen()),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              AetherPill(label: statusLabel, color: statusColor),
+              Text(
+                connected ? 'Signed in' : 'Sign in to activate',
+                style: AetherType.caption,
               ),
+              Text('${provider.models.length} models', style: AetherType.caption),
+            ],
+          ),
+          const SizedBox(height: 8),
+          TextButton.icon(
+            label: const Text('Manage plan'),
+            icon: const Icon(Icons.open_in_new, size: 16),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const BillingScreen()),
             ),
           ),
         ],
@@ -183,8 +169,8 @@ class _OvidCloudTile extends StatelessWidget {
   }
 }
 
-/// BYOK provider tile: one status pill + model count + actions. Key capture,
-/// base-URL editing, and model management defer into bottom sheets so the
+/// BYOK provider tile. Exposes provider actions and defers key
+/// capture / base-URL editing / model management into bottom sheets so the
 /// tile stays compact in the list.
 class _ProviderTile extends StatefulWidget {
   final ProviderConfig provider;
@@ -199,13 +185,16 @@ class _ProviderTileState extends State<_ProviderTile> {
   bool _fetching = false;
   String? _fetchResult;
 
-  /// The single status pill: a saved key means connected; a free tier still
-  /// needs its own key; anything else has no key on file. Labels stay short
-  /// on purpose — at 2× text scale a pill has ~290px before it overflows.
-  (String, Color) get _status {
-    if (provider.hasKey) return ('CONNECTED', Aether.successLight);
-    if (provider.isFree) return ('NEEDS KEY', Aether.accent);
-    return ('NO KEY', Aether.textFaint);
+  Color get _statusColor {
+    if (provider.hasKey) return Aether.successLight;
+    if (provider.isFree) return Aether.accent;
+    return Aether.textFaint;
+  }
+
+  String get _statusLabel {
+    if (provider.hasKey) return 'Connected';
+    if (provider.isFree) return 'Free tier — key required';
+    return 'Not connected';
   }
 
   Future<void> _confirmRemove(BuildContext context) async {
@@ -313,7 +302,6 @@ class _ProviderTileState extends State<_ProviderTile> {
     final letter = provider.name.isEmpty
         ? '?'
         : provider.name.substring(0, 1).toUpperCase();
-    final (statusLabel, statusColor) = _status;
     return AetherCard(
       padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
       child: Column(
@@ -326,7 +314,42 @@ class _ProviderTileState extends State<_ProviderTile> {
               _IconChip(label: letter, color: Aether.textMuted),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(provider.name, style: AetherType.title),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(provider.name, style: AetherType.title),
+                        const SizedBox(height: 6),
+                        if (provider.isFree)
+                          AetherPill(
+                            label: 'FREE',
+                            color: Aether.successLight,
+                          )
+                        else if (!provider.custom)
+                          AetherPill(label: 'BUILT-IN', color: Aether.accent),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 6,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          _statusLabel,
+                          style: AetherType.caption.copyWith(color: _statusColor),
+                        ),
+                        Text(
+                          '${provider.models.length} models',
+                          style: AetherType.caption,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
               PopupMenuButton<String>(
                 tooltip: 'More actions',
@@ -357,24 +380,6 @@ class _ProviderTileState extends State<_ProviderTile> {
             ],
           ),
           const SizedBox(height: 8),
-          // Status + count get the full card width; the header slot beside
-          // the overflow menu is too narrow for a pill at 2× text scale.
-          Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: Wrap(
-              spacing: 10,
-              runSpacing: 6,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                AetherPill(label: statusLabel, color: statusColor),
-                Text(
-                  '${provider.models.length} models',
-                  style: AetherType.caption,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 4),
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: Wrap(
@@ -579,11 +584,12 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
             style: AetherType.bodyMuted,
           ),
           const SizedBox(height: 16),
-          AetherSecretField(
+          AetherField(
             label: 'API key',
             hint: 'sk-…',
+            obscure: true,
             controller: _controller,
-            saved: widget.provider.hasKey,
+            autofocus: true,
           ),
           if (_error != null) ...[
             const SizedBox(height: 12),
@@ -598,7 +604,7 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
   }
 }
 
-/// Edit sheet — base URL, API format ([OI]/Anthropic), model list. All
+/// Edit sheet — base URL, API format (OpenAI/Anthropic), model list. All
 /// mutations route through [AppState] so the agent catalog is in sync.
 class _EditProviderSheet extends StatefulWidget {
   final ProviderConfig provider;
@@ -976,10 +982,11 @@ void addProviderSheet(BuildContext context) {
               controller: url,
             ),
             const SizedBox(height: 12),
-            AetherSecretField(
+            AetherField(
               label: 'API key (optional)',
               hint: 'sk-…',
               controller: key,
+              obscure: true,
             ),
           ],
         ),

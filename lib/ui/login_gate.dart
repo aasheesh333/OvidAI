@@ -588,6 +588,11 @@ class _LoginScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final deletion = service.lastDeletionReceipt;
     final pending = deletion?.isPending == true;
+    final deadline = deletion?.deleteAfter
+        ?.toUtc()
+        .toIso8601String()
+        .replaceFirst('T', '\n')
+        .replaceFirst('Z', ' UTC');
     return Scaffold(
       backgroundColor: Aether.bg,
       body: Stack(
@@ -635,11 +640,41 @@ class _LoginScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: AetherSpacing.space7),
                     if (pending) ...[
-                      DeletionPendingBanner(receipt: deletion!),
+                      AetherCard(
+                        color: Aether.warn.withValues(alpha: 0.10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Account deletion pending',
+                              style: AetherType.title,
+                            ),
+                            const SizedBox(height: AetherSpacing.space2),
+                            Text(
+                              'Deletion was requested on the server.',
+                              style: AetherType.bodyMuted,
+                            ),
+                            if (deadline != null) ...[
+                              const SizedBox(height: AetherSpacing.space2),
+                              Text(
+                                'Scheduled after\n$deadline',
+                                style: AetherType.body,
+                              ),
+                              const SizedBox(height: AetherSpacing.space2),
+                              Text(
+                                'Sign in before then to cancel.',
+                                style: AetherType.bodyMuted,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
                       const SizedBox(height: AetherSpacing.space5),
                     ],
                     AetherCard(
                       padding: const EdgeInsets.all(AetherSpacing.space4),
+                      title: const Text('Sign in or create an account'),
                       child: AuthMethods(
                         providers: service.authProviders,
                         intent: AuthIntent.signIn,
@@ -652,7 +687,9 @@ class _LoginScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: AetherSpacing.space6),
                     Text(
-                      'By continuing you agree to use Ovid responsibly.',
+                      'By continuing you agree to use Ovid responsibly. '
+                      'Abuse, automated farming, or sharing accounts may '
+                      'lead to suspension.',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 13,

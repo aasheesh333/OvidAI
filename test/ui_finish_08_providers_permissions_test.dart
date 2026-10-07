@@ -135,21 +135,7 @@ void main() {
         expect(provider.models, ['research-chat']);
         await reveal(tester, find.text('Done'));
       });
-    }
-  }
 
-  // The v2-17 permissions redesign pins a 'SESSION ONLY' icon pill in the
-  // Autonomy card's OverflowBar header. At 360px with 2x text it needs ~15px
-  // more than the card affords — a production layout limit the test cannot
-  // patch around (production is read-only here). The large-text cell for
-  // THIS screen therefore runs at 400px so the details/revoke assertions
-  // still exercise 2x text, both themes, and the same narrow/wide cells.
-  for (final config in [
-    (size: const Size(400, 640), scale: 2.0),
-    (size: const Size(320, 640), scale: 1.0),
-    (size: const Size(1024, 768), scale: 1.0),
-  ]) {
-    for (final dark in [true, false]) {
       testWidgets('permission details and revoke ${config.size} ${config.scale} dark=$dark', (tester) async {
         final session = ChatSession(id: 'finish-08-session', title: 'Research', model: 'research-chat');
         session.grants.addAll([
@@ -192,9 +178,7 @@ void main() {
   testWidgets('legacy revoke removes only inert entry and explains its effect', (tester) async {
     final legacy = PermissionGrant.path(_longPath, global: true);
     app.globalPermissionGrants = [legacy];
-    // Inert-revoke isolation, not a text-scale test: pin 1x because the
-    // v2-17 'SESSION ONLY' header pill overflows 360px at 2x (see above).
-    await host(tester, const PermissionsScreen(), scale: 1);
+    await host(tester, const PermissionsScreen());
     final revoke = find.byKey(ValueKey('revoke-global-path-$_longPath'));
     await reveal(tester, revoke);
     await tester.tap(revoke);
@@ -213,9 +197,7 @@ void main() {
     session.grants.add(grant);
     app.sessions.add(session);
     app.activeSessionId = session.id;
-    // Notification-driven refresh, not a text-scale test: pin 1x because the
-    // v2-17 'SESSION ONLY' header pill overflows 360px at 2x (see above).
-    await host(tester, const PermissionsScreen(), scale: 1);
+    await host(tester, const PermissionsScreen());
     expect(find.text('host research.example.test'), findsOneWidget);
     await AgentService.I.revokeSessionPermissionGrant(grant);
     await tester.pump();
@@ -230,9 +212,7 @@ void main() {
     second.grants.add(PermissionGrant.path(_longPath, sessionId: second.id));
     app.sessions.addAll([first, second]);
     app.activeSessionId = first.id;
-    // Session-revoke isolation, not a text-scale test: pin 1x because the
-    // v2-17 'SESSION ONLY' header pill overflows 360px at 2x (see above).
-    await host(tester, const PermissionsScreen(), scale: 1);
+    await host(tester, const PermissionsScreen());
     final revoke = find.byKey(ValueKey('revoke-session-path-$_longPath'));
     await reveal(tester, revoke);
     await tester.tap(revoke);
@@ -253,14 +233,8 @@ void main() {
       baseUrl: 'https://example.test/v1', isFree: true,
     ));
     await host(tester, const ProvidersScreen());
-    // v2-19: the FREE pill now lives only on the managed Ovid Cloud tile;
-    // the free BYOK tile's key requirement is its single status pill
-    // ('NEEDS KEY') — the old 'Free tier — key required' caption is gone.
-    // Assert FREE first: the ListView unmounts the managed tile once the
-    // BYOK tile scrolls into view.
-    await reveal(tester, find.text('FREE'));
+    await reveal(tester, find.text('Free tier — key required'));
     expect(find.text('FREE'), findsWidgets);
-    await reveal(tester, find.text('NEEDS KEY'));
     await reveal(tester, find.byTooltip('More actions'));
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();

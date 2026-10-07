@@ -117,25 +117,6 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
     return Aether.textMuted;
   }
 
-  /// The receipt's ONE context action: image recovery when the receipt is
-  /// confirmed (accounting settled, so a retained result may exist),
-  /// otherwise a read-only status check. Both are GET recoveries against the
-  /// saved request identity; neither submits new paid work.
-  Widget _receiptAction(ImageRequestRecord record) {
-    final busy = _busy.contains(record.requestId);
-    final canRecover = record.state == 'confirmed';
-    return AetherGhostButton(
-      label: busy
-          ? 'Checking…'
-          : (canRecover ? 'Recover image' : 'Check status'),
-      icon: busy ? null : (canRecover ? Icons.image_outlined : Icons.sync),
-      loading: busy,
-      onPressed: busy
-          ? null
-          : () => _check(record.requestId, retrieveImage: canRecover),
-    );
-  }
-
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
@@ -190,6 +171,8 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
                 ],
               ),
               const SizedBox(height: 6),
+              Text('Status: ${record.state}', style: AetherType.bodyMuted),
+              const SizedBox(height: 4),
               Text(
                 record.receipt?.charged == null
                     ? 'Charge: not confirmed'
@@ -224,9 +207,25 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
                   semanticLabel: 'Recovered image for ${record.requestId}',
                   gaplessPlayback: false,
                 ),
+              AetherGhostButton(
+                label: 'Recover image',
+                icon: Icons.image_outlined,
+                onPressed: _busy.contains(record.requestId)
+                    ? null
+                    : () => _check(record.requestId, retrieveImage: true),
+              ),
               Align(
                 alignment: Alignment.centerLeft,
-                child: _receiptAction(record),
+                child: AetherGhostButton(
+                  label: _busy.contains(record.requestId)
+                      ? 'Checking…'
+                      : 'Check status',
+                  icon: _busy.contains(record.requestId) ? null : Icons.sync,
+                  loading: _busy.contains(record.requestId),
+                  onPressed: _busy.contains(record.requestId)
+                      ? null
+                      : () => _check(record.requestId),
+                ),
               ),
             ],
           ),

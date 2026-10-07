@@ -13,12 +13,10 @@ import 'widgets/aether_primitives.dart';
 
 /// Social/phone identity and explicit same-UID linking.
 ///
-/// The redesigned account screen orders the signed-in surface hero → plan →
-/// details → linked methods → danger zone: the hero carries the avatar, name
-/// and plan pill; the plan card links through to Plans & Billing; details are
-/// copy rows; the danger zone holds deletion and sign-out. All existing
-/// behavior — AnimatedBuilder on FirebaseService, _verifyIdentity with its
-/// busy PopScope, the edit-name dialog, phone/social/link flows via
+/// The redesigned account screen groups the signed-in surface into five Aether
+/// sections (profile header, plan, account details, linked methods, danger zone).
+/// All existing behavior — AnimatedBuilder on FirebaseService, _verifyIdentity
+/// with its busy PopScope, the edit-name dialog, phone/social/link flows via
 /// AuthMethods, AccountDeletionPanel wiring, and the sign-out button — is
 /// preserved.
 class AuthScreen extends StatefulWidget {
@@ -146,188 +144,187 @@ class _AuthScreenState extends State<AuthScreen> {
     final nonPassword = linked.where((id) => id != 'password').toList()..sort();
     final hasPassword = linked.contains('password');
 
-    // One column child: the account page is short, and a single sliver child
-    // keeps the hero (avatar, name, plan pill) composed instead of letting the
-    // lazy list recycle it once the user scrolls down to the cards below.
     return ListView(
       padding: EdgeInsets.zero,
       children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _ProfileHeader(
-              photoUrl: fb.photoUrl,
-              displayName: fb.displayName,
-              fallback: fb.email ?? fb.phoneNumber ?? 'Signed in',
-              planPill: AetherPill(
-                label: _planPill(tier, isPaid),
-                color: isPaid ? Aether.accentC : Aether.textMuted,
-                filled: isPaid,
-              ),
-              onEdit: () => _editName(fb),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AetherSpacing.space5,
-                AetherSpacing.space5,
-                AetherSpacing.space5,
-                AetherSpacing.space6,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // ── Plan card — links through to Plans & Billing (Money) ──
-                  AetherCard(
-                    title: _cardTitle(Icons.auto_awesome, 'Ovid Cloud plan'),
-                    footer: Align(
-                      alignment: Alignment.centerLeft,
-                      child: AetherGhostButton(
-                        label: 'Manage plan',
-                        icon: Icons.arrow_forward,
-                        onPressed: () => _openBilling(),
-                      ),
+        _ProfileHeader(
+          photoUrl: fb.photoUrl,
+          displayName: fb.displayName,
+          fallback: fb.email ?? fb.phoneNumber ?? 'Signed in',
+          email: fb.email,
+          phone: fb.phoneNumber,
+          emailVerified: fb.emailVerified,
+          onEdit: () => _editName(fb),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AetherSpacing.space5,
+            AetherSpacing.space5,
+            AetherSpacing.space5,
+            AetherSpacing.space6,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ── Plan card ──
+              AetherCard(
+                title: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _cardTitle(Icons.auto_awesome, 'Ovid Cloud plan'),
+                    const SizedBox(height: AetherSpacing.space2),
+                    AetherPill(
+                      label: _planPill(tier, isPaid),
+                      color: isPaid ? Aether.accentC : Aether.textMuted,
+                      filled: isPaid,
                     ),
-                    child: Text(
-                      isPaid
-                          ? 'Paid plan active. Check remaining usage in Usage.'
-                          : 'Free plan — just chat. Upgrade for more usage.',
-                      style: AetherType.body,
-                    ),
-                  ),
-                  const SizedBox(height: AetherSpacing.space4),
-
-                  // ── Account details ──
-                  AetherCard(
-                    title: _cardTitle(Icons.badge_outlined, 'Account details'),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _DetailRow(
-                          label: 'Email',
-                          value: fb.email ?? '—',
-                          canCopy: fb.email != null,
-                        ),
-                        const SizedBox(height: AetherSpacing.space3),
-                        _DetailRow(
-                          label: 'Phone',
-                          value: fb.phoneNumber ?? '—',
-                          canCopy: fb.phoneNumber != null,
-                        ),
-                        const SizedBox(height: AetherSpacing.space3),
-                        _DetailRow(
-                          label: 'Email status',
-                          value: fb.email == null
-                              ? 'No email linked'
-                              : fb.emailVerified
-                              ? 'Verified'
-                              : 'Unverified',
-                          canCopy: false,
-                        ),
-                        const SizedBox(height: AetherSpacing.space3),
-                        _DetailRow(
-                          label: 'User ID',
-                          value: fb.uid ?? '—',
-                          canCopy: fb.uid != null,
-                          mono: true,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: AetherSpacing.space4),
-
-                  // ── Linked sign-in methods ──
-                  AetherCard(
-                    title: _cardTitle(Icons.link, 'Linked sign-in methods'),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        if (nonPassword.isEmpty)
-                          Text(
-                            'No social or phone providers linked yet.',
-                            style: AetherType.bodyMuted,
-                          )
-                        else
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              for (final id in nonPassword)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 8),
-                                  child: Row(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Icon(
-                                        _providerIcon(id),
-                                        size: 24,
-                                        color: Aether.accentC,
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              AuthProviders.labelFor(id),
-                                              style: AetherType.body,
-                                            ),
-                                            Text(
-                                              fb.authProviders.isEnabled(id)
-                                                  ? 'Linked'
-                                                  : 'Linked · Unavailable in this build',
-                                              style: AetherType.label,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                            ],
-                          ),
-                        const SizedBox(height: AetherSpacing.space4),
-                        AuthMethods(
-                          key: ValueKey('link-${fb.uid}'),
-                          providers: fb.authProviders,
-                          intent: AuthIntent.link,
-                          linkedIds: fb.linkedProviderIds,
-                          social: (id) async {
-                            final error = await _verifyIdentity(fb);
-                            if (error != null) return error;
-                            return fb.authenticateSocial(id, AuthIntent.link);
-                          },
-                          phone: () => fb.createPhoneFlow(AuthIntent.link),
-                          beforePhone: () => _verifyIdentity(fb),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (hasPassword) ...[
-                    const SizedBox(height: AetherSpacing.space4),
-                    _LegacyPasswordWarnCard(),
                   ],
-                  const SizedBox(height: AetherSpacing.space6),
-
-                  // ── Danger zone ──
-                  _DangerZoneCard(
-                    deletion: AccountDeletionPanel(
-                      key: ValueKey('delete-${fb.uid}'),
-                      service: fb.accountService,
-                      reauthenticate: (_) => _verifyIdentity(fb),
-                      requestDeletion: fb.requestAccountDeletion,
-                    ),
-                    signOut: AetherDangerButton(
-                      label: 'Sign out',
-                      icon: Icons.logout,
-                      onPressed: () => fb.signOut(),
-                    ),
+                ),
+                footer: Align(
+                  alignment: Alignment.centerLeft,
+                  child: AetherGhostButton(
+                    label: 'Manage plan',
+                    icon: Icons.arrow_forward,
+                    onPressed: () => _openBilling(),
                   ),
-                  const SizedBox(height: AetherSpacing.space6),
-                ],
+                ),
+                child: Text(
+                  isPaid
+                      ? 'Paid plan active. Check remaining usage in Usage.'
+                      : 'Free plan — just chat. Upgrade for more usage.',
+                  style: AetherType.body,
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: AetherSpacing.space4),
+
+              // ── Account details ──
+              AetherCard(
+                title: _cardTitle(Icons.badge_outlined, 'Account details'),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _DetailRow(
+                      label: 'Email',
+                      value: fb.email ?? '—',
+                      canCopy: fb.email != null,
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
+                    _DetailRow(
+                      label: 'Phone',
+                      value: fb.phoneNumber ?? '—',
+                      canCopy: fb.phoneNumber != null,
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
+                    _DetailRow(
+                      label: 'Email status',
+                      value: fb.email == null
+                          ? 'No email linked'
+                          : fb.emailVerified
+                          ? 'Verified'
+                          : 'Unverified',
+                      canCopy: false,
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
+                    _DetailRow(
+                      label: 'User ID',
+                      value: fb.uid ?? '—',
+                      canCopy: fb.uid != null,
+                      mono: true,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: AetherSpacing.space4),
+
+              // ── Linked sign-in methods ──
+              AetherCard(
+                title: _cardTitle(Icons.link, 'Linked sign-in methods'),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (nonPassword.isEmpty)
+                      Text(
+                        'No social or phone providers linked yet.',
+                        style: AetherType.bodyMuted,
+                      )
+                    else
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (final id in nonPassword)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Icon(
+                                    _providerIcon(id),
+                                    size: 24,
+                                    color: Aether.accentC,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          AuthProviders.labelFor(id),
+                                          style: AetherType.body,
+                                        ),
+                                        Text(
+                                          fb.authProviders.isEnabled(id)
+                                              ? 'Linked'
+                                              : 'Linked · Unavailable in this build',
+                                          style: AetherType.label,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    const SizedBox(height: AetherSpacing.space4),
+                    AuthMethods(
+                      key: ValueKey('link-${fb.uid}'),
+                      providers: fb.authProviders,
+                      intent: AuthIntent.link,
+                      linkedIds: fb.linkedProviderIds,
+                      social: (id) async {
+                        final error = await _verifyIdentity(fb);
+                        if (error != null) return error;
+                        return fb.authenticateSocial(id, AuthIntent.link);
+                      },
+                      phone: () => fb.createPhoneFlow(AuthIntent.link),
+                      beforePhone: () => _verifyIdentity(fb),
+                    ),
+                  ],
+                ),
+              ),
+              if (hasPassword) ...[
+                const SizedBox(height: AetherSpacing.space4),
+                _LegacyPasswordWarnCard(),
+              ],
+              const SizedBox(height: AetherSpacing.space6),
+
+              // ── Danger zone ──
+              _DangerZoneCard(
+                deletion: AccountDeletionPanel(
+                  key: ValueKey('delete-${fb.uid}'),
+                  service: fb.accountService,
+                  reauthenticate: (_) => _verifyIdentity(fb),
+                  requestDeletion: fb.requestAccountDeletion,
+                ),
+                signOut: AetherDangerButton(
+                  label: 'Sign out',
+                  icon: Icons.logout,
+                  onPressed: () => fb.signOut(),
+                ),
+              ),
+              const SizedBox(height: AetherSpacing.space6),
+            ],
+          ),
         ),
       ],
     );
@@ -380,15 +377,35 @@ class _AuthScreenState extends State<AuthScreen> {
   // ──────────────────────────────────────────────────────── signed-out ──
 
   Widget _signedOut(FirebaseService fb) {
-    final receipt = fb.lastDeletionReceipt;
-    final pending = receipt?.isPending == true;
+    final pending = fb.lastDeletionReceipt?.isPending == true;
     return ListView(
       padding: const EdgeInsets.all(AetherSpacing.space5),
       children: [
         if (pending)
           Padding(
             padding: const EdgeInsets.only(bottom: AetherSpacing.space4),
-            child: DeletionPendingBanner(receipt: receipt!),
+            child: AetherCard(
+              color: Aether.surface,
+              title: Row(
+                children: [
+                  Icon(
+                    Icons.hourglass_bottom,
+                    size: 16,
+                    color: Aether.warnLight,
+                  ),
+                  const SizedBox(width: 8),
+                  const Flexible(
+                    child: Text('Deletion requested'),
+                  ),
+                ],
+              ),
+              child: Text(
+                'Scheduled after '
+                '${fb.lastDeletionReceipt!.deleteAfter!.toUtc().toIso8601String()} '
+                '(UTC). Sign in before then to cancel.',
+                style: AetherType.body,
+              ),
+            ),
           ),
         AetherCard(
           title: _cardTitle(Icons.login, 'Sign in to Ovid'),
@@ -404,28 +421,28 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 }
 
-/// Account hero: gradient background + centered avatar + name + plan pill.
-/// Contact details live once in the Account details card below, so the hero
-/// stays a calm identity summary.
+/// Profile header: gradient background + centered avatar + name + contact row.
 class _ProfileHeader extends StatelessWidget {
   const _ProfileHeader({
     required this.photoUrl,
     required this.displayName,
     required this.fallback,
-    required this.planPill,
+    required this.email,
+    required this.phone,
+    required this.emailVerified,
     required this.onEdit,
   });
   final String? photoUrl;
   final String? displayName;
   final String fallback;
-  final Widget planPill;
+  final String? email;
+  final String? phone;
+  final bool emailVerified;
   final VoidCallback onEdit;
 
   @override
   Widget build(BuildContext context) {
-    final name = displayName?.trim().isNotEmpty == true
-        ? displayName!
-        : fallback;
+    final name = displayName?.trim().isNotEmpty == true ? displayName! : fallback;
     // Content owns the height; the gradient fills it rather than constraining
     // long identities to a fixed number of scaled lines.
     return Stack(
@@ -438,7 +455,7 @@ class _ProfileHeader extends StatelessWidget {
             AetherSpacing.space5,
             AetherSpacing.space4,
             AetherSpacing.space5,
-            AetherSpacing.space4,
+            AetherSpacing.space3,
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -448,7 +465,7 @@ class _ProfileHeader extends StatelessWidget {
                 child: ProfileAvatar(
                   photoUrl: photoUrl,
                   displayName: displayName,
-                  radius: 40,
+                  radius: 36,
                 ),
               ),
               const SizedBox(height: AetherSpacing.space4),
@@ -474,8 +491,33 @@ class _ProfileHeader extends StatelessWidget {
                   ),
                 ],
               ),
-              const SizedBox(height: AetherSpacing.space3),
-              Center(child: planPill),
+              if (email != null || phone != null) ...[
+                const SizedBox(height: AetherSpacing.space2),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        email ?? phone!,
+                        textAlign: TextAlign.center,
+                        style: AetherType.bodyMuted,
+                      ),
+                    ),
+                    if (email != null) ...[
+                      const SizedBox(width: 6),
+                      Icon(
+                        emailVerified ? Icons.verified : Icons.error_outline,
+                        size: 14,
+                        color: emailVerified ? Aether.accentC : Aether.warnLight,
+                        semanticLabel: emailVerified
+                            ? 'Email verified'
+                            : 'Email not verified',
+                      ),
+                    ],
+                  ],
+                ),
+              ],
             ],
           ),
         ),

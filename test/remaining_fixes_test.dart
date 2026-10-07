@@ -127,8 +127,7 @@ void main() {
   group('background approvals are surfaced instead of silently auto-denied', () {
     test('the dock renders the other-sessions row when the foreground is idle',
         () {
-      // v2-03 chat split: the approval dock moved to lib/ui/chat/docks.dart.
-      final src = File('lib/ui/chat/docks.dart').readAsStringSync();
+      final src = File('lib/ui/chat_screen.dart').readAsStringSync();
       final dock = src.substring(src.indexOf('class _ApprovalDockState'));
       final body = dock.substring(0, dock.indexOf('Widget build(BuildContext') + 2000);
       expect(body, contains('pendingApprovalsElsewhere'));
@@ -209,8 +208,7 @@ void main() {
 
   group('images decode to the display size, not full resolution', () {
     test('every Image.file/Image.network passes a cacheWidth', () {
-      // v2-03 chat split: the image cards moved to lib/ui/chat/transcript.dart.
-      final chat = File('lib/ui/chat/transcript.dart').readAsStringSync();
+      final chat = File('lib/ui/chat_screen.dart').readAsStringSync();
       final studio = File('lib/ui/studio_screen.dart').readAsStringSync();
       expect(
         'cacheWidth:'.allMatches(chat).length,

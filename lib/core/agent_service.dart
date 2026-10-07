@@ -40,7 +40,6 @@ import 'plugin_manifest.dart';
 import 'native_plugin.dart';
 import 'native_plugins/prompt_framework.dart';
 import 'native_plugins/utility_cancellation_bridge.dart';
-import 'native_plugins/utility_limits.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_runtime.dart';
@@ -648,67 +647,6 @@ class _RunCtx {
            );
 }
 
-/// Evaluation context for ONE tool-capable agent-hook evaluation
-/// (HookService's `agentHookEvaluator`). Carried in a Dart Zone value
-/// ([AgentService._hookEvalCtxKey]) so every continuation of the evaluation
-/// loop — the LLM call, the quiet tool dispatch, MCP/native callTool —
-/// resolves policy, transport ownership and cancellation to the EVALUATION,
-/// never to the active session's run bucket. This is the architecture the
-/// closure audit demanded (docs/superpowers/audits/2026-10-06-agent-hooks-closure.md
-/// §4): a fence aborts the evaluation's own transport/processes (1),
-/// approvals fail safe instead of parking on the wrong bucket (2), and the
-/// detached bucket keeps run accounting/error surface out of session state (3).
-class _AgentHookEvalCtx {
-  _AgentHookEvalCtx({required this.session, required this.declaredTools});
-
-  /// The session the hook fired FOR — the policy owner (mode, plan jail,
-  /// grants, workspace), resolved from `AgentHookEvaluation.context`.
-  final ChatSession session;
-
-  /// The hook's declared tools ∩ the live roster (intersected when the
-  /// schemas are built). Schemas are offered strictly from this set and the
-  /// quiet dispatch re-checks membership before executing.
-  final Set<String> declaredTools;
-
-  /// Detached run bucket: transport ownership (`_TransportOwner`), error
-  /// surface and cancel flag for THIS evaluation. Never registered in
-  /// `_runs`, so no session bucket is read or mutated and no UI watches it.
-  final AgentRun run = AgentRun();
-
-  /// Per-evaluation cancellation token handed to every native/MCP callTool
-  /// the evaluation invokes.
-  final UtilityCancellation cancellation = UtilityCancellation();
-
-  /// Tool schemas offered to the model, built once inside the evaluation
-  /// zone (so the roster resolves against [session]).
-  List<Map<String, dynamic>> toolSchemas = const [];
-
-  /// Sticky abort flag — set by [abort], sampled between loop steps.
-  bool aborted = false;
-
-  /// Abort in-flight work: cancel the callTool token, invalidate the
-  /// transport owner (the same close sequence a run Stop performs, but on
-  /// the DETACHED bucket) and kill every process the evaluation spawned.
-  void abort(String callKey) {
-    if (aborted) return;
-    aborted = true;
-    cancellation.cancel();
-    run.cancelRequested = true;
-    run.runEpoch++;
-    try {
-      run.activeClient?.close(force: true);
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-    run.activeClient = null;
-    try {
-      SandboxService.I.killCallProcesses(callKey);
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-  }
-}
-
 /// One transport attempt owns only its captured generation and resources.
 /// In particular, a late postUrl completion/finally cannot touch a replacement.
 class _TransportOwner {
@@ -1002,18 +940,15 @@ class AgentService extends ChangeNotifier {
           }
         };
     // The tool-capable agent-hook evaluator (HookService's `agentHookEvaluator`
-    // field): a bounded, cancellable, QUIET tool loop wired exactly once here.
-    // It never publishes to the chat transcript or the session ledger, builds
-    // tool schemas strictly from the hook's declared `tools` (∩ the live
-    // roster), fails interactive approvals safe (deny — a card is never
-    // parked on the active session's bucket), threads a per-evaluation
-    // cancellation token into the native/MCP callTool paths it invokes, and
-    // stops when `AgentHookEvaluation.isCancelled` completes true. Null or a
-    // throw fails OPEN (HookService treats it as "no verdict"). It must never
-    // fall back to the prompt evaluator above — that would misrepresent
-    // agent semantics. See
-    // docs/superpowers/audits/2026-10-06-agent-hooks-closure.md §4.
-    _wireAgentHookEvaluator();
+    // field) stays null in production on purpose. Wiring it safely needs a
+    // bounded, cancellable, publication-free tool loop plus an approval channel
+    // addressable to a specific evaluation — none of which the current dispatch
+    // path provides (`_dispatch` publishes run accounting/ledger/chat text, and
+    // `_askUser` parks approvals on the active session's bucket). See
+    // docs/superpowers/audits/2026-10-06-agent-hooks-closure.md and
+    // docs/superpowers/audits/2026-10-06-partial-closure.md §C. Agent hooks
+    // therefore fail open with an honest ledger note; they must never fall back
+    // to the prompt evaluator above.
     // 2. User-initiated stops always win over Stop-hook vetoes. This is the
     //    run bucket's passive cancel flag — never stopRequested() itself
     //    (that method PERFORMS the stop).
@@ -1035,12 +970,9 @@ class AgentService extends ChangeNotifier {
   /// Per-session (the session mode resolver per-conversation parity): inside a run this resolves
   /// to the RUNNING session's persisted mode; outside a run it resolves to
   /// the ACTIVE session's mode. Subagents are real sessions, so their mode
-  /// resolves through the same path — no detached special case. Inside an
-  /// agent-hook evaluation it resolves to the EVALUATED session's mode (the
-  /// hook's policy owner), never the active session's.
+  /// resolves through the same path — no detached special case.
   AgentMode get mode {
-    final s =
-        _hookEvalCtx?.session ?? _runCtx?.session ?? AppState.I.activeSession;
+    final s = _runCtx?.session ?? AppState.I.activeSession;
     return AgentMode.values.firstWhere(
       (m) => m.name == s?.mode,
       orElse: () => AgentMode.auto,
@@ -1224,15 +1156,6 @@ class AgentService extends ChangeNotifier {
   /// each other's bucket because each lives in its own Zone.
   static const _runCtxKey = #ovidAgentRunCtx;
 
-  /// Zone value carrying the active agent-hook evaluation context
-  /// ([_AgentHookEvalCtx]). Bound for the whole evaluation loop so every
-  /// continuation resolves policy/transport/cancellation to the evaluation;
-  /// shadowed to null nowhere else — outside an evaluation this is absent.
-  static const _hookEvalCtxKey = #ovidAgentHookEvalCtx;
-
-  _AgentHookEvalCtx? get _hookEvalCtx =>
-      Zone.current[_hookEvalCtxKey] as _AgentHookEvalCtx?;
-
   /// The per-run execution context active in the current async Zone.
   /// Tests may pin one via [setRunCtxForTest] (no Zone needed).
   _RunCtx? _testRunCtxOverride;
@@ -1243,8 +1166,7 @@ class AgentService extends ChangeNotifier {
   /// else the active session's bucket. Mid-run tool calls MUST route
   /// through this so a session switch mid-run can't make the run touch
   /// the wrong session's workspace/studio/notes.
-  AgentRun get _runResolved =>
-      _hookEvalCtx?.run ?? _runCtx?.run ?? _run;
+  AgentRun get _runResolved => _runCtx?.run ?? _run;
 
   String? get _pinnedRunId => _runCtx?.session.id;
 
@@ -1252,7 +1174,6 @@ class AgentService extends ChangeNotifier {
       (_runSessionOverrideForTest != null
           ? AppState.I.sessionById(_runSessionOverrideForTest!)
           : null) ??
-      _hookEvalCtx?.session ??
       _runCtx?.session ??
       AppState.I.activeSession;
 
@@ -5865,12 +5786,8 @@ user which one instead of assuming this one.''';
     AppState.I.refresh();
   }
 
-  void _emit(String kind, String text) {
-    // An agent-hook evaluation is QUIET: no run events, no status line, no
-    // session event log — its only output is the returned verdict.
-    if (_hookEvalCtx != null) return;
-    _emitToRun(_runResolved, kind, text, sessionId: _pinnedRunId);
-  }
+  void _emit(String kind, String text) =>
+      _emitToRun(_runResolved, kind, text, sessionId: _pinnedRunId);
 
   void _emitToRun(AgentRun run, String kind, String text, {String? sessionId}) {
     // Run-epoch gate (stop/output rendering): events from a superseded run
@@ -11767,347 +11684,6 @@ ${await _agentsMdBlock()}
     }
   }
 
-  /// Monotonic id scoping one agent-hook evaluation's sandbox processes.
-  int _agentHookEvalSeq = 0;
-
-  /// Tools that can NEVER run inside an agent-hook evaluation, even when the
-  /// hook declares them: they publish to a chat transcript (artifact/image
-  /// messages), ask the user interactively (card, system dialog, plan
-  /// review), or spawn nested agent runs (an unbounded depth the evaluation
-  /// contract does not allow). Everything else runs through the ordinary
-  /// dispatch policy for the evaluated session — and anything that would
-  /// prompt for approval is denied fail-safe by the `_maybeApprove` /
-  /// `_askUser` evaluation guards.
-  static const Set<String> _agentHookEvalDeniedTools = {
-    'render_html',
-    'generate_image',
-    'edit_image',
-    'resize_image',
-    'crop_image',
-    'ask_user_question',
-    'request_permission',
-    'exit_plan_mode',
-    'dispatch_agent',
-    'workflow',
-    'ralph',
-    'send_message',
-    'interrupt_agent',
-    'report',
-  };
-
-  /// The last tool-schema names offered to an agent-hook evaluation
-  /// (test observability for the declared-tools intersection).
-  @visibleForTesting
-  List<String>? lastAgentHookEvalToolsForTest;
-
-  /// Wires [HookService.agentHookEvaluator] to the bounded, cancellable,
-  /// quiet tool loop below. Called once from the constructor; re-callable
-  /// from tests after a `HookService.resetForTest()`.
-  void _wireAgentHookEvaluator() {
-    HookService.I.agentHookEvaluator = _evaluateAgentHookQuietly;
-  }
-
-  @visibleForTesting
-  void wireAgentHookEvaluatorForTest() => _wireAgentHookEvaluator();
-
-  /// Tool-capable agent-hook evaluator (wired as
-  /// [HookService.agentHookEvaluator] once at init). A bounded, cancellable,
-  /// QUIET agent loop around the existing dispatch policy:
-  ///
-  ///  • BOUNDED — at most 8 tool rounds inside `evaluation.budget`
-  ///    (HookService additionally drops any late verdict and signals the
-  ///    fence), per-tool timeouts match the run loop, nested agent spawns
-  ///    and chat-publishing tools are refused
-  ///    ([_agentHookEvalDeniedTools]).
-  ///  • CANCELLABLE — `evaluation.isCancelled` completing true aborts the
-  ///    evaluation's OWN detached transport bucket and sandbox process key,
-  ///    and the per-evaluation [UtilityCancellation] token threaded into
-  ///    every native/MCP callTool the loop invokes.
-  ///  • QUIET — the whole loop runs in a Zone carrying the
-  ///    [_AgentHookEvalCtx]: `_emit`/`_appendAssistant` are inert there, no
-  ///    session-ledger tool entries are written (`_dispatch`'s accounting
-  ///    wrapper is bypassed), no pre_tool/post_tool hooks re-fire, and no
-  ///    approval card is ever parked — interactive approvals fail safe
-  ///    (deny) via the `_maybeApprove`/`_askUser` evaluation guards.
-  ///
-  /// Tool scope is `evaluation.approvedTools` ∩ the live roster for the
-  /// EVALUATED session — never broader. A null return (or a throw) fails
-  /// OPEN: HookService records "no verdict" and lets the event through.
-  Future<AgentHookVerdict?> _evaluateAgentHookQuietly(
-    AgentHookEvaluation evaluation,
-  ) async {
-    try {
-      final sessionId = evaluation.context['session'] as String?;
-      final session =
-          (sessionId != null ? AppState.I.sessionById(sessionId) : null) ??
-          AppState.I.activeSession;
-      if (session == null) return null;
-      final p = AppState.I.providerForSession(session);
-      if (p == null || !p.isConfigured) return null;
-      final ctx = _AgentHookEvalCtx(
-        session: session,
-        declaredTools: Set.of(evaluation.approvedTools),
-      );
-      // The evaluation-scoped sandbox process key — distinct from any
-      // session run key, killed wholesale on abort (closure audit §4.1).
-      final callKey = 'hook-eval-${++_agentHookEvalSeq}';
-      // Bridge the explicit abort signal into the evaluation's own
-      // transport/process/token teardown. `isCancelled` completes false on
-      // a normal verdict, so a settled evaluation never cancels itself.
-      unawaited(
-        evaluation.isCancelled.then((cancelled) {
-          if (cancelled) ctx.abort(callKey);
-        }),
-      );
-      return await runZoned(
-        () async {
-          // Build tool schemas INSIDE the zone so the roster (mode gates,
-          // plugin visibility, subagent filter) resolves for the EVALUATED
-          // session, then intersect with the hook's declared tools.
-          final declared = ctx.declaredTools;
-          ctx.toolSchemas = _tools.where((t) {
-            final fn = t['function'];
-            return fn is Map && declared.contains(fn['name']);
-          }).toList();
-          ctx.declaredTools
-            ..clear()
-            ..addAll(ctx.toolSchemas.map((t) {
-              final fn = t['function'];
-              return fn is Map ? fn['name'] as String : '';
-            }).where((n) => n.isNotEmpty));
-          lastAgentHookEvalToolsForTest = List.of(ctx.declaredTools);
-          return await _agentHookLoop(evaluation, ctx, p);
-        },
-        zoneValues: <Object, Object?>{
-          // Detach from any parent run chain: an agent hook fired mid-run
-          // (e.g. a gating pre_tool hook) must not read or mutate the
-          // parent run's bucket, generation or ledger.
-          _runCtxKey: null,
-          _hookEvalCtxKey: ctx,
-          SandboxService.callZoneKey: callKey,
-        },
-      );
-    } catch (_) {
-      return null; // fail open
-    }
-  }
-
-  /// The evaluation loop: alternate quiet LLM calls and quiet tool
-  /// dispatches until the model answers with a verdict, the bounds bite, or
-  /// the fence aborts the evaluation.
-  Future<AgentHookVerdict?> _agentHookLoop(
-    AgentHookEvaluation evaluation,
-    _AgentHookEvalCtx ctx,
-    ProviderConfig p,
-  ) async {
-    const maxToolRounds = 8;
-    final session = ctx.session;
-    final stdinJson = evaluation.context['stdin'] as String? ?? '';
-    final event = evaluation.context['event'] as String? ?? 'unknown';
-    final msgs = <Map<String, dynamic>>[
-      {
-        'role': 'system',
-        'content':
-            'You are evaluating a plugin hook rule for the "$event" event '
-            '(session "${session.id}"). Decide whether the event violates '
-            'the rule.\n\n'
-            'You may call the provided tools to inspect state before '
-            'deciding. Tool approvals are unavailable during hook '
-            'evaluation: a tool that would ask the user is DENIED '
-            'automatically — do not retry it; decide with the tools that '
-            'work, or with no tools at all.\n\n'
-            'When you have decided, reply with exactly one JSON object and '
-            'nothing else:\n'
-            '{"decision":"block","reason":"…"} or '
-            '{"decision":"approve","reason":"…"}',
-      },
-      {
-        'role': 'user',
-        'content':
-            'Hook rule:\n${evaluation.prompt}\n\n'
-            'Event context (JSON):\n$stdinJson',
-      },
-    ];
-    final deadline = DateTime.now().add(evaluation.budget);
-    for (var round = 0; round <= maxToolRounds; round++) {
-      if (ctx.aborted) return null;
-      if (DateTime.now().isAfter(deadline)) return null;
-      final r = await _callLlm(
-        p,
-        msgs,
-        session,
-        includeTools: ctx.toolSchemas.isNotEmpty,
-        // Invisible helper call — must never stream into the transcript.
-        streamToTranscript: false,
-      );
-      if (ctx.aborted || r == null) return null;
-      final toolCalls = r['tool_calls'] as List?;
-      if (toolCalls == null || toolCalls.isEmpty) {
-        final text = (r['content'] as String?)?.trim() ?? '';
-        if (text.isEmpty) return null;
-        return _parseAgentHookVerdict(text);
-      }
-      // Turn bound: never dispatch tools beyond the round cap — fail open.
-      if (round == maxToolRounds) return null;
-      msgs.add({
-        'role': 'assistant',
-        'content': r['content'] ?? '',
-        'tool_calls': toolCalls,
-      });
-      for (final tc in toolCalls) {
-        if (ctx.aborted) return null;
-        final fn = tc['function'];
-        final name = fn is Map ? fn['name'] as String? : null;
-        var args = <String, dynamic>{};
-        Object? argError;
-        if (name != null) {
-          try {
-            final decoded = jsonDecode(
-              (fn['arguments'] ?? '{}').toString(),
-            );
-            if (decoded is Map) {
-              args = decoded.cast<String, dynamic>();
-            } else {
-              argError = 'arguments must be a JSON object';
-            }
-          } catch (e) {
-            argError = e;
-          }
-        }
-        final String result;
-        if (name == null) {
-          result = 'tool error: malformed tool call (no function name).';
-        } else if (argError != null) {
-          result =
-              'tool error: invalid arguments JSON for "$name" ($argError). '
-              'Re-issue the call with a complete, valid JSON object.';
-        } else {
-          result = await _dispatchAgentHookTool(ctx, name, args);
-        }
-        msgs.add({
-          'role': 'tool',
-          'tool_call_id': tc['id'],
-          'content': cleanTruncate(result, _toolOutputCapFor(name ?? '')),
-        });
-      }
-    }
-    return null;
-  }
-
-  /// Parse the evaluation model's final answer into an [AgentHookVerdict].
-  /// Same contract as the prompt-hook decision parser: JSON
-  /// `{"decision":"block"|"approve","reason":"…"}` (or `{"ok": bool}`),
-  /// else plain-text heuristics — a leading "block"/"approve" wins, else the
-  /// first whole-word occurrence (a negated "do not block" does NOT count as
-  /// block). Anything else yields null → the caller fails open.
-  static AgentHookVerdict? _parseAgentHookVerdict(String response) {
-    final t = response.trim();
-    if (t.isEmpty) return null;
-    if (t.startsWith('{') && t.endsWith('}')) {
-      try {
-        final j = jsonDecode(t);
-        if (j is Map) {
-          if (j['ok'] is bool) {
-            final reason = j['reason'];
-            return AgentHookVerdict(
-              j['ok'] == true ? 'approve' : 'block',
-              reason is String ? reason : null,
-            );
-          }
-          final d = j['decision']?.toString().toLowerCase().trim();
-          if (d == 'block' || d == 'approve') {
-            final r = j['reason'];
-            return AgentHookVerdict(
-              d!,
-              r is String && r.trim().isNotEmpty ? r.trim() : null,
-            );
-          }
-        }
-      } catch (_) {
-        // Fall through to the text heuristics.
-      }
-    }
-    final lower = t.toLowerCase();
-    final capped = t.length > 500 ? '${t.substring(0, 500)}…' : t;
-    if (lower.startsWith('block')) return AgentHookVerdict('block', capped);
-    if (lower.startsWith('approve')) {
-      return AgentHookVerdict('approve', capped);
-    }
-    final negatedBlock = RegExp(
-      r"\b(do not|don't|dont|never|no)\s+block\b",
-    ).hasMatch(lower);
-    if (!negatedBlock && RegExp(r'\bblock\b').hasMatch(lower)) {
-      return AgentHookVerdict('block', capped);
-    }
-    if (RegExp(r'\bapprove\b').hasMatch(lower)) {
-      return AgentHookVerdict('approve', capped);
-    }
-    return null;
-  }
-
-  /// Quiet tool dispatch for an agent-hook evaluation: the tool-execution
-  /// core ([_dispatchInner]) with its full permission/read-only/plan/
-  /// sandbox policy for the EVALUATED session, but WITHOUT `_dispatch`'s
-  /// run accounting, session-ledger tool entries, pre_tool/post_tool hook
-  /// recursion, or chat emission (all inert inside the evaluation zone).
-  /// The hook's declared tool scope is re-enforced here, so a schema
-  /// mismatch can never widen it.
-  Future<String> _dispatchAgentHookTool(
-    _AgentHookEvalCtx ctx,
-    String name,
-    Map<String, dynamic> args,
-  ) async {
-    if (ctx.aborted) return 'cancelled: the hook evaluation was aborted.';
-    if (!ctx.declaredTools.contains(name)) {
-      return 'DENIED: "$name" is not one of this hook\'s declared tools '
-          '(${ctx.declaredTools.isEmpty ? 'none' : ctx.declaredTools.join(', ')}). '
-          'Call a declared tool, or decide without tools.';
-    }
-    if (_agentHookEvalDeniedTools.contains(name)) {
-      return 'DENIED: "$name" cannot run inside a hook evaluation — it '
-          'publishes to a chat transcript, asks the user, or spawns nested '
-          'agent runs. Decide with inspection tools instead.';
-    }
-    // Shell-like tools get the sandbox target jail rooted at the EVALUATED
-    // session's workspace + grants (mirrors the run loop's dispatch zone).
-    final zoneValues = <Object, Object?>{};
-    if (_isShellLikeTool(name)) {
-      final roots = await _sandboxAllowedRoots();
-      if (roots.isNotEmpty) {
-        zoneValues[SandboxService.allowedRootsZoneKey] = SandboxRootScope(
-          roots,
-          decisions: planMode || mode == AgentMode.drive
-              ? const []
-              : _grantStoreFor(ctx.session.id).grantsFor(ctx.session.id),
-        );
-      }
-    }
-    final budget = _toolTimeoutFor(name);
-    try {
-      return await runZoned(
-        () => _dispatchInner(name, args),
-        zoneValues: zoneValues,
-      ).timeout(
-        budget,
-        onTimeout: () {
-          SandboxService.I.killCallProcesses(
-            Zone.current[SandboxService.callZoneKey] as String? ?? '',
-          );
-          return 'Error: tool "$name" timed out after '
-              '${budget.inSeconds}s and its processes were killed. Do NOT '
-              're-run it blindly — decide with what you have.';
-        },
-      );
-    } catch (e) {
-      return 'tool error: $e';
-    }
-  }
-
-  @visibleForTesting
-  Future<AgentHookVerdict?> evaluateAgentHookForTest(
-    AgentHookEvaluation evaluation,
-  ) => _evaluateAgentHookQuietly(evaluation);
-
   /// Warmed per-session transcript paths for hook payloads.
   ///
   /// Only the ledger resolves filenames and invalidates their lifetime.
@@ -12754,11 +12330,7 @@ ${await _agentsMdBlock()}
         // never send token counts, leaving the Usage screen at zero.
         'stream_options': {'include_usage': true},
       };
-      // An agent-hook evaluation offers ONLY the schemas built from the
-      // hook's declared tools — never the full roster.
-      final toolList = includeTools
-          ? (_hookEvalCtx?.toolSchemas ?? _tools)
-          : const <Map<String, dynamic>>[];
+      final toolList = includeTools ? _tools : const <Map<String, dynamic>>[];
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort != null && !dropReasoningEffort) {
         body['reasoning_effort'] = effort;
@@ -13346,9 +12918,8 @@ ${await _agentsMdBlock()}
         if (converted.system.isNotEmpty) 'system': converted.system,
         'messages': converted.messages,
       };
-      // Agent-hook evaluation: declared-tools schemas only (see _callLlmOnce).
       final toolList = includeTools
-          ? _anthropicTools(_hookEvalCtx?.toolSchemas ?? _tools)
+          ? _anthropicTools(_tools)
           : const <Map<String, dynamic>>[];
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort == 'high') {
@@ -14476,7 +14047,6 @@ ${await _agentsMdBlock()}
           resolved.tool.name,
           cleanArgs,
           timeout: callTimeout,
-          cancellation: _hookEvalCtx?.cancellation,
         );
       case String() when name.startsWith('mcp_'):
         final runSid = _runSession?.id ?? '';
@@ -14518,7 +14088,6 @@ ${await _agentsMdBlock()}
             resolved.tool.name,
             cleanArgs,
             timeout: callTimeout,
-            cancellation: _hookEvalCtx?.cancellation,
           );
         }
         // Real MCP proxy — resolve the matched server BY NAME first, then
@@ -14562,7 +14131,6 @@ ${await _agentsMdBlock()}
           action,
           cleanMcpArgs,
           timeout: callTimeout,
-          cancellation: _hookEvalCtx?.cancellation,
         );
       case String() when name.startsWith('plugin__'):
         // Native plugin capability tool: plugin__<slug>__<tool>.
@@ -14606,18 +14174,6 @@ ${await _agentsMdBlock()}
         final cleanArgs = Map<String, dynamic>.from(args);
         if (capability is NativePromptCapability) {
           return runPromptTool(capability, toolName, cleanArgs);
-        }
-        // An agent-hook evaluation hands over its OWN per-evaluation token
-        // (bridged from AgentHookEvaluation.isCancelled) instead of a
-        // session-keyed bridge token — a fence aborts the evaluation's
-        // in-flight call without touching any session run's tokens.
-        final evalCtx = _hookEvalCtx;
-        if (evalCtx != null) {
-          return await capability.callTool(
-            toolName,
-            cleanArgs,
-            cancellation: evalCtx.cancellation,
-          );
         }
         final runKey = _runSession?.id ?? '';
         final cancellation = UtilityCancellationBridge.I.open(runKey);
@@ -17380,11 +16936,6 @@ ${await _agentsMdBlock()}
   }
 
   Future<bool> _maybeApprove(String tool, String summary, String detail) async {
-    // Agent-hook evaluation: anything that WOULD need an approval is denied
-    // outright (fail safe) — before the permission_request hook gate (no
-    // hook recursion from an evaluation), before any ledger write, and
-    // before mode/subagent auto-grants can silently bless detached work.
-    if (_hookEvalCtx != null) return false;
     final running = _runSession;
     final sessionId = running?.id ?? AppState.I.activeSession?.id;
     final approvalKey = jsonEncode([tool, detail]);
@@ -17843,11 +17394,6 @@ ${await _agentsMdBlock()}
     List<String> hostTargets = const [],
     String? approvalKey,
   }) async {
-    // Agent-hook evaluation: an approval card has nobody to answer it.
-    // FAIL SAFE — deny, and never park a request on the active session's
-    // bucket (the detached-approval blocker from the closure audit). The
-    // evaluation model sees DENIED and continues with approval-free tools.
-    if (_hookEvalCtx != null) return false;
     // This bypass concerns app-level approval only. Callers still enforce
     // read-only/plan policy, hook denials, sandbox policy and Android grants.
     if (mode == AgentMode.drive && planBody == null && t != 'exit_plan_mode') {
@@ -17974,8 +17520,6 @@ ${await _agentsMdBlock()}
     MsgKind kind = MsgKind.text,
     ChatSession? session,
   }) {
-    // An agent-hook evaluation never writes to the chat transcript.
-    if (_hookEvalCtx != null) return;
     // While a run is pinned, default to THE RUNNING session — a mid-run
     // session switch must never redirect assistant output into the
     // newly-active chat (session bleed).

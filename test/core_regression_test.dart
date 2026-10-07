@@ -7921,9 +7921,7 @@ block</pre>
       // Chat red button stops only the current session for 100% session isolation
       // (queues preserved so a queued message still sends next).
       // Whitespace-tolerant: the call may be formatted across lines.
-      // The chat split moved the composer (with the Stop button) out of
-      // chat_screen.dart into lib/ui/chat/composer.dart.
-      final chat = File('lib/ui/chat/composer.dart').readAsStringSync();
+      final chat = File('lib/ui/chat_screen.dart').readAsStringSync();
       expect(
         chat,
         matches(RegExp(r'stopRequested\(\s*sessionId:\s*sessionId,?\s*\)')),
@@ -8659,9 +8657,7 @@ block</pre>
     test(
       'subagent @-mention menu inserts a resolvable @session:<id> token',
       () {
-        // The chat split moved the @-mention provider out of
-        // chat_screen.dart into lib/ui/chat/composer.dart.
-        final src = File('lib/ui/chat/composer.dart').readAsStringSync();
+        final src = File('lib/ui/chat_screen.dart').readAsStringSync();
         expect(src, contains("insert: '@session:\${sub.sessionId} '"));
       },
     );

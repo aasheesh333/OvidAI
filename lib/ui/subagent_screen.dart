@@ -490,91 +490,54 @@ Future<void> showSubagentCatalog(BuildContext context, String sessionId) async {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
     ),
-    builder: (sheetCtx) => SafeArea(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(sheetCtx).height * .85,
-        ),
-        child: SubagentListView(
-          sessionId: sessionId,
-          shrinkWrap: true,
-          onOpenChild: (_, child) {
-            Navigator.pop(sheetCtx);
-            SubagentScreen.open(context, child.id);
-          },
-        ),
-      ),
-    ),
-  );
-}
-
-/// Live list of the subagents dispatched by [sessionId]: one premium card per
-/// child (status dot + pill, runtime, one-line summary, ghost Stop for running
-/// children) or a calm empty state. Shared by [showSubagentCatalog] and the
-/// Activity hub's Agents tab. Tapping a card resolves through
-/// [SubagentScreen.open] unless [onOpenChild] overrides it.
-class SubagentListView extends StatelessWidget {
-  final String sessionId;
-  final bool shrinkWrap;
-  final void Function(BuildContext context, ChatSession child)? onOpenChild;
-  const SubagentListView({
-    super.key,
-    required this.sessionId,
-    this.shrinkWrap = false,
-    this.onOpenChild,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
+    builder: (sheetCtx) => AnimatedBuilder(
       animation: Listenable.merge([AppState.I, AgentService.I]),
       builder: (_, _) {
-        final children = AppState.I.childrenOf(sessionId);
-        if (children.isEmpty) {
-          return const SingleChildScrollView(
-            child: Padding(
-              padding: EdgeInsets.symmetric(vertical: 12),
-              child: AetherEmptyState(
-                key: ValueKey('subagent-catalog-empty'),
-                icon: Icons.account_tree_outlined,
-                title: 'No subagents yet',
-                message:
-                    'Ask the agent to dispatch one for a focused subtask — '
-                    'it gets its own transcript and workspace.',
-              ),
-            ),
-          );
-        }
-        return ListView(
-          shrinkWrap: shrinkWrap,
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
-              child: AetherSectionTitle(
-                eyebrow: 'Subagents (${children.length})',
-              ),
-            ),
-            for (final child in children)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                child: _CatalogCard(
-                  session: child,
-                  onOpen: () {
-                    final override = onOpenChild;
-                    if (override != null) {
-                      override(context, child);
-                    } else {
-                      SubagentScreen.open(context, child.id);
-                    }
-                  },
+        final app = AppState.I;
+        final children = app.childrenOf(sessionId);
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(sheetCtx).height * .85),
+            child: children.isEmpty
+              ? const SingleChildScrollView(child: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: AetherEmptyState(
+                    key: ValueKey('subagent-catalog-empty'),
+                    icon: Icons.account_tree_outlined,
+                    title: 'No subagents yet',
+                    message:
+                        'Ask the agent to dispatch one for a focused subtask — '
+                        'it gets its own transcript and workspace.',
+                  ),
+                ))
+              : ListView(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
+                      child: AetherSectionTitle(
+                        eyebrow: 'Subagents (${children.length})',
+                      ),
+                    ),
+                    for (final child in children)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                        child: _CatalogCard(
+                          session: child,
+                          onOpen: () {
+                            Navigator.pop(sheetCtx);
+                            SubagentScreen.open(context, child.id);
+                          },
+                        ),
+                      ),
+                  ],
                 ),
-              ),
-          ],
+          ),
         );
       },
-    );
-  }
+    ),
+  );
 }
 
 /// Premium catalog row: an [AetherCard] with the child's name, a status pill,

@@ -12,9 +12,6 @@ import '../core/startup_coordinator.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'chat_screen.dart';
-import 'plugins_screen.dart';
-import 'sandbox_setup.dart' show openStudio;
-import 'settings_screen.dart';
 import 'sidebar.dart';
 
 /// Shown when the debounced session write has failed, i.e. chat history is
@@ -74,24 +71,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    // Sidebar destination wiring (v2, 2026-10-06): the sidebar is a leaf
-    // library — it does not import the Studio/Plugins/Settings screens —
-    // so the shell, which already does, registers the real push closures
-    // once here. The narrow drawer's sidebar (created by ChatScreen) is
-    // covered too: the shell always initialises before any drawer opens.
-    SidebarNav.register(SidebarNav.studio, openStudio);
-    SidebarNav.register(
-      SidebarNav.plugins,
-      (ctx) => Navigator.of(
-        ctx,
-      ).push(MaterialPageRoute(builder: (_) => const PluginsScreen())),
-    );
-    SidebarNav.register(
-      SidebarNav.settings,
-      (ctx) => Navigator.of(
-        ctx,
-      ).push(MaterialPageRoute(builder: (_) => const SettingsScreen())),
-    );
     WidgetsBinding.instance.addObserver(this);
     AgentService.I.onControlTaskCompleted = _revealControlChat;
     // Foreground-notification wiring (agent keep-alive): registers the
@@ -236,12 +215,13 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
       // The inner chat Scaffold owns keyboard avoidance. Resizing both shells
       // subtracts the same inset twice and crowds out the composer.
       resizeToAvoidBottomInset: false,
-      // SINGLE-DRAWER RULE (2026-10-06): the narrow-screen drawer is declared
-      // exactly once — inside ChatScreen's own Scaffold, whose AppBar owns the
-      // hamburger that opens it. The shell used to declare a second copy here,
-      // but this Scaffold has no AppBar, so that drawer was unreachable via
-      // any button and only raced the inner one on edge swipes. In wide mode
-      // there is no drawer at all; the sidebar is embedded in the Row below.
+      drawer: wide
+          ? null
+          : Drawer(
+              width: 288,
+              backgroundColor: Aether.surface,
+              child: SessionsSidebar(),
+            ),
       body: Column(
         children: [
           if (_persistWarned) const _PersistWarningBanner(),

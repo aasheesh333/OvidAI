@@ -64,7 +64,7 @@ void main() {
   test('catalog heuristic is preserved when no runtime manifest exists', () {
     expect(
       PluginCard.sourceFormatLabel(_row(source: 'acme/repo')),
-      '[CC]',
+      'Claude Code',
     );
     expect(
       PluginCard.sourceFormatLabel(_row(author: 'ovidai')),
@@ -79,7 +79,7 @@ void main() {
       PluginCard.sourceFormatLabel(
         _row(runtimeId: 'acme/missing', source: 'acme/repo'),
       ),
-      '[CC]',
+      'Claude Code',
     );
   });
 

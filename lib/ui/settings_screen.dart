@@ -20,7 +20,7 @@ import '../core/state.dart';
 import '../core/settings_actions.dart';
 import 'settings_action_widgets.dart';
 import 'settings_backup_screen.dart';
-import 'health_screen.dart';
+import 'settings_health_screen.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
 import 'profile_avatar.dart';
@@ -34,19 +34,13 @@ import 'usage_screen.dart';
 import 'widgets/aether_primitives.dart';
 import '../core/diag.dart';
 
-/// Settings hub — calm Aether premium with progressive disclosure.
+/// Settings hub — Aether premium reskin.
 ///
-/// The root is a short list of clean sections — Account / Appearance /
-/// Models / Privacy & autonomy / Data & backup / Studio / Health & repair /
-/// About — where dense topics collapse into a single [_NavRow] that pushes a
-/// focused sub-page (Models, Privacy & autonomy, Data & backup). Every row
-/// uses the same one-nav-row component (icon + title + ONE-line subtitle +
-/// chevron); ghost buttons are reserved for actions, and the privacy policy
-/// appears exactly once (About).
-///
-/// All preference tiles and their persisted bindings are preserved verbatim
-/// — nothing was added to [AppState] or [SettingsActions]; only the
-/// information architecture changed.
+/// Rows are grouped into premium cards (Account / Appearance / Models /
+/// Autonomy / Studio / Backup / Health / Diagnostics / About). All existing
+/// preference tiles and their persisted bindings are preserved verbatim —
+/// nothing was added to [AppState] or [SettingsActions]; the AetherCard
+/// wrappers only change presentation.
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
@@ -67,25 +61,7 @@ class SettingsScreen extends StatelessWidget {
           const SizedBox(height: 10),
           AetherCard(
             padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _accountHeader(context),
-                _hairline(),
-                const _NavRow(
-                  icon: Icons.workspace_premium_outlined,
-                  title: 'Plan & Billing',
-                  subtitle: 'Your Ovid Cloud plan & upgrades',
-                  screen: BillingScreen(),
-                ),
-                _hairline(),
-                const _NavRow(
-                  icon: Icons.bar_chart_rounded,
-                  title: 'Usage',
-                  subtitle: 'Spend per client',
-                  screen: UsageScreen(),
-                ),
-              ],
-            ),
+            child: _accountHeader(context),
           ),
 
           // ── Appearance ────────────────────────────────────────────────
@@ -97,84 +73,251 @@ class SettingsScreen extends StatelessWidget {
             child: _ThemeToggle(),
           ),
 
-          // ── Models (sub-page) ─────────────────────────────────────────
+          // ── Models ────────────────────────────────────────────────────
           const _SectionGap(),
-          const AetherSectionTitle(eyebrow: 'Models'),
-          const SizedBox(height: 10),
-          const AetherCard(
-            padding: EdgeInsets.zero,
-            child: _NavRow(
-              icon: Icons.model_training_outlined,
-              title: 'Models',
-              subtitle: 'Providers, context, timeout & presets',
-              screen: _ModelsScreen(),
-            ),
+          const AetherSectionTitle(
+            eyebrow: 'Models',
+            subtitle:
+                'Providers, context window, output cap, response timeout and preset routing.',
           ),
-
-          // ── Privacy & autonomy (sub-page) ─────────────────────────────
-          const _SectionGap(),
-          const AetherSectionTitle(eyebrow: 'Privacy & autonomy'),
-          const SizedBox(height: 10),
-          const AetherCard(
-            padding: EdgeInsets.zero,
-            child: _NavRow(
-              icon: Icons.privacy_tip_outlined,
-              title: 'Privacy & autonomy',
-              subtitle: 'Permissions, memory & reasoning',
-              screen: _PrivacyAutonomyScreen(),
-            ),
-          ),
-
-          // ── Data & backup (sub-page) ──────────────────────────────────
-          const _SectionGap(),
-          const AetherSectionTitle(eyebrow: 'Data & backup'),
-          const SizedBox(height: 10),
-          const AetherCard(
-            padding: EdgeInsets.zero,
-            child: _NavRow(
-              icon: Icons.inventory_2_outlined,
-              title: 'Data & backup',
-              subtitle: 'Export, storage & reset',
-              screen: _DataBackupScreen(),
-            ),
-          ),
-
-          // ── Studio ────────────────────────────────────────────────────
-          const _SectionGap(),
-          const AetherSectionTitle(eyebrow: 'Studio'),
           const SizedBox(height: 10),
           AetherCard(
             padding: EdgeInsets.zero,
             child: Column(
               children: [
-                const _NavRow(
-                  icon: Icons.extension_outlined,
-                  title: 'Plugins',
-                  subtitle: 'Agents, MCP servers & tools',
-                  screen: PluginsScreen(),
+                _navTile(
+                  context,
+                  Icons.key_outlined,
+                  'Providers',
+                  'BYOK · free & custom providers',
+                  const ProvidersScreen(),
                 ),
                 _hairline(),
-                const _NavRow(
-                  icon: Icons.auto_fix_high_outlined,
-                  title: 'Skills',
-                  subtitle: 'Upload .md skills for chat',
-                  screen: SkillsScreen(),
+                _navTile(
+                  context,
+                  Icons.memory_outlined,
+                  'Context & output',
+                  'Context window override (per-model auto by default) and max output tokens. Drives auto-compaction + the % context ring.',
+                  const _ContextModelScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.timer_outlined,
+                  'AI response timeout',
+                  'How long the agent may stream. Lower = snappier, higher = no cutoff of long answers.',
+                  const _TimeoutScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.tune_outlined,
+                  'Agent presets',
+                  'Tool rosters & permissions · built-in & custom presets',
+                  const _PresetsScreen(),
                 ),
               ],
             ),
           ),
 
-          // ── Health & repair ───────────────────────────────────────────
+          // ── Autonomy ──────────────────────────────────────────────────
           const _SectionGap(),
-          const AetherSectionTitle(eyebrow: 'Health & repair'),
+          const AetherSectionTitle(
+            eyebrow: 'Autonomy',
+            subtitle:
+                'What the agent may reach into on its own — paths, hosts, memory and chain-of-thought visibility.',
+          ),
           const SizedBox(height: 10),
-          const AetherCard(
+          AetherCard(
             padding: EdgeInsets.zero,
-            child: _NavRow(
-              icon: Icons.monitor_heart_outlined,
-              title: 'Health & repair',
-              subtitle: 'Score, checks & repair',
-              screen: HealthScreen(),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.key_outlined),
+                  title: const Text(
+                    'Permissions',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  subtitle: const Text(
+                    'Paths and hosts the agent may always access',
+                    style: TextStyle(fontSize: 11.5),
+                  ),
+                  trailing: const Icon(Icons.chevron_right, size: 18),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const PermissionsScreen(),
+                    ),
+                  ),
+                ),
+                _hairline(),
+                const _SettingsSwitchTile(
+                  icon: Icons.psychology_outlined,
+                  title: 'Memory',
+                  subtitleOn:
+                      'ON — personal and current-chat memory context & tools',
+                  subtitleOff:
+                      'OFF — saved memory context & tools disabled',
+                  getter: _getMemoryEnabled,
+                  setter: _setMemoryEnabled,
+                ),
+                _hairline(),
+                const _ShareMemoryTile(),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.description_outlined,
+                  'Memory files',
+                  'View, edit, save, add or import Markdown memory',
+                  const MemoryScreen(),
+                ),
+                _hairline(),
+                const _SettingsSwitchTile(
+                  icon: Icons.auto_awesome,
+                  title: 'Reasoning mode',
+                  subtitleOn: 'ON — show thinking before answers',
+                  subtitleOff: 'OFF — hide thinking, answers only',
+                  getter: _getShowReasoning,
+                  setter: _setShowReasoning,
+                ),
+                _hairline(),
+                const _SettingsSwitchTile(
+                  icon: Icons.desktop_windows_outlined,
+                  title: 'Browser: desktop mode',
+                  subtitleOn:
+                      'ON — Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)',
+                  subtitleOff:
+                      'OFF — new tabs use the device\'s mobile viewport (default)',
+                  getter: _getBrowserDesktop,
+                  setter: _setBrowserDesktop,
+                ),
+                _hairline(),
+                const _DeviceIntegrityTile(),
+              ],
+            ),
+          ),
+
+          // ── Studio ────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Studio',
+            subtitle:
+                'Workspace agents, MCP servers and skill packs the agent can use in every chat.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _navTile(
+                  context,
+                  Icons.extension_outlined,
+                  'Plugins',
+                  'Agents, MCP servers, tools',
+                  const PluginsScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.auto_fix_high_outlined,
+                  'Skills',
+                  'Upload .md skill files the agent uses in chat',
+                  const SkillsScreen(),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Backup ────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Backup',
+            subtitle:
+                'Export, import, inspect and clear app-owned data.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _navTileWithAction(
+                  context,
+                  Icons.inventory_2_outlined,
+                  'Portable transcript backup',
+                  'Versioned archive · attachment limits · validate restore',
+                  const SettingsBackupScreen(),
+                  actionLabel: 'Backup',
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.download_outlined,
+                  'Export chats',
+                  'Download all sessions as JSON',
+                  const _ExportChatsScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.delete_outline,
+                  'Delete all data',
+                  SettingsActions.resetAll == null
+                      ? 'Unavailable · verified full reset is not connected'
+                      : 'Chats, keys and settings · irreversible',
+                  const SettingsResetScreen(),
+                ),
+                _hairline(),
+                const _StorageTile(),
+              ],
+            ),
+          ),
+
+          // ── Health ────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Health',
+            subtitle:
+                'Per-runtime probes and configuration repair.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: _navTileWithAction(
+              context,
+              Icons.monitor_heart_outlined,
+              'Device health',
+              'Per-runtime probes · configuration and repair availability',
+              const SettingsHealthScreen(),
+              actionLabel: 'Health',
+            ),
+          ),
+
+          // ── Diagnostics ───────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Diagnostics',
+            subtitle:
+                'Telemetry, background keep-alive and notification channel.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _TelemetryTile(),
+                _hairline(),
+                const _KeepAliveToggle(),
+                _hairline(),
+                const _SettingsSwitchTile(
+                  icon: Icons.notifications_outlined,
+                  title: 'Notifications',
+                  subtitleOn:
+                      'Requested — status notifications also require OS permission and an available background service',
+                  subtitleOff:
+                      'OFF — no status notification; background runs may stop',
+                  getter: _getNotificationsEnabled,
+                  setter: _setNotificationsEnabled,
+                ),
+              ],
             ),
           ),
 
@@ -186,35 +329,37 @@ class SettingsScreen extends StatelessWidget {
             padding: EdgeInsets.zero,
             child: Column(
               children: [
-                Material(
-                  type: MaterialType.transparency,
-                  child: ListTile(
-                    leading: Icon(
-                      Icons.share_outlined,
-                      size: 20,
-                      color: Aether.textMuted,
-                    ),
-                    title: const Text(
-                      'Share Ovid',
-                      style: TextStyle(fontSize: 14),
-                    ),
-                    subtitle: Text(
-                      'Send the app website',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-                    ),
-                    onTap: () => showNativeShare(context, NativeShare.app),
-                  ),
+                _navTile(
+                  context,
+                  Icons.workspace_premium_outlined,
+                  'Plan & Billing',
+                  'Your Ovid Cloud plan · usage · upgrade',
+                  const BillingScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.bar_chart_rounded,
+                  'Usage',
+                  'Per-client spend · OvidAI, OpenCode, [CC], Z Code',
+                  const UsageScreen(),
+                ),
+                _hairline(),
+                ListTile(
+                  leading: const Icon(Icons.share_outlined),
+                  title: const Text('Share Ovid'),
+                  subtitle: const Text('Send the app website'),
+                  onTap: () => showNativeShare(context, NativeShare.app),
                 ),
                 _hairline(),
                 _privacyPolicyTile(context),
                 _hairline(),
-                _NavRow(
-                  icon: Icons.info_outline,
-                  title: 'About',
-                  subtitle: 'Ovid AI $kAppVersion',
-                  screen: const _AboutScreen(),
+                _navTile(
+                  context,
+                  Icons.info_outline,
+                  'About',
+                  'Ovid AI $kAppVersion',
+                  const _AboutScreen(),
                 ),
               ],
             ),
@@ -280,6 +425,78 @@ class SettingsScreen extends StatelessWidget {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+
+  Widget _navTile(
+    BuildContext context,
+    IconData icon,
+    String title,
+    String subtitle,
+    Widget screen,
+  ) {
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
+        leading: Icon(icon, size: 20, color: Aether.textMuted),
+        title: Text(title, style: const TextStyle(fontSize: 14)),
+        subtitle: Text(
+          subtitle,
+          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+        ),
+        trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
+        onTap: () =>
+            Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen)),
+      ),
+    );
+  }
+
+  /// Variant of [_navTile] that also surfaces an [AetherGhostButton] in the
+  /// trailing area labelled [actionLabel]. The row itself preserves the
+  /// legacy tap-to-push behavior; the button is an additive affordance so
+  /// callers (and tests) can locate the row by its short premium verb.
+  Widget _navTileWithAction(
+    BuildContext context,
+    IconData icon,
+    String title,
+    String subtitle,
+    Widget screen, {
+    required String actionLabel,
+  }) {
+    void push() => Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => screen));
+    return InkWell(
+      onTap: push,
+      borderRadius: BorderRadius.circular(AetherRadius.rSm),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 4,
+          vertical: 10,
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: Aether.textMuted),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title, style: const TextStyle(fontSize: 14)),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            AetherGhostButton(label: actionLabel, onPressed: push),
+          ],
         ),
       ),
     );
@@ -552,254 +769,23 @@ Future<int> clearDirContents(Directory dir) async {
   return (before - after).clamp(0, before);
 }
 
-/// The ONE nav-row component: icon + title + ONE-line subtitle + chevron.
-///
-/// Used for every navigation row on the root and the sub-pages so the whole
-/// settings IA reads as a single, calm list grammar. Subtitles are capped at
-/// one line (ellipsis) — explanations belong on the destination screen.
-class _NavRow extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final Widget screen;
-  const _NavRow({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.screen,
-  });
-
+/// Storage row: opens the breakdown screen instead of just re-measuring.
+class _StorageTile extends StatelessWidget {
+  const _StorageTile();
   @override
   Widget build(BuildContext context) {
-    return Material(
-      type: MaterialType.transparency,
-      child: ListTile(
-        leading: Icon(icon, size: 20, color: Aether.textMuted),
-        title: Text(title, style: const TextStyle(fontSize: 14)),
-        subtitle: Text(
-          subtitle,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-        ),
-        trailing: Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
-        onTap: () => Navigator.of(
-          context,
-        ).push(MaterialPageRoute<void>(builder: (_) => screen)),
+    return ListTile(
+      dense: true,
+      leading: Icon(Icons.storage_outlined, size: 19, color: Aether.textMuted),
+      title: const Text('Storage', style: TextStyle(fontSize: 14)),
+      subtitle: Text(
+        'Usage by section · clear cache & cookies',
+        style: TextStyle(fontSize: 12, color: Aether.textFaint),
       ),
-    );
-  }
-}
-
-/// Shared scaffold for the settings sub-pages (progressive disclosure). The
-/// toolbar height follows the accessibility text scale so 2x text never
-/// clips the title.
-class _SubPage extends StatelessWidget {
-  final String title;
-  final List<Widget> children;
-  const _SubPage({required this.title, required this.children});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Aether.bg,
-      appBar: AppBar(
-        leading: const BackButton(),
-        toolbarHeight:
-            kToolbarHeight * (MediaQuery.textScalerOf(context).scale(20) / 20),
-        title: Text(title),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
-        children: children,
-      ),
-    );
-  }
-}
-
-Widget _subHairline() =>
-    Divider(height: 1, thickness: 1, color: Aether.hairline);
-
-/// Models sub-page — providers, context & output, response timeout, presets.
-class _ModelsScreen extends StatelessWidget {
-  const _ModelsScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPage(
-      title: 'Models',
-      children: [
-        AetherCard(
-          padding: EdgeInsets.zero,
-          child: Column(
-            children: [
-              const _NavRow(
-                icon: Icons.key_outlined,
-                title: 'Providers',
-                subtitle: 'BYOK · free & custom providers',
-                screen: ProvidersScreen(),
-              ),
-              _subHairline(),
-              const _NavRow(
-                icon: Icons.memory_outlined,
-                title: 'Context & output',
-                subtitle: 'Context window & max output tokens',
-                screen: _ContextModelScreen(),
-              ),
-              _subHairline(),
-              const _NavRow(
-                icon: Icons.timer_outlined,
-                title: 'AI response timeout',
-                subtitle: 'How long the agent may stream',
-                screen: _TimeoutScreen(),
-              ),
-              _subHairline(),
-              const _NavRow(
-                icon: Icons.tune_outlined,
-                title: 'Agent presets',
-                subtitle: 'Tool rosters & permissions',
-                screen: _PresetsScreen(),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Privacy & autonomy sub-page — permissions, memory, reasoning, background
-/// behavior and the device-integrity probe. All switches keep their exact
-/// persisted bindings.
-class _PrivacyAutonomyScreen extends StatelessWidget {
-  const _PrivacyAutonomyScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPage(
-      title: 'Privacy & autonomy',
-      children: [
-        AetherCard(
-          padding: EdgeInsets.zero,
-          child: Column(
-            children: [
-              const _NavRow(
-                icon: Icons.key_outlined,
-                title: 'Permissions',
-                subtitle: 'Paths & hosts the agent may always access',
-                screen: PermissionsScreen(),
-              ),
-              _subHairline(),
-              const _SettingsSwitchTile(
-                icon: Icons.psychology_outlined,
-                title: 'Memory',
-                subtitleOn:
-                    'ON — personal and current-chat memory context & tools',
-                subtitleOff:
-                    'OFF — saved memory context & tools disabled',
-                getter: _getMemoryEnabled,
-                setter: _setMemoryEnabled,
-              ),
-              _subHairline(),
-              const _ShareMemoryTile(),
-              _subHairline(),
-              const _NavRow(
-                icon: Icons.description_outlined,
-                title: 'Memory files',
-                subtitle: 'View, edit & import Markdown memory',
-                screen: MemoryScreen(),
-              ),
-              _subHairline(),
-              const _SettingsSwitchTile(
-                icon: Icons.auto_awesome,
-                title: 'Reasoning mode',
-                subtitleOn: 'ON — show thinking before answers',
-                subtitleOff: 'OFF — hide thinking, answers only',
-                getter: _getShowReasoning,
-                setter: _setShowReasoning,
-              ),
-              _subHairline(),
-              const _SettingsSwitchTile(
-                icon: Icons.notifications_outlined,
-                title: 'Notifications',
-                subtitleOn:
-                    'Requested — status notifications also require OS permission and an available background service',
-                subtitleOff:
-                    'OFF — no status notification; background runs may stop',
-                getter: _getNotificationsEnabled,
-                setter: _setNotificationsEnabled,
-              ),
-              _subHairline(),
-              const _KeepAliveToggle(),
-              _subHairline(),
-              _TelemetryTile(),
-              _subHairline(),
-              const _SettingsSwitchTile(
-                icon: Icons.desktop_windows_outlined,
-                title: 'Browser: desktop mode',
-                subtitleOn:
-                    'ON — Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)',
-                subtitleOff:
-                    'OFF — new tabs use the device\'s mobile viewport (default)',
-                getter: _getBrowserDesktop,
-                setter: _setBrowserDesktop,
-              ),
-              _subHairline(),
-              const _DeviceIntegrityTile(),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Data & backup sub-page — backup/export, storage, delete all data.
-class _DataBackupScreen extends StatelessWidget {
-  const _DataBackupScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return _SubPage(
-      title: 'Data & backup',
-      children: [
-        AetherCard(
-          padding: EdgeInsets.zero,
-          child: Column(
-            children: [
-              const _NavRow(
-                icon: Icons.inventory_2_outlined,
-                title: 'Backup & export',
-                subtitle: 'Versioned archive of your chats',
-                screen: SettingsBackupScreen(),
-              ),
-              _subHairline(),
-              const _NavRow(
-                icon: Icons.download_outlined,
-                title: 'Export chats',
-                subtitle: 'All sessions as JSON',
-                screen: _ExportChatsScreen(),
-              ),
-              _subHairline(),
-              const _NavRow(
-                icon: Icons.storage_outlined,
-                title: 'Storage',
-                subtitle: 'Usage by section · clear cache & cookies',
-                screen: _StorageScreen(),
-              ),
-              _subHairline(),
-              _NavRow(
-                icon: Icons.delete_outline,
-                title: 'Delete all data',
-                subtitle: SettingsActions.resetAll == null
-                    ? 'Unavailable in this build'
-                    : 'Chats, keys & settings · irreversible',
-                screen: const SettingsResetScreen(),
-              ),
-            ],
-          ),
-        ),
-      ],
+      trailing: const Icon(Icons.chevron_right, size: 18),
+      onTap: () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const _StorageScreen())),
     );
   }
 }

@@ -13,11 +13,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Premium `health_screen` + `settings_health_screen` redesign contract
 /// (wave 2 UI).
 ///
-/// The two former health surfaces are merged into ONE [HealthScreen]
-/// (0–100 score ring, per-check breakdown, TARGETED repair, per-service
-/// retry, and the destructive hard reset behind an Advanced disclosure);
-/// [SettingsHealthScreen] remains as a source-compatible alias.
-///
 /// Pins the public widgets the redesign owes callers:
 ///   * [AetherSectionTitle] eyebrow 'RUNTIME HEALTH' on each surface.
 ///   * [AetherCard]s stacked per runtime check and per service.
@@ -106,13 +101,8 @@ void main() {
       expect(find.widgetWithText(TextButton, 'Retry'), findsWidgets);
     });
 
-    testWidgets('offers a targeted Repair primary action when checks are '
-        'repairable', (tester) async {
-      tester.view.physicalSize = const Size(900, 3200);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-
+    testWidgets('offers a Repair primary button when checks are repairable',
+        (tester) async {
       final health = buildService(
         anyFail: true,
         worker: (targets, cancellation, onLine) async {},
@@ -125,23 +115,12 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // The merged screen's repair card offers ONE primary action…
-      expect(find.text('Select runtimes to repair'), findsOneWidget);
-      final repairButton = find.widgetWithText(
-        FilledButton,
-        'Repair selected runtimes',
-      );
-      expect(repairButton, findsOneWidget);
-      // …gated on ticking a failed, repairable runtime — never a blanket fix.
-      expect(tester.widget<FilledButton>(repairButton).onPressed, isNull);
-      await tester.tap(find.byType(Checkbox).first);
-      await tester.pump();
-      expect(find.text('Ready to repair'), findsOneWidget);
-      expect(tester.widget<FilledButton>(repairButton).onPressed, isNotNull);
+      expect(find.text('Repair available'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Repair'), findsOneWidget);
     });
 
-    testWidgets('exposes re-run directly and the hard reset behind the '
-        'Advanced disclosure', (tester) async {
+    testWidgets('diagnostics card exposes re-run and hard reset actions',
+        (tester) async {
       final health = buildService(anyFail: false);
       await tester.pumpWidget(
         MaterialApp(
@@ -151,15 +130,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.scrollUntilVisible(find.text('Advanced'), 300);
-      // Re-run is a first-class action on the merged screen.
+      await tester.scrollUntilVisible(
+        find.text('Hard reset the sandbox'),
+        300,
+      );
       expect(find.text('Re-run checks'), findsOneWidget);
-      // The destructive hard reset stays tucked away until Advanced is
-      // expanded — never one accidental tap away.
-      expect(find.text('Hard reset the sandbox'), findsNothing);
-
-      await tester.tap(find.text('Advanced'));
-      await tester.pumpAndSettle();
       expect(find.text('Hard reset the sandbox'), findsOneWidget);
     });
   });

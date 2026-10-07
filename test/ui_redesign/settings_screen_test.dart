@@ -1,14 +1,13 @@
 // Smoke tests for the Wave 2 Aether reskin of SettingsScreen.
 //
 // Verifies that the premium reskin:
-//   * renders the calm v2-08 section titles — Account / Appearance / Models /
-//     Privacy & autonomy / Data & backup / Studio / Health & repair / About
-//     (built from AetherSectionTitle, uppercased by the primitive);
+//   * renders the Account / Appearance / Models / Autonomy / Studio section
+//     titles (built from AetherSectionTitle, uppercased by the primitive);
 //   * flips Aether.dark when the theme segmented control is driven;
-//   * navigates to SettingsBackupScreen via the Data & backup sub-page when
-//     its "Backup & export" nav row is tapped;
-//   * navigates to the merged HealthScreen when the "Health & repair" nav
-//     row is tapped (SettingsHealthScreen survives as an alias of it).
+//   * navigates to SettingsBackupScreen when the backup row's "Backup"
+//     action is tapped;
+//   * navigates to SettingsHealthScreen when the health row's "Health"
+//     action is tapped.
 //
 // Behavior parity (persisted preferences, action widgets, provider config
 // entry, autonomy / Studio / Image bindings) is already covered by the
@@ -19,7 +18,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
-import 'package:ovid_ai/ui/health_screen.dart';
 import 'package:ovid_ai/ui/settings_backup_screen.dart';
 import 'package:ovid_ai/ui/settings_health_screen.dart';
 import 'package:ovid_ai/ui/settings_screen.dart';
@@ -50,7 +48,7 @@ void main() {
   );
 
   testWidgets(
-    'renders the calm v2-08 sections',
+    'renders Account / Appearance / Models / Autonomy / Studio sections',
     (tester) async {
       // Give the screen a tall viewport so every section is laid out and
       // reachable via a single scroll pass.
@@ -68,11 +66,8 @@ void main() {
       expect(find.text('ACCOUNT'), findsOneWidget);
       expect(find.text('APPEARANCE'), findsOneWidget);
       expect(find.text('MODELS'), findsOneWidget);
-      expect(find.text('PRIVACY & AUTONOMY'), findsOneWidget);
-      expect(find.text('DATA & BACKUP'), findsOneWidget);
+      expect(find.text('AUTONOMY'), findsOneWidget);
       expect(find.text('STUDIO'), findsOneWidget);
-      expect(find.text('HEALTH & REPAIR'), findsOneWidget);
-      expect(find.text('ABOUT'), findsOneWidget);
 
       // Multiple AetherCard surfaces are composed into the list — one per
       // section bucket at minimum.
@@ -122,21 +117,19 @@ void main() {
     await tester.pumpWidget(host());
     await tester.pump();
 
-    // v2-08 IA: backup lives behind the 'Data & backup' sub-page — its
-    // 'Backup & export' nav row pushes the SettingsBackupScreen.
-    await tester.tap(find.text('Data & backup'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Backup & export'), findsOneWidget);
-
-    await tester.tap(find.text('Backup & export'));
+    // Backup row carries an AetherGhostButton labelled 'Backup' — tapping
+    // it pushes the SettingsBackupScreen without changing the legacy
+    // row-level tap behavior.
+    await tester.ensureVisible(find.widgetWithText(AetherGhostButton, 'Backup'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(AetherGhostButton, 'Backup'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byType(SettingsBackupScreen), findsOneWidget);
   });
 
-  testWidgets('tapping Health pushes the merged HealthScreen', (tester) async {
+  testWidgets('tapping Health pushes SettingsHealthScreen', (tester) async {
     tester.view.physicalSize = const Size(540, 2400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -145,21 +138,18 @@ void main() {
     await tester.pumpWidget(host());
     await tester.pump();
 
-    // v2-08 merged the two health surfaces into HealthScreen;
-    // SettingsHealthScreen survives only as a source-compatible alias.
-    expect(const SettingsHealthScreen(), isA<HealthScreen>());
-
-    // The 'Health & repair' nav row pushes the merged HealthScreen directly.
-    await tester.tap(find.text('Health & repair'));
+    await tester.ensureVisible(find.widgetWithText(AetherGhostButton, 'Health'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(AetherGhostButton, 'Health'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.byType(HealthScreen), findsOneWidget);
-    // HealthScreen kicks real HealthService probes on init; let them
+    expect(find.byType(SettingsHealthScreen), findsOneWidget);
+    // SettingsHealthScreen kicks real HealthService probes on init; let them
     // finish (with timers) before popping, so the test does not trip the
     // pending-Timer invariant on dispose.
     await tester.runAsync(() => Future<void>.delayed(const Duration(seconds: 4)));
-    final ctx = tester.element(find.byType(HealthScreen));
+    final ctx = tester.element(find.byType(SettingsHealthScreen));
     Navigator.of(ctx).pop();
     await tester.pump();
   });

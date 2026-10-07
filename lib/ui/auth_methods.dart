@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../core/account_service.dart';
 import '../core/auth_identity.dart';
 import '../core/auth_phone_flow.dart';
 import '../core/auth_providers.dart';
@@ -230,39 +229,6 @@ class _AuthMethodsState extends State<AuthMethods> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: children,
-      ),
-    );
-  }
-}
-
-/// Shared deletion-pending banner — the single format rendered anywhere a
-/// pending server-side account deletion is surfaced (login gate and account
-/// screen). One warn-tinted card: hourglass + title, then one schedule line
-/// carrying the raw server deadline so the copy can never drift between
-/// screens.
-class DeletionPendingBanner extends StatelessWidget {
-  const DeletionPendingBanner({super.key, required this.receipt});
-
-  final AccountDeletion receipt;
-
-  @override
-  Widget build(BuildContext context) {
-    final deadline = receipt.deleteAfter?.toUtc().toIso8601String();
-    return AetherCard(
-      color: Aether.warn.withValues(alpha: 0.10),
-      title: Row(
-        children: [
-          Icon(Icons.hourglass_bottom, size: 16, color: Aether.warnLight),
-          const SizedBox(width: AetherSpacing.space2),
-          const Flexible(child: Text('Deletion requested')),
-        ],
-      ),
-      child: Text(
-        deadline == null
-            ? 'Sign in to cancel your scheduled deletion.'
-            : 'Scheduled after $deadline (UTC). '
-                'Sign in before then to cancel.',
-        style: AetherType.body,
       ),
     );
   }

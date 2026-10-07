@@ -12,15 +12,6 @@ import '../../core/theme.dart';
 ///
 /// Nothing here reaches outside of this file plus [Aether] from
 /// `lib/core/theme.dart`. These primitives are safe to use anywhere.
-///
-/// ## Deprecations
-///
-/// `SectionHeader` and `Tag` — still exported from `lib/core/theme.dart` so
-/// existing call sites keep compiling — are deprecated. New UI must use
-/// [AetherSectionTitle] and [AetherPill] from this file instead: they cover
-/// the same roles (section eyebrow + subtitle, compact status chip) on the
-/// Aether type, spacing, and radius scales. The legacy widgets stay until
-/// their call sites migrate; do not add new uses.
 
 /// Spacing scale used throughout the Aether UI.
 ///
@@ -78,20 +69,6 @@ class AetherShadows {
       spreadRadius: 0,
     ),
   ];
-}
-
-/// Motion preferences shared by the primitives.
-///
-/// [reduced] reflects the platform "disable animations" accessibility
-/// setting (`MediaQuery.disableAnimations`). Animated primitives (the
-/// status-dot pulse, loading spinners) freeze to a static presentation when
-/// it is true so the UI stays calm for users sensitive to motion.
-class AetherMotion {
-  AetherMotion._();
-
-  /// Whether reduced motion is requested for [context].
-  static bool reduced(BuildContext context) =>
-      MediaQuery.disableAnimationsOf(context);
 }
 
 /// Typography presets. These are getters because [Aether.text] is theme-aware.
@@ -327,7 +304,6 @@ class _AetherButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final effectiveOnPressed = (loading || onPressed == null) ? null : onPressed;
-    final reducedMotion = AetherMotion.reduced(context);
 
     if (iconOnly) {
       final fg =
@@ -349,19 +325,15 @@ class _AetherButton extends StatelessWidget {
         _AetherBtnKind.ghost => null,
         _ => null,
       };
-      // Reduced motion: a static hourglass carries the same "busy" meaning
-      // as the spinner without perpetual animation.
       final content = loading
-          ? (reducedMotion
-                ? Icon(Icons.hourglass_empty, size: 18, color: fg)
-                : SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(fg),
-                    ),
-                  ))
+          ? SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(fg),
+              ),
+            )
           : Icon(icon ?? Icons.arrow_upward, size: 18, color: fg);
       final btn = Material(
         color: bg,
@@ -394,29 +366,18 @@ class _AetherButton extends StatelessWidget {
     }
 
     final child = loading
-        ? (reducedMotion
-              ? Icon(
-                  Icons.hourglass_empty,
-                  size: 18,
-                  color:
-                      kind == _AetherBtnKind.primary ||
-                          kind == _AetherBtnKind.danger
-                      ? Colors.white
-                      : Aether.text,
-                )
-              : SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      kind == _AetherBtnKind.primary ||
-                              kind == _AetherBtnKind.danger
-                          ? Colors.white
-                          : Aether.text,
-                    ),
-                  ),
-                ))
+        ? SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(
+                kind == _AetherBtnKind.primary || kind == _AetherBtnKind.danger
+                    ? Colors.white
+                    : Aether.text,
+              ),
+            ),
+          )
         : Row(
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
@@ -850,7 +811,7 @@ class _AetherStatusDotState extends State<AetherStatusDot>
   }
 
   void _syncPulse() {
-    final animate = widget.pulsing && !AetherMotion.reduced(context);
+    final animate = widget.pulsing && !MediaQuery.disableAnimationsOf(context);
     if (animate) {
       if (_controller == null) _startPulse();
       if (!_controller!.isAnimating) _controller!.repeat(reverse: true);
@@ -926,19 +887,13 @@ class AetherPill extends StatelessWidget {
             Icon(icon, size: 12, color: c),
             const SizedBox(width: 4),
           ],
-          // The label must be able to shrink under horizontal pressure (2× text
-          // scale, narrow viewports) instead of overflowing the pill.
-          Flexible(
-            child: Text(
-              label,
-              overflow: TextOverflow.ellipsis,
-              softWrap: false,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.6,
-                color: c,
-              ),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
+              color: c,
             ),
           ),
         ],
@@ -1418,36 +1373,19 @@ class AetherStepper extends StatelessWidget {
   }
 }
 
-/// Bottom sheet — the single Aether modal surface.
+/// Full-screen bottom sheet with drag handle, title, body, and action row.
 ///
-/// Use via `showModalBottomSheet(context: context, builder: (_) => AetherSheet(...))`
-/// rather than rolling bespoke dialogs or sheets, so every modal shares the
-/// same chrome and behavior:
-///
-/// - centered drag handle at the top (hide with [showHandle] when the sheet
-///   is not user-draggable, e.g. forced-choice flows);
-/// - [SafeArea] bottom padding for gesture/system bars;
-/// - keyboard inset handling that applies `viewInsets` exactly once, whether
-///   or not the surrounding scaffold already resized for the keyboard;
-/// - an [actions] row laid out in an [OverflowBar], so buttons wrap to
-///   stacked rows instead of overflowing on narrow screens or at large text
-///   scale;
-/// - a scrollable body that stays bounded when the keyboard or 2x text
-///   leaves little vertical room.
+/// Use via `showModalBottomSheet(context: context, builder: (_) => AetherSheet(...))`.
 class AetherSheet extends StatelessWidget {
   final String title;
   final Widget child;
   final List<Widget>? actions;
-
-  /// Whether to render the centered drag handle above the title.
-  final bool showHandle;
 
   const AetherSheet({
     super.key,
     required this.title,
     required this.child,
     this.actions,
-    this.showHandle = true,
   });
 
   @override
@@ -1480,19 +1418,17 @@ class AetherSheet extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (showHandle) ...[
-                          Center(
-                            child: Container(
-                              width: 36,
-                              height: 4,
-                              decoration: BoxDecoration(
-                                color: Aether.hairlineStrong,
-                                borderRadius: BorderRadius.circular(AetherRadius.rPill),
-                              ),
+                        Center(
+                          child: Container(
+                            width: 36,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: Aether.hairlineStrong,
+                              borderRadius: BorderRadius.circular(AetherRadius.rPill),
                             ),
                           ),
-                          const SizedBox(height: 14),
-                        ],
+                        ),
+                        const SizedBox(height: 14),
                         Text(title, style: AetherType.h2),
                         const SizedBox(height: 16),
                         // Keep list/Expanded-based bodies bounded, while

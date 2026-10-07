@@ -19,21 +19,6 @@ Widget Function(BrowserTab tab)? browserWebViewBuilderForTest;
 /// The WebViewController is owned by [AgentService.browserTabs], NOT by this
 /// screen. Opening/closing the screen never reloads pages; the agent's
 /// current page is always what the user sees.
-///
-/// SLIM CHROME (2026-10-06): the old six stacked bands (AppBar + actions row,
-/// tab strip, two-row gradient header, status row, popup bar, progress) are
-/// consolidated into four slim bands —
-///   1. ONE omnibar: back/forward/reload + URL + go. The desktop-view,
-///      open-external and new-tab actions ride inline on wide layouts and
-///      overflow onto the omnibar's second line on narrow ones (they stay
-///      mounted either way — tests and screen readers navigate by their
-///      tooltips).
-///   2. ONE status caption: leave-browser affordance + agent/ready dot +
-///      one line of text.
-///   3. the hairline progress bar (only while loading), and
-///   4. the tab strip (only when more than one tab is open).
-/// The held-popup notice sits between caption and progress, exactly like a
-/// desktop browser's blocked-popup bar.
 class BrowserScreen extends StatefulWidget {
   final String? openUrl;
   final bool agentControlled;
@@ -193,267 +178,78 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final agent = _agent;
     final tab = _activeTab;
     final textScaler = MediaQuery.textScalerOf(context);
-    final busy = agent.browserBusy || agent.busy;
+    final stackedActions =
+        MediaQuery.sizeOf(context).width < textScaler.scale(300);
+    final actions = <Widget>[
+      IconButton(
+        tooltip: tab?.desktopMode == true
+            ? 'Switch to mobile view'
+            : 'Switch to desktop view',
+        icon: Icon(
+          tab?.desktopMode == true
+              ? Icons.phone_android_outlined
+              : Icons.desktop_windows_outlined,
+          size: 19,
+        ),
+        onPressed: tab == null
+            ? null
+            : () async {
+                await agent.setTabDesktopMode(tab, !tab.desktopMode);
+                if (mounted) setState(() {});
+              },
+      ),
+      IconButton(
+        tooltip: 'Open in browser',
+        icon: const Icon(Icons.open_in_new, size: 19),
+        onPressed: tab == null || tab.localPreviewPath != null
+            ? null
+            : () => _openInExternalBrowser(tab.url),
+      ),
+      IconButton(
+        tooltip: 'New tab',
+        icon: const Icon(Icons.add, size: 19),
+        onPressed: () {
+          agent.newBrowserTab();
+          setState(() {});
+        },
+      ),
+    ];
     final controller = tab == null || browserWebViewBuilderForTest != null
         ? tab?.controller
         : agent.controllerForTab(tab);
     return Scaffold(
       backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: const Text('Browser'),
+        toolbarHeight: math.max(56, textScaler.scale(22) * 1.4 + 16),
+        bottom: stackedActions
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(48),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: actions,
+                ),
+              )
+            : null,
+        actions: [
+          // Agent-activity indicator: blue pulsing while agent drives.
+          AnimatedBuilder(
+            animation: agent,
+            builder: (_, _) => Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: Center(
+                child: _AgentDot(busy: agent.browserBusy || agent.busy),
+              ),
+            ),
+          ),
+          if (!stackedActions) ...actions,
+        ],
+      ),
       body: SafeArea(
         child: Column(
           children: [
-            // BAND 1 — the omnibar.
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final narrow = constraints.maxWidth < 600;
-                // The band grows with the input's text metrics rather than
-                // clipping at a fixed height.
-                final fieldHeight = math.max(
-                  48.0,
-                  textScaler.scale(14) * 1.5 + 24,
-                );
-                final navigation = <Widget>[
-                  AetherGhostButton(
-                    key: const ValueKey('browser-back'),
-                    label: 'Back',
-                    tooltip: 'Back',
-                    icon: Icons.arrow_back_ios_new,
-                    iconOnly: true,
-                    iconSize: 48,
-                    onPressed: () async {
-                      if (await controller?.canGoBack() ?? false) {
-                        await controller!.goBack();
-                      }
-                    },
-                  ),
-                  AetherGhostButton(
-                    key: const ValueKey('browser-forward'),
-                    label: 'Forward',
-                    tooltip: 'Forward',
-                    icon: Icons.arrow_forward_ios,
-                    iconOnly: true,
-                    iconSize: 48,
-                    onPressed: () async {
-                      if (await controller?.canGoForward() ?? false) {
-                        await controller!.goForward();
-                      }
-                    },
-                  ),
-                  AetherGhostButton(
-                    key: const ValueKey('browser-reload'),
-                    label: 'Reload',
-                    tooltip: 'Reload',
-                    icon: Icons.refresh,
-                    iconOnly: true,
-                    iconSize: 48,
-                    onPressed: () {
-                      final t = _activeTab;
-                      final lp = t?.localPreviewPath;
-                      if (t != null && lp != null) {
-                        t.controller?.loadFile(lp);
-                      } else {
-                        controller?.reload();
-                      }
-                    },
-                  ),
-                ];
-                final address = AetherField(
-                  key: const ValueKey('browser-url-field'),
-                  label: 'URL',
-                  showLabel: false,
-                  hint: 'Search or type URL',
-                  controller: _url,
-                  focusNode: _urlFocus,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 11,
-                  ),
-                  prefixIcon: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Icon(
-                      tab?.localPreviewPath != null
-                          ? Icons.preview_outlined
-                          : (tab?.url ?? '').startsWith('https')
-                          ? Icons.lock_outline
-                          : Icons.public,
-                      size: 14,
-                      color: tab?.localPreviewPath != null
-                          ? Aether.accent
-                          : (tab?.url ?? '').startsWith('https')
-                          ? Aether.successLight
-                          : Aether.textFaint,
-                    ),
-                  ),
-                  onSubmitted: (value) {
-                    _nav(value);
-                    _endUrlEditing();
-                  },
-                );
-                final go = AetherGhostButton(
-                  label: 'Go',
-                  tooltip: 'Go',
-                  icon: Icons.open_in_browser,
-                  iconOnly: true,
-                  iconSize: 48,
-                  onPressed: () => _nav(_url.text),
-                );
-                // Secondary actions: inline on wide, overflowing to the
-                // omnibar's second line on narrow layouts.
-                final secondary = <Widget>[
-                  IconButton(
-                    tooltip: tab?.desktopMode == true
-                        ? 'Switch to mobile view'
-                        : 'Switch to desktop view',
-                    icon: Icon(
-                      tab?.desktopMode == true
-                          ? Icons.phone_android_outlined
-                          : Icons.desktop_windows_outlined,
-                      size: 19,
-                      color: Aether.textMuted,
-                    ),
-                    onPressed: tab == null
-                        ? null
-                        : () async {
-                            await agent.setTabDesktopMode(
-                              tab,
-                              !tab.desktopMode,
-                            );
-                            if (mounted) setState(() {});
-                          },
-                  ),
-                  IconButton(
-                    tooltip: 'Open in browser',
-                    icon: Icon(
-                      Icons.open_in_new,
-                      size: 19,
-                      color: Aether.textMuted,
-                    ),
-                    onPressed: tab == null || tab.localPreviewPath != null
-                        ? null
-                        : () => _openInExternalBrowser(tab.url),
-                  ),
-                  IconButton(
-                    tooltip: 'New tab',
-                    icon: Icon(Icons.add, size: 19, color: Aether.textMuted),
-                    onPressed: () {
-                      agent.newBrowserTab();
-                      setState(() {});
-                    },
-                  ),
-                ];
-                return AetherGradientHeader(
-                  height: fieldHeight + 20 + (narrow ? 48 : 0),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(6, 10, 6, 8),
-                    child: narrow
-                        ? Column(
-                            children: [
-                              Row(
-                                children: [Expanded(child: address), go],
-                              ),
-                              Row(
-                                children: [
-                                  ...navigation,
-                                  const Spacer(),
-                                  ...secondary,
-                                ],
-                              ),
-                            ],
-                          )
-                        : Row(
-                            children: [
-                              ...navigation,
-                              const SizedBox(width: 4),
-                              Expanded(child: address),
-                              go,
-                              ...secondary,
-                            ],
-                          ),
-                  ),
-                );
-              },
-            ),
-            // BAND 2 — ONE status caption: a way out of the browser, the
-            // agent/ready dot (state travels with the dot as a label, not
-            // colour alone) and one compact line of text.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(2, 0, 14, 2),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: 'Close browser',
-                    icon: Icon(
-                      Icons.close,
-                      size: 18,
-                      color: Aether.textMuted,
-                    ),
-                    onPressed: () => Navigator.of(context).maybePop(),
-                  ),
-                  if (tab != null) ...[
-                    Semantics(
-                      label: busy
-                          ? 'Agent is driving this tab'
-                          : 'Agent idle on this tab',
-                      child: Tooltip(
-                        message: busy
-                            ? 'Agent is driving this tab'
-                            : 'Agent idle on this tab',
-                        child: AetherStatusDot(
-                          key: const ValueKey('browser-status-dot'),
-                          color: busy ? Aether.accent : Aether.successLight,
-                          pulsing: busy,
-                          size: 7,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        busy
-                            ? 'Agent is driving · ${_hostOrPreview(tab)}'
-                            : 'Ready · ${_hostOrPreview(tab)}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: AetherType.caption,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            // Held popups (window.open / target=_blank clicks captured
-            // for the agent): without this chip such a click looked
-            // like a dead UI. Desktop browsers show a blocked-popup
-            // bar; this is the same thing, with Open / Dismiss.
-            if (tab != null)
-              _PopupNotice(
-                tab: tab,
-                onOpen: () {
-                  final opened = _agent.openBrowserPopup(tab);
-                  if (opened == null) {
-                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'That popup link is empty or not a web '
-                          'address - nothing to open.',
-                        ),
-                      ),
-                    );
-                  }
-                },
-                onDismiss: () => _agent.dismissBrowserPopups(tab),
-              ),
-            // BAND 3 — the hairline progress bar.
-            if (tab?.loading ?? false)
-              LinearProgressIndicator(
-                value: tab!.progress > 0 && tab.progress < 100
-                    ? tab.progress / 100
-                    : null,
-                minHeight: 2,
-                backgroundColor: Aether.hairline,
-                color: Aether.accent,
-              ),
-            // BAND 4 — the tab strip, only when there is a choice to make.
+            // Tab strip
             if (agent.browserTabs.length > 1)
               Container(
                 height: math.max(60, textScaler.scale(11.5) * 1.5 + 20),
@@ -544,6 +340,180 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ],
                 ),
               ),
+            // Give the address field a full row on phones. The header grows
+            // with the input's text metrics rather than clipping at 76dp.
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final narrow = constraints.maxWidth < 600;
+                final fieldHeight = math.max(
+                  48.0, textScaler.scale(14) * 1.5 + 24,
+                );
+                final navigation = <Widget>[
+                  AetherGhostButton(
+                    key: const ValueKey('browser-back'),
+                    label: 'Back',
+                    tooltip: 'Back',
+                    icon: Icons.arrow_back_ios_new,
+                    iconOnly: true,
+                    iconSize: 48,
+                    onPressed: () async {
+                      if (await controller?.canGoBack() ?? false) {
+                        await controller!.goBack();
+                      }
+                    },
+                  ),
+                  AetherGhostButton(
+                    key: const ValueKey('browser-forward'),
+                    label: 'Forward',
+                    tooltip: 'Forward',
+                    icon: Icons.arrow_forward_ios,
+                    iconOnly: true,
+                    iconSize: 48,
+                    onPressed: () async {
+                      if (await controller?.canGoForward() ?? false) {
+                        await controller!.goForward();
+                      }
+                    },
+                  ),
+                  AetherGhostButton(
+                    key: const ValueKey('browser-reload'),
+                    label: 'Reload',
+                    tooltip: 'Reload',
+                    icon: Icons.refresh,
+                    iconOnly: true,
+                    iconSize: 48,
+                    onPressed: () {
+                      final t = _activeTab;
+                      final lp = t?.localPreviewPath;
+                      if (t != null && lp != null) {
+                        t.controller?.loadFile(lp);
+                      } else {
+                        controller?.reload();
+                      }
+                    },
+                  ),
+                ];
+                final address = AetherField(
+                  key: const ValueKey('browser-url-field'),
+                  label: 'URL',
+                  showLabel: false,
+                  hint: 'Search or type URL',
+                  controller: _url,
+                  focusNode: _urlFocus,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 11,
+                  ),
+                  prefixIcon: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Icon(
+                      tab?.localPreviewPath != null
+                          ? Icons.preview_outlined
+                          : (tab?.url ?? '').startsWith('https')
+                          ? Icons.lock_outline
+                          : Icons.public,
+                      size: 14,
+                      color: tab?.localPreviewPath != null
+                          ? Aether.accent
+                          : (tab?.url ?? '').startsWith('https')
+                          ? Aether.successLight
+                          : Aether.textFaint,
+                    ),
+                  ),
+                  onSubmitted: (value) {
+                    _nav(value);
+                    _endUrlEditing();
+                  },
+                );
+                final go = AetherGhostButton(
+                  label: 'Go',
+                  tooltip: 'Go',
+                  icon: Icons.open_in_browser,
+                  iconOnly: true,
+                  iconSize: 48,
+                  onPressed: () => _nav(_url.text),
+                );
+                return AetherGradientHeader(
+                  height: fieldHeight + 18 + (narrow ? 48 : 0),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 10, 6, 8),
+                    child: narrow
+                        ? Column(children: [
+                            Row(children: [Expanded(child: address), go]),
+                            Row(children: navigation),
+                          ])
+                        : Row(children: [
+                            ...navigation,
+                            const SizedBox(width: 4),
+                            Expanded(child: address),
+                            go,
+                          ]),
+                  ),
+                );
+              },
+            ),
+            // Status row — AetherStatusDot + compact caption describing the
+            // active tab (agent busy, protocol, host). Replaces the old
+            // scattered dots and gives screen readers one place to speak.
+            if (tab != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 2, 14, 6),
+                child: Row(
+                  children: [
+                    AetherStatusDot(
+                      key: const ValueKey('browser-status-dot'),
+                      color: (agent.browserBusy || agent.busy)
+                          ? Aether.accent
+                          : Aether.successLight,
+                      pulsing: agent.browserBusy || agent.busy,
+                      size: 7,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        (agent.browserBusy || agent.busy)
+                            ? 'Agent is driving · ${_hostOrPreview(tab)}'
+                            : 'Ready · ${_hostOrPreview(tab)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AetherType.caption,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            // Held popups (window.open / target=_blank clicks captured
+            // for the agent): without this chip such a click looked
+            // like a dead UI. Desktop browsers show a blocked-popup
+            // bar; this is the same thing, with Open / Dismiss.
+            if (tab != null)
+              _PopupNotice(
+                tab: tab,
+                onOpen: () {
+                  final opened = _agent.openBrowserPopup(tab);
+                  if (opened == null) {
+                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'That popup link is empty or not a web '
+                          'address - nothing to open.',
+                        ),
+                      ),
+                    );
+                  }
+                },
+                onDismiss: () => _agent.dismissBrowserPopups(tab),
+              ),
+            // Progress bar
+            if (tab?.loading ?? false)
+              LinearProgressIndicator(
+                value: tab!.progress > 0 && tab.progress < 100
+                    ? tab.progress / 100
+                    : null,
+                minHeight: 2,
+                backgroundColor: Aether.hairline,
+                color: Aether.accent,
+              ),
             // WebView — IndexedStack keeps every tab's platform view alive.
             //
             // DESKTOP MODE (2026-09-24): a desktop tab is now laid out at REAL
@@ -593,6 +563,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 }
 
+/// Agent-activity status dot (the browser status indicator StateDot semantics):
+/// blue = agent actively driving the browser, green = ready.
 /// Lays a desktop-mode tab out at REAL desktop dimensions and scales it to fit;
 /// a mobile tab fills the available space unchanged.
 ///
@@ -708,6 +680,36 @@ const browserDesktopLogicalSize = Size(
   _SizedBrowserView.desktopWidth,
   _SizedBrowserView.desktopHeight,
 );
+
+class _AgentDot extends StatelessWidget {
+  final bool busy;
+  const _AgentDot({required this.busy});
+
+  @override
+  Widget build(BuildContext context) {
+    // State was encoded by COLOUR ALONE on a 10px dot: colour-blind users could
+    // not tell "agent is driving this tab" from "idle", and a screen reader had
+    // nothing to announce. The label travels with the dot now.
+    final label = busy
+        ? 'Agent is driving this tab'
+        : 'Agent idle on this tab';
+    return Semantics(
+      label: label,
+      child: Tooltip(
+        message: label,
+        child: Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+            color: busy ? Aether.accent : Aether.successLight,
+            shape: BoxShape.circle,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 
 /// Auth-origin classification retained for callers. Navigation never displays
 /// a proactive sign-in notice. Opening externally does not transfer cookies

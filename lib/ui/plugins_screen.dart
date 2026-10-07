@@ -19,7 +19,6 @@ import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'github_login_sheet.dart';
-import 'integration_detail.dart';
 import 'mcp_oauth_sheet.dart';
 import 'plugin_install_progress.dart';
 import 'plugin_permission_sheet.dart';
@@ -533,9 +532,10 @@ Future<void> showPluginAddSheet(BuildContext context) {
               ),
               const SizedBox(height: 6),
               Text(
-                'One GitHub repo field — fetch a plugin, or add a '
-                'marketplace. Every repo is inspected and asks for one '
-                'capability approval before anything installs.',
+                'Fetch a plugin from GitHub, or add a marketplace (itself '
+                'a GitHub repo with a marketplace.json). Every repo is '
+                'inspected and asks for one capability approval before '
+                'anything installs.',
                 style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
               ),
               const SizedBox(height: 14),
@@ -559,22 +559,19 @@ Future<void> showPluginAddSheet(BuildContext context) {
                   errorMaxLines: 4,
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               SizedBox(
                 width: double.infinity,
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Aether.accent,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(11),
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Aether.accent,
+                    side: BorderSide(
+                      color: Aether.accent.withValues(alpha: .4),
                     ),
+                    padding: const EdgeInsets.symmetric(vertical: 11),
                   ),
                   icon: const Icon(Icons.code, size: 16),
-                  label: const Text(
-                    'Fetch from GitHub',
-                    style: TextStyle(fontSize: 13.5),
-                  ),
+                  label: const Text('Fetch from GitHub'),
                   onPressed: () {
                     final txt = repoC.text.trim();
                     final src = _githubSourceFromInput(txt);
@@ -590,13 +587,13 @@ Future<void> showPluginAddSheet(BuildContext context) {
               const SizedBox(height: 8),
               SizedBox(
                 width: double.infinity,
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Aether.accent,
-                    side: BorderSide(
-                      color: Aether.accent.withValues(alpha: .4),
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Aether.accent,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(11),
                     ),
-                    padding: const EdgeInsets.symmetric(vertical: 11),
                   ),
                   icon: const Icon(Icons.link, size: 16),
                   label: const Text(
@@ -1238,120 +1235,101 @@ class _MarketplaceCardState extends State<_MarketplaceCard> {
   Widget build(BuildContext context) {
     final app = AppState.I;
     return AetherCard(
-      padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: Aether.surfaceRaised,
-                  borderRadius: BorderRadius.circular(10),
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: Aether.surfaceRaised,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(
+              Icons.inventory_2_outlined,
+              size: 18,
+              color: Aether.textMuted,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                    widget.repo,
+                  style: AetherType.title.copyWith(fontSize: 13.5),
                 ),
-                child: Icon(
-                  Icons.inventory_2_outlined,
-                  size: 18,
-                  color: Aether.textMuted,
+                const SizedBox(height: 2),
+                Text(
+                  'GitHub marketplace',
+                  style: AetherType.caption,
                 ),
-              ),
-              const Spacer(),
-              AetherGhostButton(
-                label: _busy ? 'Browsing…' : 'Browse',
-                loading: _busy,
-                onPressed: _busy
-                    ? null
-                    : () async {
-                        final messenger = ScaffoldMessenger.of(context);
-                        setState(() => _busy = true);
-                        try {
-                          final msg = await app.fetchMarketplaceCatalog(
-                            widget.repo,
-                          );
-                          if (!mounted) return;
-                          messenger.showSnackBar(
-                            SnackBar(
-                              content: Text(msg),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                        } catch (e) {
-                          if (mounted) {
-                            messenger.showSnackBar(
-                              SnackBar(
-                                content: Text('Could not load marketplace: $e'),
-                              ),
-                            );
-                          }
-                        } finally {
-                          if (mounted) setState(() => _busy = false);
-                        }
-                      },
-              ),
-              IconButton(
-                key: ValueKey('marketplace-remove-${widget.repo}'),
-                tooltip: 'Remove marketplace',
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(
-                  Icons.delete_outline,
-                  size: 18,
-                  color: Aether.danger,
-                ),
-                onPressed: _busy
-                    ? null
-                    : () async {
-                        final ok = await showDeleteConfirmationDialog(
-                          context,
-                          title: 'Remove ${widget.repo}?',
-                          content:
-                              'Removes this marketplace repo. Plugins already '
-                              'installed from it stay installed.',
-                        );
-                        if (!ok) return;
-                        app.removeMarketplace(widget.repo);
-                      },
-              ),
-            ],
+              ],
+            ),
           ),
           const SizedBox(height: 8),
-          Text(widget.repo, style: AetherType.title.copyWith(fontSize: 13.5)),
-          const SizedBox(height: 2),
-          Text('GitHub marketplace', style: AetherType.caption),
+          Wrap(
+            spacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+          AetherGhostButton(
+            label: _busy ? 'Browsing…' : 'Browse',
+            icon: Icons.open_in_new,
+            loading: _busy,
+            onPressed: _busy
+                ? null
+                : () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    setState(() => _busy = true);
+                    try {
+                      final msg = await app.fetchMarketplaceCatalog(widget.repo);
+                      if (!mounted) return;
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: Text(msg),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    } catch (e) {
+                      if (mounted) {
+                        messenger.showSnackBar(SnackBar(content: Text('Could not load marketplace: $e')));
+                      }
+                    } finally {
+                      if (mounted) setState(() => _busy = false);
+                    }
+                  },
+          ),
+          const SizedBox(width: 2),
+          IconButton(
+            key: ValueKey('marketplace-remove-${widget.repo}'),
+            tooltip: 'Remove marketplace',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(
+              Icons.delete_outline,
+              size: 18,
+              color: Aether.danger,
+            ),
+            onPressed: _busy
+                ? null
+                : () async {
+                    final ok = await showDeleteConfirmationDialog(
+                      context,
+                      title: 'Remove ${widget.repo}?',
+                      content:
+                          'Removes this marketplace repo. Plugins already '
+                          'installed from it stay installed.',
+                    );
+                    if (!ok) return;
+                    app.removeMarketplace(widget.repo);
+                  },
+          ),
+            ],
+          ),
         ],
-      ),
-    );
-  }
-}
-
-/// The v2 card status pill — [AetherPill] styling, but with a wrap-safe
-/// text child (AetherPill's inner Row gives its label unbounded width,
-/// which overflows at 2× text scale on narrow cards). Exactly one of
-/// these renders per card.
-class PluginStatusPill extends StatelessWidget {
-  final String label;
-  final Color color;
-  const PluginStatusPill({super.key, required this.label, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(AetherRadius.rPill),
-        border: Border.all(color: color.withValues(alpha: 0.4)),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.4,
-          color: color,
-        ),
       ),
     );
   }
@@ -1411,83 +1389,13 @@ class PluginCard extends StatelessWidget {
   static String _catalogFormatLabel(PluginItem p) {
     if (p.category == 'MCP') return 'MCP';
     if (p.author == 'ovidai' || p.author == 'you') return 'Ovid built-in';
-    if (p.marketplace != null || p.source != null) return '[CC]';
+    if (p.marketplace != null || p.source != null) return 'Claude Code';
     return 'Codex';
-  }
-
-  /// The ONE status pill on the slim card (v2): the durable non-ready
-  /// state first (authoritative, never inferred from booleans), then the
-  /// runtime activation, then the honest availability flag for legacy rows.
-  static ({String label, Color color}) statusPillFor(PluginItem p) {
-    final durable = durablePluginStatus(p);
-    if (durable != null && durable.state != StartupItemState.ready) {
-      return (
-        label: startupItemStateLabel(durable.state),
-        color: switch (durable.state) {
-          StartupItemState.failed ||
-          StartupItemState.unsupported => Aether.danger,
-          StartupItemState.queued ||
-          StartupItemState.running => Aether.accent,
-          StartupItemState.disabled => Aether.textFaint,
-          _ => Aether.warnLight,
-        },
-      );
-    }
-    if (p.runtimeId != null) {
-      final ({String label, Color color})? activation = switch (p.activation) {
-        PluginActivation.sessionActive => (
-          label: 'This session',
-          color: Aether.accent,
-        ),
-        PluginActivation.pendingGlobal => (
-          label: 'Restart to enable everywhere',
-          color: Aether.warnLight,
-        ),
-        PluginActivation.globalActive => (
-          label: 'Global',
-          color: Aether.successLight,
-        ),
-        PluginActivation.degraded => (
-          label: 'Degraded',
-          color: Aether.warnLight,
-        ),
-        PluginActivation.failed => (label: 'Failed', color: Aether.danger),
-        PluginActivation.disabled => null,
-      };
-      if (activation != null) return activation;
-    }
-    // Task 10 copy pass (spec §10): honest availability — installed-but-
-    // disabled rows (Web Fetch & Reader) read "Installed · disabled";
-    // uninstalled rows "Available".
-    return (
-      label: availabilityLabel(p),
-      color: !p.installed
-          ? Aether.textMuted
-          : p.enabled
-          ? Aether.successLight
-          : Aether.textMuted,
-    );
-  }
-
-  /// The ONE supporting line on the slim card: the durable `label · reason`
-  /// for non-ready rows (the reason is why the row needs attention), else
-  /// the author · version · installs meta.
-  static String statusLineFor(PluginItem p, AppState app) {
-    if (durablePluginStatus(p) case final durable?
-        when durable.state != StartupItemState.ready) {
-      return durable.reason == null || durable.reason!.isEmpty
-          ? startupItemStateLabel(durable.state)
-          : '${startupItemStateLabel(durable.state)} · ${durable.reason}';
-    }
-    return p.installsKnown && p.installs > 0
-        ? '${p.author} · v${p.version} · ${app.fmtInstalls(p.installs)} installs'
-        : '${p.author} · v${p.version}';
   }
 
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
-    final pill = statusPillFor(plugin);
     return InkWell(
       borderRadius: BorderRadius.circular(14),
       onTap: () => Navigator.of(context).push(
@@ -1504,52 +1412,47 @@ class PluginCard extends StatelessWidget {
             width: highlighted ? 1.5 : 1,
           ),
         ),
-        child: Row(
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (highlighted)
-                  Container(
-                    key: ValueKey('plugin-card-highlight-$_keyId'),
-                    width: 40,
-                    height: 3,
-                    margin: const EdgeInsets.only(bottom: 6),
-                    decoration: BoxDecoration(
-                      color: Aether.accent,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: Aether.surfaceRaised,
-                    borderRadius: BorderRadius.circular(11),
-                  ),
-                  child: Icon(
-                    switch (plugin.category) {
-                      'Agent' => Icons.smart_toy_outlined,
-                      'MCP' => Icons.hub_outlined,
-                      'Runtime' => Icons.memory,
-                      _ => Icons.build_outlined,
-                    },
-                    size: 19,
-                    color: Aether.textMuted,
-                  ),
+            if (highlighted)
+              Container(
+                key: ValueKey('plugin-card-highlight-$_keyId'),
+                width: 40,
+                height: 3,
+                margin: const EdgeInsets.only(right: 8),
+                decoration: BoxDecoration(
+                  color: Aether.accent,
+                  borderRadius: BorderRadius.circular(2),
                 ),
-              ],
+              ),
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: Aether.surfaceRaised,
+                borderRadius: BorderRadius.circular(11),
+              ),
+              child: Icon(
+                switch (plugin.category) {
+                  'Agent' => Icons.smart_toy_outlined,
+                  'MCP' => Icons.hub_outlined,
+                  'Runtime' => Icons.memory,
+                  _ => Icons.build_outlined,
+                },
+                size: 19,
+                color: Aether.textMuted,
+              ),
             ),
-            const SizedBox(width: 12),
-            Expanded(
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Wrap(
                     crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
+                    spacing: 4,
                     runSpacing: 4,
                     children: [
                       Text(
@@ -1559,20 +1462,66 @@ class PluginCard extends StatelessWidget {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      // v2: exactly ONE status pill — no tag stacks.
-                      PluginStatusPill(label: pill.label, color: pill.color),
+                      Tag(plugin.category.toUpperCase(), filled: true),
+                      // Task 11 (spec §11): source/format badge —
+                      // Claude Code / Codex / MCP / Ovid built-in.
+                      Tag(PluginCard.sourceFormatLabel(plugin), filled: false),
+                      // Task 11 (spec §11): activation badge beside the
+                      // category tag (This session / Restart to enable
+                      // everywhere / Global / Degraded / Failed).
+                      ...?switch (pluginActivationBadge(plugin)) {
+                        final b? => [b],
+                        null => null,
+                      },
+                      // PR24: hook chips — a plugin with hooks shows which
+                      // events it fires (e.g. ON_TURN_START).
+                      for (final ev in plugin.hooks.keys)
+                        Tag(ev.toUpperCase(), filled: false),
                     ],
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 3),
                   Text(
-                    statusLineFor(plugin, app),
+                    plugin.installsKnown && plugin.installs > 0
+                        ? '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs'
+                        : '${plugin.author} · v${plugin.version}',
                     style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                  ),
+                  // Task 10 copy pass (spec §10): honest availability —
+                  // installed-but-disabled rows (Web Fetch & Reader) read
+                  // "Installed · disabled"; uninstalled rows "Available".
+                  Text(
+                    PluginCard.availabilityLabel(plugin),
+                    style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                  ),
+                  // Task 8 (spec §5.8/§6.2): the durable canonical startup
+                  // status + short reason, never inferred from booleans.
+                  if (durablePluginStatus(plugin) case final durable?
+                      when durable.state != StartupItemState.ready) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      durable.reason == null || durable.reason!.isEmpty
+                          ? startupItemStateLabel(durable.state)
+                          : '${startupItemStateLabel(durable.state)} · '
+                                '${durable.reason}',
+                      style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  Text(
+                    plugin.description,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.45,
+                      color: Aether.textMuted,
+                    ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(width: 4),
-            Column(
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -1718,6 +1667,7 @@ class PluginCard extends StatelessWidget {
                 ),
               ],
             ),
+            ),
           ],
         ),
       ),
@@ -1749,46 +1699,14 @@ class PluginDetailScreen extends StatelessWidget {
             plugin.runtimeId!,
           )
         : const <PluginSettingsField>[];
-    // Task 8 (spec §5.8/§6.2): the durable canonical startup status +
-    // short reason, persisted across restarts by Task 7 — the ONE health
-    // line of the Status section below.
-    final durable = durablePluginStatus(plugin);
-    return IntegrationDetailScaffold(
-      icon: Icons.extension,
-      name: plugin.name,
-      subtitle: plugin.installsKnown && plugin.installs > 0
-          ? '${plugin.author} · v${plugin.version} · '
-                '${app.fmtInstalls(plugin.installs)} installs'
-          : '${plugin.author} · v${plugin.version}',
-      badge: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Wrap(
-            spacing: 4,
-            runSpacing: 4,
-            children: [
-              // Task 11 (spec §11): source/format badge beside the
-              // category tag on the detail header.
-              Tag(plugin.category.toUpperCase(), filled: true),
-              Tag(PluginCard.sourceFormatLabel(plugin), filled: false),
-            ],
-          ),
-          // Task 11 (spec §11): the activation badge — This session /
-          // Restart to enable everywhere / Global / Degraded / Failed.
-          // Legacy flag-flip rows (no runtimeId) render no badge. When a
-          // durable canonical status exists it is authoritative (M5) and
-          // the badge is suppressed so the two signals never conflict.
-          if (durable == null)
-            if (pluginActivationBadge(plugin) case final activationBadge?) ...[
-              const SizedBox(height: 6),
-              activationBadge,
-            ],
-        ],
-      ),
-      enableSwitch: !plugin.installed
-          ? null
-          : SizedBox(
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: Text(plugin.name),
+        actions: [
+          if (plugin.installed) ...[
+            SizedBox(
               height: 28,
               child: Switch(
                 key: ValueKey('plugin-detail-switch-${plugin.name}'),
@@ -1826,33 +1744,109 @@ class PluginDetailScreen extends StatelessWidget {
                 },
               ),
             ),
-      headerActions: [
-        IconButton(
-          key: ValueKey('plugin-detail-delete-${plugin.name}'),
-          tooltip: 'Delete plugin',
-          icon: const Icon(
-            Icons.delete_outline,
-            size: 19,
-            color: Aether.danger,
+            const SizedBox(width: 4),
+          ],
+          IconButton(
+            key: ValueKey('plugin-detail-delete-${plugin.name}'),
+            tooltip: 'Delete plugin',
+            icon: const Icon(
+              Icons.delete_outline,
+              size: 19,
+              color: Aether.danger,
+            ),
+            onPressed: () async {
+              final ok = await showDeleteConfirmationDialog(
+                context,
+                title: 'Delete ${plugin.name}?',
+              );
+              if (!ok) return;
+              PluginRuntimeCallRecorderForTest.record?.call('uninstall');
+              await app.uninstallPlugin(plugin);
+              app.plugins.remove(plugin);
+              await app.persistPluginState();
+              app.refresh();
+              if (context.mounted) Navigator.pop(context);
+            },
           ),
-          onPressed: () async {
-            final ok = await showDeleteConfirmationDialog(
-              context,
-              title: 'Delete ${plugin.name}?',
-            );
-            if (!ok) return;
-            PluginRuntimeCallRecorderForTest.record?.call('uninstall');
-            await app.uninstallPlugin(plugin);
-            app.plugins.remove(plugin);
-            await app.persistPluginState();
-            app.refresh();
-            if (context.mounted) Navigator.pop(context);
-          },
-        ),
-      ],
-      statusLine: durable == null
-          ? null
-          : Container(
+          const SizedBox(width: 4),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: Aether.surfaceRaised,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Icon(Icons.extension, size: 26, color: Aether.textMuted),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      plugin.name,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      plugin.installsKnown && plugin.installs > 0
+                          ? '${plugin.author} · v${plugin.version} · ${app.fmtInstalls(plugin.installs)} installs'
+                          : '${plugin.author} · v${plugin.version}',
+                      style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                    ),
+                    // Task 10 copy pass (spec §10): honest availability on
+                    // the detail header too — installed-but-disabled rows
+                    // (Web Fetch & Reader) read "Installed · disabled";
+                    // uninstalled rows read "Available".
+                    Text(
+                      PluginCard.availabilityLabel(plugin),
+                      style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: [
+                        // Task 11 (spec §11): source/format badge beside
+                        // the category tag on the detail header.
+                        Tag(plugin.category.toUpperCase(), filled: true),
+                        Tag(
+                          PluginCard.sourceFormatLabel(plugin),
+                          filled: false,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    // Task 11 (spec §11): the activation badge — This
+                    // session / Restart to enable everywhere / Global /
+                    // Degraded / Failed. Legacy flag-flip rows (no
+                    // runtimeId) render no badge. When a durable canonical
+                    // status exists it is authoritative (M5) and the badge is
+                    // suppressed so the two signals never conflict.
+                    if (durablePluginStatus(plugin) == null)
+                      if (pluginActivationBadge(plugin) case final badge?) ...[
+                        badge,
+                      ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+          // Task 8 (spec §5.8/§6.2): the durable canonical startup status +
+          // short reason, persisted across restarts by Task 7.
+          if (durablePluginStatus(plugin) case final durable?) ...[
+            const SizedBox(height: 12),
+            Container(
               width: double.infinity,
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -1893,9 +1887,8 @@ class PluginDetailScreen extends StatelessWidget {
                 ],
               ),
             ),
-      primaryAction: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
+          ],
+          const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
             child: plugin.installed
@@ -2157,67 +2150,64 @@ class PluginDetailScreen extends StatelessWidget {
                       await app.uninstallPlugin(plugin);
                     },
                   ),
-                 ),
-               ],
-             ),
-           ],
-        ],
-      ),
-      overview: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Text(
-          plugin.description,
-          style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.text),
-        ),
-      ),
-      configSections: [
-        // ── Declarative settings form (audit 2026-09-25): rendered ONLY
-        // from manifest-declared data — no WebView, no JS, no plugin code.
-        if (settingsFields.isNotEmpty) ...[
-          const SectionHeader(
-            'Settings',
-            subtitle:
-                'Declared by the plugin manifest — secrets stay in '
-                'secure storage on this device',
-          ),
+                ),
+              ],
+            ),
+          ],
+
+          const SizedBox(height: 18),
+          const SectionHeader('Overview'),
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-            child: PluginSettingsPanel(
-              pluginName: plugin.runtimeId!,
-              fields: configFieldsForSettings(settingsFields),
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Text(
+              plugin.description,
+              style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.text),
             ),
           ),
-        ],
-      ],
-      extraSections: [
-        // ── Task 11 (spec §11): the diagnostics sections. Runtime
-        // rows (runtimeId set) render the full production surface;
-        // legacy flag-flip rows keep the minimal sections only.
-        if (plugin.runtimeId != null) ...[
-          _PluginDiagnostics(plugin: plugin),
-        ] else ...[
-          const SectionHeader('Permissions'),
-          if (plugin.hooks.isNotEmpty)
-            _Perm('Declared hooks: ${plugin.hooks.keys.join(', ')}')
-          else
-            const _Perm('Declared by plugin manifest'),
-        ],
-      ],
-      logs: durable?.logs ?? const <String>[],
-      trailingSections: [
-        const SectionHeader('Changelog'),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Text(
-            'v${plugin.version} — declared by plugin manifest.',
-            style: TextStyle(
-              fontSize: 12.5,
-              height: 1.6,
-              color: Aether.textMuted,
+          // ── Declarative settings form (audit 2026-09-25): rendered ONLY
+          // from manifest-declared data — no WebView, no JS, no plugin code.
+          if (settingsFields.isNotEmpty) ...[
+            const SectionHeader(
+              'Settings',
+              subtitle:
+                  'Declared by the plugin manifest — secrets stay in '
+                  'secure storage on this device',
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: PluginSettingsPanel(
+                pluginName: plugin.runtimeId!,
+                fields: configFieldsForSettings(settingsFields),
+              ),
+            ),
+          ],
+          // ── Task 11 (spec §11): the diagnostics sections. Runtime
+          // rows (runtimeId set) render the full production surface;
+          // legacy flag-flip rows keep the minimal sections only.
+          if (plugin.runtimeId != null) ...[
+            _PluginDiagnostics(plugin: plugin),
+          ] else ...[
+            const SectionHeader('Permissions'),
+            if (plugin.hooks.isNotEmpty)
+              _Perm('Declared hooks: ${plugin.hooks.keys.join(', ')}')
+            else
+              const _Perm('Declared by plugin manifest'),
+          ],
+          const SectionHeader('Changelog'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Text(
+              'v${plugin.version} — declared by plugin manifest.',
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.6,
+                color: Aether.textMuted,
+              ),
             ),
           ),
-        ),
-      ],
+          const SizedBox(height: 30),
+        ],
+      ),
     );
   }
 }
@@ -3353,95 +3343,147 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
     final app = AppState.I;
     final configJson = _configJsonFor(s);
 
-    // Durable-only health line (spec §5.3, Task 3): the canonical
-    // label · reason, or the neutral no-record copy — never serviceStatus
-    // or connected. Rendered ONCE in the Status section below.
-    final durable = durableMcpStatus(s);
-    return IntegrationDetailScaffold(
-      icon: Icons.usb_outlined,
-      name: s.name,
-      subtitle: '${s.author} · ${s.category} · via ${s.source}',
-      enableSwitch: SizedBox(
-        height: 28,
-        child: Switch(
-          key: ValueKey('mcp-detail-switch-${s.canonicalId}'),
-          value: s.connected,
-          activeTrackColor: Aether.accent,
-          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          onChanged: (_) async {
-            await connectMcpServer(context, s);
-            if (context.mounted) setState(() {});
-          },
-        ),
-      ),
-      headerActions: [
-        // OAuth entry hook: shown only when this server carries a usable
-        // OAuth config.
-        FutureBuilder<McpOAuthConfig?>(
-          future: McpService.I.mcpOAuthConfigForAsync(s.canonicalId),
-          builder: (context, snapshot) {
-            final config = snapshot.data;
-            if (config == null || !config.isUsable) {
-              return const SizedBox.shrink();
-            }
-            return IconButton(
-              tooltip: 'Authorize with OAuth',
-              icon: const Icon(Icons.lock_open_outlined, size: 19),
-              onPressed: () => showMcpOAuthSheet(
-                context,
-                serverKey: s.canonicalId,
-                serverName: s.name,
-                service: const _LiveMcpOAuthService(),
-              ),
-            );
-          },
-        ),
-        // Pencil — edit the mcp.json config in place (user request).
-        IconButton(
-          tooltip: 'Edit config',
-          icon: const Icon(Icons.edit_outlined, size: 19),
-          onPressed: () => _editConfigJson(context, s),
-        ),
-        IconButton(
-          key: ValueKey('mcp-detail-delete-${s.canonicalId}'),
-          tooltip: 'Delete server',
-          icon: const Icon(
-            Icons.delete_outline,
-            size: 19,
-            color: Aether.danger,
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(
+        leading: const BackButton(),
+        title: Text(s.name),
+        actions: [
+          // OAuth entry hook: shown only when this server carries a usable
+          // OAuth config.
+          FutureBuilder<McpOAuthConfig?>(
+            future: McpService.I.mcpOAuthConfigForAsync(s.canonicalId),
+            builder: (context, snapshot) {
+              final config = snapshot.data;
+              if (config == null || !config.isUsable) {
+                return const SizedBox.shrink();
+              }
+              return IconButton(
+                tooltip: 'Authorize with OAuth',
+                icon: const Icon(Icons.lock_open_outlined, size: 19),
+                onPressed: () => showMcpOAuthSheet(
+                  context,
+                  serverKey: s.canonicalId,
+                  serverName: s.name,
+                  service: const _LiveMcpOAuthService(),
+                ),
+              );
+            },
           ),
-          onPressed: () async {
-            final ok = await showDeleteConfirmationDialog(
-              context,
-              title: 'Delete ${s.name}?',
-            );
-            if (!ok) return;
-            await app.removeMcpServer(s);
-            if (context.mounted) Navigator.pop(context);
-          },
-        ),
-      ],
-      statusLine: durable == null
-          ? Text(
-              'Not started',
-              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-            )
-          : Text(
-              durable.reason == null || durable.reason!.isEmpty
-                  ? startupItemStateLabel(durable.state)
-                  : '${startupItemStateLabel(durable.state)} · '
-                        '${durable.reason}',
-              style: TextStyle(
-                fontSize: 11.5,
-                color: durable.state == StartupItemState.ready
-                    ? Aether.successLight
-                    : Aether.textMuted,
-              ),
+          // Pencil — edit the mcp.json config in place (user request).
+          IconButton(
+            tooltip: 'Edit config',
+            icon: const Icon(Icons.edit_outlined, size: 19),
+            onPressed: () => _editConfigJson(context, s),
+          ),
+          SizedBox(
+            height: 28,
+            child: Switch(
+              key: ValueKey('mcp-detail-switch-${s.canonicalId}'),
+              value: s.connected,
+              activeTrackColor: Aether.accent,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              onChanged: (_) async {
+                await connectMcpServer(context, s);
+                if (context.mounted) setState(() {});
+              },
             ),
-      logs: durable?.logs ?? const <String>[],
-      primaryAction: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            key: ValueKey('mcp-detail-delete-${s.canonicalId}'),
+            tooltip: 'Delete server',
+            icon: const Icon(
+              Icons.delete_outline,
+              size: 19,
+              color: Aether.danger,
+            ),
+            onPressed: () async {
+              final ok = await showDeleteConfirmationDialog(
+                context,
+                title: 'Delete ${s.name}?',
+              );
+              if (!ok) return;
+              await app.removeMcpServer(s);
+              if (context.mounted) Navigator.pop(context);
+            },
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
         children: [
+          Row(
+            children: [
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  color: Aether.surfaceRaised,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(
+                  Icons.usb_outlined,
+                  size: 24,
+                  color: Aether.textMuted,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      s.name,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${s.author} · ${s.category} · via ${s.source}',
+                      style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                    ),
+                    // Durable-only header status (spec §5.3, Task 3): the
+                    // canonical label · reason, or neutral "Not started" —
+                    // never serviceStatus or connected. The live
+                    // Connect/Disconnect toggle below stays as-is.
+                    const SizedBox(height: 3),
+                    Builder(
+                      builder: (_) {
+                        final durable = durableMcpStatus(s);
+                        if (durable == null) {
+                          return Text(
+                            'Not started',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: Aether.textFaint,
+                            ),
+                          );
+                        }
+                        final label = startupItemStateLabel(durable.state);
+                        final reason = durable.reason;
+                        return Text(
+                          reason == null || reason.isEmpty
+                              ? label
+                              : '$label · $reason',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: durable.state == StartupItemState.ready
+                                ? Aether.successLight
+                                : Aether.textMuted,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
@@ -3471,46 +3513,11 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               },
             ),
           ),
-          if (s.connected) ...[
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Aether.textMuted,
-                      side: BorderSide(color: Aether.hairlineStrong),
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    icon: const Icon(Icons.settings_backup_restore, size: 15),
-                    label: const Text(
-                      'Reset config',
-                      style: TextStyle(fontSize: 12.5),
-                    ),
-                    onPressed: () {
-                      // Reset = disconnect + clear any custom env
-                      if (s.connected) app.toggleMcpServer(s);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('MCP server config reset'),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-      banners: [
           // Task 10 (spec §10): Android-incompatible desktop servers show
           // `Unsupported on this device` with the missing runtime/ABI
           // reason — never a silent connect failure.
-          if (mcpUnsupportedReason(s) != null)
+          if (mcpUnsupportedReason(s) != null) ...[
+            const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -3533,9 +3540,11 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                 ],
               ),
             ),
+          ],
           // Task 10 (spec §10): credential-dependent MCPs show their setup
           // requirements and never auto-spawn until configured.
-          if (s.envHint != null && !s.connected)
+          if (s.envHint != null && !s.connected) ...[
+            const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -3591,15 +3600,49 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                 ],
               ),
             ),
-      ],
-      overview: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        child: Text(
-          s.description,
-          style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.text),
-        ),
-      ),
-      configSections: [
+          ],
+          if (s.connected) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Aether.textMuted,
+                      side: BorderSide(color: Aether.hairlineStrong),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(Icons.settings_backup_restore, size: 15),
+                    label: const Text(
+                      'Reset config',
+                      style: TextStyle(fontSize: 12.5),
+                    ),
+                    onPressed: () {
+                      // Reset = disconnect + clear any custom env
+                      if (s.connected) app.toggleMcpServer(s);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('MCP server config reset'),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 18),
+          const SectionHeader('Overview'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              s.description,
+              style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.text),
+            ),
+          ),
           if (s.envHint != null) ...[
             const SectionHeader('Environment'),
             Container(
@@ -3663,23 +3706,23 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               ],
             ),
           ),
-      ],
-      trailingSections: [
-        const SectionHeader('Runtime'),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _runRow('Process', '${s.command} ${s.args.join(' ')}'),
-              const SizedBox(height: 6),
-              _runRow('Protocol', 'JSON-RPC over stdio'),
-              const SizedBox(height: 6),
-              _runRow('Sandbox', 'Isolated · ask before network'),
-            ],
+          const SectionHeader('Runtime'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _runRow('Process', '${s.command} ${s.args.join(' ')}'),
+                const SizedBox(height: 6),
+                _runRow('Protocol', 'JSON-RPC over stdio'),
+                const SizedBox(height: 6),
+                _runRow('Sandbox', 'Isolated · ask before network'),
+              ],
+            ),
           ),
-        ),
-      ],
+          const SizedBox(height: 30),
+        ],
+      ),
     );
   }
 
