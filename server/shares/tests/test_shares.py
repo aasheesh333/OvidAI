@@ -151,7 +151,30 @@ class SharesTest(unittest.TestCase):
         self.assertEqual(set(first.json()), {'session_id'})
         self.assertEqual(self.repo.public(share['id'])['messages'][0]['content'], 'Hello')
 
-    def test_fork_rejects_expired_revoked_and_invalid_owner_requests(self):
+    def test_fork_replay_after_expiry_is_rejected(self):
+        clock = [100.0]
+        repo = ShareRepository(self.directory.name + '/fork-expiry.sqlite', clock=lambda: clock[0], ttl_seconds=10)
+        share = repo.create('alice', self.body)
+        first = repo.fork('bob', share['id'], {'request_id': 'fork-1'})
+        self.assertIsNotNone(first['session_id'])
+        clock[0] = 110
+        with self.assertRaises(ShareError) as rejected:
+            repo.fork('bob', share['id'], {'request_id': 'fork-1'})
+        self.assertEqual(rejected.exception.status, 409)
+
+    def test_fork_replay_after_revocation_is_rejected(self):
+        share = self.create().json()
+        first = self.client.post('/shares/' + share['id'] + '/fork',
+                                 headers=self.headers | {'Authorization': 'Bearer bob'},
+                                 json={'request_id': 'fork-1'})
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(self.client.delete('/shares/' + share['id'], headers=self.headers).status_code, 204)
+        replay = self.client.post('/shares/' + share['id'] + '/fork',
+                                  headers=self.headers | {'Authorization': 'Bearer bob'},
+                                  json={'request_id': 'fork-1'})
+        self.assertEqual(replay.status_code, 409)
+
+    def test_fork_rejects_expired_revoked_and_invalid_request_fields(self):
         clock = [100.0]
         repo = ShareRepository(self.directory.name + '/fork.sqlite', clock=lambda: clock[0], ttl_seconds=10)
         app = FastAPI()

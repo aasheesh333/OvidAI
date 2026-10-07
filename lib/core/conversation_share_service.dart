@@ -198,13 +198,17 @@ class ConversationShareService {
     if (!_tokenPattern.hasMatch(id)) {
       throw const ConversationShareException('Invalid share ID.');
     }
+    if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(requestId)) {
+      throw const ConversationShareException('Invalid fork request ID.');
+    }
     final data = await _call(
       'POST',
       '/shares/$id/fork',
       body: {'request_id': requestId},
     );
     final sessionId = data['session_id'];
-    if (sessionId is! String || !RegExp(r'^[A-Za-z0-9_-]{22}$').hasMatch(sessionId)) {
+    if (sessionId is! String ||
+        !RegExp(r'^[A-Za-z0-9_-]{22}$').hasMatch(sessionId)) {
       throw const ConversationShareException('The share server returned an invalid fork.');
     }
     return sessionId;

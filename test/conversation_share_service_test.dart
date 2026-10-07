@@ -122,6 +122,44 @@ void main() {
     );
   });
 
+  test('fork rejects invalid request IDs before making a request', () async {
+    var sent = false;
+    final service = ConversationShareService(
+      baseUrl: 'https://share.example.test',
+      idToken: () async => 'firebase-token',
+      client: MockClient((_) async {
+        sent = true;
+        return http.Response('{}', 500);
+      }),
+    );
+
+    for (final requestId in ['', 'contains spaces', 'x' * 129]) {
+      await expectLater(
+        service.fork(shareId, requestId: requestId),
+        throwsA(isA<ConversationShareException>()),
+      );
+    }
+    expect(sent, false);
+  });
+
+  test('fork rejects malformed server responses', () async {
+    for (final body in [
+      '{}',
+      '{"session_id": "too-short"}',
+      '{"session_id": 42}',
+    ]) {
+      final service = ConversationShareService(
+        baseUrl: 'https://share.example.test',
+        idToken: () async => 'firebase-token',
+        client: MockClient((_) async => http.Response(body, 201)),
+      );
+      await expectLater(
+        service.fork(shareId, requestId: 'fork-request'),
+        throwsA(isA<ConversationShareException>()),
+      );
+    }
+  });
+
   test(
     'missing config, auth, failed network and forged URL never produce a link',
     () async {

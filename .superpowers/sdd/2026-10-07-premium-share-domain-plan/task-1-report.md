@@ -98,3 +98,39 @@ Python environment were used instead.
   app continuation work.
 - The server suite was run in the repository's existing image virtualenv because
   the base Python installation has no `pip`/FastAPI environment.
+
+## Review fix report
+
+### Findings addressed
+
+- Fork replay now validates that the source token is still live before looking
+  up an idempotency receipt. Replays after expiry or revocation return the same
+  `409 share_unavailable` result as a first attempt, while replays of live
+  shares remain idempotent.
+- Added server regressions for replay after expiry and replay after revocation.
+- Added client coverage for invalid request IDs (including the no-network
+  guarantee) and malformed fork responses.
+- Renamed the recipient test to describe invalid request fields rather than an
+  invalid owner; Bob is intentionally a permitted recipient.
+- Formatted the long Dart fork response validation condition.
+
+### Review-fix test output
+
+The new tests were first run against the prior implementation and failed as
+expected: both replay regressions returned a stored success, and invalid client
+request IDs reached the transport. After the fix:
+
+```text
+/root/flutter/bin/flutter test --no-pub test/conversation_share_service_test.dart
+00:00 +8: All tests passed!
+
+/tmp/opencode/images-venv/bin/python -m unittest server.shares.tests.test_shares
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 89.016s
+
+OK
+
+/root/flutter/bin/flutter analyze lib/core/conversation_share_service.dart test/conversation_share_service_test.dart
+No issues found! (ran in 3.3s)
+```
