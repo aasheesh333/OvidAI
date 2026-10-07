@@ -194,6 +194,22 @@ class ConversationShareService {
     await _call('DELETE', '/shares/$id');
   }
 
+  Future<String> fork(String id, {required String requestId}) async {
+    if (!_tokenPattern.hasMatch(id)) {
+      throw const ConversationShareException('Invalid share ID.');
+    }
+    final data = await _call(
+      'POST',
+      '/shares/$id/fork',
+      body: {'request_id': requestId},
+    );
+    final sessionId = data['session_id'];
+    if (sessionId is! String || !RegExp(r'^[A-Za-z0-9_-]{22}$').hasMatch(sessionId)) {
+      throw const ConversationShareException('The share server returned an invalid fork.');
+    }
+    return sessionId;
+  }
+
   /// Local share state owned by this service, for the verified all-store reset.
   ///
   /// This service is deliberately stateless: [create] returns the parsed
@@ -304,7 +320,7 @@ class ConversationShareService {
           401 => 'Sign in again to verify your identity.',
           403 => 'This account or app is not allowed to share.',
           409 =>
-            'This request was already used or revoked. Refresh existing links.',
+            'This request was already used, revoked, or expired. Refresh existing links.',
           422 => 'The snapshot contains unsupported or private content.',
           429 => 'Share storage limit reached. Contact support if it persists.',
           _ =>

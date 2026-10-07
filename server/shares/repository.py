@@ -3,12 +3,13 @@
 import hashlib
 import json
 import math
+import re
 import secrets
 import sqlite3
 import time
 from contextlib import contextmanager
 
-from .snapshot import CreateShare
+from .snapshot import CreateShare, ForkShare
 
 
 class ShareError(Exception):
@@ -40,6 +41,14 @@ class ShareRepository:
                 CREATE TABLE IF NOT EXISTS deleted_accounts (uid TEXT PRIMARY KEY);
                 CREATE INDEX IF NOT EXISTS shares_expiry ON shares(expires_at)
                     WHERE snapshot IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS share_forks (
+                    owner_uid TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    source_token TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(owner_uid, request_id)
+                );
             ''')
 
     @contextmanager
@@ -123,6 +132,34 @@ class ShareRepository:
             if result.rowcount != 1:
                 raise ShareError(404, 'share_not_found')
 
+    def fork(self, uid, token, body):
+        if not isinstance(uid, str) or not uid.strip():
+            raise ShareError(401, 'invalid_identity')
+        if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', token):
+            raise ShareError(409, 'share_unavailable')
+        body = ForkShare.model_validate(body).model_dump()
+        with self._connection(write=True) as db:
+            now = self.clock()
+            if db.execute('SELECT 1 FROM deleted_accounts WHERE uid=?', (uid,)).fetchone():
+                raise ShareError(403, 'account_deleted')
+            previous = db.execute(
+                'SELECT session_id, source_token FROM share_forks WHERE owner_uid=? AND request_id=?',
+                (uid, body['request_id'])).fetchone()
+            if previous:
+                if previous['source_token'] != token:
+                    raise ShareError(409, 'request_already_used')
+                return {'session_id': previous['session_id']}
+            source = db.execute(
+                'SELECT snapshot FROM shares WHERE token=? AND revoked=0 AND expires_at>?',
+                (token, now)).fetchone()
+            if source is None or source['snapshot'] is None:
+                raise ShareError(409, 'share_unavailable')
+            session_id = secrets.token_urlsafe(16)
+            db.execute(
+                'INSERT INTO share_forks VALUES (?, ?, ?, ?, ?)',
+                (uid, body['request_id'], token, session_id, now))
+            return {'session_id': session_id}
+
     def delete_account(self, uid):
         """Idempotent cleanup hook. Fence and erase in the same write transaction.
 
@@ -133,6 +170,7 @@ class ShareRepository:
         with self._connection(write=True) as db:
             db.execute('INSERT OR IGNORE INTO deleted_accounts VALUES (?)', (uid,))
             db.execute('DELETE FROM shares WHERE owner_uid=?', (uid,))
+            db.execute('DELETE FROM share_forks WHERE owner_uid=?', (uid,))
 
     def purge_expired(self, limit=500):
         # Retain minimal dedup receipts until account deletion so a retry never

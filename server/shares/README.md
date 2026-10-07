@@ -51,6 +51,10 @@ Endpoints:
 * `DELETE /shares/{id}`: owner-only; idempotent 204 for an owned receipt, 404 for
   unknown/wrong owner. Erases the snapshot body immediately.
 * `GET /s/{id}`: anonymous static HTML, 404 for unknown/revoked/expired IDs.
+* `POST /shares/{id}/fork`: authenticated recipient fork; JSON
+  `{request_id}` returns 201 `{session_id}`. The request is idempotent per
+  recipient and rejects revoked or expired snapshots. The source snapshot and
+  source owner's session are never mutated.
 
 Session IDs group the authenticated owner's uploads; they do not authorize
 access to any server-side session. The server stores only the submitted snapshot

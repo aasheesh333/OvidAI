@@ -136,6 +136,47 @@ class SharesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             router(repo, lambda *_: 'alice', '')
 
+    def test_authenticated_fork_is_idempotent_and_preserves_snapshot(self):
+        share = self.create().json()
+        first = self.client.post('/shares/' + share['id'] + '/fork',
+                                 headers=self.headers,
+                                 json={'request_id': 'fork-1'})
+        self.assertEqual(first.status_code, 201)
+        self.assertRegex(first.json()['session_id'], r'^[A-Za-z0-9_-]{22}$')
+        replay = self.client.post('/shares/' + share['id'] + '/fork',
+                                  headers=self.headers,
+                                  json={'request_id': 'fork-1'})
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(replay.json(), first.json())
+        self.assertEqual(set(first.json()), {'session_id'})
+        self.assertEqual(self.repo.public(share['id'])['messages'][0]['content'], 'Hello')
+
+    def test_fork_rejects_expired_revoked_and_invalid_owner_requests(self):
+        clock = [100.0]
+        repo = ShareRepository(self.directory.name + '/fork.sqlite', clock=lambda: clock[0], ttl_seconds=10)
+        app = FastAPI()
+        app.include_router(router(repo, lambda token, attestation: token, 'https://share.example.test'))
+        with TestClient(app) as client:
+            share = repo.create('alice', self.body)
+            headers = {'Authorization': 'Bearer bob', 'X-Firebase-AppCheck': 'app'}
+            response = client.post('/shares/' + share['id'] + '/fork', headers=headers,
+                                   json={'request_id': 'fork-1'})
+            self.assertEqual(response.status_code, 201)
+            alice_response = client.post('/shares/' + share['id'] + '/fork',
+                                         headers=headers | {'Authorization': 'Bearer alice'},
+                                         json={'request_id': 'fork-1'})
+            self.assertEqual(alice_response.status_code, 201)
+            self.assertNotEqual(alice_response.json(), response.json())
+            clock[0] = 110
+            self.assertEqual(client.post('/shares/' + share['id'] + '/fork', headers=headers,
+                                         json={'request_id': 'fork-2'}).status_code, 409)
+            revoked = repo.create('alice', self.body | {'request_id': 'request-2'})
+            repo.revoke('alice', revoked['id'])
+            self.assertEqual(client.post('/shares/' + revoked['id'] + '/fork', headers=headers,
+                                         json={'request_id': 'fork-3'}).status_code, 409)
+            self.assertEqual(client.post('/shares/' + share['id'] + '/fork', headers=headers,
+                                         json={'request_id': 'fork-1', 'secret': 'x'}).status_code, 422)
+
     def test_authentication_failures_and_validation_are_not_cached_or_echoed(self):
         for path in ['/shares', '/shares/unknown']:
             response = (self.client.get(path) if path == '/shares' else self.client.delete(path))

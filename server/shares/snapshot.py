@@ -46,3 +46,8 @@ class CreateShare(BaseModel):
         if sum(len(m.content.encode('utf-8')) for m in messages) > 200000:
             raise ValueError('Snapshot is too large')
         return messages
+
+
+class ForkShare(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, revalidate_instances='always')
+    request_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')]

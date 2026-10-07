@@ -100,6 +100,28 @@ void main() {
     expect(methods, ['POST', 'GET', 'DELETE']);
   });
 
+  test('authenticated fork sends share token and idempotency request ID', () async {
+    final service = ConversationShareService(
+      baseUrl: 'https://share.example.test',
+      idToken: () async => 'firebase-token',
+      currentUid: () => 'alice',
+      client: MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/shares/$shareId/fork');
+        expect(jsonDecode(request.body), {'request_id': 'fork-request'});
+        return http.Response(
+          jsonEncode({'session_id': 'forked-session-1234567'}),
+          201,
+        );
+      }),
+    );
+
+    expect(
+      await service.fork(shareId, requestId: 'fork-request'),
+      'forked-session-1234567',
+    );
+  });
+
   test(
     'missing config, auth, failed network and forged URL never produce a link',
     () async {

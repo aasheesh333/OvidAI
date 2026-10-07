@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.routing import APIRoute
 
 from .repository import ShareError
-from .snapshot import CreateShare
+from .snapshot import CreateShare, ForkShare
 
 HEADERS = {
     'Cache-Control': 'no-store, private, max-age=0',
@@ -104,6 +104,11 @@ def router(repository, verify_uid, base_url, *, admission=None):
         with admission(uid) if admission else nullcontext(uid) as admitted_uid:
             repository.revoke(admitted_uid, token)
         return Response(status_code=204)
+
+    @routes.post('/shares/{token}/fork', status_code=201)
+    def fork(token: str, body: ForkShare, uid=Depends(owner)):
+        with admission(uid) if admission else nullcontext(uid) as admitted_uid:
+            return repository.fork(admitted_uid, token, body.model_dump())
 
     @routes.get('/s/{token}', response_class=HTMLResponse)
     def viewer(token: str):
