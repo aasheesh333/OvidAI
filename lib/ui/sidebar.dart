@@ -254,7 +254,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             onTap: hasSession
                                 ? () {
                                     final sid = app.activeSessionId ?? '';
-                                    return _navigateFromSidebar(
+                                    _navigateFromSidebar(
                                       context,
                                       (_) => TrajectoryScreen(sessionId: sid),
                                     );
