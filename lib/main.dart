@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 
 import 'core/state.dart';
@@ -7,6 +8,8 @@ import 'core/agent_service.dart';
 import 'core/theme.dart';
 import 'ui/login_gate.dart';
 import 'ui/shell.dart';
+import 'core/share_link_resolver.dart';
+import 'ui/shared_conversation_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -48,6 +51,9 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   /// `MaterialApp`, its theme and every route once per token. Only a theme
   /// toggle is worth a rebuild, so the listener now compares before rebuilding.
   bool _builtDark = Aether.dark;
+  final _links = AppLinks();
+  final _resolver = ShareLinkResolver();
+  StreamSubscription<Uri>? _linkSubscription;
 
   @override
   void initState() {
@@ -55,6 +61,25 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     // Rebuild the whole app when the user toggles the theme in Settings.
     AppState.I.addListener(_onThemeChanged);
+    _restoreAndListenForLinks();
+  }
+
+  Future<void> _restoreAndListenForLinks() async {
+    final initial = await _links.getInitialLink();
+    if (initial != null) _openShare(initial);
+    _linkSubscription = _links.uriLinkStream.listen(_openShare);
+    final deferred = await _resolver.restoreDeferred();
+    if (deferred != null && mounted) _openShare(Uri.parse('https://ovidsi.com/s/${deferred.token}'));
+  }
+
+  void _openShare(Uri uri) {
+    final route = ShareLinkResolver.route(uri);
+    if (route is! ShareViewerRoute || !mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => SharedConversationScreen(token: route.token),
+      ));
+    });
   }
 
   void _onThemeChanged() {
@@ -90,6 +115,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     AppState.I.removeListener(_onThemeChanged);
+    _linkSubscription?.cancel();
     super.dispose();
   }
 

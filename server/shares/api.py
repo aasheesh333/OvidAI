@@ -110,14 +110,25 @@ def router(repository, verify_uid, base_url, *, admission=None):
         with admission(uid) if admission else nullcontext(uid) as admitted_uid:
             return repository.fork(admitted_uid, token, body.model_dump())
 
+    def public_snapshot(token):
+        return repository.public(token) if re.fullmatch(r'[A-Za-z0-9_-]{43}', token) else None
+
+    @routes.get('/s/{token}.json')
+    def snapshot_json(token: str):
+        snapshot = public_snapshot(token)
+        if snapshot is None:
+            return JSONResponse({'detail': 'share_not_found'}, status_code=404)
+        return snapshot
+
     @routes.get('/s/{token}', response_class=HTMLResponse)
     def viewer(token: str):
-        snapshot = repository.public(token) if re.fullmatch(r'[A-Za-z0-9_-]{43}', token) else None
+        snapshot = public_snapshot(token)
         if snapshot is None:
             return HTMLResponse('<!doctype html><title>Link unavailable</title><h1>Link unavailable</h1>', status_code=404)
         rows = ''.join('<section><h2>' + ('You' if m['role'] == 'user' else 'Assistant') +
                        '</h2><pre>' + html.escape(m['content'], quote=True) + '</pre></section>'
                        for m in snapshot['messages'])
+        play_store = 'https://play.google.com/store/apps/details?id=com.dhanuk.ovidai&referrer=share_token%3D' + token
         return HTMLResponse('''<!doctype html><html lang="en"><head><meta charset="utf-8">
             <meta name="viewport" content="width=device-width,initial-scale=1">
             <meta name="robots" content="noindex,nofollow,noarchive"><title>Shared conversation · Ovid</title>
@@ -125,6 +136,6 @@ def router(repository, verify_uid, base_url, *, admission=None):
             section{border-top:1px solid #ddd;padding:16px 0}h2{font-size:15px}
             pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.6}</style>
             </head><body><h1>Shared conversation</h1><p>Immutable snapshot shared by an Ovid user.</p>'''
-                            + rows + '</body></html>')
+                            + rows + '<p><a rel="nofollow" href="' + play_store + '">Open in Ovid Si</a></p></body></html>')
 
     return routes

@@ -45,6 +45,9 @@ class ConversationSnapshot {
     caseSensitive: false,
   );
 
+  factory ConversationSnapshot.fromJson(String sessionId, List<SharedMessage> messages) =>
+      ConversationSnapshot._(sessionId, messages);
+
   factory ConversationSnapshot.fromSession(ChatSession session) {
     final messages = <SharedMessage>[];
     if (!session.isSubagent) {
