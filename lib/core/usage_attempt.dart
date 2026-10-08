@@ -107,8 +107,8 @@ class UsageAttempt {
     if (sessionId != null) _requireIdentity('sessionId', sessionId!);
     if (runId != null) _requireIdentity('runId', runId!);
     if (revision < 1) throw ArgumentError('revision must be positive');
-    if (elapsed != null && elapsed!.inMilliseconds < 0) {
-      throw ArgumentError('elapsed must not be negative');
+    if (elapsed != null) {
+      _validateElapsed(elapsed!);
     }
   }
 
@@ -145,7 +145,7 @@ class UsageAttempt {
         'runId': runId,
         'startedAt': startedAt.toUtc().toIso8601String(),
         'completedAt': completedAt?.toUtc().toIso8601String(),
-        'elapsedMilliseconds': elapsed?.inMilliseconds,
+        'elapsedMilliseconds': elapsed == null ? null : _elapsedMilliseconds(elapsed!),
         'dispatchStage': dispatchStage.name,
         'outcome': outcome.name,
         'inputTokens': inputTokens?.toJson(),
@@ -176,12 +176,12 @@ class UsageAttempt {
       'totalTokens',
     };
     _requireKeys(json, keys);
-    if (json['schemaVersion'] != schemaVersion) {
+    if (json['schemaVersion'] is! int ||
+        json['schemaVersion'] != schemaVersion) {
       throw ArgumentError('Unsupported usage attempt schema');
     }
-    String stringValue(String key, {bool nullable = false}) {
+    String stringValue(String key) {
       final value = json[key];
-      if (nullable && value == null) return '';
       if (value is! String) throw ArgumentError('$key must be a string');
       return value;
     }
@@ -292,10 +292,36 @@ String? _nullableString(Object? value, String name) {
 DateTime _dateValue(Map<String, dynamic> json, String key) {
   final value = json[key];
   if (value is! String) throw ArgumentError('$key must be an ISO timestamp');
+  final match = RegExp(
+    r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})(\d{3})?Z$',
+  ).firstMatch(value);
+  if (match == null) throw ArgumentError('$key must be an ISO timestamp');
   try {
-    return DateTime.parse(value);
+    final parsed = DateTime.parse(value);
+    final expected = <int>[
+      int.parse(match.group(1)!),
+      int.parse(match.group(2)!),
+      int.parse(match.group(3)!),
+      int.parse(match.group(4)!),
+      int.parse(match.group(5)!),
+      int.parse(match.group(6)!),
+      int.parse('${match.group(7)}${match.group(8) ?? '000'}'),
+    ];
+    final actual = <int>[
+      parsed.year,
+      parsed.month,
+      parsed.day,
+      parsed.hour,
+      parsed.minute,
+      parsed.second,
+      parsed.millisecond * 1000 + parsed.microsecond,
+    ];
+    if (! _sameInts(expected, actual) || !parsed.isUtc) {
+      throw ArgumentError('$key must be a valid UTC timestamp');
+    }
+    return parsed;
   } catch (_) {
-    throw ArgumentError('$key must be an ISO timestamp');
+    throw ArgumentError('$key must be a valid UTC timestamp');
   }
 }
 
@@ -314,3 +340,25 @@ UsageDispatchStage _dispatchFromJson(Object? value) => UsageDispatchStage.values
 
 UsageOutcome _outcomeFromJson(Object? value) => UsageOutcome.values
     .firstWhere((item) => item.name == value, orElse: () => throw ArgumentError('Unknown outcome'));
+
+void _validateElapsed(Duration value) {
+  if (value.inMicroseconds < 0) {
+    throw ArgumentError('elapsed must not be negative');
+  }
+  if (value.inMicroseconds % Duration.microsecondsPerMillisecond != 0) {
+    throw ArgumentError('elapsed supports millisecond precision only');
+  }
+}
+
+int _elapsedMilliseconds(Duration value) {
+  _validateElapsed(value);
+  return value.inMilliseconds;
+}
+
+bool _sameInts(List<int> left, List<int> right) {
+  if (left.length != right.length) return false;
+  for (var index = 0; index < left.length; index++) {
+    if (left[index] != right[index]) return false;
+  }
+  return true;
+}
