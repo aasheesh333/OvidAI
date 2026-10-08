@@ -87,17 +87,23 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     );
     try {
       await _resolver.readInstallReferrer();
-    } on Object {}
+    } on Object {
+      // Install referrer support is optional on platforms without it.
+    }
     try {
       final initial = await _links.getInitialLink();
       if (initial != null) _openShare(initial);
-    } on Object {}
+    } on Object {
+      // Initial app links may be unavailable during platform startup.
+    }
     try {
       final deferred = await _resolver.restoreDeferred();
       if (deferred != null) {
         _openShare(Uri.parse('${ShareLinkResolver.canonicalOrigin}/s/${deferred.token}'));
       }
-    } on Object {}
+    } on Object {
+      // Deferred links are optional and may fail when the provider is absent.
+    }
   }
 
   void _openShare(Uri uri) {
