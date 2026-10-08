@@ -13,6 +13,10 @@ on:
         description: 'Build production-signed artifacts (all release gates required)'
         type: boolean
         default: false
+      release_candidate:
+        description: 'Build signed release-candidate APK + AAB (target 28 sideload)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -143,7 +147,7 @@ jobs:
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          if [ -n "$KEYSTORE_B64" ] && [ "${{ inputs.production_release }}" = "true" ]; then
+          if [ -n "$KEYSTORE_B64" ] && { [ "${{ inputs.production_release }}" = "true" ] || [ "${{ inputs.release_candidate }}" = "true" ]; }; then
             echo "release_signing=true" >> "$GITHUB_ENV"
           fi
 
