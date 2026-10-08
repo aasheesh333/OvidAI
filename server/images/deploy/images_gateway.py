@@ -17,6 +17,7 @@ ownership, tier/free-cap) via VerifierAuth — no firebase_admin, no second stor
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -40,6 +41,36 @@ DB_PATH = os.environ.get("OVID_IMAGE_DB", "/data/ovid-images.sqlite")
 MAX_UPSTREAM_USD = Decimal(os.environ.get("OVID_IMAGE_MAX_UPSTREAM_USD", "1.00"))
 HTTP_TIMEOUT = float(os.environ.get("OVID_IMAGE_TIMEOUT", "120"))
 _CATALOG_TTL = 30.0
+_LOG = logging.getLogger(__name__)
+
+
+def _capacity_rejected(response, model):
+    """Recognize only the upstream's explicit pre-dispatch no-capacity contract.
+
+    Generic 5xx, timeouts and proxy HTML are ambiguous and must never trigger a
+    second paid attempt. LiteLLM sometimes wraps the structured upstream error
+    in a message; accept only that exact, model-bound first line, not substrings.
+    """
+    if response.status_code != 503:
+        return False
+    try:
+        error = response.json()['error']
+        if not isinstance(error, dict):
+            return False
+        if error.get('type') == 'no_capacity' or error.get('code') == 'no_capacity':
+            return True
+        message = error.get('message')
+        if not isinstance(message, str) or not message:
+            return False
+        return re.fullmatch(
+            r'(?:litellm\.ServiceUnavailableError: )?'
+            r'(?:ServiceUnavailableError: )?(?:OpenAIException - )?'
+            r'no available provider for ' + re.escape(model) +
+            r' \(all offers exhausted or in cooldown\); try again shortly',
+            message.splitlines()[0],
+        ) is not None
+    except (ValueError, KeyError, TypeError):
+        return False
 
 
 class _Backend:
@@ -151,6 +182,7 @@ class LiteLLMImageService:
                 result = self._forward(key, backend, operation, prompt, size, image_b64, image_mime)
             except _NotServed as error:
                 last_status = error.status
+                _LOG.info('image_attempt_rejected status=%s', error.status)
                 continue  # model not served / not found: nothing was billed
             except Exception:
                 raise self._unknown(account, request, fingerprint) from None
@@ -169,7 +201,7 @@ class LiteLLMImageService:
             except Exception:
                 raise self._unknown(account, request, fingerprint) from None
         self.ledger.fail(account, request)
-        raise ImageError(502 if last_status else 503, "image_unavailable",
+        raise ImageError(503 if last_status == 503 or last_status is None else 502, "image_unavailable",
                          receipt=self.ledger.receipt(account, request))
 
     def _forward(self, key, backend, operation, prompt, size, image_b64, image_mime):
@@ -187,7 +219,7 @@ class LiteLLMImageService:
                     data={"model": backend.model, "prompt": prompt, "size": size, "n": "1"},
                     files={"image": ("image.png", raw, image_mime)},
                 )
-        if response.status_code in (400, 404):
+        if response.status_code in (400, 404) or _capacity_rejected(response, backend.model):
             raise _NotServed(response.status_code)
         if response.status_code != 200:
             raise ImageError(502, "image_unavailable")

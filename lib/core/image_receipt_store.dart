@@ -177,6 +177,20 @@ class ImageReceiptConflict extends StateError {
   final ImageRequestRecord record;
 }
 
+enum ImageAdmissionReason {
+  accountUnavailable,
+  identityConflict,
+  capabilityUnavailable,
+  unresolved,
+}
+
+/// Expected admission failures are distinct from journal read/write failures.
+class ImageAdmissionError extends StateError {
+  ImageAdmissionError(this.reason, {this.record}) : super(reason.name);
+  final ImageAdmissionReason reason;
+  final ImageRequestRecord? record;
+}
+
 class _PreferencesJournal implements _ImageJournal {
   _PreferencesJournal(this.preferences);
   final Future<SharedPreferences> Function() preferences;
@@ -326,7 +340,7 @@ class ImageReceiptStore {
   }) => _serial(() async {
     final data = await _load();
     if (!isCurrent() || data.blocked.contains(candidate.accountId)) {
-      throw StateError('Image account unavailable');
+      throw ImageAdmissionError(ImageAdmissionReason.accountUnavailable);
     }
     final existing = data.rows
         .where(
@@ -337,16 +351,23 @@ class ImageReceiptStore {
         .firstOrNull;
     if (existing != null) {
       if (existing.fingerprint != candidate.fingerprint) {
-        throw StateError('Image request identity conflict');
+        throw ImageAdmissionError(
+          ImageAdmissionReason.identityConflict,
+          record: existing,
+        );
       }
       return (record: existing, created: false);
     }
-    if (!canSubmit()) throw StateError('Image capability unavailable');
-    if (data.rows.any(
-      (r) => r.accountId == candidate.accountId && r.unresolved,
-    )) {
-      throw StateError(
-        'Reconcile the existing image request before another paid submission',
+    if (!canSubmit()) {
+      throw ImageAdmissionError(ImageAdmissionReason.capabilityUnavailable);
+    }
+    final unresolved = data.rows
+        .where((r) => r.accountId == candidate.accountId && r.unresolved)
+        .firstOrNull;
+    if (unresolved != null) {
+      throw ImageAdmissionError(
+        ImageAdmissionReason.unresolved,
+        record: unresolved,
       );
     }
     data.rows.add(candidate);

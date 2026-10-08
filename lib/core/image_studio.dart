@@ -309,10 +309,27 @@ class ImageStudio extends ChangeNotifier {
         isCurrent: () => _current(account, generation),
         canSubmit: () => supportedSizes(operation).contains(size),
       );
+    } on ImageAdmissionError catch (error) {
+      _checkCurrent(account, generation);
+      throw ImageStudioError(switch (error.reason) {
+        ImageAdmissionReason.accountUnavailable =>
+          'Image access is unavailable for this account. Sign in to an active Ovid Cloud account.',
+        ImageAdmissionReason.identityConflict =>
+          'Request ${error.record!.requestId} is already saved with different image content. '
+              'Check its receipt in Usage → Image receipts before starting another job.',
+        ImageAdmissionReason.capabilityUnavailable =>
+          'Image generation or editing at this size is currently unavailable. '
+              'Refresh Ovid Cloud image availability and try again. No new image request was submitted.',
+        ImageAdmissionReason.unresolved =>
+          'Image request ${error.record!.requestId} has an unresolved outcome. '
+              'Open Usage → ⋮ → Image receipts → Check status for this request. '
+              'No new image request was submitted.',
+      });
     } catch (_) {
       _checkCurrent(account, generation);
       throw const ImageStudioError(
-        'Image admission could not be saved or conflicts with existing work. Check saved receipts before submitting; an unresolved job blocks new paid requests.',
+        'Image receipt storage could not be read or saved. No new image request was submitted. '
+        'Open Usage → ⋮ → Image receipts and retry loading receipts.',
       );
     }
     _checkCurrent(account, generation);
@@ -521,6 +538,9 @@ class ImageStudio extends ChangeNotifier {
         'The server did not find this request. Its outcome remains uncertain; no new paid submission is allowed.',
       401 || 403 =>
         'Sign in to the original account with current image permission to check this receipt.',
+      _ when record.state == 'failed' =>
+        'Image request failed; exact charge ${record.receipt?.charged ?? 'unavailable'}. '
+            'This receipt is resolved. You may start a new image request when image service is available.',
       _ =>
         bytes != null
             ? null
