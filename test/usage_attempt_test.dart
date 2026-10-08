@@ -132,19 +132,7 @@ void main() {
   });
 
   test('rejects a non-integer schema version', () {
-    final json = <String, dynamic>{
-      'schemaVersion': 1.0,
-      'attemptId': 'attempt-1',
-      'requestId': 'request-1',
-      'revision': 1,
-      'sourceDevice': 'device-1',
-      'provider': 'openai',
-      'requestedModel': 'gpt-5',
-      'purpose': 'chat',
-      'startedAt': '2026-10-08T00:00:00.000Z',
-      'dispatchStage': 'prepared',
-      'outcome': 'pending',
-    };
+    final json = _validJson()..['schemaVersion'] = 1.0;
 
     expect(() => UsageAttempt.fromJson(json), throwsArgumentError);
   });
