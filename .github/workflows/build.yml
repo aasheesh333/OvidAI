@@ -69,9 +69,27 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+          PINNED_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
           GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: python3 tool/release_prepare.py
+        run: |
+          set -euo pipefail
+          # Derive the certificate fingerprint from the keystore (the source of
+          # truth) unless an operator pinned one via the repo variable.
+          ANDROID_SIGNING_CERT_SHA256="$PINNED_CERT_SHA256"
+          if [ -z "$ANDROID_SIGNING_CERT_SHA256" ]; then
+            keystore="$(mktemp)"
+            trap 'rm -f "$keystore"' EXIT
+            printf '%s' "$KEYSTORE_B64" | base64 --decode > "$keystore"
+            ANDROID_SIGNING_CERT_SHA256="$(keytool -list -v -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" \
+              | sed -n 's/.*SHA256: *//p' | head -n1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            if [ -z "$ANDROID_SIGNING_CERT_SHA256" ]; then
+              echo "Unable to compute keystore certificate SHA-256" >&2
+              exit 1
+            fi
+          fi
+          export ANDROID_SIGNING_CERT_SHA256
+          echo "ANDROID_SIGNING_CERT_SHA256=$ANDROID_SIGNING_CERT_SHA256" >> "$GITHUB_ENV"
+          python3 tool/release_prepare.py
 
       - name: Test release inventory gates
         run: python3 -m unittest discover -s tool -p 'release_*test.py'
@@ -178,8 +196,6 @@ jobs:
       # Manual production_release enforces the API 36 Play floor.
       - name: Gate release artifacts
         if: env.release_signing == 'true'
-        env:
-          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: |
           if [ "${{ inputs.production_release }}" = "true" ]; then mode=production; target=36; else mode=release; target=28; fi
           status=0
