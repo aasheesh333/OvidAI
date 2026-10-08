@@ -162,6 +162,10 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
   Widget build(BuildContext context) {
     return AetherSheet(
       title: 'Connect GitHub',
+      // Pin Cancel below the scrolling body: at 360x640 with textScale 2.0 the
+      // code view is taller than the viewport, and a scrolling action row left
+      // Cancel just below the fold and un-tappable.
+      pinActions: true,
       actions: [AetherGhostButton(label: 'Cancel', onPressed: _cancel)],
       child: SingleChildScrollView(
         child: switch (_state) {

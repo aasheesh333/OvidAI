@@ -1383,11 +1383,18 @@ class AetherSheet extends StatelessWidget {
   final Widget child;
   final List<Widget>? actions;
 
+  /// Pins [actions] below the scrollable body instead of letting them scroll
+  /// away with the content. Callers with tall bodies at small viewports or
+  /// large text scales opt in so the primary action row stays reachable.
+  /// Defaults to the historical scrolling chrome for every existing caller.
+  final bool pinActions;
+
   const AetherSheet({
     super.key,
     required this.title,
     required this.child,
     this.actions,
+    this.pinActions = false,
   });
 
   @override
@@ -1414,53 +1421,94 @@ class AetherSheet extends StatelessWidget {
               ),
               padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
               child: LayoutBuilder(
-                builder: (context, bodyConstraints) {
-                  return SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Center(
-                          child: Container(
-                            width: 36,
-                            height: 4,
-                            decoration: BoxDecoration(
-                              color: Aether.hairlineStrong,
-                              borderRadius: BorderRadius.circular(AetherRadius.rPill),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 14),
-                        Text(title, style: AetherType.h2),
-                        const SizedBox(height: 16),
-                        // Keep list/Expanded-based bodies bounded, while
-                        // allowing the title and actions to scroll when large
-                        // text or the keyboard leaves too little room.
-                        ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxHeight: bodyConstraints.maxHeight,
-                          ),
-                          child: child,
-                        ),
-                        if (actions != null && actions!.isNotEmpty) ...[
-                          const SizedBox(height: 16),
-                          OverflowBar(
-                            alignment: MainAxisAlignment.end,
-                            overflowAlignment: OverflowBarAlignment.end,
-                            spacing: 8,
-                            overflowSpacing: 8,
-                            children: actions!,
-                          ),
-                        ],
-                      ],
-                    ),
-                  );
-                },
+                builder: (context, bodyConstraints) => pinActions
+                    ? _pinnedBody(bodyConstraints)
+                    : _scrollingBody(bodyConstraints),
               ),
             ),
           ),
         );
       },
+    );
+  }
+
+  Widget _dragHandle() => Center(
+    child: Container(
+      width: 36,
+      height: 4,
+      decoration: BoxDecoration(
+        color: Aether.hairlineStrong,
+        borderRadius: BorderRadius.circular(AetherRadius.rPill),
+      ),
+    ),
+  );
+
+  Widget _actionsRow() => OverflowBar(
+    alignment: MainAxisAlignment.end,
+    overflowAlignment: OverflowBarAlignment.end,
+    spacing: 8,
+    overflowSpacing: 8,
+    children: actions!,
+  );
+
+  Widget _scrollingBody(BoxConstraints bodyConstraints) {
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _dragHandle(),
+          const SizedBox(height: 14),
+          Text(title, style: AetherType.h2),
+          const SizedBox(height: 16),
+          // Keep list/Expanded-based bodies bounded, while
+          // allowing the title and actions to scroll when large
+          // text or the keyboard leaves too little room.
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: bodyConstraints.maxHeight,
+            ),
+            child: child,
+          ),
+          if (actions != null && actions!.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _actionsRow(),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _pinnedBody(BoxConstraints bodyConstraints) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Flexible(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _dragHandle(),
+                const SizedBox(height: 14),
+                Text(title, style: AetherType.h2),
+                const SizedBox(height: 16),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: bodyConstraints.maxHeight,
+                  ),
+                  child: child,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (actions != null && actions!.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          _actionsRow(),
+        ],
+      ],
     );
   }
 }

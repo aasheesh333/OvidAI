@@ -311,6 +311,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                                   Text(detail, style: AetherType.bodyMuted.copyWith(fontSize: 12)),
                                 ],
                                 Semantics(
+                                  container: true,
                                   label: _accessibilityLabel(e),
                                   button: true,
                                   child: TextButton(
