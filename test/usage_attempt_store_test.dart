@@ -214,4 +214,56 @@ void main() {
     expect(data['attempts'][0]['outcome'], 'pending');
     expect(data['revision'], 1);
   });
+
+  test('terminal pruning leaves durable tombstones that reject replay', () async {
+    final store = await UsageAttemptStore.open(accountRoot: root, terminalHistoryLimit: 0);
+    await store.upsert(attempt('pruned'));
+    expect(store.snapshot, isEmpty);
+    expect(await store.upsert(attempt('pruned', revision: 2)), isFalse);
+    expect(store.revision, 1);
+    final reopened = await UsageAttemptStore.open(accountRoot: root, terminalHistoryLimit: 0);
+    expect(await reopened.upsert(attempt('pruned', revision: 99)), isFalse);
+    expect(reopened.revision, 1);
+  });
+
+  test('journal input is capped before whole-file allocation', () async {
+    final file = File('${root.path}/usage_attempts.json');
+    await file.writeAsString('x' * 1000);
+    await expectLater(UsageAttemptStore.open(accountRoot: root, maxJournalBytes: 10),
+        throwsA(isA<FormatException>()));
+  });
+
+  test('legacy migration runs once, preserves equal duplicates, and marks provenance', () async {
+    final store = await UsageAttemptStore.open(accountRoot: root);
+    final first = attempt('legacy-1', tokens: 7);
+    final second = attempt('legacy-2', tokens: 7);
+    expect(await store.migrateLegacy(
+      marker: 'state-v1', records: [first, second],
+    ), 2);
+    expect(store.snapshot.length, 2);
+    expect(store.snapshot.map((record) => record.inputTokens!.provenance),
+        everyElement(UsageProvenance.legacyUnspecified));
+    expect(await store.migrateLegacy(marker: 'state-v1', records: [attempt('other')]), 0);
+    final reopened = await UsageAttemptStore.open(accountRoot: root);
+    expect(reopened.snapshot.map((record) => record.attemptId), ['legacy-1', 'legacy-2']);
+    expect(reopened.migrationMarkers, contains('state-v1'));
+  });
+
+  test('owner fence rejects stale account callbacks before persistence', () async {
+    var current = true;
+    final store = await UsageAttemptStore.open(accountRoot: root,
+        ownerFence: () => current);
+    current = false;
+    await expectLater(store.upsert(attempt('stale')), throwsStateError);
+    expect(store.snapshot, isEmpty);
+    expect(store.revision, 0);
+  });
+
+  test('directory sync hook is invoked after atomic rename', () async {
+    var synced = 0;
+    final store = await UsageAttemptStore.open(accountRoot: root,
+        syncDirectory: (_) async { synced++; });
+    await store.upsert(attempt('a'));
+    expect(synced, 1);
+  });
 }
