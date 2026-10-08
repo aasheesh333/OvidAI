@@ -98,5 +98,17 @@ void main() {
 
     expect(find.text('Existing timeline'), findsOneWidget);
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
+
+    // The reload read starts in the fake-clock zone; let its real file/isolate
+    // IO finish so the shared ledger teardown can close the sink instead of
+    // blocking forever on the never-completing read future.
+    await tester.runAsync(() async {
+      final deadline = DateTime.now().add(const Duration(seconds: 30));
+      while (find.byType(LinearProgressIndicator).evaluate().isNotEmpty &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+    });
   });
 }

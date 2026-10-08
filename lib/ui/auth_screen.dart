@@ -100,73 +100,13 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   Future<void> _editName(FirebaseService fb) async {
-    final ctrl = TextEditingController(text: fb.displayName ?? '');
-    String? error;
-    bool busy = false;
     final name = await showDialog<String>(
       context: context,
-      builder: (d) => StatefulBuilder(
-        builder: (d, update) {
-          Future<void> save() async {
-            final value = ctrl.text.trim();
-            if (value.isEmpty) {
-              update(() => error = 'Enter a name.');
-              return;
-            }
-            update(() {
-              busy = true;
-              error = null;
-            });
-            final saveError = await fb.updateDisplayName(value);
-            if (!d.mounted) return;
-            if (saveError != null) {
-              update(() {
-                busy = false;
-                error = saveError;
-              });
-              return;
-            }
-            Navigator.pop(d, value);
-          }
-
-          return AlertDialog(
-            backgroundColor: Aether.surface,
-            title: const Text('Edit name', style: TextStyle(fontSize: 16)),
-            content: TextField(
-              controller: ctrl,
-              autofocus: true,
-              enabled: !busy,
-              textCapitalization: TextCapitalization.words,
-              decoration: InputDecoration(
-                hintText: 'Your name',
-                errorText: error,
-              ),
-              onSubmitted: (_) => save(),
-            ),
-            actions: [
-              TextButton(
-                onPressed: busy ? null : () => Navigator.pop(d),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: busy ? null : save,
-                child: busy
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Save'),
-              ),
-            ],
-          );
-        },
+      builder: (_) => _EditNameDialog(
+        initialName: fb.displayName ?? '',
+        save: fb.updateDisplayName,
       ),
     );
-    // Defer disposal until after the dialog's reverse transition completes.
-    // The TextField in the dialog is rebuilt during pop animation and
-    // disposing synchronously causes "used after being disposed" assertions.
-    WidgetsBinding.instance.addPostFrameCallback((_) => ctrl.dispose());
     if (name == null || name.isEmpty) return;
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -478,6 +418,92 @@ class _AuthScreenState extends State<AuthScreen> {
             social: (id) => fb.authenticateSocial(id, AuthIntent.signIn),
             phone: () => fb.createPhoneFlow(AuthIntent.signIn),
           ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Owns the edit-name [TextEditingController] for the dialog route's lifetime.
+///
+/// The controller is disposed by [State.dispose], which runs only after the
+/// dialog finishes its reverse transition. Disposing it from the caller on a
+/// single post-frame callback raced that animation and triggered
+/// "used after being disposed" assertions while the dialog was still built.
+class _EditNameDialog extends StatefulWidget {
+  const _EditNameDialog({required this.initialName, required this.save});
+  final String initialName;
+  final Future<String?> Function(String name) save;
+
+  @override
+  State<_EditNameDialog> createState() => _EditNameDialogState();
+}
+
+class _EditNameDialogState extends State<_EditNameDialog> {
+  late final TextEditingController _ctrl = TextEditingController(
+    text: widget.initialName,
+  );
+  String? _error;
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final value = _ctrl.text.trim();
+    if (value.isEmpty) {
+      setState(() => _error = 'Enter a name.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final saveError = await widget.save(value);
+    if (!mounted) return;
+    if (saveError != null) {
+      setState(() {
+        _busy = false;
+        _error = saveError;
+      });
+      return;
+    }
+    Navigator.pop(context, value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Aether.surface,
+      title: const Text('Edit name', style: TextStyle(fontSize: 16)),
+      content: TextField(
+        controller: _ctrl,
+        autofocus: true,
+        enabled: !_busy,
+        textCapitalization: TextCapitalization.words,
+        decoration: InputDecoration(
+          hintText: 'Your name',
+          errorText: _error,
+        ),
+        onSubmitted: (_) => _save(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _busy ? null : _save,
+          child: _busy
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Save'),
         ),
       ],
     );

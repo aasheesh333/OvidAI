@@ -93,6 +93,20 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
   IconData _eventIcon(Map<String, dynamic> e) =>
       _isFailed(e) ? Icons.error_outline : _iconFor(e['kind'] as String?);
 
+  /// Outcome-accurate label for terminal tool/subagent events, or null for
+  /// event kinds that carry no outcome. Rendered next to the `#seq · title`
+  /// so success/failure is explicit, not merely implied by the icon.
+  String? _outcomeLabel(Map<String, dynamic> e) {
+    final ok = e['ok'] == true;
+    return switch (e['kind']) {
+      'tool_end' =>
+        'Tool ${ok ? 'succeeded' : 'failed'}: ${e['tool'] ?? '?'}',
+      'subagent_end' =>
+        'Subagent ${ok ? 'succeeded' : 'failed'}: ${e['agent'] ?? '?'}',
+      _ => null,
+    };
+  }
+
   Color _colorFor(String? kind, {bool failed = false}) {
     if (failed) return Aether.danger;
     return switch (kind) {
@@ -113,10 +127,8 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
       'turn_start' => 'Turn start (turn ${e['turn'] ?? '?'})',
       'turn_end' => 'Turn end',
       'tool_start' => 'Tool: ${e['tool'] ?? '?'}',
-      'tool_end' =>
-        'Tool ${e['ok'] == true ? 'succeeded' : 'failed'}: ${e['tool'] ?? '?'}',
-      'subagent_end' =>
-        'Subagent ${e['ok'] == true ? 'succeeded' : 'failed'}: ${e['agent'] ?? '?'}',
+      'tool_end' => 'Tool done: ${e['tool'] ?? '?'}',
+      'subagent_end' => 'Subagent done: ${e['agent'] ?? '?'}',
       'checkpoint' => 'Checkpoint (${e['at'] ?? '?'})',
       'note' => 'Note',
       _ => kind,
@@ -148,9 +160,9 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
       case 'tool_end':
         final ms = (e['ms'] as num?)?.toInt() ?? 0;
         final error = e['error'];
-        return '$title. ${ms}ms.${error != null ? ' Error: $error' : ''}';
+        return '${_outcomeLabel(e)!}. ${ms}ms.${error != null ? ' Error: $error' : ''}';
       case 'subagent_end':
-        return '$title.${e['error'] != null ? ' Error: ${e['error']}' : ''}';
+        return '${_outcomeLabel(e)!}.${e['error'] != null ? ' Error: ${e['error']}' : ''}';
       default:
         final detail = _detailFor(e);
         return detail.isEmpty ? title : '$title. ${detail.replaceAll(' · ', '. ')}';
@@ -207,6 +219,14 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    Text(
+                      '${p.turns} turns · ${p.steps} tool calls · '
+                      'wall ${formatCompactDuration(Duration(milliseconds: p.wallMs))} · '
+                      'llm ${formatCompactDuration(Duration(milliseconds: p.llmMs))} · '
+                      'tools ${formatCompactDuration(Duration(milliseconds: p.toolMs))}',
+                      style: AetherType.bodyMuted.copyWith(fontSize: 12),
+                    ),
+                    const SizedBox(height: AetherSpacing.space3),
                     _stats(p),
                     if (p.toolCounts.isNotEmpty) ...[
                       const SizedBox(height: AetherSpacing.space3),
@@ -257,6 +277,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                   final detail = _detailFor(e);
                   final kind = e['kind'] as String?;
                   final color = _colorFor(kind, failed: _isFailed(e));
+                  final outcome = _outcomeLabel(e);
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 8),
                     child: AetherCard(
@@ -274,6 +295,17 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                                 Text('${e['t'] ?? ''}', style: AetherType.mono.copyWith(fontSize: 11, color: Aether.textFaint)),
                                 const SizedBox(height: 2),
                                 Text('#${e['seq'] ?? i - 1} · ${_titleFor(e)}', style: AetherType.title.copyWith(fontSize: 13)),
+                                if (outcome != null) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    outcome,
+                                    style: AetherType.caption.copyWith(
+                                      color: _isFailed(e)
+                                          ? Aether.danger
+                                          : Aether.successLight,
+                                    ),
+                                  ),
+                                ],
                                 if (detail.isNotEmpty) ...[
                                   const SizedBox(height: 4),
                                   Text(detail, style: AetherType.bodyMuted.copyWith(fontSize: 12)),

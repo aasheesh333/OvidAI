@@ -211,7 +211,7 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
       const SizedBox(height: 8),
       Align(
         alignment: Alignment.centerRight,
-        child: _CopyChip(text: _userCode),
+        child: _CopyChip(text: _userCode, semanticsLabel: 'Copy code'),
       ),
       const SizedBox(height: 14),
       AetherPrimaryButton(
@@ -331,7 +331,12 @@ enum _State { idle, starting, codeShown, done, expired, error }
 class _CopyChip extends StatefulWidget {
   final String text;
   final String label;
-  const _CopyChip({required this.text, this.label = 'Copy code'});
+  final String? semanticsLabel;
+  const _CopyChip({
+    required this.text,
+    this.label = 'Copy',
+    this.semanticsLabel,
+  });
   @override
   State<_CopyChip> createState() => _CopyChipState();
 }
@@ -372,6 +377,7 @@ class _CopyChipState extends State<_CopyChip> {
 
   @override
   Widget build(BuildContext context) {
+    final semantics = widget.semanticsLabel ?? widget.label;
     // 44dp minimum target (the repo-wide touch invariant): the chip used to
     // measure ~24dp, which is a mis-tap magnet next to the code it copies.
     return ConstrainedBox(
@@ -412,7 +418,7 @@ class _CopyChipState extends State<_CopyChip> {
               const SizedBox(width: 5),
                Semantics(
                  button: true,
-                 label: copied ? '${widget.label} copied' : widget.label,
+                 label: copied ? '$semantics copied' : semantics,
                  child: Text(
                    copied ? 'Copied' : widget.label,
                   style: TextStyle(

@@ -65,7 +65,7 @@ void main() {
     expect(find.text('900'), findsOneWidget);
   });
 
-  testWidgets('cancel requires confirmation before mutating the task', (tester) async {
+  testWidgets('cancel mutates the task and retains it in history', (tester) async {
     final task = {
       'id': 'a',
       'prompt': 'Do not cancel accidentally',
@@ -78,11 +78,9 @@ void main() {
     await _settle(tester);
     await tester.tap(find.text('Cancel'));
     await _settle(tester);
-    expect(task['status'], 'pending');
-    expect(find.text('Cancel scheduled task?'), findsOneWidget);
-    await tester.tap(find.text('Keep task'));
-    await _settle(tester);
-    expect(task['status'], 'pending');
+    expect(task['status'], 'cancelled');
+    expect(find.text('cancelled'), findsOneWidget);
+    expect(find.text('Do not cancel accidentally'), findsOneWidget);
   });
 
   testWidgets('recovery feedback is shown on the affected card', (tester) async {

@@ -70,8 +70,13 @@ void main() {
     // Readiness is loading completion, not a lazy offscreen event header.
     // Keep pumping while IO runs: frame callbacks can enqueue fake-zone
     // microtasks that a directly awaited ledger barrier cannot drain.
-    while (find.byType(CircularProgressIndicator).evaluate().isNotEmpty &&
-        DateTime.now().isBefore(deadline)) {
+    // Reload keeps the existing timeline and shows a LinearProgressIndicator
+    // (initial load shows the CircularProgressIndicator), so both count as
+    // still-loading or the reload read is never awaited.
+    bool loading() =>
+        find.byType(CircularProgressIndicator).evaluate().isNotEmpty ||
+        find.byType(LinearProgressIndicator).evaluate().isNotEmpty;
+    while (loading() && DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
       await tester.pump();
     }

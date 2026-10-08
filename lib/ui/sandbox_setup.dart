@@ -399,7 +399,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  'Step ${idx + 1} of ${_phaseNames.length} · ${verifying ? 'Verification' : 'Setup'}',
+                  'Step ${idx + 1} of ${_phaseNames.length}',
                   style: AetherType.caption,
                 ),
                 const SizedBox(height: 8),
@@ -415,15 +415,19 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    Text(
-                      '${(_overall * 100).toStringAsFixed(1)}% ${_verified ? 'verified' : 'verification'}',
-                      style: const TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w700,
-                        color: Aether.accent,
+                    Expanded(
+                      child: Text(
+                        '${(_overall * 100).toStringAsFixed(1)}%',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: Aether.accent,
+                        ),
                       ),
                     ),
-                    const Spacer(),
+                    const SizedBox(width: 8),
                     Text(_elapsedLabel, style: AetherType.caption),
                   ],
                 ),
@@ -687,7 +691,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     ),
                     _SetupBadge(
                       label: _partial || _setup.coreOnly
-                          ? 'RUNTIMES NOT VERIFIED'
+                          ? 'RUNTIMES INCOMPLETE'
                           : 'RUNTIMES VERIFIED',
                       color: Aether.textMuted,
                       filled: false,

@@ -193,7 +193,7 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
                    Expanded(
                      child: Text(
                        record.receipt?.charged == null
-                           ? 'Charge not confirmed'
+                           ? 'Charge: not confirmed'
                            : 'Exact charge: ${record.receipt!.charged}',
                        style: AetherType.body.copyWith(fontFamily: Aether.mono),
                      ),

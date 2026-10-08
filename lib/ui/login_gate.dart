@@ -310,31 +310,13 @@ class _UnavailableScreen extends StatelessWidget {
 // failed.
 // ---------------------------------------------------------------------------
 
-class _AccountNotReadyScreen extends StatefulWidget {
+class _AccountNotReadyScreen extends StatelessWidget {
   const _AccountNotReadyScreen({required this.service});
   final FirebaseService service;
 
   @override
-  State<_AccountNotReadyScreen> createState() => _AccountNotReadyScreenState();
-}
-
-class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
-  bool _retrying = false;
-
-  Future<void> _retry() async {
-    if (_retrying) return;
-    setState(() => _retrying = true);
-    try {
-      await widget.service.retryAccountLogin();
-    } finally {
-      if (mounted) setState(() => _retrying = false);
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final error = widget.service.accountError;
-    final checking = error == null && !_retrying;
+    final error = service.accountError;
     return Scaffold(
       backgroundColor: Aether.bg,
       body: SafeArea(
@@ -350,30 +332,23 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
                   children: [
                     const _GateWordmark(),
                     const SizedBox(height: AetherSpacing.space5),
-                     Semantics(
-                       header: true,
-                       liveRegion: true,
-                       child: Text(
-                         checking || _retrying
-                             ? 'Confirming your account'
-                             : 'Account check needs attention',
-                         style: AetherType.h2,
-                       ),
+                    Semantics(
+                      header: true,
+                      liveRegion: true,
+                      child: Text(
+                        'Confirming your account',
+                        style: AetherType.h2,
+                      ),
                     ),
                     const SizedBox(height: AetherSpacing.space3),
                     Text(
-                        _retrying
-                            ? 'Retrying the account check. Please wait.'
-                            : error == null
-                            ? 'Checking your account with the Ovid service. '
-                                'This usually takes a moment.'
-                           : 'Ovid could not confirm your account right now. '
-                               'Retry the account check or sign out and use '
-                               'another sign-in method.',
+                      error ??
+                          'Checking your account with the Ovid service. '
+                              'This usually takes a moment.',
                       style: AetherType.bodyMuted,
                     ),
                     const SizedBox(height: AetherSpacing.space5),
-                    if (checking)
+                    if (error == null)
                       Center(
                         child: SizedBox(
                           width: 24,
@@ -386,21 +361,18 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
                             ),
                           ),
                         ),
+                      )
+                    else ...[
+                      AetherPrimaryButton(
+                        label: 'Retry',
+                        onPressed: service.retryAccountLogin,
                       ),
-                    AetherPrimaryButton(
-                      label: checking
-                          ? 'Checking…'
-                          : _retrying
-                          ? 'Retrying…'
-                          : 'Retry',
-                      loading: checking || _retrying,
-                      onPressed: checking || _retrying ? null : _retry,
-                    ),
-                    const SizedBox(height: AetherSpacing.space2),
-                    AetherGhostButton(
-                      label: 'Sign out',
-                      onPressed: widget.service.signOut,
-                    ),
+                      const SizedBox(height: AetherSpacing.space2),
+                      AetherGhostButton(
+                        label: 'Sign out',
+                        onPressed: service.signOut,
+                      ),
+                    ],
                   ],
                 ),
               ),

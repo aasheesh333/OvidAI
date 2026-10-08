@@ -4396,6 +4396,7 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           find.byType(TextField).first,
           '/permission control confirm',
         );
+        await tester.pump();
         await tester.tap(find.byTooltip('Send'));
         await tester.pumpAndSettle();
         expect(find.text('Enable Control'), findsOneWidget);
@@ -8470,6 +8471,7 @@ block</pre>
 
       // Run the command through the real composer, not the service direct.
       await tester.enterText(find.byType(TextField).first, '/preset');
+      await tester.pump();
       await tester.tap(find.byTooltip('Send'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
