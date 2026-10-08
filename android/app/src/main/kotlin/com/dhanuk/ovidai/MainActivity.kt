@@ -34,6 +34,7 @@ import java.net.URLConnection
 import java.util.concurrent.Executors
 import java.util.zip.ZipFile
 import com.android.installreferrer.api.InstallReferrerClient
+import com.android.installreferrer.api.InstallReferrerStateListener
 
 internal data class InstalledBootstrap(
     val bytes: ByteArray? = null,
@@ -633,7 +634,7 @@ class MainActivity : FlutterActivity() {
                             result.success(value)
                         }
                         try {
-                            referrer.startConnection(object : InstallReferrerClient.InstallReferrerStateListener {
+                            referrer.startConnection(object : InstallReferrerStateListener {
                                 override fun onInstallReferrerSetupFinished(responseCode: Int) {
                                     if (responseCode == InstallReferrerClient.InstallReferrerResponse.OK) {
                                         try {
