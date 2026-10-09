@@ -199,7 +199,12 @@ void main() {
         requests: 10000,
         tokensIn: 1234567,
         tokensOut: 7654321,
-        models: [('custom-model-with-a-long-name', 10000, 8888888)],
+        models: [
+          UsageModelUsage('custom-model-with-a-long-name')
+            ..requests = 10000
+            ..measuredTotal = 8888888
+            ..measuredTotalKnown = true,
+        ],
         costUsd: 99,
         hasPricedModel: true,
       );

@@ -14,6 +14,7 @@ import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
+import 'package:ovid_ai/core/secure_store.dart';
 import 'package:ovid_ai/core/state.dart';
 
 /// Claude Code plugin/MCP parity: wrapperless `.mcp.json`, OAuth config
@@ -28,6 +29,8 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     AppState.createForTest();
     HookService.I.resetForTest();
+    AppState.mcpOAuthWriteOverrideForTest = null;
+    AppState.mcpCustomMcpPersistenceOverrideForTest = null;
     // OAuth token/config storage never touches the real secure storage.
     McpService.oauthSecureStorageDisabledForTest = true;
   });
@@ -39,6 +42,8 @@ void main() {
     McpService.I.httpClientForTest = null;
     McpService.rpcTimeoutSecondsForTest = null;
     McpService.oauthSecureStorageDisabledForTest = false;
+    AppState.mcpOAuthWriteOverrideForTest = null;
+    AppState.mcpCustomMcpPersistenceOverrideForTest = null;
     HookService.I.resetForTest();
     AppState.resetTestInstance();
   });
@@ -78,12 +83,14 @@ void main() {
 
   group('wrapperless .mcp.json (item 2)', () {
     test('top-level server map without an mcpServers wrapper parses', () {
-      final parsed = parseMcpConfig(jsonEncode({
-        'my-server': {
-          'command': 'npx',
-          'args': ['-y', 'probe'],
-        },
-      }));
+      final parsed = parseMcpConfig(
+        jsonEncode({
+          'my-server': {
+            'command': 'npx',
+            'args': ['-y', 'probe'],
+          },
+        }),
+      );
       expect(parsed, hasLength(1));
       expect(parsed.first.name, 'my-server');
       expect(parsed.first.command, 'npx');
@@ -91,34 +98,43 @@ void main() {
       expect(parsed.first.type, 'stdio');
     });
 
-    test('known non-server keys (inputs) are skipped, not parsed as servers',
-        () {
-      final parsed = parseMcpConfig(jsonEncode({
-        'inputs': [
-          {'id': 'token', 'description': 'a token'},
-        ],
-        'real-server': {'command': 'node', 'args': ['server.js']},
-      }));
-      expect(parsed.map((s) => s.name), ['real-server']);
-    });
+    test(
+      'known non-server keys (inputs) are skipped, not parsed as servers',
+      () {
+        final parsed = parseMcpConfig(
+          jsonEncode({
+            'inputs': [
+              {'id': 'token', 'description': 'a token'},
+            ],
+            'real-server': {
+              'command': 'node',
+              'args': ['server.js'],
+            },
+          }),
+        );
+        expect(parsed.map((s) => s.name), ['real-server']);
+      },
+    );
   });
 
   group('OAuth config parsing (item 2)', () {
     test('oauth block parses and is not treated as an unknown key', () {
-      final parsed = parseMcpConfig(jsonEncode({
-        'mcpServers': {
-          'oauth-server': {
-            'type': 'http',
-            'url': 'https://mcp.example.com/mcp',
-            'oauth': {
-              'authorization_url': 'https://auth.example.com/authorize',
-              'token_url': 'https://auth.example.com/token',
-              'client_id': 'ovid-client',
-              'scopes': ['read', 'write'],
+      final parsed = parseMcpConfig(
+        jsonEncode({
+          'mcpServers': {
+            'oauth-server': {
+              'type': 'http',
+              'url': 'https://mcp.example.com/mcp',
+              'oauth': {
+                'authorization_url': 'https://auth.example.com/authorize',
+                'token_url': 'https://auth.example.com/token',
+                'client_id': 'ovid-client',
+                'scopes': ['read', 'write'],
+              },
             },
           },
-        },
-      }));
+        }),
+      );
       expect(parsed, hasLength(1));
       final oauth = parsed.first.oauth;
       expect(oauth, isNotNull);
@@ -132,13 +148,15 @@ void main() {
 
   group('PreToolUse updatedInput (item 5)', () {
     test('hookSpecificOutput.updatedInput is extracted and allows', () async {
-      HookService.I.stdinExecutorForTest = (cmd, env, stdinJson) async =>
-          (0, jsonEncode({
-            'hookSpecificOutput': {
-              'updatedInput': {'command': 'ls -la'},
-              'permissionDecision': 'allow',
-            },
-          }));
+      HookService.I.stdinExecutorForTest = (cmd, env, stdinJson) async => (
+        0,
+        jsonEncode({
+          'hookSpecificOutput': {
+            'updatedInput': {'command': 'ls -la'},
+            'permissionDecision': 'allow',
+          },
+        }),
+      );
       registerHooks([commandHook(event: 'pre_tool', payload: 'rewrite')]);
 
       final gate = await HookService.I.fireGate(
@@ -157,10 +175,7 @@ void main() {
 
     test('permissionDecision "ask" surfaces as HookDecision.ask', () async {
       HookService.I.stdinExecutorForTest = (cmd, env, stdinJson) async =>
-          (0, jsonEncode({
-            'decision': 'ask',
-            'reason': 'destructive command',
-          }));
+          (0, jsonEncode({'decision': 'ask', 'reason': 'destructive command'}));
       registerHooks([commandHook(event: 'pre_tool', payload: 'asker')]);
 
       final gate = await HookService.I.fireGate(
@@ -186,7 +201,10 @@ void main() {
       final gate = await HookService.I.fireGate(
         'pre_tool',
         's1',
-        payload: {'tool': 'Bash', 'tool_input': {'command': 'ls'}},
+        payload: {
+          'tool': 'Bash',
+          'tool_input': {'command': 'ls'},
+        },
       );
 
       expect(gate.decision, HookDecision.deny);
@@ -266,58 +284,60 @@ void main() {
   });
 
   group('output contract: continue:false halting (item 9)', () {
-    test('continue:false stops later hooks and marks the result halted',
-        () async {
-      final ran = <String>[];
-      HookService.I.stdinExecutorForTest = (cmd, env, stdinJson) async {
-        ran.add(cmd);
-        if (cmd == 'first') {
-          return (0, jsonEncode({
-            'continue': false,
-            'systemMessage': 'stop here',
-          }));
-        }
-        return (0, 'second output');
-      };
-      registerHooks([
-        commandHook(event: 'session_start', payload: 'first', ordinal: 0),
-        commandHook(event: 'session_start', payload: 'second', ordinal: 1),
-      ]);
+    test(
+      'continue:false stops later hooks and marks the result halted',
+      () async {
+        final ran = <String>[];
+        HookService.I.stdinExecutorForTest = (cmd, env, stdinJson) async {
+          ran.add(cmd);
+          if (cmd == 'first') {
+            return (
+              0,
+              jsonEncode({'continue': false, 'systemMessage': 'stop here'}),
+            );
+          }
+          return (0, 'second output');
+        };
+        registerHooks([
+          commandHook(event: 'session_start', payload: 'first', ordinal: 0),
+          commandHook(event: 'session_start', payload: 'second', ordinal: 1),
+        ]);
 
-      final result = await HookService.I.fireDetailed('session_start', 's1');
+        final result = await HookService.I.fireDetailed('session_start', 's1');
 
-      expect(ran, ['first'], reason: 'second hook must not run');
-      expect(result.halted, isTrue);
-      expect(result.systemMessages, ['stop here']);
-    });
+        expect(ran, ['first'], reason: 'second hook must not run');
+        expect(result.halted, isTrue);
+        expect(result.systemMessages, ['stop here']);
+      },
+    );
 
-    test('suppressOutput:true keeps the hook output out of the result',
-        () async {
-      HookService.I.stdinExecutorForTest = (cmd, env, stdinJson) async =>
-          (0, jsonEncode({'suppressOutput': true}));
-      registerHooks([commandHook(event: 'session_start', payload: 'quiet')]);
+    test(
+      'suppressOutput:true keeps the hook output out of the result',
+      () async {
+        HookService.I.stdinExecutorForTest = (cmd, env, stdinJson) async =>
+            (0, jsonEncode({'suppressOutput': true}));
+        registerHooks([commandHook(event: 'session_start', payload: 'quiet')]);
 
-      final result = await HookService.I.fireDetailed('session_start', 's1');
+        final result = await HookService.I.fireDetailed('session_start', 's1');
 
-      expect(result.output, isEmpty);
-      expect(result.halted, isFalse);
-    });
+        expect(result.output, isEmpty);
+        expect(result.halted, isFalse);
+      },
+    );
   });
 
   group('an unrunnable stdio row is rejected with a reason', () {
-    McpServer stdio({
-      String command = 'npx',
-      List<String> args = const [],
-    }) => McpServer(
-      name: 'dead-row',
-      author: 't',
-      description: 'stdio probe',
-      category: 'Custom',
-      command: command,
-      args: args,
-      custom: true,
-      transport: 'stdio',
-    );
+    McpServer stdio({String command = 'npx', List<String> args = const []}) =>
+        McpServer(
+          name: 'dead-row',
+          author: 't',
+          description: 'stdio probe',
+          category: 'Custom',
+          command: command,
+          args: args,
+          custom: true,
+          transport: 'stdio',
+        );
 
     test('a package launcher with no package cannot run', () {
       // Custom rows that declare no transport DEFAULT to 'stdio', so a
@@ -409,8 +429,10 @@ void main() {
     test('full handshake + tool call over legacy SSE', () async {
       final events = StreamController<String>();
       addTearDown(() => events.close());
-      McpService.I.httpClientForTest =
-          MockClient.streaming((request, bodyStream) async {
+      McpService.I.httpClientForTest = MockClient.streaming((
+        request,
+        bodyStream,
+      ) async {
         if (request.method == 'GET') {
           // The endpoint event arrives split across chunks — the channel
           // must reassemble it from its buffer.
@@ -470,12 +492,16 @@ void main() {
       expect(status, contains('connected (sse)'));
       expect(McpService.I.isConnected(server.canonicalId), isTrue);
 
-      final out = await McpService.I.callTool(
-        server.canonicalId,
-        'ping',
-        {},
-      );
+      final out = await McpService.I.callTool(server.canonicalId, 'ping', {});
       expect(out, contains('pong'));
+
+      await events.close();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(server.connected, isFalse);
+      expect(
+        AppState.I.serviceStatusForTest('mcp:${server.canonicalId}')?.health,
+        ServiceHealth.failed,
+      );
 
       await McpService.I.disconnect(server.canonicalId);
       expect(McpService.I.isConnected(server.canonicalId), isFalse);
@@ -615,9 +641,9 @@ void main() {
         } catch (_) {}
       });
       Directory('${root.path}/.claude-plugin').createSync(recursive: true);
-      File('${root.path}/.claude-plugin/plugin.json').writeAsStringSync(
-        jsonEncode({'name': 'sse-plugin', 'author': 'acme'}),
-      );
+      File(
+        '${root.path}/.claude-plugin/plugin.json',
+      ).writeAsStringSync(jsonEncode({'name': 'sse-plugin', 'author': 'acme'}));
       File('${root.path}/.mcp.json').writeAsStringSync(
         jsonEncode({
           'mcpServers': {
@@ -643,5 +669,1055 @@ void main() {
         reason: 'no required-severity SSE rejection issue',
       );
     });
+
+    test(
+      'normalized MCP declarations retain mount metadata without secrets',
+      () async {
+        final root = Directory.systemTemp.createTempSync('claude-metadata-');
+        addTearDown(() {
+          try {
+            root.deleteSync(recursive: true);
+          } catch (_) {}
+        });
+        Directory('${root.path}/.claude-plugin').createSync(recursive: true);
+        File('${root.path}/.claude-plugin/plugin.json').writeAsStringSync(
+          jsonEncode({'name': 'metadata-probe', 'author': 'acme'}),
+        );
+        File('${root.path}/.mcp.json').writeAsStringSync(
+          jsonEncode({
+            'mcpServers': {
+              'remote': {
+                'type': 'streamable-http',
+                'url': 'https://mcp.example.com/api',
+                'startup_timeout_s': 17,
+                'env': {'API_KEY': 'secret-value'},
+                'headers': {'Authorization': 'Bearer secret-value'},
+                'oauth': {
+                  'client_secret': 'oauth-secret-value',
+                  'access_token': 'oauth-access-value',
+                  'authorization_url': 'https://auth.example.com/authorize',
+                  'token_url': 'https://auth.example.com/token',
+                  'client_id': 'public-client',
+                  'scopes': ['read'],
+                },
+              },
+            },
+          }),
+        );
+
+        final manifest = await const ClaudePluginAdapter().inspect(root);
+        final server = manifest.mcpServers.single;
+
+        expect(server.transport, 'http');
+        expect(server.url, 'https://mcp.example.com/api');
+        expect(server.startupTimeoutS, 17);
+        expect(server.envNames, ['API_KEY']);
+        expect(server.headerNames, ['Authorization']);
+        expect(
+          server.oauth?.authorizationUrl,
+          'https://auth.example.com/authorize',
+        );
+        expect(server.oauth?.clientId, 'public-client');
+        expect(jsonEncode(manifest.toJson()), isNot(contains('secret-value')));
+        expect(
+          jsonEncode(manifest.toJson()),
+          isNot(contains('oauth-secret-value')),
+        );
+        expect(
+          jsonEncode(manifest.toJson()),
+          isNot(contains('oauth-access-value')),
+        );
+      },
+    );
+
+    test('file MCP declarations retain the same normalized metadata', () async {
+      final root = Directory.systemTemp.createTempSync('claude-file-metadata-');
+      addTearDown(() {
+        try {
+          root.deleteSync(recursive: true);
+        } catch (_) {}
+      });
+      Directory('${root.path}/.claude-plugin').createSync(recursive: true);
+      File('${root.path}/.claude-plugin/plugin.json').writeAsStringSync(
+        jsonEncode({
+          'name': 'file-probe',
+          'author': 'acme',
+          'mcpServers': 'servers.json',
+        }),
+      );
+      File('${root.path}/servers.json').writeAsStringSync(
+        jsonEncode({
+          'mcpServers': {
+            'stdio': {
+              'command': 'node',
+              'args': ['server.js'],
+              'cwd': 'server',
+              'startupTimeoutS': 9,
+            },
+          },
+        }),
+      );
+
+      final manifest = await const ClaudePluginAdapter().inspect(root);
+      final server = manifest.mcpServers.single;
+      expect(server.transport, 'stdio');
+      expect(server.command, 'node');
+      expect(server.args, ['server.js']);
+      expect(server.cwd, 'server');
+      expect(server.startupTimeoutS, 9);
+    });
+
+    test(
+      'mounts normalized metadata and cleans the OAuth sidecar on removal',
+      () async {
+        final app = AppState.I;
+        const pluginId = 'acme/mounted-probe';
+        const serverName = 'remote';
+        final manifest = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'mounted-probe',
+          version: '1.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/mounted-probe',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: serverName,
+              transport: 'http',
+              url: 'https://mcp.example.com/api',
+              envNames: ['API_KEY'],
+              headerNames: ['Authorization'],
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://auth.example.com/authorize',
+                tokenUrl: 'https://auth.example.com/token',
+                clientId: 'public-client',
+                scopes: ['read'],
+              ),
+              startupTimeoutS: 17,
+            ),
+          ],
+        );
+        await app.setMcpHeaders('$pluginId/$serverName', {
+          'Authorization': 'Bearer secure-value',
+        });
+
+        expect(
+          await app.mountPluginOwnedMcpServers(manifest, connect: false),
+          1,
+        );
+        final mounted = app.mcpServers.singleWhere(
+          (s) => s.canonicalId == '$pluginId/$serverName',
+        );
+        expect(mounted.transport, 'http');
+        expect(mounted.url, 'https://mcp.example.com/api');
+        expect(mounted.startupTimeoutS, 17);
+        expect(mounted.requiredEnvNames, ['API_KEY']);
+        expect(mounted.requiredHeaderNames, ['Authorization']);
+        expect(mounted.headers, {'Authorization': 'Bearer secure-value'});
+        final persisted = SharedPreferences.getInstance();
+        final persistedRows = (await persisted).getStringList(
+          'ovid_custom_mcp_servers_v1',
+        );
+        expect(persistedRows, hasLength(1));
+        expect(
+          jsonDecode(persistedRows!.single),
+          containsPair('ownerPluginId', pluginId),
+        );
+        expect(
+          jsonDecode(persistedRows.single),
+          containsPair('transport', 'http'),
+        );
+        expect(
+          jsonDecode(persistedRows.single),
+          containsPair('startupTimeoutS', 17),
+        );
+        expect(persistedRows.single, isNot(contains('secure-value')));
+        expect(
+          McpService.I.mcpOAuthConfigFor(mounted.canonicalId)?.clientId,
+          'public-client',
+        );
+
+        final updated = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'mounted-probe',
+          version: '1.1.0',
+          format: PluginFormat.claudeCode,
+          rootPath: manifest.rootPath,
+        );
+        await app.mountPluginOwnedMcpServers(updated, connect: false);
+        expect(
+          app.mcpServers.any((s) => s.canonicalId == '$pluginId/$serverName'),
+          isFalse,
+        );
+        expect(McpService.I.mcpOAuthConfigFor('$pluginId/$serverName'), isNull);
+        expect(await app.getMcpHeaders('$pluginId/$serverName'), isEmpty);
+        expect(
+          (await persisted).getStringList('ovid_custom_mcp_servers_v1'),
+          isEmpty,
+        );
+        expect(jsonEncode(manifest.toJson()), isNot(contains('secure-value')));
+      },
+    );
+
+    test(
+      'failed OAuth registration restores an existing persisted row',
+      () async {
+        final app = AppState.I;
+        const pluginId = 'acme/rollback-probe';
+        const canonicalId = '$pluginId/remote';
+        McpOAuthConfig? previous;
+        final initial = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'rollback-probe',
+          version: '1.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/rollback-probe',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'remote',
+              transport: 'http',
+              url: 'https://old.example.com/mcp',
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://old.example.com/authorize',
+                tokenUrl: 'https://old.example.com/token',
+                clientId: 'old-client',
+              ),
+            ),
+          ],
+        );
+        await app.mountPluginOwnedMcpServers(initial, connect: false);
+        previous = McpService.I.mcpOAuthConfigFor(canonicalId);
+        AppState.mcpOAuthWriteOverrideForTest = (id, config) async {
+          if (config.clientId == 'new-client') {
+            expect(
+              app.mcpServers
+                  .singleWhere((server) => server.canonicalId == canonicalId)
+                  .url,
+              'https://old.example.com/mcp',
+            );
+            final persisted = await SharedPreferences.getInstance();
+            expect(
+              persisted.getStringList('ovid_custom_mcp_servers_v1')!.single,
+              contains('old.example.com'),
+            );
+            throw StateError('secure registration failed');
+          }
+        };
+
+        final replacement = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'rollback-probe',
+          version: '2.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/rollback-probe-v2',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'remote',
+              transport: 'http',
+              url: 'https://new.example.com/mcp',
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://new.example.com/authorize',
+                tokenUrl: 'https://new.example.com/token',
+                clientId: 'new-client',
+              ),
+            ),
+          ],
+        );
+
+        await expectLater(
+          app.mountPluginOwnedMcpServers(replacement, connect: false),
+          throwsStateError,
+        );
+        final restored = app.mcpServers.singleWhere(
+          (server) => server.canonicalId == canonicalId,
+        );
+        expect(restored.url, 'https://old.example.com/mcp');
+        expect(McpService.I.mcpOAuthConfigFor(canonicalId), same(previous));
+        final prefs = await SharedPreferences.getInstance();
+        final rows = prefs.getStringList('ovid_custom_mcp_servers_v1')!;
+        expect(rows.single, contains('old.example.com'));
+        expect(rows.single, isNot(contains('new.example.com')));
+      },
+    );
+
+    test(
+      'failed OAuth registration removes a new row and its secure sidecar',
+      () async {
+        final app = AppState.I;
+        const pluginId = 'acme/new-rollback-probe';
+        const canonicalId = '$pluginId/remote';
+        McpService.oauthSecureStorageDisabledForTest = false;
+        AppState.mcpOAuthWriteOverrideForTest = (id, config) async {
+          await McpService.I.setMcpOAuthConfig(id, config);
+          throw StateError('secure registration failed after write');
+        };
+
+        final manifest = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'new-rollback-probe',
+          version: '1.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/new-rollback-probe',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'remote',
+              transport: 'http',
+              url: 'https://new.example.com/mcp',
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://new.example.com/authorize',
+                tokenUrl: 'https://new.example.com/token',
+                clientId: 'new-client',
+              ),
+            ),
+          ],
+        );
+
+        await expectLater(
+          app.mountPluginOwnedMcpServers(manifest, connect: false),
+          throwsStateError,
+        );
+        expect(
+          app.mcpServers.any((server) => server.canonicalId == canonicalId),
+          isFalse,
+        );
+        expect(McpService.I.mcpOAuthConfigFor(canonicalId), isNull);
+        final secure = await ovidSecureStorage().read(
+          key: 'ovid_mcp_oauth_cfg_$canonicalId',
+        );
+        expect(secure, isNull);
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getStringList('ovid_custom_mcp_servers_v1'), isNull);
+      },
+    );
+
+    test(
+      'a later OAuth failure restores every owned row and sidecar',
+      () async {
+        final app = AppState.I;
+        McpService.oauthSecureStorageDisabledForTest = false;
+        const pluginId = 'acme/multi-rollback-probe';
+        const firstId = '$pluginId/first';
+        const secondId = '$pluginId/second';
+        final old = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'multi-rollback-probe',
+          version: '1.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/multi-old',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'first',
+              transport: 'http',
+              url: 'https://old.example.com/first',
+              envNames: ['FIRST_KEY'],
+              headerNames: ['Authorization'],
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://old.example.com/authorize',
+                clientId: 'old-first',
+              ),
+            ),
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'second',
+              transport: 'http',
+              url: 'https://old.example.com/second',
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://old.example.com/authorize',
+                clientId: 'old-second',
+              ),
+            ),
+          ],
+        );
+        await app.setMcpEnv(firstId, {'FIRST_KEY': 'old-secret'});
+        await app.setMcpHeaders(firstId, {'Authorization': 'Bearer old'});
+        await app.mountPluginOwnedMcpServers(old, connect: false);
+        final prefs = await SharedPreferences.getInstance();
+        final before = prefs.getStringList('ovid_custom_mcp_servers_v1');
+        final oldFirst = McpService.I.mcpOAuthConfigFor(firstId);
+        final oldSecond = McpService.I.mcpOAuthConfigFor(secondId);
+
+        AppState.mcpOAuthWriteOverrideForTest = (id, config) async {
+          if (config.clientId == 'new-second') {
+            throw StateError('second registration failed');
+          }
+          await McpService.I.setMcpOAuthConfig(id, config);
+        };
+        final replacement = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'multi-rollback-probe',
+          version: '2.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/multi-new',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'first',
+              transport: 'http',
+              url: 'https://new.example.com/first',
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://new.example.com/authorize',
+                clientId: 'new-first',
+              ),
+            ),
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'second',
+              transport: 'http',
+              url: 'https://new.example.com/second',
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://new.example.com/authorize',
+                clientId: 'new-second',
+              ),
+            ),
+          ],
+        );
+        await expectLater(
+          app.mountPluginOwnedMcpServers(replacement, connect: false),
+          throwsStateError,
+        );
+        expect(
+          app.mcpServers
+              .where((s) => s.ownerPluginId == pluginId)
+              .map((s) => s.canonicalId),
+          [firstId, secondId],
+        );
+        expect(
+          app.mcpServers.firstWhere((s) => s.canonicalId == firstId).url,
+          'https://old.example.com/first',
+        );
+        expect(await app.getMcpEnv(firstId), {'FIRST_KEY': 'old-secret'});
+        expect(await app.getMcpHeaders(firstId), {
+          'Authorization': 'Bearer old',
+        });
+        expect(McpService.I.mcpOAuthConfigFor(firstId), same(oldFirst));
+        expect(McpService.I.mcpOAuthConfigFor(secondId), same(oldSecond));
+        expect(prefs.getStringList('ovid_custom_mcp_servers_v1'), before);
+        expect(
+          (await ovidSecureStorage().read(key: 'ovid_mcp_oauth_cfg_$firstId')),
+          contains('old-first'),
+        );
+        // Drop the in-memory registration and re-seed only the durable
+        // sidecar, matching a fresh McpService after process restart.
+        await McpService.I.removeMcpOAuth(firstId);
+        await ovidSecureStorage().write(
+          key: 'ovid_mcp_oauth_cfg_$firstId',
+          value: jsonEncode(oldFirst!.toJson()),
+        );
+        expect(
+          await McpService.I.mcpOAuthConfigForAsync(firstId),
+          isNotNull,
+          reason: 'restored OAuth config remains recoverable after reload',
+        );
+        expect(
+          (await McpService.I.mcpOAuthConfigForAsync(firstId))!.clientId,
+          'old-first',
+        );
+      },
+    );
+
+    test('persistence failure after a multi-row apply rolls back', () async {
+      final app = AppState.I;
+      const pluginId = 'acme/persist-rollback-probe';
+      final initial = NormalizedPluginManifest(
+        id: pluginId,
+        name: 'persist-rollback-probe',
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: '/plugins/persist-old',
+        mcpServers: [
+          PluginMcpServer(
+            pluginId: pluginId,
+            name: 'one',
+            transport: 'http',
+            url: 'https://old.example.com/one',
+            oauth: const McpOAuthConfig(
+              authorizationUrl: 'https://old.example.com/authorize',
+              clientId: 'old-one',
+            ),
+          ),
+          PluginMcpServer(
+            pluginId: pluginId,
+            name: 'two',
+            transport: 'http',
+            url: 'https://old.example.com/two',
+            oauth: const McpOAuthConfig(
+              authorizationUrl: 'https://old.example.com/authorize',
+              clientId: 'old-two',
+            ),
+          ),
+        ],
+      );
+      await app.mountPluginOwnedMcpServers(initial, connect: false);
+      final replacement = NormalizedPluginManifest(
+        id: pluginId,
+        name: 'persist-rollback-probe',
+        version: '2.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: '/plugins/persist-new',
+        mcpServers: [
+          PluginMcpServer(
+            pluginId: pluginId,
+            name: 'one',
+            transport: 'http',
+            url: 'https://new.example.com/one',
+            oauth: const McpOAuthConfig(
+              authorizationUrl: 'https://new.example.com/authorize',
+              clientId: 'new-one',
+            ),
+          ),
+          PluginMcpServer(
+            pluginId: pluginId,
+            name: 'two',
+            transport: 'http',
+            url: 'https://new.example.com/two',
+            oauth: const McpOAuthConfig(
+              authorizationUrl: 'https://new.example.com/authorize',
+              clientId: 'new-two',
+            ),
+          ),
+        ],
+      );
+      AppState.mcpCustomMcpPersistenceOverrideForTest = () async {
+        app.mcpServers
+                .singleWhere((s) => s.canonicalId == '$pluginId/one')
+                .toolTimeoutS =
+            999;
+        throw StateError('persistence failed');
+      };
+      await expectLater(
+        app.mountPluginOwnedMcpServers(replacement, connect: false),
+        throwsStateError,
+      );
+      expect(
+        app.mcpServers
+            .where((s) => s.ownerPluginId == pluginId)
+            .map((s) => s.url),
+        ['https://old.example.com/one', 'https://old.example.com/two'],
+      );
+      expect(
+        McpService.I.mcpOAuthConfigFor('$pluginId/one')!.clientId,
+        'old-one',
+      );
+      expect(
+        McpService.I.mcpOAuthConfigFor('$pluginId/two')!.clientId,
+        'old-two',
+      );
+    });
+
+    test(
+      'rollback restores tool timeout and leaves a failed reconnect disconnected',
+      () async {
+        final app = AppState.I;
+        const pluginId = 'acme/live-rollback-probe';
+        const id = '$pluginId/remote';
+        var failReconnect = false;
+        McpService.I.httpClientForTest = MockClient((request) async {
+          if (failReconnect)
+            throw const SocketException('rollback endpoint unavailable');
+          final body =
+              jsonDecode(
+                    request is http.Request
+                        ? request.body
+                        : await request.finalize().bytesToString(),
+                  )
+                  as Map<String, dynamic>;
+          final result = switch (body['method']) {
+            'initialize' => {
+              'protocolVersion': '2024-11-05',
+              'capabilities': <String, dynamic>{},
+              'serverInfo': {'name': 'rollback', 'version': '1'},
+            },
+            'tools/list' => {'tools': <dynamic>[]},
+            _ => <String, dynamic>{},
+          };
+          return http.Response(
+            jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': result}),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        });
+        final initial = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'live-rollback-probe',
+          version: '1.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/live-old',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'remote',
+              transport: 'http',
+              url: 'https://old.example.com/mcp',
+            ),
+          ],
+        );
+        PluginContributionRegistry.I.register(
+          initial,
+          activation: PluginActivation.sessionActive,
+        );
+        addTearDown(
+          () => PluginContributionRegistry.I.unregisterPlugin(pluginId),
+        );
+        await app.mountPluginOwnedMcpServers(initial, connect: false);
+        final server = app.mcpServers.singleWhere((s) => s.canonicalId == id)
+          ..toolTimeoutS = 137;
+        await McpService.I.connect(server);
+        server.connected = true;
+        expect(McpService.I.isConnected(id), isTrue);
+
+        AppState.mcpCustomMcpPersistenceOverrideForTest = () async {
+          failReconnect = true;
+          throw StateError('persistence failed');
+        };
+        final replacement = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'live-rollback-probe',
+          version: '2.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/live-new',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'remote',
+              transport: 'http',
+              url: 'https://new.example.com/mcp',
+            ),
+          ],
+        );
+
+        await expectLater(
+          app.mountPluginOwnedMcpServers(replacement),
+          throwsStateError,
+        );
+        final restored = app.mcpServers.singleWhere((s) => s.canonicalId == id);
+        expect(restored.url, 'https://old.example.com/mcp');
+        expect(restored.toolTimeoutS, 137);
+        expect(restored.connected, isFalse);
+        expect(McpService.I.isConnected(id), isFalse);
+        expect(
+          app.serviceStatusForTest('mcp:$id')?.health,
+          ServiceHealth.failed,
+        );
+      },
+    );
+
+    test('overlapping mounts cannot roll back a later transaction', () async {
+      final app = AppState.I;
+      const pluginId = 'acme/serialized-mount-probe';
+      final firstStarted = Completer<void>();
+      final releaseFirst = Completer<void>();
+      var writes = 0;
+      AppState.mcpOAuthWriteOverrideForTest = (id, config) async {
+        writes++;
+        if (writes == 1) {
+          firstStarted.complete();
+          await releaseFirst.future;
+          throw StateError('first transaction failed');
+        }
+      };
+      NormalizedPluginManifest manifest(String name, String url) =>
+          NormalizedPluginManifest(
+            id: pluginId,
+            name: 'serialized-mount-probe',
+            version: name,
+            format: PluginFormat.claudeCode,
+            rootPath: '/plugins/$name',
+            mcpServers: [
+              PluginMcpServer(
+                pluginId: pluginId,
+                name: name,
+                transport: 'http',
+                url: url,
+                oauth: McpOAuthConfig(
+                  authorizationUrl: 'https://auth.example.com/$name',
+                  clientId: name,
+                ),
+              ),
+            ],
+          );
+
+      final first = app.mountPluginOwnedMcpServers(
+        manifest('first', 'https://first.example.com'),
+        connect: false,
+      );
+      await firstStarted.future;
+      final second = app.mountPluginOwnedMcpServers(
+        manifest('second', 'https://second.example.com'),
+        connect: false,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        app.mcpServers.where((s) => s.ownerPluginId == pluginId),
+        isEmpty,
+        reason: 'the second mount waits for the first transaction mutex',
+      );
+      releaseFirst.complete();
+      await expectLater(first, throwsStateError);
+      await second;
+      expect(
+        app.mcpServers.map((s) => s.canonicalId),
+        contains('$pluginId/second'),
+      );
+    });
+
+    test(
+      'unmounting another plugin does not invalidate an in-flight mount',
+      () async {
+        final app = AppState.I;
+        const mountingPlugin = 'acme/in-flight-mount-probe';
+        const otherPlugin = 'acme/other-unmount-probe';
+        final initial = NormalizedPluginManifest(
+          id: mountingPlugin,
+          name: mountingPlugin,
+          version: '0.1.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/$mountingPlugin-old',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: mountingPlugin,
+              name: 'remote',
+              transport: 'http',
+              url: 'https://old.example.com',
+            ),
+          ],
+        );
+        await app.mountPluginOwnedMcpServers(initial, connect: false);
+        final entered = Completer<void>();
+        final release = Completer<void>();
+        AppState.mcpOAuthWriteOverrideForTest = (id, config) async {
+          entered.complete();
+          await release.future;
+          throw StateError('mount failed');
+        };
+        NormalizedPluginManifest manifest(String pluginId) =>
+            NormalizedPluginManifest(
+              id: pluginId,
+              name: pluginId,
+              version: '1.0.0',
+              format: PluginFormat.claudeCode,
+              rootPath: '/plugins/$pluginId',
+              mcpServers: [
+                PluginMcpServer(
+                  pluginId: pluginId,
+                  name: 'remote',
+                  transport: 'http',
+                  url: 'https://$pluginId.example.com',
+                  oauth: McpOAuthConfig(
+                    authorizationUrl: 'https://auth.example.com/$pluginId',
+                    clientId: pluginId,
+                  ),
+                ),
+              ],
+            );
+
+        final mounting = app.mountPluginOwnedMcpServers(
+          manifest(mountingPlugin),
+          connect: false,
+        );
+        await entered.future;
+        final unmounting = app.unmountPluginOwnedMcpServers(
+          otherPlugin,
+          uninstall: true,
+        );
+        await Future<void>.delayed(Duration.zero);
+        release.complete();
+
+        await expectLater(mounting, throwsStateError);
+        await unmounting;
+        final restored = app.mcpServers.singleWhere(
+          (s) => s.canonicalId == '$mountingPlugin/remote',
+        );
+        expect(restored.url, 'https://old.example.com');
+      },
+    );
+
+    test(
+      'connect false clears an existing row connection and status',
+      () async {
+        final app = AppState.I;
+        const pluginId = 'acme/connect-false-probe';
+        const id = '$pluginId/remote';
+        final manifest = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'connect-false-probe',
+          version: '1.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/connect-false-probe',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'remote',
+              transport: 'http',
+              url: 'https://mcp.example.com',
+            ),
+          ],
+        );
+        await app.mountPluginOwnedMcpServers(manifest, connect: false);
+        final server = app.mcpServers.singleWhere((s) => s.canonicalId == id);
+        server.connected = true;
+        app.updateServiceStatus('mcp:$id', ServiceHealth.working);
+
+        await app.mountPluginOwnedMcpServers(manifest, connect: false);
+
+        expect(server.connected, isFalse);
+        expect(app.serviceStatusForTest('mcp:$id'), isNull);
+      },
+    );
+
+    test(
+      'connect false preserves reconnect intent until explicit unmount',
+      () async {
+        final app = AppState.I;
+        final prefs = await SharedPreferences.getInstance();
+        const pluginId = 'acme/connect-false-intent-probe';
+        const id = '$pluginId/remote';
+        final manifest = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'connect-false-intent-probe',
+          version: '1.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/connect-false-intent-probe',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'remote',
+              transport: 'http',
+              url: 'https://mcp.example.com',
+            ),
+          ],
+        );
+        await prefs.setStringList('ovid_mcp_connected_v1', [id]);
+
+        await app.mountPluginOwnedMcpServers(manifest, connect: false);
+        await app.persistMcpIntent();
+        expect(prefs.getStringList('ovid_mcp_connected_v1'), [id]);
+
+        await app.unmountPluginOwnedMcpServers(pluginId, uninstall: false);
+        expect(prefs.getStringList('ovid_mcp_connected_v1'), isEmpty);
+      },
+    );
+
+    test('unmount waits for mount rollback and wins the final state', () async {
+      final app = AppState.I;
+      const pluginId = 'acme/unmount-race-probe';
+      const id = '$pluginId/remote';
+      final initial = NormalizedPluginManifest(
+        id: pluginId,
+        name: 'unmount-race-probe',
+        version: '1.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: '/plugins/unmount-race-old',
+        mcpServers: [
+          PluginMcpServer(
+            pluginId: pluginId,
+            name: 'remote',
+            transport: 'http',
+            url: 'https://old.example.com',
+            oauth: const McpOAuthConfig(
+              authorizationUrl: 'https://auth.example.com/old',
+              clientId: 'old-client',
+            ),
+          ),
+        ],
+      );
+      await app.mountPluginOwnedMcpServers(initial, connect: false);
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      AppState.mcpOAuthWriteOverrideForTest = (id, config) async {
+        entered.complete();
+        await release.future;
+        throw StateError('mount failed');
+      };
+      final replacement = NormalizedPluginManifest(
+        id: pluginId,
+        name: 'unmount-race-probe',
+        version: '2.0.0',
+        format: PluginFormat.claudeCode,
+        rootPath: '/plugins/unmount-race-new',
+        mcpServers: [
+          PluginMcpServer(
+            pluginId: pluginId,
+            name: 'remote',
+            transport: 'http',
+            url: 'https://new.example.com',
+            oauth: const McpOAuthConfig(
+              authorizationUrl: 'https://auth.example.com/new',
+              clientId: 'new-client',
+            ),
+          ),
+        ],
+      );
+
+      final mounting = app.mountPluginOwnedMcpServers(
+        replacement,
+        connect: false,
+      );
+      await entered.future;
+      final unmounting = app.unmountPluginOwnedMcpServers(
+        pluginId,
+        uninstall: true,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(app.mcpServers.any((s) => s.ownerPluginId == pluginId), isTrue);
+
+      release.complete();
+      await expectLater(mounting, throwsStateError);
+      await unmounting;
+      expect(app.mcpServers.where((s) => s.ownerPluginId == pluginId), isEmpty);
+      expect(McpService.I.mcpOAuthConfigFor(id), isNull);
+      expect(app.serviceStatusForTest('mcp:$id'), isNull);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList('ovid_custom_mcp_servers_v1'), isEmpty);
+    });
+
+    test(
+      'legacy mount serializes with normalized unmount and preserves ownership',
+      () async {
+        final app = AppState.I;
+        const pluginId = 'acme/legacy-race-probe';
+        const serverId = '$pluginId/remote';
+        final root = await Directory.systemTemp.createTemp('ovid-legacy-race-');
+        AppState.pluginCacheRootOverrideForTest = root;
+        addTearDown(() {
+          AppState.pluginCacheRootOverrideForTest = null;
+          root.deleteSync(recursive: true);
+        });
+        final cache = await app.pluginCacheDirFor(pluginId);
+        cache.createSync(recursive: true);
+        File('${cache.path}/.mcp.json').writeAsStringSync(
+          jsonEncode({
+            'mcpServers': {
+              'remote': {
+                'type': 'http',
+                'url': 'https://legacy.example.com',
+                'oauth': {
+                  'authorization_url': 'https://auth.example.com/legacy',
+                  'client_id': 'legacy-client',
+                },
+              },
+            },
+          }),
+        );
+
+        final entered = Completer<void>();
+        final release = Completer<void>();
+        AppState.mcpOAuthWriteOverrideForTest = (id, config) async {
+          expect(id, serverId);
+          expect(config.clientId, 'legacy-client');
+          entered.complete();
+          await release.future;
+        };
+
+        final mounting = app.mountPluginMcpServers(pluginId);
+        await entered.future;
+        final unmounting = app.unmountPluginOwnedMcpServers(
+          pluginId,
+          uninstall: true,
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          app.mcpServers.where((s) => s.ownerPluginId == pluginId),
+          isEmpty,
+          reason: 'normalized unmount must wait for the legacy transaction',
+        );
+
+        release.complete();
+        await mounting;
+        await unmounting;
+        expect(
+          app.mcpServers.where((s) => s.ownerPluginId == pluginId),
+          isEmpty,
+        );
+        expect(McpService.I.mcpOAuthConfigFor(serverId), isNull);
+      },
+    );
+
+    test(
+      'stale mount removes OAuth sidecars for a newly declared server ID',
+      () async {
+        final app = AppState.I;
+        const pluginId = 'acme/unmount-new-id-race-probe';
+        const oldId = '$pluginId/old';
+        const newId = '$pluginId/new';
+        McpService.oauthSecureStorageDisabledForTest = false;
+        final initial = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'unmount-new-id-race-probe',
+          version: '1.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/unmount-new-id-old',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'old',
+              transport: 'http',
+              url: 'https://old.example.com',
+            ),
+          ],
+        );
+        await app.mountPluginOwnedMcpServers(initial, connect: false);
+
+        final entered = Completer<void>();
+        final release = Completer<void>();
+        AppState.mcpOAuthWriteOverrideForTest = (id, config) async {
+          await McpService.I.setMcpOAuthConfig(id, config);
+          entered.complete();
+          await release.future;
+          throw StateError('mount failed after OAuth registration');
+        };
+        final replacement = NormalizedPluginManifest(
+          id: pluginId,
+          name: 'unmount-new-id-race-probe',
+          version: '2.0.0',
+          format: PluginFormat.claudeCode,
+          rootPath: '/plugins/unmount-new-id-new',
+          mcpServers: [
+            PluginMcpServer(
+              pluginId: pluginId,
+              name: 'new',
+              transport: 'http',
+              url: 'https://new.example.com',
+              oauth: const McpOAuthConfig(
+                authorizationUrl: 'https://auth.example.com/new',
+                clientId: 'new-client',
+              ),
+            ),
+          ],
+        );
+
+        final mounting = app.mountPluginOwnedMcpServers(
+          replacement,
+          connect: false,
+        );
+        await entered.future;
+        final unmounting = app.unmountPluginOwnedMcpServers(
+          pluginId,
+          uninstall: true,
+        );
+        release.complete();
+
+        await expectLater(mounting, throwsStateError);
+        await unmounting;
+        expect(
+          app.mcpServers.where((s) => s.ownerPluginId == pluginId),
+          isEmpty,
+        );
+        expect(McpService.I.mcpOAuthConfigFor(newId), isNull);
+        expect(await McpService.I.mcpOAuthTokenFor(newId), isNull);
+        expect(
+          await ovidSecureStorage().read(key: 'ovid_mcp_oauth_cfg_$newId'),
+          isNull,
+        );
+        expect(
+          await ovidSecureStorage().read(key: 'ovid_mcp_oauth_$newId'),
+          isNull,
+        );
+        expect(McpService.I.mcpOAuthConfigFor(oldId), isNull);
+      },
+    );
   });
 }

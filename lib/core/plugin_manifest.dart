@@ -15,6 +15,8 @@
 /// normalized.
 library;
 
+import 'mcp_config_parse.dart';
+
 /// The source format a manifest was adapted from (spec §4.3).
 enum PluginFormat { claudeCode, codex, genericMcp }
 
@@ -394,6 +396,13 @@ class PluginMcpServer {
   /// Source-relative path of the declaring file, e.g. `.mcp.json`.
   final String path;
 
+  /// Non-secret OAuth client configuration. Tokens and client secrets remain
+  /// in the MCP secure-store sidecar.
+  final McpOAuthConfig? oauth;
+
+  /// Startup handshake timeout declared by the source config.
+  final int startupTimeoutS;
+
   /// Raw server declaration block from the source config, scrubbed of
   /// secret VALUES (spec §5.1): `env`/`headers` objects never survive
   /// here — only their names, moved into [envNames]/[headerNames].
@@ -412,6 +421,8 @@ class PluginMcpServer {
     this.envNames = const [],
     this.headerNames = const [],
     this.path = '',
+    this.oauth,
+    this.startupTimeoutS = 30,
     this.frontmatter = const {},
     this.unknownFields = const {},
   });
@@ -436,6 +447,8 @@ class PluginMcpServer {
     List<String> envNames = const [],
     List<String> headerNames = const [],
     String path = '',
+    McpOAuthConfig? oauth,
+    int startupTimeoutS = 30,
     Map<String, dynamic> unknownFields = const {},
   }) {
     final decl = scrubMcpSecrets(rawDeclaration);
@@ -455,6 +468,8 @@ class PluginMcpServer {
         unknown.headerNames,
       ]),
       path: path,
+      oauth: oauth,
+      startupTimeoutS: startupTimeoutS,
       frontmatter: decl.scrubbed,
       unknownFields: unknown.scrubbed,
     );
@@ -478,6 +493,8 @@ class PluginMcpServer {
     'envNames': envNames,
     'headerNames': headerNames,
     'path': path,
+    if (oauth != null) 'oauth': oauth!.toJson(),
+    if (startupTimeoutS != 30) 'startupTimeoutS': startupTimeoutS,
     'frontmatter': frontmatter,
     'unknownFields': unknownFields,
   };
@@ -507,6 +524,10 @@ class PluginMcpServer {
         unknown.headerNames,
       ]),
       path: j['path'] as String? ?? '',
+      oauth: j['oauth'] is Map
+          ? McpOAuthConfig.fromJson((j['oauth'] as Map).cast<String, dynamic>())
+          : null,
+      startupTimeoutS: (j['startupTimeoutS'] as num?)?.toInt() ?? 30,
       frontmatter: decl.scrubbed,
       unknownFields: unknown.scrubbed,
     );
@@ -1050,6 +1071,18 @@ Object? _scrubNode(
         }
         return;
       }
+      if (value is Map && lower == 'oauth') {
+        out[name] = Map<String, dynamic>.unmodifiable({
+          for (final entry in value.entries)
+            if (!_oauthSecretKeys.contains(entry.key.toString().toLowerCase()))
+              entry.key.toString(): _scrubNode(
+                entry.value,
+                envNames,
+                headerNames,
+              ),
+        });
+        return;
+      }
       out[name] = _scrubNode(value, envNames, headerNames);
     });
     return Map<String, dynamic>.unmodifiable(out);
@@ -1061,6 +1094,18 @@ Object? _scrubNode(
   }
   return node;
 }
+
+/// OAuth discovery/client metadata may be persisted for the authorization
+/// flow; bearer tokens and client secrets remain secure-store-only.
+const Set<String> _oauthSecretKeys = {
+  'access_token',
+  'accesstoken',
+  'client_secret',
+  'clientsecret',
+  'refresh_token',
+  'refreshtoken',
+  'token',
+};
 
 /// Merges name groups in source order, exact-deduplicated, frozen.
 List<String> _mergedNames(Iterable<Iterable<String>> groups) {

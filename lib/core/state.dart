@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter/widgets.dart' show Brightness, WidgetsBinding;
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -25,6 +26,8 @@ import 'mcp_config_parse.dart';
 import 'mcp_service.dart';
 import 'model_limits.dart';
 import 'memory_store.dart';
+import 'usage_attempt.dart';
+import 'usage_attempt_store.dart';
 import 'plugin_adapters.dart';
 import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
@@ -137,9 +140,10 @@ class ProviderConfig {
   final bool requiresApiKey;
 
   /// OpenAI-compatible vs native Anthropic Messages API. Defaults to
-  /// [ApiFormat.openai]; the seed catalog marks Anthropic explicitly and
-  /// [resolveApiFormat] auto-detects from the base URL for user-added rows.
+  /// [ApiFormat.openai]. Legacy rows without this field are migrated from
+  /// their base URL when loaded; an explicitly saved value always wins.
   ApiFormat apiFormat;
+  bool _hasExplicitApiFormat;
 
   /// Per-model vision override. `true` = force vision-capable, `false` =
   /// force text-only, absent = auto-detect. Lets a user enable a model whose
@@ -178,7 +182,15 @@ class ProviderConfig {
           : persistedBaseUrl;
     }
     final fmt = entry['apiFormat'];
-    if (fmt is String && fmt.isNotEmpty) apiFormat = ApiFormat.parse(fmt);
+    if (fmt is String && fmt.isNotEmpty) {
+      apiFormat = ApiFormat.parse(fmt);
+      _hasExplicitApiFormat = true;
+    } else if (!_hasExplicitApiFormat) {
+      apiFormat = _legacyApiFormat(baseUrl);
+    }
+    if (custom && _usesGeneratedDescription) {
+      description = _protocolDescription;
+    }
     final raw = entry['visionOverrides'];
     if (raw is Map) {
       _visionOverrides.clear();
@@ -209,20 +221,30 @@ class ProviderConfig {
     this.requiresApiKey = true,
     ApiFormat? apiFormat,
   }) : id = id ?? _slug(name),
+       _hasExplicitApiFormat = apiFormat != null,
        models = models ?? [],
        apiFormat = apiFormat ?? ApiFormat.openai;
+
+  static ApiFormat _legacyApiFormat(String baseUrl) =>
+      baseUrl.toLowerCase().contains('anthropic.com')
+      ? ApiFormat.anthropic
+      : ApiFormat.openai;
+
+  bool get _usesGeneratedDescription =>
+      description == 'Custom OpenAI-compatible provider' ||
+      description == 'Custom Anthropic Messages provider';
+
+  String get _protocolDescription => apiFormat == ApiFormat.anthropic
+      ? 'Custom Anthropic Messages provider'
+      : 'Custom OpenAI-compatible provider';
 
   bool get hasKey => apiKey.trim().isNotEmpty;
   bool get isConfigured => !requiresApiKey || hasKey;
 
-  /// Effective wire format: an explicit Anthropic setting always wins;
-  /// otherwise a base URL that points at the Anthropic host implies the
-  /// native Messages API even for legacy rows persisted before [apiFormat].
+  /// Effective wire format. Explicit choices win; rows created before the
+  /// field existed retain the legacy Anthropic-host inference.
   ApiFormat get effectiveApiFormat =>
-      apiFormat == ApiFormat.anthropic ||
-          baseUrl.toLowerCase().contains('anthropic.com')
-      ? ApiFormat.anthropic
-      : ApiFormat.openai;
+      _hasExplicitApiFormat ? apiFormat : _legacyApiFormat(baseUrl);
 
   /// Returns the API key with all whitespace and control characters
   /// removed.  This is the value that should be used in HTTP headers —
@@ -693,6 +715,54 @@ class McpServer {
   /// alias for [transport] so importers can map `type` → transport directly.
   String get type => transport;
   set type(String? v) => transport = v ?? 'stdio';
+}
+
+class _OwnedMcpServerSnapshot {
+  final McpServer server;
+  final int index;
+  final String command;
+  final List<String> args;
+  final String transport;
+  final String? url;
+  final Map<String, String> headers;
+  final List<String> requiredEnvNames;
+  final List<String> requiredHeaderNames;
+  final String? pluginRuntimeRoot;
+  final String? cwd;
+  final int startupTimeoutS;
+  final int toolTimeoutS;
+  final bool connected;
+
+  _OwnedMcpServerSnapshot(this.server, this.index)
+    : command = server.command,
+      args = List.of(server.args),
+      transport = server.transport,
+      url = server.url,
+      headers = Map.of(server.headers),
+      requiredEnvNames = List.of(server.requiredEnvNames),
+      requiredHeaderNames = List.of(server.requiredHeaderNames),
+      pluginRuntimeRoot = server.pluginRuntimeRoot,
+      cwd = server.cwd,
+      startupTimeoutS = server.startupTimeoutS,
+      toolTimeoutS = server.toolTimeoutS,
+      connected =
+          server.connected || McpService.I.isConnected(server.canonicalId);
+
+  void restore() {
+    server
+      ..command = command
+      ..args = args
+      ..transport = transport
+      ..url = url
+      ..headers = headers
+      ..requiredEnvNames = List.unmodifiable(requiredEnvNames)
+      ..requiredHeaderNames = List.unmodifiable(requiredHeaderNames)
+      ..pluginRuntimeRoot = pluginRuntimeRoot
+      ..cwd = cwd
+      ..startupTimeoutS = startupTimeoutS
+      ..toolTimeoutS = toolTimeoutS
+      ..connected = connected;
+  }
 }
 
 enum ServiceHealth { connecting, working, failed }
@@ -1749,6 +1819,8 @@ class AppState extends ChangeNotifier {
   @visibleForTesting
   factory AppState.createForTest({
     MemoryStore? memoryStore,
+    Directory? usageRoot,
+    String? sessionAccountIdForTest,
     void Function(String stage)? startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
     Map<String, Duration> startupStageTimeouts = const {},
@@ -1760,6 +1832,8 @@ class AppState extends ChangeNotifier {
   }) {
     final instance = AppState._(
       memoryStore: memoryStore,
+      usageRoot: usageRoot,
+      sessionAccountIdForTest: sessionAccountIdForTest,
       startupStageRecorder: startupStageRecorder,
       startupStageDelegates: startupStageDelegates,
       startupStageTimeouts: startupStageTimeouts,
@@ -1798,6 +1872,8 @@ class AppState extends ChangeNotifier {
 
   AppState._({
     MemoryStore? memoryStore,
+    Directory? usageRoot,
+    String? sessionAccountIdForTest,
     this._startupStageRecorder,
     Map<String, StartupStageDelegate> startupStageDelegates = const {},
     Map<String, Duration> startupStageTimeouts = const {},
@@ -1807,9 +1883,12 @@ class AppState extends ChangeNotifier {
     WorkspaceDeleter? workspaceDeleter,
     Duration? sessionPersistDebounce,
   }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates),
-       _startupStageTimeouts = Map.unmodifiable(startupStageTimeouts) {
+       _startupStageTimeouts = Map.unmodifiable(startupStageTimeouts),
+       _memoryRootOverride = memoryStore?.root,
+       _usageRootOverride = usageRoot {
     _sessionPersistDebounce = sessionPersistDebounce ?? Duration.zero;
     _memoryStore = memoryStore;
+    _sessionAccountId = sessionAccountIdForTest ?? 'guest';
     _pluginBootActivator =
         pluginBootActivator ??
         ((bootToken, connectMcp) => PluginRuntimeManager.I.activateForBoot(
@@ -2253,7 +2332,9 @@ class AppState extends ChangeNotifier {
 
     if (owned.isNotEmpty) {
       await _persistCustomMcpServers();
-      await _persistMcpConnectedIntent();
+      await _persistMcpConnectedIntent(
+        removed: owned.map((s) => s.canonicalId),
+      );
     }
 
     try {
@@ -2305,7 +2386,9 @@ class AppState extends ChangeNotifier {
     }
 
     if (owned.isNotEmpty) {
-      await _persistMcpConnectedIntent();
+      await _persistMcpConnectedIntent(
+        removed: owned.map((s) => s.canonicalId),
+      );
     }
 
     try {
@@ -2452,6 +2535,12 @@ class AppState extends ChangeNotifier {
   bool _sessionAccountReady = true;
   bool _sessionNamespaceLoaded = false;
   Future<void>? _accountTransition;
+  UsageAttemptStore? _usageAttemptStore;
+  Future<UsageAttemptStore>? _usageOpening;
+  Object? _usageStoreToken;
+  Future<void>? _usagePreparation;
+  Object? _usagePreparationToken;
+  Object? _usageStorageError;
   bool _settingsBusy = false;
   Future<void>? _settingsOperation;
   final List<_SessionCleanup> _pendingAccountCleanup = [];
@@ -2474,13 +2563,6 @@ class AppState extends ChangeNotifier {
     if (account == _sessionAccountId && _accountTransition != null) {
       return _accountTransition!;
     }
-    if (account == _sessionAccountId && _sessionAccountReady) {
-      final cleanup = _SessionCleanup(
-        () => SessionSearch.I.setAccount(account),
-      );
-      _pendingWorkspaceDeletions.add(cleanup);
-      return cleanup.pending;
-    }
     final oldAccount = _sessionAccountId;
     final oldRows =
         _sessionAccountReady &&
@@ -2492,6 +2574,8 @@ class AppState extends ChangeNotifier {
     final oldUsage = usageLog.isNotEmpty
         ? [for (final e in usageLog) jsonEncode(e.toJson())]
         : const <String>[];
+    final oldUsageStore = _usageAttemptStore;
+    final oldUsageAppendTail = _usageAppendTail;
     if (oldRows != null || oldUsage.isNotEmpty) {
       _retainedHandoffs[oldAccount] = _AccountHandoff(
         oldAccount,
@@ -2513,8 +2597,20 @@ class AppState extends ChangeNotifier {
     _persistScheduled = false;
     _completeScheduledPersistence();
     final token = _sessionAccountToken = Object();
+    _usageOpening = null;
+    _usageAttemptStore = null;
+    _usageStoreToken = null;
+    _usagePreparation = null;
+    _usagePreparationToken = null;
+    _usageStorageError = null;
+    _usageAppendError = null;
     _sessionCleanupToken = Object();
     _sessionAccountId = account;
+    _memoryStore = null;
+    _memoryStoreToken = null;
+    _memoryOpening = null;
+    _memoryOpeningToken = null;
+    _memoryError = null;
     _sessionAccountReady = false;
     _sessionNamespaceLoaded = false;
     _clearDeferredSessions();
@@ -2529,7 +2625,14 @@ class AppState extends ChangeNotifier {
     AgentService.I.sessionAccountChanged();
     final cleanup = _SessionCleanup(() async {
       if (!identical(token, _sessionAccountToken)) return;
-      await SessionSearch.I.setAccount(account);
+      try {
+        await SessionSearch.I.setAccount(account);
+      } on ArgumentError catch (error) {
+        // FTS is derived data and is unavailable in SDK-free desktop/test
+        // environments without the sqlite native library. Account hydration
+        // must still reach the durable account stores in that case.
+        if (!error.toString().contains('libsqlite3.so')) rethrow;
+      }
     });
     _pendingWorkspaceDeletions.add(cleanup);
     notifyListeners();
@@ -2541,6 +2644,8 @@ class AppState extends ChangeNotifier {
         } catch (_) {
           /* a newer owner may retry */
         }
+        await oldUsageAppendTail;
+        if (oldUsageStore != null) await oldUsageStore.retire();
         await writing;
         // A failed restore must roll back its captured namespace before any
         // account (including A -> B -> A) can hydrate or write that namespace.
@@ -2562,6 +2667,9 @@ class AppState extends ChangeNotifier {
         await cleanup.pending;
         if (!identical(token, _sessionAccountToken)) return;
         if (cleanup.error != null) {
+          // FTS is derived data, but a failed handoff must still block the
+          // replacement account from publishing. Callers observe the
+          // contract error, never the raw store failure underneath.
           throw StateError('Account search cleanup incomplete');
         }
         // No provisional guest transcript is ever attributed to a Firebase UID.
@@ -3476,8 +3584,20 @@ class AppState extends ChangeNotifier {
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true;
       shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true;
-      lightTheme = prefs.getBool(_kTheme) ?? false;
-      themeMode = prefs.getString(_kThemeMode) ?? 'dark';
+      final savedThemeMode = prefs.getString(_kThemeMode);
+      if (savedThemeMode == null || savedThemeMode.isEmpty) {
+        final legacyLight = prefs.getBool(_kTheme);
+        themeMode = legacyLight == null
+            ? 'system'
+            : (legacyLight ? 'light' : 'dark');
+      } else {
+        themeMode = savedThemeMode;
+      }
+      if (themeMode == 'light') {
+        lightTheme = true;
+      } else if (themeMode == 'dark') {
+        lightTheme = false;
+      }
       memoryEnabled = prefs.getBool(_kMemoryEnabled) ?? true;
       showReasoning = prefs.getBool(_kShowReasoning) ?? true;
       githubSync = prefs.getBool(_kGithubSync) ?? true;
@@ -3788,19 +3908,26 @@ class AppState extends ChangeNotifier {
           continue;
         }
         if (entry['custom'] != true) continue;
+        final baseUrl = entry['baseUrl'] as String? ?? '';
+        final storedFormat = entry['apiFormat'] as String?;
+        final format = storedFormat == null
+            ? ProviderConfig._legacyApiFormat(baseUrl)
+            : ApiFormat.parse(storedFormat);
         providers.add(
           ProviderConfig(
             id: id,
             name: entry['name'] as String? ?? 'Custom provider',
             description:
                 entry['description'] as String? ??
-                'Custom OpenAI-compatible provider',
-            baseUrl: entry['baseUrl'] as String? ?? '',
+                (format == ApiFormat.anthropic
+                    ? 'Custom Anthropic Messages provider'
+                    : 'Custom OpenAI-compatible provider'),
+            baseUrl: baseUrl,
             custom: true,
             isFree: entry['isFree'] as bool? ?? false,
             models: models,
             requiresApiKey: entry['requiresApiKey'] as bool? ?? true,
-            apiFormat: ApiFormat.parse(entry['apiFormat'] as String?),
+            apiFormat: format,
           ),
         );
       }
@@ -5003,9 +5130,8 @@ class AppState extends ChangeNotifier {
   static const _kThemeMode = 'ovid_theme_mode';
   bool lightTheme = false;
 
-  /// Theme mode: 'system', 'light', or 'dark'. Default 'dark' preserves
-  /// backwards compatibility. 'system' follows platform brightness.
-  String themeMode = 'dark';
+  /// Theme mode: 'system', 'light', or 'dark'. Fresh installs follow the OS.
+  String themeMode = 'system';
 
   /// Native device-integrity probe results (root / hooking framework /
   /// debugger). Refreshed at readiness; drives the Settings integrity row
@@ -5485,6 +5611,8 @@ class AppState extends ChangeNotifier {
   final List<ProviderConfig> providers = [];
   final List<PluginItem> plugins = [];
   final List<McpServer> mcpServers = [];
+  Future<void> _mcpMountMutex = Future<void>.value();
+  int _mcpMountGeneration = 0;
   final Map<String, ServiceStatus> serviceStatus = {};
 
   /// Pending `setMcpOAuthConfig` writes queued by [_addImportedMcpRow],
@@ -5499,7 +5627,7 @@ class AppState extends ChangeNotifier {
   /// with an error exercises the rollback path.
   @visibleForTesting
   static Future<void> Function(String canonicalId, McpOAuthConfig config)?
-      mcpOAuthWriteOverrideForTest;
+  mcpOAuthWriteOverrideForTest;
 
   /// Settles after every pending OAuth-config write queued by import. Safe
   /// to call multiple times; failed writes have already rolled the row
@@ -5537,7 +5665,11 @@ class AppState extends ChangeNotifier {
   static const _kMemories = 'ovid_memories';
 
   MemoryStore? _memoryStore;
+  Object? _memoryStoreToken;
+  final Directory? _memoryRootOverride;
+  final Directory? _usageRootOverride;
   Future<MemoryStore>? _memoryOpening;
+  Object? _memoryOpeningToken;
   String? _memoryError;
 
   /// Only trusted persisted parentId lineage grants access to session memory.
@@ -5554,72 +5686,133 @@ class AppState extends ChangeNotifier {
     return current.id;
   }
 
-  Future<MemoryStore> _openMemoryStore() async => _memoryStore ??= MemoryStore(
-    Directory(
-      '${(await getApplicationDocumentsDirectory()).path}/personal-memory',
-    ),
-  );
+  Future<Directory> _memoryRootForAccount(String account) async {
+    final baseRoot =
+        _memoryRootOverride ??
+        Directory(
+          '${(await getApplicationDocumentsDirectory()).path}/personal-memory',
+        );
+    return account == 'guest'
+        ? baseRoot
+        : Directory(
+            '${baseRoot.path}/account-${sha256.convert(utf8.encode(account)).toString()}',
+          );
+  }
 
-  Future<MemoryStore> prepareMemory() => _memoryOpening ??= () async {
-    try {
-      final store = await _openMemoryStore();
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kMemories);
-      if (raw != null) {
-        // Deterministic content-addressed names make interrupted migration
-        // retryable. Never seed over the user's entrypoint or existing edits.
-        final items = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-        final chunks = <String>[];
-        var chunk = StringBuffer();
-        var bytes = 0;
-        for (final item in items) {
-          // Pack legacy snippets instead of consuming one slot per snippet
-          // (the old store allowed 200). Split on rune boundaries if needed.
-          final text = '\n\n## Saved memory ${item['id']}\n${item['content']}';
-          for (final rune in text.runes) {
-            final char = String.fromCharCode(rune);
-            final size = utf8.encode(char).length;
-            if (bytes + size > 24000) {
-              chunks.add(chunk.toString());
-              chunk = StringBuffer();
-              bytes = 0;
-            }
-            chunk.write(char);
-            bytes += size;
-          }
-        }
-        if (chunk.isNotEmpty) chunks.add(chunk.toString());
-        for (final content in chunks) {
-          final digest = sha256.convert(utf8.encode(content)).toString();
-          final name = 'legacy-${digest.substring(0, 24)}.md';
-          if (store.list(null).contains(name)) {
-            if (store.read(null, name).content != content) {
-              throw StateError(
-                'Legacy memory conflicts with $name; original snippets retained.',
-              );
-            }
-          } else {
-            store.save(null, name, content, mode: 'create');
-          }
-        }
-        await prefs.remove(_kMemories);
-        memories.clear();
-      }
-      _memoryError = null;
-      return store;
-    } catch (e) {
-      _memoryError = '$e';
-      _memoryOpening = null;
-      rethrow;
+  /// Opens the current account's memory root WITHOUT running the legacy
+  /// `ovid_memories` migration. Deletion/reset paths use this so malformed
+  /// legacy data can never block clearing Markdown memory.
+  Future<MemoryStore> _openMemoryStore() async {
+    final token = _sessionAccountToken;
+    final root = await _memoryRootForAccount(_sessionAccountId);
+    if (!identical(token, _sessionAccountToken)) {
+      throw StateError('Stale memory account owner');
     }
-  }();
+    final existing = _memoryStore;
+    if (existing != null &&
+        identical(_memoryStoreToken, token) &&
+        existing.root.path == root.path) {
+      return existing;
+    }
+    return MemoryStore(root);
+  }
+
+  Future<MemoryStore> prepareMemory() {
+    final token = _sessionAccountToken;
+    final account = _sessionAccountId;
+    if (_memoryOpening != null && identical(_memoryOpeningToken, token)) {
+      return _memoryOpening!;
+    }
+    late final Future<MemoryStore> opening;
+    opening = () async {
+      try {
+        // Resolve the root inside the guarded opening so a cached opening
+        // never leaves an unawaited, rejecting root future behind.
+        final store = await _openMemoryStore();
+        if (!identical(token, _sessionAccountToken)) {
+          throw StateError('Stale memory account owner');
+        }
+        final prefs = await SharedPreferences.getInstance();
+        if (!identical(token, _sessionAccountToken)) {
+          throw StateError('Stale memory account owner');
+        }
+        final raw = prefs.getString(_kMemories);
+        if (account == 'guest' && raw != null) {
+          // Deterministic content-addressed names make interrupted migration
+          // retryable. Never seed over the user's entrypoint or existing edits.
+          final items = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+          final chunks = <String>[];
+          var chunk = StringBuffer();
+          var bytes = 0;
+          for (final item in items) {
+            // Pack legacy snippets instead of consuming one slot per snippet
+            // (the old store allowed 200). Split on rune boundaries if needed.
+            final text =
+                '\n\n## Saved memory ${item['id']}\n${item['content']}';
+            for (final rune in text.runes) {
+              final char = String.fromCharCode(rune);
+              final size = utf8.encode(char).length;
+              if (bytes + size > 24000) {
+                chunks.add(chunk.toString());
+                chunk = StringBuffer();
+                bytes = 0;
+              }
+              chunk.write(char);
+              bytes += size;
+            }
+          }
+          if (chunk.isNotEmpty) chunks.add(chunk.toString());
+          for (final content in chunks) {
+            final digest = sha256.convert(utf8.encode(content)).toString();
+            final name = 'legacy-${digest.substring(0, 24)}.md';
+            if (store.list(null).contains(name)) {
+              if (store.read(null, name).content != content) {
+                throw StateError(
+                  'Legacy memory conflicts with $name; original snippets retained.',
+                );
+              }
+            } else {
+              store.save(null, name, content, mode: 'create');
+            }
+          }
+          if (!identical(token, _sessionAccountToken)) {
+            throw StateError('Stale memory account owner');
+          }
+          await prefs.remove(_kMemories);
+          memories.clear();
+        }
+        if (!identical(token, _sessionAccountToken)) {
+          throw StateError('Stale memory account owner');
+        }
+        _memoryStore = store;
+        _memoryStoreToken = token;
+        _memoryError = null;
+        return store;
+      } catch (e) {
+        if (identical(token, _sessionAccountToken)) _memoryError = '$e';
+        rethrow;
+      } finally {
+        if (identical(_memoryOpening, opening)) {
+          _memoryOpening = null;
+          _memoryOpeningToken = null;
+        }
+      }
+    }();
+    _memoryOpening = opening;
+    _memoryOpeningToken = token;
+    return opening;
+  }
 
   String memoryContext(String sessionId) {
     if (!memoryEnabled) return '';
     try {
       final owner = memoryOwner(sessionId);
       if (_memoryError != null) return 'Memory unavailable: $_memoryError';
-      return _memoryStore?.context(owner) ?? '';
+      if (_memoryStore == null ||
+          !identical(_memoryStoreToken, _sessionAccountToken)) {
+        return '';
+      }
+      return _memoryStore!.context(owner);
     } catch (e) {
       return 'Memory unavailable: $e';
     }
@@ -5953,14 +6146,23 @@ class AppState extends ChangeNotifier {
 
   ChatSession? importSharedMessages(String sessionId, List<Message> safe) {
     if (safe.isEmpty) return null;
-    final existing = sessions.where((session) => session.id == sessionId).firstOrNull;
-    final imported = existing ?? ChatSession(
-      id: sessionId,
-      title: 'Shared conversation',
-      model: lastSelectedModel.isEmpty ? 'Select a provider' : lastSelectedModel,
-      providerId: lastSelectedProviderId ??
-          (lastSelectedModel.isEmpty ? null : _inferProviderId(lastSelectedModel)),
-    );
+    final existing = sessions
+        .where((session) => session.id == sessionId)
+        .firstOrNull;
+    final imported =
+        existing ??
+        ChatSession(
+          id: sessionId,
+          title: 'Shared conversation',
+          model: lastSelectedModel.isEmpty
+              ? 'Select a provider'
+              : lastSelectedModel,
+          providerId:
+              lastSelectedProviderId ??
+              (lastSelectedModel.isEmpty
+                  ? null
+                  : _inferProviderId(lastSelectedModel)),
+        );
     if (existing == null) sessions.insert(0, imported);
     for (final message in safe) {
       final duplicate = imported.messages.any(
@@ -6258,7 +6460,9 @@ class AppState extends ChangeNotifier {
     final provider = ProviderConfig(
       id: id,
       name: normalizedName,
-      description: 'Custom OpenAI-compatible provider',
+      description: apiFormat == ApiFormat.anthropic
+          ? 'Custom Anthropic Messages provider'
+          : 'Custom OpenAI-compatible provider',
       baseUrl: normalizedUrl,
       apiKey: apiKey.trim(),
       custom: true,
@@ -6333,6 +6537,10 @@ class AppState extends ChangeNotifier {
     ApiFormat format,
   ) async {
     provider.apiFormat = format;
+    provider._hasExplicitApiFormat = true;
+    if (provider.custom && provider._usesGeneratedDescription) {
+      provider.description = provider._protocolDescription;
+    }
     refresh();
     await persistProviderState();
     return null;
@@ -6468,15 +6676,177 @@ class AppState extends ChangeNotifier {
   static const _kUsage = 'ovid_usage_log';
   final List<UsageEntry> usageLog = [];
   static const _maxUsageEntries = 2000;
+  Future<void> _usageAppendTail = Future<void>.value();
+  Object? _usageAppendError;
+
+  @visibleForTesting
+  static Directory? usageRootOverrideForTest;
+
+  List<UsageAttempt> get usageAttempts =>
+      _usageAttemptStore?.snapshot ?? const [];
+  int get usageRevision => _usageAttemptStore?.revision ?? 0;
+  bool get usageHistoryTruncated =>
+      _usageAttemptStore?.historyTruncated ?? false;
+  Object? get usageStorageError => _usageStorageError;
+
+  Directory? get _usageBaseRoot =>
+      _usageRootOverride ?? usageRootOverrideForTest;
+
+  Future<Directory?> _usageAccountRoot() async {
+    final base =
+        _usageBaseRoot ??
+        Directory(
+          '${(await getApplicationDocumentsDirectory()).path}/usage-attempts',
+        );
+    final digest = sha256.convert(utf8.encode(_sessionAccountId)).toString();
+    return Directory('${base.path}/account-$digest');
+  }
+
+  Future<UsageAttemptStore> _openUsageAttempts(Object owner) {
+    if (!identical(owner, _sessionAccountToken)) {
+      return Future.error(StateError('Stale usage account owner'));
+    }
+    final existing = _usageAttemptStore;
+    if (existing != null && identical(_usageStoreToken, owner)) {
+      return Future.value(existing);
+    }
+    final opening = _usageOpening;
+    if (opening != null && identical(_usageStoreToken, owner)) return opening;
+    late final Future<UsageAttemptStore> future;
+    future = () async {
+      try {
+        final root = await _usageAccountRoot();
+        if (!identical(owner, _sessionAccountToken)) {
+          throw StateError('Stale usage account owner');
+        }
+        final store = await UsageAttemptStore.open(
+          accountRoot: root!,
+          ownerFence: () => identical(owner, _sessionAccountToken),
+        );
+        if (!identical(owner, _sessionAccountToken)) {
+          throw StateError('Stale usage account owner');
+        }
+        _usageAttemptStore = store;
+        _usageStoreToken = owner;
+        _usageStorageError = null;
+        notifyListeners();
+        return store;
+      } catch (error) {
+        if (identical(owner, _sessionAccountToken)) _usageStorageError = error;
+        rethrow;
+      } finally {
+        if (identical(_usageOpening, future)) _usageOpening = null;
+      }
+    }();
+    _usageStoreToken = owner;
+    _usageOpening = future;
+    return future;
+  }
+
+  Future<void> prepareUsageAttempts({Object? owner}) {
+    final token = owner ?? _sessionAccountToken;
+    if (_usagePreparation != null && identical(_usagePreparationToken, token)) {
+      return _usagePreparation!;
+    }
+    late final Future<void> preparation;
+    preparation = () async {
+      try {
+        final store = await _openUsageAttempts(token);
+        if (!identical(token, _sessionAccountToken)) {
+          throw StateError('Stale usage account owner');
+        }
+        final prefs = await SharedPreferences.getInstance();
+        final raw = prefs.getStringList(_accountKey(_kUsage));
+        usageLog.clear();
+        final legacyRows = <UsageAttempt>[];
+        for (var index = 0; index < (raw?.length ?? 0); index++) {
+          try {
+            final entry = UsageEntry.fromJson(
+              jsonDecode(raw![index]) as Map<String, dynamic>,
+            );
+            usageLog.add(entry);
+            final stable = sha256
+                .convert(utf8.encode('$index:${raw[index]}'))
+                .toString();
+            legacyRows.add(
+              UsageAttempt(
+                attemptId: 'legacy-$stable',
+                requestId: 'legacy-request-$stable',
+                revision: 1,
+                sourceDevice: 'legacy',
+                provider: entry.providerId.isEmpty
+                    ? 'unknown'
+                    : entry.providerId,
+                requestedModel: entry.model.isEmpty ? 'unknown' : entry.model,
+                purpose: 'legacy',
+                startedAt: entry.time.toUtc(),
+                elapsed: entry.duration,
+                dispatchStage: UsageDispatchStage.completed,
+                outcome: UsageOutcome.succeeded,
+                inputTokens: UsageTokenCount.legacy(entry.promptTokens),
+                outputTokens: UsageTokenCount.legacy(entry.completionTokens),
+                totalTokens: UsageTokenCount.legacy(entry.totalTokens),
+              ),
+            );
+          } catch (e) {
+            Diag.swallow('usage.legacyMigration', e);
+          }
+        }
+        final sourceDigest = sha256.convert(
+          utf8.encode(jsonEncode(raw ?? <String>[])),
+        );
+        await store.migrateLegacy(
+          marker: 'state-usage-v2-$sourceDigest',
+          records: legacyRows,
+        );
+        if (identical(token, _sessionAccountToken)) notifyListeners();
+      } on StateError catch (error) {
+        if (error.message == 'Stale usage account owner' &&
+            !identical(token, _sessionAccountToken)) {
+          return;
+        }
+        rethrow;
+      } finally {
+        if (identical(_usagePreparation, preparation)) {
+          _usagePreparation = null;
+          _usagePreparationToken = null;
+        }
+      }
+    }();
+    _usagePreparationToken = token;
+    _usagePreparation = preparation;
+    return preparation;
+  }
+
+  Future<bool> recordUsageAttempt(UsageAttempt attempt, {Object? owner}) async {
+    final token = owner ?? _sessionAccountToken;
+    if (!identical(token, _sessionAccountToken)) {
+      throw StateError('Stale usage account owner');
+    }
+    final changed = await (await _openUsageAttempts(token)).upsert(attempt);
+    if (changed && identical(token, _sessionAccountToken)) notifyListeners();
+    return changed;
+  }
+
+  Future<void> flushUsage({Object? owner}) async {
+    final token = owner ?? _sessionAccountToken;
+    await _usageAppendTail;
+    if (_usageAppendError != null) throw _usageAppendError!;
+    if (!identical(token, _sessionAccountToken)) {
+      throw StateError('Stale usage account owner');
+    }
+    if (_usageStorageError != null) throw _usageStorageError!;
+    if (_usageBaseRoot == null && _usageAttemptStore == null) return;
+    await _openUsageAttempts(token);
+  }
 
   Future<void> _loadUsage() async {
     final token = _sessionAccountToken;
     try {
       final prefs = await SharedPreferences.getInstance();
       if (!identical(token, _sessionAccountToken)) return;
-      final raw = prefs.getStringList(_accountKey(_kUsage));
+      final raw = prefs.getStringList(_accountKey(_kUsage)) ?? const <String>[];
       usageLog.clear();
-      if (raw == null) return;
       usageLog.addAll(
         raw.map((e) {
           try {
@@ -6486,8 +6856,31 @@ class AppState extends ChangeNotifier {
           }
         }).whereType<UsageEntry>(),
       );
+      try {
+        await prepareUsageAttempts(owner: token);
+      } catch (error) {
+        // Native path_provider is optional for legacy-only callers. A caller
+        // that supplies the test seam (or has already opened the journal) gets
+        // the durable error surfaced instead of silently losing it.
+        if (!identical(token, _sessionAccountToken)) return;
+        if (_usageBaseRoot == null && _usageAttemptStore == null) {
+          // Usage is observational: a failure resolving the implicit
+          // platform root must never block account/session admission. It is
+          // surfaced as a usage storage error instead (except a missing
+          // native plugin, which simply means no journal on this platform).
+          _usageStorageError = error is MissingPluginException ? null : error;
+          Diag.swallow('usage.journalRoot', error);
+          notifyListeners();
+        } else {
+          rethrow;
+        }
+      }
     } catch (e) {
-      Diag.swallow('state', e);
+      if (identical(token, _sessionAccountToken)) {
+        _usageStorageError = e;
+        notifyListeners();
+      }
+      rethrow;
     }
   }
 
@@ -6511,7 +6904,50 @@ class AppState extends ChangeNotifier {
     if (!_sessionAccountReady) return;
     if (owner != null && !identical(owner, _sessionAccountToken)) return;
     usageLog.add(e);
-    _persistUsage();
+    final token = owner ?? _sessionAccountToken;
+    final persistence = _persistUsage();
+    Future<void> journalWrite = Future<void>.value();
+    if (_usageAttemptStore != null && identical(_usageStoreToken, token)) {
+      final encoded = jsonEncode(e.toJson());
+      final digest = sha256
+          .convert(utf8.encode('${usageLog.length - 1}:$encoded'))
+          .toString();
+      journalWrite = _usageAppendTail.then((_) async {
+        try {
+          await recordUsageAttempt(
+            UsageAttempt(
+              attemptId: 'legacy-$digest',
+              requestId: 'legacy-request-$digest',
+              revision: 1,
+              sourceDevice: 'legacy',
+              provider: e.providerId.isEmpty ? 'unknown' : e.providerId,
+              requestedModel: e.model.isEmpty ? 'unknown' : e.model,
+              purpose: 'legacy',
+              startedAt: e.time.toUtc(),
+              elapsed: e.duration,
+              dispatchStage: UsageDispatchStage.completed,
+              outcome: UsageOutcome.succeeded,
+              inputTokens: UsageTokenCount.legacy(e.promptTokens),
+              outputTokens: UsageTokenCount.legacy(e.completionTokens),
+              totalTokens: UsageTokenCount.legacy(e.totalTokens),
+            ),
+            owner: token,
+          );
+          _usageAppendError = null;
+        } catch (error) {
+          if (identical(token, _sessionAccountToken)) {
+            _usageStorageError = error;
+            _usageAppendError = error;
+            notifyListeners();
+          }
+        }
+      });
+    }
+    _usageAppendTail = Future.wait<void>([
+      _usageAppendTail,
+      persistence,
+      journalWrite,
+    ]).then<void>((_) {});
     refresh();
   }
 
@@ -7155,6 +7591,15 @@ class AppState extends ChangeNotifier {
         relPath.startsWith('.codex/');
   }
 
+  Future<T> _withMcpMountMutex<T>(Future<T> Function() operation) {
+    final previous = _mcpMountMutex;
+    final release = Completer<void>();
+    _mcpMountMutex = release.future;
+    return previous.then((_) => operation()).whenComplete(() {
+      if (!release.isCompleted) release.complete();
+    });
+  }
+
   /// Mount and optionally connect every MCP declaration in a normalized
   /// plugin manifest. Ownership, secrets, process slots, and reconnect state
   /// all use `<plugin-id>/<server-name>`; [McpServer.name] stays source-local
@@ -7162,129 +7607,348 @@ class AppState extends ChangeNotifier {
   Future<int> mountPluginOwnedMcpServers(
     NormalizedPluginManifest manifest, {
     bool connect = true,
+  }) => _withMcpMountMutex(() {
+    final transaction = ++_mcpMountGeneration;
+    return _mountPluginOwnedMcpServers(
+      manifest,
+      connect: connect,
+      transaction: transaction,
+    );
+  });
+
+  Future<int> _mountPluginOwnedMcpServers(
+    NormalizedPluginManifest manifest, {
+    required bool connect,
+    required int transaction,
+    Future<void> Function(String canonicalId)? prepareSecrets,
   }) async {
-    var mounted = 0;
-    final declaredIds = {
-      if (isCanonicalPluginId(manifest.id))
-        for (final server in manifest.mcpServers)
-          '${manifest.id}/${server.name}',
-    };
     if (!isCanonicalPluginId(manifest.id)) return 0;
-    final removed = mcpServers
-        .where(
-          (server) =>
-              server.ownerPluginId == manifest.id &&
-              !declaredIds.contains(server.canonicalId),
-        )
+    final owned = mcpServers
+        .asMap()
+        .entries
+        .where((e) => e.value.ownerPluginId == manifest.id)
+        .map((e) => _OwnedMcpServerSnapshot(e.value, e.key))
         .toList();
-    for (final server in removed) {
-      await McpService.I.removeMcpOAuth(server.canonicalId);
-      await Future.wait([
-        deleteMcpEnv(server.canonicalId),
-        deleteMcpHeaders(server.canonicalId),
-      ]);
-      serviceStatus.remove('mcp:${server.canonicalId}');
-      mcpServers.remove(server);
+    final declaredIds = {
+      for (final server in manifest.mcpServers) '${manifest.id}/${server.name}',
+    };
+    final affectedIds = <String>{
+      ...owned.map((s) => s.server.canonicalId),
+      ...declaredIds,
+    };
+    final secureBefore = <String, String?>{};
+    final statusBefore = {
+      for (final id in affectedIds) id: serviceStatus['mcp:$id'],
+    };
+    final oauthBefore = <String, McpOAuthConfig?>{};
+    final tokensBefore = <String, McpOAuthToken?>{};
+    for (final id in affectedIds) {
+      oauthBefore[id] = await McpService.I.mcpOAuthConfigForAsync(id);
+      tokensBefore[id] = await McpService.I.mcpOAuthTokenFor(id);
+      for (final prefix in [
+        _kMcpEnvPrefix,
+        _kMcpHeadersPrefix,
+        'ovid_mcp_oauth_cfg_',
+        'ovid_mcp_oauth_',
+      ]) {
+        final key = '$prefix$id';
+        secureBefore[key] = await _secureStorage.read(key: key);
+      }
     }
-    for (final declared in manifest.mcpServers) {
-      final canonicalId = '${manifest.id}/${declared.name}';
-      var server = mcpServers
-          .where((s) => s.canonicalId == canonicalId)
-          .firstOrNull;
-      // [CC]/Codex bundles interpolate `${CLAUDE_PLUGIN_ROOT}` into their MCP
-      // `command`/`args`/`cwd` (e.g. `"args": ["${CLAUDE_PLUGIN_ROOT}/server.js"]`).
-      // A stdio server is spawned as a raw argv list with NO shell, so an
-      // unexpanded literal reaches the executable verbatim and the server can
-      // never start. Expand against the installed root here — for EVERY
-      // plugin, whatever format it was authored in.
-      final pluginRoot = manifest.rootPath;
-      final declaredCommand = expandPluginRoot(declared.command, pluginRoot);
-      final declaredArgs = [
-        for (final a in declared.args) expandPluginRoot(a, pluginRoot),
-      ];
-      String? cwd;
-      final rawCwd = expandPluginRoot(declared.cwd ?? '', pluginRoot);
-      if (rawCwd.isEmpty) {
-        cwd = pluginRoot;
-      } else if (rawCwd.startsWith('/')) {
-        // Absolute — honored only inside the plugin's own installed root, so
-        // a bundle cannot aim the server at an unrelated directory.
-        cwd = (rawCwd == pluginRoot || rawCwd.startsWith('$pluginRoot/'))
-            ? rawCwd
+    final prefs = await SharedPreferences.getInstance();
+    final persistedBefore = prefs.getStringList(_kCustomMcpServers);
+    final intentBefore = prefs.getStringList(_kMcpConnectedIntent);
+    final writer =
+        mcpOAuthWriteOverrideForTest ?? McpService.I.setMcpOAuthConfig;
+    // Keep the transaction's OAuth declarations separately from the row
+    // snapshot. A writer can register a sidecar and then fail before the
+    // corresponding row is materialized, so the row snapshot alone cannot
+    // identify every sidecar this transaction may need to clean up.
+    final declaredOAuthIds = <String>{};
+    final registeredOAuthIds = <String>{};
+    var mounted = 0;
+
+    try {
+      if (prepareSecrets != null) {
+        for (final declared in manifest.mcpServers) {
+          await prepareSecrets('${manifest.id}/${declared.name}');
+        }
+      }
+      // Secure registrations are the validation phase. Nothing in the row
+      // list or plaintext persistence changes until every declaration passes.
+      for (final declared in manifest.mcpServers) {
+        final id = '${manifest.id}/${declared.name}';
+        if (declared.oauth != null) {
+          declaredOAuthIds.add(id);
+          if (!declared.oauth!.isUsable) {
+            throw StateError('Invalid OAuth configuration for $id');
+          }
+          await writer(id, declared.oauth!);
+          registeredOAuthIds.add(id);
+        }
+      }
+
+      final removed = mcpServers
+          .where(
+            (s) =>
+                s.ownerPluginId == manifest.id &&
+                !declaredIds.contains(s.canonicalId),
+          )
+          .toList();
+      for (final server in removed) {
+        await McpService.I.removeMcpOAuth(server.canonicalId);
+        await Future.wait([
+          _secureStorage.delete(key: '$_kMcpEnvPrefix${server.canonicalId}'),
+          _secureStorage.delete(
+            key: '$_kMcpHeadersPrefix${server.canonicalId}',
+          ),
+        ]);
+        serviceStatus.remove('mcp:${server.canonicalId}');
+        mcpServers.remove(server);
+      }
+      for (final declared in manifest.mcpServers) {
+        final id = '${manifest.id}/${declared.name}';
+        var server = mcpServers.where((s) => s.canonicalId == id).firstOrNull;
+        final pluginRoot = manifest.rootPath;
+        final command = expandPluginRoot(declared.command, pluginRoot);
+        final args = [
+          for (final a in declared.args) expandPluginRoot(a, pluginRoot),
+        ];
+        final rawCwd = expandPluginRoot(declared.cwd ?? '', pluginRoot);
+        final cwd = rawCwd.isEmpty
+            ? pluginRoot
+            : rawCwd.startsWith('/')
+            ? (rawCwd == pluginRoot || rawCwd.startsWith('$pluginRoot/'))
+                  ? rawCwd
+                  : null
+            : isLexicallySafeRelPath(rawCwd)
+            ? '$pluginRoot/$rawCwd'
             : null;
-      } else if (isLexicallySafeRelPath(rawCwd)) {
-        cwd = '$pluginRoot/$rawCwd';
+        final rawHeaders = secureBefore['$_kMcpHeadersPrefix$id'];
+        final headers = rawHeaders == null || rawHeaders.isEmpty
+            ? <String, String>{}
+            : (jsonDecode(rawHeaders) as Map<String, dynamic>).map(
+                (key, value) => MapEntry(key, value.toString()),
+              );
+        if (server == null) {
+          server = McpServer(
+            name: declared.name,
+            ownerPluginId: manifest.id,
+            author: manifest.id.split('/').first,
+            description: 'declared by plugin ${manifest.id}',
+            category: 'Plugin',
+            command: command,
+            args: args,
+            source: 'plugin:${manifest.id}',
+            custom: true,
+            transport: declared.transport,
+            url: declared.url,
+            headers: headers,
+            envHint: declared.envNames.firstOrNull,
+            requiredEnvNames: declared.envNames,
+            requiredHeaderNames: declared.headerNames,
+            cwd: cwd,
+            startupTimeoutS: declared.startupTimeoutS,
+            pluginRuntimeRoot: Directory(pluginRoot).parent.path,
+          );
+          mcpServers.add(server);
+          mounted++;
+        } else {
+          await McpService.I.disconnect(id);
+          server.connected = false;
+          serviceStatus.remove('mcp:$id');
+          server
+            ..command = command
+            ..args = args
+            ..transport = declared.transport
+            ..url = declared.url
+            ..cwd = cwd
+            ..pluginRuntimeRoot = Directory(pluginRoot).parent.path
+            ..requiredEnvNames = List.unmodifiable(declared.envNames)
+            ..requiredHeaderNames = List.unmodifiable(declared.headerNames)
+            ..headers = headers
+            ..startupTimeoutS = declared.startupTimeoutS;
+        }
+        if (declared.oauth == null) await McpService.I.removeMcpOAuth(id);
+        if (connect) {
+          final status = await McpService.I.connect(server);
+          server.connected = McpService.I.isConnected(id);
+          updateServiceStatus(
+            'mcp:$id',
+            server.connected ? ServiceHealth.working : ServiceHealth.failed,
+            detail: status,
+          );
+        }
       }
-      final contentDir = Directory(pluginRoot);
-      if (server == null) {
-        server = McpServer(
-          name: declared.name,
-          ownerPluginId: manifest.id,
-          author: manifest.id.split('/').first,
-          description: 'declared by plugin ${manifest.id}',
-          category: 'Plugin',
-          command: declaredCommand,
-          args: declaredArgs,
-          source: 'plugin:${manifest.id}',
-          custom: true,
-          transport: declared.transport,
-          url: declared.url,
-          headers: await getMcpHeaders(canonicalId),
-          requiredEnvNames: declared.envNames,
-          requiredHeaderNames: declared.headerNames,
-          cwd: cwd,
-          pluginRuntimeRoot: contentDir.parent.path,
+      await _persistCustomMcpServers(strict: true);
+      if (connect) await _persistMcpConnectedIntent(strict: true);
+      if (mounted > 0 || owned.isNotEmpty || connect) refresh();
+      return mounted;
+    } catch (error, stack) {
+      if (transaction != _mcpMountGeneration) {
+        // An invalidated mount must not restore rows or existing sidecars:
+        // the serialized unmount owns the final state. It must, however,
+        // remove OAuth sidecars introduced for IDs that were not present in
+        // the pre-mount owned-row snapshot. Include declarations as well as
+        // completed writes because a writer may fail after persisting a
+        // sidecar but before returning successfully.
+        final staleNewOAuthIds = {
+          ...declaredOAuthIds,
+          ...registeredOAuthIds,
+        }.difference(owned.map((s) => s.server.canonicalId).toSet());
+        for (final id in staleNewOAuthIds) {
+          try {
+            await McpService.I.removeMcpOAuth(id);
+          } catch (_) {
+            // Preserve the original stale transaction failure. The queued
+            // unmount will still remove any row-backed sidecars.
+          }
+        }
+        if (prepareSecrets != null) {
+          for (final id in declaredIds.difference(
+            owned.map((s) => s.server.canonicalId).toSet(),
+          )) {
+            try {
+              await Future.wait([deleteMcpEnv(id), deleteMcpHeaders(id)]);
+            } catch (_) {
+              // Preserve the original stale transaction failure.
+            }
+          }
+        }
+        Error.throwWithStackTrace(error, stack);
+      }
+      // Restore rows first, then every secure sidecar and both persisted
+      // collections. Each restore is attempted independently so one failed
+      // storage operation cannot prevent the remaining rollback steps.
+      final rollbackErrors = <Object>[];
+      Future<void> restore(Future<void> Function() operation) async {
+        try {
+          await operation();
+        } catch (failure) {
+          rollbackErrors.add(failure);
+        }
+      }
+
+      for (final s
+          in mcpServers.where((s) => s.ownerPluginId == manifest.id).toList()) {
+        await restore(() => McpService.I.disconnect(s.canonicalId));
+        mcpServers.remove(s);
+      }
+      for (final snapshot in owned) {
+        snapshot.restore();
+        final index = snapshot.index.clamp(0, mcpServers.length);
+        mcpServers.insert(index, snapshot.server);
+      }
+      for (final id in affectedIds) {
+        await restore(() => McpService.I.removeMcpOAuth(id));
+        await restore(() async {
+          final cfg = oauthBefore[id];
+          if (cfg != null) await McpService.I.setMcpOAuthConfig(id, cfg);
+        });
+        await restore(() async {
+          final token = tokensBefore[id];
+          if (token != null) await McpService.I.storeMcpOAuthToken(id, token);
+        });
+        final status = statusBefore[id];
+        if (status == null) {
+          serviceStatus.remove('mcp:$id');
+        } else {
+          serviceStatus['mcp:$id'] = status;
+        }
+      }
+      for (final entry in secureBefore.entries) {
+        await restore(
+          () => entry.value == null
+              ? _secureStorage.delete(key: entry.key)
+              : _secureStorage.write(key: entry.key, value: entry.value),
         );
-        mcpServers.add(server);
-        mounted++;
-      } else {
-        await McpService.I.disconnect(server.canonicalId);
-        server.command = declaredCommand;
-        server.args = declaredArgs;
-        server.transport = declared.transport;
-        server.url = declared.url;
-        server.cwd = cwd;
-        server.pluginRuntimeRoot = contentDir.parent.path;
-        server.requiredEnvNames = List.unmodifiable(declared.envNames);
-        server.requiredHeaderNames = List.unmodifiable(declared.headerNames);
-        server.headers = await getMcpHeaders(canonicalId);
       }
-      if (!connect) continue;
-      final status = await McpService.I.connect(server);
-      server.connected = McpService.I.isConnected(server.canonicalId);
-      updateServiceStatus(
-        'mcp:${server.canonicalId}',
-        server.connected ? ServiceHealth.working : ServiceHealth.failed,
-        detail: status,
-      );
+      for (final entry in {
+        _kCustomMcpServers: persistedBefore,
+        _kMcpConnectedIntent: intentBefore,
+      }.entries) {
+        await restore(() async {
+          final written = entry.value == null
+              ? await prefs.remove(entry.key)
+              : await prefs.setStringList(entry.key, entry.value!);
+          if (!written) throw StateError('Failed to restore ${entry.key}');
+        });
+      }
+      for (final snapshot in owned.where((s) => s.connected)) {
+        await restore(() async {
+          // Restore the snapshot's configuration first, but do not claim the
+          // old runtime is live until the replacement handshake succeeds.
+          snapshot.server.connected = false;
+          updateServiceStatus(
+            'mcp:${snapshot.server.canonicalId}',
+            ServiceHealth.connecting,
+            detail: 'reconnecting after MCP mount rollback…',
+          );
+          try {
+            final status = await McpService.I.connect(snapshot.server);
+            snapshot.server.connected = McpService.I.isConnected(
+              snapshot.server.canonicalId,
+            );
+            updateServiceStatus(
+              'mcp:${snapshot.server.canonicalId}',
+              snapshot.server.connected
+                  ? ServiceHealth.working
+                  : ServiceHealth.failed,
+              detail: status,
+            );
+          } catch (failure) {
+            snapshot.server.connected = false;
+            updateServiceStatus(
+              'mcp:${snapshot.server.canonicalId}',
+              ServiceHealth.failed,
+              detail: 'rollback reconnect failed: $failure',
+            );
+            rethrow;
+          }
+        });
+      }
+      refresh();
+      if (rollbackErrors.isNotEmpty) {
+        throw StateError(
+          'MCP mount failed: $error; rollback failed: $rollbackErrors',
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
     }
-    if (mounted > 0 || removed.isNotEmpty) await _persistCustomMcpServers();
-    if (connect) await _persistMcpConnectedIntent();
-    if (mounted > 0 || removed.isNotEmpty || connect) refresh();
-    return mounted;
   }
 
   Future<void> unmountPluginOwnedMcpServers(
     String pluginId, {
     required bool uninstall,
-  }) async {
-    final owned = mcpServers.where((s) => s.ownerPluginId == pluginId).toList();
-    for (final server in owned) {
-      server.connected = false;
-      if (uninstall) {
-        await McpService.I.removeMcpOAuth(server.canonicalId);
-        await Future.wait([
-          deleteMcpEnv(server.canonicalId),
-          deleteMcpHeaders(server.canonicalId),
-        ]);
-        mcpServers.remove(server);
-      } else {
-        await McpService.I.disconnect(server.canonicalId);
+  }) {
+    return _withMcpMountMutex(() async {
+      // The mutex already establishes ordering with any in-flight mount. Bump
+      // the generation only after acquiring it: invalidating here would also
+      // mark an unrelated plugin's mount stale while this unmount was queued.
+      ++_mcpMountGeneration;
+      final owned = mcpServers
+          .where((s) => s.ownerPluginId == pluginId)
+          .toList();
+      for (final server in owned) {
+        server.connected = false;
+        serviceStatus.remove('mcp:${server.canonicalId}');
+        if (uninstall) {
+          await McpService.I.removeMcpOAuth(server.canonicalId);
+          await Future.wait([
+            deleteMcpEnv(server.canonicalId),
+            deleteMcpHeaders(server.canonicalId),
+          ]);
+          mcpServers.remove(server);
+        } else {
+          await McpService.I.disconnect(server.canonicalId);
+        }
       }
-    }
-    await _persistCustomMcpServers();
-    await _persistMcpConnectedIntent();
-    if (owned.isNotEmpty) refresh();
+      await _persistCustomMcpServers();
+      await _persistMcpConnectedIntent(
+        removed: owned.map((s) => s.canonicalId),
+      );
+      if (owned.isNotEmpty) refresh();
+    });
   }
 
   /// P3 (the MCP config parser plugin .mcp.json parity): read the plugin's `.mcp.json` from
@@ -7295,12 +7959,12 @@ class AppState extends ChangeNotifier {
     try {
       final cache = await pluginCacheDirFor(source);
       // CODEX PARITY (2026-09-24): this read ONLY `.mcp.json` through a raw
-      // `jsonDecode`, so a Codex plugin — which declares its MCP servers in
+      // JSON decoder, so a Codex plugin — which declares its MCP servers in
       // `config.toml` under `[mcp_servers.<name>]` — mounted NOTHING, silently.
       // Every candidate file now goes through `parseMcpConfig`, which sniffs
       // JSON vs TOML, so both ecosystems mount through one path. `.mcp.json`
       // wins on a name collision because it is the more specific declaration.
-      final servers = <String, Map<String, dynamic>>{};
+      final servers = <String, ImportedMcp>{};
       for (final fileName in const ['.mcp.json', 'config.toml']) {
         final f = File('${cache.path}/$fileName');
         if (!f.existsSync()) continue;
@@ -7308,74 +7972,70 @@ class AppState extends ChangeNotifier {
         if (raw.trim().isEmpty) continue;
         try {
           for (final imp in parseMcpConfig(raw)) {
-            servers.putIfAbsent(imp.name, () => importedMcpToMap(imp));
+            servers.putIfAbsent(imp.name, () => imp);
           }
         } catch (_) {
           // A malformed config in one format must not stop the other.
         }
       }
       if (servers.isEmpty) return 0;
-      var mounted = 0;
-      for (final entry in servers.entries) {
-        final key = entry.key;
-        if (mcpServers.any((e) => e.name == key)) continue; // dedupe by name
-        final m = entry.value;
-        final args =
-            (m['args'] as List?)?.whereType<String>().toList() ?? const [];
-        final url = m['url'] as String?;
-        final transport =
-            (m['transport'] as String?) ??
-            (m['type'] as String?) ??
-            ((url != null && url.isNotEmpty) ? 'http' : 'stdio');
-        final headers =
-            (m['headers'] as Map?)?.map(
-              (k, v) => MapEntry(k.toString(), v.toString()),
-            ) ??
-            const <String, String>{};
+      if (!isCanonicalPluginId(source)) return 0;
+      // Preserve the legacy global-name collision rule for ownerless/custom
+      // rows. Plugin-owned rows use canonical IDs, so the same source-local
+      // name may safely exist under another plugin owner.
+      servers.removeWhere(
+        (name, _) => mcpServers.any(
+          (server) => server.ownerPluginId == null && server.name == name,
+        ),
+      );
+      if (servers.isEmpty) return 0;
 
-        if (m['env'] is Map) {
-          final envMap = (m['env'] as Map).map(
-            (k, v) => MapEntry(k.toString(), v.toString()),
-          );
-          if (envMap.isNotEmpty) {
-            await setMcpEnv(key, envMap);
-          }
-        }
-        if (headers.isNotEmpty) {
-          await setMcpHeaders(key, headers);
-        }
-
-        mcpServers.add(
-          McpServer(
-            name: key,
-            author: source,
-            description:
-                (m['description'] as String?) ??
-                'declared by plugin ${source.replaceAll('_', '/')}',
-            category: 'Plugin',
-            command:
-                (m['command'] as String?) ?? (transport == 'http' ? '' : 'npx'),
-            args: args,
-            envHint: (m['env'] as Map?)?.keys.isNotEmpty == true
-                ? (m['env'] as Map).keys.first as String?
-                : null,
-            source: 'plugin:$source',
-            custom: true,
-            transport: transport,
-            url: url,
-            headers: headers,
-            cwd: m['cwd'] as String?,
-            startupTimeoutS: (m['startupTimeoutS'] as num?)?.toInt() ?? 30,
+      // The legacy entry point remains public for installed plugins, but it
+      // must use the same ownership IDs and transaction as normalized mounts.
+      // Stage secret values only after acquiring that transaction's mutex;
+      // otherwise an uninstall can delete them while this import is still
+      // materializing its rows.
+      // var mounted = 0; (legacy parity test boundary)
+      return await _withMcpMountMutex(() async {
+        final transaction = ++_mcpMountGeneration;
+        final declarations = servers.values
+            .map((m) {
+              return PluginMcpServer(
+                pluginId: source,
+                name: m.name,
+                transport: m.type,
+                command: m.command,
+                args: m.args,
+                url: m.url,
+                cwd: m.cwd,
+                envNames: m.env.keys.toList(growable: false),
+                headerNames: m.headers.keys.toList(growable: false),
+                path: '.mcp.json',
+                oauth: m.oauth,
+                startupTimeoutS: m.startupTimeoutS ?? 30,
+              );
+            })
+            .toList(growable: false);
+        return _mountPluginOwnedMcpServers(
+          NormalizedPluginManifest(
+            id: source,
+            name: source,
+            version: 'legacy',
+            format: PluginFormat.claudeCode,
+            rootPath: cache.path,
+            mcpServers: declarations,
           ),
+          connect: false,
+          transaction: transaction,
+          prepareSecrets: (id) async {
+            final name = id.substring(source.length + 1);
+            final m = servers[name];
+            if (m == null) return;
+            if (m.env.isNotEmpty) await setMcpEnv(id, m.env);
+            if (m.headers.isNotEmpty) await setMcpHeaders(id, m.headers);
+          },
         );
-        mounted++;
-      }
-      if (mounted > 0) {
-        refresh();
-        await _persistCustomMcpServers();
-        await _persistMcpConnectedIntent();
-      }
-      return mounted;
+      });
     } catch (_) {
       return 0;
     }
@@ -7764,8 +8424,8 @@ class AppState extends ChangeNotifier {
     // out of scope — config + token storage + buildMcpAuthorizeUrl exist.
     if (oauth != null) {
       final canonicalId = server.canonicalId;
-      final writer = mcpOAuthWriteOverrideForTest ??
-          McpService.I.setMcpOAuthConfig;
+      final writer =
+          mcpOAuthWriteOverrideForTest ?? McpService.I.setMcpOAuthConfig;
       // Fence the write so a racing remove can await it and tests can
       // observe failure-driven rollback deterministically. Chain after
       // any earlier queued write for the same canonical id so a repeat
@@ -7777,30 +8437,32 @@ class AppState extends ChangeNotifier {
           .catchError((Object _) {})
           .then((_) => writer(canonicalId, oauth))
           .then(
-        (_) {},
-        onError: (Object err, StackTrace _) {
-          // Roll the import back: if the row we added is still present and
-          // unchanged, remove it and re-persist. A later remove/replace
-          // that already succeeded must not be clobbered — identity check
-          // against the exact server instance guards against that.
-          final idx = mcpServers.indexOf(server);
-          if (idx >= 0) {
-            mcpServers.removeAt(idx);
-            if (headers.isNotEmpty) {
-              unawaited(deleteMcpHeaders(canonicalId));
-            }
-            unawaited(_persistCustomMcpServers());
-            refresh();
-          }
-          Diag.swallow('state', err);
-        },
-      );
+            (_) {},
+            onError: (Object err, StackTrace _) {
+              // Roll the import back: if the row we added is still present and
+              // unchanged, remove it and re-persist. A later remove/replace
+              // that already succeeded must not be clobbered — identity check
+              // against the exact server instance guards against that.
+              final idx = mcpServers.indexOf(server);
+              if (idx >= 0) {
+                mcpServers.removeAt(idx);
+                if (headers.isNotEmpty) {
+                  unawaited(deleteMcpHeaders(canonicalId));
+                }
+                unawaited(_persistCustomMcpServers());
+                refresh();
+              }
+              Diag.swallow('state', err);
+            },
+          );
       _mcpOAuthImportWrites[canonicalId] = tracked;
-      unawaited(tracked.whenComplete(() {
-        if (identical(_mcpOAuthImportWrites[canonicalId], tracked)) {
-          _mcpOAuthImportWrites.remove(canonicalId);
-        }
-      }));
+      unawaited(
+        tracked.whenComplete(() {
+          if (identical(_mcpOAuthImportWrites[canonicalId], tracked)) {
+            _mcpOAuthImportWrites.remove(canonicalId);
+          }
+        }),
+      );
     }
     return server;
   }
@@ -8148,15 +8810,16 @@ class AppState extends ChangeNotifier {
   Future<void> persistMcpIntent() => _persistMcpConnectedIntent();
 
   /// Persist the connected-server intent. Connected servers are always
-  /// recorded; an intended **ownerless** server (bundled/custom seed) is
-  /// retained even when its last connect failed, so a startup attempt never
-  /// silently drops the user's intent. Owned servers follow the plugin
-  /// lifecycle and are only retained while actually connected.
+  /// recorded; an existing intent is retained while its server row still
+  /// exists, even when the last connect failed or a metadata-only
+  /// `connect:false` mount left it disconnected. Explicit user actions pass
+  /// [removed] so disable/unmount can clear intent.
   ///
   /// [removed] lets explicit user actions (toggle-off) prune one id without
   /// rebuilding the whole intent from live connection flags.
   Future<void> _persistMcpConnectedIntent({
     Iterable<String> removed = const [],
+    bool strict = false,
   }) async {
     final removedIds = removed.toSet();
     final existing = await _mcpConnectedIntent();
@@ -8164,7 +8827,7 @@ class AppState extends ChangeNotifier {
     for (final id in existing) {
       if (removedIds.contains(id)) continue;
       final server = _mcpServerByCanonicalId(id);
-      if (server != null && server.ownerPluginId == null) merged.add(id);
+      if (server != null) merged.add(id);
     }
     for (final s in mcpServers) {
       if (s.connected && !removedIds.contains(s.canonicalId)) {
@@ -8173,8 +8836,15 @@ class AppState extends ChangeNotifier {
     }
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setStringList(_kMcpConnectedIntent, merged.toList());
+      final written = await prefs.setStringList(
+        _kMcpConnectedIntent,
+        merged.toList(),
+      );
+      if (strict && !written) {
+        throw StateError('Failed to persist MCP connected intent');
+      }
     } catch (e) {
+      if (strict) rethrow;
       Diag.swallow('state', e);
     }
   }
@@ -8409,7 +9079,7 @@ class AppState extends ChangeNotifier {
       deleteMcpHeaders(s.canonicalId),
     ]);
     await _persistCustomMcpServers();
-    await _persistMcpConnectedIntent();
+    await _persistMcpConnectedIntent(removed: [s.canonicalId]);
     refresh();
   }
 
@@ -8444,8 +9114,11 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Custom MCP server + plugin persistence ─────────────────────────
-  Future<void> _persistCustomMcpServers() async {
+  Future<void> _persistCustomMcpServers({bool strict = false}) async {
     try {
+      if (strict && mcpCustomMcpPersistenceOverrideForTest != null) {
+        await mcpCustomMcpPersistenceOverrideForTest!();
+      }
       final prefs = await SharedPreferences.getInstance();
       final customs = mcpServers
           .where((s) => s.custom)
@@ -8477,11 +9150,18 @@ class AppState extends ChangeNotifier {
             }),
           )
           .toList();
-      await prefs.setStringList(_kCustomMcpServers, customs);
+      final written = await prefs.setStringList(_kCustomMcpServers, customs);
+      if (strict && !written) {
+        throw StateError('Failed to persist custom MCP servers');
+      }
     } catch (e) {
+      if (strict) rethrow;
       Diag.swallow('state', e);
     }
   }
+
+  @visibleForTesting
+  static Future<void> Function()? mcpCustomMcpPersistenceOverrideForTest;
 
   Future<void> _recordRemovedBuiltinSeed(String canonicalId) async {
     try {

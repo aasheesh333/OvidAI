@@ -58,7 +58,7 @@ class WorkerTests(unittest.TestCase):
         admin.enable = lambda uid: (_ for _ in ()).throw(RuntimeError('offline'))
         claims['auth_time'] = 87399
         with self.assertRaises(RuntimeError):
-            service.login(claims)
+            service.cancel(claims)
         now[0] = 87460
         self.assertEqual(sweep(service), 1)
         self.assertEqual(store.get('alice')['state'], 'cancelled')

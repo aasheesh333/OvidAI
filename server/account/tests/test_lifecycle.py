@@ -108,12 +108,13 @@ class LifecycleTests(unittest.TestCase):
                 self.service.request({**self.claims, **update}, 'request-0001')
         self.assertEqual(self.store.rows, {})
 
-    def test_login_during_grace_cancels_and_duplicate_request_cannot_resurrect(self):
+    def test_login_during_grace_is_observational_and_duplicate_request_cannot_resurrect(self):
         self.request()
         self.now = 2000
         self.claims['auth_time'] = 2000
-        self.assertEqual(self.service.login(self.claims)['state'], 'cancelled')
-        self.assertEqual(self.request()['state'], 'cancelled')
+        self.assertEqual(self.service.login(self.claims)['state'], 'pending')
+        self.assertEqual(self.request()['state'], 'pending')
+        self.assertEqual(self.service.cancel(self.claims)['state'], 'cancelled')
         self.assertEqual(self.expire()['state'], 'cancelled')
         self.assertIn('alice', self.admin.users)
         self.assertIn('alice', self.data.keys)
@@ -122,39 +123,45 @@ class LifecycleTests(unittest.TestCase):
         self.request()
         self.now = 2000
         self.claims['auth_time'] = 900
-        with self.assertRaises(AccountError):
-            self.service.login(self.claims)
+        self.assertEqual(self.service.login(self.claims)['state'], 'pending')
         self.assertEqual(self.store.get('alice')['state'], 'pending')
 
     def test_restoring_requesting_session_in_same_second_does_not_cancel(self):
         self.request()
-        with self.assertRaises(AccountError):
-            self.service.login(self.claims)
+        self.assertEqual(self.service.login(self.claims)['state'], 'pending')
         self.assertEqual(self.store.get('alice')['state'], 'pending')
 
     def test_cancel_wins_at_exact_deadline_before_worker_claim(self):
         self.request()
         self.now = 87_400
         self.claims['auth_time'] = 87_400
-        self.service.login(self.claims)
+        self.service.cancel(self.claims)
         self.service.finalize('alice')
         self.assertIn('alice', self.admin.users)
 
-    def test_firebase_login_during_fence_cancels_before_any_data_is_deleted(self):
+    def test_cancel_at_accepted_deadline_uses_one_server_timestamp(self):
+        self.request()
+        self.now = 87_400
+        self.claims['auth_time'] = 87_400
+        ticks = iter((87_400, 87_401))
+        self.service.clock = lambda: next(ticks)
+        self.assertEqual(self.service.cancel(self.claims)['state'], 'cancelled')
+        self.assertIn('alice', self.admin.users)
+
+    def test_firebase_login_during_fence_does_not_cancel(self):
         self.request()
         self.admin.on_disable = lambda: self.admin.users['alice'].update(
             last_login_ms=87_399_999)
-        self.assertEqual(self.expire()['state'], 'cancelled')
-        self.assertFalse(self.admin.users['alice']['disabled'])
-        self.assertIn('alice', self.data.keys)
+        self.assertEqual(self.expire()['state'], 'deleted')
+        self.assertNotIn('alice', self.admin.users)
 
-    def test_late_arriving_grace_login_ack_can_cancel_fenced_request(self):
+    def test_late_explicit_cancel_can_cancel_fenced_request(self):
         self.request()
         self.now = 87_400
         self.service.finalize('alice')
         self.now += 10
-        self.claims['auth_time'] = 87_399
-        self.assertEqual(self.service.login(self.claims)['state'], 'cancelled')
+        self.claims['auth_time'] = 87_410
+        self.assertEqual(self.service.cancel(self.claims)['state'], 'cancelled')
         self.assertFalse(self.admin.users['alice']['disabled'])
         self.assertIn('alice', self.data.profiles)
 
@@ -162,8 +169,7 @@ class LifecycleTests(unittest.TestCase):
         self.request()
         self.now = 87_401
         self.claims['auth_time'] = 87_401
-        with self.assertRaises(AccountError):
-            self.service.login(self.claims)
+        self.assertEqual(self.service.login(self.claims)['state'], 'pending')
 
     def test_cleanup_retries_after_restart_and_deletes_only_bound_uid(self):
         self.request()
@@ -206,14 +212,14 @@ class LifecycleTests(unittest.TestCase):
         # Firebase exposes only the latest login, not the login history. A late
         # worker cannot prove there was no earlier login during grace.
         self.admin.users['alice']['last_login_ms'] = 87_401_000
-        self.assertEqual(self.expire()['state'], 'cancelled')
-        self.assertIn('alice', self.data.keys)
+        self.assertEqual(self.expire()['state'], 'deleted')
+        self.assertNotIn('alice', self.data.keys)
 
     def test_request_ids_remain_idempotent_after_new_request(self):
         self.request()
         self.now = 2000
         self.claims['auth_time'] = 2000
-        self.service.login(self.claims)
+        self.service.cancel(self.claims)
         second = self.request('request-0002')
         with self.assertRaises(AccountError):
             self.request('request-0001')
@@ -224,7 +230,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.request('request-bbbb'), first)
         self.now = 1001
         self.claims['auth_time'] = 1001
-        self.service.login(self.claims)
+        self.service.cancel(self.claims)
         self.service = Lifecycle(self.store, self.admin, self.data, lambda: self.now)
         self.assertEqual(self.request('request-bbbb')['state'], 'cancelled')
         self.request('request-cccc')
@@ -295,9 +301,9 @@ class LifecycleTests(unittest.TestCase):
         enable = self.admin.enable
         self.admin.enable = lambda uid: (_ for _ in ()).throw(RuntimeError('offline'))
         with self.assertRaises(RuntimeError):
-            self.service.login(claims)
+            self.service.cancel(claims)
         self.admin.enable = enable
-        self.assertEqual(self.service.login(claims)['state'], 'cancelled')
+        self.assertEqual(self.service.cancel(claims)['state'], 'cancelled')
         self.assertFalse(self.admin.users['alice']['disabled'])
         self.assertEqual(self.service.status(claims)['state'], 'cancelled')
         self.assertEqual(self.service.request(claims, 'request-0001')['state'], 'cancelled')
@@ -370,7 +376,7 @@ class LifecycleTests(unittest.TestCase):
         enable = self.admin.enable
         self.admin.enable = lambda uid: (_ for _ in ()).throw(RuntimeError('offline'))
         with self.assertRaises(RuntimeError):
-            self.service.login(self.claims)
+            self.service.cancel(self.claims)
         self.assertEqual(self.store.get('alice')['state'], 'cancelled')
         self.admin.enable = enable
         self.now += 120

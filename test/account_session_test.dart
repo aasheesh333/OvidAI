@@ -38,4 +38,44 @@ void main() {
       expect(session.uid, 'bob');
     },
   );
+
+  test(
+    'overlapping binds for the same UID share one acknowledgement',
+    () async {
+      final session = AccountSession();
+      final acknowledgement = Completer<void>();
+      var calls = 0;
+
+      final first = session.bind('alice', () {
+        calls++;
+        return acknowledgement.future;
+      });
+      final second = session.bind('alice', () {
+        calls++;
+        return acknowledgement.future;
+      });
+
+      expect(calls, 1);
+      acknowledgement.complete();
+      await Future.wait([first, second]);
+      expect(session.ready, isTrue);
+      expect(session.uid, 'alice');
+    },
+  );
+
+  test('a stale same-UID bind cannot clear a newer auth revision', () async {
+    final session = AccountSession();
+    final oldAck = Completer<void>();
+    final newAck = Completer<void>();
+    final old = session.bind('alice', () => oldAck.future);
+    session.clear();
+    final current = session.bind('alice', () => newAck.future);
+
+    oldAck.complete();
+    await old;
+    expect(session.ready, isFalse);
+    newAck.complete();
+    await current;
+    expect(session.ready, isTrue);
+  });
 }

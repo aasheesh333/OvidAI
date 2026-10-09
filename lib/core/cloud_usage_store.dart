@@ -6,12 +6,11 @@ import 'ovid_cloud_service.dart';
 import 'state.dart';
 
 /// One live allowance projection per AppState, shared by all mounted consumers.
-/// AppState notifications are noisy (including streaming tokens); only completed
-/// usage-row revisions and cloud configuration changes invalidate this cache.
+/// Local activity notifications never invalidate server allowance. Only account
+/// and cloud configuration changes do; local consumers use AppState's revision.
 class CloudUsageStore extends ChangeNotifier with WidgetsBindingObserver {
   CloudUsageStore._(this.app) {
     _identity = service.accountIdentity;
-    _revision = _readRevision();
     _configuration = _readConfiguration();
     app.addListener(_onChange);
     service.addListener(_onChange);
@@ -32,7 +31,6 @@ class CloudUsageStore extends ChangeNotifier with WidgetsBindingObserver {
   bool _disposed = false;
   bool _notifyScheduled = false;
   late Object _identity;
-  late Object _revision;
   late Object _configuration;
   int _generation = 0;
   bool _inFlight = false;
@@ -44,8 +42,6 @@ class CloudUsageStore extends ChangeNotifier with WidgetsBindingObserver {
   String? error;
   bool loading = false;
   bool stale = true;
-
-  Object _readRevision() => (app.usageLog.length, app.usageLog.lastOrNull);
 
   Object _readConfiguration() {
     final provider = app.providerById(AppState.ovidCloudProviderId);
@@ -60,15 +56,13 @@ class CloudUsageStore extends ChangeNotifier with WidgetsBindingObserver {
 
   void _onChange() {
     final identity = service.accountIdentity;
-    final revision = _readRevision();
     final configuration = _readConfiguration();
     final changedAccount = identity != _identity;
     final changedConfiguration = configuration != _configuration;
-    if (!changedAccount && !changedConfiguration && revision == _revision) {
+    if (!changedAccount && !changedConfiguration) {
       return;
     }
     _identity = identity;
-    _revision = revision;
     _configuration = configuration;
     if (changedAccount || changedConfiguration) {
       // A previous account/plan/key snapshot must never override a new one.
@@ -109,7 +103,6 @@ class CloudUsageStore extends ChangeNotifier with WidgetsBindingObserver {
     if (_disposed) return;
     final generation = _generation;
     final identity = _identity;
-    final revision = _revision;
     _pending = false;
     _inFlight = true;
     loading = true;
@@ -127,7 +120,7 @@ class CloudUsageStore extends ChangeNotifier with WidgetsBindingObserver {
         return;
       }
       usage = result;
-      stale = revision != _revision;
+      stale = false;
     } catch (e) {
       if (_disposed ||
           generation != _generation ||

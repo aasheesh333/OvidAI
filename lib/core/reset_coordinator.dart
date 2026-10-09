@@ -10,6 +10,7 @@ enum ResetStoreKind {
   search('search'),
   ledger('ledger'),
   memory('memory'),
+  usage('usage'),
   account('account'),
   imageReceipts('image-receipts'),
   shares('shares');
@@ -149,7 +150,11 @@ class ResetCoordinator {
   ResetCoordinator(List<ResetStore> stores)
     : stores = List.unmodifiable(stores) {
     if (stores.isEmpty) {
-      throw ArgumentError.value(stores, 'stores', 'At least one store required.');
+      throw ArgumentError.value(
+        stores,
+        'stores',
+        'At least one store required.',
+      );
     }
     final names = <String>{};
     for (final store in stores) {
@@ -170,7 +175,11 @@ class ResetCoordinator {
     for (final kind in ResetStoreKind.values) {
       final store = stores[kind];
       if (store == null) {
-        throw ArgumentError.value(stores, 'stores', 'Missing store: ${kind.id}');
+        throw ArgumentError.value(
+          stores,
+          'stores',
+          'Missing store: ${kind.id}',
+        );
       }
       if (store.name != kind.id) {
         throw ArgumentError.value(

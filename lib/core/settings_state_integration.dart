@@ -22,7 +22,9 @@ extension _SettingsStateIntegration on AppState {
     if (!identical(AppState.I, this) ||
         !identical(token, _sessionAccountToken) ||
         !_sessionAccountReady) {
-      throw StateError('Account changed or is not ready. No restore published.');
+      throw StateError(
+        'Account changed or is not ready. No restore published.',
+      );
     }
   }
 
@@ -110,6 +112,60 @@ extension _SettingsStateIntegration on AppState {
           onVerifyDeleted: () async =>
               !(await _openMemoryStore()).root.existsSync(),
         ),
+        ResetStoreKind.usage: FunctionalResetStore(
+          name: ResetStoreKind.usage.id,
+          onStage: () async {
+            await _usageAppendTail;
+            if (_usageAppendError != null) throw _usageAppendError!;
+            final store = _usageAttemptStore;
+            if (store != null) await store.retire();
+          },
+          onDelete: () async {
+            final root = (await _usageAccountRoot())!;
+            final journal = File(
+              '${root.path}/${UsageAttemptStore.journalFileName}',
+            );
+            if (await journal.exists()) await journal.delete();
+            if (await root.exists()) {
+              await for (final entity in root.list(followLinks: false)) {
+                if (entity is File &&
+                    entity.path.startsWith('${journal.path}.tmp')) {
+                  await entity.delete();
+                }
+              }
+            }
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.remove(_accountKey(AppState._kUsage));
+            await prefs.reload();
+            usageLog.clear();
+            _usageAttemptStore = null;
+            _usageStoreToken = null;
+            _usageStorageError = null;
+            _usageAppendError = null;
+          },
+          onVerifyDeleted: () async {
+            final root = (await _usageAccountRoot())!;
+            final journal = File(
+              '${root.path}/${UsageAttemptStore.journalFileName}',
+            );
+            var staging = false;
+            if (await root.exists()) {
+              await for (final entity in root.list(followLinks: false)) {
+                if (entity is File &&
+                    entity.path.startsWith('${journal.path}.tmp')) {
+                  staging = true;
+                }
+              }
+            }
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.reload();
+            return !await journal.exists() &&
+                !staging &&
+                prefs.getStringList(_accountKey(AppState._kUsage)) == null &&
+                usageLog.isEmpty &&
+                _usageAttemptStore == null;
+          },
+        ),
         ResetStoreKind.account: FunctionalResetStore(
           name: ResetStoreKind.account.id,
           onStage: () async {},
@@ -190,7 +246,8 @@ extension _SettingsStateIntegration on AppState {
     Future<T> Function(Object token) action,
   ) async {
     _checkSettingsOwner(expectedAccount);
-    if (_settingsBusy) throw StateError('Settings operation already in progress.');
+    if (_settingsBusy)
+      throw StateError('Settings operation already in progress.');
     final settled = Completer<void>();
     _settingsOperation = settled.future;
     _settingsBusy = true;
@@ -250,9 +307,12 @@ extension _SettingsStateIntegration on AppState {
     if (sourceIds.length != backup.sessions.length ||
         !setEquals(sourceIds, newIds.keys.toSet()) ||
         newIds.values.toSet().length != sourceIds.length ||
-        newIds.values.any((id) =>
-            !RegExp(r'^restored-[a-f0-9]{32}$').hasMatch(id) ||
-            existingIds.contains(id) || sourceIds.contains(id))) {
+        newIds.values.any(
+          (id) =>
+              !RegExp(r'^restored-[a-f0-9]{32}$').hasMatch(id) ||
+              existingIds.contains(id) ||
+              sourceIds.contains(id),
+        )) {
       throw StateError('Restore requires distinct, fresh session IDs.');
     }
 
@@ -289,14 +349,17 @@ extension _SettingsStateIntegration on AppState {
           }
           final builder = BytesBuilder(copy: false);
           await for (final chunk in source.openRead(
-            0, SettingsBackupService.maxAttachmentBytes + 1,
+            0,
+            SettingsBackupService.maxAttachmentBytes + 1,
           )) {
             builder.add(chunk);
           }
           final bytes = builder.takeBytes();
           if (bytes.length != size ||
               bytes.length > SettingsBackupService.maxAttachmentBytes) {
-            throw StateError('Staged attachment changed size or exceeds its limit.');
+            throw StateError(
+              'Staged attachment changed size or exceeds its limit.',
+            );
           }
           _checkSettingsOwner(token);
           if (workspaceStage == null) {
@@ -306,31 +369,42 @@ extension _SettingsStateIntegration on AppState {
           final name = '${paths.length}.blob';
           final file = File('${workspaceStage!.path}/$name');
           await file.writeAsBytes(bytes, flush: true);
-          if (sha256.convert(await file.readAsBytes()) != sha256.convert(bytes)) {
+          if (sha256.convert(await file.readAsBytes()) !=
+              sha256.convert(bytes)) {
             throw StateError('Attachment copy verification failed.');
           }
           return paths[blob] = '${workspace.path}/$name';
         }
+
         final messages = <Message>[];
         for (final raw in row['messages'] as List) {
           final attachments = <MessageAttachment>[];
           for (final a in raw['attachments'] as List) {
             String? path;
             if (a['status'] == 'included') {
-              path = await copyAttachment(a['blob'] as String, a['size'] as int);
+              path = await copyAttachment(
+                a['blob'] as String,
+                a['size'] as int,
+              );
             }
-            attachments.add(MessageAttachment(
-              name: a['name'] as String, size: a['size'] as int, path: path,
-            ));
+            attachments.add(
+              MessageAttachment(
+                name: a['name'] as String,
+                size: a['size'] as int,
+                path: path,
+              ),
+            );
           }
-          messages.add(Message(
-            role: raw['role'] as String,
-            kind: MsgKind.values.byName(raw['kind'] as String),
-            content: raw['content'] as String,
-            time: DateTime.parse(raw['time'] as String),
-            toolState: 'ok',
-            attachments: attachments,
-          ));
+          messages.add(
+            Message(
+              role: raw['role'] as String,
+              kind: MsgKind.values.byName(raw['kind'] as String),
+              content: raw['content'] as String,
+              time: DateTime.parse(raw['time'] as String),
+              toolState: 'ok',
+              attachments: attachments,
+            ),
+          );
         }
         if (workspaceStage != null) {
           _checkSettingsOwner(token);
@@ -343,18 +417,24 @@ extension _SettingsStateIntegration on AppState {
           workspaceStage!.renameSync(workspace.path);
           copiedDirectories[copiedDirectories.length - 1] = workspace;
         }
-        imported.add(ChatSession(
-          id: id, title: row['title'] as String,
-          model: 'Select a provider', mode: 'safe',
-          createdAt: DateTime.parse(row['createdAt'] as String),
-          messages: messages,
-        ));
+        imported.add(
+          ChatSession(
+            id: id,
+            title: row['title'] as String,
+            model: 'Select a provider',
+            mode: 'safe',
+            createdAt: DateTime.parse(row['createdAt'] as String),
+            messages: messages,
+          ),
+        );
       }
       void checkUnchanged() {
         _checkSettingsOwner(token);
         if (activeBefore != activeSessionId ||
             !listEquals(liveBefore, _sessionJsonForPersistence())) {
-          throw StateError('Sessions changed during restore. Retry the import.');
+          throw StateError(
+            'Sessions changed during restore. Retry the import.',
+          );
         }
       }
 
@@ -366,7 +446,10 @@ extension _SettingsStateIntegration on AppState {
       }
       // One authoritative write: append without rewriting a single existing
       // row, active selection, bootstrap snapshot, setting, grant or schedule.
-      final rows = [...?oldRows, for (final s in imported) jsonEncode(s.toJson())];
+      final rows = [
+        ...?oldRows,
+        for (final s in imported) jsonEncode(s.toJson()),
+      ];
       writeAttempted = true;
       await _writeRestoreRows(prefs, key, rows);
       checkUnchanged();
@@ -409,9 +492,11 @@ extension _SettingsStateIntegration on AppState {
           // A persisted candidate may still reference these files. Preserve
           // them rather than turning recoverable data into dangling paths.
           keepCopies = true;
-          throw StateError('Restore failed: $error. Rollback could not be '
-              'verified: $rollbackError. Attachment copies retained at '
-              '${copiedDirectories.map((d) => d.path).join(", ")}.');
+          throw StateError(
+            'Restore failed: $error. Rollback could not be '
+            'verified: $rollbackError. Attachment copies retained at '
+            '${copiedDirectories.map((d) => d.path).join(", ")}.',
+          );
         }
       }
       rethrow;
@@ -426,7 +511,9 @@ extension _SettingsStateIntegration on AppState {
   }
 
   Future<void> _writeRestoreRows(
-    SharedPreferences prefs, String key, List<String>? rows,
+    SharedPreferences prefs,
+    String key,
+    List<String>? rows,
   ) async {
     final accepted = rows == null
         ? await prefs.remove(key)

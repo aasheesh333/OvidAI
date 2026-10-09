@@ -388,11 +388,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ],
                 ),
               ),
-            // Give the address field a full row on phones. The header grows
-            // with the input's text metrics rather than clipping at 76dp.
+            // Keep navigation to the right of the title. Editing reclaims that
+            // space for the real URL; the row still grows with text scaling.
             LayoutBuilder(
               builder: (context, constraints) {
-                final narrow = constraints.maxWidth < 600;
                 final fieldHeight = math.max(
                   48.0,
                   textScaler.scale(14) * 1.5 + 24,
@@ -477,7 +476,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                   onSubmitted: (value) {
                     _nav(value);
-                    _endUrlEditing();
+                    _urlFocus.unfocus();
                   },
                 );
                 final go = AetherGhostButton(
@@ -486,66 +485,25 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   icon: Icons.open_in_browser,
                   iconOnly: true,
                   iconSize: 48,
-                  onPressed: () => _nav(_url.text),
+                  onPressed: () {
+                    _nav(_url.text);
+                    _urlFocus.unfocus();
+                  },
                 );
                 return AetherGradientHeader(
-                  height: fieldHeight + 18 + (narrow ? 48 : 0),
+                  height: fieldHeight + 18,
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(6, 10, 6, 8),
-                    child: narrow
-                        ? Column(
-                            children: [
-                              Row(
-                                children: [
-                                  Expanded(child: address),
-                                  go,
-                                ],
-                              ),
-                              Row(children: navigation),
-                            ],
-                          )
-                        : Row(
-                            children: [
-                              ...navigation,
-                              const SizedBox(width: 4),
-                              Expanded(child: address),
-                              go,
-                            ],
-                          ),
+                    child: Row(
+                      children: [
+                        Expanded(child: address),
+                        if (_editingUrl) go else ...navigation,
+                      ],
+                    ),
                   ),
                 );
               },
             ),
-            // Status row — AetherStatusDot + compact caption describing the
-            // active tab (agent busy, protocol, host). Replaces the old
-            // scattered dots and gives screen readers one place to speak.
-            if (tab != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 2, 14, 6),
-                child: Row(
-                  children: [
-                    AetherStatusDot(
-                      key: const ValueKey('browser-status-dot'),
-                      color: (agent.browserBusy || agent.busy)
-                          ? Aether.accent
-                          : Aether.successLight,
-                      pulsing: agent.browserBusy || agent.busy,
-                      size: 7,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        (agent.browserBusy || agent.busy)
-                            ? 'Agent is driving · ${_hostOrPreview(tab)}'
-                            : 'Ready · ${_hostOrPreview(tab)}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: AetherType.caption,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             // Held popups (window.open / target=_blank clicks captured
             // for the agent): without this chip such a click looked
             // like a dead UI. Desktop browsers show a blocked-popup
@@ -628,12 +586,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (t.localPreviewPath != null) return 'Preview';
     if (t.url == 'ovid://preview') return 'Preview';
     if (t.title?.isNotEmpty == true) return t.title!;
-    final host = Uri.tryParse(t.url)?.host ?? '';
-    return host.isNotEmpty ? host : t.url;
-  }
-
-  String _hostOrPreview(BrowserTab t) {
-    if (t.localPreviewPath != null) return 'Live preview';
     final host = Uri.tryParse(t.url)?.host ?? '';
     return host.isNotEmpty ? host : t.url;
   }

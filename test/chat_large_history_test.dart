@@ -308,6 +308,46 @@ void main() {
       expect(find.byIcon(Icons.thumb_up_alt_outlined), findsNothing);
     });
 
+    testWidgets('stream rebuilds preserve drafts across session switches', (
+      tester,
+    ) async {
+      await pumpChat(tester, 5000);
+      final app = AppState.I;
+      final original = app.activeSession!;
+      final other = ChatSession(
+        id: 'other-history',
+        title: 'Other',
+        model: 'm',
+        messages: [_answer('Other answer')],
+      );
+      app.sessions.add(other);
+      final composer = find.byKey(const ValueKey('chat-composer'));
+      await tester.enterText(composer, 'Original draft');
+      final controller = tester.widget<TextField>(composer).controller!;
+      controller.selection = const TextSelection.collapsed(offset: 3);
+      final originalValue = controller.value;
+      for (var i = 0; i < 5; i++) {
+        original.messages.last.content += ' token';
+        app.refresh();
+        await tester.pump();
+        expect(controller.value, originalValue);
+      }
+      app.selectSession(other.id);
+      await tester.pump();
+      await tester.pump();
+      expect(controller.text, isEmpty);
+      await tester.enterText(composer, 'Other draft');
+      app.selectSession(original.id);
+      await tester.pump();
+      await tester.pump();
+      expect(controller.text, 'Original draft');
+      app.selectSession(other.id);
+      await tester.pump();
+      await tester.pump();
+      expect(controller.text, 'Other draft');
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets(
       'ChatTranscript shows an older-messages indicator when truncated',
       (tester) async {

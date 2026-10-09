@@ -53,9 +53,16 @@ This module neither creates Firebase users nor changes project provider settings
   receipt and remain bound to it after cancellation/restart. Completed request IDs
   cannot resurrect deletion, including after a later request supersedes the receipt.
 - `GET /account/deletion`: active/pending/cancelled/fenced/deleting/deleted status.
-- `POST /account/login` or `/account/deletion/cancel`: a new login during grace
-  cancels. A restored requesting session cannot cancel itself. Current client calls
-  login before admitting an authenticated user when account deployment is enabled.
+- `POST /account/login`: observational. Returns the current deletion state; it
+  never cancels deletion or re-enables a fenced account. The client calls it
+  before admitting an authenticated user when account deployment is enabled, and
+  a pending account stays gated after ordinary sign-in.
+- `POST /account/deletion/cancel {"consent":true}`: the only restore mutation.
+  Requires auth_time no older than 5 minutes (checked under the UID lock) and App
+  Check. Accepted only for `pending` rows before the server `delete_after`
+  deadline, or worker-fenced rows inside the settlement interval; `deleting` and
+  `deleted` are rejected. The client calls it only from an explicit
+  "Restore account" action.
 - No public finalize/admin deletion endpoint. Only the server worker finalizes.
 
 The server returns `{state, delete_after, request_id}`. Errors never represent
@@ -83,10 +90,11 @@ cannot bypass backoff. Unattempted work sorts ahead of retried poison rows even
 when another timer tick happens after their backoff expires. There is no permanent
 attempt cutoff. Explicit cancellation can still recover immediately during backoff.
 
-At expiry the worker checks Firebase last sign-in metadata, durably marks fencing,
-disables sign-in, and re-reads metadata. A successful disable starts a 60-second
-settlement interval. No key/data/auth deletion occurs during settlement. A late
-grace login acknowledgement can still cancel. Only then does durable `deleting`
+At expiry the worker durably marks fencing and disables sign-in. A successful
+disable starts a 60-second settlement interval. No key/data/auth deletion occurs
+during settlement. An explicit `/account/deletion/cancel` committed under the UID
+lock during settlement can still restore; Firebase sign-in metadata is never
+treated as cancellation. Only then does durable `deleting`
 commit, followed by key blocking, data/cache cleanup, and Auth/profile removal.
 Tokens needed for crash-safe cleanup are captured in the durable record before
 effects, retained through failures, and removed on completion.
@@ -102,18 +110,16 @@ An effect followed by a lost response or failed checkpoint is still an unknown
 outcome requiring the deployed adapter's retry contract. HTTP 404 is not silently
 treated as proof of successful key/cache cleanup.
 
-Firebase only provides **latest** sign-in metadata, not login history. A newer
-login even after the deadline conservatively cancels when the worker cannot rule
-out an earlier grace login. This may extend cancellation during worker downtime;
-it deliberately prefers keeping an account to deleting a potentially cancelled
-one. Same-second token timestamps require newer Firebase metadata to cancel.
+Authentication is not consent. The worker does not read Firebase last-login
+metadata as a cancellation signal; only a durable `cancelled` row committed under
+the UID lock stops cleanup. Worker downtime therefore does not convert ordinary
+sign-ins into restoration, and an explicit cancel that wins the lock is honored.
 
-**Activation-critical assumption:** production Firebase sign-in/disable and
-last-sign-in visibility must be validated with concurrent staging sign-ins. A
-60-second wait is not proof of a globally linearizable external identity service.
-If that property cannot be established, add a durable pre-sign-in fence/event
-integration before activation; do not claim an unconditional cross-service race
-guarantee from fake tests. Gateway access must also be fenced as described below.
+**Activation-critical assumption:** production Firebase disable and explicit
+cancel/re-enable must be validated with concurrent staging sign-ins and cancel
+requests. A 60-second wait is not proof of a globally linearizable external
+identity service. Do not claim an unconditional cross-service race guarantee from
+fake tests. Gateway access must also be fenced as described below.
 
 ## Data scope and manifest
 
@@ -183,7 +189,8 @@ future app-data writer. Paid webhooks must obey tombstones too. Pending/deleting
 accounts cannot mint new keys; background `/usage` must not cancel deletion.
 Guard `/v1/*` authenticated access by resolved key-owner UID so old cached keys or
 older clients cannot write/spend after fencing. Drain in-flight UID-owned writes
-before cleanup. Integrate explicit `/account/login` before new client cloud use.
+before cleanup. Call observational `/account/login` before new client cloud use;
+it never cancels deletion.
 Do not hold locks in mutually inverted orders with quota locks. This branch does
 not modify a nonexistent tracked mint module or the live `/opt` implementation.
 
@@ -197,8 +204,9 @@ not modify a nonexistent tracked mint module or the live `/opt` implementation.
    delete permissions, never client credentials. Register Play Integrity App Check
    for the signed Android build. Client now includes the App Check SDK; server
    allowlist requires `ACCOUNT_FIREBASE_APP_IDS`.
-3. Provision durable PostgreSQL storage/backups and run `schema.sql` explicitly
-   (existing installations: see migration notes below).
+3. Provision durable PostgreSQL storage/backups and run `schema.sql`, then
+   `schema_private_sync.sql` (PostgreSQL only), explicitly (existing
+   installations: see migration notes below).
    Complete and review the LiteLLM/app cleanup manifest; validate key block/delete,
    cache eviction, missing-key retry semantics and foreign-key ordering for the
    deployed LiteLLM release (`main-latest` is not a pinned contract). Supply and
@@ -225,7 +233,12 @@ not modify a nonexistent tracked mint module or the live `/opt` implementation.
 
 ## Migration notes (artifacts only; not applied to a live database)
 
-- Fresh database: `schema.sql` includes the original table and both due indexes.
+- Fresh database: apply `schema.sql` (original table and both due indexes), then
+  `schema_private_sync.sql` (PostgreSQL-only private-sync tables; identical to
+  `migrations/003_private_sync.sql`). `schema.sql` stays portable account-lifecycle
+  DDL and must not gain PostgreSQL-only sync objects.
+- Existing database without private sync: explicitly apply
+  `migrations/003_private_sync.sql` (additive, repeatable, one transaction).
 - Existing database: explicitly apply `migrations/002_retry_schedule.sql`. It adds
   only a repeatable expression index, keeps the old index, and changes no records,
   columns, states, deadlines, recovery flags or cleanup context. Standard index

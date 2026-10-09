@@ -250,6 +250,10 @@ def test_exact_deadline_cancel_beats_cleanup_and_alias_cannot_resurrect(fenced):
         assert service.finalize('alice', scheduled=True)['state'] == 'fenced'
         claims['_account_disabled'] = True
     restarted = Lifecycle(store, admin, data, lambda: now[0])
+    observed = restarted.login(claims)
+    assert observed['state'] == ('fenced' if fenced else 'pending')
+    assert restarted.cancel(claims)['state'] == 'cancelled'
+    claims.pop('_account_disabled', None)
     assert restarted.login(claims)['state'] == 'cancelled'
     assert restarted.request(claims, 'request-alias')['state'] == 'cancelled'
     restarted.request(claims, 'request-newone')

@@ -10,6 +10,11 @@ class DeleteRequest(BaseModel):
     request_id: str
 
 
+class RestoreRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    consent: bool
+
+
 def router(service, verify):
     routes = APIRouter(prefix='/account', tags=['account'])
 
@@ -34,11 +39,16 @@ def router(service, verify):
         return run(service.status, authorization, x_firebase_appcheck)
 
     @routes.post('/login')
+    def acknowledge_login(authorization: str = Header(default=''),
+                          x_firebase_appcheck: str = Header(default='')):
+        return run(service.login, authorization, x_firebase_appcheck)
+
     @routes.post('/deletion/cancel')
-    def login(authorization: str = Header(default=''),
+    def cancel(body: RestoreRequest, authorization: str = Header(default=''),
               x_firebase_appcheck: str = Header(default='')):
-        # Disabled-token exception is narrowly confined to cancellation.
-        # Lifecycle checks the durable fence ownership and grace auth_time.
-        return run(service.login, authorization, x_firebase_appcheck, True)
+        if body.consent is not True:
+            raise HTTPException(400, detail='explicit_consent_required')
+        # Disabled-token exception is narrowly confined to explicit recovery.
+        return run(service.cancel, authorization, x_firebase_appcheck, True)
 
     return routes

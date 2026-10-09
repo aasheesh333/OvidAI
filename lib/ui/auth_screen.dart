@@ -405,7 +405,7 @@ class _AuthScreenState extends State<AuthScreen> {
               child: Text(
                 'Scheduled after '
                 '${fb.lastDeletionReceipt!.deleteAfter!.toUtc().toIso8601String()} '
-                '(UTC). Sign in before then to cancel.',
+                 '(UTC). Signing in does not cancel deletion; restore the account explicitly before then.',
                 style: AetherType.body,
               ),
             ),

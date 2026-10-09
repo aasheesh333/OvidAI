@@ -124,7 +124,9 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(TextField), findsNothing);
         expect(find.textContaining('social provider or phone'), findsOneWidget);
-        await tester.tap(find.text('Request deletion'));
+        final requestButton = find.text('Request deletion');
+        await tester.ensureVisible(requestButton);
+        await tester.tap(requestButton);
         await tester.pumpAndSettle();
       }
 
@@ -155,4 +157,42 @@ void main() {
       expect(find.textContaining('2026-10-04T12:00:00.000Z'), findsOneWidget);
     },
   );
+
+  testWidgets('duplicate restore taps are disabled while restore is pending', (
+    tester,
+  ) async {
+    final verification = Completer<String?>();
+    var verificationCalls = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AccountDeletionPanel(
+            service: AccountService(
+              enabled: true,
+              idToken: (_) async => 'id',
+              appCheck: () async => 'app',
+              client: MockClient(
+                (_) async => http.Response(
+                  '{"state":"pending","delete_after":87400,"request_id":"request-0001"}',
+                  200,
+                ),
+              ),
+            ),
+            reauthenticate: (_) {
+              verificationCalls++;
+              return verification.future;
+            },
+            requestDeletion: (_) async => throw StateError('must not request'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Restore account'));
+    await tester.pump();
+    await tester.tap(find.text('Restore account'));
+    expect(verificationCalls, 1);
+    verification.complete('cancelled');
+    await tester.pumpAndSettle();
+  });
 }

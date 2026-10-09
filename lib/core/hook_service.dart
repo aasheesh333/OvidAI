@@ -264,7 +264,7 @@ class HookOutputContract {
 
   /// Parse a hook's stdout for the contract. Non-JSON output yields
   /// [empty] (plain text is context, never a decision).
-  static HookOutputContract parse(String stdout) {
+  static HookOutputContract parse(String stdout, {String? canonicalEvent}) {
     final t = stdout.trim();
     if (t.isEmpty || !t.startsWith('{') || !t.endsWith('}')) return empty;
     dynamic j;
@@ -280,8 +280,21 @@ class HookOutputContract {
     if (rawHso is Map) hso = rawHso.cast<String, dynamic>();
     String? str(Object? v) =>
         v is String && v.trim().isNotEmpty ? v.trim() : null;
+    // PermissionRequest has a different envelope from PreToolUse. Interpret
+    // it only for that event, never as a cross-event approval or rewrite.
+    final rawPermission = hso?['decision'];
+    final permission = canonicalEvent == 'permission_request' &&
+            (hso?['hookEventName'] == null ||
+                hso?['hookEventName'] == 'PermissionRequest') &&
+            rawPermission is Map
+        ? rawPermission
+        : null;
+    final behavior = str(permission?['behavior']);
+    final validPermission = behavior == 'allow' || behavior == 'deny';
     Map<String, dynamic>? updated;
-    final rawUpdated = hso?['updatedInput'];
+    final rawUpdated = validPermission
+        ? (behavior == 'allow' ? (permission?['updatedInput']) : null)
+        : hso?['updatedInput'];
     if (rawUpdated is Map) updated = rawUpdated.cast<String, dynamic>();
     return HookOutputContract(
       continueHooks: m['continue'] is bool ? m['continue'] as bool : true,
@@ -290,8 +303,12 @@ class HookOutputContract {
       decision: str(m['decision'])?.toLowerCase(),
       reason: str(m['reason']),
       additionalContext: str(hso?['additionalContext']),
-      permissionDecision: str(hso?['permissionDecision'])?.toLowerCase(),
-      permissionDecisionReason: str(hso?['permissionDecisionReason']),
+      permissionDecision: validPermission
+          ? behavior
+          : str(hso?['permissionDecision'])?.toLowerCase(),
+      permissionDecisionReason: validPermission
+          ? str(permission?['message'])
+          : str(hso?['permissionDecisionReason']),
       updatedInput: updated,
     );
   }
@@ -3256,7 +3273,10 @@ class HookService extends ChangeNotifier {
         }
         // Decisions and executable arguments are operational data. Never parse
         // them from a publication copy: a credential can equal "deny".
-        final contract = HookOutputContract.parse(rawOut);
+        final contract = HookOutputContract.parse(
+          rawOut,
+          canonicalEvent: canonical,
+        );
         // Rewritten tool args (item 5) — collected even from hooks that
         // allow, so the caller can apply them pre-execution.
         if (contract.updatedInput != null) {

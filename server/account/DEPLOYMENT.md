@@ -46,10 +46,18 @@ Constructors add retention indexes without changing existing deadlines or charge
 The image legacy migration retains unknown reservations and discards undated old
 replay content; see images/README.md. No destructive schema migration is introduced.
 
-Existing account database (first install uses `schema.sql` instead):
+First install of the account database (PostgreSQL only):
+
+```sh
+psql "$ACCOUNT_DATABASE_URL" -v ON_ERROR_STOP=1 -f server/account/schema.sql
+psql "$ACCOUNT_DATABASE_URL" -v ON_ERROR_STOP=1 -f server/account/schema_private_sync.sql
+```
+
+Existing account database (instead of the fresh-install files):
 
 ```sh
 psql "$ACCOUNT_DATABASE_URL" -v ON_ERROR_STOP=1 -f server/account/migrations/002_retry_schedule.sql
+psql "$ACCOUNT_DATABASE_URL" -v ON_ERROR_STOP=1 -f server/account/migrations/003_private_sync.sql
 ```
 
 Legacy rows still `deleting` get the new image/share stages despite aggregate

@@ -179,6 +179,42 @@ void main() {
     },
   );
 
+  testWidgets(
+    'pending account shows its deadline and disables restore in flight',
+    (tester) async {
+      final service = _GateService()
+        ..isAvailable = true
+        ..isSignedIn = true
+        ..accountError = 'Account deletion is pending.'
+        ..lastDeletionReceipt = AccountDeletion(
+          'pending',
+          DateTime.utc(2026, 10, 10, 12),
+          'request-0001',
+        );
+      service.initialization.complete();
+
+      await tester.pumpWidget(
+        _host(
+          LoginGate(
+            service: service,
+            bindCloud: () async {},
+            child: const Text('Protected app'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('2026-10-10'), findsOneWidget);
+      expect(
+        find.textContaining('Signing in did not cancel deletion'),
+        findsOneWidget,
+      );
+
+      await tester.pumpWidget(const SizedBox());
+      service.dispose();
+    },
+  );
+
   testWidgets('signed-in child renders behind welcome overlay', (tester) async {
     // Fresh install: welcome has NOT been shown yet.
     SharedPreferences.setMockInitialValues({});

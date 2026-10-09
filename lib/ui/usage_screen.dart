@@ -1,20 +1,21 @@
 import 'package:flutter/material.dart';
 
-import '../core/format.dart';
-import '../core/cloud_usage_store.dart';
-import '../core/image_studio.dart';
-import '../core/ovid_cloud_service.dart';
-import '../core/theme.dart';
-import '../core/state.dart';
-import 'cloud_usage_status.dart';
-import 'image_receipt_panel.dart';
-import 'widgets/aether_primitives.dart';
+import 'package:ovid_ai/core/cloud_usage_store.dart';
+import 'package:ovid_ai/core/format.dart';
+import 'package:ovid_ai/core/image_studio.dart';
+import 'package:ovid_ai/core/ovid_cloud_service.dart';
+import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/core/theme.dart';
+import 'package:ovid_ai/core/usage_attempt.dart';
+import 'package:ovid_ai/ui/cloud_usage_status.dart';
+import 'package:ovid_ai/ui/image_receipt_panel.dart';
+import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
 /// PROVIDER-WISE usage tracking — "kisne kitna khaya" view.
 /// ───────────────────────────────────────────────────────────────────
-/// Aggregated from [AppState.usageLog] — real token counts metered per
-/// model call by the agent loop. web-IDE StatsLine + TurnUsage pattern,
+/// Aggregated from [AppState.usageAttempts] — observed per-attempt history.
+/// web-IDE StatsLine + TurnUsage pattern,
 /// with server-authoritative remaining usage for Ovid Cloud.
 /// ═══════════════════════════════════════════════════════════════════
 
@@ -26,12 +27,6 @@ class _Pricing {
   const _Pricing(this.inputPer1M, this.outputPer1M);
 
   static const List<(String, _Pricing)> _table = [
-    ('', _Pricing(15, 75)),
-    ('', _Pricing(15, 75)),
-    ('', _Pricing(3, 15)),
-    ('', _Pricing(3, 15)),
-    ('', _Pricing(0.80, 4)),
-    ('', _Pricing(0.80, 4)),
     ('gpt-4o-mini', _Pricing(0.15, 0.60)),
     ('gpt-4o', _Pricing(2.50, 10)),
     ('gpt-4.1', _Pricing(2, 8)),
@@ -86,9 +81,21 @@ class ProviderUsage {
   int requests;
   int tokensIn;
   int tokensOut;
+  bool inputKnown;
+  bool outputKnown;
+  bool inputMeasuredKnown;
+  bool outputMeasuredKnown;
+  bool inputHasUnknown;
+  bool outputHasUnknown;
+  int measuredTotalTokens;
+  bool measuredTotalKnown;
+  bool hasMeasuredTotalUnknown;
+  final Map<UsageProvenance, int> alternateTotals;
+  final Set<UsageProvenance> provenances;
+  int unknownTokenFields;
   double costUsd; // approx, only known models contribute
   bool hasPricedModel;
-  List<(String, int, int)> models; // model, reqs, totalTokens
+  List<UsageModelUsage> models;
   ProviderUsage({
     required this.providerId,
     required this.providerName,
@@ -99,62 +106,148 @@ class ProviderUsage {
     required this.tokensIn,
     required this.tokensOut,
     required this.models,
+    this.inputKnown = true,
+    this.outputKnown = true,
+    this.inputMeasuredKnown = false,
+    this.outputMeasuredKnown = false,
+    this.inputHasUnknown = false,
+    this.outputHasUnknown = false,
+    this.measuredTotalTokens = 0,
+    this.measuredTotalKnown = false,
+    this.hasMeasuredTotalUnknown = false,
+    Map<UsageProvenance, int>? alternateTotals,
+    Set<UsageProvenance>? provenances,
+    this.unknownTokenFields = 0,
     this.costUsd = 0,
     this.hasPricedModel = false,
-  });
+  }) : alternateTotals = alternateTotals ?? <UsageProvenance, int>{},
+       provenances = provenances ?? <UsageProvenance>{};
+}
+
+class UsageModelUsage {
+  UsageModelUsage(this.model);
+  final String model;
+  int requests = 0;
+  int measuredTotal = 0;
+  bool measuredTotalKnown = false;
+  bool hasUnknownTotal = false;
+  final Map<UsageProvenance, int> alternateTotals = {};
+  final Set<UsageProvenance> provenances = {};
 }
 
 class UsageScreen extends StatelessWidget {
   const UsageScreen({super.key});
 
-  /// Aggregate the real usage log into per-provider summaries.
-  ///
-  /// The built-in Ovid Cloud provider is intentionally EXCLUDED here: its usage
-  /// is server-authoritative (fetched from `/usage`, shown by the plan header
-  /// via [CloudUsageStore]), not computed from the device-side log. Custom and
-  /// other built-in providers (the user's own keys) stay app-side as before.
+  /// Aggregate the retained attempt journal into observed per-provider history.
+  /// The Ovid Cloud card is deliberately separate from the server allowance:
+  /// this is what the device observed, not a billing projection.
   List<ProviderUsage> _aggregate(AppState app) {
-    // Pick provider metadata from the catalog for icon/color.
     final byId = <String, ProviderUsage>{};
-    for (final e in app.usageLog) {
-      if (e.providerId == AppState.ovidCloudProviderId) continue;
+    for (final e in app.usageAttempts) {
+      final config = app.providerById(e.provider);
+      final providerName = e.provider == AppState.ovidCloudProviderId
+          ? 'Ovid Cloud'
+          : (config?.name ?? e.provider);
       final p = byId.putIfAbsent(
-        e.providerId,
+        e.provider,
         () => ProviderUsage(
-          providerId: e.providerId,
-          providerName: e.providerName,
-          // Built-in free providers (Groq/Gemini/…) are not BYOK.
-          tier: (app.providerById(e.providerId)?.isFree ?? false)
+          providerId: e.provider,
+          providerName: providerName,
+          tier: e.provider == AppState.ovidCloudProviderId
+              ? 'CLOUD'
+              : (config?.isFree ?? false)
               ? 'FREE'
               : 'BYOK',
-          icon: _iconFor(e.providerName),
-          color: _colorFor(e.providerName),
+          icon: _iconFor(providerName),
+          color: _colorFor(providerName),
           requests: 0,
           tokensIn: 0,
           tokensOut: 0,
           models: [],
         ),
       );
-      p
-        ..requests += 1
-        ..tokensIn += e.promptTokens
-        ..tokensOut += e.completionTokens;
-      final cost = _Pricing.estimate(
-        e.model,
-        e.promptTokens,
-        e.completionTokens,
-      );
-      if (cost != null) {
-        p
-          ..costUsd += cost
-          ..hasPricedModel = true;
+      p.requests++;
+      final tokens = [e.inputTokens, e.outputTokens, e.totalTokens];
+      for (final token in tokens) {
+        if (token == null || token.value == null) {
+          p.unknownTokenFields++;
+          p.provenances.add(UsageProvenance.unknown);
+        } else {
+          p.provenances.add(token.provenance);
+        }
       }
-      // Per-model aggregation (in+out split kept for the detail view).
-      final m = p.models.where((m) => m.$1 == e.model).firstOrNull;
-      if (m != null) {
-        p.models[p.models.indexOf(m)] = (m.$1, m.$2 + 1, m.$3 + e.totalTokens);
+      final input = e.inputTokens;
+      final output = e.outputTokens;
+      if (input?.provenance == UsageProvenance.providerReported &&
+          input?.value != null) {
+        p.inputKnown = true;
+        p.inputMeasuredKnown = true;
+        p.tokensIn += input!.value!;
+      } else if (input == null || input.value == null) {
+        p.inputHasUnknown = true;
+        p.inputKnown = p.inputMeasuredKnown;
       } else {
-        p.models.add((e.model, 1, e.totalTokens));
+        p.inputKnown = p.inputMeasuredKnown;
+      }
+      if (output?.provenance == UsageProvenance.providerReported &&
+          output?.value != null) {
+        p.outputKnown = true;
+        p.outputMeasuredKnown = true;
+        p.tokensOut += output!.value!;
+      } else if (output == null || output.value == null) {
+        p.outputHasUnknown = true;
+        p.outputKnown = p.outputMeasuredKnown;
+      } else {
+        p.outputKnown = p.outputMeasuredKnown;
+      }
+      final total = e.totalTokens;
+      if (total?.provenance == UsageProvenance.providerReported &&
+          total?.value != null) {
+        p.measuredTotalKnown = true;
+        p.measuredTotalTokens += total!.value!;
+      } else if (total == null || total.value == null) {
+        p.hasMeasuredTotalUnknown = true;
+      } else {
+        p.alternateTotals.update(
+          total.provenance,
+          (value) => value + total.value!,
+          ifAbsent: () => total.value!,
+        );
+      }
+      final model = e.reportedModel == null
+          ? 'Requested: ${e.requestedModel} · reported model unavailable'
+          : e.reportedModel!;
+      if (input?.provenance == UsageProvenance.providerReported &&
+          output?.provenance == UsageProvenance.providerReported &&
+          input?.value != null &&
+          output?.value != null) {
+        final cost = _Pricing.estimate(model, input!.value!, output!.value!);
+        if (cost != null) {
+          p
+            ..costUsd += cost
+            ..hasPricedModel = true;
+        }
+      }
+      final m = p.models.where((m) => m.model == model).firstOrNull;
+      final modelUsage = m ?? UsageModelUsage(model);
+      if (m == null) p.models.add(modelUsage);
+      modelUsage.requests++;
+      if (total?.provenance == UsageProvenance.providerReported &&
+          total?.value != null) {
+        modelUsage.measuredTotalKnown = true;
+        modelUsage.measuredTotal += total!.value!;
+      } else if (total != null && total.value != null) {
+        modelUsage.alternateTotals.update(
+          total.provenance,
+          (value) => value + total.value!,
+          ifAbsent: () => total.value!,
+        );
+      }
+      if (total == null || total.value == null) {
+        modelUsage.hasUnknownTotal = true;
+        modelUsage.provenances.add(UsageProvenance.unknown);
+      } else {
+        modelUsage.provenances.add(total.provenance);
       }
     }
     return byId.values.toList()
@@ -220,18 +313,37 @@ class UsageScreen extends StatelessWidget {
           final providers = _aggregate(app);
           final tokensIn = providers.fold<int>(0, (s, p) => s + p.tokensIn);
           final tokensOut = providers.fold<int>(0, (s, p) => s + p.tokensOut);
-          final todayEntries = app.usageLog.where((e) {
-            if (e.providerId == AppState.ovidCloudProviderId) return false;
-            final d = e.time;
+          final todayEntries = app.usageAttempts.where((e) {
+            final d = e.startedAt.toLocal();
             final now = DateTime.now();
             return d.year == now.year &&
                 d.month == now.month &&
                 d.day == now.day;
           }).toList();
-          final todayTokens = todayEntries.fold<int>(
-            0,
-            (s, e) => s + e.totalTokens,
+          final todayMeasured = todayEntries.where(
+            (e) =>
+                e.totalTokens?.provenance == UsageProvenance.providerReported,
           );
+          final todayTokens = todayMeasured.fold<int>(
+            0,
+            (s, e) => s + e.totalTokens!.value!,
+          );
+          final todayHasUnknown = todayEntries.any(
+            (e) => e.totalTokens == null || e.totalTokens!.value == null,
+          );
+          final todayAlternate = <UsageProvenance, int>{};
+          for (final e in todayEntries) {
+            final total = e.totalTokens;
+            if (total != null &&
+                total.value != null &&
+                total.provenance != UsageProvenance.providerReported) {
+              todayAlternate.update(
+                total.provenance,
+                (value) => value + total.value!,
+                ifAbsent: () => total.value!,
+              );
+            }
+          }
           return ListView(
             padding: const EdgeInsets.only(bottom: 40),
             children: [
@@ -245,6 +357,13 @@ class UsageScreen extends StatelessWidget {
                   todayTokens: todayTokens,
                   tokensIn: tokensIn,
                   tokensOut: tokensOut,
+                  inputKnown: providers.any((p) => p.inputKnown),
+                  outputKnown: providers.any((p) => p.outputKnown),
+                  inputHasUnknown: providers.any((p) => p.inputHasUnknown),
+                  outputHasUnknown: providers.any((p) => p.outputHasUnknown),
+                  hasUnknown: providers.any((p) => p.unknownTokenFields > 0),
+                  todayHasUnknown: todayHasUnknown,
+                  todayAlternate: todayAlternate,
                 ),
               ),
 
@@ -253,8 +372,7 @@ class UsageScreen extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(18, 22, 18, 10),
                 child: const AetherSectionTitle(
                   eyebrow: 'By provider',
-                  subtitle:
-                      'All-time measured usage · other providers (BYOK & free).',
+                  subtitle: 'Observed attempts · retained device history.',
                 ),
               ),
 
@@ -276,8 +394,8 @@ class UsageScreen extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(18, 6, 18, 0),
                   child: Text(
-                    'Usage tracked from real API responses '
-                    '(token counts from the provider).',
+                    'Observed attempts are separate from the server allowance. '
+                    'Unknown prices remain unavailable.',
                     style: AetherType.caption,
                   ),
                 ),
@@ -341,6 +459,45 @@ Widget _stat(String label, String value, {bool big = false}) {
 
 String _fmtTok(int n) => formatCompactCount(n);
 
+String _displayTokenValue(int value, bool known, bool hasUnknown) {
+  if (!known) return 'Unavailable';
+  return hasUnknown ? '${_fmtTok(value)} · some unavailable' : _fmtTok(value);
+}
+
+String _formatProvenanceTotals(Map<UsageProvenance, int> totals) {
+  final entries = totals.entries.toList()
+    ..sort(
+      (a, b) => _provenanceLabel(a.key).compareTo(_provenanceLabel(b.key)),
+    );
+  return entries
+      .map((entry) => '${_provenanceLabel(entry.key)} ${_fmtTok(entry.value)}')
+      .join(' · ');
+}
+
+String _provenanceLabel(UsageProvenance provenance) {
+  switch (provenance) {
+    case UsageProvenance.providerReported:
+      return 'Reported';
+    case UsageProvenance.locallyEstimated:
+      return 'Estimated';
+    case UsageProvenance.derived:
+      return 'Derived';
+    case UsageProvenance.legacyUnspecified:
+      return 'Legacy';
+    case UsageProvenance.unknown:
+      return 'Unknown';
+  }
+}
+
+String _provenanceSummary(ProviderUsage provider) {
+  final labels = provider.provenances.map(_provenanceLabel).toSet().toList()
+    ..sort();
+  if (provider.unknownTokenFields > 0 && !labels.contains('Unknown')) {
+    labels.add('Unknown');
+  }
+  return labels.join(' · ');
+}
+
 /// Today's token snapshot + "in · out" micro-banner, kept behaviourally
 /// identical to the previous layout so downstream tests that assert these
 /// exact text strings (`'30'`, `'20 in · 10 out'`) still pass under the
@@ -350,23 +507,46 @@ class _LocalTotalsStrip extends StatelessWidget {
     required this.todayTokens,
     required this.tokensIn,
     required this.tokensOut,
+    required this.inputKnown,
+    required this.outputKnown,
+    required this.inputHasUnknown,
+    required this.outputHasUnknown,
+    required this.hasUnknown,
+    required this.todayHasUnknown,
+    required this.todayAlternate,
   });
 
   final int todayTokens;
   final int tokensIn;
   final int tokensOut;
+  final bool inputKnown;
+  final bool outputKnown;
+  final bool inputHasUnknown;
+  final bool outputHasUnknown;
+  final bool hasUnknown;
+  final bool todayHasUnknown;
+  final Map<UsageProvenance, int> todayAlternate;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('All-time measured usage', style: AetherType.caption),
+        Text('Retained observed history', style: AetherType.caption),
         const SizedBox(height: 8),
         AetherCard(
           padding: const EdgeInsets.all(16),
           child: Row(
-            children: [_stat('Today · measured tokens', _fmtTok(todayTokens))],
+            children: [
+              _stat(
+                'Today · provider-reported tokens',
+                todayHasUnknown
+                    ? (todayTokens == 0
+                          ? 'Unavailable'
+                          : '${_fmtTok(todayTokens)} · some unavailable')
+                    : _fmtTok(todayTokens),
+              ),
+            ],
           ),
         ),
         const SizedBox(height: 10),
@@ -389,11 +569,19 @@ class _LocalTotalsStrip extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Text(
-                'Input · output · all recorded usage',
+                hasUnknown
+                    ? 'Input · output · some values unavailable'
+                    : 'Input · output · provider-reported usage',
                 style: TextStyle(fontSize: 11, color: Aether.textFaint),
               ),
+              if (hasUnknown)
+                Text(
+                  'Unavailable',
+                  style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                ),
               Text(
-                '${_fmtTok(tokensIn)} in · ${_fmtTok(tokensOut)} out',
+                '${_displayTokenValue(tokensIn, inputKnown, inputHasUnknown)} in · '
+                '${_displayTokenValue(tokensOut, outputKnown, outputHasUnknown)} out',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w700,
@@ -404,6 +592,13 @@ class _LocalTotalsStrip extends StatelessWidget {
             ],
           ),
         ),
+        if (todayAlternate.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Estimated/legacy totals · ${_formatProvenanceTotals(todayAlternate)}',
+            style: AetherType.caption,
+          ),
+        ],
       ],
     );
   }
@@ -642,7 +837,9 @@ class _ProviderCardState extends State<_ProviderCard> {
   Widget build(BuildContext context) {
     final p = widget.provider;
     final countsLine =
-        '${p.requests} requests · ${_fmtTok(p.tokensIn)} in · ${_fmtTok(p.tokensOut)} out';
+        '${p.requests} requests · '
+        '${_displayTokenValue(p.tokensIn, p.inputKnown, p.inputHasUnknown)} in · '
+        '${_displayTokenValue(p.tokensOut, p.outputKnown, p.outputHasUnknown)} out';
     return InkWell(
       borderRadius: BorderRadius.circular(AetherRadius.rLg),
       onTap: () => Navigator.of(context).push(
@@ -697,6 +894,27 @@ class _ProviderCardState extends State<_ProviderCard> {
                     fontSize: 12,
                   ),
                 ),
+                if (_provenanceSummary(p).isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Token provenance · ${_provenanceSummary(p)}',
+                    style: AetherType.caption,
+                  ),
+                ],
+                if (p.measuredTotalKnown || p.hasMeasuredTotalUnknown) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Measured · ${p.hasMeasuredTotalUnknown ? 'Unavailable' : _fmtTok(p.measuredTotalTokens)}',
+                    style: AetherType.caption,
+                  ),
+                ],
+                if (p.alternateTotals.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    'Estimated/legacy · ${_formatProvenanceTotals(p.alternateTotals)}',
+                    style: AetherType.caption,
+                  ),
+                ],
                 if (p.models.isNotEmpty) ...[
                   const SizedBox(height: 4),
                   Align(
@@ -772,18 +990,28 @@ class _ProviderCardState extends State<_ProviderCard> {
 /// Keep the complete model identifier readable even at large text sizes.
 class _ModelCounts extends StatelessWidget {
   const _ModelCounts({required this.model});
-  final (String, int, int) model;
+  final UsageModelUsage model;
 
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      Text(model.$1, style: AetherType.mono.copyWith(color: Aether.text)),
+      Text(model.model, style: AetherType.mono.copyWith(color: Aether.text)),
       const SizedBox(height: 4),
       Text(
-        '${model.$2} req · ${_fmtTok(model.$3)} tok',
+        '${model.requests} req · ${model.measuredTotalKnown && !model.hasUnknownTotal ? '${_fmtTok(model.measuredTotal)} provider-reported tok' : 'Unavailable total'}',
         style: AetherType.caption,
       ),
+      if (model.alternateTotals.isNotEmpty)
+        Text(
+          'Estimated/legacy · ${_formatProvenanceTotals(model.alternateTotals)}',
+          style: AetherType.caption,
+        ),
+      if (model.provenances.isNotEmpty)
+        Text(
+          'Provenance · ${model.provenances.map(_provenanceLabel).join(' · ')}',
+          style: AetherType.caption,
+        ),
     ],
   );
 }
@@ -808,8 +1036,8 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
     // A caller-supplied snapshot remains a valid initial seed, but can never
     // resurrect counts after the live log has changed or been cleared.
     _initialRevision = (
-      AppState.I.usageLog.length,
-      AppState.I.usageLog.lastOrNull,
+      AppState.I.usageRevision,
+      AppState.I.usageAttempts.lastOrNull,
     );
     _initialIdentity = OvidCloudService.I.accountIdentity;
   }
@@ -830,8 +1058,8 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
             .firstOrNull ??
         ((_initialRevision ==
                     (
-                      AppState.I.usageLog.length,
-                      AppState.I.usageLog.lastOrNull,
+                      AppState.I.usageRevision,
+                      AppState.I.usageAttempts.lastOrNull,
                     ) &&
                 _initialIdentity == OvidCloudService.I.accountIdentity)
             ? provider
@@ -846,19 +1074,26 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                 tokensOut: 0,
                 models: [],
               ));
-    // Calendar-day buckets from measured tokens only. The shared activity
-    // helper gives even empty days a minimum bar height, which would imply
-    // activity here. Never turn a caller-supplied totals snapshot into history.
+    // Calendar-day buckets come from the attempt journal only. Legacy rows are
+    // already migrated into that journal, so reading usageLog here would count
+    // them a second time.
     final now = DateTime.now();
-    final today = DateTime.utc(now.year, now.month, now.day);
+    final today = DateTime(now.year, now.month, now.day);
     final daily = List<int>.filled(14, 0);
-    for (final entry in AppState.I.usageLog) {
-      if (entry.providerId != p.providerId || entry.time.isAfter(now)) continue;
-      final local = entry.time.toLocal();
-      final date = DateTime.utc(local.year, local.month, local.day);
+    for (final entry in AppState.I.usageAttempts) {
+      if (entry.provider != p.providerId || entry.startedAt.isAfter(now)) {
+        continue;
+      }
+      final local = entry.startedAt.toLocal();
+      final date = DateTime(local.year, local.month, local.day);
       final age = today.difference(date).inDays;
-      if (age >= 0 && age < 14 && entry.totalTokens > 0) {
-        daily[13 - age] += entry.totalTokens;
+      final total = entry.totalTokens;
+      if (age >= 0 &&
+          age < 14 &&
+          total?.provenance == UsageProvenance.providerReported &&
+          total?.value != null &&
+          total!.value! > 0) {
+        daily[13 - age] += total.value!;
       }
     }
     final hasTrend = daily.where((tokens) => tokens > 0).length >= 2;
@@ -923,8 +1158,28 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                     280;
                 final cells = [
                   _cell('Requests', '${p.requests}'),
-                  _cell('Tokens in', _fmtTok(p.tokensIn)),
-                  _cell('Tokens out', _fmtTok(p.tokensOut)),
+                  _cell(
+                    'Tokens in',
+                    _displayTokenValue(
+                      p.tokensIn,
+                      p.inputKnown,
+                      p.inputHasUnknown,
+                    ),
+                  ),
+                  _cell(
+                    'Tokens out',
+                    _displayTokenValue(
+                      p.tokensOut,
+                      p.outputKnown,
+                      p.outputHasUnknown,
+                    ),
+                  ),
+                  _cell(
+                    'Measured total',
+                    p.measuredTotalKnown && !p.hasMeasuredTotalUnknown
+                        ? _fmtTok(p.measuredTotalTokens)
+                        : 'Unavailable',
+                  ),
                 ];
                 return stacked
                     ? Column(
@@ -951,7 +1206,9 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 18),
               child: Text(
-                'Not enough recent activity for a trend.',
+                p.hasMeasuredTotalUnknown
+                    ? 'Provider-reported totals unavailable for some attempts; not enough measured activity for a trend.'
+                    : 'Provider-reported totals unavailable or not enough recent activity for a trend.',
                 style: AetherType.caption,
               ),
             )
@@ -969,7 +1226,7 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'Last 14 days · measured tokens · relative to busiest day',
+                    'Last 14 days · Provider-reported measured tokens · relative to busiest day',
                     style: AetherType.caption,
                   ),
                   const SizedBox(height: 8),
@@ -1011,6 +1268,11 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Legacy totals excluded from measured chart.',
+                    style: AetherType.caption,
                   ),
                 ],
               ),

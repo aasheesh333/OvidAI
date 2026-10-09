@@ -252,11 +252,12 @@ class SkillService {
     // Dart's sort is not stable, so a post-sort dedupe would be arbitrary.
     final notes = <String>[];
     final keptByCanonical = <String, Skill>{};
+    final seenSources = <String>{};
     final deduped = <Skill>[];
     for (final skill in candidate) {
       final id = skill.canonicalId;
       if (id == null) {
-        deduped.add(skill);
+        if (seenSources.add(_sourceIdentity(skill))) deduped.add(skill);
         continue;
       }
       final kept = keptByCanonical[id];
@@ -395,7 +396,22 @@ class SkillService {
       if (!dir.existsSync()) continue;
       await _scanDir(dir, pluginId: _pluginRoots[root]);
     }
+    final seenSources = <String>{};
+    _skills.removeWhere((skill) => !seenSources.add(_sourceIdentity(skill)));
     _skills.sort((a, b) => a.name.compareTo(b.name));
+  }
+
+  // Overlapping search roots can discover the same file more than once. Keep
+  // ownership and contribution kind in the identity; equal names alone never
+  // grant one provider precedence over another.
+  String _sourceIdentity(Skill skill) {
+    var source = skill.sourcePath ?? skill.path;
+    try {
+      source = File(source).resolveSymbolicLinksSync();
+    } catch (_) {
+      // A concurrently removed file retains its original identity.
+    }
+    return jsonEncode([skill.pluginId, skill.kind.name, source]);
   }
 
   Future<void> _scanDir(
@@ -478,7 +494,9 @@ class SkillService {
   }) async {
     try {
       final raw = await file.readAsString();
-      var name = _basename(path);
+      var name = _fileName(file.path) == 'SKILL.md'
+          ? _basename(file.parent.path)
+          : _basename(path);
       var description = '';
       var whenToUse = '';
       var modelInvocable = true;

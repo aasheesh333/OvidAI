@@ -131,7 +131,7 @@ class PostgresTests(unittest.TestCase):
         first = service.request(claims, 'request-aaaa')
         self.assertEqual(service.request(claims, 'request-bbbb'), first)
         now[0] = claims['auth_time'] = 1001
-        service.login(claims)
+        service.cancel(claims)
         restarted = Lifecycle(LocalStore(self.connection), admin, data, lambda: now[0])
         self.assertEqual(restarted.request(claims, 'request-bbbb')['state'], 'cancelled')
         restarted.request(claims, 'request-cccc')

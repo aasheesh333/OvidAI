@@ -12,8 +12,8 @@ import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 /// Wave 2 UI redesign — BrowserScreen smoke renders.
 ///
 /// The redesign composes the browser chrome from Aether primitives
-/// (AetherGradientHeader + AetherField omnibar + AetherGhostButton nav +
-/// AetherStatusDot load status) while keeping every functional contract the
+/// (AetherGradientHeader + AetherField omnibar + AetherGhostButton nav)
+/// while keeping every functional contract the
 /// older suites pin: navigation guards, popup notice, desktop geometry,
 /// external-open tooltip and the agent-status semantics. These tests only
 /// prove the screen RENDERS as primitives and that the cheap, platform-free
@@ -69,11 +69,11 @@ void main() {
         find.descendant(of: header, matching: find.byType(AetherField)),
         findsOneWidget,
       );
-      // Back / forward / reload / go are all Aether ghost icon buttons
+      // Back / forward / reload are all Aether ghost icon buttons
       // sitting inside the gradient header.
       expect(
         find.descendant(of: header, matching: find.byType(AetherGhostButton)),
-        findsNWidgets(4),
+        findsNWidgets(3),
       );
 
       // Stable keys the older suites (and screen readers) navigate by.
@@ -83,15 +83,16 @@ void main() {
       );
       expect(
         find.byKey(const ValueKey('browser-status-dot')),
-        findsOneWidget,
+        findsNothing,
       );
       expect(find.byKey(const ValueKey('browser-back')), findsOneWidget);
       expect(find.byKey(const ValueKey('browser-forward')), findsOneWidget);
       expect(find.byKey(const ValueKey('browser-reload')), findsOneWidget);
 
-      // Load status is an AetherStatusDot (strip + app-bar agent indicator).
-      expect(find.byType(AetherStatusDot), findsWidgets);
-      expect(find.textContaining('Ready · '), findsOneWidget);
+      // No status strip consumes height between the address row and page.
+      expect(find.textContaining('Ready · '), findsNothing);
+      expect(tester.getRect(find.byKey(stubKey)).top,
+          tester.getRect(header).bottom);
 
       // External-launch entry point (download fallback / sign-in escape
       // hatch) is still mounted.
@@ -121,7 +122,7 @@ void main() {
 
     expect(find.bySemanticsLabel('Close tab'), findsNWidgets(2));
     // One ghost button per nav action still, strip did not add more.
-    expect(find.byType(AetherGhostButton), findsNWidgets(4));
+    expect(find.byType(AetherGhostButton), findsNWidgets(3));
     expect(tester.takeException(), isNull);
   });
 

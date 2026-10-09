@@ -51,67 +51,79 @@ class _FakeStore implements ResetStore {
 }
 
 void main() {
-  test('successful reset deletes and verifies every enumerated store', () async {
-    final stores = [
-      _FakeStore('sessions'),
-      _FakeStore('search'),
-      _FakeStore('memory'),
-    ];
-    final coordinator = ResetCoordinator(stores);
+  test(
+    'successful reset deletes and verifies every enumerated store',
+    () async {
+      final stores = [
+        _FakeStore('sessions'),
+        _FakeStore('search'),
+        _FakeStore('memory'),
+      ];
+      final coordinator = ResetCoordinator(stores);
 
-    await coordinator.prepare();
-    final report = await coordinator.commit();
+      await coordinator.prepare();
+      final report = await coordinator.commit();
 
-    expect(report.success, isTrue);
-    expect(report.verifiedComplete, isTrue);
-    expect(report.failures, isEmpty);
-    expect(report.completed, ['sessions', 'search', 'memory']);
-    expect(report.stores.map((s) => s.name), ['sessions', 'search', 'memory']);
-    expect(stores.every((s) => s.data.isEmpty), isTrue);
-    expect(stores.every((s) => s.deleteCalls == 1), isTrue);
-    expect(stores.every((s) => s.verifyCalls == 1), isTrue);
-  });
+      expect(report.success, isTrue);
+      expect(report.verifiedComplete, isTrue);
+      expect(report.failures, isEmpty);
+      expect(report.completed, ['sessions', 'search', 'memory']);
+      expect(report.stores.map((s) => s.name), [
+        'sessions',
+        'search',
+        'memory',
+      ]);
+      expect(stores.every((s) => s.data.isEmpty), isTrue);
+      expect(stores.every((s) => s.deleteCalls == 1), isTrue);
+      expect(stores.every((s) => s.verifyCalls == 1), isTrue);
+    },
+  );
 
-  test('partial failure is reported per store, never a silent success', () async {
-    final failing = _FakeStore('search')..failDelete = true;
-    final stores = [
-      _FakeStore('sessions'),
-      failing,
-      _FakeStore('memory'),
-    ];
-    final coordinator = ResetCoordinator(stores);
+  test(
+    'partial failure is reported per store, never a silent success',
+    () async {
+      final failing = _FakeStore('search')..failDelete = true;
+      final stores = [_FakeStore('sessions'), failing, _FakeStore('memory')];
+      final coordinator = ResetCoordinator(stores);
 
-    await coordinator.prepare();
-    final report = await coordinator.commit();
+      await coordinator.prepare();
+      final report = await coordinator.commit();
 
-    expect(report.success, isFalse);
-    expect(report.verifiedComplete, isFalse);
-    expect(report.failures.map((s) => s.name), ['search']);
-    expect(report.errors['search'], contains('delete failed'));
-    expect(failing.data, isNotEmpty);
-    // A failed store does not stop the coordinator from truthfully resetting
-    // the stores that do succeed.
-    expect(report.completed, ['sessions', 'memory']);
-    expect(report.stores.singleWhere((s) => s.name == 'search').deleted, isFalse);
-    expect(report.stores.singleWhere((s) => s.name == 'search').verified, isFalse);
-  });
+      expect(report.success, isFalse);
+      expect(report.verifiedComplete, isFalse);
+      expect(report.failures.map((s) => s.name), ['search']);
+      expect(report.errors['search'], contains('delete failed'));
+      expect(failing.data, isNotEmpty);
+      // A failed store does not stop the coordinator from truthfully resetting
+      // the stores that do succeed.
+      expect(report.completed, ['sessions', 'memory']);
+      expect(
+        report.stores.singleWhere((s) => s.name == 'search').deleted,
+        isFalse,
+      );
+      expect(
+        report.stores.singleWhere((s) => s.name == 'search').verified,
+        isFalse,
+      );
+    },
+  );
 
-  test('readback failure blocks success even when delete throws no error', () async {
-    final lingering = _FakeStore('ledger')..failVerify = true;
-    final coordinator = ResetCoordinator([
-      _FakeStore('sessions'),
-      lingering,
-    ]);
+  test(
+    'readback failure blocks success even when delete throws no error',
+    () async {
+      final lingering = _FakeStore('ledger')..failVerify = true;
+      final coordinator = ResetCoordinator([_FakeStore('sessions'), lingering]);
 
-    await coordinator.prepare();
-    final report = await coordinator.commit();
+      await coordinator.prepare();
+      final report = await coordinator.commit();
 
-    expect(report.success, isFalse);
-    final row = report.stores.singleWhere((s) => s.name == 'ledger');
-    expect(row.deleted, isTrue);
-    expect(row.verified, isFalse);
-    expect(row.error, isNotNull);
-  });
+      expect(report.success, isFalse);
+      final row = report.stores.singleWhere((s) => s.name == 'ledger');
+      expect(row.deleted, isTrue);
+      expect(row.verified, isFalse);
+      expect(row.error, isNotNull);
+    },
+  );
 
   test('readback that throws is reported as a failure, not success', () async {
     final broken = _FakeStore('image-receipts')..verifyThrows = true;
@@ -124,37 +136,40 @@ void main() {
     expect(report.errors['image-receipts'], contains('readback failed'));
   });
 
-  test('no data is destroyed before commit; abort leaves stores intact', () async {
-    final stores = [
-      _FakeStore('sessions'),
-      _FakeStore('memory'),
-    ];
-    final coordinator = ResetCoordinator(stores);
+  test(
+    'no data is destroyed before commit; abort leaves stores intact',
+    () async {
+      final stores = [_FakeStore('sessions'), _FakeStore('memory')];
+      final coordinator = ResetCoordinator(stores);
 
-    await coordinator.prepare();
-    expect(stores.every((s) => s.data.isNotEmpty), isTrue);
-    expect(stores.every((s) => s.deleteCalls == 0), isTrue);
+      await coordinator.prepare();
+      expect(stores.every((s) => s.data.isNotEmpty), isTrue);
+      expect(stores.every((s) => s.deleteCalls == 0), isTrue);
 
-    await coordinator.abort();
-    expect(stores.every((s) => s.data.isNotEmpty), isTrue);
-    expect(stores.every((s) => s.restoreCalled), isTrue);
-    expect(stores.every((s) => s.deleteCalls == 0), isTrue);
+      await coordinator.abort();
+      expect(stores.every((s) => s.data.isNotEmpty), isTrue);
+      expect(stores.every((s) => s.restoreCalled), isTrue);
+      expect(stores.every((s) => s.deleteCalls == 0), isTrue);
 
-    await expectLater(coordinator.commit(), throwsStateError);
-  });
+      await expectLater(coordinator.commit(), throwsStateError);
+    },
+  );
 
-  test('a failed prepare restores already-staged stores and never deletes', () async {
-    final first = _FakeStore('sessions');
-    final bad = _FakeStore('memory')..failStage = true;
-    final coordinator = ResetCoordinator([first, bad]);
+  test(
+    'a failed prepare restores already-staged stores and never deletes',
+    () async {
+      final first = _FakeStore('sessions');
+      final bad = _FakeStore('memory')..failStage = true;
+      final coordinator = ResetCoordinator([first, bad]);
 
-    await expectLater(coordinator.prepare(), throwsStateError);
+      await expectLater(coordinator.prepare(), throwsStateError);
 
-    expect(first.restoreCalled, isTrue);
-    expect(first.data, isNotEmpty);
-    expect(first.deleteCalls, 0);
-    expect(bad.deleteCalls, 0);
-  });
+      expect(first.restoreCalled, isTrue);
+      expect(first.data, isNotEmpty);
+      expect(first.deleteCalls, 0);
+      expect(bad.deleteCalls, 0);
+    },
+  );
 
   test('commit and abort both require a prepared plan', () async {
     final coordinator = ResetCoordinator([_FakeStore('sessions')]);
@@ -191,4 +206,29 @@ void main() {
     expect(result.completed, ['sessions']);
     expect(result.failures.keys, ['search']);
   });
+
+  test(
+    'canonical enumeration includes the usage participant in order',
+    () async {
+      final stores = <ResetStoreKind, ResetStore>{
+        for (final kind in ResetStoreKind.values) kind: _FakeStore(kind.id),
+      };
+      final coordinator = ResetCoordinator.canonical(stores);
+
+      await coordinator.prepare();
+      final report = await coordinator.commit();
+
+      expect(report.stores.map((store) => store.name), [
+        'sessions',
+        'search',
+        'ledger',
+        'memory',
+        'usage',
+        'account',
+        'image-receipts',
+        'shares',
+      ]);
+      expect(report.success, isTrue);
+    },
+  );
 }

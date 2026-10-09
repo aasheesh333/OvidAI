@@ -19,6 +19,30 @@ import 'plugin_registry.dart';
 import 'state.dart';
 import 'diag.dart';
 
+/// Sends one Streamable-HTTP request without allowing the HTTP client to
+/// replay credentials or request bodies at a redirect destination. Redirects
+/// are rejected rather than followed; the configured MCP URL is the only
+/// approved destination for these requests.
+Future<http.Response> _sendMcpHttpRequest(
+  http.Client client,
+  String method,
+  Uri uri,
+  Map<String, String> headers, {
+  String? body,
+  required Duration timeout,
+}) async {
+  final request = http.Request(method, uri)
+    ..followRedirects = false
+    ..headers.addAll(headers);
+  if (body != null) request.body = body;
+  final response = await client.send(request).timeout(timeout);
+  if (const {301, 302, 303, 307, 308}.contains(response.statusCode)) {
+    unawaited(response.stream.listen(null).cancel());
+    throw StateError('MCP HTTP redirect rejected');
+  }
+  return http.Response.fromStream(response).timeout(timeout);
+}
+
 /// OAuth access token for one MCP server (item 6). Stored per-server in
 /// secure storage via [McpService.storeMcpOAuthToken] — never in the
 /// config file or prefs. Expired tokens are refreshed automatically when
@@ -40,8 +64,7 @@ class McpOAuthToken {
       expiresAt != null &&
       DateTime.now().isAfter(expiresAt!.subtract(const Duration(seconds: 30)));
 
-  bool get canRefresh =>
-      refreshToken != null && refreshToken!.isNotEmpty;
+  bool get canRefresh => refreshToken != null && refreshToken!.isNotEmpty;
 
   Map<String, dynamic> toJson() => {
     'access_token': accessToken,
@@ -67,9 +90,11 @@ class McpOAuthToken {
     final expiresIn = j['expires_in'];
     final access = j['access_token'];
     final type = j['token_type'] ?? 'Bearer';
-    if (access is! String || access.isEmpty ||
+    if (access is! String ||
+        access.isEmpty ||
         RegExp(r'[\x00-\x20\x7f]').hasMatch(access) ||
-        type is! String || type.toLowerCase() != 'bearer' ||
+        type is! String ||
+        type.toLowerCase() != 'bearer' ||
         (j.containsKey('refresh_token') && j['refresh_token'] is! String) ||
         (j.containsKey('expires_in') &&
             (expiresIn is! int || expiresIn < 0 || expiresIn > 315360000))) {
@@ -95,8 +120,14 @@ class McpOAuthAuthorization {
   final String _state;
   final String _verifier;
   final Object _generation;
-  McpOAuthAuthorization._(this.authorizationUrl, this.expiresAt,
-      this._config, this._state, this._verifier, this._generation);
+  McpOAuthAuthorization._(
+    this.authorizationUrl,
+    this.expiresAt,
+    this._config,
+    this._state,
+    this._verifier,
+    this._generation,
+  );
 }
 
 /// Legacy MCP SSE transport channel (GET /sse event stream + POST
@@ -111,21 +142,32 @@ class McpOAuthAuthorization {
 /// The GET stream stays open for the channel's lifetime; [close] tears it
 /// down. All waits are bounded by caller-supplied timeouts.
 class _SseMcpChannel {
-  _SseMcpChannel._(this._client, this._ownsClient, this._onDestinationRejected,
-      this._onNotification);
+  _SseMcpChannel._(
+    this._client,
+    this._ownsClient,
+    this._onDestinationRejected,
+    this._onNotification,
+    this._onClosed,
+  );
 
   factory _SseMcpChannel({
     http.Client? client,
     required void Function(String) onDestinationRejected,
     required void Function(Map<String, dynamic>) onNotification,
+    required void Function() onClosed,
   }) => _SseMcpChannel._(
-    client ?? http.Client(), client == null, onDestinationRejected, onNotification,
+    client ?? http.Client(),
+    client == null,
+    onDestinationRejected,
+    onNotification,
+    onClosed,
   );
 
   final http.Client _client;
   final bool _ownsClient;
   final void Function(String) _onDestinationRejected;
   final void Function(Map<String, dynamic>) _onNotification;
+  final void Function() _onClosed;
   StreamSubscription<String>? _sub;
 
   Uri? messageEndpoint;
@@ -158,12 +200,14 @@ class _SseMcpChannel {
       _closeClient();
       throw Exception('SSE stream failed: HTTP ${res.statusCode}');
     }
-    _sub = res.stream.transform(utf8.decoder).listen(
-      _onChunk,
-      onError: (_) => _onDone(),
-      onDone: _onDone,
-      cancelOnError: true,
-    );
+    _sub = res.stream
+        .transform(utf8.decoder)
+        .listen(
+          _onChunk,
+          onError: (_) => _onDone(),
+          onDone: _onDone,
+          cancelOnError: true,
+        );
     // The endpoint event must arrive promptly — without it nothing can be
     // posted. Bound the wait so a hanging stream can't wedge connect().
     final deadline = timeout ?? const Duration(seconds: 30);
@@ -328,7 +372,8 @@ class _SseMcpChannel {
       }
       _validateDestination(uri);
       final left = timeout - clock.elapsed;
-      if (left <= Duration.zero) throw TimeoutException('SSE request timed out');
+      if (left <= Duration.zero)
+        throw TimeoutException('SSE request timed out');
       final req = http.Request(method, uri)..followRedirects = false;
       req.headers.addAll(headers);
       if (body != null) req.body = body;
@@ -383,6 +428,7 @@ class _SseMcpChannel {
   void _onDone() {
     _closed = true;
     _wake();
+    _onClosed();
   }
 
   /// POST a JSON-RPC message to the resolved endpoint.
@@ -469,7 +515,9 @@ class _SseMcpChannel {
     if (_ownsClient) {
       try {
         _client.close();
-      } catch (e) { Diag.swallow('mcp_service', e); }
+      } catch (e) {
+        Diag.swallow('mcp_service', e);
+      }
     }
   }
 }
@@ -781,18 +829,22 @@ class McpService {
     if (existing != null) {
       if (existing.handshakeDone) {
         return McpConnectOutcome(
-          McpConnectOutcomeKind.ready, '"${server.name}" is already connected',
+          McpConnectOutcomeKind.ready,
+          '"${server.name}" is already connected',
         );
       }
       // A joiner's local wait budget never cancels the owner of the attempt.
-      return existing.connection.future.timeout(handshakeBudget,
+      return existing.connection.future.timeout(
+        handshakeBudget,
         onTimeout: () => const McpConnectOutcome(
-          McpConnectOutcomeKind.failed, 'MCP handshake timed out',
+          McpConnectOutcomeKind.failed,
+          'MCP handshake timed out',
         ),
       );
     }
     // Reservation is synchronous and precedes EVERY credential/runtime wait.
     final rs = _RunningServer(server: server);
+    _captureOwnership(rs);
     _running[key] = rs;
     _sseDestinationFailures.remove(key);
     _reconnectTimers.remove(key)?.cancel();
@@ -820,7 +872,7 @@ class McpService {
                 (server.name.toLowerCase() == 'github' ||
                     server.canonicalId.toLowerCase() == 'github'))
             ? 'Please log in to GitHub or set GITHUB_TOKEN'
-             : '"${server.name}" degraded: needs configuration (${missing.join(', ')})';
+            : '"${server.name}" degraded: needs configuration (${missing.join(', ')})';
         return McpConnectOutcome(McpConnectOutcomeKind.needsSetup, reason);
       }
       if (server.ownerPluginId != null) {
@@ -872,18 +924,24 @@ class McpService {
       }
     }
 
-    unawaited(attempt().then((outcome) {
-      if (!outcome.isReady) _abortStartupAttempt(server, rs);
-      if (!rs.connection.isCompleted) rs.connection.complete(outcome);
-    }));
-    return rs.connection.future.timeout(handshakeBudget, onTimeout: () {
-      _abortStartupAttempt(server, rs);
-      const outcome = McpConnectOutcome(
-        McpConnectOutcomeKind.failed, 'MCP handshake timed out',
-      );
-      if (!rs.connection.isCompleted) rs.connection.complete(outcome);
-      return outcome;
-    });
+    unawaited(
+      attempt().then((outcome) {
+        if (!outcome.isReady) _abortStartupAttempt(server, rs);
+        if (!rs.connection.isCompleted) rs.connection.complete(outcome);
+      }),
+    );
+    return rs.connection.future.timeout(
+      handshakeBudget,
+      onTimeout: () {
+        _abortStartupAttempt(server, rs);
+        const outcome = McpConnectOutcome(
+          McpConnectOutcomeKind.failed,
+          'MCP handshake timed out',
+        );
+        if (!rs.connection.isCompleted) rs.connection.complete(outcome);
+        return outcome;
+      },
+    );
   }
 
   void _requireCurrent(_RunningServer rs) {
@@ -906,10 +964,14 @@ class McpService {
     rs.httpClients.clear();
     try {
       rs.nativeHandler?.dispose();
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    } catch (e) {
+      Diag.swallow('mcp_service', e);
+    }
     try {
       rs.process?.kill();
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    } catch (e) {
+      Diag.swallow('mcp_service', e);
+    }
   }
 
   static Duration _remainingUntil(DateTime deadline) {
@@ -1033,10 +1095,7 @@ class McpService {
         return 'stdio server has no command — set one or remove this entry';
       }
       // Basename, so an absolute path like /usr/local/bin/npx still matches.
-      final launcher = command
-          .split(RegExp(r'[\\/\s]+'))
-          .last
-          .toLowerCase();
+      final launcher = command.split(RegExp(r'[\\/\s]+')).last.toLowerCase();
       final hasPackageArg = server.args.any(
         (a) => a.trim().isNotEmpty && !a.trim().startsWith('-'),
       );
@@ -1103,13 +1162,18 @@ class McpService {
   Future<void> _oauthStorage(String key, Future<void> Function() operation) {
     final previous = _oauthStorageOperations[key] ?? Future<void>.value();
     final next = previous.then((_) => operation());
-    final settled = next.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    final settled = next.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
     _oauthStorageOperations[key] = settled;
-    unawaited(settled.then((_) {
-      if (identical(_oauthStorageOperations[key], settled)) {
-        _oauthStorageOperations.remove(key);
-      }
-    }));
+    unawaited(
+      settled.then((_) {
+        if (identical(_oauthStorageOperations[key], settled)) {
+          _oauthStorageOperations.remove(key);
+        }
+      }),
+    );
     return next;
   }
 
@@ -1165,23 +1229,23 @@ class McpService {
   }
 
   /// Persist an OAuth token for [serverKey] (secure storage, never prefs).
-  Future<void> storeMcpOAuthToken(
-    String serverKey,
-    McpOAuthToken token,
-  ) async {
+  Future<void> storeMcpOAuthToken(String serverKey, McpOAuthToken token) async {
     final generation = _invalidateOAuth(serverKey);
     await _storeOAuthToken(serverKey, token, generation);
   }
 
   Future<bool> _storeOAuthToken(
-    String serverKey, McpOAuthToken token, Object generation,
+    String serverKey,
+    McpOAuthToken token,
+    Object generation,
   ) async {
     if (!_ownsOAuth(serverKey, generation)) return false;
     if (!oauthSecureStorageDisabledForTest) {
       await _oauthStorage(serverKey, () async {
         if (!_ownsOAuth(serverKey, generation)) return;
         await ovidSecureStorage().write(
-          key: _oauthTokenKey(serverKey), value: jsonEncode(token.toJson()),
+          key: _oauthTokenKey(serverKey),
+          value: jsonEncode(token.toJson()),
         );
       });
     }
@@ -1245,7 +1309,9 @@ class McpService {
 
   /// Begin a ten-minute, one-use S256 authorization attempt for a canonical id.
   /// Starting again invalidates the previous attempt and pending refresh writes.
-  Future<McpOAuthAuthorization> beginMcpOAuthAuthorization(String serverKey) async {
+  Future<McpOAuthAuthorization> beginMcpOAuthAuthorization(
+    String serverKey,
+  ) async {
     final generation = _invalidateOAuth(serverKey);
     final config = await mcpOAuthConfigForAsync(serverKey);
     if (!_ownsOAuth(serverKey, generation) || config == null) {
@@ -1254,24 +1320,39 @@ class McpService {
     _oauthEndpoint(config.authorizationUrl);
     _oauthEndpoint(config.tokenUrl);
     final redirect = Uri.tryParse(config.redirectUri ?? '');
-    if (redirect == null || !redirect.hasScheme || redirect.hasFragment ||
+    if (redirect == null ||
+        !redirect.hasScheme ||
+        redirect.hasFragment ||
         redirect.userInfo.isNotEmpty ||
-        (redirect.scheme != 'https' && redirect.scheme != 'http' &&
+        (redirect.scheme != 'https' &&
+            redirect.scheme != 'http' &&
             !redirect.hasAuthority) ||
         redirect.queryParametersAll.values.any((v) => v.length != 1) ||
-        redirect.queryParameters.keys.any(const {'code', 'state', 'error'}.contains)) {
+        redirect.queryParameters.keys.any(
+          const {'code', 'state', 'error'}.contains,
+        )) {
       throw StateError('OAuth redirect URI is invalid');
     }
     final random = Random.secure();
-    String nonce() => base64Url.encode(List.generate(32, (_) => random.nextInt(256)))
+    String nonce() => base64Url
+        .encode(List.generate(32, (_) => random.nextInt(256)))
         .replaceAll('=', '');
     final state = nonce();
     final verifier = nonce();
-    final challenge = base64Url.encode(sha256.convert(ascii.encode(verifier)).bytes)
+    final challenge = base64Url
+        .encode(sha256.convert(ascii.encode(verifier)).bytes)
         .replaceAll('=', '');
     final attempt = McpOAuthAuthorization._(
-      buildMcpAuthorizeUrl(config: config, state: state, codeChallenge: challenge),
-      _now().add(const Duration(minutes: 10)), config, state, verifier, generation,
+      buildMcpAuthorizeUrl(
+        config: config,
+        state: state,
+        codeChallenge: challenge,
+      ),
+      _now().add(const Duration(minutes: 10)),
+      config,
+      state,
+      verifier,
+      generation,
     );
     _oauthAttempts[serverKey] = attempt;
     return attempt;
@@ -1281,61 +1362,89 @@ class McpService {
   /// server/config generation is still current. Invalid callbacks consume the
   /// attempt too. No callback secrets are included in exception messages.
   Future<McpOAuthToken> completeMcpOAuthAuthorization(
-    String serverKey, String callbackUri,
+    String serverKey,
+    String callbackUri,
   ) async {
     final attempt = _oauthAttempts.remove(serverKey);
-    if (attempt == null || !_ownsOAuth(serverKey, attempt._generation) ||
+    if (attempt == null ||
+        !_ownsOAuth(serverKey, attempt._generation) ||
         !_now().isBefore(attempt.expiresAt)) {
       throw StateError('OAuth attempt expired or unavailable');
     }
     final callback = Uri.tryParse(callbackUri);
     final expected = Uri.parse(attempt._config.redirectUri!);
-    if (callback == null || callback.hasFragment || callback.userInfo.isNotEmpty ||
-        callback.scheme != expected.scheme || callback.host != expected.host ||
-        callback.port != expected.port || callback.path != expected.path ||
+    if (callback == null ||
+        callback.hasFragment ||
+        callback.userInfo.isNotEmpty ||
+        callback.scheme != expected.scheme ||
+        callback.host != expected.host ||
+        callback.port != expected.port ||
+        callback.path != expected.path ||
         callback.queryParametersAll.values.any((v) => v.length != 1) ||
-        !callback.queryParameters.keys.every((key) =>
-            expected.queryParameters.containsKey(key) ||
-            const {'code', 'state'}.contains(key)) ||
-        expected.queryParameters.entries.any((e) => callback.queryParameters[e.key] != e.value) ||
+        !callback.queryParameters.keys.every(
+          (key) =>
+              expected.queryParameters.containsKey(key) ||
+              const {'code', 'state'}.contains(key),
+        ) ||
+        expected.queryParameters.entries.any(
+          (e) => callback.queryParameters[e.key] != e.value,
+        ) ||
         callback.queryParameters['state'] != attempt._state ||
         callback.queryParameters.containsKey('error') ||
         (callback.queryParameters['code'] ?? '').isEmpty) {
       throw StateError('OAuth callback rejected');
     }
-    final token = await exchangeMcpOAuthCode(config: attempt._config,
-        code: callback.queryParameters['code']!, codeVerifier: attempt._verifier);
+    final token = await exchangeMcpOAuthCode(
+      config: attempt._config,
+      code: callback.queryParameters['code']!,
+      codeVerifier: attempt._verifier,
+    );
     if (!await _storeOAuthToken(serverKey, token, attempt._generation)) {
       throw StateError('OAuth attempt replaced or removed');
     }
     return token;
   }
 
-  void cancelMcpOAuthAuthorization(String serverKey) => _invalidateOAuth(serverKey);
+  void cancelMcpOAuthAuthorization(String serverKey) =>
+      _invalidateOAuth(serverKey);
 
   static Uri _oauthEndpoint(String? value) {
     final uri = Uri.tryParse(value ?? '');
-    if (uri == null || !uri.hasAuthority || uri.host.isEmpty ||
-        uri.userInfo.isNotEmpty || uri.hasFragment ||
-        RegExp(r'^https?://[^/?#]*@', caseSensitive: false).hasMatch(value ?? '') ||
-        (uri.scheme != 'https' && !(uri.scheme == 'http' &&
-            const {'127.0.0.1', '::1', 'localhost'}.contains(uri.host)))) {
+    if (uri == null ||
+        !uri.hasAuthority ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment ||
+        RegExp(
+          r'^https?://[^/?#]*@',
+          caseSensitive: false,
+        ).hasMatch(value ?? '') ||
+        (uri.scheme != 'https' &&
+            !(uri.scheme == 'http' &&
+                const {'127.0.0.1', '::1', 'localhost'}.contains(uri.host)))) {
       throw StateError('OAuth endpoint requires HTTPS (or loopback HTTP)');
     }
     return uri;
   }
 
-  Future<http.Response> _postOAuth(http.Client client, String url,
-      Map<String, String> fields) async {
+  Future<http.Response> _postOAuth(
+    http.Client client,
+    String url,
+    Map<String, String> fields,
+  ) async {
     final request = http.Request('POST', _oauthEndpoint(url))
       ..followRedirects = false
       ..bodyFields = fields;
-    final streamed = await client.send(request).timeout(const Duration(seconds: 30));
+    final streamed = await client
+        .send(request)
+        .timeout(const Duration(seconds: 30));
     if (const {301, 302, 303, 307, 308}.contains(streamed.statusCode)) {
       unawaited(streamed.stream.listen(null).cancel());
       throw StateError('OAuth token endpoint redirected');
     }
-    return await http.Response.fromStream(streamed).timeout(const Duration(seconds: 30));
+    return await http.Response.fromStream(
+      streamed,
+    ).timeout(const Duration(seconds: 30));
   }
 
   /// Build the browser authorize URL for the OAuth flow (step 1 of the
@@ -1389,17 +1498,15 @@ class McpService {
     final client = httpClientForTest ?? http.Client();
     try {
       final res = await _postOAuth(client, tokenUrl.trim(), {
-              'grant_type': 'authorization_code',
-              'code': code,
-              'redirect_uri': config.redirectUri ?? '',
-              'client_id': config.clientId ?? '',
-              if (codeVerifier != null && codeVerifier.isNotEmpty)
-                'code_verifier': codeVerifier,
-            });
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': config.redirectUri ?? '',
+        'client_id': config.clientId ?? '',
+        if (codeVerifier != null && codeVerifier.isNotEmpty)
+          'code_verifier': codeVerifier,
+      });
       if (res.statusCode < 200 || res.statusCode >= 300) {
-        throw Exception(
-          'OAuth token exchange failed: HTTP ${res.statusCode}',
-        );
+        throw Exception('OAuth token exchange failed: HTTP ${res.statusCode}');
       }
       final j = jsonDecode(res.body) as Map<String, dynamic>;
       if ((j['access_token']?.toString() ?? '').isEmpty) {
@@ -1420,21 +1527,25 @@ class McpService {
     final generation = _oauthGeneration(serverKey);
     final future = _refreshMcpOAuthToken(serverKey, generation);
     _oauthRefreshes[serverKey] = future;
-    unawaited(future.then((_) {
-      if (identical(_oauthRefreshes[serverKey], future)) {
-        _oauthRefreshes.remove(serverKey);
-      }
-    }));
+    unawaited(
+      future.then((_) {
+        if (identical(_oauthRefreshes[serverKey], future)) {
+          _oauthRefreshes.remove(serverKey);
+        }
+      }),
+    );
     return future;
   }
 
   Future<McpOAuthToken?> _refreshMcpOAuthToken(
-    String serverKey, Object generation,
+    String serverKey,
+    Object generation,
   ) async {
     final config = await mcpOAuthConfigForAsync(serverKey);
     final current = await mcpOAuthTokenFor(serverKey);
     final tokenUrl = config?.tokenUrl;
-    if (!_ownsOAuth(serverKey, generation) || tokenUrl == null ||
+    if (!_ownsOAuth(serverKey, generation) ||
+        tokenUrl == null ||
         tokenUrl.trim().isEmpty ||
         current == null ||
         !current.canRefresh) {
@@ -1443,10 +1554,10 @@ class McpService {
     final client = httpClientForTest ?? http.Client();
     try {
       final res = await _postOAuth(client, tokenUrl.trim(), {
-              'grant_type': 'refresh_token',
-              'refresh_token': current.refreshToken!,
-              'client_id': config!.clientId ?? '',
-            });
+        'grant_type': 'refresh_token',
+        'refresh_token': current.refreshToken!,
+        'client_id': config!.clientId ?? '',
+      });
       if (res.statusCode < 200 || res.statusCode >= 300) return null;
       final j = jsonDecode(res.body) as Map<String, dynamic>;
       if ((j['access_token']?.toString() ?? '').isEmpty) return null;
@@ -1460,7 +1571,9 @@ class McpService {
               expiresAt: next.expiresAt,
             )
           : next;
-      return await _storeOAuthToken(serverKey, merged, generation) ? merged : null;
+      return await _storeOAuthToken(serverKey, merged, generation)
+          ? merged
+          : null;
     } catch (_) {
       return null;
     } finally {
@@ -1525,6 +1638,7 @@ class McpService {
       channel = _SseMcpChannel(
         client: httpClientForTest,
         onNotification: (message) => _onNotification(rs, message),
+        onClosed: () => _markSseFailure(rs),
         onDestinationRejected: (reason) {
           if (!identical(rs.sseChannel, channel)) return;
           rs.sseDestinationFailure = reason;
@@ -1598,10 +1712,16 @@ class McpService {
       if (rs.sseDestinationFailure != null) {
         throw StateError(rs.sseDestinationFailure!);
       }
-      if (!identical(_running[key], rs) || rs.userDisconnected) {
+      if (!identical(_running[key], rs) ||
+          rs.userDisconnected ||
+          !_canPublishStatus(rs)) {
         return 'connect aborted';
       }
       rs.handshakeDone = true;
+      _markConnected(
+        rs,
+        '"${server.name}" connected (sse) · ${rs.tools.length} tools',
+      );
       _reconnectAttempts.remove(key);
       return '"${server.name}" connected (sse) · ${rs.tools.length} tools';
     } catch (e) {
@@ -1614,7 +1734,10 @@ class McpService {
       rs.sseChannel = null;
       try {
         await channel?.close();
-      } catch (e) { Diag.swallow('mcp_service', e); }
+      } catch (e) {
+        Diag.swallow('mcp_service', e);
+      }
+      _markDisconnected(rs, 'connect failed: $e');
       return 'connect failed: $e';
     }
   }
@@ -1637,12 +1760,11 @@ class McpService {
     final id = _nextId++;
     final effectiveTimeout = timeout ?? Duration(seconds: _rpcTimeoutSeconds);
 
-    Future<void> doPost(Map<String, String> headers) => channel.post({
-      'jsonrpc': '2.0',
-      'id': id,
-      'method': method,
-      'params': params,
-    }, headers, timeout: effectiveTimeout);
+    Future<void> doPost(Map<String, String> headers) => channel.post(
+      {'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params},
+      headers,
+      timeout: effectiveTimeout,
+    );
 
     try {
       try {
@@ -1709,11 +1831,11 @@ class McpService {
     if (channel == null || !channel.isOpen) return;
     try {
       final headers = {...rs.server.headers, ...await _authHeaders(rs)};
-      await channel.post({
-        'jsonrpc': '2.0',
-        'method': method,
-        'params': params,
-      }, headers, timeout: timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+      await channel.post(
+        {'jsonrpc': '2.0', 'method': method, 'params': params},
+        headers,
+        timeout: timeout ?? Duration(seconds: _rpcTimeoutSeconds),
+      );
     } catch (_) {
       // Notifications are fire-and-forget by design.
     }
@@ -1724,8 +1846,11 @@ class McpService {
   Future<List<McpToolDef>?> _listToolsSse(
     _RunningServer rs, {
     Duration? timeout,
-  }) => _listToolsPages(rs, (params, left) =>
-      _rpcSse(rs, 'tools/list', params, timeout: left), timeout: timeout);
+  }) => _listToolsPages(
+    rs,
+    (params, left) => _rpcSse(rs, 'tools/list', params, timeout: left),
+    timeout: timeout,
+  );
 
   /// An SSE server whose stream dies unexpectedly gets the same treatment
   /// as a dead stdio process / failed HTTP call: drop it and schedule an
@@ -1735,11 +1860,14 @@ class McpService {
     final key = _key(rs.server);
     if (!identical(_running[key], rs)) return; // already superseded
     _running.remove(key);
+    _markDisconnected(rs, 'SSE stream disconnected unexpectedly');
     _lastDeath = (server: key, code: -1, at: DateTime.now());
     final channel = rs.sseChannel;
     rs.sseChannel = null;
     unawaited(channel?.close());
-    if (!rs.userDisconnected) _scheduleReconnect(rs.server);
+    if (!rs.userDisconnected && _canPublishStatus(rs)) {
+      _scheduleReconnect(rs.server);
+    }
   }
 
   Future<List<String>> _missingCredentials(McpServer server) async {
@@ -1817,7 +1945,9 @@ class McpService {
       try {
         await file.parent.create(recursive: true);
         await legacy.copy(file.path);
-      } catch (e) { Diag.swallow('mcp_service', e); }
+      } catch (e) {
+        Diag.swallow('mcp_service', e);
+      }
     }
     return file;
   }
@@ -1911,18 +2041,27 @@ class McpService {
       );
       rs.tools = tools;
 
-      if (!identical(_running[key], rs) || rs.userDisconnected) {
+      if (!identical(_running[key], rs) ||
+          rs.userDisconnected ||
+          !_canPublishStatus(rs)) {
         await handler.dispose();
         return 'connect aborted';
       }
       rs.handshakeDone = true;
+      _markConnected(
+        rs,
+        '"${server.name}" connected (native) · ${rs.tools.length} tools',
+      );
       _reconnectAttempts.remove(key);
       return '"${server.name}" connected (native) · ${rs.tools.length} tools';
     } catch (e) {
       if (identical(_running[key], rs)) _running.remove(key);
       try {
         await rs.nativeHandler?.dispose();
-      } catch (e) { Diag.swallow('mcp_service', e); }
+      } catch (e) {
+        Diag.swallow('mcp_service', e);
+      }
+      _markDisconnected(rs, 'connect failed: $e');
       return 'connect failed: $e';
     }
   }
@@ -2045,14 +2184,24 @@ class McpService {
           await _listToolsHttp(rs, timeout: phaseTimeout('tools/list')) ??
           <McpToolDef>[];
       // A budget abort may have detached this attempt — never mark it ready.
-      if (!identical(_running[key], rs) || rs.userDisconnected) {
+      // The ownership fence covers the cases the runtime map cannot see: an
+      // account transition or a plugin unmount/replacement while this
+      // handshake was in flight.
+      if (!identical(_running[key], rs) ||
+          rs.userDisconnected ||
+          !_canPublishStatus(rs)) {
         return 'connect aborted';
       }
       rs.handshakeDone = true;
+      _markConnected(
+        rs,
+        '"${server.name}" connected (http) · ${rs.tools.length} tools',
+      );
       _reconnectAttempts.remove(key);
       return '"${server.name}" connected (http) · ${rs.tools.length} tools';
     } catch (e) {
       if (identical(_running[key], rs)) _running.remove(key);
+      _markDisconnected(rs, 'connect failed: $e');
       return 'connect failed: $e';
     }
   }
@@ -2085,8 +2234,11 @@ class McpService {
   Future<List<McpToolDef>?> _listToolsHttp(
     _RunningServer rs, {
     Duration? timeout,
-  }) => _listToolsPages(rs, (params, left) =>
-      _rpcHttp(rs, 'tools/list', params, timeout: left), timeout: timeout);
+  }) => _listToolsPages(
+    rs,
+    (params, left) => _rpcHttp(rs, 'tools/list', params, timeout: left),
+    timeout: timeout,
+  );
 
   /// One aggregate time/size budget; an incomplete catalog is never published.
   Future<List<McpToolDef>> _listToolsPages(
@@ -2094,7 +2246,9 @@ class McpService {
     Future<McpRpcResult> Function(Map<String, dynamic>, Duration) request, {
     Duration? timeout,
   }) async {
-    final deadline = _now().add(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+    final deadline = _now().add(
+      timeout ?? Duration(seconds: _rpcTimeoutSeconds),
+    );
     final tools = <McpToolDef>[];
     final names = <String>{};
     final cursors = <String>{};
@@ -2104,9 +2258,7 @@ class McpService {
       _requireCurrent(rs);
       final left = _remainingUntil(deadline);
       if (left <= Duration.zero) throw TimeoutException('tools/list timed out');
-      final res = await request({
-        'cursor': ?cursor,
-      }, left);
+      final res = await request({'cursor': ?cursor}, left);
       if (res.isTimeout) {
         throw TimeoutException('tools/list timed out', timeout);
       }
@@ -2129,8 +2281,10 @@ class McpService {
         throw StateError('tools/list catalog exceeds tool limit');
       }
       for (final tool in pageTools) {
-        if (tool is! Map<String, dynamic> || tool['name'] is! String ||
-            (tool['name'] as String).isEmpty || !names.add(tool['name'] as String)) {
+        if (tool is! Map<String, dynamic> ||
+            tool['name'] is! String ||
+            (tool['name'] as String).isEmpty ||
+            !names.add(tool['name'] as String)) {
           throw const FormatException('tools/list invalid or duplicate tool');
         }
         tools.add(McpToolDef.fromJson(tool));
@@ -2157,8 +2311,11 @@ class McpService {
   Future<List<McpToolDef>> _listToolsStdio(
     _RunningServer rs, {
     Duration? timeout,
-  }) => _listToolsPages(rs, (params, left) =>
-      _rpc(rs, 'tools/list', params, timeout: left), timeout: timeout);
+  }) => _listToolsPages(
+    rs,
+    (params, left) => _rpc(rs, 'tools/list', params, timeout: left),
+    timeout: timeout,
+  );
 
   Future<String> _connectStdio(
     McpServer server,
@@ -2175,8 +2332,13 @@ class McpService {
       return timeout;
     }
 
+    // The ownership fence is checked here as well as before marking ready:
+    // a fence trip mid-attempt (account transition, plugin unmount) must
+    // kill the freshly spawned process instead of finishing the handshake.
     bool aborted() =>
-        (!identical(_running[key], rs) || rs.userDisconnected);
+        (!identical(_running[key], rs) ||
+            rs.userDisconnected ||
+            !_canPublishStatus(rs));
     try {
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('MCP handshake timed out', Duration.zero);
@@ -2262,7 +2424,9 @@ class McpService {
       if (aborted()) {
         try {
           proc.kill();
-        } catch (e) { Diag.swallow('mcp_service', e); }
+        } catch (e) {
+          Diag.swallow('mcp_service', e);
+        }
         return 'connect aborted';
       }
 
@@ -2277,7 +2441,10 @@ class McpService {
           if (identical(_running[key], rs)) {
             _running.remove(key);
             _lastDeath = (server: key, code: code, at: DateTime.now());
-            if (rs.handshakeDone && !rs.userDisconnected) {
+            if (rs.handshakeDone &&
+                !rs.userDisconnected &&
+                _canPublishStatus(rs)) {
+              _markDisconnected(rs, 'server exited with code $code');
               _scheduleReconnect(server);
             }
           }
@@ -2305,13 +2472,20 @@ class McpService {
       rs.tools = await _listToolsStdio(rs, timeout: phaseTimeout('tools/list'));
       if (aborted()) return 'connect aborted';
       rs.handshakeDone = true;
+      _markConnected(
+        rs,
+        '"${server.name}" connected (stdio) · ${rs.tools.length} tools',
+      );
       _reconnectAttempts.remove(key);
       return '"${server.name}" connected · ${rs.tools.length} tools';
     } catch (e) {
       if (identical(_running[key], rs)) _running.remove(key);
       try {
         rs.process?.kill();
-      } catch (e) { Diag.swallow('mcp_service', e); }
+      } catch (e) {
+        Diag.swallow('mcp_service', e);
+      }
+      _markDisconnected(rs, 'connect failed: $e');
       return 'connect failed: $e';
     }
   }
@@ -2329,7 +2503,9 @@ class McpService {
       try {
         final json = jsonDecode(line) as Map<String, dynamic>;
         _onNotification(rs, json);
-      } catch (e) { Diag.swallow('mcp_service', e); }
+      } catch (e) {
+        Diag.swallow('mcp_service', e);
+      }
     });
   }
 
@@ -2407,8 +2583,10 @@ class McpService {
           .where((s) => s.canonicalId == key)
           .firstOrNull;
       if (fresh == null || !_ownerActive(fresh)) return;
-      final outcome = await connectOutcome(fresh,
-        handshakeBudget: Duration(seconds: fresh.startupTimeoutS));
+      final outcome = await connectOutcome(
+        fresh,
+        handshakeBudget: Duration(seconds: fresh.startupTimeoutS),
+      );
       if (identical(_reconnectGenerations[key], generation) &&
           outcome.kind == McpConnectOutcomeKind.failed &&
           !_running.containsKey(key) &&
@@ -2465,9 +2643,9 @@ class McpService {
         } else if (rs.server.transport == 'native') {
           final result = await _listNativeTools(rs);
           if (result.isError) return;
-          merged = (result.value['tools'] as List).map(
-            (t) => McpToolDef.fromJson(t as Map<String, dynamic>),
-          ).toList();
+          merged = (result.value['tools'] as List)
+              .map((t) => McpToolDef.fromJson(t as Map<String, dynamic>))
+              .toList();
         } else {
           merged = await _listToolsStdio(rs);
         }
@@ -2492,8 +2670,22 @@ class McpService {
       ..process = process
       ..handshakeDone = true
       ..tools = List.of(initialTools);
+    _captureOwnership(rs);
     _running[key] = rs;
     _attachStdioStreams(rs, key, process);
+    unawaited(
+      process.exitCode.then((code) {
+        if (!identical(_running[key], rs)) return;
+        _running.remove(key);
+        _lastDeath = (server: key, code: code, at: DateTime.now());
+        if (rs.handshakeDone &&
+            !rs.userDisconnected &&
+            _canPublishStatus(rs)) {
+          _markDisconnected(rs, 'server exited with code $code');
+          _scheduleReconnect(server);
+        }
+      }),
+    );
   }
 
   /// Kill a server process. Safe to call when not connected. For a
@@ -2508,9 +2700,12 @@ class McpService {
     if (rs == null) return;
     rs.userDisconnected = true;
     if (!rs.connection.isCompleted) {
-      rs.connection.complete(const McpConnectOutcome(
-        McpConnectOutcomeKind.failed, 'connect aborted',
-      ));
+      rs.connection.complete(
+        const McpConnectOutcome(
+          McpConnectOutcomeKind.failed,
+          'connect aborted',
+        ),
+      );
     }
     for (final client in rs.httpClients) {
       client.close();
@@ -2524,19 +2719,26 @@ class McpService {
         : null;
     try {
       await rs.nativeHandler?.dispose();
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    } catch (e) {
+      Diag.swallow('mcp_service', e);
+    }
     try {
       rs.process?.kill();
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    } catch (e) {
+      Diag.swallow('mcp_service', e);
+    }
     try {
       await rs.sseChannel?.close();
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    } catch (e) {
+      Diag.swallow('mcp_service', e);
+    }
     rs.sseChannel = null;
     if (sessionDelete != null) await sessionDelete;
   }
 
   void _onNotification(_RunningServer rs, Map<String, dynamic> message) {
-    if (message.containsKey('id') || !identical(_running[_key(rs.server)], rs) ||
+    if (message.containsKey('id') ||
+        !identical(_running[_key(rs.server)], rs) ||
         rs.userDisconnected) {
       return;
     }
@@ -2546,7 +2748,10 @@ class McpService {
     }
     final catalogs = switch (method) {
       'notifications/prompts/list_changed' => ['prompts/list'],
-      'notifications/resources/list_changed' => ['resources/list', 'resources/templates/list'],
+      'notifications/resources/list_changed' => [
+        'resources/list',
+        'resources/templates/list',
+      ],
       _ => <String>[],
     };
     for (final catalog in catalogs) {
@@ -2561,7 +2766,9 @@ class McpService {
       throw StateError('MCP server is not connected or active');
     }
     if (rs.server.transport == 'native') {
-      throw UnsupportedError('Native MCP $capability methods are not implemented');
+      throw UnsupportedError(
+        'Native MCP $capability methods are not implemented',
+      );
     }
     if (rs.capabilities[capability] is! Map) {
       throw UnsupportedError('MCP server does not advertise $capability');
@@ -2569,8 +2776,12 @@ class McpService {
     return rs;
   }
 
-  Future<Map<String, dynamic>> _protocolRequest(_RunningServer rs,
-      String method, Map<String, dynamic> params, Duration timeout) async {
+  Future<Map<String, dynamic>> _protocolRequest(
+    _RunningServer rs,
+    String method,
+    Map<String, dynamic> params,
+    Duration timeout,
+  ) async {
     _requireCurrent(rs);
     final result = switch (rs.server.transport) {
       'http' => await _rpcHttp(rs, method, params, timeout: timeout),
@@ -2592,24 +2803,64 @@ class McpService {
 
   /// Capability-gated, bounded, atomic catalogs. Notifications evict snapshots;
   /// an in-flight invalidated snapshot is rejected, never cached or returned.
-  Future<List<Map<String, dynamic>>> listPrompts(String serverName, {
-    Duration? timeout, bool refresh = false,
-  }) => _listCatalog(serverName, 'prompts', 'prompts/list', 'prompts', 'name', timeout, refresh);
+  Future<List<Map<String, dynamic>>> listPrompts(
+    String serverName, {
+    Duration? timeout,
+    bool refresh = false,
+  }) => _listCatalog(
+    serverName,
+    'prompts',
+    'prompts/list',
+    'prompts',
+    'name',
+    timeout,
+    refresh,
+  );
 
-  Future<List<Map<String, dynamic>>> listResources(String serverName, {
-    Duration? timeout, bool refresh = false,
-  }) => _listCatalog(serverName, 'resources', 'resources/list', 'resources', 'uri', timeout, refresh);
+  Future<List<Map<String, dynamic>>> listResources(
+    String serverName, {
+    Duration? timeout,
+    bool refresh = false,
+  }) => _listCatalog(
+    serverName,
+    'resources',
+    'resources/list',
+    'resources',
+    'uri',
+    timeout,
+    refresh,
+  );
 
-  Future<List<Map<String, dynamic>>> listResourceTemplates(String serverName, {
-    Duration? timeout, bool refresh = false,
-  }) => _listCatalog(serverName, 'resources', 'resources/templates/list', 'resourceTemplates', 'uriTemplate', timeout, refresh);
+  Future<List<Map<String, dynamic>>> listResourceTemplates(
+    String serverName, {
+    Duration? timeout,
+    bool refresh = false,
+  }) => _listCatalog(
+    serverName,
+    'resources',
+    'resources/templates/list',
+    'resourceTemplates',
+    'uriTemplate',
+    timeout,
+    refresh,
+  );
 
-  Future<List<Map<String, dynamic>>> _listCatalog(String name, String capability,
-      String method, String field, String identity, Duration? timeout, bool refresh) async {
+  Future<List<Map<String, dynamic>>> _listCatalog(
+    String name,
+    String capability,
+    String method,
+    String field,
+    String identity,
+    Duration? timeout,
+    bool refresh,
+  ) async {
     final rs = _protocolServer(name, capability);
-    if (!refresh && rs.catalogs.containsKey(method)) return rs.catalogs[method]!;
+    if (!refresh && rs.catalogs.containsKey(method))
+      return rs.catalogs[method]!;
     final version = rs.catalogVersions[method] ?? 0;
-    final deadline = _now().add(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+    final deadline = _now().add(
+      timeout ?? Duration(seconds: _rpcTimeoutSeconds),
+    );
     final entries = <Map<String, dynamic>>[];
     final identities = <String>{};
     final cursors = <String>{};
@@ -2618,33 +2869,44 @@ class McpService {
     for (var page = 0; page < 50; page++) {
       final left = _remainingUntil(deadline);
       if (left <= Duration.zero) throw TimeoutException('$method timed out');
-      final payload = await _protocolRequest(rs, method, {'cursor': ?cursor}, left);
+      final payload = await _protocolRequest(rs, method, {
+        'cursor': ?cursor,
+      }, left);
       if ((rs.catalogVersions[method] ?? 0) != version) {
         throw StateError('$method invalidated during discovery; retry');
       }
       bytes += utf8.encode(jsonEncode(payload)).length;
-      if (bytes > 4 * 1024 * 1024) throw StateError('$method catalog exceeds byte limit');
+      if (bytes > 4 * 1024 * 1024)
+        throw StateError('$method catalog exceeds byte limit');
       final items = payload[field];
-      if (items is! List) throw FormatException('$method expected $field array');
-      if (entries.length + items.length > 10000) throw StateError('$method catalog exceeds item limit');
+      if (items is! List)
+        throw FormatException('$method expected $field array');
+      if (entries.length + items.length > 10000)
+        throw StateError('$method catalog exceeds item limit');
       for (final item in items) {
-        if (item is! Map<String, dynamic>) throw FormatException('$method invalid item');
+        if (item is! Map<String, dynamic>)
+          throw FormatException('$method invalid item');
         _requiredString(item, identity);
         _requiredString(item, 'name');
         _optionalString(item, 'description');
         _optionalString(item, 'title');
-        if (!identities.add(item[identity] as String)) throw FormatException('$method duplicate identity');
+        if (!identities.add(item[identity] as String))
+          throw FormatException('$method duplicate identity');
         if (capability == 'prompts' && item.containsKey('arguments')) {
           final arguments = item['arguments'];
-          if (arguments is! List) throw const FormatException('Invalid prompt arguments');
+          if (arguments is! List)
+            throw const FormatException('Invalid prompt arguments');
           final names = <String>{};
           for (final arg in arguments) {
-            if (arg is! Map<String, dynamic>) throw const FormatException('Invalid prompt argument');
+            if (arg is! Map<String, dynamic>)
+              throw const FormatException('Invalid prompt argument');
             _requiredString(arg, 'name');
             _optionalString(arg, 'description');
             if (!names.add(arg['name'] as String) ||
                 (arg.containsKey('required') && arg['required'] is! bool)) {
-              throw const FormatException('Invalid or duplicate prompt argument');
+              throw const FormatException(
+                'Invalid or duplicate prompt argument',
+              );
             }
           }
         }
@@ -2657,7 +2919,10 @@ class McpService {
         rs.catalogs[method] = snapshot;
         return snapshot;
       }
-      if (next is! String || next.isEmpty || next.length > 4096 || !cursors.add(next)) {
+      if (next is! String ||
+          next.isEmpty ||
+          next.length > 4096 ||
+          !cursors.add(next)) {
         throw FormatException('$method invalid or repeated cursor');
       }
       cursor = next;
@@ -2678,31 +2943,38 @@ class McpService {
   }
 
   static dynamic _freeze(dynamic value) => switch (value) {
-    Map<String, dynamic> map => Map<String, dynamic>.unmodifiable(map.map((k, v) => MapEntry(k, _freeze(v)))),
+    Map<String, dynamic> map => Map<String, dynamic>.unmodifiable(
+      map.map((k, v) => MapEntry(k, _freeze(v))),
+    ),
     List list => List<dynamic>.unmodifiable(list.map(_freeze)),
     _ => value,
   };
 
   static void _resourceContents(dynamic value) {
-    if (value is! Map<String, dynamic>) throw const FormatException('Invalid resource contents');
+    if (value is! Map<String, dynamic>)
+      throw const FormatException('Invalid resource contents');
     _requiredString(value, 'uri');
     _optionalString(value, 'mimeType');
     if (value.containsKey('text') == value.containsKey('blob')) {
       throw const FormatException('Resource needs exactly one text or blob');
     }
     if (value.containsKey('text')) {
-      if (value['text'] is! String) throw const FormatException('Invalid resource text');
+      if (value['text'] is! String)
+        throw const FormatException('Invalid resource text');
     } else {
-      if (value['blob'] is! String) throw const FormatException('Invalid resource blob');
+      if (value['blob'] is! String)
+        throw const FormatException('Invalid resource blob');
       base64Decode(value['blob'] as String);
     }
   }
 
   static void _promptContent(dynamic value) {
-    if (value is! Map<String, dynamic>) throw const FormatException('Invalid prompt content');
+    if (value is! Map<String, dynamic>)
+      throw const FormatException('Invalid prompt content');
     switch (value['type']) {
       case 'text':
-        if (value['text'] is! String) throw const FormatException('Invalid prompt text');
+        if (value['text'] is! String)
+          throw const FormatException('Invalid prompt text');
       case 'image':
       case 'audio':
         _requiredString(value, 'mimeType');
@@ -2718,18 +2990,25 @@ class McpService {
     }
   }
 
-  Future<Map<String, dynamic>> getPrompt(String serverName, String name, {
-    Map<String, String> arguments = const {}, Duration? timeout,
+  Future<Map<String, dynamic>> getPrompt(
+    String serverName,
+    String name, {
+    Map<String, String> arguments = const {},
+    Duration? timeout,
   }) async {
     if (name.isEmpty) throw ArgumentError('Prompt name is empty');
     final rs = _protocolServer(serverName, 'prompts');
-    final payload = await _protocolRequest(rs, 'prompts/get', {'name': name, 'arguments': arguments},
-        timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+    final payload = await _protocolRequest(rs, 'prompts/get', {
+      'name': name,
+      'arguments': arguments,
+    }, timeout ?? Duration(seconds: _rpcTimeoutSeconds));
     _optionalString(payload, 'description');
     final messages = payload['messages'];
-    if (messages is! List) throw const FormatException('Expected prompt messages array');
+    if (messages is! List)
+      throw const FormatException('Expected prompt messages array');
     for (final message in messages) {
-      if (message is! Map<String, dynamic> || !const {'user', 'assistant'}.contains(message['role'])) {
+      if (message is! Map<String, dynamic> ||
+          !const {'user', 'assistant'}.contains(message['role'])) {
         throw const FormatException('Invalid prompt message role');
       }
       _promptContent(message['content']);
@@ -2737,14 +3016,22 @@ class McpService {
     return _freeze(payload) as Map<String, dynamic>;
   }
 
-  Future<Map<String, dynamic>> readResource(String serverName, String uri, {Duration? timeout}) async {
+  Future<Map<String, dynamic>> readResource(
+    String serverName,
+    String uri, {
+    Duration? timeout,
+  }) async {
     if (uri.isEmpty) throw ArgumentError('Resource URI is empty');
     final rs = _protocolServer(serverName, 'resources');
-    final payload = await _protocolRequest(rs, 'resources/read', {'uri': uri},
-        timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+    final payload = await _protocolRequest(rs, 'resources/read', {
+      'uri': uri,
+    }, timeout ?? Duration(seconds: _rpcTimeoutSeconds));
     final contents = payload['contents'];
-    if (contents is! List) throw const FormatException('Expected resource contents array');
-    for (final content in contents) { _resourceContents(content); }
+    if (contents is! List)
+      throw const FormatException('Expected resource contents array');
+    for (final content in contents) {
+      _resourceContents(content);
+    }
     return _freeze(payload) as Map<String, dynamic>;
   }
 
@@ -2819,12 +3106,10 @@ class McpService {
             cancelOnTimeout: true,
           )
         : rs.server.transport == 'sse'
-        ? _rpcSse(
-            rs,
-            'tools/call',
-            {'name': toolName, 'arguments': args},
-            timeout: effectiveTimeout,
-          )
+        ? _rpcSse(rs, 'tools/call', {
+            'name': toolName,
+            'arguments': args,
+          }, timeout: effectiveTimeout)
         : rs.server.transport == 'native'
         ? _callNativeTool(rs, toolName, args, timeout: effectiveTimeout)
         : _rpc(rs, 'tools/call', {
@@ -2881,6 +3166,25 @@ class McpService {
               '[audio content returned — $mime, '
               '${data is String ? _base64ByteLength(data) : 0} bytes]',
             );
+          } else if (type == 'resource_link') {
+            final uri = c['uri'];
+            if (uri is String && uri.isNotEmpty) {
+              final label =
+                  c['name'] is String && (c['name'] as String).isNotEmpty
+                  ? ' (${c['name']})'
+                  : '';
+              final description =
+                  c['description'] is String &&
+                      (c['description'] as String).isNotEmpty
+                  ? ': ${c['description']}'
+                  : '';
+              final mime =
+                  c['mimeType'] is String &&
+                      (c['mimeType'] as String).isNotEmpty
+                  ? ' [${c['mimeType']}]'
+                  : '';
+              parts.add('[resource link] $uri$label$description$mime');
+            }
           }
         }
         final structured = payload['structuredContent'];
@@ -2983,7 +3287,9 @@ class McpService {
       proc.stdin.writeln(
         jsonEncode({'jsonrpc': '2.0', 'method': method, 'params': params}),
       );
-    } catch (e) { Diag.swallow('mcp_service', e); }
+    } catch (e) {
+      Diag.swallow('mcp_service', e);
+    }
   }
 
   /// PR41: Streamable-HTTP JSON-RPC notification — a POST that carries no
@@ -3004,25 +3310,26 @@ class McpService {
     try {
       final authHeaders = await _authHeaders(rs);
       _requireCurrent(rs);
-      final res = await client
-          .post(
-            Uri.parse(url),
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json, text/event-stream',
-              if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
-              if (rs.protocolVersion != null)
-                'MCP-Protocol-Version': rs.protocolVersion!,
-              ...authHeaders,
-              ...rs.server.headers,
-            },
-            body: jsonEncode({
-              'jsonrpc': '2.0',
-              'method': method,
-              'params': params,
-            }),
-          )
-          .timeout(timeout ?? Duration(seconds: rs.server.startupTimeoutS));
+      final res = await _sendMcpHttpRequest(
+        client,
+        'POST',
+        Uri.parse(url),
+        {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/event-stream',
+          if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
+          if (rs.protocolVersion != null)
+            'MCP-Protocol-Version': rs.protocolVersion!,
+          ...authHeaders,
+          ...rs.server.headers,
+        },
+        body: jsonEncode({
+          'jsonrpc': '2.0',
+          'method': method,
+          'params': params,
+        }),
+        timeout: timeout ?? Duration(seconds: rs.server.startupTimeoutS),
+      );
       _rememberSessionId(rs, res.headers);
     } catch (_) {
       // Notifications are fire-and-forget by design.
@@ -3070,26 +3377,27 @@ class McpService {
       // silent OAuth refresh + retry.
       Future<(http.Response, Map<String, dynamic>?)> doPost() async {
         _requireCurrent(rs);
-        final res = await client
-            .post(
-              Uri.parse(url),
-              headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json, text/event-stream',
-                if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
-                if (method != 'initialize' && rs.protocolVersion != null)
-                  'MCP-Protocol-Version': rs.protocolVersion!,
-                ...authHeaders,
-                ...rs.server.headers,
-              },
-              body: jsonEncode({
-                'jsonrpc': '2.0',
-                'id': id,
-                'method': method,
-                'params': params,
-              }),
-            )
-            .timeout(timeout ?? Duration(seconds: _rpcTimeoutSeconds));
+        final res = await _sendMcpHttpRequest(
+          client,
+          'POST',
+          Uri.parse(url),
+          {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/event-stream',
+            if (rs.sessionId != null) 'Mcp-Session-Id': rs.sessionId!,
+            if (method != 'initialize' && rs.protocolVersion != null)
+              'MCP-Protocol-Version': rs.protocolVersion!,
+            ...authHeaders,
+            ...rs.server.headers,
+          },
+          body: jsonEncode({
+            'jsonrpc': '2.0',
+            'id': id,
+            'method': method,
+            'params': params,
+          }),
+          timeout: timeout ?? Duration(seconds: _rpcTimeoutSeconds),
+        );
         _rememberSessionId(rs, res.headers);
         if (rs.userDisconnected) {
           if (rs.sessionId != null) unawaited(_deleteHttpSession(rs));
@@ -3107,7 +3415,9 @@ class McpService {
         } else if (res.body.trim().isNotEmpty) {
           try {
             j = jsonDecode(res.body) as Map<String, dynamic>;
-          } catch (e) { Diag.swallow('mcp_service', e); }
+          } catch (e) {
+            Diag.swallow('mcp_service', e);
+          }
         }
         return (res, j);
       }
@@ -3195,18 +3505,19 @@ class McpService {
     final client = injected ?? http.Client();
     try {
       final authHeaders = await _authHeaders(rs);
-      await client
-          .delete(
-            Uri.parse(url),
-            headers: {
-              'Mcp-Session-Id': sessionId,
-              if (rs.protocolVersion != null)
-                'MCP-Protocol-Version': rs.protocolVersion!,
-              ...authHeaders,
-              ...rs.server.headers,
-            },
-          )
-          .timeout(Duration(seconds: rs.server.startupTimeoutS));
+      await _sendMcpHttpRequest(
+        client,
+        'DELETE',
+        Uri.parse(url),
+        {
+          'Mcp-Session-Id': sessionId,
+          if (rs.protocolVersion != null)
+            'MCP-Protocol-Version': rs.protocolVersion!,
+          ...authHeaders,
+          ...rs.server.headers,
+        },
+        timeout: Duration(seconds: rs.server.startupTimeoutS),
+      );
     } catch (_) {
       // Best-effort teardown: never let a dead endpoint block disconnect.
     } finally {
@@ -3217,7 +3528,11 @@ class McpService {
   /// Parse a `text/event-stream` body into the JSON-RPC response whose `id`
   /// matches [id]. Handles `event:` lines and multi-line `data:` blocks
   /// (joined per the SSE spec). Returns null if no matching event is found.
-  Map<String, dynamic>? _parseSseResponse(String body, int id, {_RunningServer? rs}) {
+  Map<String, dynamic>? _parseSseResponse(
+    String body,
+    int id, {
+    _RunningServer? rs,
+  }) {
     final events = body.split(RegExp(r'\r?\n\r?\n'));
     Map<String, dynamic>? response;
     for (final event in events) {
@@ -3232,9 +3547,12 @@ class McpService {
       final payload = dataParts.join('\n');
       try {
         final decoded = jsonDecode(payload) as Map<String, dynamic>;
-        if (rs != null && !decoded.containsKey('id')) _onNotification(rs, decoded);
+        if (rs != null && !decoded.containsKey('id'))
+          _onNotification(rs, decoded);
         if (decoded['id']?.toString() == id.toString()) response = decoded;
-      } catch (e) { Diag.swallow('mcp_service', e); }
+      } catch (e) {
+        Diag.swallow('mcp_service', e);
+      }
     }
     return response;
   }
@@ -3251,8 +3569,71 @@ class McpService {
     final key = _key(rs.server);
     if (!identical(_running[key], rs)) return; // already superseded
     _running.remove(key);
+    _markDisconnected(rs, 'HTTP connection failed unexpectedly');
     _lastDeath = (server: key, code: -1, at: DateTime.now());
-    if (!rs.userDisconnected) _scheduleReconnect(rs.server);
+    if (!rs.userDisconnected && _canPublishStatus(rs)) {
+      _scheduleReconnect(rs.server);
+    }
+  }
+
+  void _markConnected(_RunningServer rs, String detail) {
+    if (!_canPublishStatus(rs)) return;
+    rs.server.connected = true;
+    AppState.I.updateServiceStatus(
+      'mcp:${rs.server.canonicalId}',
+      ServiceHealth.working,
+      detail: detail,
+    );
+  }
+
+  void _markDisconnected(_RunningServer rs, String detail) {
+    if (!_canPublishStatus(rs)) return;
+    rs.server.connected = false;
+    AppState.I.updateServiceStatus(
+      'mcp:${rs.server.canonicalId}',
+      ServiceHealth.failed,
+      detail: detail,
+    );
+  }
+
+  /// Capture the session token and row-registration identity a connection
+  /// starts under, so its late callbacks can be fenced against account
+  /// transitions and plugin unmounts. Called when the [_RunningServer]
+  /// reservation is made (never mid-connect, never for harness-only
+  /// servers that never publish status).
+  void _captureOwnership(_RunningServer rs) {
+    rs.sessionToken = AppState.I.sessionAccountToken;
+    rs.rowRegistered = AppState.I.mcpServers.any(
+      (s) => s.canonicalId == rs.server.canonicalId,
+    );
+  }
+
+  /// True when a late callback from [rs] may still publish service status
+  /// or mutate its [McpServer] row: the session that started the
+  /// connection is still current, and — when the row was registered at
+  /// connect time — a row with the same canonical id is still registered.
+  ///
+  /// The `identical(_running[key], rs)` checks in the exit/close watchers
+  /// only protect the runtime map: `transitionSessionAccount` swaps the
+  /// session token synchronously and plugin unmount removes the row, both
+  /// without touching [_running], so without this fence a stale connection
+  /// can publish into a new account or resurrect an unmounted row.
+  /// Unregistered (harness) servers are never fenced, and an ordinary
+  /// same-account disconnect — token unchanged, row still registered —
+  /// always passes.
+  bool _canPublishStatus(_RunningServer rs) {
+    final token = rs.sessionToken;
+    if (token == null) return true;
+    if (!identical(token, AppState.I.sessionAccountToken)) return false;
+    if (rs.rowRegistered) {
+      final canonicalId = rs.server.canonicalId;
+      if (!AppState.I.mcpServers.any(
+        (s) => s.canonicalId == canonicalId,
+      )) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /// Send a JSON-RPC request and await the matching response (id-correlated).
@@ -3498,6 +3879,20 @@ class _RunningServer {
   /// the death watcher can tell a user-initiated disconnect apart from an
   /// unexpected crash — only the latter schedules automatic reconnection.
   bool userDisconnected = false;
+
+  /// Session ownership fence: the [AppState.sessionAccountToken] captured
+  /// when this connection started. Account transitions swap the token
+  /// synchronously without touching [_running], so a late stdio exit /
+  /// SSE close / HTTP failure callback must re-check it before publishing
+  /// status or mutating the row. Null only for harness-only servers that
+  /// never publish ([McpService.callToolForTest]).
+  Object? sessionToken;
+
+  /// Whether a row for this server was registered in [AppState.mcpServers]
+  /// when the connection started. A registered row that has since been
+  /// unmounted (or replaced) must no longer receive status publishes, while
+  /// servers that were never registered are never row-fenced.
+  bool rowRegistered = false;
 
   _RunningServer({required this.server});
 }

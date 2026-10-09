@@ -271,29 +271,29 @@ class _UnavailableScreen extends StatelessWidget {
                   children: [
                     const _GateWordmark(),
                     const SizedBox(height: AetherSpacing.space5),
-                     Semantics(
-                       header: true,
-                       liveRegion: true,
-                       child: Text(
-                         'Sign-in is unavailable in this build.',
-                         style: AetherType.title,
-                         textAlign: TextAlign.center,
-                       ),
+                    Semantics(
+                      header: true,
+                      liveRegion: true,
+                      child: Text(
+                        'Sign-in is unavailable in this build.',
+                        style: AetherType.title,
+                        textAlign: TextAlign.center,
+                      ),
                     ),
                     const SizedBox(height: AetherSpacing.space3),
                     Text(
-                       'Ovid could not initialize sign-in for this app. Retry '
-                       'to check again, or restart after configuration is '
-                       'available.',
+                      'Ovid could not initialize sign-in for this app. Retry '
+                      'to check again, or restart after configuration is '
+                      'available.',
                       style: AetherType.bodyMuted,
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: AetherSpacing.space5),
-                     AetherPrimaryButton(
-                       label: retrying ? 'Retrying…' : 'Retry',
-                       loading: retrying,
-                       onPressed: retrying ? null : onRetry,
-                     ),
+                    AetherPrimaryButton(
+                      label: retrying ? 'Retrying…' : 'Retry',
+                      loading: retrying,
+                      onPressed: retrying ? null : onRetry,
+                    ),
                   ],
                 ),
               ),
@@ -310,13 +310,29 @@ class _UnavailableScreen extends StatelessWidget {
 // failed.
 // ---------------------------------------------------------------------------
 
-class _AccountNotReadyScreen extends StatelessWidget {
+class _AccountNotReadyScreen extends StatefulWidget {
   const _AccountNotReadyScreen({required this.service});
   final FirebaseService service;
 
   @override
+  State<_AccountNotReadyScreen> createState() => _AccountNotReadyScreenState();
+}
+
+class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
+  bool _restoreBusy = false;
+  bool _retryBusy = false;
+
+  @override
   Widget build(BuildContext context) {
+    final service = widget.service;
     final error = service.accountError;
+    final receipt = service.lastDeletionReceipt;
+    final deadline = receipt?.deleteAfter
+        ?.toUtc()
+        .toIso8601String()
+        .replaceFirst('T', '\n')
+        .replaceFirst('Z', ' UTC');
+    final pending = receipt?.isPending == true;
     return Scaffold(
       backgroundColor: Aether.bg,
       body: SafeArea(
@@ -342,11 +358,20 @@ class _AccountNotReadyScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: AetherSpacing.space3),
                     Text(
-                      error ??
-                          'Checking your account with the Ovid service. '
-                              'This usually takes a moment.',
+                      pending
+                          ? 'Signing in did not cancel deletion. Restore the account explicitly before the server deadline.'
+                          : error ??
+                                'Checking your account with the Ovid service. '
+                                    'This usually takes a moment.',
                       style: AetherType.bodyMuted,
                     ),
+                    if (deadline != null) ...[
+                      const SizedBox(height: AetherSpacing.space3),
+                      Text(
+                        'Scheduled after\n$deadline',
+                        style: AetherType.body,
+                      ),
+                    ],
                     const SizedBox(height: AetherSpacing.space5),
                     if (error == null)
                       Center(
@@ -363,9 +388,38 @@ class _AccountNotReadyScreen extends StatelessWidget {
                         ),
                       )
                     else ...[
+                      if (pending) ...[
+                        AetherPrimaryButton(
+                          label: 'Restore account',
+                          onPressed: _restoreBusy
+                              ? null
+                              : () async {
+                                  setState(() => _restoreBusy = true);
+                                  try {
+                                    await service.restoreAccount();
+                                  } finally {
+                                    if (mounted) {
+                                      setState(() => _restoreBusy = false);
+                                    }
+                                  }
+                                },
+                        ),
+                        const SizedBox(height: AetherSpacing.space2),
+                      ],
                       AetherPrimaryButton(
                         label: 'Retry',
-                        onPressed: service.retryAccountLogin,
+                        onPressed: _retryBusy
+                            ? null
+                            : () async {
+                                setState(() => _retryBusy = true);
+                                try {
+                                  await service.retryAccountLogin();
+                                } finally {
+                                  if (mounted) {
+                                    setState(() => _retryBusy = false);
+                                  }
+                                }
+                              },
                       ),
                       const SizedBox(height: AetherSpacing.space2),
                       AetherGhostButton(
@@ -472,10 +526,7 @@ class _PostLoginWelcomeGateState extends State<_PostLoginWelcomeGate> {
 }
 
 class _WelcomeBanner extends StatefulWidget {
-  const _WelcomeBanner({
-    required this.onDismiss,
-    required this.onInteraction,
-  });
+  const _WelcomeBanner({required this.onDismiss, required this.onInteraction});
   final VoidCallback onDismiss;
   final VoidCallback onInteraction;
 
@@ -524,21 +575,21 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
             alignment: Alignment.bottomCenter,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 420),
-               child: reducedMotion
-                   ? _WelcomeContent(
-                       onDismiss: widget.onDismiss,
-                       onInteraction: widget.onInteraction,
-                     )
-                   : SlideTransition(
-                 position: _slide,
-                 child: FadeTransition(
-                   opacity: _fade,
-                    child: _WelcomeContent(
+              child: reducedMotion
+                  ? _WelcomeContent(
                       onDismiss: widget.onDismiss,
                       onInteraction: widget.onInteraction,
+                    )
+                  : SlideTransition(
+                      position: _slide,
+                      child: FadeTransition(
+                        opacity: _fade,
+                        child: _WelcomeContent(
+                          onDismiss: widget.onDismiss,
+                          onInteraction: widget.onInteraction,
+                        ),
+                      ),
                     ),
-                 ),
-               ),
             ),
           ),
         ),
@@ -548,10 +599,7 @@ class _WelcomeBannerState extends State<_WelcomeBanner>
 }
 
 class _WelcomeContent extends StatelessWidget {
-  const _WelcomeContent({
-    required this.onDismiss,
-    required this.onInteraction,
-  });
+  const _WelcomeContent({required this.onDismiss, required this.onInteraction});
   final VoidCallback onDismiss;
   final VoidCallback onInteraction;
 
@@ -677,7 +725,7 @@ class _LoginScreen extends StatelessWidget {
                           ),
                           const SizedBox(height: AetherSpacing.space2),
                           Text(
-                            'Sign in before then to cancel.',
+                            'Signing in does not cancel deletion. Restore the account explicitly before then.',
                             style: AetherType.bodyMuted,
                           ),
                         ],

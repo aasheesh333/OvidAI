@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,6 +14,22 @@ import 'package:ovid_ai/core/plugin_registry.dart';
 import 'package:ovid_ai/core/session_lifecycle_service.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/state.dart';
+// ignore: depend_on_referenced_packages
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+
+/// Real temp documents dir so per-run memory preparation succeeds instead of
+/// throwing MissingPluginException from concurrently started child runs.
+class _TestPaths extends PathProviderPlatform {
+  _TestPaths(this.directory);
+
+  final Directory directory;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => directory.path;
+
+  @override
+  Future<String?> getApplicationSupportPath() async => directory.path;
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -20,6 +37,8 @@ void main() {
   late AppState app;
   late ChatSession root;
   final requests = <String>[];
+  late Directory documents;
+  late PathProviderPlatform originalPaths;
 
   Future<void> until(bool Function() done) async {
     final deadline = DateTime.now().add(const Duration(seconds: 10));
@@ -29,7 +48,10 @@ void main() {
     }
   }
 
-  setUp(() {
+  setUp(() async {
+    documents = await Directory.systemTemp.createTemp('p2-subagent-races-');
+    originalPaths = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = _TestPaths(documents);
     SharedPreferences.setMockInitialValues({});
     AppState.resetTestInstance();
     app = AppState.createForTest();
@@ -72,6 +94,8 @@ void main() {
     SessionLifecycleService.I.resetForTest();
     agent.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
+    PathProviderPlatform.instance = originalPaths;
+    await documents.delete(recursive: true);
   });
 
   Future<String> dispatch(String prompt) => agent.dispatchForTest(

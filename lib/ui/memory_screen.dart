@@ -27,7 +27,9 @@ import 'widgets/aether_primitives.dart';
 /// the overflow Delete stays disabled for that entrypoint rather than pretending
 /// a removal happened. These gaps are called out in the wave report.
 class MemoryScreen extends StatefulWidget {
-  const MemoryScreen({super.key});
+  final MemoryStore? memoryStore;
+
+  const MemoryScreen({super.key, this.memoryStore});
   @override
   State<MemoryScreen> createState() => _MemoryScreenState();
 }
@@ -58,7 +60,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
   Future<void> _initialize() async {
     setState(() => _error = null);
     try {
-      final store = await AppState.I.prepareMemory();
+      final store = widget.memoryStore ?? await AppState.I.prepareMemory();
       if (!mounted) return;
       _store = store;
       _load();
@@ -155,11 +157,15 @@ class _MemoryScreenState extends State<MemoryScreen> {
   }
 
   Future<void> _import() async {
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
     try {
       final picked = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['md'],
+        // Android's MIME map does not consistently recognize .md. Pick any
+        // document, then enforce our Markdown name/content rules locally.
+        type: FileType.any,
         allowMultiple: false,
         withData: false,
       );
@@ -185,7 +191,12 @@ class _MemoryScreenState extends State<MemoryScreen> {
       if (bytes.length > MemoryStore.maxFileBytes) {
         throw const FormatException('Memory file exceeds 32 KiB.');
       }
-      final text = utf8.decode(bytes);
+      final String text;
+      try {
+        text = utf8.decode(bytes);
+      } on FormatException {
+        throw const FormatException('Memory must be valid UTF-8 text.');
+      }
       MemoryStore.validateContent(text);
       // Reading is complete; the confirm sheet now waits on the user, not I/O,
       // so the indeterminate "Importing memory" bar must stop before it opens.
@@ -194,8 +205,15 @@ class _MemoryScreenState extends State<MemoryScreen> {
         content: text,
         suggested: file.name == 'MEMORY.md' ? 'imported-memory.md' : file.name,
       );
-    } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+    } on FormatException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _error = 'Could not import the selected file. '
+              'Choose a readable .md file and try again.',
+        );
+      }
     } finally {
       if (mounted && _busy) setState(() => _busy = false);
     }

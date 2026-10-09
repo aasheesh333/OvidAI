@@ -53,8 +53,8 @@ class FirebaseService extends ChangeNotifier {
          initializeApp: initializeApp,
          configure: configure,
          identity: identity,
-          initialUser: initialUser,
-          userChanges: userChanges,
+         initialUser: initialUser,
+         userChanges: userChanges,
        );
 
   static const _consentKey = 'ovid_telemetry_consent'; // 'yes' | 'no' | null
@@ -109,6 +109,8 @@ class FirebaseService extends ChangeNotifier {
       .where((p) => linkedProviderIds.contains(p.id))
       .toList();
   int _authRevision = 0;
+  Future<void>? _accountAdmission;
+  String? _accountAdmissionUid;
 
   StreamSubscription<User?>? _authSub;
   Future<void>? _initialization;
@@ -184,6 +186,8 @@ class FirebaseService extends ChangeNotifier {
     final changed = _user?.uid != user?.uid;
     if (changed) {
       _authRevision++;
+      _accountAdmission = null;
+      _accountAdmissionUid = null;
     }
     // A successful reauthentication is a new image owner even for the same UID.
     // Keep the auth revision stable: an in-progress phone flow captures it.
@@ -229,6 +233,10 @@ class FirebaseService extends ChangeNotifier {
   Future<void> retryAccountLogin() async {
     final u = _user;
     if (u == null || u.isAnonymous || !accountService.enabled) return;
+    return _admitAccount(u.uid, () => _retryAccountLogin(u));
+  }
+
+  Future<void> _retryAccountLogin(User u) async {
     final revision = _authRevision;
     _accountSession.clear();
     ImageStudio.I.bindAccount(null);
@@ -240,8 +248,14 @@ class FirebaseService extends ChangeNotifier {
     }
     await _accountSession.bind(u.uid, () async {
       final result = await accountService.acknowledgeLogin();
-      if (revision == _authRevision && result.allowsLogin) {
-        lastDeletionReceipt = null;
+      if (revision != _authRevision || _user?.uid != u.uid) return;
+      lastDeletionReceipt = result;
+      if (!result.allowsLogin) {
+        throw AccountException(
+          result.isPending
+              ? 'Account deletion is pending. Choose Restore account to cancel it.'
+              : 'This account cannot be admitted while deletion is in progress.',
+        );
       }
     });
     if (revision != _authRevision) return;
@@ -255,6 +269,47 @@ class FirebaseService extends ChangeNotifier {
       if (revision != _authRevision) return;
     }
     notifyListeners();
+  }
+
+  Future<void> restoreAccount() async {
+    final u = _user;
+    if (u == null || u.isAnonymous || !accountService.enabled) return;
+    return _admitAccount(u.uid, () async {
+      final revision = _authRevision;
+      final result = await accountService.cancelDeletion();
+      if (revision != _authRevision || _user?.uid != u.uid) return;
+      lastDeletionReceipt = result;
+      if (result.state != 'cancelled') {
+        throw const AccountException(
+          'The server did not confirm account restoration.',
+        );
+      }
+      await _retryAccountLogin(u);
+    });
+  }
+
+  Future<void> _admitAccount(String uid, Future<void> Function() operation) {
+    final existing = _accountAdmission;
+    if (existing != null && _accountAdmissionUid == uid) return existing;
+    late final Future<void> current;
+    current = operation();
+    _accountAdmission = current;
+    _accountAdmissionUid = uid;
+    current.then(
+      (_) {
+        if (identical(_accountAdmission, current)) {
+          _accountAdmission = null;
+          _accountAdmissionUid = null;
+        }
+      },
+      onError: (Object error, StackTrace stack) {
+        if (identical(_accountAdmission, current)) {
+          _accountAdmission = null;
+          _accountAdmissionUid = null;
+        }
+      },
+    );
+    return current;
   }
 
   Future<String?> authenticateSocial(
@@ -420,6 +475,8 @@ class FirebaseService extends ChangeNotifier {
     if (_identity.busy) return;
     _identity.cancelPending();
     _authRevision++;
+    _accountAdmission = null;
+    _accountAdmissionUid = null;
     ImageStudio.I.bindAccount(null);
     if (!_available) return;
     _accountSession.clear();
@@ -448,6 +505,8 @@ class FirebaseService extends ChangeNotifier {
     _identity.cancelPending();
     _identity.observeUser(null);
     _authRevision++;
+    _accountAdmission = null;
+    _accountAdmissionUid = null;
     ImageStudio.I.bindAccount(null);
     _accountSession.clear();
     _user = null;

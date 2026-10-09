@@ -39,11 +39,16 @@ void main() {
     dir.deleteSync(recursive: true);
   });
 
-  Future<void> pumpScreen(WidgetTester tester) async {
+  Future<void> pumpScreen(WidgetTester tester, {MemoryStore? memoryStore}) async {
     await tester.pumpWidget(
-      MaterialApp(theme: Aether.theme(), home: const MemoryScreen()),
+      MaterialApp(
+        theme: Aether.theme(),
+        home: MemoryScreen(memoryStore: memoryStore),
+      ),
     );
-    await tester.runAsync(() => app.prepareMemory());
+    if (memoryStore == null) {
+      await tester.runAsync(() => app.prepareMemory());
+    }
     await tester.pumpAndSettle();
   }
 
@@ -128,8 +133,8 @@ void main() {
   testWidgets('shows AetherEmptyState when the scope lists no files', (
     tester,
   ) async {
-    app = AppState.createForTest(memoryStore: _EmptyListMemoryStore(dir));
-    await pumpScreen(tester);
+    final emptyStore = _EmptyListMemoryStore(dir);
+    await pumpScreen(tester, memoryStore: emptyStore);
 
     expect(find.byType(AetherEmptyState), findsOneWidget);
     expect(find.text('No memories yet'), findsOneWidget);

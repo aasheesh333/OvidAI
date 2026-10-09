@@ -27,8 +27,6 @@ enum _FetchState { idle, busy, success, error, empty }
 
 /// Premium Providers screen — managed Ovid Cloud + BYOK providers.
 ///
-/// This is a visual-only redesign over an unchanged state contract:
-///
 /// * Managed Ovid Cloud always surfaces at the top with a 'Manage plan' route
 ///   into [BillingScreen]. Its base URL and secret stay server-side.
 /// * BYOK providers (built-in + user-added) render as [AetherCard] tiles.
@@ -154,7 +152,10 @@ class _OvidCloudTile extends StatelessWidget {
                 connected ? 'Signed in' : 'Sign in to activate',
                 style: AetherType.caption,
               ),
-              Text('${provider.models.length} models', style: AetherType.caption),
+              Text(
+                '${provider.models.length} models',
+                style: AetherType.caption,
+              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -185,6 +186,7 @@ class _ProviderTile extends StatefulWidget {
 class _ProviderTileState extends State<_ProviderTile> {
   ProviderConfig get provider => widget.provider;
   bool _fetching = false;
+  bool _expanded = false;
   _FetchState _fetchState = _FetchState.idle;
   String? _fetchResult;
 
@@ -225,8 +227,9 @@ class _ProviderTileState extends State<_ProviderTile> {
     );
     if (confirmed != true || !context.mounted) return;
     final messenger = ScaffoldMessenger.of(context);
-    final error = await (removeCustomProviderForTest?.call(provider.id) ??
-        AppState.I.removeCustomProvider(provider.id));
+    final error =
+        await (removeCustomProviderForTest?.call(provider.id) ??
+            AppState.I.removeCustomProvider(provider.id));
     if (!context.mounted) return;
     if (error != null) {
       messenger.showSnackBar(SnackBar(content: Text(error)));
@@ -328,52 +331,72 @@ class _ProviderTileState extends State<_ProviderTile> {
         ? '?'
         : provider.name.substring(0, 1).toUpperCase();
     return AetherCard(
-      padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
+      padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              _IconChip(label: letter, color: Aether.textMuted),
-              const SizedBox(width: 12),
               Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(provider.name, style: AetherType.title),
-                        const SizedBox(height: 6),
-                        if (provider.isFree)
-                          AetherPill(
-                            label: 'FREE',
-                            color: Aether.successLight,
-                          )
-                        else if (!provider.custom)
-                          AetherPill(label: 'BUILT-IN', color: Aether.accent),
-                      ],
+                child: Semantics(
+                  button: true,
+                  expanded: _expanded,
+                  child: InkWell(
+                    onTap: () => setState(() => _expanded = !_expanded),
+                    borderRadius: BorderRadius.circular(8),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minHeight: 48),
+                      child: Row(
+                        children: [
+                          _IconChip(label: letter, color: Aether.textMuted),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(provider.name, style: AetherType.title),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 2,
+                                  children: [
+                                    Text(
+                                      _statusLabel,
+                                      style: AetherType.caption.copyWith(
+                                        color: _statusColor,
+                                      ),
+                                    ),
+                                    Text(
+                                      '${provider.models.length} models',
+                                      style: AetherType.caption,
+                                    ),
+                                    if (provider.isFree)
+                                      Text(
+                                        'FREE',
+                                        style: AetherType.caption.copyWith(
+                                          color: Aether.successLight,
+                                        ),
+                                      )
+                                    else if (!provider.custom)
+                                      Text(
+                                        'BUILT-IN',
+                                        style: AetherType.caption,
+                                      ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          Icon(
+                            _expanded ? Icons.expand_less : Icons.expand_more,
+                            color: Aether.textMuted,
+                          ),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 6,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        Text(
-                          _statusLabel,
-                          style: AetherType.caption.copyWith(color: _statusColor),
-                        ),
-                        Text(
-                          '${provider.models.length} models',
-                          style: AetherType.caption,
-                        ),
-                      ],
-                    ),
-                  ],
+                  ),
                 ),
               ),
               PopupMenuButton<String>(
@@ -404,7 +427,6 @@ class _ProviderTileState extends State<_ProviderTile> {
               ),
             ],
           ),
-          const SizedBox(height: 8),
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: Wrap(
@@ -412,6 +434,7 @@ class _ProviderTileState extends State<_ProviderTile> {
               runSpacing: 4,
               children: [
                 TextButton.icon(
+                  style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
                   label: Text(_fetching ? 'Fetching models…' : 'Fetch models'),
                   icon: _fetching
                       ? const SizedBox.square(
@@ -422,6 +445,7 @@ class _ProviderTileState extends State<_ProviderTile> {
                   onPressed: _fetching ? null : () => _fetchModels(context),
                 ),
                 TextButton.icon(
+                  style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
                   label: const Text('API key'),
                   icon: Icon(
                     provider.hasKey ? Icons.key : Icons.key_outlined,
@@ -465,34 +489,11 @@ class _ProviderTileState extends State<_ProviderTile> {
                 ),
               ),
             ),
-          if (provider.models.isNotEmpty) ...[
-            const SizedBox(height: 10),
+          if (_expanded) ...[
+            const SizedBox(height: 6),
             Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  for (final m in provider.models.take(6))
-                    _ModelChip(provider: provider, model: m),
-                  if (provider.models.length > 6)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Aether.surfaceAlt,
-                        borderRadius: BorderRadius.circular(7),
-                        border: Border.all(color: Aether.hairline),
-                      ),
-                      child: Text(
-                        '+${provider.models.length - 6} more',
-                        style: AetherType.caption,
-                      ),
-                    ),
-                ],
-              ),
+              padding: const EdgeInsets.only(right: 8, bottom: 6),
+              child: _CachedProviderModels(provider: provider),
             ),
           ],
         ],
@@ -565,8 +566,10 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
     });
     final navigator = Navigator.of(context);
     // Strip whitespace/control chars so pasted blobs never hit HTTP headers.
-    final sanitized =
-        _controller.text.replaceAll(RegExp(r'[\s\x00-\x1f\x7f]'), '');
+    final sanitized = _controller.text.replaceAll(
+      RegExp(r'[\s\x00-\x1f\x7f]'),
+      '',
+    );
     try {
       await AppState.I.updateProviderApiKey(widget.provider, sanitized);
     } catch (_) {
@@ -608,10 +611,7 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
         if (widget.provider.hasKey)
           TextButton(
             onPressed: _saving ? null : _clear,
-            child: const Text(
-              'Clear',
-              style: TextStyle(color: Aether.danger),
-            ),
+            child: const Text('Clear', style: TextStyle(color: Aether.danger)),
           ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
@@ -645,7 +645,10 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
             const SizedBox(height: 12),
             Semantics(
               liveRegion: true,
-              child: Text(_error!, style: AetherType.body.copyWith(color: Aether.dangerC)),
+              child: Text(
+                _error!,
+                style: AetherType.body.copyWith(color: Aether.dangerC),
+              ),
             ),
           ],
         ],
@@ -737,90 +740,80 @@ class _EditProviderSheetState extends State<_EditProviderSheet> {
             ),
           ],
           child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AetherField(
-                  label: 'Base URL',
-                  hint: 'https://…/v1',
-                  controller: _urlController,
-                  onSubmitted: (_) => _saveUrl(),
-                  suffix: IconButton(
-                    tooltip: 'Save base URL',
-                    icon: const Icon(Icons.save_outlined, size: 18),
-                    color: Aether.textMuted,
-                    onPressed: _saveUrl,
-                  ),
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AetherField(
+                label: 'Base URL',
+                hint: 'https://…/v1',
+                controller: _urlController,
+                onSubmitted: (_) => _saveUrl(),
+                suffix: IconButton(
+                  tooltip: 'Save base URL',
+                  icon: const Icon(Icons.save_outlined, size: 18),
+                  color: Aether.textMuted,
+                  onPressed: _saveUrl,
                 ),
-                if (_urlResult != null) ...[
-                  const SizedBox(height: 8),
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(_urlResult!, style: AetherType.bodyMuted),
+              ),
+              if (_urlResult != null) ...[
+                const SizedBox(height: 8),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(_urlResult!, style: AetherType.bodyMuted),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Text('API format', style: AetherType.label),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final option in const [
+                    (value: ApiFormat.openai, label: '[OI]-compatible'),
+                    (value: ApiFormat.anthropic, label: 'Anthropic'),
+                  ])
+                    ChoiceChip(
+                      label: Text(option.label),
+                      selected: provider.effectiveApiFormat == option.value,
+                      materialTapTargetSize: MaterialTapTargetSize.padded,
+                      onSelected: (_) async {
+                        final messenger = ScaffoldMessenger.of(context);
+                        final err = await AppState.I.updateProviderApiFormat(
+                          provider,
+                          option.value,
+                        );
+                        if (!mounted) return;
+                        if (err != null) {
+                          messenger.showSnackBar(SnackBar(content: Text(err)));
+                        }
+                      },
+                    ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Wrap(
+                spacing: 12,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text('Models', style: AetherType.label),
+                  TextButton.icon(
+                    label: const Text('Add model'),
+                    icon: const Icon(Icons.add, size: 16),
+                    onPressed: _addModel,
                   ),
                 ],
-                const SizedBox(height: 16),
-                Text('API format', style: AetherType.label),
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final option in const [
-                      (value: ApiFormat.openai, label: '[OI]-compatible'),
-                      (value: ApiFormat.anthropic, label: 'Anthropic'),
-                    ])
-                      ChoiceChip(
-                        label: Text(option.label),
-                        selected: provider.effectiveApiFormat == option.value,
-                        onSelected: (_) async {
-                          final messenger = ScaffoldMessenger.of(context);
-                          final err = await AppState.I.updateProviderApiFormat(
-                            provider,
-                            option.value,
-                          );
-                          if (!mounted) return;
-                          if (err != null) {
-                            messenger.showSnackBar(SnackBar(content: Text(err)));
-                          }
-                        },
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                Wrap(
-                  spacing: 12,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text('Models', style: AetherType.label),
-                    TextButton.icon(
-                      label: const Text('Add model'),
-                      icon: const Icon(Icons.add, size: 16),
-                      onPressed: _addModel,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                if (provider.models.isEmpty)
-                  Text(
-                    'No models yet — fetch from the provider or add one '
-                    'manually.',
-                    style: AetherType.caption,
-                  )
-                else
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      for (final m in provider.models)
-                        _ModelChip(
-                          provider: provider,
-                          model: m,
-                          removable: true,
-                        ),
-                    ],
-                  ),
-              ],
+              ),
+              const SizedBox(height: 8),
+              if (provider.models.isEmpty)
+                Text(
+                  'No models yet — fetch from the provider or add one '
+                  'manually.',
+                  style: AetherType.caption,
+                )
+              else
+                _CachedProviderModels(provider: provider, removable: true),
+            ],
           ),
         );
       },
@@ -904,6 +897,57 @@ class _ProviderSheet extends StatelessWidget {
   }
 }
 
+/// Cached models are built only as requested; expanding never fetches remotely.
+class _CachedProviderModels extends StatefulWidget {
+  const _CachedProviderModels({required this.provider, this.removable = false});
+
+  final ProviderConfig provider;
+  final bool removable;
+
+  @override
+  State<_CachedProviderModels> createState() => _CachedProviderModelsState();
+}
+
+class _CachedProviderModelsState extends State<_CachedProviderModels> {
+  static const _pageSize = 10;
+  int _visibleCount = _pageSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final models = widget.provider.models;
+    if (models.isEmpty) {
+      return Text(
+        'No cached models yet — use Fetch models or add one in Edit.',
+        style: AetherType.caption,
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (final model in models.take(_visibleCount))
+              _ModelChip(
+                provider: widget.provider,
+                model: model,
+                removable: widget.removable,
+              ),
+          ],
+        ),
+        if (models.length > _visibleCount)
+          TextButton(
+            style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
+            onPressed: () => setState(() => _visibleCount += _pageSize),
+            child: const Text('More'),
+          ),
+      ],
+    );
+  }
+}
+
 /// Compact monospace model badge. Shows the provider-published context
 /// window label if known and (when [removable]) a tap-to-remove `×`.
 class _ModelChip extends StatelessWidget {
@@ -942,8 +986,7 @@ class _ModelChip extends StatelessWidget {
                     color: Aether.textMuted,
                   ),
                 ),
-                if (limits != null)
-                  Text(limits, style: AetherType.caption),
+                if (limits != null) Text(limits, style: AetherType.caption),
               ],
             ),
           ),
@@ -974,14 +1017,38 @@ class _ModelChip extends StatelessWidget {
 /// which validates the URL, dedupes by slug, and persists the key through
 /// secure storage before the row surfaces in the list.
 void addProviderSheet(BuildContext context) {
-  final name = TextEditingController();
-  final url = TextEditingController();
-  final key = TextEditingController();
   showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (sheetContext) => Padding(
+    builder: (_) => const _AddProviderSheet(),
+  );
+}
+
+class _AddProviderSheet extends StatefulWidget {
+  const _AddProviderSheet();
+
+  @override
+  State<_AddProviderSheet> createState() => _AddProviderSheetState();
+}
+
+class _AddProviderSheetState extends State<_AddProviderSheet> {
+  final name = TextEditingController();
+  final url = TextEditingController();
+  final key = TextEditingController();
+  var apiFormat = ApiFormat.openai;
+
+  @override
+  void dispose() {
+    name.dispose();
+    url.dispose();
+    key.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext sheetContext) {
+    return Padding(
       padding: EdgeInsets.only(
         bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
       ),
@@ -1000,6 +1067,7 @@ void addProviderSheet(BuildContext context) {
                 name: name.text,
                 baseUrl: url.text,
                 apiKey: key.text,
+                apiFormat: apiFormat,
               );
               if (!sheetContext.mounted) return;
               if (error != null) {
@@ -1016,7 +1084,7 @@ void addProviderSheet(BuildContext context) {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Any [OI]-compatible endpoint works.',
+              'Connect an [OI]-compatible or Anthropic endpoint.',
               style: AetherType.bodyMuted,
             ),
             const SizedBox(height: 16),
@@ -1038,13 +1106,28 @@ void addProviderSheet(BuildContext context) {
               controller: key,
               obscure: true,
             ),
+            const SizedBox(height: 16),
+            Text('API format', style: AetherType.label),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final option in const [
+                  (value: ApiFormat.openai, label: '[OI]-compatible'),
+                  (value: ApiFormat.anthropic, label: 'Anthropic'),
+                ])
+                  ChoiceChip(
+                    label: Text(option.label),
+                    selected: apiFormat == option.value,
+                    materialTapTargetSize: MaterialTapTargetSize.padded,
+                    onSelected: (_) => setState(() => apiFormat = option.value),
+                  ),
+              ],
+            ),
           ],
         ),
       ),
-    ),
-  ).whenComplete(() {
-    name.dispose();
-    url.dispose();
-    key.dispose();
-  });
+    );
+  }
 }

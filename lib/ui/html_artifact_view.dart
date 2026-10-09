@@ -302,15 +302,48 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
     required String label,
     required IconData icon,
     required VoidCallback? onPressed,
+    required bool compact,
   }) {
+    if (compact) {
+      return Tooltip(
+        message: label,
+        child: TextButton(
+          onPressed: onPressed,
+          style: TextButton.styleFrom(
+            foregroundColor: Aether.textMuted,
+            minimumSize: const Size(48, 48),
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          ),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: SizedBox(
+              width: 48,
+              height: 48,
+              child: Center(
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     // The shared ghost label button is fixed at 44dp. At enlarged text sizes
     // let the label wrap and the action grow instead of truncating its name.
     if (MediaQuery.textScalerOf(context).scale(14) <= 14) {
-      return AetherGhostButton(
-        label: label,
-        tooltip: label,
-        icon: icon,
-        onPressed: onPressed,
+      return ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+        child: AetherGhostButton(
+          label: label,
+          tooltip: label,
+          icon: icon,
+          onPressed: onPressed,
+        ),
       );
     }
     return Tooltip(
@@ -332,6 +365,57 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
           ],
         ),
       ),
+    );
+  }
+
+  Widget _header(String title, {Widget? trailing}) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact =
+            constraints.maxWidth < 560 ||
+            MediaQuery.textScalerOf(context).scale(14) > 14;
+        return Row(
+          children: [
+            Expanded(
+              child: Tooltip(
+                message: title,
+                child: Text(
+                  title,
+                  style: AetherType.title,
+                  softWrap: true,
+                ),
+              ),
+            ),
+            // Fullscreen sets _collapsed only to stop execution while exiting;
+            // its controls must stay until the route is actually removed.
+            if (!_collapsed || widget._fullscreen) ...[
+              const SizedBox(width: 4),
+              _control(
+                label: _source ? 'Show preview' : 'View source',
+                icon: _source ? Icons.preview_outlined : Icons.code,
+                compact: compact,
+                onPressed: () {
+                  _source = !_source;
+                  _refresh();
+                },
+              ),
+              _control(
+                label: widget._fullscreen ? 'Exit fullscreen' : 'Expand preview',
+                icon: widget._fullscreen
+                    ? Icons.fullscreen_exit
+                    : Icons.fullscreen,
+                compact: compact,
+                onPressed: _expanded
+                    ? null
+                    : widget._fullscreen
+                    ? _exitFullscreen
+                    : _expand,
+              ),
+            ],
+            ?trailing,
+          ],
+        );
+      },
     );
   }
 
@@ -496,49 +580,27 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
         : _collapsed
         ? 'Preview collapsed'
         : 'Ready';
-    final controls = Wrap(
-      crossAxisAlignment: WrapCrossAlignment.center,
-      runSpacing: 4,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(AetherRadius.rPill),
-              border: Border.all(color: Aether.textMuted.withValues(alpha: .4)),
-            ),
-            child: Text(
-              'OFFLINE SANDBOX',
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: .6,
-                color: Aether.textMuted,
-              ),
+    final sandboxBadge = Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(AetherRadius.rPill),
+            border: Border.all(color: Aether.textMuted.withValues(alpha: .4)),
+          ),
+          child: Text(
+            'OFFLINE SANDBOX',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: .6,
+              color: Aether.textMuted,
             ),
           ),
         ),
-        _control(
-          label: _source ? 'Show preview' : 'View source',
-          icon: _source ? Icons.preview_outlined : Icons.code,
-          onPressed: () {
-            _source = !_source;
-            _refresh();
-          },
-        ),
-        _control(
-          label: widget._fullscreen ? 'Exit fullscreen' : 'Expand preview',
-          icon: widget._fullscreen
-              ? Icons.fullscreen_exit
-              : Icons.fullscreen,
-          onPressed: _expanded
-              ? null
-              : widget._fullscreen
-              ? _exitFullscreen
-              : _expand,
-        ),
-      ],
+      ),
     );
     if (widget._fullscreen) {
       return PopScope<void>(
@@ -552,22 +614,15 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
               56,
               MediaQuery.textScalerOf(context).scale(15) * 2.8 + 16,
             ),
-            title: Tooltip(
-              message: artifact.title,
-              child: Text(
-                artifact.title,
-                style: AetherType.title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
+            title: _header(artifact.title),
+            titleSpacing: 8,
             leading: BackButton(onPressed: _exitFullscreen),
           ),
           body: SafeArea(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                controls,
+                sandboxBadge,
                 _status(status),
                 Expanded(child: preview),
               ],
@@ -589,23 +644,22 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: AetherCard(
         padding: const EdgeInsets.all(12),
-        title: Text(
-          artifact.title,
-          style: AetherType.title,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _header(artifact.title, trailing: collapseBtn),
+            if (!_collapsed) ...[
+              const SizedBox(height: 12),
+              Divider(height: 1, thickness: 1, color: Aether.hairline),
+              const SizedBox(height: 12),
+              sandboxBadge,
+              _status(status),
+              const SizedBox(height: 4),
+              SizedBox(height: height, child: preview),
+            ],
+          ],
         ),
-        trailing: collapseBtn,
-        child: _collapsed
-            ? const SizedBox.shrink()
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  controls,
-                  _status(status),
-                  const SizedBox(height: 4),
-                  SizedBox(height: height, child: preview),
-                ],
-              ),
       ),
     );
   }

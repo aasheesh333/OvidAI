@@ -65,47 +65,56 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
         insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 440),
-          child: SingleChildScrollView(
-            child: AetherCard(
-              title: Row(
-                children: [
-                  Icon(Icons.warning_amber_rounded,
-                      size: 20, color: Aether.warnLight),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text('Delete your account?', style: AetherType.title),
-                  ),
-                ],
-              ),
-              footer: OverflowBar(
-                alignment: MainAxisAlignment.end,
-                overflowAlignment: OverflowBarAlignment.end,
-                spacing: 10,
-                overflowSpacing: 8,
-                children: [
-                  AetherGhostButton(
-                    label: 'Keep account',
-                    onPressed: () => Navigator.pop(dialog, false),
-                  ),
-                  AetherDangerButton(
-                    label: 'Request deletion',
-                    onPressed: () => Navigator.pop(dialog, true),
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'The server will retain your request for 24 hours. Signing in again during that time cancels deletion. After the deadline, your Ovid identity, profile, cloud data and cloud keys will be removed.\n\nLocal workspaces and data held by third-party providers are not erased by this action.',
-                    style: AetherType.body,
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Next, verify with a social provider or phone linked to this account.',
-                    style: AetherType.bodyMuted,
-                  ),
-                ],
+          // Only the body scrolls; header and footer actions stay pinned so
+          // "Request deletion" / "Keep account" remain reachable on short
+          // viewports (AetherCard's Column is mainAxisSize.min, so the
+          // Flexible body shrinks to fit the Dialog's bounded height).
+          child: AetherCard(
+            title: Row(
+              children: [
+                Icon(
+                  Icons.warning_amber_rounded,
+                  size: 20,
+                  color: Aether.warnLight,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text('Delete your account?', style: AetherType.title),
+                ),
+              ],
+            ),
+            footer: OverflowBar(
+              alignment: MainAxisAlignment.end,
+              overflowAlignment: OverflowBarAlignment.end,
+              spacing: 10,
+              overflowSpacing: 8,
+              children: [
+                AetherGhostButton(
+                  label: 'Keep account',
+                  onPressed: () => Navigator.pop(dialog, false),
+                ),
+                AetherDangerButton(
+                  label: 'Request deletion',
+                  onPressed: () => Navigator.pop(dialog, true),
+                ),
+              ],
+            ),
+            child: Flexible(
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'The server will retain your request for 24 hours. Signing in does not cancel deletion; choose Restore account explicitly before the deadline. After the deadline, your Ovid identity, profile, cloud data and cloud keys will be removed.\n\nLocal workspaces and data held by third-party providers are not erased by this action.',
+                      style: AetherType.body,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Next, verify with a social provider or phone linked to this account.',
+                      style: AetherType.bodyMuted,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -127,6 +136,26 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
       final status = await widget.requestDeletion(_requestId);
       if (!mounted) return;
       setState(() => _status = status);
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _restore() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final error = await widget.reauthenticate(null);
+      if (error != null) {
+        if (error != 'cancelled') throw AccountException(error);
+        return;
+      }
+      final status = await widget.service.cancelDeletion();
+      if (mounted) setState(() => _status = status);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {
@@ -185,8 +214,11 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
               color: Aether.warn.withValues(alpha: 0.06),
               title: Row(
                 children: [
-                  Icon(Icons.hourglass_bottom,
-                      size: 18, color: Aether.warnLight),
+                  Icon(
+                    Icons.hourglass_bottom,
+                    size: 18,
+                    color: Aether.warnLight,
+                  ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text('Deletion requested', style: AetherType.title),
@@ -208,7 +240,7 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
                       ),
                     ),
                   Text(
-                    'Deletion requested. Scheduled after ${_status!.deleteAfter!.toUtc().toIso8601String()} (UTC). Sign in again before then to cancel.',
+                    'Deletion requested. Scheduled after ${_status!.deleteAfter!.toUtc().toIso8601String()} (UTC). Restore the account explicitly before then if you want to keep it.',
                     style: AetherType.body,
                   ),
                 ],
@@ -222,12 +254,17 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.check_circle_outline,
-                    size: 18, color: Aether.successLight),
+                Icon(
+                  Icons.check_circle_outline,
+                  size: 18,
+                  color: Aether.successLight,
+                ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text('Your deletion request was cancelled.',
-                      style: AetherType.body),
+                  child: Text(
+                    'Your deletion request was cancelled.',
+                    style: AetherType.body,
+                  ),
                 ),
               ],
             ),
@@ -257,15 +294,17 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
           const Padding(
             padding: EdgeInsets.only(bottom: 10),
             child: ClipRRect(
-              borderRadius: BorderRadius.all(Radius.circular(AetherRadius.rPill)),
+              borderRadius: BorderRadius.all(
+                Radius.circular(AetherRadius.rPill),
+              ),
               child: LinearProgressIndicator(minHeight: 3),
             ),
           ),
         if (pending)
           AetherGhostButton(
-            label: 'Cancel request',
-            icon: Icons.close,
-            onPressed: _busy ? null : _refresh,
+            label: 'Restore account',
+            icon: Icons.restore,
+            onPressed: _busy ? null : _restore,
           )
         else
           AetherDangerButton(

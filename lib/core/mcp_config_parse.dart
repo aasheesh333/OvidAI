@@ -421,8 +421,10 @@ ImportedMcp importedMcpFromJson(
     // No silent default: a stdio entry without `command`/`cmd` keeps an
     // empty command so connect fails loudly naming the missing field
     // instead of spawning an unrelated binary.
-    command:
-        (v['command'] as String?) ?? (v['cmd'] as String?) ?? '',
+    command: interpolateMcpValue(
+      ((v['command'] as String?) ?? (v['cmd'] as String?) ?? ''),
+      resolvedEnv,
+    ),
     args: [for (final a in args) interpolateMcpValue(a, resolvedEnv)],
     env: mcpStringMap(v['env'], env: resolvedEnv),
     url: url != null && url.isNotEmpty ? url : null,

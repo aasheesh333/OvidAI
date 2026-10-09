@@ -116,7 +116,9 @@ List<File> _filesUnder(Directory dir, bool Function(File) test) {
         try {
           final real = e.resolveSymbolicLinksSync();
           if (real.startsWith('$root/')) out.add(e);
-        } catch (e) { Diag.swallow('plugin_adapters', e); }
+        } catch (e) {
+          Diag.swallow('plugin_adapters', e);
+        }
       }
     }
   }
@@ -360,11 +362,13 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
       if (group is! Map) continue;
       final rawMatcher = group['matcher'];
       if (rawMatcher != null && rawMatcher is! String) {
-        b.issues.add(CompatibilityIssue(
-          severity: CompatibilitySeverity.optional,
-          message: 'Hook matcher must be a string; group skipped.',
-          fields: ['hooks.$rawEvent'],
-        ));
+        b.issues.add(
+          CompatibilityIssue(
+            severity: CompatibilitySeverity.optional,
+            message: 'Hook matcher must be a string; group skipped.',
+            fields: ['hooks.$rawEvent'],
+          ),
+        );
         continue;
       }
       final matcher = (rawMatcher as String?)?.trim();
@@ -377,11 +381,14 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
             (map['command'] != null && map['command'] is! String) ||
             (map['prompt'] != null && map['prompt'] is! String) ||
             (map['timeout'] != null && map['timeout'] is! num)) {
-          b.issues.add(CompatibilityIssue(
-            severity: CompatibilitySeverity.optional,
-            message: 'Malformed hook declaration skipped; type/payload must be strings and timeout numeric.',
-            fields: ['hooks.$rawEvent'],
-          ));
+          b.issues.add(
+            CompatibilityIssue(
+              severity: CompatibilitySeverity.optional,
+              message:
+                  'Malformed hook declaration skipped; type/payload must be strings and timeout numeric.',
+              fields: ['hooks.$rawEvent'],
+            ),
+          );
           continue;
         }
         final explicitType = (map['type'] as String?)?.trim();
@@ -399,27 +406,35 @@ void _addHooks(_Build b, Map<String, dynamic> hooksJson, String sourcePath) {
             ? 'prompt'
             : 'command';
         if (type != 'command' && type != 'prompt' && type != 'agent') {
-          b.issues.add(CompatibilityIssue(
-            severity: CompatibilitySeverity.optional,
-            message: 'Unsupported hook type; only command and prompt hooks can execute. Agent hooks require a tool-capable evaluator.',
-            fields: ['hooks.$rawEvent'],
-          ));
+          b.issues.add(
+            CompatibilityIssue(
+              severity: CompatibilitySeverity.optional,
+              message:
+                  'Unsupported hook type; only command and prompt hooks can execute. Agent hooks require a tool-capable evaluator.',
+              fields: ['hooks.$rawEvent'],
+            ),
+          );
           continue;
         }
         if (type == 'agent') {
-          b.issues.add(CompatibilityIssue(
-            severity: CompatibilitySeverity.optional,
-            message: 'Agent hook requires a wired tool-capable evaluator.',
-            fields: ['hooks.$rawEvent'],
-          ));
+          b.issues.add(
+            CompatibilityIssue(
+              severity: CompatibilitySeverity.optional,
+              message: 'Agent hook requires a wired tool-capable evaluator.',
+              fields: ['hooks.$rawEvent'],
+            ),
+          );
         }
         final payload = (type == 'command' ? command : prompt) ?? '';
         if (payload.trim().isEmpty) {
-          b.issues.add(CompatibilityIssue(
-            severity: CompatibilitySeverity.optional,
-            message: 'Hook has no payload for its declared type and was skipped.',
-            fields: ['hooks.$rawEvent'],
-          ));
+          b.issues.add(
+            CompatibilityIssue(
+              severity: CompatibilitySeverity.optional,
+              message:
+                  'Hook has no payload for its declared type and was skipped.',
+              fields: ['hooks.$rawEvent'],
+            ),
+          );
           continue;
         }
         add(
@@ -545,6 +560,8 @@ void _addMcp(
         cwd: s.cwd,
         envNames: s.env.keys.toList(),
         headerNames: s.headers.keys.toList(),
+        oauth: s.oauth,
+        startupTimeoutS: s.startupTimeoutS ?? 30,
         path: sourcePath,
       ),
     );
@@ -598,7 +615,8 @@ void _addSettingsFields(_Build b, Map<String, dynamic> j) {
         b.issues.add(
           CompatibilityIssue(
             severity: CompatibilitySeverity.optional,
-            message: 'Settings field $where is not a field object and was skipped.',
+            message:
+                'Settings field $where is not a field object and was skipped.',
             fields: [where],
           ),
         );
@@ -984,16 +1002,13 @@ Future<void> _addClaudeInlineComponents(
   // hook-level unknown fields such as `"if"` predicates.
   final hooksDecl = j['hooks'];
   if (hooksDecl is Map) {
-    _addHooks(
-      b,
-      {'hooks': hooksDecl},
-      '.claude-plugin/plugin.json#hooks',
-    );
+    _addHooks(b, {'hooks': hooksDecl}, '.claude-plugin/plugin.json#hooks');
   } else if (hooksDecl is String && hooksDecl.trim().isNotEmpty) {
     // Claude Code: `"hooks": "path/to/file.json"` is a FILE pointer. Resolve
     // it as a file first (the correct spec behaviour); fall back to the old
     // "directory containing hooks.json" interpretation for tolerance.
-    final f = safeComponentFile(hooksDecl) ??
+    final f =
+        safeComponentFile(hooksDecl) ??
         (() {
           final dir = safeComponentDir(
             hooksDecl,
@@ -1002,11 +1017,7 @@ Future<void> _addClaudeInlineComponents(
           return dir == null ? null : File('${dir.path}/hooks.json');
         })();
     if (f != null && f.existsSync()) {
-      _addHooks(
-        b,
-        _readJsonMap(f),
-        '.claude-plugin/plugin.json#hooks',
-      );
+      _addHooks(b, _readJsonMap(f), '.claude-plugin/plugin.json#hooks');
     }
   }
 
@@ -1020,10 +1031,7 @@ Future<void> _addClaudeInlineComponents(
       if (v is! Map) continue;
       try {
         parsed.add(
-          importedMcpFromJson(
-            e.key.toString(),
-            v.cast<String, dynamic>(),
-          ),
+          importedMcpFromJson(e.key.toString(), v.cast<String, dynamic>()),
         );
       } catch (_) {
         // A malformed inline entry must not fail the whole plugin —
@@ -1049,8 +1057,9 @@ Future<void> _addClaudeInlineComponents(
           b,
           parseMcpConfig(f.readAsStringSync()),
           '.claude-plugin/plugin.json#mcpServers→${mcpDecl.trim()}',
-          rawByName:
-              servers is Map ? servers.cast<String, dynamic>() : const {},
+          rawByName: servers is Map
+              ? servers.cast<String, dynamic>()
+              : const {},
         );
       } catch (_) {
         // Malformed pointed-at config: skip, don't fail the whole install.
@@ -1291,7 +1300,9 @@ class GenericMcpAdapter {
     try {
       final d = jsonDecode(raw);
       if (d is Map) decoded = d.cast<String, dynamic>();
-    } catch (e) { Diag.swallow('plugin_adapters', e); }
+    } catch (e) {
+      Diag.swallow('plugin_adapters', e);
+    }
     final servers =
         decoded['mcpServers'] ?? decoded['mcp_servers'] ?? decoded['servers'];
     if (servers is Map) rawByName = servers.cast<String, dynamic>();

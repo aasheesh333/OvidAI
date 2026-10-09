@@ -30,7 +30,7 @@ class ApiTests(unittest.TestCase):
             json={'request_id': 'request-0001', 'uid': 'bob'}).status_code, 422)
         self.assertEqual(self.store.rows, {})
 
-    def test_request_status_and_cancel_are_bound_to_verified_uid(self):
+    def test_login_is_observational_and_explicit_cancel_is_bound_to_verified_uid(self):
         response = self.client.post('/account/deletion', headers=self.headers,
                                     json={'request_id': 'request-0001'})
         self.assertEqual(response.status_code, 200)
@@ -40,7 +40,17 @@ class ApiTests(unittest.TestCase):
                          .json()['state'], 'pending')
         self.now = 1001
         self.assertEqual(self.client.post('/account/login', headers=self.headers)
-                         .json()['state'], 'cancelled')
+                         .json()['state'], 'pending')
+        self.assertEqual(self.client.post('/account/deletion/cancel', headers=self.headers,
+                         json={'consent': True}).json()['state'], 'cancelled')
+
+    def test_cancel_requires_explicit_consent(self):
+        self.client.post('/account/deletion', headers=self.headers,
+                         json={'request_id': 'request-0001'})
+        response = self.client.post('/account/deletion/cancel', headers=self.headers,
+                                    json={'consent': False})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.store.rows['alice']['state'], 'pending')
 
     def test_missing_attestation_is_rejected(self):
         self.assertEqual(self.client.post('/account/login', headers={

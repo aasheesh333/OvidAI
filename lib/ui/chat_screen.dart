@@ -833,6 +833,7 @@ class _ChatScreenState extends State<ChatScreen>
   bool _restoringDraft = false;
   String _observedDraftText = '';
   final Map<String, ({int id, String original})> _queueEdits = {};
+  String? _draftBindScheduledFor;
 
   void _recordDraftEdit() {
     if (_observedDraftText == _input.text) return;
@@ -1192,8 +1193,16 @@ class _ChatScreenState extends State<ChatScreen>
         final s = app.activeSession;
         // Restore the draft that belongs to THIS session — never leak
         // another session's composer text.
-        if (s != null) {
-          WidgetsBinding.instance.addPostFrameCallback((_) => _bindDraft(s.id));
+        if (s != null &&
+            _boundSessionId != s.id &&
+            _draftBindScheduledFor != s.id) {
+          _draftBindScheduledFor = s.id;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_draftBindScheduledFor == s.id) {
+              _draftBindScheduledFor = null;
+            }
+            _bindDraft(s.id);
+          });
         }
         final wide = MediaQuery.of(context).size.width >= 840;
         return Scaffold(
@@ -1212,11 +1221,11 @@ class _ChatScreenState extends State<ChatScreen>
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                   Flexible(
+                  Flexible(
                     child: Text(
-                       s?.model == null || s!.model.trim().isEmpty
-                           ? 'Select model'
-                           : ovidModelLabel(s.model),
+                      s?.model == null || s!.model.trim().isEmpty
+                          ? 'Select model'
+                          : ovidModelLabel(s.model),
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 14),
                     ),
@@ -1426,468 +1435,537 @@ class _ChatScreenState extends State<ChatScreen>
                       ),
                     ),
                     Expanded(
-                      child: s == null || s.messages.isEmpty
-                          ? const _EmptyState()
-                          : Stack(
-                              children: [
-                                // Pinch-to-zoom: scales message text only.
-                                GestureDetector(
-                                  behavior: HitTestBehavior.translucent,
-                                  onScaleStart: (d) {
-                                    _pinchStartScale = app.chatFontScale;
-                                  },
-                                  onScaleUpdate: (d) {
-                                    // Only react to genuine 2-finger pinch
-                                    // (pointerCount >= 2), not 1-finger scroll.
-                                    if (d.pointerCount < 2) return;
-                                    app.setChatFontScale(
-                                      _pinchStartScale * d.scale,
-                                    );
-                                  },
-                                  child: MediaQuery(
-                                    // Apply the font scale to the message list
-                                    // subtree ONLY. The AppBar (header) and the
-                                    // _InputBar (composer chatbox) are outside
-                                    // this MediaQuery, so they stay fixed.
-                                    data: MediaQuery.of(context).copyWith(
-                                      textScaler: _ChatTextScaler(
-                                        MediaQuery.textScalerOf(context),
-                                        app.chatFontScale,
-                                      ),
-                                    ),
-                                    child: AnimatedBuilder(
-                                      animation: AgentService.I,
-                                      builder: (_, _) {
-                                        final typing = AgentService.I.busyFor(
-                                          s.id,
-                                        );
-                                        // Bounded, cached fold (Task 4): the
-                                        // folded window is reused across streaming
-                                        // tokens; only the message count / last
-                                        // message identity / showReasoning / pager
-                                        // window can invalidate it.
-                                        final window = _transcriptWindow(s);
-                                        _hasEarlier = window.hasEarlier;
-                                        final hiddenMessages =
-                                            window.hiddenMessages;
-                                        final items = window.visible;
-                                        // "Produced" card — files written by
-                                        // this run surface as a card under the
-                                        // final answer (tap → Studio).
-                                        final produced =
-                                            AgentService.I.producedFiles;
-                                        final showProduced =
-                                            !typing && produced.isNotEmpty;
-                                        // System-prompt disclosure (context
-                                        // visibility): only at the top of the
-                                        // loaded window so it never shifts the
-                                        // paging row.
-                                        // SECURITY: the system prompt snapshot
-                                        // contains internal agent instructions
-                                        // and must never be shown to the user.
-                                        final count =
-                                            (hiddenMessages > 0 ? 1 : 0) +
-                                            items.length +
-                                            (typing ? 1 : 0) +
-                                            (showProduced ? 1 : 0);
-                                        // Keyed anchor (Task 7): keep the row-key
-                                        // map current for capture/restore, then
-                                        // follow the tip only when it changed.
-                                        _rowKeys = _computeRowKeys(
-                                          window,
-                                          typing,
-                                          showProduced,
-                                        );
-                                        _maybeFollowTip();
-                                        final list = ListView.builder(
-                                          key: const ValueKey(
-                                            'chat-transcript-list',
-                                          ),
-                                          controller: _scroll,
-                                          padding: const EdgeInsets.fromLTRB(
-                                            16,
-                                            8,
-                                            16,
-                                            16,
-                                          ),
-                                          itemCount: count,
-                                          itemBuilder: (_, i) {
-                                            var idx = i;
-                                            // System prompt row removed —
-                                            // internal instructions are hidden.
+                      child: LayoutBuilder(
+                        builder: (context, chatConstraints) => Column(
+                          children: [
+                            Expanded(
+                              child: s == null || s.messages.isEmpty
+                                  ? const _EmptyState()
+                                  : Stack(
+                                      children: [
+                                        // Pinch-to-zoom: scales message text only.
+                                        GestureDetector(
+                                          behavior: HitTestBehavior.translucent,
+                                          onScaleStart: (d) {
+                                            _pinchStartScale =
+                                                app.chatFontScale;
+                                          },
+                                          onScaleUpdate: (d) {
+                                            // Only react to genuine 2-finger pinch
+                                            // (pointerCount >= 2), not 1-finger scroll.
+                                            if (d.pointerCount < 2) return;
+                                            app.setChatFontScale(
+                                              _pinchStartScale * d.scale,
+                                            );
+                                          },
+                                          child: MediaQuery(
+                                            // Apply the font scale to the message list
+                                            // subtree ONLY. The AppBar (header) and the
+                                            // _InputBar (composer chatbox) are outside
+                                            // this MediaQuery, so they stay fixed.
+                                            data: MediaQuery.of(context)
+                                                .copyWith(
+                                                  textScaler: _ChatTextScaler(
+                                                    MediaQuery.textScalerOf(
+                                                      context,
+                                                    ),
+                                                    app.chatFontScale,
+                                                  ),
+                                                ),
+                                            child: AnimatedBuilder(
+                                              animation: AgentService.I,
+                                              builder: (_, _) {
+                                                final typing = AgentService.I
+                                                    .busyFor(s.id);
+                                                // Bounded, cached fold (Task 4): the
+                                                // folded window is reused across streaming
+                                                // tokens; only the message count / last
+                                                // message identity / showReasoning / pager
+                                                // window can invalidate it.
+                                                final window =
+                                                    _transcriptWindow(s);
+                                                _hasEarlier = window.hasEarlier;
+                                                final hiddenMessages =
+                                                    window.hiddenMessages;
+                                                final items = window.visible;
+                                                // "Produced" card — files written by
+                                                // this run surface as a card under the
+                                                // final answer (tap → Studio).
+                                                final produced = AgentService
+                                                    .I
+                                                    .producedFiles;
+                                                final showProduced =
+                                                    !typing &&
+                                                    produced.isNotEmpty;
+                                                // System-prompt disclosure (context
+                                                // visibility): only at the top of the
+                                                // loaded window so it never shifts the
+                                                // paging row.
+                                                // SECURITY: the system prompt snapshot
+                                                // contains internal agent instructions
+                                                // and must never be shown to the user.
+                                                final count =
+                                                    (hiddenMessages > 0
+                                                        ? 1
+                                                        : 0) +
+                                                    items.length +
+                                                    (typing ? 1 : 0) +
+                                                    (showProduced ? 1 : 0);
+                                                // Keyed anchor (Task 7): keep the row-key
+                                                // map current for capture/restore, then
+                                                // follow the tip only when it changed.
+                                                _rowKeys = _computeRowKeys(
+                                                  window,
+                                                  typing,
+                                                  showProduced,
+                                                );
+                                                _maybeFollowTip();
+                                                final list = ListView.builder(
+                                                  key: const ValueKey(
+                                                    'chat-transcript-list',
+                                                  ),
+                                                  controller: _scroll,
+                                                  padding:
+                                                      const EdgeInsets.fromLTRB(
+                                                        16,
+                                                        8,
+                                                        16,
+                                                        16,
+                                                      ),
+                                                   itemCount: count,
+                                                   itemBuilder: (_, i) {
+                                                     final rowKey = ValueKey(
+                                                       _rowKeys[i],
+                                                     );
+                                                     var idx = i;
+                                                    // System prompt row removed —
+                                                    // internal instructions are hidden.
 
-                                            // Next row: paging affordance. The
-                                            // spinner shows only while a page is
-                                            // actually loading — it used to spin
-                                            // forever in any long thread.
-                                            if (hiddenMessages > 0 &&
-                                                idx == 0) {
-                                              return Center(
-                                                child: Padding(
-                                                  padding: const EdgeInsets.all(
-                                                    8,
-                                                  ),
-                                                  child: Row(
-                                                    mainAxisSize:
-                                                        MainAxisSize.min,
-                                                    children: [
-                                                      if (_paging) ...[
-                                                        SizedBox(
-                                                          width: 12,
-                                                          height: 12,
-                                                          child:
-                                                              CircularProgressIndicator(
-                                                                strokeWidth:
-                                                                    1.5,
-                                                                color: Aether
-                                                                    .textFaint,
+                                                    // Next row: paging affordance. The
+                                                    // spinner shows only while a page is
+                                                    // actually loading — it used to spin
+                                                    // forever in any long thread.
+                                                    if (hiddenMessages > 0 &&
+                                                        idx == 0) {
+                                                       return KeyedSubtree(
+                                                         key: rowKey,
+                                                         child: Center(
+                                                           child: Padding(
+                                                             padding:
+                                                                 const EdgeInsets.all(
+                                                                   8,
+                                                                 ),
+                                                             child: Row(
+                                                               mainAxisSize:
+                                                                   MainAxisSize
+                                                                       .min,
+                                                               children: [
+                                                              if (_paging) ...[
+                                                                SizedBox(
+                                                                  width: 12,
+                                                                  height: 12,
+                                                                  child: CircularProgressIndicator(
+                                                                    strokeWidth:
+                                                                        1.5,
+                                                                    color: Aether
+                                                                        .textFaint,
+                                                                  ),
+                                                                ),
+                                                                const SizedBox(
+                                                                  width: 6,
+                                                                ),
+                                                              ] else ...[
+                                                                Icon(
+                                                                  Icons
+                                                                      .keyboard_arrow_up_rounded,
+                                                                  size: 14,
+                                                                  color: Aether
+                                                                      .textFaint,
+                                                                ),
+                                                                const SizedBox(
+                                                                  width: 4,
+                                                                ),
+                                                              ],
+                                                              Text(
+                                                                _paging
+                                                                    ? 'Loading earlier…'
+                                                                    : '$hiddenMessages earlier '
+                                                                          'message${hiddenMessages == 1 ? '' : 's'} '
+                                                                          '· scroll up',
+                                                                style: TextStyle(
+                                                                  fontSize: 11,
+                                                                  color: Aether
+                                                                      .textFaint,
+                                                                ),
                                                               ),
-                                                        ),
-                                                        const SizedBox(
-                                                          width: 6,
-                                                        ),
-                                                      ] else ...[
-                                                        Icon(
-                                                          Icons
-                                                              .keyboard_arrow_up_rounded,
-                                                          size: 14,
-                                                          color:
-                                                              Aether.textFaint,
-                                                        ),
-                                                        const SizedBox(
-                                                          width: 4,
-                                                        ),
-                                                      ],
-                                                      Text(
-                                                        _paging
-                                                            ? 'Loading earlier…'
-                                                            : '$hiddenMessages earlier '
-                                                                  'message${hiddenMessages == 1 ? '' : 's'} '
-                                                                  '· scroll up',
-                                                        style: TextStyle(
-                                                          fontSize: 11,
-                                                          color:
-                                                              Aether.textFaint,
-                                                        ),
-                                                      ),
-                                                    ],
+                                                               ],
+                                                             ),
+                                                           ),
+                                                         ),
+                                                       );
+                                                    }
+                                                    final li =
+                                                        hiddenMessages > 0
+                                                        ? idx - 1
+                                                        : idx;
+                                                    if (li == items.length) {
+                                                       return KeyedSubtree(
+                                                         key: rowKey,
+                                                         child: typing
+                                                             ? const _TypingBubble()
+                                                             : _RowIn(
+                                                                 child:
+                                                                     _ProducedFilesCard(
+                                                                       files:
+                                                                           produced,
+                                                                     ),
+                                                               ),
+                                                       );
+                                                    }
+                                                    final item = items[li];
+                                                    // The live tail bubble subscribes to
+                                                    // AppState so streaming tokens repaint
+                                                    // only this row — the rest of the list
+                                                    // stays cached.
+                                                    if (typing &&
+                                                        li ==
+                                                            items.length - 1) {
+                                                       return KeyedSubtree(
+                                                         key: rowKey,
+                                                         child: AnimatedBuilder(
+                                                           animation: AppState.I,
+                                                           builder: (_, _) =>
+                                                               _buildItem(
+                                                                 item,
+                                                                 s,
+                                                                 onAction: () =>
+                                                                     setState(
+                                                                       () {},
+                                                                     ),
+                                                                 input: _input,
+                                                                 layout: layout,
+                                                               ),
+                                                         ),
+                                                       );
+                                                     }
+                                                     return KeyedSubtree(
+                                                       key: rowKey,
+                                                       child: _buildItem(
+                                                         item,
+                                                         s,
+                                                         onAction: () =>
+                                                             setState(() {}),
+                                                         input: _input,
+                                                         layout: layout,
+                                                       ),
+                                                     );
+                                                  },
+                                                );
+                                                return Center(
+                                                  child: ConstrainedBox(
+                                                    key: const ValueKey(
+                                                      'chat-transcript-column',
+                                                    ),
+                                                    constraints: BoxConstraints(
+                                                      maxWidth:
+                                                          layout.contentWidth,
+                                                    ),
+                                                    child: list,
                                                   ),
-                                                ),
-                                              );
-                                            }
-                                            final li = hiddenMessages > 0
-                                                ? idx - 1
-                                                : idx;
-                                            if (li == items.length) {
-                                              return typing
-                                                  ? const _TypingBubble()
-                                                  : _RowIn(
-                                                      child: _ProducedFilesCard(
-                                                        files: produced,
-                                                      ),
-                                                    );
-                                            }
-                                            final item = items[li];
-                                            // The live tail bubble subscribes to
-                                            // AppState so streaming tokens repaint
-                                            // only this row — the rest of the list
-                                            // stays cached.
-                                            if (typing &&
-                                                li == items.length - 1) {
-                                              return AnimatedBuilder(
-                                                animation: AppState.I,
-                                                builder: (_, _) => _buildItem(
-                                                  item,
-                                                  s,
-                                                  onAction: () =>
-                                                      setState(() {}),
-                                                  input: _input,
-                                                  layout: layout,
-                                                ),
-                                              );
-                                            }
-                                            return _buildItem(
-                                              item,
-                                              s,
-                                              onAction: () => setState(() {}),
-                                              input: _input,
-                                              layout: layout,
-                                            );
-                                          },
-                                        );
-                                        return Center(
-                                          child: ConstrainedBox(
-                                            key: const ValueKey(
-                                              'chat-transcript-column',
-                                            ),
-                                            constraints: BoxConstraints(
-                                              maxWidth: layout.contentWidth,
-                                            ),
-                                            child: list,
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                ),
-                                // web-IDE "jump to latest" pill — only when the
-                                // user scrolled up while content keeps streaming.
-                                if (_showJumpFab)
-                                  Positioned(
-                                    bottom: 12,
-                                    right: 12,
-                                    child: Semantics(
-                                      button: true,
-                                      label: 'Jump to latest',
-                                      child: Material(
-                                        color: Aether.surface,
-                                        elevation: 2,
-                                        borderRadius: BorderRadius.circular(20),
-                                        child: InkWell(
-                                          borderRadius: BorderRadius.circular(
-                                            20,
-                                          ),
-                                          onTap: () {
-                                            _scroll.jumpTo(
-                                              _scroll.position.maxScrollExtent,
-                                            );
-                                          },
-                                          child: const Padding(
-                                            padding: EdgeInsets.symmetric(
-                                              horizontal: 10,
-                                              vertical: 6,
-                                            ),
-                                            child: Icon(
-                                              Icons.arrow_downward,
-                                              size: 16,
-                                              color: Aether.accent,
+                                                );
+                                              },
                                             ),
                                           ),
                                         ),
-                                      ),
+                                        // web-IDE "jump to latest" pill — only when the
+                                        // user scrolled up while content keeps streaming.
+                                        if (_showJumpFab)
+                                          Positioned(
+                                            bottom: 12,
+                                            right: 12,
+                                            child: Semantics(
+                                              button: true,
+                                              label: 'Jump to latest',
+                                              child: Material(
+                                                color: Aether.surface,
+                                                elevation: 2,
+                                                borderRadius:
+                                                    BorderRadius.circular(20),
+                                                child: InkWell(
+                                                  borderRadius:
+                                                      BorderRadius.circular(20),
+                                                  onTap: () {
+                                                    _scroll.jumpTo(
+                                                      _scroll
+                                                          .position
+                                                          .maxScrollExtent,
+                                                    );
+                                                  },
+                                                  child: const Padding(
+                                                    padding:
+                                                        EdgeInsets.symmetric(
+                                                          horizontal: 10,
+                                                          vertical: 6,
+                                                        ),
+                                                    child: Icon(
+                                                      Icons.arrow_downward,
+                                                      size: 16,
+                                                      color: Aether.accent,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                      ],
                                     ),
+                            ),
+                            ConstrainedBox(
+                              constraints: BoxConstraints(
+                                // Natural height for ordinary questions/queues. A
+                                // single scroll surface bounds unusually long docks,
+                                // using the space left below the startup dashboard.
+                                maxHeight: math.min(
+                                  480,
+                                  chatConstraints.maxHeight *
+                                      (AgentService.I.pendingApproval != null
+                                          ? 0.45
+                                          : 0.30),
+                                ),
+                              ),
+                              child: SingleChildScrollView(
+                                // A new request starts at the top, even if the user
+                                // previously scrolled through queued work.
+                                key: ObjectKey(AgentService.I.pendingApproval),
+                                child: Center(
+                                  child: ConstrainedBox(
+                                    constraints: BoxConstraints(
+                                      maxWidth: layout.contentWidth,
+                                    ),
+                                    // Blocking decisions take priority over passive
+                                    // status and queued work in this bounded area.
+                                    child:
+                                        AgentService.I.pendingApproval != null
+                                        ? const _ApprovalDock()
+                                        : dockColumn,
                                   ),
-                              ],
+                                ),
+                              ),
                             ),
-                    ),
-                    ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxHeight: constraints.maxHeight *
-                            (AgentService.I.pendingApproval != null ? 0.25 : 0.15),
-                      ),
-                      child: SingleChildScrollView(
-                        // A new request starts at the top, even if the user
-                        // previously scrolled through queued work.
-                        key: ObjectKey(AgentService.I.pendingApproval),
-                        child: Center(
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxWidth: layout.contentWidth,
+                            _InputBar(
+                              layout: layout,
+                              availableHeight: chatConstraints.maxHeight,
+                              controller: _input,
+                              focusNode: _inputFocus,
+                              sessionId: s?.id,
+                              coordinator: widget.startupCoordinator,
+                              running: s == null
+                                  ? false
+                                  : AgentService.I.busyFor(s.id),
+                              // approval takeover parity: a pending approval LOCKS
+                              // the composer — the user answers the card, not the box.
+                              locked: AgentService.I.pendingApproval != null,
+                              editingQueue: _queueEdits.containsKey(s?.id),
+                              onCancelQueueEdit: () => setState(() {
+                                _queueEdits.remove(s?.id);
+                              }),
+                              onSend: () async {
+                                if (s == null ||
+                                    _boundSessionId != s.id ||
+                                    AppState.I.activeSessionId != s.id ||
+                                    AgentService.I.pendingApproval != null) {
+                                  return;
+                                }
+                                final submitted = _input.text;
+                                final version = _draftVersions[s.id] ?? 0;
+                                void clearSubmitted() => _clearSubmittedDraft(
+                                  s.id,
+                                  submitted,
+                                  version,
+                                );
+                                final t = submitted.trim();
+                                if (t.isEmpty) return;
+                                final edit = _queueEdits[s.id];
+                                if (edit != null) {
+                                  final agent = AgentService.I;
+                                  final index = agent
+                                      .queuedMessageIdsFor(s.id)
+                                      .indexOf(edit.id);
+                                  final queue = agent.queuedMessagesFor(s.id);
+                                  if (index < 0 ||
+                                      index >= queue.length ||
+                                      queue[index] != edit.original) {
+                                    setState(() => _queueEdits.remove(s.id));
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'The queued message changed or already started. Your draft has been kept.',
+                                        ),
+                                      ),
+                                    );
+                                    return;
+                                  }
+                                  if (agent.pendingAttachments.isNotEmpty) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Remove newly staged files before saving. The queued message keeps its original attachments.',
+                                        ),
+                                      ),
+                                    );
+                                    return;
+                                  }
+                                  agent.editQueuedMessageById(edit.id, t);
+                                  setState(() => _queueEdits.remove(s.id));
+                                  clearSubmitted();
+                                  return;
+                                }
+
+                                // ── Composer command system ───────────────────────
+                                if (t.startsWith('/')) {
+                                  final result = await CommandService.I.execute(
+                                    t,
+                                  );
+                                  if (!mounted || !context.mounted) return;
+                                  if (result != null) {
+                                    if (result.clearInput &&
+                                        result.prompt == null) {
+                                      clearSubmitted();
+                                    }
+                                    // popupSelect (the command picker parity): open the overlay picker.
+                                    if (AppState.I.activeSessionId != s.id) {
+                                      return;
+                                    }
+                                    if (result.popup == 'model') {
+                                      _modelPicker(context);
+                                      return;
+                                    }
+                                    if (result.popup == 'permission') {
+                                      _showModeSheetFromCommand(context);
+                                      return;
+                                    }
+                                    if (result.popup == 'controlDisclosure') {
+                                      await _enableControlMode(context);
+                                      return;
+                                    }
+                                    if (result.popup == 'preset') {
+                                      _showPresetSheetFromCommand(context);
+                                      return;
+                                    }
+                                    if (result.feedback != null &&
+                                        result.feedback!.isNotEmpty &&
+                                        context.mounted) {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(result.feedback!),
+                                          behavior: SnackBarBehavior.floating,
+                                        ),
+                                      );
+                                    }
+                                    final prompt = result.prompt;
+                                    if (prompt != null &&
+                                        prompt.isNotEmpty &&
+                                        context.mounted) {
+                                      _sendPrompt(
+                                        context,
+                                        s,
+                                        prompt,
+                                        onAccepted: result.clearInput
+                                            ? clearSubmitted
+                                            : null,
+                                      );
+                                    }
+                                    return;
+                                  }
+                                  if (AppState.I.activeSessionId != s.id) {
+                                    return;
+                                  }
+                                  // Skill direct invocation: /skill-name [args].
+                                  final parsed = parseSkillInvocation(t);
+                                  if (parsed != null) {
+                                    final resolved = SkillService.I
+                                        .resolveForSession(s.id, parsed.token);
+                                    if (resolved.isAmbiguous) {
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(
+                                              'Ambiguous skill. Choose exactly one: '
+                                              '${resolved.options.join(', ')}',
+                                            ),
+                                            behavior: SnackBarBehavior.floating,
+                                          ),
+                                        );
+                                      }
+                                      return;
+                                    }
+                                    final skill = resolved.unique;
+                                    if (skill != null && skill.userInvocable) {
+                                      if (!AgentService.I
+                                          .isSkillAvailableForSession(
+                                            skill,
+                                            s.id,
+                                          )) {
+                                        return;
+                                      }
+                                      final content =
+                                          AgentService.substituteCommandArguments(
+                                            skill.content,
+                                            parsed.args,
+                                          );
+                                      final argsText =
+                                          AgentService.commandArgumentTrailer(
+                                            skill.content,
+                                            parsed.args,
+                                            'User instruction',
+                                          );
+                                      if (context.mounted) {
+                                        _sendPrompt(
+                                          context,
+                                          s,
+                                          '<skill_content>\n$content\n</skill_content>'
+                                          '$argsText',
+                                          onAccepted: clearSubmitted,
+                                        );
+                                      }
+                                      return;
+                                    }
+                                  }
+                                  // Unknown /command falls through to the agent.
+                                }
+
+                                // ── web-IDE busy behavior: typing while running either
+                                // queues the message (default) or interrupts the current
+                                // run and sends immediately, per the user's setting. ──
+                                if (AgentService.I.busyFor(s.id)) {
+                                  if (AppState.I.sendWhileBusyInterrupt) {
+                                    AgentService.I.stopRequested(
+                                      sessionId: s.id,
+                                    );
+                                    // fall through to send
+                                  } else {
+                                    if (_enqueuePrompt(s, t)) clearSubmitted();
+                                    return;
+                                  }
+                                }
+
+                                if (context.mounted) {
+                                  _sendPrompt(
+                                    context,
+                                    s,
+                                    t,
+                                    onAccepted: clearSubmitted,
+                                  );
+                                }
+                              },
                             ),
-                            // Blocking decisions take priority over passive
-                            // status and queued work in this bounded area.
-                            child: AgentService.I.pendingApproval != null
-                                ? const _ApprovalDock()
-                                : dockColumn,
-                          ),
+                          ],
                         ),
                       ),
-                    ),
-                    _InputBar(
-                      layout: layout,
-                      availableHeight: constraints.maxHeight,
-                      controller: _input,
-                      focusNode: _inputFocus,
-                      sessionId: s?.id,
-                      coordinator: widget.startupCoordinator,
-                      running: s == null ? false : AgentService.I.busyFor(s.id),
-                      // approval takeover parity: a pending approval LOCKS
-                      // the composer — the user answers the card, not the box.
-                      locked: AgentService.I.pendingApproval != null,
-                      editingQueue: _queueEdits.containsKey(s?.id),
-                      onCancelQueueEdit: () => setState(() {
-                        _queueEdits.remove(s?.id);
-                      }),
-                      onSend: () async {
-                        if (s == null ||
-                            _boundSessionId != s.id ||
-                            AppState.I.activeSessionId != s.id ||
-                            AgentService.I.pendingApproval != null) {
-                          return;
-                        }
-                        final submitted = _input.text;
-                        final version = _draftVersions[s.id] ?? 0;
-                        void clearSubmitted() =>
-                            _clearSubmittedDraft(s.id, submitted, version);
-                        final t = submitted.trim();
-                        if (t.isEmpty) return;
-                        final edit = _queueEdits[s.id];
-                        if (edit != null) {
-                          final agent = AgentService.I;
-                          final index = agent
-                              .queuedMessageIdsFor(s.id)
-                              .indexOf(edit.id);
-                          final queue = agent.queuedMessagesFor(s.id);
-                          if (index < 0 ||
-                              index >= queue.length ||
-                              queue[index] != edit.original) {
-                            setState(() => _queueEdits.remove(s.id));
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'The queued message changed or already started. Your draft has been kept.',
-                                ),
-                              ),
-                            );
-                            return;
-                          }
-                          if (agent.pendingAttachments.isNotEmpty) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Remove newly staged files before saving. The queued message keeps its original attachments.',
-                                ),
-                              ),
-                            );
-                            return;
-                          }
-                          agent.editQueuedMessageById(edit.id, t);
-                          setState(() => _queueEdits.remove(s.id));
-                          clearSubmitted();
-                          return;
-                        }
-
-                        // ── Composer command system ───────────────────────
-                        if (t.startsWith('/')) {
-                          final result = await CommandService.I.execute(t);
-                          if (!mounted || !context.mounted) return;
-                          if (result != null) {
-                            if (result.clearInput && result.prompt == null) {
-                              clearSubmitted();
-                            }
-                            // popupSelect (the command picker parity): open the overlay picker.
-                            if (AppState.I.activeSessionId != s.id) return;
-                            if (result.popup == 'model') {
-                              _modelPicker(context);
-                              return;
-                            }
-                            if (result.popup == 'permission') {
-                              _showModeSheetFromCommand(context);
-                              return;
-                            }
-                            if (result.popup == 'controlDisclosure') {
-                              await _enableControlMode(context);
-                              return;
-                            }
-                            if (result.popup == 'preset') {
-                              _showPresetSheetFromCommand(context);
-                              return;
-                            }
-                            if (result.feedback != null &&
-                                result.feedback!.isNotEmpty &&
-                                context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(result.feedback!),
-                                  behavior: SnackBarBehavior.floating,
-                                ),
-                              );
-                            }
-                            final prompt = result.prompt;
-                            if (prompt != null &&
-                                prompt.isNotEmpty &&
-                                context.mounted) {
-                              _sendPrompt(
-                                context,
-                                s,
-                                prompt,
-                                onAccepted: result.clearInput
-                                    ? clearSubmitted
-                                    : null,
-                              );
-                            }
-                            return;
-                          }
-                          if (AppState.I.activeSessionId != s.id) return;
-                          // Skill direct invocation: /skill-name [args].
-                          final parsed = parseSkillInvocation(t);
-                          if (parsed != null) {
-                            final resolved = SkillService.I.resolveForSession(
-                              s.id,
-                              parsed.token,
-                            );
-                            if (resolved.isAmbiguous) {
-                              if (context.mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      'Ambiguous skill. Choose exactly one: '
-                                      '${resolved.options.join(', ')}',
-                                    ),
-                                    behavior: SnackBarBehavior.floating,
-                                  ),
-                                );
-                              }
-                              return;
-                            }
-                            final skill = resolved.unique;
-                            if (skill != null && skill.userInvocable) {
-                              if (!AgentService.I.isSkillAvailableForSession(
-                                skill,
-                                s.id,
-                              )) {
-                                return;
-                              }
-                              final content =
-                                  AgentService.substituteCommandArguments(
-                                    skill.content,
-                                    parsed.args,
-                                  );
-                              final argsText =
-                                  AgentService.commandArgumentTrailer(
-                                    skill.content,
-                                    parsed.args,
-                                    'User instruction',
-                                  );
-                              if (context.mounted) {
-                                _sendPrompt(
-                                  context,
-                                  s,
-                                  '<skill_content>\n$content\n</skill_content>'
-                                  '$argsText',
-                                  onAccepted: clearSubmitted,
-                                );
-                              }
-                              return;
-                            }
-                          }
-                          // Unknown /command falls through to the agent.
-                        }
-
-                        // ── web-IDE busy behavior: typing while running either
-                        // queues the message (default) or interrupts the current
-                        // run and sends immediately, per the user's setting. ──
-                        if (AgentService.I.busyFor(s.id)) {
-                          if (AppState.I.sendWhileBusyInterrupt) {
-                            AgentService.I.stopRequested(sessionId: s.id);
-                            // fall through to send
-                          } else {
-                            AgentService.I.enqueueMessage(t, sessionId: s.id);
-                            AgentService.I.clearAttachment();
-                            clearSubmitted();
-                            return;
-                          }
-                        }
-
-                        if (context.mounted) {
-                          _sendPrompt(
-                            context,
-                            s,
-                            t,
-                            onAccepted: clearSubmitted,
-                          );
-                        }
-                      },
                     ),
                   ],
                 );
@@ -2003,6 +2081,32 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
+  /// Queue ownership transfers synchronously, but enqueue notifies listeners.
+  /// Capture the originating list and paths before that notification: a picker
+  /// completion or session switch must not change what this send consumes.
+  bool _enqueuePrompt(ChatSession session, String text) {
+    final app = AppState.I;
+    if (!app.sessionAccountReady ||
+        app.activeSessionId != session.id ||
+        !identical(app.sessionById(session.id), session)) {
+      return false;
+    }
+    final agent = AgentService.I;
+    final pending = agent.pendingAttachments;
+    final paths = pending.map((a) => a.path).toSet();
+    final previousIds = agent.queuedMessageIdsFor(session.id).toSet();
+    agent.enqueueMessage(text, sessionId: session.id);
+    // enqueue can reject admission. Never clear a rejected draft.
+    if (!agent
+        .queuedMessageIdsFor(session.id)
+        .any((id) => !previousIds.contains(id))) {
+      return false;
+    }
+    pending.removeWhere((a) => paths.contains(a.path));
+    app.refresh();
+    return true;
+  }
+
   void _sendPrompt(
     BuildContext context,
     ChatSession? s,
@@ -2047,9 +2151,7 @@ class _ChatScreenState extends State<ChatScreen>
 
     final agent = AgentService.I;
     if (agent.busyFor(session.id)) {
-      agent.enqueueMessage(t, sessionId: session.id);
-      agent.clearAttachment();
-      onAccepted?.call();
+      if (_enqueuePrompt(session, t)) onAccepted?.call();
       return;
     }
     app.sendMessage(t);
@@ -2064,6 +2166,14 @@ class _ChatScreenState extends State<ChatScreen>
     // @file/@session references expand into model-visible context blocks
     // (the composer mention expander file-reference parity) before the run starts.
     AgentService.I.runTask(t, sessionId: session.id, expandRefsFor: session);
+    // An ADMITTED run owns the staged files from this tick on: runTask
+    // snapshots them onto the submitted row synchronously at admission, so
+    // the composer's staging area must hand them over now instead of
+    // waiting for the first provider response — a mid-run cancel then keeps
+    // them on the message row rather than resurrecting them as new chips.
+    if (AgentService.I.busyFor(session.id)) {
+      AgentService.I.clearAttachment();
+    }
   }
 
   /// Background jobs popover (the jobs panel ui-jobs): one row per job with label,
@@ -2279,7 +2389,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
     CloudConnectionStatus.failed =>
       (state.error == null || state.error!.trim().isEmpty)
           ? 'Ovid Cloud connection failed. Tap Retry.'
-           : state.error!,
+          : state.error!,
   };
 
   bool _matchesQuery(String q, String haystack) =>
@@ -2377,85 +2487,93 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
           ),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
-          child: CustomScrollView(
-            key: const ValueKey('model-picker-list'),
-            controller: widget.scrollController,
-            // Search, notices and provider cards share the sheet's real scroll
-            // controller, including empty results. Keep normal lazy caching;
-            // search filters the catalogue data before rows are built.
-            slivers: [
-              SliverToBoxAdapter(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Center(child: Container(
-                      width: 36,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Aether.hairlineStrong,
-                        borderRadius: BorderRadius.circular(AetherRadius.rPill),
+            child: CustomScrollView(
+              key: const ValueKey('model-picker-list'),
+              controller: widget.scrollController,
+              // Search, notices and provider cards share the sheet's real scroll
+              // controller, including empty results. Keep normal lazy caching;
+              // search filters the catalogue data before rows are built.
+              slivers: [
+                SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 36,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: Aether.hairlineStrong,
+                            borderRadius: BorderRadius.circular(
+                              AetherRadius.rPill,
+                            ),
+                          ),
+                        ),
                       ),
-                    )),
-                    const SizedBox(height: 14),
-                    Text('Select model', style: AetherType.h2),
-                    const SizedBox(height: 16),
-                  ],
+                      const SizedBox(height: 14),
+                      Text('Select model', style: AetherType.h2),
+                      const SizedBox(height: 16),
+                    ],
+                  ),
                 ),
-              ),
-              SliverToBoxAdapter(child:
-              AetherField(
-                key: const ValueKey('model-picker-search'),
-                label: 'Search',
-                showLabel: false,
-                hint: 'Search models or providers',
-                controller: _searchCtrl,
-                onChanged: (v) => setState(() => _query = v.trim()),
-                prefixIcon: Icon(
-                  Icons.search,
-                  size: 18,
-                  color: Aether.textFaint,
+                SliverToBoxAdapter(
+                  child: AetherField(
+                    key: const ValueKey('model-picker-search'),
+                    label: 'Search',
+                    showLabel: false,
+                    hint: 'Search models or providers',
+                    controller: _searchCtrl,
+                    onChanged: (v) => setState(() => _query = v.trim()),
+                    prefixIcon: Icon(
+                      Icons.search,
+                      size: 18,
+                      color: Aether.textFaint,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 12,
+                    ),
+                  ),
                 ),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 12,
-                ),
-              ),
-              ),
-              const SliverToBoxAdapter(child: SizedBox(height: 12)),
-              Builder(
+                const SliverToBoxAdapter(child: SizedBox(height: 12)),
+                Builder(
                   builder: (_) {
                     // Branch 1: catalogue is empty and no search entered.
                     if (noConfiguredAtAll && !showCloud && q.isEmpty) {
-                      return SliverToBoxAdapter(child: AetherEmptyState(
-                        icon: Icons.hub_outlined,
-                        title: 'No models configured',
-                        message:
-                            'Add a provider API key in Settings → Providers '
-                            'and tap Fetch models, or connect Ovid Cloud for a '
-                            'managed catalogue.',
-                        action: AetherPrimaryButton(
-                          label: 'Open Settings',
-                          icon: Icons.settings_outlined,
-                          onPressed: () {
-                            Navigator.pop(context);
-                            Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) => const SettingsScreen(),
-                              ),
-                            );
-                          },
+                      return SliverToBoxAdapter(
+                        child: AetherEmptyState(
+                          icon: Icons.hub_outlined,
+                          title: 'No models configured',
+                          message:
+                              'Add a provider API key in Settings → Providers '
+                              'and tap Fetch models, or connect Ovid Cloud for a '
+                              'managed catalogue.',
+                          action: AetherPrimaryButton(
+                            label: 'Open Settings',
+                            icon: Icons.settings_outlined,
+                            onPressed: () {
+                              Navigator.pop(context);
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => const SettingsScreen(),
+                                ),
+                              );
+                            },
+                          ),
                         ),
-                      ));
+                      );
                     }
                     // Branch 2: query matched absolutely nothing.
                     if (searchMissed) {
-                      return SliverToBoxAdapter(child: AetherEmptyState(
-                        icon: Icons.search_off_outlined,
-                        title: 'No matches',
-                        message:
-                            'Nothing matches "$_query" in your configured '
-                            'providers or models. Try a different search.',
-                      ));
+                      return SliverToBoxAdapter(
+                        child: AetherEmptyState(
+                          icon: Icons.search_off_outlined,
+                          title: 'No matches',
+                          message:
+                              'Nothing matches "$_query" in your configured '
+                              'providers or models. Try a different search.',
+                        ),
+                      );
                     }
                     return SliverList.list(
                       children: [
@@ -2470,7 +2588,11 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                           ),
                         if (recents.isNotEmpty) ...[
                           const SizedBox(height: 12),
-                          _buildRecentsCard(context, app: app, recents: recents),
+                          _buildRecentsCard(
+                            context,
+                            app: app,
+                            recents: recents,
+                          ),
                         ],
                         for (final p in configured) ...[
                           const SizedBox(height: 12),
@@ -2478,17 +2600,23 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                         ],
                         if (unconfiguredMatchesSearch) ...[
                           const SizedBox(height: 12),
-                          _buildUnconfiguredNotice(context, unconfigured.where(
-                            (p) => _matchesQuery(q, p.name) ||
-                                p.models.any((m) => _matchesQuery(q, m)),
-                          ).toList()),
+                          _buildUnconfiguredNotice(
+                            context,
+                            unconfigured
+                                .where(
+                                  (p) =>
+                                      _matchesQuery(q, p.name) ||
+                                      p.models.any((m) => _matchesQuery(q, m)),
+                                )
+                                .toList(),
+                          ),
                         ],
                       ],
                     );
                   },
-              ),
-            ],
-          ),
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -2505,9 +2633,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
   }) {
     final ready = connection.status == CloudConnectionStatus.ready;
     final filtered = managed.models
-        .where(
-          (m) => _matchesQuery(q, m) || _matchesQuery(q, managed.name),
-        )
+        .where((m) => _matchesQuery(q, m) || _matchesQuery(q, managed.name))
         .toList();
     final body = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2534,20 +2660,19 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
             ),
           ],
         ),
-             if (!ready)
-               Align(
-                 alignment: Alignment.centerLeft,
-                 child:
-               AetherGhostButton(
-                 key: const ValueKey('cloud-connection-retry'),
-                label: connection.loading ? 'Retrying…' : 'Retry',
-                icon: Icons.refresh,
-                loading: connection.loading,
-                onPressed: connection.loading
-                    ? null
-                    : () => unawaited(cloud.ensureConnected(app: app)),
-               ),
-               ),
+        if (!ready)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: AetherGhostButton(
+              key: const ValueKey('cloud-connection-retry'),
+              label: connection.loading ? 'Retrying…' : 'Retry',
+              icon: Icons.refresh,
+              loading: connection.loading,
+              onPressed: connection.loading
+                  ? null
+                  : () => unawaited(cloud.ensureConnected(app: app)),
+            ),
+          ),
         if (ready && filtered.isNotEmpty) ...[
           const SizedBox(height: 12),
           Divider(height: 1, thickness: 1, color: Aether.hairline),
@@ -2579,11 +2704,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
   }) {
     return AetherCard(
       padding: const EdgeInsets.fromLTRB(16, 14, 12, 8),
-      title: Row(
-        children: [
-          Text('Recent', style: AetherType.label),
-        ],
-      ),
+      title: Row(children: [Text('Recent', style: AetherType.label)]),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -2617,10 +2738,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
         children: [
           Text(p.name, style: AetherType.title),
           if (p.isFree) ...[
-            AetherPill(
-              label: 'FREE',
-              color: Aether.successLight,
-            ),
+            AetherPill(label: 'FREE', color: Aether.successLight),
           ],
           const AetherPill(label: 'KEY', color: Aether.accent),
         ],
@@ -2759,7 +2877,10 @@ class _ModelTile extends StatelessWidget {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(ovidModelLabel(baseModel), style: const TextStyle(fontSize: 13.5)),
+          Text(
+            ovidModelLabel(baseModel),
+            style: const TextStyle(fontSize: 13.5),
+          ),
           const SizedBox(height: 4),
           Wrap(
             spacing: 6,
@@ -2811,76 +2932,78 @@ class _ModelTile extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        dense: true,
-        tilePadding: const EdgeInsets.symmetric(horizontal: 16),
-        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-        leading: Icon(
-          Icons.psychology_outlined,
-          size: 18,
-          color: selected ? Aether.accent : Aether.textMuted,
-        ),
-        title: modelTitle(),
-        subtitle: isRecent
-            ? Text(
-                effortVariant != null
-                    ? '$providerName · $effortVariant'
-                    : providerName,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: selected ? Aether.accent : Aether.textFaint,
-                ),
-              )
-            : (effortVariant != null
-                  ? Text(
-                      effortVariant,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: Aether.accent,
-                      ),
-                    )
-                  : null),
-        children: [
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final v in variants)
-                ChoiceChip(
-                  label: Text(v, style: const TextStyle(fontSize: 12)),
-                  selected:
-                      current ==
-                      (v == 'Medium'
-                          ? '$baseModel · Medium'
-                          : '$baseModel · $v'),
-                  onSelected: (_) {
-                    app.setModel(
-                      providerId,
-                      v == 'Medium' ? '$baseModel · Medium' : '$baseModel · $v',
-                    );
-                    Navigator.pop(context);
-                  },
-                  showCheckmark: false,
-                  selectedColor: Aether.accentSoft,
-                  backgroundColor: Aether.surfaceAlt,
-                  side: BorderSide(
-                    color:
-                        current ==
-                            (v == 'Medium'
-                                ? '$baseModel · Medium'
-                                : '$baseModel · $v')
-                        ? Aether.accent
-                        : Aether.hairline,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(9),
-                  ),
-                ),
-            ],
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          dense: true,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          leading: Icon(
+            Icons.psychology_outlined,
+            size: 18,
+            color: selected ? Aether.accent : Aether.textMuted,
           ),
-        ],
-      ),
+          title: modelTitle(),
+          subtitle: isRecent
+              ? Text(
+                  effortVariant != null
+                      ? '$providerName · $effortVariant'
+                      : providerName,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: selected ? Aether.accent : Aether.textFaint,
+                  ),
+                )
+              : (effortVariant != null
+                    ? Text(
+                        effortVariant,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Aether.accent,
+                        ),
+                      )
+                    : null),
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final v in variants)
+                  ChoiceChip(
+                    label: Text(v, style: const TextStyle(fontSize: 12)),
+                    selected:
+                        current ==
+                        (v == 'Medium'
+                            ? '$baseModel · Medium'
+                            : '$baseModel · $v'),
+                    onSelected: (_) {
+                      app.setModel(
+                        providerId,
+                        v == 'Medium'
+                            ? '$baseModel · Medium'
+                            : '$baseModel · $v',
+                      );
+                      Navigator.pop(context);
+                    },
+                    showCheckmark: false,
+                    selectedColor: Aether.accentSoft,
+                    backgroundColor: Aether.surfaceAlt,
+                    side: BorderSide(
+                      color:
+                          current ==
+                              (v == 'Medium'
+                                  ? '$baseModel · Medium'
+                                  : '$baseModel · $v')
+                          ? Aether.accent
+                          : Aether.hairline,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3476,10 +3599,17 @@ class _DetailBodyState extends State<_DetailBody> {
     // Structured plugin renderers take precedence over the prose fallback.
     // Hook/skill Markdown lists must not be mistaken for file diffs.
     final name = m.toolName ?? '';
-    if (name == 'hook' || name.startsWith('hook_') ||
-        name.startsWith('hook:') || name == 'skill' ||
-        name.startsWith('plugin:') || name.startsWith('plugin_')) {
-      return _OvidMarkdown(content: detail, fontSize: 12, color: Aether.textMuted);
+    if (name == 'hook' ||
+        name.startsWith('hook_') ||
+        name.startsWith('hook:') ||
+        name == 'skill' ||
+        name.startsWith('plugin:') ||
+        name.startsWith('plugin_')) {
+      return _OvidMarkdown(
+        content: detail,
+        fontSize: 12,
+        color: Aether.textMuted,
+      );
     }
     // Default diff or text view
     if (isDiff) {
@@ -3510,10 +3640,7 @@ class _RichToolResultState extends State<_RichToolResult> {
   bool _jsonExpanded = true;
   bool _mermaidExpanded = false;
 
-  static final _urlRe = RegExp(
-    r'https?://[^\s)\]}>,"]+',
-    caseSensitive: false,
-  );
+  static final _urlRe = RegExp(r'https?://[^\s)\]}>,"]+', caseSensitive: false);
   static final _hexColorRe = RegExp(r'#([0-9a-fA-F]{6})\b');
   static final _mermaidFenceRe = RegExp(
     r'```mermaid\s*\n([\s\S]*?)```',
@@ -3566,7 +3693,12 @@ class _RichToolResultState extends State<_RichToolResult> {
     final hasColor = _hexColorRe.hasMatch(content);
     final hasUrl = _urlRe.hasMatch(content);
     if (hasColor || hasUrl) {
-      return _enrichedText(content, baseColor, hasColor: hasColor, hasUrl: hasUrl);
+      return _enrichedText(
+        content,
+        baseColor,
+        hasColor: hasColor,
+        hasUrl: hasUrl,
+      );
     }
 
     // ── Plain fallback ──
@@ -3700,7 +3832,8 @@ class _RichToolResultState extends State<_RichToolResult> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final line in lines) _enrichedLine(line, baseColor, hasColor: hasColor, hasUrl: hasUrl),
+        for (final line in lines)
+          _enrichedLine(line, baseColor, hasColor: hasColor, hasUrl: hasUrl),
       ],
     );
   }
@@ -3733,12 +3866,22 @@ class _RichToolResultState extends State<_RichToolResult> {
     final matches = <({int start, int end, String type, String value})>[];
     if (lineHasColor) {
       for (final m in _hexColorRe.allMatches(line)) {
-        matches.add((start: m.start, end: m.end, type: 'color', value: m.group(0)!));
+        matches.add((
+          start: m.start,
+          end: m.end,
+          type: 'color',
+          value: m.group(0)!,
+        ));
       }
     }
     if (lineHasUrl) {
       for (final m in _urlRe.allMatches(line)) {
-        matches.add((start: m.start, end: m.end, type: 'url', value: m.group(0)!));
+        matches.add((
+          start: m.start,
+          end: m.end,
+          type: 'url',
+          value: m.group(0)!,
+        ));
       }
     }
     matches.sort((a, b) => a.start.compareTo(b.start));
@@ -3753,7 +3896,9 @@ class _RichToolResultState extends State<_RichToolResult> {
     for (final m in matches) {
       if (m.start < cursor) continue; // overlapping
       if (m.start > cursor) {
-        spans.add(TextSpan(text: line.substring(cursor, m.start), style: baseStyle));
+        spans.add(
+          TextSpan(text: line.substring(cursor, m.start), style: baseStyle),
+        );
       }
       if (m.type == 'color') {
         spans.add(TextSpan(text: m.value, style: baseStyle));
@@ -3766,35 +3911,41 @@ class _RichToolResultState extends State<_RichToolResult> {
           Diag.swallow('chat_screen.color_parse', e);
         }
         if (c != null) {
-          spans.add(WidgetSpan(
-            alignment: PlaceholderAlignment.middle,
-            child: Container(
-              width: 12,
-              height: 12,
-              margin: const EdgeInsets.only(left: 3),
-              decoration: BoxDecoration(
-                color: c,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white24, width: 0.5),
+          spans.add(
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: Container(
+                width: 12,
+                height: 12,
+                margin: const EdgeInsets.only(left: 3),
+                decoration: BoxDecoration(
+                  color: c,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white24, width: 0.5),
+                ),
               ),
             ),
-          ));
+          );
         }
       } else {
         // Tappable URL.
-        spans.add(TextSpan(
-          text: m.value,
-          style: baseStyle.copyWith(
-            color: Aether.accent,
-            decoration: TextDecoration.underline,
-            decorationColor: Aether.accent,
+        spans.add(
+          TextSpan(
+            text: m.value,
+            style: baseStyle.copyWith(
+              color: Aether.accent,
+              decoration: TextDecoration.underline,
+              decorationColor: Aether.accent,
+            ),
+            recognizer: (TapGestureRecognizer()
+              ..onTap = () {
+                final uri = Uri.tryParse(m.value);
+                if (uri != null) {
+                  launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
+              }),
           ),
-          recognizer: (TapGestureRecognizer()
-            ..onTap = () {
-              final uri = Uri.tryParse(m.value);
-              if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
-            }),
-        ));
+        );
       }
       cursor = m.end;
     }
@@ -3802,9 +3953,7 @@ class _RichToolResultState extends State<_RichToolResult> {
       spans.add(TextSpan(text: line.substring(cursor), style: baseStyle));
     }
 
-    return Text.rich(
-      TextSpan(children: spans),
-    );
+    return Text.rich(TextSpan(children: spans));
   }
 }
 
@@ -4646,7 +4795,9 @@ class _MessageView extends StatelessWidget {
             !provider.models.contains(session.model.split('·').first.trim())) {
           return;
         }
-        if (lastUser.attachments.any((a) => a.path == null || a.path!.isEmpty)) {
+        if (lastUser.attachments.any(
+          (a) => a.path == null || a.path!.isEmpty,
+        )) {
           return;
         }
         // Delete from the current assistant message onward and resend.
@@ -4829,10 +4980,7 @@ class _MessageView extends StatelessWidget {
           onSubmitted: send,
         ),
         actions: [
-          TextButton(
-            onPressed: navigator.pop,
-            child: const Text('Cancel'),
-          ),
+          TextButton(onPressed: navigator.pop, child: const Text('Cancel')),
           TextButton(
             onPressed: () => send(c.text),
             child: const Text(
@@ -5215,6 +5363,7 @@ class _AttachmentChip extends StatelessWidget {
                   children: [
                     for (final att in atts)
                       Container(
+                        constraints: const BoxConstraints(maxWidth: 300),
                         margin: const EdgeInsets.only(top: 6),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 9,
@@ -5237,13 +5386,16 @@ class _AttachmentChip extends StatelessWidget {
                             ),
                             const SizedBox(width: 7),
                             Flexible(
-                              child: Text(
-                                att.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w600,
+                              child: Tooltip(
+                                message: att.name,
+                                child: Text(
+                                  att.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
                             ),
@@ -6040,6 +6192,21 @@ class _InputBarState extends State<_InputBar> {
     );
   }
 
+  /// Line cap for the composer field. The card is capped at half of the
+  /// chat pane (which excludes the startup panel), so at large text scales a
+  /// fixed 5-line field (a wrapped hint counts toward its height) can be
+  /// taller than the card itself and push the field below the viewport.
+  /// Derive the cap from the space the card actually leaves for the field.
+  int _composerMaxLines(BuildContext context) {
+    final preferred = widget.availableHeight < 400 ? 2 : 5;
+    // AetherType.body: 14px at 1.5 line height.
+    final lineHeight = MediaQuery.textScalerOf(context).scale(14) * 1.5;
+    // Card padding (12) + toolbar gap (6) + 48px toolbar + field padding (24).
+    final budget = widget.availableHeight * 0.5 - 12 - 6 - 48 - 24;
+    final fits = (budget / lineHeight).floor();
+    return fits.clamp(1, preferred);
+  }
+
   @override
   Widget build(BuildContext context) {
     _ctx = context; // keep a live context for post-picker toasts
@@ -6081,147 +6248,164 @@ class _InputBarState extends State<_InputBar> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-              // ── Staged attachment preview chips (dismissible) ──
-              const _AttachmentChip(),
-              // ── Slash menu: opens on a bare `/`, fuzzy-ranked, grouped
-              //    into Commands / Skills / MCP tools / Plugins ──
-              if (suggestions.isNotEmpty)
-                Container(
-                  margin: const EdgeInsets.fromLTRB(4, 2, 4, 4),
-                  constraints: BoxConstraints(
-                    maxHeight: math.min(220, widget.availableHeight * 0.25),
-                  ),
-                  decoration: BoxDecoration(
-                    color: Aether.surface,
-                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
-                    border: Border.all(color: Aether.hairline),
-                  ),
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    itemCount: suggestions.length,
-                    itemBuilder: (_, i) {
-                      final s = suggestions[i];
-                      final newGroup =
-                          i == 0 || suggestions[i - 1].group != s.group;
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (newGroup)
-                            Padding(
-                              padding: EdgeInsets.fromLTRB(
-                                12,
-                                i == 0 ? 2 : 8,
-                                12,
-                                3,
-                              ),
-                              child: Text(
-                                s.group.toUpperCase(),
-                                style: TextStyle(
-                                  fontSize: 9.5,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 1.1,
-                                  color: Aether.textFaint,
-                                ),
-                              ),
-                            )
-                          else
-                            Divider(
-                              height: 1,
-                              thickness: 0.5,
-                              color: Aether.hairline,
-                            ),
-                          InkWell(
-                            onTap: () => _applySuggestion(s),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 8,
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(s.icon, size: 16, color: Aether.accent),
-                                  const SizedBox(width: 9),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          s.name,
-                                          style: const TextStyle(
-                                            fontSize: 13.5,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        if (s.description.isNotEmpty) ...[
-                                          const SizedBox(height: 1),
-                                          Text(
-                                            s.description,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              color: Aether.textFaint,
-                                            ),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ),
-                                  if (s.hint.isNotEmpty)
-                                    Text(
-                                      s.hint,
-                                      style: TextStyle(
-                                        fontSize: 10.5,
-                                        color: Aether.textFaint,
-                                      ),
-                                    ),
-                                ],
-                              ),
+                      // ── Staged attachment preview chips (dismissible) ──
+                      const _AttachmentChip(),
+                      // ── Slash menu: opens on a bare `/`, fuzzy-ranked, grouped
+                      //    into Commands / Skills / MCP tools / Plugins ──
+                      if (suggestions.isNotEmpty)
+                        Container(
+                          margin: const EdgeInsets.fromLTRB(4, 2, 4, 4),
+                          constraints: BoxConstraints(
+                            maxHeight: math.min(
+                              220,
+                              widget.availableHeight * 0.25,
                             ),
                           ),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-              // ── Composer field — AetherField, multiline, rLg surfaceAlt ──
-              AetherField(
-                fieldKey: const ValueKey('chat-composer'),
-                label: 'Message',
-                showLabel: false,
-                controller: controller,
-                focusNode: widget.focusNode,
-                enabled: !locked,
-                maxLines: widget.availableHeight < 400 ? 2 : 5,
-                minLines: 1,
-                radius: AetherRadius.rLg,
-                hint: locked
-                    ? 'Answer the approval card above first…'
-                    : 'Describe what you want to build…  / commands  @ agents',
-                contentPadding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                onSubmitted: (_) {
-                  if (!locked) onSend();
-                },
-              ),
-              const _ControlServiceNotice(),
-              if (widget.editingQueue)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                          'Editing queued message · original files retained',
+                          decoration: BoxDecoration(
+                            color: Aether.surface,
+                            borderRadius: BorderRadius.circular(
+                              AetherRadius.rMd,
+                            ),
+                            border: Border.all(color: Aether.hairline),
+                          ),
+                          child: ListView.builder(
+                            shrinkWrap: true,
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            itemCount: suggestions.length,
+                            itemBuilder: (_, i) {
+                              final s = suggestions[i];
+                              final newGroup =
+                                  i == 0 || suggestions[i - 1].group != s.group;
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  if (newGroup)
+                                    Padding(
+                                      padding: EdgeInsets.fromLTRB(
+                                        12,
+                                        i == 0 ? 2 : 8,
+                                        12,
+                                        3,
+                                      ),
+                                      child: Text(
+                                        s.group.toUpperCase(),
+                                        style: TextStyle(
+                                          fontSize: 9.5,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: 1.1,
+                                          color: Aether.textFaint,
+                                        ),
+                                      ),
+                                    )
+                                  else
+                                    Divider(
+                                      height: 1,
+                                      thickness: 0.5,
+                                      color: Aether.hairline,
+                                    ),
+                                  InkWell(
+                                    onTap: () => _applySuggestion(s),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 8,
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(
+                                            s.icon,
+                                            size: 16,
+                                            color: Aether.accent,
+                                          ),
+                                          const SizedBox(width: 9),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  s.name,
+                                                  style: const TextStyle(
+                                                    fontSize: 13.5,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                                if (s
+                                                    .description
+                                                    .isNotEmpty) ...[
+                                                  const SizedBox(height: 1),
+                                                  Text(
+                                                    s.description,
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      color: Aether.textFaint,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ],
+                                            ),
+                                          ),
+                                          if (s.hint.isNotEmpty)
+                                            Text(
+                                              s.hint,
+                                              style: TextStyle(
+                                                fontSize: 10.5,
+                                                color: Aether.textFaint,
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                        ),
+                      // ── Composer field — AetherField, multiline, rLg surfaceAlt ──
+                      AetherField(
+                        fieldKey: const ValueKey('chat-composer'),
+                        label: 'Message',
+                        showLabel: false,
+                        controller: controller,
+                        focusNode: widget.focusNode,
+                        enabled: !locked,
+                        maxLines: _composerMaxLines(context),
+                        minLines: 1,
+                        radius: AetherRadius.rLg,
+                        hint: locked
+                            ? 'Answer the approval card above first…'
+                            : 'Describe what you want to build…  / commands  @ agents',
+                        contentPadding: const EdgeInsets.fromLTRB(
+                          14,
+                          12,
+                          14,
+                          12,
+                        ),
+                        onSubmitted: (_) {
+                          if (!locked) onSend();
+                        },
                       ),
-                      AetherGhostButton(
-                        label: 'Keep as new draft',
-                        onPressed: widget.onCancelQueueEdit,
-                      ),
-                    ],
-                  ),
-                ),
+                      const _ControlServiceNotice(),
+                      if (widget.editingQueue)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Editing queued message · original files retained',
+                              ),
+                              AetherGhostButton(
+                                label: 'Keep as new draft',
+                                onPressed: widget.onCancelQueueEdit,
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -6289,7 +6473,8 @@ class _InputBarState extends State<_InputBar> {
                       // Match the existing submission handler: files alone
                       // are not a submission, and queue edits retain their
                       // original attachments rather than newly staged files.
-                      final canSubmit = hasSession &&
+                      final canSubmit =
+                          hasSession &&
                           AppState.I.activeSessionId == sessionId &&
                           hasDraft &&
                           !locked &&
@@ -6321,7 +6506,9 @@ class _InputBarState extends State<_InputBar> {
                               iconOnly: true,
                               onPressed: stop,
                             ),
-                          if (!runningNow || hasDraft || widget.editingQueue) ...[
+                          if (!runningNow ||
+                              hasDraft ||
+                              widget.editingQueue) ...[
                             if (runningNow) const SizedBox(width: 4),
                             AetherPrimaryButton(
                               label: actionLabel,
@@ -6789,14 +6976,16 @@ class _QueueDock extends StatelessWidget {
                   children: [
                     Icon(Icons.queue_music, size: 13, color: Aether.textMuted),
                     const SizedBox(width: 6),
-                    Expanded(child: Text(
-                      '${queue.length} queued message${queue.length > 1 ? 's' : ''}',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                        color: Aether.textMuted,
+                    Expanded(
+                      child: Text(
+                        '${queue.length} queued message${queue.length > 1 ? 's' : ''}',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: Aether.textMuted,
+                        ),
                       ),
-                    )),
+                    ),
                     const SizedBox(width: 8),
                     GestureDetector(
                       onTap: () {
@@ -6828,43 +7017,24 @@ class _QueueDock extends StatelessWidget {
                 const SizedBox(height: 3),
                 // Queued message rows — keyed by the message's stable id so
                 // a delete/steer/edit never rebinds another row's State.
-                // Guardrail: the rows scroll inside ~24% of the available
-                // height instead of growing until the composer is pushed
-                // off-screen. (The dock sits in a min-sized Column, so the
-                // incoming maxHeight is unbounded — fall back to the
-                // viewport height, which is always finite.)
-                //
-                // 2026-09-24: was 38%, which made the dock dominate the
-                // screen. Rows still auto-size to their text — only the
-                // ceiling and the chrome shrank.
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final reference = constraints.maxHeight.isFinite
-                        ? constraints.maxHeight
-                        : MediaQuery.sizeOf(context).height;
-                    return ConstrainedBox(
-                      constraints: BoxConstraints(maxHeight: reference * 0.24),
-                      child: SingleChildScrollView(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            for (var i = 0; i < queue.length; i++)
-                              _QueueRow(
-                                key: ValueKey((
-                                  sid,
-                                  ids.length == queue.length ? ids[i] : 'q-$i',
-                                )),
-                                id: ids.length == queue.length ? ids[i] : null,
-                                index: i,
-                                text: queue[i],
-                                onEdited: onEdited,
-                                onEditToComposer: onEditToComposer,
-                              ),
-                          ],
-                        ),
+                // The shared dock owns scrolling; nesting a second viewport
+                // here clips rows even when the surrounding chat has room.
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (var i = 0; i < queue.length; i++)
+                      _QueueRow(
+                        key: ValueKey((
+                          sid,
+                          ids.length == queue.length ? ids[i] : 'q-$i',
+                        )),
+                        id: ids.length == queue.length ? ids[i] : null,
+                        index: i,
+                        text: queue[i],
+                        onEdited: onEdited,
+                        onEditToComposer: onEditToComposer,
                       ),
-                    );
-                  },
+                  ],
                 ),
               ],
             ),
@@ -7202,13 +7372,19 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                                 key: ObjectKey(req),
                                 child: SelectionArea(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       for (final line in req.detail.split('\n'))
-                                        Text(line, style: TextStyle(
-                                          fontSize: 12, height: 1.4,
-                                          color: Aether.text, fontFamily: Aether.mono,
-                                        )),
+                                        Text(
+                                          line,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            height: 1.4,
+                                            color: Aether.text,
+                                            fontFamily: Aether.mono,
+                                          ),
+                                        ),
                                     ],
                                   ),
                                 ),
@@ -7216,18 +7392,18 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                             ),
                           )
                         : Text(
-                      req.detail.isNotEmpty && req.detail != req.summary
-                          ? req.detail
-                          : req.summary,
-                      maxLines: 8,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        height: 1.4,
-                        color: Aether.text,
-                        fontFamily: Aether.mono,
-                      ),
-                    ),
+                            req.detail.isNotEmpty && req.detail != req.summary
+                                ? req.detail
+                                : req.summary,
+                            maxLines: 8,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              height: 1.4,
+                              color: Aether.text,
+                              fontFamily: Aether.mono,
+                            ),
+                          ),
                   ),
                   const SizedBox(width: 6),
                   // EXACTLY THREE actions (owner requirement, 2026-09-24):
@@ -7342,20 +7518,24 @@ class _QuestionsCardState extends State<_QuestionsCard> {
             children: [
               Icon(Icons.help_outline, size: 14, color: Aether.accent),
               SizedBox(width: 6),
-              Text(
-                'Questions from the AI',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: Aether.accent,
+              Expanded(
+                child: Text(
+                  'Questions from the AI',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Aether.accent,
+                  ),
                 ),
               ),
             ],
           ),
           const SizedBox(height: 8),
           // The question list is bounded and scrollable so a tall set of
-          // questions never overflows the viewport (header + actions stay
-          // fixed; only the questions scroll).
+          // questions never overflows the viewport. Short sets lay out at
+          // natural height (no scrolling); only content beyond the cap
+          // scrolls. The shared dock scroll surface still bounds the whole
+          // card, so the header and the answer action stay reachable.
           ConstrainedBox(
             constraints: BoxConstraints(
               maxHeight: math.min(MediaQuery.sizeOf(context).height * 0.5, 360),
@@ -8738,8 +8918,8 @@ class _RuntimeInstallBanner extends StatelessWidget {
               ],
               if (app.runtimeInstallLine.isNotEmpty) ...[
                 const SizedBox(height: 5),
-                  Text(
-                    app.runtimeInstallLine,
+                Text(
+                  app.runtimeInstallLine,
                   style: TextStyle(
                     fontFamily: Aether.mono,
                     fontSize: 10.5,

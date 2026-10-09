@@ -3,12 +3,11 @@
 // Verifies the reskin composition:
 //   * the pending state renders an AetherCard wrapped in a warn left rule,
 //     the countdown toward the server deadline, and the AetherGhostButton
-//     'Cancel request' (with the danger request action hidden);
+//     'Restore account' (with the danger request action hidden);
 //   * the request flow's confirmation dialog drives the reauth hook and the
 //     deletion request through the AetherDangerButton 'Request deletion',
 //     then renders the returned pending status immediately;
-//   * 'Cancel request' re-checks the server status and surfaces the
-//     cancelled state, restoring the request action.
+//   * 'Restore account' explicitly cancels and surfaces the cancelled state.
 //
 // Behavior parity (late-proof guard, unactivated-server copy, reauth
 // failure surfacing) is covered by test/account_deletion_panel_test.dart
@@ -115,7 +114,7 @@ void main() {
 
       // Pending swaps the danger request action for the ghost cancel action.
       expect(
-        find.widgetWithText(AetherGhostButton, 'Cancel request'),
+        find.widgetWithText(AetherGhostButton, 'Restore account'),
         findsOneWidget,
       );
       expect(
@@ -156,7 +155,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.widgetWithText(AetherGhostButton, 'Cancel request'),
+        find.widgetWithText(AetherGhostButton, 'Restore account'),
         findsNothing,
       );
       expect(warnRule(), findsNothing);
@@ -166,9 +165,10 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Delete your account?'), findsOneWidget);
-      await tester.tap(
-        find.widgetWithText(AetherDangerButton, 'Request deletion'),
-      );
+      final requestButton =
+          find.widgetWithText(AetherDangerButton, 'Request deletion');
+      await tester.ensureVisible(requestButton);
+      await tester.tap(requestButton);
       await tester.pumpAndSettle();
 
       expect(reauthCalls, 1);
@@ -183,14 +183,14 @@ void main() {
       expect(find.textContaining(deadline.toIso8601String()), findsOneWidget);
       expect(find.textContaining('remaining'), findsOneWidget);
       expect(
-        find.widgetWithText(AetherGhostButton, 'Cancel request'),
+        find.widgetWithText(AetherGhostButton, 'Restore account'),
         findsOneWidget,
       );
     },
   );
 
   testWidgets(
-    'cancel request: ghost re-checks status and surfaces cancelled state',
+    'restore request: explicit reauthentication cancels deletion',
     (tester) async {
       final server = _FakeAccountServer()
         ..state = 'pending'
@@ -207,10 +207,10 @@ void main() {
       expect(server.statusCalls, 1);
       expect(find.text('Deletion requested'), findsOneWidget);
 
-      // Server-side cancellation happens on next sign-in; the panel's cancel
-      // action re-checks the status.
+      // Explicit restore uses the cancellation endpoint and receives the
+      // canonical cancelled status.
       server.state = 'cancelled';
-      await tester.tap(find.widgetWithText(AetherGhostButton, 'Cancel request'));
+      await tester.tap(find.widgetWithText(AetherGhostButton, 'Restore account'));
       await tester.pumpAndSettle();
 
       expect(server.statusCalls, 2);
@@ -221,7 +221,7 @@ void main() {
       expect(find.text('Deletion requested'), findsNothing);
       expect(warnRule(), findsNothing);
       expect(
-        find.widgetWithText(AetherGhostButton, 'Cancel request'),
+        find.widgetWithText(AetherGhostButton, 'Restore account'),
         findsNothing,
       );
       expect(

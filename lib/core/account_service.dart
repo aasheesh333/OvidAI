@@ -70,23 +70,28 @@ class AccountService {
   Future<AccountDeletion> requestDeletion(String requestId) =>
       _call('/deletion', body: {'request_id': requestId}, refresh: true);
   Future<AccountDeletion> acknowledgeLogin() async {
-    final result = await _call('/login');
-    if (!result.allowsLogin) {
+    return _call('/login');
+  }
+
+  Future<AccountDeletion> cancelDeletion() async {
+    final result = await _call(
+      '/deletion/cancel',
+      refresh: true,
+      body: const {'consent': true},
+    );
+    if (result.state != 'cancelled') {
       throw const AccountException(
-        'Account deletion is pending. Sign in again during the 24-hour grace period to cancel.',
+        'The server did not confirm account restoration.',
       );
     }
     return result;
   }
 
-  Future<AccountDeletion> cancelDeletion() =>
-      _call('/deletion/cancel', refresh: true);
-
   Future<AccountDeletion> _call(
     String path, {
     bool get = false,
     bool refresh = false,
-    Map<String, String>? body,
+    Map<String, dynamic>? body,
   }) async {
     if (!enabled) {
       throw const AccountException(
@@ -137,7 +142,7 @@ class AccountService {
           401 => 'Please sign in again to verify your identity.',
           403 => 'This account or app could not be verified.',
           409 =>
-            'Deletion is pending or already in progress. Sign in again during the grace period to cancel.',
+            'Deletion is pending or already in progress. Explicitly restore the account before the deadline.',
           _ =>
             'The account server is unavailable. Request status is unconfirmed; retry to check it.',
         });

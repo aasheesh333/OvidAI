@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -8,43 +9,96 @@ import 'package:http/testing.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/core/usage_attempt.dart';
 import 'package:ovid_ai/ui/usage_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Premium `usage_screen` redesign contract (wave 2 UI).
 ///
 /// These tests pin the *public* surface the redesign owes callers:
-/// [AetherEmptyState] when the local log has no measurable rows, per-provider
-/// [AetherCard]s with request/token counts, the plan pill derived from the
-/// existing tier/paid state, the inline per-model toggle, and the hard rule
-/// that the Ovid Cloud provider is never rendered as a device-side card (its
-/// usage is server-authoritative, shown in the hero header).
+/// [AetherEmptyState] when the attempt journal has no rows, per-provider
+/// [AetherCard]s with request/token counts aggregated from provider-reported
+/// attempts, the plan pill derived from the existing tier/paid state, the
+/// inline per-model toggle, and the rule that Ovid Cloud attempts render on
+/// their own observed-history card — never leaking into a BYOK provider's
+/// counts or the server-authoritative allowance hero.
 
-UsageEntry _entry({
+int _attemptSequence = 0;
+
+/// A completed attempt whose token counts are provider-reported, i.e. the
+/// only provenance that contributes to measured totals on the usage screen.
+UsageAttempt _attempt({
   required String providerId,
-  required String providerName,
   String model = 'model',
   int prompt = 20,
   int completion = 10,
-}) => UsageEntry(
-  time: DateTime.now(),
-  providerId: providerId,
-  providerName: providerName,
-  model: model,
-  promptTokens: prompt,
-  completionTokens: completion,
-  totalTokens: prompt + completion,
-  duration: const Duration(seconds: 1),
-);
+}) {
+  final id = 'usage-screen-${_attemptSequence++}';
+  final startedAt = DateTime.now().toUtc();
+  return UsageAttempt(
+    attemptId: id,
+    requestId: 'request-$id',
+    revision: 1,
+    sourceDevice: 'test-device',
+    provider: providerId,
+    requestedModel: model,
+    reportedModel: model,
+    purpose: 'chat',
+    startedAt: startedAt,
+    completedAt: startedAt,
+    elapsed: const Duration(seconds: 1),
+    dispatchStage: UsageDispatchStage.completed,
+    outcome: UsageOutcome.succeeded,
+    inputTokens: UsageTokenCount.reported(prompt),
+    outputTokens: UsageTokenCount.reported(completion),
+    totalTokens: UsageTokenCount.reported(prompt + completion),
+  );
+}
+
+/// The screen resolves display names through [AppState.providerById].
+void _addAcme(String name) {
+  AppState.I.providers.add(
+    ProviderConfig(
+      id: 'custom-acme',
+      name: name,
+      description: '',
+      baseUrl: 'https://acme.invalid/v1',
+      models: const ['model'],
+      requiresApiKey: true,
+    ),
+  );
+}
+
+Future<void> _record(WidgetTester tester, List<UsageAttempt> attempts) async {
+  // The durable journal does real filesystem I/O, outside the fake clock.
+  await tester.runAsync(() async {
+    for (final attempt in attempts) {
+      expect(
+        await AppState.I.recordUsageAttempt(
+          attempt,
+          owner: AppState.I.sessionAccountToken,
+        ),
+        isTrue,
+      );
+    }
+  });
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  setUp(() {
+  late Directory usageRoot;
+
+  setUp(() async {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
     AppState.resetTestInstance();
-    AppState.createForTest();
+    usageRoot = await Directory.systemTemp.createTemp('usage-screen-test-');
+    AppState.createForTest(usageRoot: usageRoot);
+    await AppState.I.prepareUsageAttempts(
+      owner: AppState.I.sessionAccountToken,
+    );
+    _attemptSequence = 0;
     AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.idTokenOverrideForTest = () async => 'test-id-token';
     // Server usage fetch fails so the hero header falls back to the local
@@ -53,11 +107,12 @@ void main() {
         MockClient((_) async => http.Response('down', 503));
   });
 
-  tearDown(() {
+  tearDown(() async {
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.httpClientFactoryForTest = null;
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
+    await usageRoot.delete(recursive: true);
   });
 
   Future<void> pumpUsage(
@@ -83,7 +138,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('renders empty state when usageLog is empty', (tester) async {
+  testWidgets('renders empty state when the attempt journal is empty', (tester) async {
     await pumpUsage(tester);
 
     expect(find.text('No usage yet'), findsOneWidget);
@@ -120,22 +175,22 @@ void main() {
           200,
         ),
       );
-      AppState.I.usageLog.addAll([
-        _entry(
+      _addAcme('Acme Models with a long provider name');
+      await _record(tester, [
+        _attempt(
           providerId: AppState.ovidCloudProviderId,
-          providerName: 'Ovid Cloud',
           prompt: 900000,
           completion: 100000,
         ),
-        _entry(
+        _attempt(
           providerId: 'custom-acme',
-          providerName: 'Acme Models with a long provider name',
           model: 'custom-model-with-a-long-name',
         ),
       ]);
 
       await pumpUsage(tester, width: width, textScale: 1.3);
 
+      // Hero: server-authoritative allowance and plan pill.
       expect(find.text('MAX'), findsOneWidget);
       expect(find.text('37% remaining'), findsOneWidget);
       expect(find.text('23% remaining'), findsOneWidget);
@@ -147,18 +202,46 @@ void main() {
             .map((bar) => bar.value),
         [0.37, 0.23],
       );
-      expect(find.text('Ovid Cloud'), findsOneWidget);
-      expect(find.text('30'), findsOneWidget);
-      expect(find.text('20 in · 10 out'), findsOneWidget);
-       expect(find.text('1 requests · 20 in · 10 out'), findsOneWidget);
+      // Retained totals include every provider-reported attempt.
+      expect(find.text('1M'), findsOneWidget);
+      expect(find.text('900K in · 100K out'), findsOneWidget);
 
-      final toggle = find.text('Show 1 model').hitTestable();
+      // The observed CLOUD history card is its own card, below the fold at
+      // this scale, so bring the lazy list child into view before asserting.
+      final cloudCard = find.byKey(const ValueKey(AppState.ovidCloudProviderId));
+      await tester.scrollUntilVisible(cloudCard, 150);
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(of: cloudCard, matching: find.text('Ovid Cloud')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: cloudCard,
+          matching: find.text('1 requests · 900K in · 100K out'),
+        ),
+        findsOneWidget,
+      );
+
+      // The BYOK card counts only its own single attempt.
+      final acmeCard = find.byKey(const ValueKey('custom-acme'));
+      expect(
+        find.descendant(
+          of: acmeCard,
+          matching: find.text('1 requests · 20 in · 10 out'),
+        ),
+        findsOneWidget,
+      );
+
+      final toggle = find
+          .descendant(of: acmeCard, matching: find.text('Show 1 model'))
+          .hitTestable();
       await tester.scrollUntilVisible(toggle, 150);
       await tester.pumpAndSettle();
       await tester.tap(toggle);
       await tester.pumpAndSettle();
       expect(find.text('custom-model-with-a-long-name'), findsOneWidget);
-      expect(find.text('1 req · 30 tok'), findsOneWidget);
+      expect(find.text('1 req · 30 provider-reported tok'), findsOneWidget);
 
       final renderedText = tester
           .widgetList<Text>(find.byType(Text))
@@ -175,13 +258,10 @@ void main() {
   testWidgets('renders a provider card with request and token counts', (
     tester,
   ) async {
-    AppState.I.usageLog.add(
-      _entry(
-        providerId: 'custom-acme',
-        providerName: 'Acme Models',
-        model: 'gpt-4o',
-      ),
-    );
+    _addAcme('Acme Models');
+    await _record(tester, [
+      _attempt(providerId: 'custom-acme', model: 'gpt-4o'),
+    ]);
     await pumpUsage(tester);
 
     // Not the empty state.
@@ -213,15 +293,10 @@ void main() {
   });
 
   testWidgets('expands the inline model list on toggle', (tester) async {
-    AppState.I.usageLog.add(
-      _entry(
-        providerId: 'custom-acme',
-        providerName: 'Acme Models',
-        model: 'gpt-4o',
-        prompt: 20,
-        completion: 10,
-      ),
-    );
+    _addAcme('Acme Models');
+    await _record(tester, [
+      _attempt(providerId: 'custom-acme', model: 'gpt-4o'),
+    ]);
     await pumpUsage(tester);
 
     // Collapsed: per-model name hidden, toggle offered.
@@ -233,42 +308,56 @@ void main() {
 
     // Expanded: model name + per-model request/token caption visible.
     expect(find.text('gpt-4o'), findsOneWidget);
-    expect(find.text('1 req · 30 tok'), findsOneWidget);
+    expect(find.text('1 req · 30 provider-reported tok'), findsOneWidget);
     expect(find.text('Hide models'), findsOneWidget);
   });
 
-  testWidgets('excludes ovidCloudProviderId from per-provider cards', (
+  testWidgets('keeps ovid cloud attempts on their own card, apart from BYOK', (
     tester,
   ) async {
-    // A huge cloud entry would dominate the totals if it leaked into the
-    // device-side aggregation. A custom BYOK entry rides alongside it.
-    AppState.I.usageLog
-      ..add(
-        _entry(
-          providerId: AppState.ovidCloudProviderId,
-          providerName: 'Ovid Cloud',
-          model: 'auto',
-          prompt: 900000,
-          completion: 100000,
-        ),
-      )
-      ..add(
-        _entry(
-          providerId: 'custom-acme',
-          providerName: 'Acme Models',
-          model: 'gpt-4o',
-        ),
-      );
+    // A huge cloud attempt must never leak into a BYOK provider's card or
+    // into the server-authoritative allowance header.
+    _addAcme('Acme Models');
+    await _record(tester, [
+      _attempt(
+        providerId: AppState.ovidCloudProviderId,
+        model: 'auto',
+        prompt: 900000,
+        completion: 100000,
+      ),
+      _attempt(providerId: 'custom-acme', model: 'gpt-4o'),
+    ]);
     await pumpUsage(tester);
 
-    // "Ovid Cloud" appears exactly once — in the hero plan header, never as
-    // a per-provider card.
-    expect(find.text('Ovid Cloud'), findsOneWidget);
+    // Hero plan header + one observed-history CLOUD card, nothing more.
+    expect(find.text('Ovid Cloud'), findsNWidgets(2));
+    expect(find.text('Server-authoritative'), findsOneWidget);
+    final cloudCard = find.byKey(const ValueKey(AppState.ovidCloudProviderId));
+    expect(
+      find.descendant(of: cloudCard, matching: find.text('CLOUD')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: cloudCard,
+        matching: find.text('1 requests · 900K in · 100K out'),
+      ),
+      findsOneWidget,
+    );
 
-    // Only the custom provider's single row is counted, proving the cloud
-    // entry was excluded from [_aggregate].
-    expect(find.text('Acme Models'), findsOneWidget);
-    expect(find.text('1 requests · 20 in · 10 out'), findsOneWidget);
-    expect(find.text('2 requests · 900020 in · 100010 out'), findsNothing);
+    // The BYOK card counts only its own single attempt.
+    final acmeCard = find.byKey(const ValueKey('custom-acme'));
+    expect(
+      find.descendant(of: acmeCard, matching: find.text('Acme Models')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: acmeCard,
+        matching: find.text('1 requests · 20 in · 10 out'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('2 requests'), findsNothing);
   });
 }

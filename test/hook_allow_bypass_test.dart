@@ -15,6 +15,8 @@ import 'package:ovid_ai/core/plugin_registry.dart';
 /// prompted, so a hook that decided could never actually decide. The gate now
 /// reports it and the approval path honours it — narrowly: only the ordinary
 /// prompt is skipped.
+const _bypassCheck = 'if (_permissionDispatchCtx?.hookAllowBypass ?? false)';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -107,15 +109,16 @@ void main() {
       final i = src.indexOf('Future<bool> _maybeApprove(');
       expect(i, greaterThanOrEqualTo(0));
       final body = src.substring(i, i + 9000);
-      expect(body, contains('if (_runResolved.hookAllowBypass)'));
+      expect(body, contains(_bypassCheck));
     });
 
     test('the bypass sits AFTER the plan-mode and destructive gates', () {
       final i = src.indexOf('Future<bool> _maybeApprove(');
       final body = src.substring(i, i + 9000);
-      final bypassAt = body.indexOf('if (_runResolved.hookAllowBypass)');
+      final bypassAt = body.indexOf(_bypassCheck);
       final planAt = body.indexOf('if (planMode)');
       final destructiveAt = body.indexOf('_isDestructiveCommand(summary)');
+      expect(bypassAt, greaterThanOrEqualTo(0));
       expect(planAt, greaterThanOrEqualTo(0));
       expect(destructiveAt, greaterThanOrEqualTo(0));
       expect(bypassAt, greaterThan(planAt),
@@ -126,8 +129,34 @@ void main() {
 
     test('the flag is per-call: set from the gate, cleared in finally', () {
       expect(src, contains('if (gate.bypassPermission)'));
-      expect(src, contains('_runResolved.hookAllowBypass = true;'));
-      expect(src, contains('_runResolved.hookAllowBypass = false;'));
+      expect(src, contains('_permissionDispatchCtx?.hookAllowBypass = true;'));
+      expect(src, contains('_permissionDispatchCtx?.hookAllowBypass = false;'));
+      // Never on the shared run bucket: overlapping calls must not share it.
+      expect(src, isNot(contains('_runResolved.hookAllowBypass')));
+
+      // The flag lives on a per-dispatch context, created fresh for every
+      // `_dispatch` (both the direct and the queued path).
+      final ctxAt = src.indexOf('class _PermissionDispatchContext {');
+      expect(ctxAt, greaterThanOrEqualTo(0));
+      final ctxBody = src.substring(ctxAt, src.indexOf('\n}', ctxAt));
+      expect(ctxBody, contains('bool hookAllowBypass = false;'));
+      final dispatchAt = src.indexOf('Future<String> _dispatch(String name');
+      expect(dispatchAt, greaterThanOrEqualTo(0));
+      final dispatchEnd = src.indexOf('bool _dispatchNeedsPermissionQueue()');
+      final dispatchBody = src.substring(dispatchAt, dispatchEnd);
+      expect(
+        RegExp(r'_PermissionDispatchContext\(').allMatches(dispatchBody).length,
+        2,
+        reason: 'each dispatch path must build its own context',
+      );
+
+      // Cleared in the dispatch's `finally`, after it was set from the gate.
+      final setAt = src.indexOf('_permissionDispatchCtx?.hookAllowBypass = true;');
+      final clearAt =
+          src.indexOf('_permissionDispatchCtx?.hookAllowBypass = false;');
+      final finallyAt = src.lastIndexOf('} finally {', clearAt);
+      expect(clearAt, greaterThan(setAt));
+      expect(finallyAt, greaterThan(setAt));
     });
   });
 }

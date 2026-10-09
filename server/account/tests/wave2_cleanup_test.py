@@ -125,7 +125,7 @@ def test_cancel_preserves_both_stores(tmp_path, fenced):
     now[0] = 87400
     if fenced:
         service.finalize('alice')
-    assert service.login({**CLAIMS, 'auth_time': 87400})['state'] == 'cancelled'
+    assert service.cancel({**CLAIMS, 'auth_time': 87400})['state'] == 'cancelled'
     now[0] += 1000
     service.finalize('alice')
     assert stores.shares.public(share['id']) is not None

@@ -132,18 +132,34 @@ class Lifecycle:
             if row is None:
                 identity(claims)
                 return public(None)
-            if row['state'] == 'cancelled':
-                return self._cancel(db, row)
             if row['state'] == 'fenced' and not row['fence_owned']:
                 raise AccountError('account_unavailable', 403)
             if row['state'] in ('deleting', 'deleted'):
                 raise AccountError('deletion_in_progress')
-            # A restored, old session cannot undo a deletion request. A real
-            # login during grace may arrive while the worker is fencing.
-            fresh_metadata = self._grace_login(row, self.admin.user(uid))
-            if not (int(row['requested_at']) < signed_at <= row['delete_after'] or
-                    (signed_at == int(row['requested_at']) and fresh_metadata)):
-                raise AccountError('deletion_pending_sign_in_again')
+            # Login acknowledgement is observational. Restoration requires the
+            # explicit cancellation operation below; auth callbacks and token
+            # refreshes must never mutate deletion state.
+            return public(row)
+
+    def cancel(self, claims):
+        """Cancel deletion only after an explicit, recently authenticated action."""
+        uid = identity(claims, allow_legacy_password=True)
+        with self.store.locked(uid) as db:
+            accepted_at = self._recent_auth(claims)
+            row = db.get(uid)
+            if row is None:
+                identity(claims)
+                return public(None)
+            if row['state'] == 'cancelled':
+                return self._cancel(db, row)
+            if row['state'] in ('deleting', 'deleted'):
+                raise AccountError('deletion_in_progress')
+            if row['state'] == 'fenced' and not row['fence_owned']:
+                raise AccountError('account_unavailable', 403)
+            settlement = (row['state'] == 'fenced' and row['fence_at'] is not None
+                          and accepted_at < row['fence_at'] + FENCE_SETTLE_SECONDS)
+            if accepted_at > row['delete_after'] and not settlement:
+                raise AccountError('deletion_in_progress')
             return self._cancel(db, row)
 
     @contextmanager
@@ -224,8 +240,6 @@ class Lifecycle:
                 return public(row)
             if row['state'] == 'pending':
                 user = self.admin.user(uid)
-                if self._grace_login(row, user):
-                    return self._cancel(db, row)
                 row.update(state='fenced', fence_at=None,
                            fence_owned=user is not None and not user['disabled'])
                 db.save(row)
@@ -237,11 +251,8 @@ class Lifecycle:
                     # Only start settlement after the disable has succeeded.
                     row['fence_at'] = self.clock()
                     db.save(row)
-                # Re-read AFTER disabling, including on crash recovery. This
-                # captures Firebase sign-ins racing the deadline/fence even if
-                # the client never delivered its login acknowledgement.
-                if self._grace_login(row, self.admin.user(uid)):
-                    return self._cancel(db, row)
+                # Authentication metadata is not consent. Only a durable
+                # cancellation committed under this lock can stop cleanup.
                 if self.clock() < row['fence_at'] + FENCE_SETTLE_SECONDS:
                     return public(row)
                 row['state'] = 'deleting'

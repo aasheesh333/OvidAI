@@ -20,6 +20,8 @@ import 'voice_input_service.dart';
 import 'agent_notification_service.dart';
 import 'schedule_coordinator.dart';
 import 'state.dart';
+import 'usage_attempt.dart';
+import 'usage_attempt_recorder.dart';
 import 'grant_store.dart';
 import 'global_repo_registry.dart';
 import 'sandbox_service.dart';
@@ -815,18 +817,33 @@ class AgentRun {
   Set<String>? activeSkillTools;
   String? activeSkillName;
 
-  /// Set for the duration of ONE tool call when its `pre_tool` hook returned
-  /// `permissionDecision:"allow"` — Claude Code semantics: the plugin has
-  /// already decided, so the ordinary user approval prompt is skipped.
-  /// Per-run (zone-resolved) so parallel sessions never share it, and always
-  /// cleared in the dispatch `finally`.
-  bool hookAllowBypass = false;
-
   /// Latest human-readable progress line for this run ("retrying in 9s…",
   /// "context compacted", "running npm test"). The event log was never
   /// rendered anywhere, so retries and backoffs were invisible; the composer
   /// status row reads this.
   String? statusLine;
+}
+
+class _PermissionRewriteSignal implements Exception {
+  const _PermissionRewriteSignal(this.updatedInput);
+
+  final Map<String, dynamic> updatedInput;
+}
+
+/// Permission state belongs to one dispatch, not to the session's run bucket.
+/// A run may have overlapping tool calls (and tests can exercise that directly),
+/// so storing replay/bypass flags on [AgentRun] lets one call consume another's
+/// approval.
+class _PermissionDispatchContext {
+  final Object accountToken;
+  bool hookAllowBypass = false;
+  bool permissionRewriteReplay = false;
+
+  _PermissionDispatchContext(this.accountToken);
+
+  bool get accountCurrent =>
+      identical(accountToken, AppState.I.sessionAccountToken) &&
+      AppState.I.sessionAccountReady;
 }
 
 /// Session event (the session ledger SessionEvent equivalent) — durable facts about what
@@ -964,6 +981,25 @@ class AgentService extends ChangeNotifier {
   }
 
   static final AgentService I = AgentService._();
+
+  UsageAttemptRecorder? _usageAttemptRecorder;
+
+  UsageAttemptRecorder get _attemptRecorder =>
+      _usageAttemptRecorder != null &&
+          identical(
+            _usageAttemptRecorder!.owner,
+            AppState.I.sessionAccountToken,
+          )
+      ? _usageAttemptRecorder!
+      : (_usageAttemptRecorder = UsageAttemptRecorder(
+          owner: AppState.I.sessionAccountToken,
+          write: (attempt, {owner}) =>
+              AppState.I.recordUsageAttempt(attempt, owner: owner),
+        ));
+
+  @visibleForTesting
+  void resetUsageAttemptRecorderForTest({UsageAttemptRecorder? recorder}) =>
+      _usageAttemptRecorder = recorder;
 
   /// The agent mode that applies to the current execution context.
   ///
@@ -1155,12 +1191,22 @@ class AgentService extends ChangeNotifier {
   /// subagent loops. Two sessions running at the same time NEVER see
   /// each other's bucket because each lives in its own Zone.
   static const _runCtxKey = #ovidAgentRunCtx;
+  static const _permissionDispatchCtxKey = #ovidAgentPermissionDispatchCtx;
+
+  // HookService suppresses re-entrant blocking events by session/event key.
+  // Queue permission-bearing dispatches so two tool calls cannot cause one
+  // call to observe the other's in-flight hook. The dispatch context remains
+  // per invocation; the queue only protects the hook/approval transaction.
+  Future<void> _permissionDispatchTail = Future<void>.value();
 
   /// The per-run execution context active in the current async Zone.
   /// Tests may pin one via [setRunCtxForTest] (no Zone needed).
   _RunCtx? _testRunCtxOverride;
   _RunCtx? get _runCtx =>
       _testRunCtxOverride ?? Zone.current[_runCtxKey] as _RunCtx?;
+
+  _PermissionDispatchContext? get _permissionDispatchCtx =>
+      Zone.current[_permissionDispatchCtxKey] as _PermissionDispatchContext?;
 
   /// The run bound to the session a RUNNING agent action belongs to,
   /// else the active session's bucket. Mid-run tool calls MUST route
@@ -4822,7 +4868,8 @@ if (!window.__ovidBlankHooked) {
     final sessionId = _currentRunKey();
     final repo = sessionRepoFull;
     final folder = AppState.I.activeSession?.workspaceFolder;
-    if (sessionId.isEmpty || ((repo == null || repo.isEmpty) && folder == null)) {
+    if (sessionId.isEmpty ||
+        ((repo == null || repo.isEmpty) && folder == null)) {
       return;
     }
     if (RepoCache.I.isReady &&
@@ -5019,7 +5066,8 @@ if (!window.__ovidBlankHooked) {
         // Size guard: don't slurp huge binaries into the editor.
         if (f.lengthSync() > 2 * 1024 * 1024) continue;
         final content = await f.readAsString();
-        if (!owns(path) || f.lastModifiedSync().millisecondsSinceEpoch != mtime) {
+        if (!owns(path) ||
+            f.lastModifiedSync().millisecondsSinceEpoch != mtime) {
           continue;
         }
         st.syncedMtime[path] = mtime;
@@ -6249,9 +6297,7 @@ user which one instead of assuming this one.''';
   }
 
   List<Map<String, dynamic>> get _tools {
-    final tools = <Map<String, dynamic>>[
-      ...McpCatalogTools.I.toolSpecs,
-    ];
+    final tools = <Map<String, dynamic>>[...McpCatalogTools.I.toolSpecs];
     final app = AppState.I;
     // Plugin contributions resolve by the RUNNING session id — never the
     // foreground session (spec §7 session scoping at roster resolution).
@@ -9471,6 +9517,9 @@ user which one instead of assuming this one.''';
     final start = s.compactedAtCount.clamp(0, s.messages.length);
     for (final m in s.messages.skip(start)) {
       if (m.kind == MsgKind.compact) continue;
+      if (m.kind == MsgKind.reasoning && !AppState.I.showReasoning) {
+        continue;
+      }
       if (m.kind == MsgKind.tool) {
         final name = m.toolName ?? 'tool';
         final summary = m.content.trim();
@@ -9680,6 +9729,7 @@ user which one instead of assuming this one.''';
         ],
         s,
         includeTools: false,
+        purpose: 'compaction',
         // Invisible helper call — must never stream into the transcript.
         streamToTranscript: false,
       );
@@ -10868,7 +10918,8 @@ ${await _agentsMdBlock()}
         if (sessionCtx.isNotEmpty) {
           msgs.insert(0, {'role': 'system', 'content': sessionCtx});
         }
-        var msg = await _callLlm(p, msgs, s);
+        final requestId = _logicalRequestId();
+        var msg = await _callLlm(p, msgs, s, requestId: requestId);
         if (_runChainStale) break;
         // Task 8 (spec §8.1): post_request — observe-only hook after every
         // LLM response (fire-and-forget; output is never injected).
@@ -10909,7 +10960,7 @@ ${await _agentsMdBlock()}
               'context overflow — request rebuilt from compacted history '
                   '(${msgs.length} rows)',
             );
-            msg = await _callLlm(p, msgs, s);
+            msg = await _callLlm(p, msgs, s, requestId: requestId);
             if (_runChainStale) break;
           }
           if (msg == null) {
@@ -10928,24 +10979,32 @@ ${await _agentsMdBlock()}
         // Meter tokens for the Usage screen (real data, StatsLine style).
         if (msg != null) {
           final u = msg['usage'] as Map<String, dynamic>?;
-          var pt = (u?['prompt_tokens'] as num?)?.toInt() ?? 0;
-          var ct = (u?['completion_tokens'] as num?)?.toInt() ?? 0;
+          var pt = (u?['prompt_tokens'] as num?)?.toInt();
+          var ct = (u?['completion_tokens'] as num?)?.toInt();
           // Fallback metering — provider sent NO usage (e.g. endpoints that
           // ignore stream_options): estimate with the token-meter
           // heuristic (chars/4 + 4 overhead) so Usage/context-% never zero.
-          if (pt <= 0) {
-            pt = msgs.fold<int>(0, (a, m) {
-              final c = m['content'];
-              return a + estimateMessageTokens(c is String ? c : '');
-            });
-          }
-          if (ct <= 0) {
-            ct =
-                estimateMessageTokens((msg['content'] as String?) ?? '') +
-                estimateMessageTokens(
-                  (msg['reasoning_content'] as String?) ?? '',
-                );
-          }
+          pt ??= msgs.fold<int>(0, (a, m) {
+            final c = m['content'];
+            return a + estimateMessageTokens(c is String ? c : '');
+          });
+          ct ??=
+              estimateMessageTokens((msg['content'] as String?) ?? '') +
+              estimateMessageTokens(
+                (msg['reasoning_content'] as String?) ?? '',
+              );
+          final requestedModel =
+              (msg['requestedModel'] as String?)?.trim().isNotEmpty == true
+              ? (msg['requestedModel'] as String).trim()
+              : effectiveModelForSession(s);
+          final reportedModel = (msg['reportedModel'] as String?)?.trim();
+          // Provider aliases (notably `auto`) are intentionally retained in
+          // the request route. Attribution uses the provider's reported id
+          // when available; when it is absent, the requested identity remains
+          // the legacy fallback and the alias cannot be resolved safely.
+          final attributionModel = reportedModel?.isNotEmpty == true
+              ? reportedModel!
+              : requestedModel;
           lastPromptTokens = pt;
           // Per-run session stats (PR18): per-TURN TTFT (not just the
           // first), decode tok/s, cache buckets.
@@ -10988,25 +11047,6 @@ ${await _agentsMdBlock()}
           _runResolved.systemTokens = sysTok;
           _runResolved.toolTokens = toolTok;
           _runResolved.messageTokens = msgTok;
-          AppState.I.appendUsage(
-            UsageEntry(
-              time: DateTime.now(),
-              providerId: p.id,
-              providerName: p.name,
-              model: _baseModelOf(effectiveModelForSession(s)),
-              promptTokens: pt,
-              completionTokens: ct,
-              totalTokens: (u?['total_tokens'] as num?)?.toInt() ?? pt + ct,
-              cacheReadTokens:
-                  (details?['cached_tokens'] as num?)?.toInt() ??
-                  (u?['cache_read_tokens'] as num?)?.toInt() ??
-                  0,
-              cacheWriteTokens:
-                  (u?['cache_write_tokens'] as num?)?.toInt() ?? 0,
-              duration: Duration.zero,
-            ),
-            owner: ctx.accountToken,
-          );
           final toolDelta =
               _runResolved.toolMs - _runResolved.analyticsToolMsRecorded;
           final llmDelta =
@@ -11014,7 +11054,7 @@ ${await _agentsMdBlock()}
           final stepDelta =
               _runResolved.steps - _runResolved.analyticsStepsRecorded;
           final cost = estimatedCostForModel(
-            _baseModelOf(effectiveModelForSession(s)),
+            _baseModelOf(attributionModel),
             pt,
             ct,
           );
@@ -11676,6 +11716,7 @@ ${await _agentsMdBlock()}
         includeTools: false,
         // Invisible helper call — must never stream into the transcript.
         streamToTranscript: false,
+        purpose: 'hook',
       ).timeout(const Duration(seconds: 120));
       final text = (r?['content'] as String?)?.trim();
       return (text == null || text.isEmpty) ? null : text;
@@ -11767,6 +11808,7 @@ ${await _agentsMdBlock()}
             includeTools: false,
             // Invisible helper call — must never stream into the transcript.
             streamToTranscript: false,
+            purpose: 'prompt_tool',
           );
     if (r == null) {
       return 'Model call failed: ${lastError ?? 'unknown'}.';
@@ -11912,6 +11954,7 @@ ${await _agentsMdBlock()}
                 // transcript.
                 streamToTranscript: false,
                 route: route,
+                purpose: 'fanout',
               );
       } catch (e) {
         return '## $label\nModel call failed: $e.';
@@ -12033,6 +12076,7 @@ ${await _agentsMdBlock()}
               // Invisible helper call — must never stream into the
               // transcript.
               streamToTranscript: false,
+              purpose: 'title',
             );
       final choices = (r?['choices'] as List?)?.whereType<Map>().toList() ?? [];
       // The title call goes through the streaming transport, which returns
@@ -12076,6 +12120,10 @@ ${await _agentsMdBlock()}
   /// process tools get generous deadlines; local fs reads stay tight; the
   /// catch-all keeps a stuck tool from hanging the run forever.
   Duration _toolTimeoutFor(String name) {
+    final mcpTool = McpService.I.resolveToolName(name);
+    if (mcpTool != null) {
+      return Duration(seconds: mcpTool.server.toolTimeoutS.clamp(5, 600));
+    }
     // Tools that legitimately wait on humans or long jobs are exempt.
     if (name == 'ask_user_question' ||
         name == 'exit_plan_mode' ||
@@ -12100,6 +12148,9 @@ ${await _agentsMdBlock()}
     };
   }
 
+  @visibleForTesting
+  Duration toolTimeoutForTest(String name) => _toolTimeoutFor(name);
+
   /// Test seam: replaces a SINGLE LLM attempt (the retry wrapper still
   /// runs around it). Null in production.
   @visibleForTesting
@@ -12121,6 +12172,14 @@ ${await _agentsMdBlock()}
     ChatSession session, {
     bool includeTools = true,
   }) => _callLlmOnce(p, msgs, session, includeTools: includeTools);
+
+  @visibleForTesting
+  Future<Map<String, dynamic>?> callLlmForTest(
+    ProviderConfig p,
+    List<Map<String, dynamic>> msgs,
+    ChatSession session, {
+    bool includeTools = true,
+  }) => _callLlm(p, msgs, session, includeTools: includeTools);
 
   /// Test seam: overrides the [GlobalRepoRegistry] the git_clone tool
   /// routes GitHub URLs through (Issue 3). Null in production — the real
@@ -12185,6 +12244,8 @@ ${await _agentsMdBlock()}
     // under the real answer.
     bool streamToTranscript = true,
     _RequestRoute? route,
+    String purpose = 'agent',
+    String? requestId,
   }) async {
     route ??= _requestRoute(p, session);
     p = route.providerCopy();
@@ -12193,6 +12254,7 @@ ${await _agentsMdBlock()}
       _runCtx?.epoch ?? _runResolved.runEpoch,
     );
     var lastErr = 'unknown';
+    requestId ??= _logicalRequestId();
     for (var attempt = 0; attempt <= 4; attempt++) {
       if (!owner.current) return null;
       // A failed attempt may have streamed a partial answer into the live
@@ -12206,6 +12268,8 @@ ${await _agentsMdBlock()}
         includeTools: includeTools,
         streamToTranscript: streamToTranscript,
         route: route,
+        requestId: requestId,
+        purpose: purpose,
       );
       if (!owner.current) return null;
       if (r != null) {
@@ -12255,6 +12319,109 @@ ${await _agentsMdBlock()}
     // True only on that single retry — never set by callers.
     bool dropReasoningEffort = false,
     _RequestRoute? route,
+    String? requestId,
+    String purpose = 'agent',
+  }) async {
+    requestId ??= _logicalRequestId();
+    if (purpose == 'agent' && session.isSubagent) purpose = 'children';
+    final attempt = llmOnceForTest == null
+        ? await _attemptRecorder.begin(
+            requestId: requestId,
+            provider: p.id,
+            requestedModel: route?.model ?? p.selectedModel ?? 'unknown',
+            purpose: purpose,
+            sessionId: session.id,
+            runId: _runResolved.runKey,
+          )
+        : null;
+    if (llmOnceForTest == null && attempt == null) {
+      // A missing prepared row must remain visible without changing provider
+      // behavior; the recorder exposes the bounded storage result for callers.
+      _emit('think', 'usage accounting incomplete (request not captured)');
+    }
+    try {
+      final result = await _callLlmOnceTransport(
+        p,
+        msgs,
+        session,
+        includeTools: includeTools,
+        streamToTranscript: streamToTranscript,
+        dropReasoningEffort: dropReasoningEffort,
+        route: route,
+        requestId: requestId,
+        purpose: purpose,
+        attempt: attempt,
+      );
+      final transportOutcome = result?['_attemptOutcome'] as String?;
+      result?.remove('_attemptOutcome');
+      if (attempt != null) {
+        await _completeUsageAttempt(
+          attempt,
+          outcome: transportOutcome == 'failed'
+              ? UsageOutcome.failed
+              : result != null
+              ? UsageOutcome.succeeded
+              : (_cancelRequested || _runChainStale
+                    ? UsageOutcome.cancelled
+                    : UsageOutcome.failed),
+          reportedModel: result?['reportedModel'] as String?,
+          usage: (result?['usage'] as Map?)?.cast<String, dynamic>(),
+        );
+      }
+      return result;
+    } catch (_) {
+      if (attempt != null) {
+        await _completeUsageAttempt(
+          attempt,
+          outcome: _cancelRequested || _runChainStale
+              ? UsageOutcome.cancelled
+              : UsageOutcome.failed,
+        );
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _completeUsageAttempt(
+    UsageAttemptHandle attempt, {
+    required UsageOutcome outcome,
+    String? reportedModel,
+    Map<String, dynamic>? usage,
+  }) async {
+    unawaited(attempt.complete(
+      outcome: outcome,
+      reportedModel: reportedModel,
+      usage: usage,
+    ).then<void>((_) {
+      if (!attempt.captureResult.captured) {
+        _emit('think', 'usage accounting incomplete (storage unavailable)');
+      }
+    }));
+  }
+
+  void _captureUsageUpdate(
+    UsageAttemptHandle? attempt, {
+    Map<String, dynamic>? usage,
+    String? reportedModel,
+  }) {
+    if (attempt == null) return;
+    unawaited(attempt.updateUsage(usage: usage, reportedModel: reportedModel));
+  }
+
+  String _logicalRequestId() =>
+      'request-${DateTime.now().microsecondsSinceEpoch}-${_toolCallSeq++}';
+
+  Future<Map<String, dynamic>?> _callLlmOnceTransport(
+    ProviderConfig p,
+    List<Map<String, dynamic>> msgs,
+    ChatSession session, {
+    bool includeTools = true,
+    bool streamToTranscript = true,
+    bool dropReasoningEffort = false,
+    _RequestRoute? route,
+    required String requestId,
+    required String purpose,
+    UsageAttemptHandle? attempt,
   }) async {
     final owner = _TransportOwner(
       _runResolved,
@@ -12281,10 +12448,12 @@ ${await _agentsMdBlock()}
         includeTools: includeTools,
         streamToTranscript: streamToTranscript,
         route: route,
+        attempt: attempt,
       );
     }
     HttpClient? client;
-    final ttftWatch = Stopwatch()..start();
+    final transportWatch = Stopwatch();
+    final ttftWatch = Stopwatch();
     int? ttftMs;
     try {
       client = HttpClient();
@@ -12346,7 +12515,12 @@ ${await _agentsMdBlock()}
       final bodyStr = jsonEncode(body);
       final bodyBytes = utf8.encode(bodyStr);
       req.headers.contentLength = bodyBytes.length;
+      // Start only at the physical request boundary. Preparation and journal
+      // writes must never contribute to provider transport attribution.
+      transportWatch.start();
+      ttftWatch.start();
       req.add(bodyBytes);
+      attempt?.markTransmitted();
 
       // Total stream deadline — user-configurable in Settings (default 2 min).
       // ── NEVER-STOP semantics: the deadline is per-CHUNK IDLE, not total ──
@@ -12396,7 +12570,7 @@ ${await _agentsMdBlock()}
             'provider rejected reasoning_effort — retrying without it '
                 '(tools intact)',
           );
-          return await _callLlmOnce(
+          final fallback = await _callLlmOnce(
             p,
             msgs,
             session,
@@ -12404,7 +12578,12 @@ ${await _agentsMdBlock()}
             streamToTranscript: streamToTranscript,
             dropReasoningEffort: true,
             route: route,
+            requestId: requestId,
+            purpose: purpose,
           );
+          return fallback == null
+              ? null
+              : {...fallback, '_attemptOutcome': 'failed'};
         }
         // ── Auto-fallback for providers that reject tool schemas ──
         // Many compatible endpoints (older OpenRouter models, some
@@ -12438,14 +12617,19 @@ ${await _agentsMdBlock()}
             '(e.g. DeepSeek, GPT-4o, Claude, Gemini) to use them.',
             session: session,
           );
-          return await _callLlm(
+          final fallback = await _callLlm(
             p,
             msgs,
             session,
             includeTools: false,
             streamToTranscript: streamToTranscript,
             route: route,
+            purpose: purpose,
+            requestId: requestId,
           );
+          return fallback == null
+              ? null
+              : {...fallback, '_attemptOutcome': 'failed'};
         }
         lastError = ModelFailure.httpError(
           res.statusCode,
@@ -12467,6 +12651,7 @@ ${await _agentsMdBlock()}
       final tcAcc = <int, Map<String, dynamic>>{};
       String? finishReason;
       Map<String, dynamic>? usage;
+      String? reportedModel;
 
       await for (final raw
           in res
@@ -12502,8 +12687,19 @@ ${await _agentsMdBlock()}
         }
         // Usage chunk — some providers send it with empty choices, so
         // parse it BEFORE the choices guard.
+        final chunkModel = j['model'];
+        if (chunkModel is String && chunkModel.trim().isNotEmpty) {
+          reportedModel = chunkModel.trim();
+        }
         final u = j['usage'];
-        if (u is Map<String, dynamic>) usage = u;
+        if (u is Map<String, dynamic>) {
+          usage = u;
+          _captureUsageUpdate(
+            attempt,
+            usage: usage,
+            reportedModel: reportedModel,
+          );
+        }
         final choices = j['choices'] as List?;
         if (choices == null || choices.isEmpty) continue;
         final choice = choices[0] as Map<String, dynamic>;
@@ -12570,9 +12766,9 @@ ${await _agentsMdBlock()}
         if (tcAcc.isNotEmpty) 'tool_calls': tcAcc.values.toList(),
         'finish_reason': ?finishReason,
         'usage': ?usage,
-        'elapsedMs': DateTime.now()
-            .difference(_runStart ?? DateTime.now())
-            .inMilliseconds,
+        'requestedModel': modelId,
+        'reportedModel': ?reportedModel,
+        'elapsedMs': transportWatch.elapsedMilliseconds,
         'ttftMs': ?ttftMs,
       };
     } catch (e) {
@@ -12585,6 +12781,8 @@ ${await _agentsMdBlock()}
       _emit('err', lastError!);
       return null;
     } finally {
+      if (transportWatch.isRunning) transportWatch.stop();
+      attempt?.setTransportElapsed(transportWatch.elapsedMilliseconds);
       owner.release();
       client?.close(force: true);
     }
@@ -12603,9 +12801,12 @@ ${await _agentsMdBlock()}
   set _liveMsg(Message? v) => _runResolved.liveMsg = v;
 
   void _ensureLiveMsg(ChatSession s) {
+    // Streaming normally owns the tail: avoid scanning the entire transcript
+    // for every chunk, while still finding a live bubble behind other messages.
     if (_liveSession == s &&
         _liveMsg != null &&
-        s.messages.contains(_liveMsg)) {
+        ((s.messages.isNotEmpty && identical(s.messages.last, _liveMsg)) ||
+            s.messages.contains(_liveMsg))) {
       return; // reuse
     }
     // The bubble is BORN as a streaming message — never `reasoning`: the
@@ -12632,19 +12833,44 @@ ${await _agentsMdBlock()}
   /// always painted.
   Timer? _streamRefreshTimer;
   bool _streamRefreshPending = false;
+  int _streamPublicationCount = 0;
   static const _streamRefreshInterval = Duration(milliseconds: 16);
+
+  /// Writes the live buffers into the bubble. The [Message] is the source of
+  /// truth and must always reflect the latest token, so this runs on EVERY
+  /// token; only the expensive UI notification (`AppState.I.refresh()`) is
+  /// throttled by [_refreshStreamThrottled].
+  void _syncLiveBubble() {
+    final message = _liveMsg;
+    if (message == null) return;
+    if (_liveContent.isNotEmpty) {
+      message.content = _liveContent.toString();
+      message.thinking = false;
+    } else if (AppState.I.showReasoning && _liveReasoning.isNotEmpty) {
+      message.content = _liveReasoning.toString();
+      message.thinking = true;
+    }
+  }
+
+  /// One UI publication (notification) of the already-current bubble.
+  void _publishLiveBubble() {
+    if (_liveMsg == null) return;
+    _streamPublicationCount++;
+  }
 
   void _refreshStreamThrottled() {
     if (_streamRefreshTimer != null) {
       _streamRefreshPending = true;
       return;
     }
+    _publishLiveBubble();
     AppState.I.refresh();
     _streamRefreshTimer = Timer(_streamRefreshInterval, () {
       _streamRefreshTimer = null;
       if (!_streamRefreshPending) return;
       _streamRefreshPending = false;
-      _refreshStreamThrottled();
+      _publishLiveBubble();
+      AppState.I.refresh();
     });
   }
 
@@ -12656,12 +12882,21 @@ ${await _agentsMdBlock()}
     _streamRefreshTimer = null;
     final hadPending = _streamRefreshPending;
     _streamRefreshPending = false;
-    if (hadPending) AppState.I.refresh();
+    if (hadPending) {
+      _publishLiveBubble();
+      AppState.I.refresh();
+    }
   }
 
   /// Test seam: drop any pending throttled refresh.
   @visibleForTesting
   void flushStreamRefreshForTest() => _flushStreamRefresh();
+
+  @visibleForTesting
+  int get streamPublicationCountForTest => _streamPublicationCount;
+
+  @visibleForTesting
+  void resetStreamPublicationCountForTest() => _streamPublicationCount = 0;
 
   void _streamToBubble(ChatSession s, String tok) {
     // Stop/output: drop tokens from a stale/cancelled chain — nothing
@@ -12669,8 +12904,7 @@ ${await _agentsMdBlock()}
     if (_runChainStale) return;
     _ensureLiveMsg(s);
     _liveContent.write(tok);
-    _liveMsg!.content = _liveContent.toString();
-    _liveMsg!.thinking = _liveContent.isEmpty;
+    _syncLiveBubble();
     _refreshStreamThrottled();
   }
 
@@ -12681,6 +12915,11 @@ ${await _agentsMdBlock()}
     // Reasoning display toggle (Settings) — OFF hides thinking chips live;
     // tokens still accumulate in reasoningBuf for the final message.
     if (!AppState.I.showReasoning) {
+      _ensureLiveMsg(s);
+      _liveReasoning.write(tok);
+      return;
+    }
+    if (_liveContent.isNotEmpty) {
       _liveReasoning.write(tok);
       return;
     }
@@ -12696,11 +12935,7 @@ ${await _agentsMdBlock()}
     // still accumulates in _liveReasoning for `_finalizeLive`, and `thinking`
     // tracks the ANSWER buffer so the card never asserts "Thinking…" over a
     // reply that is already on screen.
-    final hasAnswer = _liveContent.isNotEmpty;
-    if (!hasAnswer) {
-      _liveMsg!.content = _liveReasoning.toString();
-    }
-    _liveMsg!.thinking = !hasAnswer;
+    _syncLiveBubble();
     _refreshStreamThrottled();
   }
 
@@ -12871,6 +13106,7 @@ ${await _agentsMdBlock()}
     // See [_callLlm]: false keeps helper calls out of the transcript.
     bool streamToTranscript = true,
     required _RequestRoute route,
+    UsageAttemptHandle? attempt,
   }) async {
     final owner = _TransportOwner(
       _runResolved,
@@ -12878,7 +13114,8 @@ ${await _agentsMdBlock()}
     );
     if (!owner.current) return null;
     HttpClient? client;
-    final ttftWatch = Stopwatch()..start();
+    final transportWatch = Stopwatch();
+    final ttftWatch = Stopwatch();
     int? ttftMs;
     try {
       client = HttpClient();
@@ -12934,7 +13171,12 @@ ${await _agentsMdBlock()}
 
       final bodyBytes = utf8.encode(jsonEncode(body));
       req.headers.contentLength = bodyBytes.length;
+      // Start only at the physical request boundary. Preparation and journal
+      // writes must never contribute to provider transport attribution.
+      transportWatch.start();
+      ttftWatch.start();
       req.add(bodyBytes);
+      attempt?.markTransmitted();
 
       final idleBudget = Duration(seconds: AppState.I.responseTimeoutSec);
       final res = await req.close().timeout(
@@ -12978,6 +13220,7 @@ ${await _agentsMdBlock()}
       final toolBlocks = <int, Map<String, dynamic>>{};
       String? finishReason;
       Map<String, dynamic>? usage;
+      String? reportedModel;
 
       await for (final rawLine
           in res
@@ -13006,8 +13249,19 @@ ${await _agentsMdBlock()}
         switch (type) {
           case 'message_start':
             final m = j['message'];
-            if (m is Map && m['usage'] is Map) {
-              usage = Map<String, dynamic>.from(m['usage'] as Map);
+            if (m is Map) {
+              final model = m['model'];
+              if (model is String && model.trim().isNotEmpty) {
+                reportedModel = model.trim();
+              }
+              if (m['usage'] is Map) {
+                usage = Map<String, dynamic>.from(m['usage'] as Map);
+                _captureUsageUpdate(
+                  attempt,
+                  usage: _normalizeAnthropicUsage(usage),
+                  reportedModel: reportedModel,
+                );
+              }
             }
           case 'content_block_start':
             final idx = (j['index'] as num?)?.toInt() ?? 0;
@@ -13064,6 +13318,11 @@ ${await _agentsMdBlock()}
                 merged[e.key.toString()] = e.value;
               }
               usage = merged;
+              _captureUsageUpdate(
+                attempt,
+                usage: _normalizeAnthropicUsage(usage),
+                reportedModel: reportedModel,
+              );
             }
           case 'error':
             final err = j['error'];
@@ -13093,9 +13352,9 @@ ${await _agentsMdBlock()}
         if (toolBlocks.isNotEmpty) 'tool_calls': toolBlocks.values.toList(),
         'finish_reason': ?finishReason,
         'usage': ?_normalizeAnthropicUsage(usage),
-        'elapsedMs': DateTime.now()
-            .difference(_runStart ?? DateTime.now())
-            .inMilliseconds,
+        'requestedModel': modelId,
+        'reportedModel': ?reportedModel,
+        'elapsedMs': transportWatch.elapsedMilliseconds,
         'ttftMs': ?ttftMs,
       };
     } catch (e) {
@@ -13104,6 +13363,8 @@ ${await _agentsMdBlock()}
       _emit('err', lastError!);
       return null;
     } finally {
+      if (transportWatch.isRunning) transportWatch.stop();
+      attempt?.setTransportElapsed(transportWatch.elapsedMilliseconds);
       owner.release();
       client?.close(force: true);
     }
@@ -13114,22 +13375,73 @@ ${await _agentsMdBlock()}
   /// the context ring stay correct for Claude runs.
   Map<String, dynamic>? _normalizeAnthropicUsage(Map<String, dynamic>? usage) {
     if (usage == null) return null;
-    final input = (usage['input_tokens'] as num?)?.toInt() ?? 0;
-    final output = (usage['output_tokens'] as num?)?.toInt() ?? 0;
-    final cacheRead = (usage['cache_read_input_tokens'] as num?)?.toInt() ?? 0;
-    final cacheWrite =
-        (usage['cache_creation_input_tokens'] as num?)?.toInt() ?? 0;
+    final input = (usage['input_tokens'] as num?)?.toInt();
+    final output = (usage['output_tokens'] as num?)?.toInt();
+    final cacheRead = (usage['cache_read_input_tokens'] as num?)?.toInt();
+    final cacheWrite = (usage['cache_creation_input_tokens'] as num?)?.toInt();
+    final prompt = input == null && cacheRead == null && cacheWrite == null
+        ? null
+        : (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
+    final total = prompt == null || output == null ? null : prompt + output;
     return {
-      'prompt_tokens': input + cacheRead + cacheWrite,
-      'completion_tokens': output,
-      'total_tokens': input + cacheRead + cacheWrite + output,
-      'cache_read_tokens': cacheRead,
-      'cache_write_tokens': cacheWrite,
+      ...?prompt == null ? null : {'prompt_tokens': prompt},
+      ...?output == null ? null : {'completion_tokens': output},
+      ...?total == null ? null : {'total_tokens': total},
+      ...?cacheRead == null ? null : {'cache_read_tokens': cacheRead},
+      ...?cacheWrite == null ? null : {'cache_write_tokens': cacheWrite},
     };
   }
 
   // ── TOOL DISPATCH (with mode-based approvals) ─────────────────────────
-  Future<String> _dispatch(String name, Map<String, dynamic> args) async {
+  Future<String> _dispatch(String name, Map<String, dynamic> args) {
+    // The queue only exists to keep HookService's per-session re-entrancy
+    // guard from fail-opening a concurrent call's blocking hook. Without a
+    // blocking listener there is nothing to protect, and queueing would make
+    // dispatch asynchronous (children no longer reserved synchronously) and
+    // serialize every tool call behind long-running ones. A dispatch nested
+    // inside another dispatch (a foreground child's tool call) must not wait
+    // for its own ancestor, or it deadlocks.
+    final nested = _permissionDispatchCtx != null;
+    if (nested || !_dispatchNeedsPermissionQueue()) {
+      return runZoned(
+        () => _dispatchInContext(name, args),
+        zoneValues: {
+          _permissionDispatchCtxKey: _PermissionDispatchContext(
+            AppState.I.sessionAccountToken,
+          ),
+        },
+      );
+    }
+    final previous = _permissionDispatchTail;
+    final current = () async {
+      await previous;
+      // Capture ownership after waiting: a queued call must never inherit an
+      // account token that was current when it was submitted.
+      final permissionCtx = _PermissionDispatchContext(
+        AppState.I.sessionAccountToken,
+      );
+      return runZoned(
+        () => _dispatchInContext(name, args),
+        zoneValues: {_permissionDispatchCtxKey: permissionCtx},
+      );
+    }();
+    _permissionDispatchTail = current.then<void>((_) {}, onError: (_) {});
+    return current;
+  }
+
+  /// Whether a dispatch for the current run session could fire a blocking
+  /// hook (pre_tool / permission_request) that the re-entrancy guard in
+  /// HookService would otherwise share with a concurrent dispatch.
+  bool _dispatchNeedsPermissionQueue() {
+    final sid = _runSession?.id ?? '';
+    return HookService.I.hasHookListeners('pre_tool', sessionId: sid) ||
+        HookService.I.hasHookListeners('permission_request', sessionId: sid);
+  }
+
+  Future<String> _dispatchInContext(
+    String name,
+    Map<String, dynamic> args,
+  ) async {
     if (_runChainStale || !AppState.I.sessionAccountReady) {
       return 'Cancelled: session account changed.';
     }
@@ -13183,7 +13495,9 @@ ${await _agentsMdBlock()}
       // THIS call is skipped. Deliberately narrow — the destructive-command
       // confirmation and plan mode's "asks nothing" rule are checked first in
       // _maybeApprove, so a hook allow cannot widen either.
-      if (gate.bypassPermission) _runResolved.hookAllowBypass = true;
+      if (gate.bypassPermission) {
+        _permissionDispatchCtx?.hookAllowBypass = true;
+      }
       if (gate.decision == HookDecision.deny) {
         // Reuses the existing "DENIED" prefix contract (same UI 'stopped'
         // state + ledger 'ok: false' as a user-declined approval) — a
@@ -13231,7 +13545,32 @@ ${await _agentsMdBlock()}
       }
     }
     try {
-      final res = await _dispatchInner(name, args);
+      late final String res;
+      try {
+        if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
+          return 'Cancelled: session account changed.';
+        }
+        res = await _dispatchInner(name, args);
+      } on _PermissionRewriteSignal catch (signal) {
+        if (_runChainStale || !AppState.I.sessionAccountReady) {
+          return 'Cancelled: session account changed.';
+        }
+        // The permission hook has already run for this call. Re-enter the
+        // full tool path with fresh arguments, but suppress only that
+        // already-fired permission hook. This makes every argument-dependent
+        // validation and safety gate observe the rewritten values, without
+        // double hooks or a recursive rewrite loop.
+        args = <String, dynamic>{...args, ...signal.updatedInput};
+        if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
+          return 'Cancelled: session account changed.';
+        }
+        _permissionDispatchCtx?.permissionRewriteReplay = true;
+        try {
+          res = await _dispatchInner(name, args);
+        } finally {
+          _permissionDispatchCtx?.permissionRewriteReplay = false;
+        }
+      }
       if (_runChainStale || !AppState.I.sessionAccountReady) {
         return 'Cancelled: session account changed.';
       }
@@ -13305,7 +13644,7 @@ ${await _agentsMdBlock()}
       _runResolved.toolMs += sw.elapsedMilliseconds;
       // A hook's "allow" applies to the ONE call it gated — never leak it
       // into the next tool call of this run.
-      _runResolved.hookAllowBypass = false;
+      _permissionDispatchCtx?.hookAllowBypass = false;
     }
   }
 
@@ -13474,6 +13813,13 @@ ${await _agentsMdBlock()}
         }
         try {
           final work = await _sessionWorkDir();
+          // Workspace resolution and sandbox provisioning are asynchronous.
+          // Revalidate the dispatch owner at the last boundary before any
+          // process is spawned, so an account handoff cannot run the command
+          // under the replacement account.
+          if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
+            return 'Cancelled: session account changed.';
+          }
           if (useSandbox) {
             if (usePty) {
               final shell = await PtyPool.I.getOrCreate(
@@ -13535,6 +13881,9 @@ ${await _agentsMdBlock()}
             // 10-minute cap: builds/installs/test-suites need real time
             // (60s used to kill them mid-run). Longer work → the model
             // already has job_start (background jobs, unbounded).
+            if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
+              return 'Cancelled: session account changed.';
+            }
             final out = await SandboxService.I
                 .exec(['bash', '-c', cmd], hostWorkDir: work)
                 .timeout(const Duration(minutes: 10));
@@ -13553,6 +13902,9 @@ ${await _agentsMdBlock()}
             return finalOut;
           }
           // Phone terminal tier — device shell, no install needed.
+          if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
+            return 'Cancelled: session account changed.';
+          }
           final out = await SandboxService.I
               .execHost(cmd, hostWorkDir: work)
               .timeout(const Duration(minutes: 10));
@@ -13592,6 +13944,9 @@ ${await _agentsMdBlock()}
         if (!granted) {
           _emit('shellOut', '$perm → DENIED by user');
           return '$perm: DENIED by user';
+        }
+        if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
+          return 'Cancelled: session account changed.';
         }
         try {
           final result = await _requestSystemPermission(perm);
@@ -15969,6 +16324,9 @@ ${await _agentsMdBlock()}
           'LOCAL EDIT (no push yet):\n$path\n${content.length} chars',
         );
         if (!ok) return 'DENIED by user';
+        if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
+          return 'Cancelled: session account changed.';
+        }
         // One write path (C7): disk + repo cache together — `run_shell cat`
         // after a `file_write` must see the same bytes.
         return await _writeWorkspaceFile(path, content, toolLabel: 'edited');
@@ -16948,10 +17306,11 @@ ${await _agentsMdBlock()}
     // a plugin may deny the approval before the user is ever asked
     // (exit 2 / JSON block). Fail-open on any hook failure: a broken
     // hook must never wedge the run (same stance as the pre_tool gate).
-    if (HookService.I.hasHookListeners(
-      'permission_request',
-      sessionId: sessionId ?? '',
-    )) {
+    if (!(_permissionDispatchCtx?.permissionRewriteReplay ?? false) &&
+        HookService.I.hasHookListeners(
+          'permission_request',
+          sessionId: sessionId ?? '',
+        )) {
       final gate = await HookService.I.fireGate(
         'permission_request',
         sessionId ?? '',
@@ -16979,6 +17338,18 @@ ${await _agentsMdBlock()}
           'DENIED by hook (${gate.deniedByPlugin}): ${gate.reason}',
         );
         return false;
+      }
+      if (gate.decision == HookDecision.allow && gate.updatedInput != null) {
+        if (_runChainStale || !AppState.I.sessionAccountReady) {
+          return false;
+        }
+        throw _PermissionRewriteSignal(gate.updatedInput!);
+      }
+      // PermissionRequest `allow` approves the ordinary prompt just like a
+      // pre-tool allow. Destructive and plan-mode checks below still run
+      // before this per-call flag can take effect.
+      if (gate.bypassPermission) {
+        _permissionDispatchCtx?.hookAllowBypass = true;
       }
     }
 
@@ -17048,12 +17419,28 @@ ${await _agentsMdBlock()}
         allowAlways: mode == AgentMode.studio,
       );
     }
+    // A PermissionRequest allow approved the original ordinary prompt. On a
+    // replay, keep that approval for the rewritten call, but only after the
+    // plan-mode and destructive-command guards above have evaluated the new
+    // arguments.
+    if (_permissionDispatchCtx?.permissionRewriteReplay ?? false) {
+      if (sessionId != null) {
+        await SessionLedger.I.append(sessionId, 'approval', {
+          'tool': tool,
+          'ok': true,
+          'allowedBy': 'hook',
+          'replay': true,
+        });
+      }
+      _emit('think', 'approved by a plugin hook — rewritten call');
+      return true;
+    }
     // A `pre_tool` hook that returned `permissionDecision:"allow"` has already
     // decided for this one call (Claude Code semantics), so the user is not
     // asked again. Placed AFTER the plan-mode and destructive-command gates
     // above, so it can never bypass either — and path/host grants go through
     // `_askUser` directly, so the workspace jail is untouched by this.
-    if (_runResolved.hookAllowBypass) {
+    if (_permissionDispatchCtx?.hookAllowBypass ?? false) {
       if (sessionId != null) {
         await SessionLedger.I.append(sessionId, 'approval', {
           'tool': tool,

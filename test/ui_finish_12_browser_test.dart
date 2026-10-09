@@ -130,9 +130,17 @@ void main() {
         await _pump(tester, const BrowserScreen(), size: configuration.size, scale: configuration.scale);
         expect(tester.takeException(), isNull);
         final field = find.byType(TextField);
-        // A usable omnibar must not be squeezed between four navigation icons.
-        expect(tester.getSize(field).width, greaterThanOrEqualTo(240));
-        for (final label in ['Open in browser', 'New tab', 'Reload', 'Go']) {
+        // Navigation shares the title row, on its right, with full hit targets.
+        final titleRect = tester.getRect(field);
+        expect(titleRect.width, greaterThanOrEqualTo(160));
+        for (final action in ['back', 'forward', 'reload']) {
+          final rect = tester.getRect(find.byKey(ValueKey('browser-$action')));
+          expect(rect.left, greaterThanOrEqualTo(titleRect.right));
+          expect(rect.center.dy, closeTo(titleRect.center.dy, 1));
+          expect(rect.width, greaterThanOrEqualTo(48));
+          expect(rect.height, greaterThanOrEqualTo(48));
+        }
+        for (final label in ['Open in browser', 'New tab', 'Reload']) {
           expect(find.byTooltip(label).hitTestable(), findsOneWidget);
         }
         final close = find.bySemanticsLabel('Close tab').first;
@@ -148,8 +156,14 @@ void main() {
         await tester.tap(field);
         await tester.pump();
         expect(tester.widget<TextField>(field).controller!.text, 'https://second.test/page');
+        expect(tester.getSize(field).width, greaterThanOrEqualTo(240));
+        for (final action in ['back', 'forward', 'reload']) {
+          expect(find.byKey(ValueKey('browser-$action')), findsNothing);
+        }
+        expect(find.byTooltip('Go').hitTestable(), findsOneWidget);
         FocusManager.instance.primaryFocus?.unfocus();
         await tester.pump();
+        expect(find.byKey(const ValueKey('browser-reload')), findsOneWidget);
         final secondClose = find.byKey(ValueKey('browser-close-${second.id}'));
         await tester.ensureVisible(secondClose);
         await tester.tap(secondClose);
@@ -266,6 +280,29 @@ void main() {
     expect(native.events.last, 'url:https://www.google.com/search?q=flutter%20layout');
     expect(tab.localPreviewPath, isNull);
     expect(tab.url, 'https://www.google.com/search?q=flutter%20layout');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('Enter navigation unfocuses the URL field and restores controls', (tester) async {
+    final native = _NavigationController();
+    final tab = BrowserTab(url: 'https://example.test/')
+      ..controller = WebViewController.fromPlatform(native)
+      ..profileBound = true;
+    AgentService.I.browserTabs.add(tab);
+    await _pump(tester, const BrowserScreen(), size: const Size(360, 640), scale: 2);
+
+    final field = find.byType(TextField);
+    await tester.tap(field);
+    await tester.enterText(field, 'flutter layout');
+    tester.widget<TextField>(field).onSubmitted!.call('flutter layout');
+    await tester.pump();
+
+    expect(native.events.last, 'url:https://www.google.com/search?q=flutter%20layout');
+    expect(tab.url, 'https://www.google.com/search?q=flutter%20layout');
+    expect(tester.widget<TextField>(field).focusNode!.hasFocus, isFalse);
+    expect(find.byTooltip('Go'), findsNothing);
+    expect(find.byKey(const ValueKey('browser-reload')), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });

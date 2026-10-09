@@ -84,7 +84,7 @@ void main() {
   }
 
   testWidgets(
-    'browser screen mounts aether header/field/status primitives and '
+    'browser screen mounts compact aether header/field primitives and '
     'preserves nav controls',
     (tester) async {
       tester.view.physicalSize = const Size(480, 960);
@@ -97,7 +97,7 @@ void main() {
 
       expect(find.byType(AetherGradientHeader), findsOneWidget);
       expect(find.byKey(const ValueKey('browser-url-field')), findsOneWidget);
-      expect(find.byKey(const ValueKey('browser-status-dot')), findsOneWidget);
+      expect(find.byKey(const ValueKey('browser-status-dot')), findsNothing);
       expect(find.byKey(const ValueKey('browser-back')), findsOneWidget);
       expect(find.byKey(const ValueKey('browser-forward')), findsOneWidget);
       expect(find.byKey(const ValueKey('browser-reload')), findsOneWidget);

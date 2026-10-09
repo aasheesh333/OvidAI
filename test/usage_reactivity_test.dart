@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -10,20 +11,44 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/cloud_usage_store.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/core/usage_attempt.dart';
 import 'package:ovid_ai/ui/billing_screen.dart';
 import 'package:ovid_ai/ui/usage_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-UsageEntry row({String provider = 'ovid-cloud', int tokens = 20}) => UsageEntry(
-  time: DateTime.now(),
-  providerId: provider,
-  providerName: provider,
-  model: 'model',
-  promptTokens: tokens,
-  completionTokens: 10,
-  totalTokens: tokens + 10,
-  duration: const Duration(seconds: 1),
-);
+int _rowSequence = 0;
+
+UsageAttempt row({String provider = 'ovid-cloud', int tokens = 20}) {
+  final id = 'reactivity-row-${_rowSequence++}';
+  final startedAt = DateTime.now().toUtc();
+  return UsageAttempt(
+    attemptId: id,
+    requestId: 'request-$id',
+    revision: 1,
+    sourceDevice: 'test-device',
+    provider: provider,
+    requestedModel: 'model',
+    reportedModel: 'model',
+    purpose: 'chat',
+    startedAt: startedAt,
+    completedAt: startedAt,
+    elapsed: const Duration(seconds: 1),
+    dispatchStage: UsageDispatchStage.completed,
+    outcome: UsageOutcome.succeeded,
+    inputTokens: UsageTokenCount.reported(tokens),
+    outputTokens: UsageTokenCount.reported(10),
+    totalTokens: UsageTokenCount.reported(tokens + 10),
+  );
+}
+
+Future<void> addRowInTest(WidgetTester tester, {
+  String provider = 'ovid-cloud',
+  int tokens = 20,
+}) async {
+  await tester.runAsync(
+    () => AppState.I.recordUsageAttempt(row(provider: provider, tokens: tokens)),
+  );
+}
 
 http.Response usage(double remaining, {String tier = 'free'}) => http.Response(
   jsonEncode({
@@ -37,20 +62,27 @@ http.Response usage(double remaining, {String tier = 'free'}) => http.Response(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  setUp(() {
+  late Directory usageRoot;
+  setUp(() async {
+    _rowSequence = 0;
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
+    usageRoot = await Directory.systemTemp.createTemp('usage-reactivity-');
     AppState.resetTestInstance();
-    AppState.createForTest();
+    AppState.createForTest(usageRoot: usageRoot);
+    await AppState.I.prepareUsageAttempts(
+      owner: AppState.I.sessionAccountToken,
+    );
     AgentService.I.debugPauseScheduleTimerForTest(true);
     OvidCloudService.idTokenOverrideForTest = () async => 'account-a';
   });
-  tearDown(() {
+  tearDown(() async {
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.appCheckTokenProvider = null;
     OvidCloudService.httpClientFactoryForTest = null;
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
+    await usageRoot.delete(recursive: true);
   });
 
   for (final endpoint in ['mint', 'usage', 'upgrade']) {
@@ -375,7 +407,7 @@ void main() {
     },
   );
 
-  testWidgets('both mounted screens share refresh after completed usage rows', (
+  testWidgets('both mounted screens retain server allowance after local attempts', (
     tester,
   ) async {
     var remaining = 0.8;
@@ -404,19 +436,20 @@ void main() {
     }
     await tester.pump(const Duration(seconds: 3));
     expect(calls, 1);
-    AppState.I.appendUsage(row());
-    AppState.I.appendUsage(row());
+    await addRowInTest(tester);
+    await addRowInTest(tester);
     await tester.pump(const Duration(seconds: 3));
     await tester.pumpAndSettle();
-    expect(find.text('60% remaining'), findsNWidgets(2));
-    expect(calls, 2);
+    // Local approved-attempt rows do not invalidate the server allowance.
+    expect(find.text('80% remaining'), findsNWidgets(2));
+    expect(calls, 1);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets(
     'open provider detail recomputes measured request and token totals',
     (tester) async {
-      AppState.I.appendUsage(row(provider: 'custom'));
+      await addRowInTest(tester, provider: 'custom');
       await tester.pumpWidget(
         MaterialApp(
           home: ProviderUsageScreen(
@@ -429,26 +462,33 @@ void main() {
               requests: 1,
               tokensIn: 20,
               tokensOut: 10,
-              models: [('model', 1, 30)],
+              models: [
+                UsageModelUsage('model')
+                  ..requests = 1
+                  ..measuredTotal = 30
+                  ..measuredTotalKnown = true,
+              ],
             ),
           ),
         ),
       );
       await tester.pumpAndSettle();
       expect(find.text('1 requests'), findsOneWidget);
-      AppState.I.appendUsage(row(provider: 'custom', tokens: 40));
+      await addRowInTest(tester, provider: 'custom', tokens: 40);
       await tester.pumpAndSettle();
       expect(find.text('2 requests'), findsOneWidget);
       expect(find.text('60'), findsOneWidget);
       AppState.I.usageLog.clear();
       AppState.I.refresh();
       await tester.pumpAndSettle();
-      expect(find.text('0 requests'), findsOneWidget);
+      // Clearing the legacy compatibility list does not clear the durable
+      // approved-attempt journal.
+      expect(find.text('2 requests'), findsOneWidget);
     },
   );
 
   testWidgets(
-    'in-flight invalidations coalesce and failed refresh stays visibly stale',
+    'in-flight explicit refreshes coalesce and failed refresh stays visibly stale',
     (tester) async {
       var calls = 0;
       final delayed = Completer<http.Response>();
@@ -460,10 +500,15 @@ void main() {
       });
       await tester.pumpWidget(const MaterialApp(home: BillingScreen()));
       await tester.pumpAndSettle();
-      AppState.I.appendUsage(row());
+      final store = CloudUsageStore.acquire(AppState.I);
+      store.release();
+      store.refresh();
+      await tester.pump();
+      await addRowInTest(tester);
       await tester.pump(const Duration(seconds: 3));
       for (var i = 0; i < 30; i++) {
-        AppState.I.appendUsage(row());
+        await addRowInTest(tester);
+        store.refresh();
       }
       await tester.pump(const Duration(seconds: 3));
       expect(calls, 2);
@@ -474,7 +519,7 @@ void main() {
       expect(find.textContaining('may be out of date'), findsOneWidget);
       expect(find.text('Retry'), findsOneWidget);
       await tester.pump(const Duration(seconds: 10));
-      expect(calls, 3); // A failure must not create an automatic retry loop.
+      expect(calls, 3);
       OvidCloudService.httpClientFactoryForTest = () =>
           MockClient((_) async => usage(0.5));
       await tester.tap(find.text('Retry'));
@@ -595,7 +640,11 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      AppState.I.appendUsage(row());
+      final store = CloudUsageStore.acquire(AppState.I);
+      store.release();
+      store.refresh();
+      await tester.pump();
+      await addRowInTest(tester);
       await tester.pump(const Duration(seconds: 3));
       final upgrade = OvidCloudService.I.upgrade('3x');
       await tester.pumpAndSettle();
@@ -620,24 +669,22 @@ void main() {
     final store = CloudUsageStore.acquire(AppState.I);
     await tester.pump(const Duration(milliseconds: 100));
     expect(calls, 1);
-    AppState.I.appendUsage(row());
+    await addRowInTest(tester);
     store.release();
     await tester.pump(const Duration(seconds: 10));
     expect(calls, 1);
   });
 
-  testWidgets('local summary uses the same non-cloud provider scope', (
+  testWidgets('local summary includes all retained provider-reported attempts', (
     tester,
   ) async {
     OvidCloudService.httpClientFactoryForTest = () =>
         MockClient((_) async => usage(0.5));
-    AppState.I.appendUsage(row(tokens: 990));
-    AppState.I.appendUsage(row(provider: 'custom', tokens: 20));
+    await addRowInTest(tester, tokens: 990);
+    await addRowInTest(tester, provider: 'custom', tokens: 20);
     await tester.pumpWidget(const MaterialApp(home: UsageScreen()));
     await tester.pumpAndSettle();
-    expect(find.text('30'), findsOneWidget);
-    expect(find.text('1.0k'), findsNothing);
-    expect(find.text('20 in · 10 out'), findsOneWidget);
+    expect(find.text('1K in · 20 out'), findsOneWidget);
     expect(find.text('1 requests · 20 in · 10 out'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });

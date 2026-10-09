@@ -105,6 +105,8 @@ void main() {
         await reveal(tester, find.text(_longName));
         final title = tester.widget<Text>(find.text(_longName));
         expect(title.overflow, isNot(TextOverflow.ellipsis));
+        await tester.tap(find.text(_longName));
+        await tester.pumpAndSettle();
         await reveal(tester, find.text(_longModel));
         await reveal(tester, find.byTooltip('More actions'));
         await tester.tap(find.byTooltip('More actions'));
@@ -321,6 +323,9 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await reveal(tester, find.text('3 models fetched ✓'));
+    await reveal(tester, find.text(_longName));
+    await tester.tap(find.text(_longName));
+    await tester.pumpAndSettle();
     await reveal(tester, find.text('new-research-model'));
   });
 

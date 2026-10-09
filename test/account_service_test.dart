@@ -112,27 +112,65 @@ void main() {
     },
   );
 
+  test('login acknowledgement is observational for pending accounts', () async {
+    final service = AccountService(
+      enabled: true,
+      idToken: (_) async => 'id',
+      appCheck: () async => 'app',
+      client: MockClient((request) async {
+        expect(request.url.path, '/account/login');
+        return http.Response(
+          '{"state":"pending","delete_after":87400,"request_id":"request-0001"}',
+          200,
+        );
+      }),
+    );
+    expect((await service.acknowledgeLogin()).state, 'pending');
+  });
+
   test(
-    'login acknowledgement requires an active or cancelled server state',
+    'explicit cancellation requires consent and confirms cancelled state',
     () async {
-      for (final state in ['pending', 'fenced', 'deleting', 'deleted']) {
-        final service = AccountService(
-          enabled: true,
-          idToken: (_) async => 'id',
-          appCheck: () async => 'app',
-          client: MockClient((request) async {
-            expect(request.url.path, '/account/login');
-            return http.Response(
-              '{"state":"$state","delete_after":87400,"request_id":"request-0001"}',
-              200,
-            );
-          }),
-        );
-        await expectLater(
-          service.acknowledgeLogin(),
-          throwsA(isA<AccountException>()),
-        );
-      }
+      final service = AccountService(
+        enabled: true,
+        idToken: (_) async => 'id',
+        appCheck: () async => 'app',
+        client: MockClient((request) async {
+          expect(request.url.path, '/account/deletion/cancel');
+          expect(jsonDecode(request.body), {'consent': true});
+          return http.Response(
+            '{"state":"cancelled","delete_after":87400,"request_id":"request-0001"}',
+            200,
+          );
+        }),
+      );
+      expect((await service.cancelDeletion()).state, 'cancelled');
     },
   );
+
+  test('cancellation never admits an unconfirmed server state', () async {
+    final service = AccountService(
+      enabled: true,
+      idToken: (_) async => 'id',
+      appCheck: () async => 'app',
+      client: MockClient((request) async {
+        expect(jsonDecode(request.body), {'consent': true});
+        return http.Response(
+          '{"state":"pending","delete_after":87400,"request_id":"request-0001"}',
+          200,
+        );
+      }),
+    );
+
+    await expectLater(
+      service.cancelDeletion(),
+      throwsA(
+        isA<AccountException>().having(
+          (error) => error.message,
+          'message',
+          contains('did not confirm'),
+        ),
+      ),
+    );
+  });
 }

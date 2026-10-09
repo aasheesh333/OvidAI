@@ -180,4 +180,37 @@ void main() {
     // Call runs with 5s timeout
     expect(res, isNotNull);
   });
+
+  test(
+    'agent timeout budget resolves canonical and legacy MCP names per server',
+    () async {
+      McpService.I.registerNativeHandler(
+        'timeout_aliases',
+        (_) => _HangingNativeHandler(),
+      );
+
+      final server = McpServer(
+        name: 'timeout_aliases',
+        author: 'test',
+        description: 'desc',
+        category: 'Custom',
+        command: '',
+        transport: 'native',
+        toolTimeoutS: 600,
+      );
+      AppState.I.mcpServers.add(server);
+      await McpService.I.connect(server);
+
+      final entry = McpService.I.connectedToolEntries.single;
+      expect(
+        AgentService.I.toolTimeoutForTest(entry.canonicalToolName).inSeconds,
+        600,
+      );
+      expect(
+        AgentService.I.toolTimeoutForTest(entry.legacyToolName).inSeconds,
+        600,
+      );
+      expect(AgentService.I.toolTimeoutForTest('fetch_url').inSeconds, 60);
+    },
+  );
 }

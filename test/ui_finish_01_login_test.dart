@@ -181,7 +181,10 @@ void main() {
     await _reveal(tester, find.text('Account deletion pending'));
     await _reveal(tester, find.textContaining('2026-10-06'));
     expect(find.textContaining('13:45:00.000 UTC'), findsOneWidget);
-    await _reveal(tester, find.textContaining('Sign in before then to cancel.'));
+    await _reveal(
+      tester,
+      find.textContaining('Signing in does not cancel deletion'),
+    );
     await _reveal(tester, find.text('Continue with Google'));
     await tester.tap(find.text('Continue with Google'));
     await tester.pump();
