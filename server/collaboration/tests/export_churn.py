@@ -1,15 +1,12 @@
-"""Real FastAPI/repository fixture consumed by the Dart cold-replay test."""
+"""Repository-only fixture consumed by the Dart cold-replay test.
+
+The Flutter CI job intentionally does not install the server's FastAPI stack;
+the fixture therefore exercises the durable repository contract directly.
+HTTP transport is covered by the Python collaboration integration suite.
+"""
 import json
 import tempfile
-from contextlib import contextmanager
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from server.collaboration.api import router
 from server.collaboration.repository import CollabRepository
-
-@contextmanager
-def admission(claims):
-    yield claims
 
 def export():
     with tempfile.TemporaryDirectory() as directory:
@@ -25,16 +22,9 @@ def export():
         code = repo.create_invite('owner', token, max_uses=9)['inviteCode']
         for i in range(9):
             repo.join(f'u{i}', token, code)
-        app = FastAPI()
-        app.include_router(router(repo, lambda *_: {'uid': 'u0'}, admission), prefix='/chat')
-        http = TestClient(app)
-        headers = {'Authorization': 'Bearer test', 'X-Firebase-AppCheck': 'test'}
-        state = http.get(f'/chat/{token}', headers=headers)
-        assert state.status_code == 200
-        page = http.get(f'/chat/{token}/events', headers=headers,
-                        params={'cursor': state.json()['cursor']})
-        assert page.status_code == 200
-        return {'state': state.json(), 'page': page.json()}
+        state = repo.get_state('u0', token)
+        page = repo.replay('u0', token, state['cursor'])
+        return {'state': state, 'page': page}
 
 if __name__ == '__main__':
     print(json.dumps(export()))
