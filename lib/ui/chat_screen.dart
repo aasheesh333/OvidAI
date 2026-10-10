@@ -1532,12 +1532,12 @@ class _ChatScreenState extends State<ChatScreen>
                                                         16,
                                                         16,
                                                       ),
-                                                   itemCount: count,
-                                                   itemBuilder: (_, i) {
-                                                     final rowKey = ValueKey(
-                                                       _rowKeys[i],
-                                                     );
-                                                     var idx = i;
+                                                  itemCount: count,
+                                                  itemBuilder: (_, i) {
+                                                    final rowKey = ValueKey(
+                                                      _rowKeys[i],
+                                                    );
+                                                    var idx = i;
                                                     // System prompt row removed —
                                                     // internal instructions are hidden.
 
@@ -1547,80 +1547,80 @@ class _ChatScreenState extends State<ChatScreen>
                                                     // forever in any long thread.
                                                     if (hiddenMessages > 0 &&
                                                         idx == 0) {
-                                                       return KeyedSubtree(
-                                                         key: rowKey,
-                                                         child: Center(
-                                                           child: Padding(
-                                                             padding:
-                                                                 const EdgeInsets.all(
-                                                                   8,
-                                                                 ),
-                                                             child: Row(
-                                                               mainAxisSize:
-                                                                   MainAxisSize
-                                                                       .min,
-                                                               children: [
-                                                              if (_paging) ...[
-                                                                SizedBox(
-                                                                  width: 12,
-                                                                  height: 12,
-                                                                  child: CircularProgressIndicator(
-                                                                    strokeWidth:
-                                                                        1.5,
+                                                      return KeyedSubtree(
+                                                        key: rowKey,
+                                                        child: Center(
+                                                          child: Padding(
+                                                            padding:
+                                                                const EdgeInsets.all(
+                                                                  8,
+                                                                ),
+                                                            child: Row(
+                                                              mainAxisSize:
+                                                                  MainAxisSize
+                                                                      .min,
+                                                              children: [
+                                                                if (_paging) ...[
+                                                                  SizedBox(
+                                                                    width: 12,
+                                                                    height: 12,
+                                                                    child: CircularProgressIndicator(
+                                                                      strokeWidth:
+                                                                          1.5,
+                                                                      color: Aether
+                                                                          .textFaint,
+                                                                    ),
+                                                                  ),
+                                                                  const SizedBox(
+                                                                    width: 6,
+                                                                  ),
+                                                                ] else ...[
+                                                                  Icon(
+                                                                    Icons
+                                                                        .keyboard_arrow_up_rounded,
+                                                                    size: 14,
+                                                                    color: Aether
+                                                                        .textFaint,
+                                                                  ),
+                                                                  const SizedBox(
+                                                                    width: 4,
+                                                                  ),
+                                                                ],
+                                                                Text(
+                                                                  _paging
+                                                                      ? 'Loading earlier…'
+                                                                      : '$hiddenMessages earlier '
+                                                                            'message${hiddenMessages == 1 ? '' : 's'} '
+                                                                            '· scroll up',
+                                                                  style: TextStyle(
+                                                                    fontSize:
+                                                                        11,
                                                                     color: Aether
                                                                         .textFaint,
                                                                   ),
                                                                 ),
-                                                                const SizedBox(
-                                                                  width: 6,
-                                                                ),
-                                                              ] else ...[
-                                                                Icon(
-                                                                  Icons
-                                                                      .keyboard_arrow_up_rounded,
-                                                                  size: 14,
-                                                                  color: Aether
-                                                                      .textFaint,
-                                                                ),
-                                                                const SizedBox(
-                                                                  width: 4,
-                                                                ),
                                                               ],
-                                                              Text(
-                                                                _paging
-                                                                    ? 'Loading earlier…'
-                                                                    : '$hiddenMessages earlier '
-                                                                          'message${hiddenMessages == 1 ? '' : 's'} '
-                                                                          '· scroll up',
-                                                                style: TextStyle(
-                                                                  fontSize: 11,
-                                                                  color: Aether
-                                                                      .textFaint,
-                                                                ),
-                                                              ),
-                                                               ],
-                                                             ),
-                                                           ),
-                                                         ),
-                                                       );
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      );
                                                     }
                                                     final li =
                                                         hiddenMessages > 0
                                                         ? idx - 1
                                                         : idx;
                                                     if (li == items.length) {
-                                                       return KeyedSubtree(
-                                                         key: rowKey,
-                                                         child: typing
-                                                             ? const _TypingBubble()
-                                                             : _RowIn(
-                                                                 child:
-                                                                     _ProducedFilesCard(
-                                                                       files:
-                                                                           produced,
-                                                                     ),
-                                                               ),
-                                                       );
+                                                      return KeyedSubtree(
+                                                        key: rowKey,
+                                                        child: typing
+                                                            ? const _TypingBubble()
+                                                            : _RowIn(
+                                                                child: _ProducedFilesCard(
+                                                                  files:
+                                                                      produced,
+                                                                ),
+                                                              ),
+                                                      );
                                                     }
                                                     final item = items[li];
                                                     // The live tail bubble subscribes to
@@ -1630,35 +1630,35 @@ class _ChatScreenState extends State<ChatScreen>
                                                     if (typing &&
                                                         li ==
                                                             items.length - 1) {
-                                                       return KeyedSubtree(
-                                                         key: rowKey,
-                                                         child: AnimatedBuilder(
-                                                           animation: AppState.I,
-                                                           builder: (_, _) =>
-                                                               _buildItem(
-                                                                 item,
-                                                                 s,
-                                                                 onAction: () =>
-                                                                     setState(
-                                                                       () {},
-                                                                     ),
-                                                                 input: _input,
-                                                                 layout: layout,
-                                                               ),
-                                                         ),
-                                                       );
-                                                     }
-                                                     return KeyedSubtree(
-                                                       key: rowKey,
-                                                       child: _buildItem(
-                                                         item,
-                                                         s,
-                                                         onAction: () =>
-                                                             setState(() {}),
-                                                         input: _input,
-                                                         layout: layout,
-                                                       ),
-                                                     );
+                                                      return KeyedSubtree(
+                                                        key: rowKey,
+                                                        child: AnimatedBuilder(
+                                                          animation: AppState.I,
+                                                          builder: (_, _) =>
+                                                              _buildItem(
+                                                                item,
+                                                                s,
+                                                                onAction: () =>
+                                                                    setState(
+                                                                      () {},
+                                                                    ),
+                                                                input: _input,
+                                                                layout: layout,
+                                                              ),
+                                                        ),
+                                                      );
+                                                    }
+                                                    return KeyedSubtree(
+                                                      key: rowKey,
+                                                      child: _buildItem(
+                                                        item,
+                                                        s,
+                                                        onAction: () =>
+                                                            setState(() {}),
+                                                        input: _input,
+                                                        layout: layout,
+                                                      ),
+                                                    );
                                                   },
                                                 );
                                                 return Center(
@@ -4685,14 +4685,14 @@ class _MessageView extends StatelessWidget {
         !session.isSubagent &&
         !AgentService.I.busyFor(session.id);
     if (canEdit && isUser && isLast) {
-      add(Icons.edit_outlined, 'Edit & resend', () {
+      add(Icons.edit_outlined, 'Edit & resend', () async {
         if (!_stageEdit(context, m.content)) return;
-        AppState.I.deleteMessagesFrom(session.id, msgIndex);
+        if (!await _deleteHistory(context)) return;
         onAction();
       });
-      add(Icons.replay_outlined, 'Revert', () {
+      add(Icons.replay_outlined, 'Revert', () async {
         if (!_canChangeHistory) return;
-        AppState.I.deleteMessagesFrom(session.id, msgIndex);
+        if (!await _deleteHistory(context)) return;
         onAction();
       });
     }
@@ -4777,7 +4777,7 @@ class _MessageView extends StatelessWidget {
     }
     // Regenerate: re-send the last user message to get a new response.
     if (canEdit && !isUser && isLast && m.kind == MsgKind.text && !m.thinking) {
-      add(Icons.refresh, 'Regenerate', () {
+      add(Icons.refresh, 'Regenerate', () async {
         if (!_canChangeHistory) return;
         // Find the last user message content.
         final msgs = session.messages as List<Message>;
@@ -4801,7 +4801,7 @@ class _MessageView extends StatelessWidget {
           return;
         }
         // Delete from the current assistant message onward and resend.
-        AppState.I.deleteMessagesFrom(session.id, msgIndex);
+        if (!await _deleteHistory(context)) return;
         onAction();
         AgentService.I.runTask(
           lastUser.content,
@@ -4852,6 +4852,31 @@ class _MessageView extends StatelessWidget {
       msgIndex < session.messages.length &&
       identical(session.messages[msgIndex], m);
 
+  Future<bool> _deleteHistory(BuildContext context) async {
+    final app = AppState.I;
+    try {
+      await app.deleteMessagesFrom(session.id, msgIndex);
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'History could not be deleted. Your draft and messages have been kept; retry the deletion.',
+            ),
+          ),
+        );
+      }
+      return false;
+    }
+    // A session switch or a newly started run during the disk write must not
+    // launch a continuation against another owner or a stale conversation.
+    return context.mounted &&
+        identical(AppState.I, app) &&
+        app.activeSessionId == session.id &&
+        identical(app.sessionById(session.id), session) &&
+        !AgentService.I.busyFor(session.id);
+  }
+
   bool _stageEdit(BuildContext context, String text) {
     if (!_canChangeHistory) return false;
     final pending = AgentService.I.pendingAttachments;
@@ -4869,8 +4894,8 @@ class _MessageView extends StatelessWidget {
       ).showSnackBar(SnackBar(content: Text(error)));
       return false;
     }
-    // Existing workspace copies remain owned by the session. Transfer all
-    // metadata before removing any transcript history; no asynchronous gap.
+    // Stage the draft before the durable deletion. A failed write keeps both
+    // the original transcript and this editable draft, including attachments.
     pending.addAll([
       for (final a in m.attachments)
         (name: a.name, path: a.path!, size: a.size),
@@ -4951,7 +4976,7 @@ class _MessageView extends StatelessWidget {
   void _showEditResendDialog(BuildContext context) {
     final c = TextEditingController(text: m.content);
     final navigator = Navigator.of(context, rootNavigator: true);
-    void send(String value) {
+    Future<void> send(String value) async {
       final text = value.trim();
       if (text.isEmpty) {
         navigator.pop();
@@ -4959,7 +4984,7 @@ class _MessageView extends StatelessWidget {
       }
       navigator.pop();
       if (!_stageEdit(context, text)) return;
-      AppState.I.deleteMessagesFrom(session.id, msgIndex);
+      if (!await _deleteHistory(context)) return;
       onAction();
     }
 

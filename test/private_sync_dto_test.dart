@@ -265,9 +265,25 @@ void main() {
       expect(() => SyncUploadRecord.fromWire({...samples['usage']!, 'recordId': 'other'}),
           throwsCode('invalid_record'));
     });
+
+    test('tombstone recordId must not equal targetRecordId', () {
+      expect(
+        () => SyncUploadRecord.fromWire(
+          {...samples['tombstone']!, 'recordId': 'rec-old'},
+        ),
+        throwsCode('invalid_record'),
+      );
+    });
   });
 
   group('payloads', () {
+    test('provider and model text round trips Unicode scalar bounds', () {
+      final payload = {...providerPayload(), 'providerId': '😀' * 64,
+        'modelId': 'model 😀 name'};
+      expect(ProviderMetadataPayload.fromWire(payload).toWire(), payload);
+      expect(() => ProviderMetadataPayload.fromWire({...payload, 'providerId': '😀' * 65}),
+          throwsCode('invalid_record'));
+    });
     void accepts(String type, String field, Object? value) {
       final rec = withPayload(type, (p) => p..[field] = value);
       final parsed = SyncUploadRecord.fromWire(rec);
@@ -330,6 +346,8 @@ void main() {
       accepts('providerMetadata', 'providerId', 'p' * 64);
       rejects('providerMetadata', 'providerId', 'p' * 65);
       rejects('providerMetadata', 'providerId', '');
+      accepts('providerMetadata', 'providerId', 'provider with spaces');
+      accepts('providerMetadata', 'modelId', 'model with spaces/é');
       accepts('providerMetadata', 'modelId', null);
       rejects('providerMetadata', 'modelId', '');
       accepts('providerMetadata', 'supportsStreaming', false);
@@ -338,6 +356,11 @@ void main() {
       accepts('providerMetadata', 'displayName', null);
       accepts('providerMetadata', 'requestPurpose', null);
       rejects('providerMetadata', 'endpoint', null);
+    });
+
+    test('usage model identifiers use bounded text semantics', () {
+      accepts('usage', 'requestedModel', 'model with spaces/é');
+      accepts('usage', 'reportedModel', 'model with spaces/é');
     });
 
     test('provider endpoint is validated and must already be canonical', () {

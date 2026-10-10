@@ -1,0 +1,27 @@
+# Send only runtime source and dependency manifests to the builder.
+**
+!server/
+server/*
+!server/__init__.py
+!server/account/
+server/account/*
+!server/account/*.py
+!server/account/requirements.txt
+!server/images/
+server/images/*
+!server/images/*.py
+!server/images/requirements.txt
+!server/shares/
+server/shares/*
+!server/shares/*.py
+!server/shares/requirements.txt
+!server/sync/
+server/sync/*
+!server/sync/*.py
+!server/collaboration/
+server/collaboration/*
+!server/collaboration/*.py
+!server/account/deploy/
+server/account/deploy/*
+!server/account/deploy/Dockerfile
+!server/account/deploy/Dockerfile.dockerignore

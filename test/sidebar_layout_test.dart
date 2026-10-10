@@ -52,11 +52,14 @@ void main() {
     required Size size,
     double scale = 1,
     bool drawer = false,
+    double keyboard = 0,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
+    tester.view.viewInsets = FakeViewPadding(bottom: keyboard);
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewInsets);
     await tester.pumpWidget(
       MaterialApp(
         theme: Aether.theme(),
@@ -250,4 +253,60 @@ void main() {
     expect(find.byType(SessionsSidebar), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'keyboard keeps search and labelled footer above the session viewport',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      await pumpSidebar(
+        tester,
+        size: const Size(360, 640),
+        scale: 2,
+        keyboard: 280,
+      );
+      final settings = find.byTooltip('Settings');
+      final footerRect = tester.getRect(settings);
+      expect(settings.hitTestable(), findsOneWidget);
+      expect(footerRect.bottom, lessThanOrEqualTo(360));
+      expect(tester.getRect(sessionScroll).height, greaterThanOrEqualTo(48));
+
+      await tester.enterText(find.byType(TextField), 'model-49');
+      await tester.pumpAndSettle();
+      expect(find.text('Session 49').hitTestable(), findsOneWidget);
+      expect(find.text('Session 0'), findsNothing);
+      expect(tester.getRect(settings), footerRect);
+      await tester.tap(find.byTooltip('Clear session search'));
+      await tester.pumpAndSettle();
+      await tester.drag(sessionScroll, const Offset(0, -100));
+      await tester.pumpAndSettle();
+      expect(
+        tester.state<ScrollableState>(sessionScroll).position.pixels,
+        greaterThan(0),
+      );
+      expect(tester.getRect(settings), footerRect);
+      expect(find.byType(TextField).hitTestable(), findsOneWidget);
+      for (final label in [
+        'Schedule',
+        'Trajectory — event ledger',
+        'Settings',
+      ]) {
+        expect(find.byTooltip(label).hitTestable(), findsOneWidget);
+        // Flutter exposes IconButton's accessible name as a tooltip property.
+        expect(
+          tester.getSemantics(find.byTooltip(label)),
+          matchesSemantics(
+            tooltip: label,
+            isButton: true,
+            hasEnabledState: true,
+            isEnabled: true,
+            isFocusable: true,
+            hasTapAction: true,
+            hasFocusAction: true,
+          ),
+        );
+      }
+      semantics.dispose();
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

@@ -182,6 +182,15 @@ class RejectedEndpointTests(unittest.TestCase):
         self.assertRejected("https://api.example.com/v1;api_key=abc/chat")
         self.assertRejected("https://api.example.com/v1;token=abc")
 
+    def test_layered_controls_and_credentials_are_rejected(self):
+        for text in ("%00", "%0a", "%7F", "%FF", "%250a", "%25250a"):
+            self.assertRejected("https://api.example.com/" + text)
+            self.assertRejected("https://api.example.com/?q=" + text)
+        for key in ("pass", "otp", "somepwd", "jwtvalue", "design"):
+            self.assertRejected("https://api.example.com/?" + key + "=x")
+        self.assertRejected("https://api.example.com/?code=x", provider_id="azure")
+        self.assertRejected("https://api.example.com/v1%3Btoken%3Dx")
+
     def test_secret_shaped_values(self):
         for value in (
             "https://api.example.com/v1?q=sk-abcdefghijklmnopqrstuvwx",

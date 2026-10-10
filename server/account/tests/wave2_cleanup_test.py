@@ -317,7 +317,8 @@ def test_app_mounts_shared_runtimes_only_when_explicitly_activated(tmp_path):
 
 def test_private_sync_factory_receives_existing_account_authority():
     authority = object()
-    repository = object()
+    repository = SimpleNamespace(durability='durable', authority='server',
+                                 authority_identity='fixture-sync-v1')
     module = SimpleNamespace(build_repository=lambda supplied: (
         repository if supplied is authority else None))
     with patch.dict('os.environ', {

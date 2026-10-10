@@ -116,7 +116,15 @@ class CommandService {
         handler: (args) async {
           final s = AppState.I.activeSession;
           if (s == null) return CommandResult(feedback: 'No active session.');
-          AppState.I.deleteMessagesFrom(s.id, 0);
+          try {
+            await AppState.I.deleteMessagesFrom(s.id, 0);
+          } catch (_) {
+            return const CommandResult(
+              feedback:
+                  'Session could not be cleared. Your draft and messages have been kept; retry the deletion.',
+              clearInput: false,
+            );
+          }
           return CommandResult(feedback: 'Session cleared.');
         },
       ),
@@ -139,7 +147,8 @@ class CommandService {
           // compaction + rewrite history it is iterating.
           if (AgentService.I.busyFor(s.id)) {
             return const CommandResult(
-              feedback: 'Session is busy — /compact runs on an idle chat '
+              feedback:
+                  'Session is busy — /compact runs on an idle chat '
                   '(queue it as a message instead).',
             );
           }
@@ -203,12 +212,11 @@ class CommandService {
             // dump — the list is right there and picking a row applies it.
             return const CommandResult(popup: 'preset');
           }
-          final match = PresetRegistry.all
-              .where((p) => p.id == q)
-              .firstOrNull;
+          final match = PresetRegistry.all.where((p) => p.id == q).firstOrNull;
           if (match == null) {
             return CommandResult(
-              feedback: 'Unknown preset "$q". Options: '
+              feedback:
+                  'Unknown preset "$q". Options: '
                   '${PresetRegistry.all.map((p) => p.id).join(', ')}.',
             );
           }
@@ -220,7 +228,8 @@ class CommandService {
           final hadMessages = s.messages.isNotEmpty;
           await AgentService.I.applyPreset(match);
           return CommandResult(
-            feedback: 'Preset → ${match.id} (${match.label}) — '
+            feedback:
+                'Preset → ${match.id} (${match.label}) — '
                 '${match.description}'
                 '${hadMessages ? ' Applies from your next message.' : ''}',
           );
@@ -368,8 +377,8 @@ class CommandService {
   /// parent's session JSON by construction (lineage fields).
   Future<File> _exportSessionsZip() async {
     final app = AppState.I;
-    final outDir = exportDirOverrideForTest ??
-        (await getTemporaryDirectory()).path;
+    final outDir =
+        exportDirOverrideForTest ?? (await getTemporaryDirectory()).path;
     final file = File(
       '$outDir/ovid-export-${DateTime.now().millisecondsSinceEpoch}.zip',
     );
@@ -405,9 +414,7 @@ class CommandService {
     for (final s in app.sessions) {
       final events = await SessionLedger.I.read(s.id);
       if (events.isEmpty) continue;
-      final lines = events
-          .map((e) => jsonEncode(e))
-          .join('\n');
+      final lines = events.map((e) => jsonEncode(e)).join('\n');
       addText('ledgers/${s.id}.jsonl', lines);
     }
 

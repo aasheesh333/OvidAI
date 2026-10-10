@@ -1,5 +1,12 @@
 # P3 account lifecycle — deployment artifact, NOT activated
 
+The account app now directly composes the concrete PostgreSQL private-sync
+repository, optional live collaboration, and image/share cleanup authorities.
+`*_CONFIGURED` retains cleanup responsibility independently of `*_ACTIVATED`
+HTTP routes. Stable authority UUIDs, bounded sync retention, a configuration CLI,
+and Docker/systemd/Caddy templates are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
+Local code tests and deployment artifacts are not evidence of real activation.
+
 This is real server code and executable fake-backed tests. It has **not** been
 deployed or run against production users/databases. The Flutter deletion action
 is visibly unavailable until built with `--dart-define=OVID_ACCOUNT_ENABLED=true`.
@@ -221,7 +228,8 @@ not modify a nonexistent tracked mint module or the live `/opt` implementation.
     `SHARE_BASE_URL` and ADC credentials.
 6. Only after these checks set `ACCOUNT_ACTIVATED=true`; run API with
    `uvicorn server.account.runtime:create_app --factory` on a private interface.
-   Route only `/account/*` through Caddy and apply existing abuse/rate limiting.
+    Use DEPLOYMENT.md's exact account/sync/chat/share Caddy route template and
+    apply the host's abuse/rate limiting without logging credential-bearing paths.
 7. Install the provided systemd worker service/timer under a least-privilege
    `ovid-account` OS user. `Persistent=true` plus durable due scanning catches up
    after restart. Alert on worker failure/overdue records. API and worker must use

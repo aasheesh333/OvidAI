@@ -1,0 +1,31 @@
+[Unit]
+Description=Ovid account, private sync, collaboration and share API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ovid-account
+Group=ovid-account
+WorkingDirectory=/opt/ovid-account
+EnvironmentFile=/etc/ovid-account/api.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/ovid-account/venv/bin/python -m uvicorn server.account.runtime:create_app --factory --host 127.0.0.1 --port 8080 --no-access-log --no-proxy-headers
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ovid-account
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

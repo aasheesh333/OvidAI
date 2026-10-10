@@ -92,7 +92,7 @@ void main() {
       expect(() => canon('https://api.example.com/v1#'), rejectedFor(EndpointRejection.fragment));
     });
 
-    test('control characters, whitespace and non-ASCII, raw or percent-encoded', () {
+    test('raw controls and non-ASCII are rejected', () {
       for (final v in [
         'https://api.example.com/v1\n',
         ' https://api.example.com/v1',
@@ -100,13 +100,52 @@ void main() {
         'https://api.example.com/\u0000',
         'https://api.example.com/\u007f',
         'https://api.example.com/\t',
-        'https://api.example.com/%0a',
-        'https://api.example.com/v1?a=%00',
-        'https://api.example.com/%7F',
         'https://api.ex\u00e4mple.com/',
         'https://api.example.com/caf\u00e9',
       ]) {
         expect(() => canon(v), rejectedFor(EndpointRejection.character), reason: v);
+      }
+    });
+
+    test('percent-encoded controls and non-ASCII are rejected at every layer', () {
+      for (final value in ['%0a', '%00', '%7F', '%FF', '%250a', '%25250a']) {
+        expect(() => canon('https://api.example.com/$value'),
+            throwsA(isA<EndpointRejectedException>()));
+        expect(() => canon('https://api.example.com/?q=$value'),
+            throwsA(isA<EndpointRejectedException>()));
+      }
+    });
+
+    test('credential values are checked even with an allowlisted key', () {
+      for (final value in [
+        'sk-abcdefghijklmnopqrstuvwx', 'AKIAIOSFODNN7EXAMPLE',
+        'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+        'AIzaSyA-abcdefghijklmnopqrstuvwxyz012345',
+        'xoxb-1234567890-abcdefghij', 'eyJabc.abcdef.abcdef',
+        'Bearer%2520abcdef',
+      ]) {
+        expect(() => canon('https://api.example.com/$value'),
+            throwsA(isA<EndpointRejectedException>()));
+        expect(() => canon('https://api.example.com/?token_type=$value',
+            nonSecretQueryKeys: {'token_type'}),
+            throwsA(isA<EndpointRejectedException>()));
+      }
+      for (final key in ['somepwd', 'jwtvalue', 'design', 'passw', 'pass', 'otp']) {
+        expect(() => canon('https://api.example.com/?$key=x'),
+            throwsA(isA<EndpointRejectedException>()));
+      }
+      expect(() => canon('https://api.example.com/v1%3Btoken%3Dx'),
+          throwsA(isA<EndpointRejectedException>()));
+    });
+
+    test('credential-shaped path values and matrix parameters are rejected', () {
+      for (final v in [
+        'https://api.example.com/sk-live-1234567890123456',
+        'https://api.example.com/v1;token=abc',
+        'https://api.example.com/v1;%74oken=abc',
+      ]) {
+        expect(() => canon(v), throwsA(isA<EndpointRejectedException>()),
+            reason: v);
       }
     });
 

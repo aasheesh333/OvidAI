@@ -272,6 +272,35 @@ void main() {
     expect(reasonOf(wire(payload: {'text': big})), CollaborationWireReason.tooLarge);
   });
 
+  test('canonical event size counts UTF-8 bytes', () {
+    final text = '€' * (maxEventCanonicalBytes ~/ 3 + 10);
+    expect(reasonOf(wire(payload: {'text': text})), CollaborationWireReason.tooLarge);
+  });
+
+  test('counts Unicode label length in code points like Python', () {
+    final accepted = CollaborationEvent.fromWire(wire(
+      kind: 'modelStatus',
+      payload: modelPayload({'displayName': '🙂' * 256}),
+    ));
+    expect((accepted.payload as ModelStatusPayload).displayName.runes.length, 256);
+
+    expect(
+      reasonOf(wire(
+        kind: 'modelStatus',
+        payload: modelPayload({'displayName': '🙂' * 257}),
+      )),
+      CollaborationWireReason.invalidValue,
+    );
+  });
+
+  test('rejects lone surrogates as invalid Unicode', () {
+    expect(reasonOf(wire(payload: {'text': '\uD800'})), CollaborationWireReason.invalidValue);
+    expect(
+      reasonOf(wire(kind: 'modelStatus', payload: modelPayload({'displayName': '\uD800'}))),
+      CollaborationWireReason.invalidValue,
+    );
+  });
+
   test('wire exceptions never echo payload contents', () {
     const sentinel = 'SENTINEL-sk-abcdefghijklmnop1234';
     try {

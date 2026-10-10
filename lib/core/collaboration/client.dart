@@ -1,8 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+
+const maxCollaborationRequestBytes = 1024 * 1024;
+const maxCollaborationBatchBytes = 8 * 1024 * 1024;
+const maxCollaborationEvents = 100;
+const maxCollaborationResponseBytes = maxCollaborationBatchBytes + 128 * 1024;
 
 const _errorMessages = <String, String>{
   'unauthenticated': 'Authentication required',
@@ -21,6 +27,11 @@ const _errorMessages = <String, String>{
   'cursor_reset': 'Replay cursor must be reset',
   'account_deleted': 'Account is unavailable',
   'account_deletion_pending': 'Account is unavailable',
+  'unsupported_identity': 'Authentication required',
+  'invite_not_found': 'Invitation not found',
+  'rate_limited': 'Collaboration rate limit exceeded',
+  'quota_exhausted': 'Collaboration quota exceeded',
+  'payload_too_large': 'Collaboration payload is too large',
   'temporarily_unavailable': 'The collaboration service is temporarily unavailable',
 };
 
@@ -30,6 +41,14 @@ class CollaborationClientException implements Exception {
   final String message;
   final int? statusCode;
   final String? code;
+
+  /// Only authoritative session/account/member failures end the saved session.
+  /// Local credential acquisition failures and target-specific mutations retry.
+  bool get isTerminalSessionError => const {
+    'unauthenticated', 'not_member', 'membership_revoked', 'session_not_found',
+    'session_closed', 'account_deleted', 'account_deletion_pending',
+    'unsupported_identity',
+  }.contains(code);
 
   @override
   String toString() => message;
@@ -61,12 +80,16 @@ class CollaborationState {
     required this.member,
     required this.members,
     required this.cursor,
+    this.initialMembers,
+    this.replayThroughSequence = 0,
   });
 
   final CollaborationSession session;
   final Member member;
   final List<Member> members;
   final CollaborationCursor cursor;
+  final List<Member>? initialMembers;
+  final int replayThroughSequence;
 }
 
 class CollaborationJoinResult {
@@ -74,6 +97,16 @@ class CollaborationJoinResult {
 
   final Member member;
   final CollaborationCursor cursor;
+}
+
+class CollaborationInvite {
+  const CollaborationInvite({required this.inviteId, required this.inviteCode,
+    required this.expiresAt, required this.maxUses});
+
+  final String inviteId;
+  final String inviteCode;
+  final DateTime expiresAt;
+  final int maxUses;
 }
 
 class CollaborationEventPage {
@@ -92,14 +125,16 @@ class CollaborationClient {
   CollaborationClient({
     required this.baseUri,
     required this.accessToken,
-    this.appCheckToken,
+    required this.appCheckToken,
+    this.requestTimeout = const Duration(seconds: 30),
     http.Client? httpClient,
-  }) : _httpClient = httpClient ?? http.Client();
+  }) : assert(requestTimeout > Duration.zero), _httpClient = httpClient ?? http.Client();
 
   final Uri baseUri;
   final Future<String?> Function() accessToken;
-  final Future<String?> Function()? appCheckToken;
+  final Future<String?> Function() appCheckToken;
   final http.Client _httpClient;
+  final Duration requestTimeout;
 
   Future<CollaborationCreateResult> create({required String requestId}) async {
     final data = await _request(
@@ -110,7 +145,6 @@ class CollaborationClient {
         'requestId': requestId,
         'idempotencyKey': requestId,
       },
-      idempotencyKey: requestId,
     );
     _exact(data, const {
       'schemaVersion',
@@ -122,28 +156,41 @@ class CollaborationClient {
     _version(data);
     return CollaborationCreateResult(
       sessionToken: _string(data, 'sessionToken'),
-      session: CollaborationSession.fromWire(_map(data, 'session')),
-      member: Member.fromWire(_map(data, 'member')),
+      session: _wire(() => CollaborationSession.fromWire(_map(data, 'session'))),
+      member: _wire(() => Member.fromWire(_map(data, 'member'))),
       cursor: _cursor(data, 'cursor'),
     );
   }
 
   Future<CollaborationState> state(String sessionToken) async {
+    _segment(sessionToken);
     final data = await _request('GET', '/chat/$sessionToken');
-    _exact(data, const {
+    _exact(data, {
       'schemaVersion',
       'session',
       'member',
       'members',
       'cursor',
+      if (data.containsKey('initialMembers')) 'initialMembers',
+      if (data.containsKey('replayThroughSequence')) 'replayThroughSequence',
     });
     _version(data);
     final members = _list(data, 'members');
+    if (members.length > 10) _invalidResponse();
+    final through = data['replayThroughSequence'] ?? 0;
+    if (through is! int || through < 0 ||
+        data.containsKey('initialMembers') != data.containsKey('replayThroughSequence')) {
+      _invalidResponse();
+    }
+    final initial = data.containsKey('initialMembers') ? _list(data, 'initialMembers') : null;
+    if (initial != null && initial.length != 1) _invalidResponse();
     return CollaborationState(
-      session: CollaborationSession.fromWire(_map(data, 'session')),
-      member: Member.fromWire(_map(data, 'member')),
-      members: [for (final value in members) Member.fromWire(_asMap(value))],
+      session: _wire(() => CollaborationSession.fromWire(_map(data, 'session'))),
+      member: _wire(() => Member.fromWire(_map(data, 'member'))),
+      members: [for (final value in members) _wire(() => Member.fromWire(_asMap(value)))],
       cursor: _cursor(data, 'cursor'),
+      initialMembers: initial == null ? null : [for (final value in initial) _wire(() => Member.fromWire(_asMap(value)))],
+      replayThroughSequence: through,
     );
   }
 
@@ -152,6 +199,8 @@ class CollaborationClient {
     required String invitationCode,
     required String idempotencyKey,
   }) async {
+    _segment(sessionToken);
+    if (invitationCode.isEmpty || invitationCode.length > 512) _invalidRequest();
     final data = await _request(
       'POST',
       '/chat/$sessionToken/members',
@@ -164,9 +213,58 @@ class CollaborationClient {
     _exact(data, const {'schemaVersion', 'member', 'cursor'});
     _version(data);
     return CollaborationJoinResult(
-      member: Member.fromWire(_map(data, 'member')),
+      member: _wire(() => Member.fromWire(_map(data, 'member'))),
       cursor: _cursor(data),
     );
+  }
+
+  Future<CollaborationInvite> createInvite(
+    String sessionToken, {
+    required String idempotencyKey,
+    int maxUses = 1,
+    int ttlSeconds = 86400,
+  }) async {
+    _segment(sessionToken);
+    if (maxUses < 1 || maxUses > 9 || ttlSeconds < 1 || ttlSeconds > 7 * 86400) {
+      _invalidRequest();
+    }
+    final data = await _request('POST', '/chat/$sessionToken/members', body: {
+      'schemaVersion': collaborationSchemaVersion, 'idempotencyKey': idempotencyKey,
+      'maxUses': maxUses, 'ttlSeconds': ttlSeconds,
+    });
+    _exact(data, const {'schemaVersion', 'inviteId', 'inviteCode', 'expiresAt', 'maxUses'});
+    _version(data);
+    final expires = _string(data, 'expiresAt');
+    final expiresAt = DateTime.tryParse(expires);
+    final uses = data['maxUses'];
+    final code = _string(data, 'inviteCode');
+    if (expiresAt == null || !expires.endsWith('Z') || uses is! int || uses < 1 || uses > 9 ||
+        !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(code)) {
+      _invalidResponse();
+    }
+    return CollaborationInvite(inviteId: _string(data, 'inviteId'), inviteCode: code,
+      expiresAt: expiresAt, maxUses: uses);
+  }
+
+  Future<Member> revokeMember(String sessionToken, {required String participantId}) async {
+    _segment(sessionToken);
+    _segment(participantId);
+    if (participantId == 'me') _invalidRequest();
+    return _removeMember('/chat/$sessionToken/members/$participantId', MemberStatus.revoked);
+  }
+
+  Future<Member> leave(String sessionToken) async {
+    _segment(sessionToken);
+    return _removeMember('/chat/$sessionToken/members/me', MemberStatus.left);
+  }
+
+  Future<Member> _removeMember(String path, MemberStatus status) async {
+    final data = await _request('DELETE', path);
+    _exact(data, const {'schemaVersion', 'member'});
+    _version(data);
+    final member = _wire(() => Member.fromWire(_map(data, 'member')));
+    if (member.status != status || member.role != MemberRole.participant) _invalidResponse();
+    return member;
   }
 
   Future<CollaborationEventPage> events(
@@ -178,6 +276,10 @@ class CollaborationClient {
     String sessionToken, {
     CollaborationCursor? cursor,
   }) async {
+    _segment(sessionToken);
+    if (cursor != null && (cursor.value.isEmpty || utf8.encode(cursor.value).length > 512)) {
+      _invalidRequest();
+    }
     final data = await _request(
       'GET',
       '/chat/$sessionToken/events',
@@ -185,12 +287,8 @@ class CollaborationClient {
     );
     _exact(data, const {'schemaVersion', 'events', 'nextCursor', 'hasMore'});
     _version(data);
-    final rawEvents = _list(data, 'events');
     return CollaborationEventPage(
-      events: [
-        for (final value in rawEvents)
-          CollaborationEvent.fromWire(_asMap(value)),
-      ],
+      events: _events(data, maxBytes: 256 * 1024),
       nextCursor: _cursor(data, 'nextCursor'),
       hasMore: _bool(data, 'hasMore'),
     );
@@ -201,6 +299,24 @@ class CollaborationClient {
     required List<Map<String, Object?>> events,
     required String idempotencyKey,
   }) async {
+    _segment(sessionToken);
+    if (events.isEmpty || events.length > maxCollaborationEvents) _invalidRequest();
+    final ids = <Object?>{};
+    for (final event in events) {
+      if (event.length != 4 || !event.keys.toSet().containsAll(
+          const {'schemaVersion', 'eventId', 'kind', 'payload'}) ||
+          !const {'message', 'modelStatus', 'usage', 'presence'}.contains(event['kind']) ||
+          !ids.add(event['eventId'])) {
+        _invalidRequest();
+      }
+      try {
+        CollaborationEvent.fromWire({...event, 'sessionId': 'validation',
+          'senderParticipantId': 'validation', 'eventSequence': 1,
+          'createdAt': '2000-01-01T00:00:00.000Z'});
+      } on CollaborationWireException {
+        _invalidRequest();
+      }
+    }
     final data = await _request(
       'POST',
       '/chat/$sessionToken/events',
@@ -213,10 +329,7 @@ class CollaborationClient {
     _exact(data, const {'schemaVersion', 'events', 'nextCursor', 'hasMore'});
     _version(data);
     return CollaborationEventPage(
-      events: [
-        for (final value in _list(data, 'events'))
-          CollaborationEvent.fromWire(_asMap(value)),
-      ],
+      events: _events(data, maxBytes: maxCollaborationBatchBytes + 128 * 1024),
       nextCursor: _cursor(data, 'nextCursor'),
       hasMore: _bool(data, 'hasMore'),
     );
@@ -226,6 +339,7 @@ class CollaborationClient {
     String sessionToken, {
     required String idempotencyKey,
   }) async {
+    _segment(sessionToken);
     final data = await _request(
       'POST',
       '/chat/$sessionToken/close',
@@ -236,7 +350,7 @@ class CollaborationClient {
     );
     _exact(data, const {'schemaVersion', 'session'});
     _version(data);
-    return CollaborationSession.fromWire(_map(data, 'session'));
+    return _wire(() => CollaborationSession.fromWire(_map(data, 'session')));
   }
 
   Future<Map<String, Object?>> _request(
@@ -244,12 +358,50 @@ class CollaborationClient {
     String path, {
     Map<String, String>? query,
     Map<String, Object?>? body,
-    String? idempotencyKey,
   }) async {
-    final token = await accessToken();
-    if (token == null || token.isEmpty) {
-      throw const CollaborationClientException('Authentication required.');
+    final abort = Completer<void>();
+    try {
+      return await _performRequest(method, path, query: query, body: body, abort: abort)
+          .timeout(requestTimeout, onTimeout: () {
+        if (!abort.isCompleted) abort.complete();
+        throw const CollaborationClientException('Collaboration request timed out.', code: 'request_timeout');
+      });
+    } finally {
+      if (!abort.isCompleted) abort.complete();
     }
+  }
+
+  Future<Map<String, Object?>> _performRequest(
+    String method, String path, {
+    Map<String, String>? query, Map<String, Object?>? body,
+    required Completer<void> abort,
+  }) async {
+    var encoded = '';
+    if (body != null) {
+      final key = body['idempotencyKey'];
+      if (key is! String || !RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(key)) _invalidRequest();
+      try {
+        encoded = jsonEncode(body);
+      } catch (_) {
+        _invalidRequest();
+      }
+      if (utf8.encode(encoded).length > maxCollaborationRequestBytes) {
+        throw const CollaborationClientException('Collaboration payload is too large',
+          statusCode: 413, code: 'payload_too_large');
+      }
+    }
+    final String? token;
+    final String? appCheck;
+    try {
+      token = await accessToken();
+      appCheck = await appCheckToken();
+    } catch (_) {
+      throw const CollaborationClientException('Credentials are temporarily unavailable.', code: 'credential_unavailable');
+    }
+    if (token == null || token.trim().isEmpty || appCheck == null || appCheck.trim().isEmpty) {
+      throw const CollaborationClientException('Credentials are temporarily unavailable.', code: 'credential_unavailable');
+    }
+    if (abort.isCompleted) throw const CollaborationClientException('Collaboration request timed out.', code: 'request_timeout');
     final basePath = baseUri.path.replaceFirst(RegExp(r'/$'), '');
     final routePath = path.startsWith('/chat') && basePath.endsWith('/chat')
         ? path.substring('/chat'.length)
@@ -263,19 +415,16 @@ class CollaborationClient {
       'Accept': 'application/json',
       'Cache-Control': 'no-store',
     };
-    final appCheck = appCheckToken == null ? null : await appCheckToken!();
-    if (appCheck == null || appCheck.isEmpty) {
-      throw const CollaborationClientException('Authentication required.', statusCode: 401, code: 'unauthenticated');
-    }
     headers['X-Firebase-AppCheck'] = appCheck;
     if (body != null) headers['Content-Type'] = 'application/json';
     try {
       final response = await _httpClient.send(
-        http.Request(method, uri)
+        http.AbortableRequest(method, uri, abortTrigger: abort.future)
           ..headers.addAll(headers)
-          ..body = body == null ? '' : jsonEncode(body),
+          ..body = encoded,
       );
-      final text = await response.stream.bytesToString();
+      final bytes = await _readBody(response, abort);
+      final text = utf8.decode(bytes);
       if (response.headers['cache-control']?.toLowerCase() != 'no-store') {
         throw const CollaborationClientException('Invalid collaboration response.');
       }
@@ -287,7 +436,7 @@ class CollaborationClient {
             code is! String || _errorMessages[code] != parsed['message']) {
           throw const CollaborationClientException('Invalid collaboration response.');
         }
-        throw CollaborationClientException('Collaboration request failed.',
+        throw CollaborationClientException(_errorMessages[code]!,
             statusCode: response.statusCode, code: code);
       }
       final decoded = jsonDecode(text);
@@ -305,6 +454,67 @@ class CollaborationClient {
     } catch (_) {
       throw const CollaborationClientException('Collaboration request failed.');
     }
+  }
+
+  Future<List<int>> _readBody(http.StreamedResponse response, Completer<void> abort) async {
+    final result = Completer<List<int>>();
+    final bytes = <int>[];
+    late StreamSubscription<List<int>> subscription;
+    subscription = response.stream.listen((chunk) {
+      if (result.isCompleted) return;
+      if (bytes.length + chunk.length > maxCollaborationResponseBytes) {
+        result.completeError(const CollaborationClientException('Invalid collaboration response.'));
+        unawaited(subscription.cancel());
+      } else {
+        bytes.addAll(chunk);
+      }
+    }, onDone: () {
+      if (!result.isCompleted) result.complete(bytes);
+    }, onError: (Object error, StackTrace stack) {
+      if (!result.isCompleted) result.completeError(error, stack);
+    });
+    unawaited(abort.future.then((_) {
+      if (!result.isCompleted) {
+        result.completeError(const CollaborationClientException('Collaboration request timed out.', code: 'request_timeout'));
+        unawaited(subscription.cancel());
+      }
+    }));
+    return result.future;
+  }
+
+  static Never _invalidRequest() => throw const CollaborationClientException(
+    'Invalid request', statusCode: 400, code: 'invalid_request');
+
+  static Never _invalidResponse() => throw const CollaborationClientException('Invalid collaboration response.');
+
+  static void _segment(String value) {
+    if (!RegExp(r'^[A-Za-z0-9._-]{1,128}$').hasMatch(value) || value == '.' || value == '..') {
+      _invalidRequest();
+    }
+  }
+
+  static T _wire<T>(T Function() decode) {
+    try {
+      return decode();
+    } on CollaborationWireException {
+      _invalidResponse();
+    } on FormatException {
+      _invalidResponse();
+    }
+  }
+
+  static List<CollaborationEvent> _events(Map<String, Object?> data, {required int maxBytes}) {
+    final raw = _list(data, 'events');
+    if (raw.length > maxCollaborationEvents) _invalidResponse();
+    var bytes = 0;
+    final events = <CollaborationEvent>[];
+    for (final value in raw) {
+      final event = _wire(() => CollaborationEvent.fromWire(_asMap(value)));
+      bytes += utf8.encode(jsonEncode(event.toWire())).length;
+      if (bytes > maxBytes) _invalidResponse();
+      events.add(event);
+    }
+    return events;
   }
 
   static void _exact(Map<String, Object?> data, Set<String> keys) {
@@ -380,6 +590,7 @@ class CollaborationClient {
     String key = 'cursor',
   ]) {
     final value = _string(data, key);
+    if (utf8.encode(value).length > 512) _invalidResponse();
     return CollaborationCursor(value);
   }
 }

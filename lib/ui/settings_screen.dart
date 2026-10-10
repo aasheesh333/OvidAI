@@ -21,6 +21,11 @@ import '../core/settings_actions.dart';
 import 'settings_action_widgets.dart';
 import 'settings_backup_screen.dart';
 import 'settings_health_screen.dart';
+import 'private_sync_settings_screen.dart';
+import 'collaboration_screen.dart';
+import '../core/collaboration/production.dart';
+export 'private_sync_settings_screen.dart'
+    show PrivateSyncSettingsScreen, PrivateSyncSettingsController;
 import '../core/theme.dart';
 import 'auth_screen.dart';
 import 'profile_avatar.dart';
@@ -43,7 +48,14 @@ import 'widgets/ovid_mark.dart';
 /// nothing was added to [AppState] or [SettingsActions]; the AetherCard
 /// wrappers only change presentation.
 class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
+  const SettingsScreen({
+    super.key,
+    this.privateSyncController,
+    this.collaborationController,
+  });
+
+  final PrivateSyncSettingsController? privateSyncController;
+  final CollaborationProduction? collaborationController;
 
   @override
   Widget build(BuildContext context) {
@@ -60,7 +72,30 @@ class SettingsScreen extends StatelessWidget {
           const _SectionGap(),
           const AetherSectionTitle(eyebrow: 'Account'),
           const SizedBox(height: 10),
-          AetherCard(padding: EdgeInsets.zero, child: _accountHeader(context)),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _accountHeader(context),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.sync_lock_outlined,
+                  'Private sync',
+                  'Private transcript storage over HTTPS, with your consent',
+                  PrivateSyncSettingsScreen(controller: privateSyncController),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.group_outlined,
+                  'Collaboration',
+                  'Shared messages and read-only activity',
+                  CollaborationScreen(controller: collaborationController),
+                ),
+              ],
+            ),
+          ),
 
           // ── Appearance ────────────────────────────────────────────────
           const _SectionGap(),
@@ -1566,9 +1601,7 @@ class _AboutScreen extends StatelessWidget {
         padding: const EdgeInsets.all(24),
         children: [
           const SizedBox(height: 24),
-          Center(
-            child: OvidLockup(markSize: 72, textSize: 30),
-          ),
+          Center(child: OvidLockup(markSize: 72, textSize: 30)),
           const SizedBox(height: 20),
           const SizedBox(height: 6),
           Center(
@@ -2088,10 +2121,7 @@ class _PresetsScreen extends StatelessWidget {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text(
-              'Delete',
-              style: TextStyle(color: Aether.danger),
-            ),
+            child: const Text('Delete', style: TextStyle(color: Aether.danger)),
           ),
         ],
       ),

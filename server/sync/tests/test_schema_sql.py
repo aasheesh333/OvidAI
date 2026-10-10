@@ -3,18 +3,15 @@
 Fresh installs apply schema.sql (portable account lifecycle) then
 schema_private_sync.sql (PostgreSQL only).
 
-Stdlib only. When PostgreSQL server binaries (initdb, pg_ctl, psql) are on
-PATH, the files are also applied to a throwaway cluster under
-/tmp/opencode/pgtest; otherwise that test is skipped, never claimed as passed.
+Live tests use SYNC_TEST_DATABASE_URL and psycopg with an isolated schema per
+test, or an unprivileged local initdb cluster. Without either, they skip.
 """
 
-import os
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
 from pathlib import Path
+
+from server.sync.tests.postgres_schema_helper import PostgresSchemaTest
 
 ROOT = Path(__file__).resolve().parents[3]
 ACCOUNT = ROOT / 'server' / 'account'
@@ -217,71 +214,38 @@ class SchemaParityTest(unittest.TestCase):
                 self.assertIsNone(re.search(pattern, code, re.I | re.M))
 
 
-PG_BINARIES = ('initdb', 'pg_ctl', 'psql')
+class PostgresApplyTest(PostgresSchemaTest):
+    """Apply schema/migrations to an isolated PostgreSQL schema."""
 
+    def sync_tables(self):
+        rows = self.db.execute(
+            "SELECT tablename FROM pg_tables "
+            "WHERE schemaname = current_schema() AND tablename LIKE 'sync_%'"
+        ).fetchall()
+        return {row[0] for row in rows}
 
-@unittest.skipUnless(all(shutil.which(b) for b in PG_BINARIES),
-                     'local PostgreSQL binaries (initdb, pg_ctl, psql) not on PATH')
-class PostgresApplyTest(unittest.TestCase):
-    """Apply schema/migrations to a disposable local cluster on a unix socket."""
-
-    @classmethod
-    def setUpClass(cls):
-        base = Path('/tmp/opencode/pgtest')
-        base.mkdir(parents=True, exist_ok=True)
-        cls.work = Path(tempfile.mkdtemp(dir=base))
-        cls.data = cls.work / 'data'
-        cls.sock = cls.work / 'sock'
-        cls.sock.mkdir()
-        subprocess.run(['initdb', '-D', str(cls.data), '-A', 'trust', '-U', 'postgres'],
-                       check=True, capture_output=True)
-        subprocess.run(['pg_ctl', '-D', str(cls.data), '-w', '-l', str(cls.work / 'log'),
-                        '-o', f"-k {cls.sock} -c listen_addresses='' -p 54329", 'start'],
-                       check=True, capture_output=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.run(['pg_ctl', '-D', str(cls.data), '-m', 'immediate', 'stop'],
-                       capture_output=True)
-        shutil.rmtree(cls.work, ignore_errors=True)
-
-    def psql(self, db, *args, sql=None):
-        return subprocess.run(
-            ['psql', '-h', str(self.sock), '-p', '54329', '-U', 'postgres', '-d', db,
-             '-v', 'ON_ERROR_STOP=1', '-qAt', *args],
-            input=sql, check=True, capture_output=True, text=True).stdout
-
-    def create_db(self, name):
-        self.psql('postgres', '-c', f'CREATE DATABASE {name}')
-
-    def sync_tables(self, db):
-        rows = self.psql(db, '-c', "SELECT tablename FROM pg_tables WHERE tablename LIKE 'sync_%'")
-        return set(rows.split())
-
-    def apply_fresh(self, db):
-        self.psql(db, '-f', str(SCHEMA))
-        self.psql(db, '-f', str(SYNC_SCHEMA))
+    def apply_fresh(self):
+        self.apply(SCHEMA)
+        self.apply(SYNC_SCHEMA)
 
     def test_fresh_schema_twice(self):
-        self.create_db('fresh')
-        self.apply_fresh('fresh')
-        self.apply_fresh('fresh')
-        self.assertEqual(self.sync_tables('fresh'), EXPECTED_TABLES)
+        self.apply_fresh()
+        self.apply_fresh()
+        self.assertEqual(self.sync_tables(), EXPECTED_TABLES)
 
     def test_upgrade_pre_sync_preserves_rows_and_reapplies(self):
-        self.create_db('upgrade')
-        self.psql('upgrade', '-f', str(SCHEMA))
-        self.psql('upgrade', '-f', str(PRE_SYNC_MIGRATION))
-        self.psql('upgrade', '-c', "INSERT INTO account_deletions VALUES ('u1','pending',1,'{}')")
-        self.psql('upgrade', '-f', str(MIGRATION))
-        self.psql('upgrade', '-f', str(MIGRATION))
-        self.assertEqual(self.sync_tables('upgrade'), EXPECTED_TABLES)
-        self.assertEqual(self.psql('upgrade', '-c', 'SELECT count(*) FROM account_deletions').strip(), '1')
+        self.apply(SCHEMA)
+        self.apply(PRE_SYNC_MIGRATION)
+        self.db.execute("INSERT INTO account_deletions VALUES ('u1','pending',1,'{}')")
+        self.apply(MIGRATION)
+        self.apply(MIGRATION)
+        self.assertEqual(self.sync_tables(), EXPECTED_TABLES)
+        self.assertEqual(self.db.execute('SELECT * FROM account_deletions').fetchall(),
+                         [('u1', 'pending', 1.0, {})])
 
     def test_constraints_and_permanent_tombstone(self):
-        self.create_db('behaviour')
-        self.apply_fresh('behaviour')
-        self.psql('behaviour', sql="""
+        self.apply_fresh()
+        self.db.execute("""
             INSERT INTO sync_accounts VALUES ('a','active',0,NULL,NULL);
             INSERT INTO sync_devices VALUES ('a','d1','Phone',1,0,0,NULL,NULL);
             INSERT INTO sync_records (account_id, record_id, record_type, schema_version,
@@ -291,29 +255,40 @@ class PostgresApplyTest(unittest.TestCase):
         """)
         bad = [
             # duplicate change_sequence within an account
-            """INSERT INTO sync_records (account_id, record_id, record_type, schema_version,
+            ("""INSERT INTO sync_records (account_id, record_id, record_type, schema_version,
                 source_device_id, revision, change_sequence, canonical_bytes,
                 canonical_sha256, canonical_length, accepted_at, updated_at)
                VALUES ('a','r2','transcript',1,'d1',1,1,'\\x7b7d',sha256('\\x7b7d'),2,0,0)""",
+             'sync_records_change_sequence_unique'),
             # digest mismatch
-            """INSERT INTO sync_records (account_id, record_id, record_type, schema_version,
+            ("""INSERT INTO sync_records (account_id, record_id, record_type, schema_version,
                 source_device_id, revision, change_sequence, canonical_bytes,
                 canonical_sha256, canonical_length, accepted_at, updated_at)
                VALUES ('a','r3','transcript',1,'d1',1,2,'\\x7b7d',sha256('\\x00'),2,0,0)""",
+             'sync_records_bytes_consistent'),
             # device id recycled under another account
-            "INSERT INTO sync_accounts VALUES ('b','active',0,NULL,NULL);"
-            "INSERT INTO sync_devices VALUES ('b','d1','Tab',1,0,0,NULL,NULL)",
+            ("INSERT INTO sync_accounts VALUES ('b','active',0,NULL,NULL);"
+             "INSERT INTO sync_devices VALUES ('b','d1','Tab',1,0,0,NULL,NULL)",
+             'sync_devices_device_id_unique'),
         ]
-        for statement in bad:
+        for statement, constraint in bad:
             with self.subTest(statement=statement[:40]):
-                with self.assertRaises(subprocess.CalledProcessError):
-                    self.psql('behaviour', sql=f'BEGIN; {statement}; COMMIT;')
-        self.psql('behaviour', '-c', "UPDATE sync_accounts SET state='fenced', fenced_at=1 WHERE account_id='a'")
-        self.psql('behaviour', '-c', "UPDATE sync_accounts SET state='deleted', deleted_at=2 WHERE account_id='a'")
+                with self.assertRaises(self.psycopg.IntegrityError) as caught:
+                    with self.db.transaction():
+                        self.db.execute(statement)
+                self.assertEqual(caught.exception.diag.constraint_name, constraint)
+        self.db.execute("UPDATE sync_accounts SET state='fenced', fenced_at=1 WHERE account_id='a'")
+        self.db.execute("UPDATE sync_accounts SET state='deleted', deleted_at=2 WHERE account_id='a'")
         for statement in ("UPDATE sync_accounts SET state='active' WHERE account_id='a'",
                           "DELETE FROM sync_accounts WHERE account_id='a'"):
-            with self.assertRaises(subprocess.CalledProcessError):
-                self.psql('behaviour', '-c', statement)
+            with self.subTest(statement=statement):
+                with self.assertRaises(self.psycopg.errors.CheckViolation) as caught:
+                    self.db.execute(statement)
+                self.assertIn('tombstone is permanent', str(caught.exception))
+                self.assertEqual(
+                    self.db.execute("SELECT state FROM sync_accounts WHERE account_id='a'").fetchone(),
+                    ('deleted',),
+                )
 
 
 if __name__ == '__main__':

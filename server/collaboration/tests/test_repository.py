@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import unittest
@@ -86,12 +87,14 @@ class CreateTest(Base):
 
 
 class InviteJoinTest(Base):
-    def test_create_invite_retry_is_durably_rejected_without_new_invite(self):
+    def test_create_invite_retry_returns_original_without_new_invite(self):
         token, _ = self.session()
         first = self.repo.create_invite('owner', token, idempotency_key='invite-request')
         restarted = CollabRepository(self.path, clock=self.clock)
+        self.assertEqual(first, restarted.create_invite(
+            'owner', token, idempotency_key='invite-request'))
         self.assertError('request_already_used', restarted.create_invite,
-                         'owner', token, idempotency_key='invite-request')
+                         'owner', token, max_uses=2, idempotency_key='invite-request')
         with restarted._connection() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM invites').fetchone()[0], 1)
         self.assertEqual(restarted.join('guest', token, first['inviteCode'])['status'], 'active')
@@ -390,6 +393,32 @@ class AppendTest(Base):
         self.assertError('session_closed', self.repo.join, 'u9', token, 'code')
         self.assertError('session_closed', self.repo.get_state, 'owner', token)
 
+    def test_close_persists_ordered_lifecycle_fence_events(self):
+        token, _ = self.session()
+        before = self.repo.replay('owner', token)
+
+        self.repo.close('owner', token)
+
+        with self.repo._connection() as db:
+            session = db.execute('SELECT lifecycle, generation FROM sessions').fetchone()
+            self.assertEqual((session['lifecycle'], session['generation']), ('closed', 2))
+        with self.assertRaises(CollabError) as caught:
+            self.repo.replay('owner', token, before['cursor'])
+        self.assertEqual(caught.exception.code, 'session_closed')
+
+        with self.repo._connection() as db:
+            events = [dict(row) for row in db.execute(
+                'SELECT * FROM events ORDER BY sequence').fetchall()]
+        self.assertEqual([e['sequence'] for e in events], [1, 2])
+        self.assertEqual([json.loads(e['envelope'])['payload'] for e in events], [
+            {'code': 'sessionClosing'}, {'code': 'sessionClosed'}])
+
+    def test_close_invalidates_a_generation_bound_cursor(self):
+        token, _ = self.session()
+        cursor = self.repo.replay('owner', token)['cursor']
+        self.repo.close('owner', token)
+        self.assertError('session_closed', self.repo.replay, 'owner', token, cursor)
+
     def test_closed_session_close_requires_owner_authorization(self):
         token, _ = self.session()
         self.repo.close('owner', token)
@@ -469,6 +498,14 @@ class ReplayTest(Base):
         sid, _ = base64.urlsafe_b64decode(page['cursor'] + '==').decode().rsplit(':', 1)
         forged = base64.urlsafe_b64encode(f'{sid}:999'.encode()).decode().rstrip('=')
         self.assertError('cursor_reset', self.repo.replay, 'owner', self.token, forged)
+
+    def test_cursor_from_before_member_revocation_requires_reset_after_rejoin(self):
+        code = self.repo.create_invite('owner', self.token, max_uses=3)['inviteCode']
+        member = self.repo.join('alice', self.token, code)
+        cursor = self.repo.replay('alice', self.token)['cursor']
+        self.repo.revoke_member('owner', self.token, member['participantId'])
+        self.repo.join('alice', self.token, self.invite(self.token))
+        self.assertError('cursor_reset', self.repo.replay, 'alice', self.token, cursor)
 
 
 class AccountDeletionTest(Base):

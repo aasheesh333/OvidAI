@@ -17,14 +17,17 @@ bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
   final route = ShareLinkResolver.route(uri);
   final navigator = navigatorKey.currentState;
   if (route is! ShareViewerRoute || navigator == null) return false;
-  navigator.push(MaterialPageRoute(
-    builder: (_) => SharedConversationScreen(token: route.token),
-  ));
+  navigator.push(
+    MaterialPageRoute(
+      builder: (_) => SharedConversationScreen(token: route.token),
+    ),
+  );
   return true;
 }
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  AppState.I.registerProductionAccountFeatures();
   // Coalesce session writes in production; tests keep the zero-window default.
   AppState.enableSessionPersistDebounce();
   await AppState.I.initializeForFirstFrame();
@@ -73,6 +76,10 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    AppState.I.setAccountFeaturesForeground(
+      WidgetsBinding.instance.lifecycleState == null ||
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
+    );
     // Rebuild the whole app when the user toggles the theme in Settings.
     AppState.I.addListener(_onThemeChanged);
     _restoreAndListenForLinks();
@@ -99,7 +106,9 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     try {
       final deferred = await _resolver.restoreDeferred();
       if (deferred != null) {
-        _openShare(Uri.parse('${ShareLinkResolver.canonicalOrigin}/s/${deferred.token}'));
+        _openShare(
+          Uri.parse('${ShareLinkResolver.canonicalOrigin}/s/${deferred.token}'),
+        );
       }
     } on Object {
       // Deferred links are optional and may fail when the provider is absent.
@@ -108,7 +117,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
 
   void _openShare(Uri uri) {
     final route = ShareLinkResolver.route(uri);
-    if (route is! ShareViewerRoute || !mounted ||
+    if (route is! ShareViewerRoute ||
+        !mounted ||
         _openedTokens.contains(route.token) ||
         !_pendingTokens.add(route.token)) {
       return;
@@ -136,6 +146,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    AppState.I.setAccountFeaturesForeground(state == AppLifecycleState.resumed);
     if (state == AppLifecycleState.resumed) {
       unawaited(AgentService.I.wakeSchedules());
     }
@@ -159,6 +170,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    AppState.I.setAccountFeaturesForeground(false);
     WidgetsBinding.instance.removeObserver(this);
     AppState.I.removeListener(_onThemeChanged);
     _linkSubscription?.cancel();

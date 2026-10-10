@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
+import time
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from server.sync.canonical import canonical_bytes
+from server.sync.cursors import CursorError, MAX_CURSOR_TTL_SECONDS, decode_cursor, encode_cursor
 from server.sync.dto import ReplayRecord, TombstonePayload, UploadRecord
 from server.sync.errors import SyncError
+from server.sync.policy import ENROLLED_DEVICES, device_can_enroll
 
 
 DEFAULT_MAX_RECORDS = 10_000
@@ -98,7 +100,9 @@ class _Account:
     records: dict[str, ReplayRecord]
     tombstoned: set[str]
     changes: list[ReplayRecord]
-    idempotency: dict[str, BatchResult]
+    idempotency: dict[str, tuple[bytes, BatchResult]]
+    enrollments: dict[str, tuple[bytes, object]]
+    revocations: dict[str, tuple[bytes, object]]
 
 
 class InMemorySyncRepository:
@@ -110,16 +114,26 @@ class InMemorySyncRepository:
         max_records: int = DEFAULT_MAX_RECORDS,
         max_retained_bytes: int = DEFAULT_MAX_RETAINED_BYTES,
         max_batch_records: int = DEFAULT_MAX_BATCH_RECORDS,
+        max_devices: int = ENROLLED_DEVICES,
+        cursor_secret: bytes = b"test-only sync cursor secret",
+        now=None,
     ):
         self.max_records = max_records
         self.max_retained_bytes = max_retained_bytes
         self.max_batch_records = max_batch_records
+        self.max_devices = max_devices
+        self.cursor_secret = cursor_secret
+        self.now = time.time if now is None else now
         self._accounts: dict[str, _Account] = {}
 
     def _account(self, uid: str) -> _Account:
         if type(uid) is not str or not uid:
             raise SyncError("invalid_request")
-        return self._accounts.setdefault(uid, _Account(set(), set(), False, 0, {}, set(), [], {}))
+        return self._accounts.setdefault(uid, _Account(set(), set(), False, 0, {}, set(), [], {}, {}, {}))
+
+    @staticmethod
+    def _digest(value) -> bytes:
+        return hashlib.sha256(canonical_bytes(value)).digest()
 
     def register_device(self, uid: str, device_id: str) -> None:
         account = self._account(uid)
@@ -138,12 +152,22 @@ class InMemorySyncRepository:
         account = self._account(uid)
         if account.deleted:
             raise SyncError("account_fenced")
+        digest = self._digest({"consent": consent, "deviceName": device_name})
+        replay = account.enrollments.get(idempotency_key)
+        if replay is not None:
+            if replay[0] != digest:
+                raise SyncError("integrity_conflict")
+            return replay[1]
+        if not device_can_enroll(len(account.devices)) or len(account.devices) >= self.max_devices:
+            raise SyncError("quota_exhausted")
         device_id = f"device-{len(account.devices) + 1}"
         self.register_device(uid, device_id)
         from server.sync.results import DeviceEnrollment
-        return DeviceEnrollment(device_id, device_name,
-                                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                                "active")
+        result = DeviceEnrollment(device_id, device_name,
+                                  datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                  "active")
+        account.enrollments[idempotency_key] = (digest, result)
+        return result
 
     def revoke_device(self, uid: str, device_id: str) -> None:
         account = self._account(uid)
@@ -153,14 +177,27 @@ class InMemorySyncRepository:
 
     def revoke(self, uid: str, requester_device_id: str, target_device_id: str,
                idempotency_key: str, fresh_auth: bool = False):
-        self._authorize(uid, requester_device_id)
+        account = self._account(uid)
+        if account.deleted:
+            raise SyncError("account_fenced")
         if not fresh_auth or not idempotency_key:
             raise SyncError("invalid_request")
+        digest = self._digest({"requesterDeviceId": requester_device_id,
+                               "targetDeviceId": target_device_id,
+                               "freshAuth": fresh_auth})
+        replay = account.revocations.get(idempotency_key)
+        if replay is not None:
+            if replay[0] != digest:
+                raise SyncError("integrity_conflict")
+            return replay[1]
+        self._authorize(uid, requester_device_id)
         self.revoke_device(uid, target_device_id)
         from server.sync.results import DeviceEnrollment
-        return DeviceEnrollment(target_device_id, "",
-                                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                                "revoked")
+        result = DeviceEnrollment(target_device_id, "",
+                                  datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                  "revoked")
+        account.revocations[idempotency_key] = (digest, result)
+        return result
 
     def delete_account(self, uid: str) -> None:
         account = self._account(uid)
@@ -168,6 +205,8 @@ class InMemorySyncRepository:
         account.records.clear()
         account.changes.clear()
         account.idempotency.clear()
+        account.enrollments.clear()
+        account.revocations.clear()
 
     def _authorize(self, uid: str, device_id: str) -> _Account:
         account = self._account(uid)
@@ -181,25 +220,23 @@ class InMemorySyncRepository:
     def _fingerprint(record: UploadRecord) -> bytes:
         return canonical_bytes(record.to_wire())
 
-    def _cursor(self, uid: str, sequence: int) -> str:
-        raw = f"v1:{hashlib.sha256(uid.encode()).hexdigest()[:32]}:{sequence}".encode()
-        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    def _cursor(self, uid: str, device_id: str, sequence: int) -> str:
+        if sequence == 0:
+            return ""
+        now = int(self.now())
+        return encode_cursor(uid, device_id, sequence, now + MAX_CURSOR_TTL_SECONDS,
+                             self.cursor_secret, now=now)
 
-    def _read_cursor(self, uid: str, cursor: str | None) -> int:
-        if cursor is None:
+    def _read_cursor(self, uid: str, device_id: str, cursor: str | None) -> int:
+        if cursor is None or cursor == "":
             return 0
-        if type(cursor) is not str or len(cursor) > 512:
-            raise SyncError("invalid_request")
         try:
-            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
-            prefix, account_hash, sequence = raw.split(":")
-            if prefix != "v1" or account_hash != hashlib.sha256(uid.encode()).hexdigest()[:32]:
-                raise ValueError
-            position = int(sequence)
-        except (ValueError, UnicodeDecodeError):
-            raise SyncError("invalid_request") from None
-        if position < 0:
-            raise SyncError("invalid_request")
+            position = decode_cursor(cursor, uid, device_id, self.cursor_secret,
+                                     now=int(self.now())).change_sequence
+        except CursorError:
+            raise SyncError("reset_required") from None
+        if position > self._account(uid).sequence:
+            raise SyncError("reset_required")
         return position
 
     def _retained_bytes(self, account: _Account) -> int:
@@ -224,18 +261,25 @@ class InMemorySyncRepository:
         records = tuple(records)
         if len(records) > self.max_batch_records:
             raise SyncError("payload_too_large")
-        if idempotency_key in account.idempotency:
-            return account.idempotency[idempotency_key]
         if any(not isinstance(item, UploadRecord) for item in records):
             raise SyncError("invalid_record")
-
-        pending: list[tuple[UploadRecord, str, ReplayRecord | None]] = []
-        new_count = 0
-        new_bytes = 0
+        if idempotency_key in account.idempotency:
+            digest = self._digest([item.to_wire() for item in records])
+            stored_digest, result = account.idempotency[idempotency_key]
+            if stored_digest != digest:
+                raise SyncError("integrity_conflict")
+            return result
+        # Stage the whole batch: later records see earlier admissions, but a
+        # conflict or quota failure must not publish any sequence or receipt.
+        account = replace(account, records=dict(account.records),
+                          tombstoned=set(account.tombstoned), changes=list(account.changes),
+                          idempotency=dict(account.idempotency))
+        results = []
+        accepted = []
         for upload in records:
             existing = account.records.get(upload.record_id)
             if upload.record_id in account.tombstoned:
-                pending.append((upload, "duplicate", account.records[next(
+                results.append(RecordResult("duplicate", account.records[next(
                     key for key, value in account.records.items()
                     if isinstance(value.payload, TombstonePayload)
                     and value.payload.target_record_id == upload.record_id
@@ -243,10 +287,10 @@ class InMemorySyncRepository:
                 continue
             if existing is not None:
                 if isinstance(existing.payload, TombstonePayload):
-                    pending.append((upload, "duplicate", existing))
+                    results.append(RecordResult("duplicate", existing))
                     continue
                 if upload.revision == existing.revision and self._fingerprint(upload) == self._fingerprint(self._as_upload(existing)):
-                    pending.append((upload, "duplicate", existing))
+                    results.append(RecordResult("duplicate", existing))
                     continue
                 if upload.revision <= existing.revision:
                     raise SyncError("integrity_conflict")
@@ -254,20 +298,7 @@ class InMemorySyncRepository:
                 target = account.records.get(upload.payload.target_record_id)
                 if target is not None and upload.revision <= target.revision:
                     raise SyncError("integrity_conflict")
-            new_count += 1 if existing is None else 0
-            new_bytes += len(self._fingerprint(upload))
-            pending.append((upload, "accepted", None))
-
-        if len(account.records) + new_count > self.max_records or self._retained_bytes(account) + new_bytes > self.max_retained_bytes:
-            # Deletion records remain admissible when the retained quota is full.
-            if not all(isinstance(upload.payload, TombstonePayload) for upload, status, _ in pending if status == "accepted"):
-                raise SyncError("quota_exhausted")
-
-        results = []
-        for upload, status, existing in pending:
-            if status == "duplicate":
-                results.append(RecordResult(status, existing))
-                continue
+            accepted.append(upload)
             account.sequence += 1
             replay = ReplayRecord.from_upload(upload, uid, account.sequence)
             account.records[upload.record_id] = replay
@@ -276,15 +307,19 @@ class InMemorySyncRepository:
                 account.records[upload.payload.target_record_id] = replay
                 account.tombstoned.add(upload.payload.target_record_id)
             results.append(RecordResult("accepted", replay))
+        if len(account.records) > self.max_records or self._retained_bytes(account) > self.max_retained_bytes:
+            if any(not isinstance(upload.payload, TombstonePayload) for upload in accepted):
+                raise SyncError("quota_exhausted")
         result = BatchResult(tuple(results))
-        account.idempotency[idempotency_key] = result
+        account.idempotency[idempotency_key] = (self._digest([item.to_wire() for item in records]), result)
+        self._accounts[uid] = account
         return result
 
     def changes(self, uid: str, device_id: str, cursor: str | None = None, *, limit: int = DEFAULT_MAX_PAGE_RECORDS, max_bytes: int = DEFAULT_MAX_PAGE_BYTES) -> ChangePage:
         account = self._authorize(uid, device_id)
         if type(limit) is not int or not 1 <= limit <= DEFAULT_MAX_PAGE_RECORDS or type(max_bytes) is not int or max_bytes < 1:
             raise SyncError("invalid_request")
-        position = self._read_cursor(uid, cursor)
+        position = self._read_cursor(uid, device_id, cursor)
         selected = []
         used = 0
         for item in account.changes:
@@ -299,7 +334,7 @@ class InMemorySyncRepository:
             used += size
         next_position = selected[-1].change_sequence if selected else position
         has_more = any(item.change_sequence > next_position for item in account.changes)
-        return ChangePage(tuple(selected), self._cursor(uid, next_position), has_more)
+        return ChangePage(tuple(selected), self._cursor(uid, device_id, next_position), has_more)
 
     def bootstrap(self, uid: str, device_id: str, cursor: str | None = None, *, limit: int = DEFAULT_MAX_PAGE_RECORDS, max_bytes: int = DEFAULT_MAX_PAGE_BYTES) -> StatePage:
         page = self.changes(uid, device_id, cursor, limit=limit, max_bytes=max_bytes)

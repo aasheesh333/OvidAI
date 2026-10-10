@@ -106,19 +106,30 @@ void main() {
         messages: [Message(role: 'user', content: 'hello')],
       );
 
+      // Transport completion deliberately does not wait for journal I/O.
+      // Observe its actual publication rather than imposing a two-second disk
+      // deadline that fails when unrelated suites contend for the filesystem.
+      final settled = Completer<void>();
+      void onUsageChanged() {
+        final records = app.usageAttempts
+            .where((a) => a.provider == provider.id)
+            .toList();
+        if (!settled.isCompleted &&
+            records.length == 2 &&
+            records.every((a) => a.outcome != UsageOutcome.pending)) {
+          settled.complete();
+        }
+      }
+      app.addListener(onUsageChanged);
+      addTearDown(() => app.removeListener(onUsageChanged));
+
       final result = await AgentService.I.callLlmForTest(provider, [
         {'role': 'user', 'content': 'hello'},
       ], session);
 
        expect(result?['content'], 'ok');
        expect(requests, 2);
-       await _eventually(() {
-         final records = app.usageAttempts
-             .where((a) => a.provider == provider.id)
-             .toList();
-         return records.length == 2 &&
-             records.every((a) => a.outcome != UsageOutcome.pending);
-       });
+        await settled.future;
       final records = app.usageAttempts
           .where((a) => a.provider == provider.id)
           .toList();
@@ -452,14 +463,4 @@ Future<void> _sse(
   }
   request.response.write('data: [DONE]\n\n');
   await request.response.close();
-}
-
-Future<void> _eventually(bool Function() condition) async {
-  final deadline = DateTime.now().add(const Duration(seconds: 2));
-  while (!condition()) {
-    if (DateTime.now().isAfter(deadline)) {
-      fail('condition did not become true before the deadline');
-    }
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-  }
 }

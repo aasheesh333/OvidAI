@@ -261,11 +261,13 @@ extension _SettingsStateIntegration on AppState {
     // Revoke captured run/lifecycle ownership synchronously, including queued
     // prompts. The public readiness getter prevents new agent/schedule work.
     final token = _sessionAccountToken = Object();
+    _accountLifecycle.fenceSynchronously();
     _cancelPersistDebounce();
     try {
       AgentService.I.sessionAccountChanged();
       refresh();
       await _persistWriteInFlight;
+      await _featureBinding;
       await SettingsActions.awaitPendingWrites();
       _checkSettingsOwner(token);
       return await action(token);

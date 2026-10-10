@@ -20,16 +20,12 @@ class CleanupData:
     @staticmethod
     def _authority_identity(value):
         identity = getattr(value, 'authority_identity', None)
-        if identity is None:
-            identity = getattr(value, 'identity', None)
         if callable(identity):
             identity = identity()
-        if identity is not None:
-            return str(identity)
-        path = getattr(value, 'path', None)
-        if path is not None:
-            return f'{type(value).__module__}.{type(value).__qualname__}:{path}'
-        return f'{type(value).__module__}.{type(value).__qualname__}'
+        if (type(identity) is not str or not identity.strip() or
+                len(identity) > 256 or any(ord(char) < 33 or ord(char) > 126 for char in identity)):
+            raise ValueError('Explicit stable cleanup authority identity is required')
+        return identity
 
     def authority_identities(self):
         identities = dict(self.stores.identities)

@@ -30,6 +30,68 @@ void main() {
 
   tearDown(() => coordinator.dispose());
 
+  test('uncommitted gap keeps transport cursor and retries the missing history', () async {
+    coordinator.start();
+    await flush();
+    transport.replayResult = (_, _) async => page(sequence: 3, text: 'gap');
+    scheduler.advance(const Duration(seconds: 15));
+    await flush();
+    expect(coordinator.cursor!.value, 'cursor-1');
+    expect(store.cursor, 1);
+    expect(coordinator.isStale, isTrue);
+    transport.replayResult = (_, _) async => client.CollaborationEventPage(
+      events: [...page(sequence: 2, text: 'missing').events, ...page(sequence: 3, text: 'gap').events],
+      nextCursor: const client.CollaborationCursor('cursor-3'), hasMore: false);
+    scheduler.advance(const Duration(seconds: 2));
+    await flush();
+    expect(coordinator.cursor!.value, 'cursor-3');
+    expect(store.state!.messages.map((m) => m.text), ['hello', 'missing', 'gap']);
+  });
+
+  test('failed initial state retries bootstrap before replay', () async {
+    var offline = true;
+    transport.stateResult = (_) async {
+      if (offline) throw StateError('offline');
+      return bootstrap('session-a');
+    };
+    coordinator.start();
+    await flush();
+    offline = false;
+    scheduler.advance(const Duration(seconds: 2));
+    await flush();
+    expect(transport.stateCalls, 2);
+    expect(store.state!.messages.single.text, 'hello');
+    expect(transport.cursors, ['bootstrap-cursor']);
+  });
+
+  for (final code in ['not_member', 'session_closed']) {
+    test('terminal $code during bootstrap fences store and stops retries', () async {
+      coordinator.start();
+      await flush();
+      transport.stateResult = (_) async => throw client.CollaborationClientException(
+        'fixed', statusCode: code == 'not_member' ? 403 : 409, code: code);
+      coordinator.bind(accountId: 'a', sessionToken: 'route-a', store: store);
+      await flush();
+      scheduler.advance(const Duration(minutes: 5));
+      await flush();
+      expect(store.state, isNull);
+      expect(coordinator.cursor, isNull);
+      expect(scheduler.activeCount, 0);
+    });
+  }
+
+  test('closed session during poll stops and clears stale read projection', () async {
+    coordinator.start();
+    await flush();
+    transport.replayResult = (_, _) async => throw const client.CollaborationClientException(
+      'closed', statusCode: 409, code: 'session_closed');
+    scheduler.advance(const Duration(seconds: 15));
+    await flush();
+    expect(store.state, isNull);
+    expect(coordinator.cursor, isNull);
+    expect(scheduler.activeCount, 0);
+  });
+
   test('bootstraps real store and polls every 15 seconds without overlap', () async {
     coordinator.start();
     await flush();
@@ -105,6 +167,22 @@ void main() {
     expect(coordinator.cursor!.value, 'cursor-1');
   });
 
+  test('failed bootstrap after cursor reset retries state before replay', () async {
+    coordinator.start();
+    await flush();
+    transport.replayResult = (_, _) async => throw const client.CollaborationClientException(
+      'reset', statusCode: 410, code: 'cursor_reset');
+    transport.stateResult = (_) async => throw StateError('offline');
+    scheduler.advance(const Duration(seconds: 15));
+    await flush();
+    transport.stateResult = (_) async => bootstrap('session-a');
+    transport.replayResult = (_, _) async => page();
+    scheduler.advance(const Duration(seconds: 2));
+    await flush();
+    expect(transport.stateCalls, 3);
+    expect(transport.cursors.last, 'bootstrap-cursor');
+  });
+
   for (final switchAccount in [false, true]) {
     test('late replay fenced by ${switchAccount ? 'account' : 'session'} replacement', () async {
       coordinator.start();
@@ -159,7 +237,7 @@ void main() {
     coordinator.start();
     await flush();
     transport.replayResult = (_, _) async =>
-        throw const client.CollaborationClientException('revoked', statusCode: 403);
+        throw const client.CollaborationClientException('revoked', statusCode: 403, code: 'membership_revoked');
     scheduler.advance(const Duration(seconds: 15));
     await flush();
     scheduler.advance(const Duration(minutes: 5));
@@ -188,7 +266,7 @@ client.CollaborationEventPage page({String session = 'session-a', int sequence =
     );
 
 class FakeClient extends client.CollaborationClient {
-  FakeClient() : super(baseUri: Uri.parse('https://unused.invalid'), accessToken: () async => null);
+  FakeClient() : super(baseUri: Uri.parse('https://unused.invalid'), accessToken: () async => null, appCheckToken: () async => null);
   final cursors = <String?>[];
   int stateCalls = 0;
   Future<client.CollaborationState> Function(String) stateResult =

@@ -19,6 +19,7 @@ import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/github_service.dart';
 import 'package:ovid_ai/core/grant_store.dart';
 import 'package:ovid_ai/core/hook_service.dart';
+import 'package:ovid_ai/core/hook_context_store.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/mcp_config_parse.dart';
 import 'package:ovid_ai/core/plugin_adapters.dart';
@@ -98,10 +99,9 @@ void main() {
       });
     }
     app = AppState.I;
-    // Session deletion also cleans personal memory. Open the real store under
-    // this suite's temp root so later persistence drains can finish cleanup.
-    // Keep the singleton: several groups temporarily replace AppState.I and
-    // reset it back to this instance.
+    // Session deletion resolves the personal-memory root again, even after
+    // prepareMemory. Keep this path available for the entire suite so cleanup
+    // can finish and subsequent session writes are genuinely durable.
     const paths = MethodChannel('plugins.flutter.io/path_provider');
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -109,11 +109,7 @@ void main() {
       if (call.method == 'getApplicationDocumentsDirectory') return tmp.path;
       return null;
     });
-    try {
-      await app.prepareMemory();
-    } finally {
-      messenger.setMockMethodCallHandler(paths, null);
-    }
+    await app.prepareMemory();
     await app.initialize();
   });
 
@@ -132,6 +128,11 @@ void main() {
     SessionLedger.rootOverrideForTest = null;
     SessionSearch.dbPathOverrideForTest = null;
     CommandService.exportDirOverrideForTest = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          null,
+        );
     suiteRoot.deleteSync(recursive: true);
   });
 
@@ -8452,16 +8453,16 @@ block</pre>
     testWidgets('bare /preset opens the sheet; tapping a row applies it', (
       tester,
     ) async {
-      app.newSession();
-      app.sendMessage('hello there'); // mid-chat — the old refusal case
-      final s = app.activeSession!;
-
       // Session start and deletion cleanup use real filesystem I/O. Complete
-      // those lifecycles outside FakeAsync before exercising the picker.
+      // those lifecycles outside FakeAsync, including their creation: starting
+      // them on the fake clock can strand a shared hook-context write queue.
       await tester.runAsync(() async {
+        app.newSession();
+        app.sendMessage('hello there'); // mid-chat — the old refusal case
         await SessionLifecycleService.I.drainForTest();
         await app.awaitPendingSessionWritesForTest();
       });
+      final s = app.activeSession!;
 
       await tester.pumpWidget(
         MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
@@ -8488,6 +8489,13 @@ block</pre>
 
       // Outlive the snackbar's auto-dismiss timer for a clean teardown.
       await tester.pump(const Duration(seconds: 5));
+      // Prove the shared durable-context queue remains usable after the widget
+      // interaction; otherwise later plugin session_start calls hang forever.
+      await tester.runAsync(() async {
+        await HookContextStore().reconcile(s.id, {}).timeout(
+          const Duration(seconds: 3),
+        );
+      });
     });
   });
 
@@ -11936,10 +11944,14 @@ You are an expert security auditor reviewing code for vulnerabilities.
 
         expect(server.transport, 'http');
         expect(server.url, 'https://api.example.com/mcp');
-        expect(server.headers['Authorization'], 'Bearer test_token');
-
-        final env = await app.getMcpEnv('remote-server');
+        expect(server.canonicalId, 'acme/remote-mcp/remote-server');
+        expect(
+          await app.getMcpHeaders(server.canonicalId),
+          {'Authorization': 'Bearer test_token'},
+        );
+        final env = await app.getMcpEnv(server.canonicalId);
         expect(env['SECRET_KEY'], 'very_secret_value');
+        expect(server.headers['Authorization'], 'Bearer test_token');
       },
     );
   });
@@ -21436,7 +21448,12 @@ cwd = 'tools'
           AgentService.I.debugPauseScheduleTimerForTest(false);
           AppState.resetTestInstance();
         });
-        final app = AppState.createForTest();
+        // The mount mutex starts as a Future.value. Construct it on the same
+        // real event loop used by the filesystem-backed install/mount below;
+        // a future queued on FakeAsync cannot complete while runAsync waits.
+        final app = (await tester.runAsync(
+          () async => AppState.createForTest(),
+        ))!;
 
         PluginRuntimeManager.depsForTest = PluginDependencyService(
           runtimeRootOverride: p11Runtime,

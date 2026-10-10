@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+from server.sync.canonical import decode_strict
 from server.sync.dto import ReplayRecord
 from server.sync.errors import SyncError, parse_error
 
@@ -84,6 +85,28 @@ class RecordOutcome:
             raise
         except (TypeError, ValueError):
             _fail()
+
+
+@dataclass(frozen=True)
+class RejectedUpload:
+    """Internal batch item retaining malformed input only for request hashing.
+
+    This is not a wire response. Only its terminal outcome is persisted; the
+    invalid payload is never stored in the idempotency result or echoed.
+    """
+
+    record_id: str
+    request_bytes: bytes = field(repr=False)
+    error: SyncError
+
+    def to_wire(self) -> object:
+        # JCS writes e.g. 1e20 as an integer-shaped decimal. Preserve its
+        # IEEE-754 number semantics when rehashing rather than manufacturing an
+        # unsafe Python int; keep the request decoder's strict JSON checks.
+        return decode_strict(self.request_bytes)
+
+    def outcome(self) -> RecordOutcome:
+        return RecordOutcome(self.record_id, "rejected", None, None, self.error)
 
 
 @dataclass(frozen=True)

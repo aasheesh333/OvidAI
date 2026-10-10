@@ -4,6 +4,7 @@
 /// The backend owns durable I/O and must replace its record atomically.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'models.dart';
@@ -26,6 +27,11 @@ abstract interface class CollaborationStoreBackend {
   Future<void> write(Map<String, Object?> record);
 
   Future<void> clear();
+}
+
+/// Disk implementations check the lease immediately before atomic replacement.
+abstract interface class GuardedCollaborationStoreBackend implements CollaborationStoreBackend {
+  Future<void> writeGuarded(Map<String, Object?> record, bool Function() owns);
 }
 
 /// Small durable-boundary test backend. It clones through JSON so callers
@@ -70,10 +76,22 @@ class CollaborationStore {
   List<CollaborationEvent> _events = const [];
   Map<String, Object?>? _record;
 
+  int _epoch = 0;
+  Future<void> _tail = Future.value();
+  Future<void> get drained => _tail;
+
+  Future<T> _enqueue<T>(Future<T> Function() action) {
+    final next = _tail.then((_) => action());
+    _tail = next.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return next;
+  }
+
   /// Loads and validates the last complete account/session record.
   Future<void> load() async {
+    final epoch = _epoch;
+    await _enqueue(() async {
     final raw = await backend.read();
-    if (raw == null) return;
+    if (raw == null || epoch != _epoch) return;
     try {
       final account = raw['accountId'];
       final generation = raw['sessionGeneration'];
@@ -104,6 +122,7 @@ class CollaborationStore {
     } catch (_) {
       throw const CollaborationStoreException('invalid collaboration record');
     }
+    });
   }
 
   Future<void> installBootstrap({
@@ -114,6 +133,9 @@ class CollaborationStore {
     if (accountId != ownerFence || sessionGeneration < 0) {
       throw const CollaborationStoreException('owner fence mismatch');
     }
+    final epoch = ++_epoch;
+    await _enqueue(() async {
+    if (epoch != _epoch) return;
     final record = _recordFor(
       accountId: accountId,
       sessionGeneration: sessionGeneration,
@@ -121,7 +143,8 @@ class CollaborationStore {
       bootstrap: state,
       events: const [],
     );
-    await _commit(record, accountId, sessionGeneration, state, const []);
+    await _commit(record, accountId, sessionGeneration, state, const [], epoch);
+    });
   }
 
   /// Reduces the complete page first, then atomically commits both projection
@@ -130,7 +153,27 @@ class CollaborationStore {
     required String ownerFence,
     required int sessionGeneration,
     required Iterable<CollaborationEvent> page,
+  }) => _applyPage(ownerFence: ownerFence, sessionGeneration: sessionGeneration, page: page);
+
+  /// An append response is not replay: it may skip events accepted concurrently.
+  /// Check its lease and contiguity against the projection inside the write queue.
+  Future<bool> applyAcknowledgement({
+    required String ownerFence,
+    required int sessionGeneration,
+    required Iterable<CollaborationEvent> page,
+  }) => _applyPage(ownerFence: ownerFence, sessionGeneration: sessionGeneration,
+      page: page, acknowledgement: true);
+
+  Future<bool> _applyPage({
+    required String ownerFence,
+    required int sessionGeneration,
+    required Iterable<CollaborationEvent> page,
+    bool acknowledgement = false,
   }) async {
+    final epoch = _epoch;
+    final pageEvents = List<CollaborationEvent>.unmodifiable(page);
+    return _enqueue(() async {
+    if (epoch != _epoch) return false;
     final current = state;
     final account = accountId;
     final generation = this.sessionGeneration;
@@ -138,8 +181,19 @@ class CollaborationStore {
         account != this.ownerFence || ownerFence != account || generation != sessionGeneration) {
       return false;
     }
-    final pageEvents = List<CollaborationEvent>.unmodifiable(page);
+    if (current.status != CollaborationStatus.live) return false;
+    if (acknowledgement) {
+      if (pageEvents.isEmpty) return false;
+      var expected = current.lastSequence + 1;
+      for (final event in pageEvents) {
+        if (event.sessionId != current.session.sessionId || event.sequence != expected++) return false;
+      }
+    }
     final next = _reducer.applyPage(current, pageEvents);
+    if (next.status == CollaborationStatus.resyncRequired || pageEvents.any(
+        (event) => event.sessionId != current.session.sessionId || event.sequence > next.lastSequence)) {
+      return false;
+    }
     final allEvents = List<CollaborationEvent>.unmodifiable([..._events, ...pageEvents]);
     final record = _recordFor(
       accountId: account,
@@ -148,41 +202,49 @@ class CollaborationStore {
       bootstrap: _decodeBootstrap(Map<String, Object?>.from(_record!['bootstrap'] as Map)),
       events: allEvents,
     );
-    await _commit(record, account, sessionGeneration, next, allEvents);
-    return true;
+    return _commit(record, account, sessionGeneration, next, allEvents, epoch);
+    });
   }
 
   Future<void> clearSession({required String ownerFence, required int sessionGeneration}) async {
     if (ownerFence != this.ownerFence || this.sessionGeneration != sessionGeneration) return;
-    await backend.clear();
-    _record = null;
-    accountId = null;
-    this.sessionGeneration = null;
-    state = null;
-    cursor = 0;
-    _events = const [];
+    fence();
+    await drained;
   }
 
   /// Invalidates callbacks admitted under the current session generation.
   /// The next session must install a bootstrap with a new generation.
   void fence() {
+    _epoch++;
     sessionGeneration = null;
     state = null;
     accountId = null;
     cursor = 0;
     _events = const [];
     _record = null;
+    unawaited(_enqueue(backend.clear).catchError((Object _) {}));
   }
 
-  Future<void> _commit(
+  Future<bool> _commit(
     Map<String, Object?> record,
     String account,
     int generation,
     CollaborationState next,
     List<CollaborationEvent> events,
+    int epoch,
   ) async {
+    if (epoch != _epoch || account != ownerFence) return false;
     try {
-      await backend.write(record);
+      final persistence = backend;
+      if (persistence is GuardedCollaborationStoreBackend) {
+        await persistence.writeGuarded(record, () => epoch == _epoch && account == ownerFence);
+      } else {
+        await persistence.write(record);
+      }
+      if (epoch != _epoch || account != ownerFence) {
+        await backend.clear();
+        return false;
+      }
     } catch (error) {
       if (error is CollaborationStoreException) rethrow;
       throw const CollaborationStoreException('persistence failed');
@@ -193,6 +255,7 @@ class CollaborationStore {
     state = next;
     cursor = next.lastSequence;
     _events = List.unmodifiable(events);
+    return true;
   }
 
   Map<String, Object?> _recordFor({
@@ -216,6 +279,7 @@ class CollaborationStore {
         'members': [for (final member in value.members.values) member.toWire()],
         'localParticipantId': value.localParticipantId,
         'lastSequence': value.lastSequence,
+        'replayThroughSequence': value.replayThroughSequence,
       };
 
   CollaborationState _decodeBootstrap(Map<String, Object?> raw) {
@@ -228,6 +292,7 @@ class CollaborationStore {
       members: members,
       localParticipantId: raw['localParticipantId'] as String,
       lastSequence: raw['lastSequence'] as int,
+      replayThroughSequence: raw['replayThroughSequence'] as int? ?? 0,
     );
   }
 }

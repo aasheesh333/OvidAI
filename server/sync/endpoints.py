@@ -61,6 +61,7 @@ _SENSITIVE_NAME_PARTS = (
     "key", "token", "secret", "passw", "pwd", "auth", "sig", "credential",
     "bearer", "jwt", "session", "cookie",
 )
+_SENSITIVE_EXACT = {"pass", "otp"}
 
 # Well-known credential value shapes, checked in decoded path and query text.
 _SECRET_VALUES = re.compile(
@@ -93,7 +94,7 @@ def validate_endpoint(
     if policy is None:
         policy = (policies or {}).get(provider_id, DEFAULT_POLICY)
     try:
-        result = _canonicalize(value, policy)
+        result = _canonicalize(value, policy, provider_id)
     except _Reject:
         result = None
     if result is None:
@@ -101,7 +102,7 @@ def validate_endpoint(
     return result
 
 
-def _canonicalize(value: object, policy: EndpointPolicy) -> str:
+def _canonicalize(value: object, policy: EndpointPolicy, provider_id: str) -> str:
     if type(value) is not str or not 0 < len(value) <= MAX_ENDPOINT_LENGTH:
         raise _Reject()
     for char in value:
@@ -116,7 +117,7 @@ def _canonicalize(value: object, policy: EndpointPolicy) -> str:
         raise _Reject()
     host, port = _authority(authority, _SUPPORTED_SCHEMES[scheme])
     path = _path(path)
-    query = _query(query, policy)
+    query = _query(query, policy, provider_id)
     result = f"{scheme}://{host}{port}{path}{query}"
     if len(result) > MAX_ENDPOINT_LENGTH:
         raise _Reject()
@@ -192,6 +193,8 @@ def _fully_decode(text: str) -> str:
     """Repeatedly percent-decode (and '+' -> space) to defeat layered encodings."""
     for _ in range(8):
         decoded = _PCT.sub(lambda m: chr(int(m.group(1), 16)), text.replace("+", " "))
+        if any(ord(char) < 0x20 or ord(char) >= 0x7f for char in decoded):
+            raise _Reject()
         if decoded == text:
             return decoded
         text = decoded
@@ -203,7 +206,7 @@ def _sensitive_name(name: str, policy: EndpointPolicy) -> bool:
     if decoded in policy.non_secret_query_keys:
         return False
     collapsed = "".join(char for char in decoded if char.isalnum())
-    return any(part in collapsed for part in _SENSITIVE_NAME_PARTS)
+    return collapsed in _SENSITIVE_EXACT or any(part in collapsed for part in _SENSITIVE_NAME_PARTS)
 
 
 def _check_secret_value(text: str) -> None:
@@ -216,7 +219,7 @@ def _path(path: str) -> str:
         raise _Reject()
     path = _normalize_pct(path or "/")
     _check_secret_value(path)
-    for segment in path.split("/"):
+    for segment in _fully_decode(path).split("/"):
         for param in segment.split(";")[1:]:
             if _sensitive_name(param.partition("=")[0], DEFAULT_POLICY):
                 raise _Reject()
@@ -242,7 +245,7 @@ def _remove_dot_segments(path: str) -> str:
     return "/" + "/".join(output)
 
 
-def _query(query: str | None, policy: EndpointPolicy) -> str:
+def _query(query: str | None, policy: EndpointPolicy, provider_id: str) -> str:
     if query is None:
         return ""
     if "[" in query or "]" in query:
@@ -254,6 +257,13 @@ def _query(query: str | None, policy: EndpointPolicy) -> str:
         name, sep, item = piece.partition("=")
         if _sensitive_name(name, policy):
             raise _Reject()
+        decoded_name = _fully_decode(name).lower()
+        provider = re.sub(r"[^a-z0-9]", "", provider_id.lower())
+        if (provider in {"azure", "azureopenai"} and
+                re.sub(r"[^a-z0-9]", "", decoded_name) == "code" and
+                decoded_name not in policy.non_secret_query_keys):
+            raise _Reject()
+        _check_secret_value(name)
         _check_secret_value(item)
         pairs.append(_normalize_pct(name) + sep + _normalize_pct(item))
     return "?" + "&".join(pairs) if pairs else ""

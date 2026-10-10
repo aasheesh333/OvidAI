@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import inspect
+import re
+import zlib
 from typing import Any
 
 from fastapi import APIRouter, Header, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
-from .events import EventRejected, validate_client_event
-from .repository import CollabError, _encode_cursor
+from .events import EventRejected, canonical_bytes
+from .repository import CollabError, MAX_BATCH_BYTES
 
 MAX_BODY_BYTES = 1024 * 1024
 MAX_EVENTS = 100
@@ -38,6 +42,10 @@ _MESSAGES = {
     "account_deletion_pending": "Account is unavailable",
     "unsupported_identity": "Authentication required",
     "temporarily_unavailable": "The collaboration service is temporarily unavailable",
+    "rate_limited": "Collaboration rate limit exceeded",
+    "quota_exhausted": "Collaboration quota exceeded",
+    "payload_too_large": "Collaboration payload is too large",
+    "invite_not_found": "Invitation not found",
 }
 _ERROR_CODES = frozenset(_MESSAGES)
 
@@ -47,8 +55,6 @@ class _PayloadTooLarge(Exception):
 
 
 def router(repository, verifier, admission, *, prefix="") -> APIRouter:
-    routes = APIRouter(prefix=prefix, tags=["collaboration"])
-
     def failure(code: str, status: int | None = None):
         if code == "invalid_identity":
             code = "unauthenticated"
@@ -58,6 +64,21 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
             status_code=status or 400,
             headers={"Cache-Control": "no-store"},
         )
+
+    class CollaborationRoute(APIRoute):
+        def get_route_handler(self):
+            original = super().get_route_handler()
+
+            async def handle_validation(request: Request):
+                try:
+                    return await original(request)
+                except RequestValidationError:
+                    return failure("invalid_request")
+
+            return handle_validation
+
+    routes = APIRouter(prefix=prefix, tags=["collaboration"],
+                       route_class=CollaborationRoute)
 
     def value(claims: Any, name: str):
         result = claims.get(name) if isinstance(claims, dict) else getattr(claims, name, None)
@@ -86,21 +107,37 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
                             headers={"Cache-Control": "no-store"})
 
     async def body(request: Request):
-        raw = await request.body()
-        if len(raw) > MAX_BODY_BYTES:
-            raise _PayloadTooLarge
+        raw = bytearray()
+        encoding = request.headers.get('content-encoding', 'identity').lower()
+        if encoding not in ('identity', 'gzip'):
+            raise CollabError('invalid_request')
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > MAX_BODY_BYTES:
+                raise _PayloadTooLarge
+            raw.extend(chunk)
+        if encoding == 'gzip':
+            try:
+                decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                raw = decoder.decompress(raw, MAX_BATCH_BYTES + 1)
+                if len(raw) > MAX_BATCH_BYTES or decoder.unconsumed_tail:
+                    raise _PayloadTooLarge
+                if not decoder.eof or decoder.unused_data:
+                    raise CollabError('invalid_request')
+            except zlib.error:
+                raise CollabError('invalid_request') from None
         try:
             parsed = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
             raise CollabError("invalid_request") from None
         if type(parsed) is not dict:
             raise CollabError("invalid_request")
         if (type(parsed.get("schemaVersion")) is not int or
                 parsed["schemaVersion"] != 1 or
                 type(parsed.get("idempotencyKey")) is not str or
-                not parsed["idempotencyKey"] or
-                len(parsed["idempotencyKey"]) > 128):
+                not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', parsed["idempotencyKey"])):
             raise CollabError("invalid_request")
+        if len(canonical_bytes(parsed)) > MAX_BATCH_BYTES:
+            raise _PayloadTooLarge
         return parsed
 
     async def handle(action):
@@ -167,9 +204,8 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
                 type(data["invitationCode"]) is str and
                 type(data["idempotencyKey"]) is str):
             def join_operation(uid):
-                member = repository.join(uid, token, data["invitationCode"])
-                state = repository.get_state(uid, token)
-                return {"member": member, "cursor": state["cursor"]}
+                return repository.join(uid, token, data["invitationCode"],
+                                       idempotency_key=data["idempotencyKey"], with_cursor=True)
             return ok(call(claims, join_operation))
         if (keys <= {"schemaVersion", "maxUses", "ttlSeconds", "idempotencyKey"} and
                 "schemaVersion" in keys and "idempotencyKey" in keys and
@@ -182,6 +218,12 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
                  uid, token, max_uses=max_uses, ttl_seconds=ttl,
                  idempotency_key=data["idempotencyKey"]))})
         raise CollabError("invalid_request")
+
+    @routes.delete("/{session_token}/members/me")
+    async def leave(session_token: str, authorization: str = Header(default=""),
+                    x_firebase_appcheck: str = Header(default="")):
+        return await handle(lambda: ok(auth_action(
+            authorization, x_firebase_appcheck, lambda uid: repository.leave(uid, session_token))))
 
     @routes.delete("/{session_token}/members/{participant_id}")
     async def revoke(session_token: str, participant_id: str,
@@ -206,12 +248,9 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
         events = data["events"]
         if type(events) is not list or not 1 <= len(events) <= MAX_EVENTS:
             raise CollabError("invalid_request")
-        validated = [validate_client_event(item) for item in events]
-        result = call(claims, lambda uid: [repository.append(uid, token, item) for item in validated])
-        return ok({"schemaVersion": 1, "events": result,
-                   "nextCursor": _encode_cursor(result[-1]["sessionId"],
-                                                 result[-1]["eventSequence"]),
-                   "hasMore": False})
+        result = call(claims, lambda uid: repository.append_batch(
+            uid, token, events, idempotency_key=data["idempotencyKey"]))
+        return ok(result)
 
     @routes.get("/{session_token}/events")
     async def replay(session_token: str, cursor: str | None = Query(default=None),
@@ -239,6 +278,7 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
         data = await body(request)
         if set(data) != {"schemaVersion", "idempotencyKey"} or data["schemaVersion"] != 1 or type(data["idempotencyKey"]) is not str:
             raise CollabError("invalid_request")
-        return ok({"session": call(claims, lambda uid: repository.close(uid, token))})
+        return ok({"session": call(claims, lambda uid: repository.close(
+            uid, token, idempotency_key=data["idempotencyKey"]))})
 
     return routes

@@ -60,6 +60,7 @@ class AccountLifecycleIntegration {
     required this.onBind,
     required this.onClear,
     required this.onVerifyEmpty,
+    this.resetDependencies = const {},
   });
 
   final AccountLifecycleFence onFence;
@@ -68,11 +69,14 @@ class AccountLifecycleIntegration {
   final AccountLifecycleClear onClear;
   final AccountLifecycleVerify onVerifyEmpty;
 
+  final Map<String, AccountLifecycleDependencies> resetDependencies;
+
   /// Composes a real feature bundle only when its dependencies are present.
   /// Missing auth, endpoint, credentials, or offline setup intentionally
   /// produces the same safe inert integration used by guest sessions.
   factory AccountLifecycleIntegration.production({
     AccountLifecycleDependencies? dependencies,
+    Map<String, AccountLifecycleDependencies> resetDependencies = const {},
   }) {
     final value = dependencies;
     if (value == null) {
@@ -90,6 +94,7 @@ class AccountLifecycleIntegration {
       onBind: value.onBind,
       onClear: value.onClear,
       onVerifyEmpty: value.onVerifyEmpty,
+      resetDependencies: resetDependencies,
     );
   }
 
@@ -111,9 +116,10 @@ class AccountLifecycleIntegration {
 
   ResetStore asResetStore(String name) => FunctionalResetStore(
     name: name,
-    onStage: () async {},
-    onDelete: () async => await onClear(),
-    onVerifyDeleted: () async => await onVerifyEmpty(),
+    onStage: () async => (resetDependencies[name]?.onFence ?? onFence)(),
+    onDelete: () async => await (resetDependencies[name]?.onClear ?? onClear)(),
+    onVerifyDeleted: () async =>
+        await (resetDependencies[name]?.onVerifyEmpty ?? onVerifyEmpty)(),
   );
 }
 

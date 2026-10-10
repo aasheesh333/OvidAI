@@ -144,7 +144,7 @@ class PrivateSyncStore {
       0,
       (max, item) => item.changeSequence > max ? item.changeSequence : max,
     );
-    if (pageSequence < _maxSequence) {
+    if (incoming.isNotEmpty && pageSequence < _maxSequence) {
       throw StateError('Private sync sequence regression');
     }
     final nextRecords = Map<String, SyncReplayRecord>.of(_records);

@@ -42,6 +42,7 @@ class OutboxEntry {
     required this.state,
     required this.attempts,
     required this.error,
+    this.retryAt,
   });
 
   final String idempotencyKey;
@@ -49,6 +50,7 @@ class OutboxEntry {
   final OutboxState state;
   final int attempts;
   final String? error;
+  final DateTime? retryAt;
 }
 
 class PrivateSyncOutbox {
@@ -139,7 +141,11 @@ class PrivateSyncOutbox {
     return _transition(idempotencyKey, OutboxState.acknowledged);
   }
 
-  Future<OutboxEntry> retry(String idempotencyKey) async {
+  Future<OutboxEntry> retry(
+    String idempotencyKey, {
+    DateTime? retryAt,
+    String? error,
+  }) async {
     await _fence();
     final old = _required(idempotencyKey);
     if (old.state == OutboxState.acknowledged ||
@@ -151,7 +157,8 @@ class PrivateSyncOutbox {
       envelope: old.envelope,
       state: OutboxState.retryable,
       attempts: old.attempts + 1,
-      error: null,
+      error: error,
+      retryAt: retryAt,
     );
     return _replace(entry);
   }
@@ -165,6 +172,31 @@ class PrivateSyncOutbox {
     await _fence();
     await _persist(<String, OutboxEntry>{});
     _entries.clear();
+  }
+
+  /// Quarantine the original bytes; accepted history is never rewritten.
+  Future<void> quarantineOtherDevices(String deviceId) async {
+    await _fence();
+    final next = Map<String, OutboxEntry>.of(_entries);
+    for (final entry in _entries.values) {
+      if (entry.envelope.sourceDeviceId == deviceId ||
+          entry.state == OutboxState.acknowledged ||
+          entry.state == OutboxState.terminal) {
+        continue;
+      }
+      next[entry.idempotencyKey] = OutboxEntry(
+        idempotencyKey: entry.idempotencyKey,
+        envelope: entry.envelope,
+        state: OutboxState.terminal,
+        attempts: entry.attempts,
+        error:
+            'Previous-device upload quarantined. Original local data is preserved.',
+      );
+    }
+    await _persist(next);
+    _entries
+      ..clear()
+      ..addAll(next);
   }
 
   Future<OutboxEntry> _transition(
@@ -233,6 +265,8 @@ Map<String, Object?> _encodeEntry(OutboxEntry entry) => {
   'state': entry.state.name,
   'attempts': entry.attempts,
   'error': entry.error,
+  if (entry.retryAt != null)
+    'retryAt': entry.retryAt!.toUtc().toIso8601String(),
 };
 
 OutboxEntry _decodeEntry(Object? value) {
@@ -258,6 +292,9 @@ OutboxEntry _decodeEntry(Object? value) {
     state: state,
     attempts: attempts,
     error: error as String?,
+    retryAt: map['retryAt'] == null
+        ? null
+        : DateTime.parse(_string(map['retryAt'])),
   );
 }
 

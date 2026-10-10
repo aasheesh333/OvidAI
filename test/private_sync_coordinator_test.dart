@@ -73,6 +73,8 @@ class StateFake implements wire.SyncStatePage {
 
 class EntryFake implements delivery.OutboxEntry {
   @override
+  DateTime? get retryAt => null;
+  @override
   final String idempotencyKey = 'key-1';
   @override
   final SyncUploadRecord envelope = SyncUploadRecord(
@@ -148,6 +150,7 @@ class ClientFake implements PrivateSyncCoordinatorClient {
   int maxActive = 0;
   bool reset = false;
   int failures = 0;
+  final cursors = <String>[];
   @override
   Future<wire.SyncBatchResult> upload(
     String key,
@@ -160,11 +163,15 @@ class ClientFake implements PrivateSyncCoordinatorClient {
   @override
   Future<wire.SyncChangePage> changes({required String cursor}) async {
     changesCalls++;
+    cursors.add(cursor);
     active++;
     if (active > maxActive) maxActive = active;
     await Future<void>.delayed(Duration.zero);
     active--;
-    if (reset) throw const SyncResetRequired();
+    if (reset) {
+      reset = false;
+      throw const SyncResetRequired();
+    }
     if (failures-- > 0) throw const SyncTransientFailure();
     return pages.isEmpty ? PageFake(cursor) : pages.removeAt(0);
   }
@@ -233,9 +240,14 @@ void main() {
 
   test('reset bootstraps and account rebinding clears old state', () async {
     client.reset = true;
+    client.pages
+      ..add(PageFake('after-state', hasMore: true))
+      ..add(PageFake('drained'));
     await coordinator.bindAccount(accountId: 'a', generation: 1);
     await coordinator.setForeground(true);
     expect(store.bootstraps, 1);
+    expect(client.cursors, ['0', 'bootstrapped', 'after-state']);
+    expect(store.cursor, 'drained');
     await coordinator.bindAccount(accountId: 'b', generation: 2);
     expect(store.clears, 1);
   });

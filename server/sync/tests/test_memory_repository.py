@@ -70,6 +70,43 @@ class MemoryRepositoryTests(unittest.TestCase):
         self.assertEqual(first.results[0].record, ReplayRecord.from_upload(record(), "acct-1", 1))
         self.assertEqual(self.repo.bootstrap("acct-1", "dev-2").accepted_record_count, 1)
 
+    def test_batch_idempotency_key_rejects_a_different_request_digest(self):
+        self.repo.admit_batch("acct-1", "dev-1", "batch-1", [record()])
+
+        with self.assertRaises(SyncError) as caught:
+            self.repo.admit_batch("acct-1", "dev-1", "batch-1", [record(text="changed")])
+
+        self.assertEqual(caught.exception.code, "integrity_conflict")
+
+    def test_enrollment_replays_the_original_result_and_enforces_device_cap(self):
+        repo = InMemorySyncRepository(max_devices=2)
+        repo.register_device("acct-1", "dev-1")
+
+        first = repo.enroll("acct-1", True, "phone", "enroll-1")
+        replay = repo.enroll("acct-1", True, "phone", "enroll-1")
+        self.assertEqual(first, replay)
+
+        with self.assertRaises(SyncError) as caught:
+            repo.enroll("acct-1", True, "tablet", "enroll-2")
+        self.assertEqual(caught.exception.code, "quota_exhausted")
+
+    def test_enrollment_idempotency_key_rejects_a_different_request_digest(self):
+        self.repo.enroll("acct-1", True, "phone", "enroll-1")
+
+        with self.assertRaises(SyncError) as caught:
+            self.repo.enroll("acct-1", True, "tablet", "enroll-1")
+
+        self.assertEqual(caught.exception.code, "integrity_conflict")
+
+    def test_revoke_replays_the_original_result_and_rejects_digest_mismatch(self):
+        first = self.repo.revoke("acct-1", "dev-1", "dev-2", "revoke-1", True)
+        replay = self.repo.revoke("acct-1", "dev-1", "dev-2", "revoke-1", True)
+        self.assertEqual(first, replay)
+
+        with self.assertRaises(SyncError) as caught:
+            self.repo.revoke("acct-1", "dev-1", "dev-1", "revoke-1", True)
+        self.assertEqual(caught.exception.code, "integrity_conflict")
+
     def test_same_record_retry_without_batch_replay_is_duplicate(self):
         self.repo.admit_batch("acct-1", "dev-1", "batch-1", [record()])
         result = self.repo.admit_batch("acct-1", "dev-2", "batch-2", [record()])
@@ -103,7 +140,18 @@ class MemoryRepositoryTests(unittest.TestCase):
         self.repo.register_device("other", "dev-2")
         with self.assertRaises(SyncError) as caught:
             self.repo.changes("other", "dev-2", cursor=first.next_cursor)
-        self.assertEqual(caught.exception.code, "invalid_request")
+        self.assertEqual(caught.exception.code, "reset_required")
+
+    def test_cursor_is_device_bound_and_expires(self):
+        repo = InMemorySyncRepository(now=lambda: 100, cursor_secret=b"a" * 16)
+        repo.register_device("acct-1", "dev-1")
+        repo.admit_batch("acct-1", "dev-1", "batch-1", [record()])
+        page = repo.changes("acct-1", "dev-1")
+
+        repo.now = lambda: 100 + 30 * 24 * 60 * 60
+        with self.assertRaises(SyncError) as caught:
+            repo.changes("acct-1", "dev-1", cursor=page.next_cursor)
+        self.assertEqual(caught.exception.code, "reset_required")
 
     def test_byte_limit_never_splits_a_record(self):
         self.repo.admit_batch("acct-1", "dev-1", "a", [record()])
@@ -149,6 +197,31 @@ class MemoryRepositoryTests(unittest.TestCase):
     def test_result_types_are_typed(self):
         self.assertIsInstance(self.repo.changes("acct-1", "dev-1"), ChangePage)
         self.assertIsInstance(self.repo.bootstrap("acct-1", "dev-1"), StatePage)
+
+    def test_empty_cursor_does_not_skip_first_later_record(self):
+        page = self.repo.changes("acct-1", "dev-1")
+        self.assertEqual(page.next_cursor, "")
+        self.repo.admit_batch("acct-1", "dev-1", "batch", [record()])
+        later = self.repo.changes("acct-1", "dev-1", page.next_cursor)
+        self.assertEqual([r.change_sequence for r in later.records], [1])
+        self.assertNotEqual(later.next_cursor, "")
+
+    def test_bad_cursor_requires_reset_even_for_empty_account(self):
+        with self.assertRaises(SyncError) as caught:
+            self.repo.changes("acct-1", "dev-1", "dummy")
+        self.assertEqual(caught.exception.code, "reset_required")
+
+    def test_duplicate_in_one_batch_allocates_only_one_sequence(self):
+        result = self.repo.admit_batch("acct-1", "dev-1", "batch", [record(), record()])
+        self.assertEqual((result.accepted, result.duplicates), (1, 1))
+        self.assertEqual(len(self.repo.changes("acct-1", "dev-1").records), 1)
+
+    def test_self_revocation_retry_replays_but_other_operations_stay_revoked(self):
+        result = self.repo.revoke("acct-1", "dev-1", "dev-1", "self", True)
+        self.assertEqual(self.repo.revoke("acct-1", "dev-1", "dev-1", "self", True), result)
+        with self.assertRaises(SyncError) as caught:
+            self.repo.changes("acct-1", "dev-1")
+        self.assertEqual(caught.exception.code, "device_revoked")
 
 
 if __name__ == "__main__":

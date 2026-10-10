@@ -1,0 +1,28 @@
+# Dedicated origin; SHARE_BASE_URL must use this host with no path prefix.
+# Intentionally no access-log directive: paths contain share/session tokens.
+{$OVID_ACCOUNT_HOST} {
+    @account {
+        path /account/login /account/deletion /account/deletion/cancel
+    }
+    @sync {
+        path_regexp sync ^/sync/v1/(records|changes|state|devices|devices/[^/]+)$
+    }
+    @chat {
+        path_regexp chat ^/chat(/[^/]+(/members(/[^/]+)?|/events|/close)?)?$
+    }
+    @shares {
+        path_regexp shares ^/(shares(/[^/]+(/fork)?)?|s/[^/]+|\.well-known/assetlinks\.json)$
+    }
+    route {
+        header Cache-Control "no-store"
+        header Referrer-Policy "no-referrer"
+        request_body {
+            max_size 10MB
+        }
+        reverse_proxy @account 127.0.0.1:8080
+        reverse_proxy @sync 127.0.0.1:8080
+        reverse_proxy @chat 127.0.0.1:8080
+        reverse_proxy @shares 127.0.0.1:8080
+        respond 404
+    }
+}

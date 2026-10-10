@@ -257,6 +257,12 @@ void main() {
     (tester) async {
       final app = AppState.I;
       final owner = app.sessionAccountToken;
+      final now = DateTime.now();
+      // Use distinct local calendar days in the chart's rolling window. A fixed
+      // date can collide with a relative day (Oct 8 == Oct 10 minus two days).
+      final reportedDay = DateTime(now.year, now.month, now.day - 1, 12);
+      final otherReportedDay = DateTime(now.year, now.month, now.day - 2, 12);
+      final legacyDay = DateTime(now.year, now.month, now.day - 3, 12);
       await tester.runAsync(
         () => app.recordUsageAttempt(
           _attempt(
@@ -266,7 +272,7 @@ void main() {
             output: UsageTokenCount.legacy(4),
             total: UsageTokenCount.legacy(24),
             requestedModel: 'old-model',
-            startedAt: DateTime.now().subtract(const Duration(days: 1)).toUtc(),
+            startedAt: legacyDay.toUtc(),
           ),
           owner: owner,
         ),
@@ -280,6 +286,7 @@ void main() {
             output: UsageTokenCount.reported(1),
             total: UsageTokenCount.reported(6),
             requestedModel: 'new-model',
+            startedAt: reportedDay.toUtc(),
           ),
           owner: owner,
         ),
@@ -293,14 +300,14 @@ void main() {
             output: UsageTokenCount.reported(2),
             total: UsageTokenCount.reported(9),
             requestedModel: 'new-model',
-            startedAt: DateTime.now().subtract(const Duration(days: 2)).toUtc(),
+            startedAt: otherReportedDay.toUtc(),
           ),
           owner: owner,
         ),
       );
       app.usageLog.add(
         UsageEntry(
-          time: DateTime.now().toUtc(),
+          time: legacyDay.toUtc(),
           providerId: 'custom',
           providerName: 'Custom',
           model: 'old-model',
@@ -321,6 +328,14 @@ void main() {
         findsOneWidget,
       );
       expect(find.bySemanticsLabel(RegExp(r'6 tokens')), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp(r'9 tokens')), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(
+          '${legacyDay.toIso8601String().split('T').first}: 0 tokens',
+        ),
+        findsOneWidget,
+      );
+      expect(find.bySemanticsLabel(RegExp(r': 24 tokens$')), findsNothing);
       expect(
         find.textContaining('Provider-reported measured tokens'),
         findsWidgets,

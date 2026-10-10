@@ -72,7 +72,28 @@ const _credentialKeyFragments = <String>[
   'session',
   'cookie',
   'bearer',
+  'passw',
+  'pwd',
+  'sig',
+  'jwt',
 ];
+
+final _secretValues = RegExp(
+  r'sk-[A-Za-z0-9_\-]{16,}'
+  r'|AKIA[0-9A-Z]{16}'
+  r'|gh[pousr]_[A-Za-z0-9]{20,}'
+  r'|AIza[0-9A-Za-z_\-]{30,}'
+  r'|xox[abprs]-[A-Za-z0-9\-]{10,}'
+  r'|eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+',
+);
+
+void _checkSecretValue(String value) {
+  final decoded = _fullyDecodeKey(value);
+  if (_secretValues.hasMatch(decoded) ||
+      RegExp(r'bearer\s', caseSensitive: false).hasMatch(decoded)) {
+    _reject(EndpointRejection.credentialQuery);
+  }
+}
 
 /// Provider-specific credential query keys (normalized form).
 const _providerCredentialKeys = <String, Set<String>>{
@@ -324,6 +345,14 @@ String _normalizePercent(String component, String extraAllowed) {
 String _canonicalPath(String rawPath) {
   if (rawPath.isEmpty) return '/';
   final normalized = _normalizePercent(rawPath, '/');
+  _checkSecretValue(normalized);
+  for (final segment in _fullyDecodeKey(normalized).split('/')) {
+    for (final parameter in segment.split(';').skip(1)) {
+      if (_isCredentialKey(parameter.split('=').first, const {})) {
+        _reject(EndpointRejection.credentialQuery);
+      }
+    }
+  }
   return _removeDotSegments(normalized);
 }
 
@@ -364,6 +393,8 @@ String _canonicalQuery(
     final eq = part.indexOf('=');
     final rawKey = eq >= 0 ? part.substring(0, eq) : part;
     final decodedKey = _fullyDecodeKey(rawKey);
+    _checkSecretValue(rawKey);
+    if (eq >= 0) _checkSecretValue(part.substring(eq + 1));
     if (!allowList.contains(decodedKey.toLowerCase()) &&
         _isCredentialKey(decodedKey, providerKeys)) {
       _reject(EndpointRejection.credentialQuery);
@@ -378,7 +409,10 @@ String _canonicalQuery(
 String _fullyDecodeKey(String rawKey) {
   var current = rawKey.replaceAll('+', ' ');
   for (var round = 0; round < 8; round++) {
-    final next = _percentDecodeLenient(current);
+    final next = _percentDecodeLenient(current.replaceAll('+', ' '));
+    if (next.codeUnits.any((unit) => unit < 0x20 || unit >= 0x7f)) {
+      _reject(EndpointRejection.character);
+    }
     if (next == current) return current;
     current = next;
   }

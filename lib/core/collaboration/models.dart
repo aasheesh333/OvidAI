@@ -55,6 +55,20 @@ class CollaborationWireException implements Exception {
 Never _reject(CollaborationWireReason reason) =>
     throw CollaborationWireException(reason);
 
+Object? _canonicalJsonValue(Object? value) {
+  if (value is Map) {
+    final keys = value.keys.cast<String>().toList()..sort();
+    return <String, Object?>{
+      for (final key in keys) key: _canonicalJsonValue(value[key]),
+    };
+  }
+  if (value is List) return value.map(_canonicalJsonValue).toList();
+  return value;
+}
+
+List<int> _canonicalUtf8Bytes(Object? value) =>
+    utf8.encode(jsonEncode(_canonicalJsonValue(value)));
+
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
@@ -82,6 +96,22 @@ enum SystemCode { sessionClosing, sessionClosed }
 // ---------------------------------------------------------------------------
 
 String _normalizeKey(String key) => key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+int _unicodeLength(String value) {
+  for (var i = 0; i < value.length; i++) {
+    final unit = value.codeUnitAt(i);
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      if (i + 1 >= value.length || value.codeUnitAt(i + 1) < 0xDC00 ||
+          value.codeUnitAt(i + 1) > 0xDFFF) {
+        _reject(CollaborationWireReason.invalidValue);
+      }
+      i++;
+    } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+      _reject(CollaborationWireReason.invalidValue);
+    }
+  }
+  return value.runes.length;
+}
 
 const _credentialKeyParts = <String>[
   'apikey',
@@ -236,12 +266,13 @@ class _Closed {
   String string(String key) {
     final v = _map[key];
     if (v is! String) _reject(CollaborationWireReason.wrongType);
+    _unicodeLength(v);
     return v;
   }
 
   String id(String key) {
     final v = string(key);
-    if (v.isEmpty || v.length > _maxIdLength || !_idPattern.hasMatch(v)) {
+    if (v.isEmpty || _unicodeLength(v) > _maxIdLength || !_idPattern.hasMatch(v)) {
       _reject(CollaborationWireReason.invalidValue);
     }
     _screenMetadataValue(v);
@@ -251,7 +282,7 @@ class _Closed {
   String label(String key) {
     final v = string(key);
     _screenMetadataValue(v);
-    if (v.trim().isEmpty || v.length > _maxLabelLength || _controlChars.hasMatch(v)) {
+    if (v.trim().isEmpty || _unicodeLength(v) > _maxLabelLength || _controlChars.hasMatch(v)) {
       _reject(CollaborationWireReason.invalidValue);
     }
     return v;
@@ -692,8 +723,14 @@ class CollaborationEvent {
       createdAt: r.timestamp('createdAt'),
       payload: CollaborationPayload.fromWire(type, r.raw('payload')),
     );
-    if (utf8.encode(jsonEncode(event.toWire())).length > maxEventCanonicalBytes) {
-      _reject(CollaborationWireReason.tooLarge);
+    try {
+      if (_canonicalUtf8Bytes(event.toWire()).length > maxEventCanonicalBytes) {
+        _reject(CollaborationWireReason.tooLarge);
+      }
+    } on JsonUnsupportedObjectError {
+      _reject(CollaborationWireReason.invalidValue);
+    } on FormatException {
+      _reject(CollaborationWireReason.invalidValue);
     }
     return event;
   }

@@ -1,0 +1,7 @@
+{
+  "scopes": [
+    {"table": "REPLACE_spend_logs", "column": "user_id", "kind": "uid", "role": "spend_logs"},
+    {"table": "REPLACE_keys", "column": "user_id", "kind": "uid", "role": "keys", "token_column": "token"},
+    {"table": "REPLACE_users", "column": "user_id", "kind": "uid", "role": "users"}
+  ]
+}

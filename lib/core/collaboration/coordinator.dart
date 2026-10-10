@@ -22,6 +22,7 @@ class CollaborationCoordinator {
     required this._accountId,
     required this._sessionToken,
     required this.scheduler,
+    this.onTerminal,
     double Function()? random,
   }) : _random = random ?? (() => 0.5);
 
@@ -30,10 +31,13 @@ class CollaborationCoordinator {
   String _accountId;
   String _sessionToken;
   final CollaborationTimerScheduler scheduler;
+  final void Function(client.CollaborationClientException)? onTerminal;
   final double Function() _random;
   int _generation = 0;
   bool _started = false;
   bool _busy = false;
+  bool _bootstrapped = false;
+  bool _refreshPending = false;
   bool _stale = false;
   int _failures = 0;
   CollaborationTimer? _pollTimer;
@@ -43,6 +47,25 @@ class CollaborationCoordinator {
   client.CollaborationCursor? cursor;
 
   bool get isStale => _stale;
+
+  /// Replay from the existing cursor. A send never resets the bootstrap.
+  void refresh() {
+    if (!_started) return;
+    if (_busy) {
+      _refreshPending = true;
+    } else {
+      unawaited(_bootstrapped ? _poll(_generation) : _bootstrapAndPoll(_generation));
+    }
+  }
+
+  void _finish(int generation) {
+    if (!_valid(generation)) return;
+    _busy = false;
+    if (_refreshPending) {
+      _refreshPending = false;
+      refresh();
+    }
+  }
 
   void start() {
     if (_started) return;
@@ -57,12 +80,14 @@ class CollaborationCoordinator {
     required CollaborationStore store,
     client.CollaborationClient? client,
   }) {
+    _store.fence();
     _generation++;
     _accountId = accountId;
     _sessionToken = sessionToken;
     _store = store;
     if (client != null) _client = client;
     _busy = false;
+    _bootstrapped = false;
     cursor = null;
     _failures = 0;
     reconnectDelay = null;
@@ -78,6 +103,7 @@ class CollaborationCoordinator {
     _started = false;
     _generation++;
     _cancelTimers();
+    _store.fence();
   }
 
   Future<void> _bootstrapAndPoll(int generation) async {
@@ -88,9 +114,10 @@ class CollaborationCoordinator {
       if (!_valid(generation)) return;
       final projection = CollaborationState.bootstrap(
         session: state.session,
-        members: state.members,
+        members: state.initialMembers ?? state.members,
         localParticipantId: state.member.participantId,
         lastSequence: 0,
+        replayThroughSequence: state.replayThroughSequence,
       );
       await _store.installBootstrap(
         accountId: _accountId,
@@ -99,6 +126,7 @@ class CollaborationCoordinator {
       );
       if (!_valid(generation)) return;
       cursor = state.cursor;
+      _bootstrapped = true;
       await _replay(generation);
       if (_valid(generation)) {
         _failures = 0;
@@ -107,10 +135,21 @@ class CollaborationCoordinator {
         _armStale(generation);
         _schedulePoll(generation);
       }
+    } on client.CollaborationClientException catch (error) {
+      if (!_valid(generation)) return;
+      if (_terminal(error)) {
+        _stopAndFence(error);
+      } else {
+        if (error.statusCode == 410) {
+          _bootstrapped = false;
+          cursor = null;
+        }
+        _scheduleReconnect(generation);
+      }
     } catch (_) {
       if (_valid(generation)) _scheduleReconnect(generation);
     } finally {
-      if (_valid(generation)) _busy = false;
+      _finish(generation);
     }
   }
 
@@ -129,22 +168,36 @@ class CollaborationCoordinator {
     } on client.CollaborationClientException catch (error) {
       if (!_valid(generation)) return;
       if (error.statusCode == 410) {
+        _bootstrapped = false;
         cursor = null;
         _busy = false;
         await _bootstrapAndPoll(generation);
-      } else if (error.statusCode == 403) {
-        _started = false;
-        _generation++;
-        _cancelTimers();
-        _store.fence();
+      } else if (_terminal(error)) {
+        _stopAndFence(error);
       } else {
         _scheduleReconnect(generation);
       }
     } catch (_) {
       if (_valid(generation)) _scheduleReconnect(generation);
     } finally {
-      if (generation == _generation) _busy = false;
+      _finish(generation);
     }
+  }
+
+  bool _terminal(client.CollaborationClientException error) =>
+      error.isTerminalSessionError;
+
+  void _stopAndFence(client.CollaborationClientException error) {
+    _started = false;
+    _generation++;
+    _busy = false;
+    _bootstrapped = false;
+    cursor = null;
+    reconnectDelay = null;
+    _setStale(true);
+    _cancelTimers();
+    _store.fence();
+    onTerminal?.call(error);
   }
 
   Future<void> _replay(int generation) async {
@@ -158,7 +211,10 @@ class CollaborationCoordinator {
         sessionGeneration: generation,
         page: page.events,
       );
-      if (!_valid(generation) || !applied) return;
+      if (!_valid(generation)) return;
+      if (!applied) {
+        throw const CollaborationStoreException('replay page not committed');
+      }
       cursor = page.nextCursor;
       more = page.hasMore;
     }
@@ -181,7 +237,9 @@ class CollaborationCoordinator {
     _failures++;
     _reconnectTimer?.cancel();
     _reconnectTimer = scheduler.schedule(reconnectDelay!, () {
-      if (_valid(generation)) unawaited(_poll(generation));
+      if (_valid(generation)) {
+        unawaited(_bootstrapped ? _poll(generation) : _bootstrapAndPoll(generation));
+      }
     });
   }
 

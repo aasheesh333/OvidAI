@@ -24,6 +24,16 @@ abstract interface class PrivateSyncCoordinatorOutbox {
   Future<void> clearAccount();
 }
 
+/// Durable delivery result processing for production outboxes. Each submitted
+/// envelope keeps its own key, quarantine state, and retry deadline.
+abstract interface class PrivateSyncResultOutbox {
+  Future<void> applyResults(
+    List<delivery.OutboxEntry> submitted,
+    wire.SyncBatchResult result,
+  );
+  Future<Duration?> nextRetryDelay();
+}
+
 abstract interface class PrivateSyncCoordinatorStore {
   String get cursor;
   Future<void> applyPage(Object page);
@@ -193,7 +203,9 @@ class PrivateSyncCoordinator {
           pending.map((entry) => entry.envelope).toList(growable: false),
         );
         if (!_owns(generation)) return;
-        if (result.results.every(
+        if (_outbox case final PrivateSyncResultOutbox durable) {
+          await durable.applyResults(pending, result);
+        } else if (result.results.every(
           (item) =>
               item.status == wire.SyncRecordOutcomeStatus.accepted ||
               item.status == wire.SyncRecordOutcomeStatus.duplicate,
@@ -201,29 +213,36 @@ class PrivateSyncCoordinator {
           await _outbox.acknowledge(pending.first.idempotencyKey);
         }
       }
-      var hasMore = true;
-      while (hasMore && _owns(generation)) {
-        final page = await _client.changes(cursor: _store.cursor);
+      try {
+        await _drainChanges(generation);
+      } on SyncResetRequired {
         if (!_owns(generation)) return;
-        await _store.applyPage(page);
+        final state = await _client.state();
+        if (!_owns(generation)) return;
+        await _store.installState(state);
         _revision++;
-        hasMore = page.hasMore;
+        // State is bounded. Its cursor is the last included change, so replay
+        // the remainder before declaring this reconciliation successful.
+        await _drainChanges(generation);
       }
       if (_owns(generation)) {
         _lastSuccess = _clock.now;
         _retryAttempt = 0;
         _retrying = false;
+        if (_outbox case final PrivateSyncResultOutbox durable) {
+          final delay = await durable.nextRetryDelay();
+          if (!_owns(generation)) return;
+          _retryTimer?.cancel();
+          if (delay != null && _foreground) {
+            _retrying = true;
+            _retryTimer = _schedule(delay, () {
+              _retryTimer = null;
+              unawaited(refresh());
+            });
+          }
+        }
         _publish();
       }
-    } on SyncResetRequired {
-      if (!_owns(generation)) return;
-      final state = await _client.state();
-      if (!_owns(generation)) return;
-      await _store.installState(state);
-      _lastSuccess = _clock.now;
-      _retryAttempt = 0;
-      _retrying = false;
-      _publish();
     } on SyncTransientFailure {
       if (!_owns(generation) || !_foreground) return;
       _retryAttempt++;
@@ -241,6 +260,21 @@ class PrivateSyncCoordinator {
         _retryTimer = null;
         unawaited(refresh());
       });
+    }
+  }
+
+  Future<void> _drainChanges(int? generation) async {
+    var hasMore = true;
+    while (hasMore && _owns(generation)) {
+      final cursor = _store.cursor;
+      final page = await _client.changes(cursor: cursor);
+      if (!_owns(generation)) return;
+      if (page.hasMore && page.nextCursor == cursor) {
+        throw const SyncTransientFailure();
+      }
+      await _store.applyPage(page);
+      _revision++;
+      hasMore = page.hasMore;
     }
   }
 

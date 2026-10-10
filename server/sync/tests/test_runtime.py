@@ -85,3 +85,31 @@ def test_mount_sync_translates_account_errors_to_http_errors():
     assert response.status_code == 403
     assert response.json()["code"] == "account_fenced"
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("prefix", ["/sync/v1", "/private-sync"])
+@pytest.mark.parametrize("method,path,status", [("get", "/unknown", 404), ("put", "/state", 405)])
+def test_framework_errors_are_fixed_and_no_store(prefix, method, path, status):
+    app = FastAPI()
+    mount_sync(app, Repository(), Lifecycle(), Admin(), prefix=prefix)
+    result = TestClient(app).request(method, prefix + path)
+    assert result.status_code == status
+    assert result.headers["cache-control"] == "no-store"
+    assert set(result.json()) == {"schemaVersion", "code", "message", "retryAfterSeconds"}
+
+
+def test_custom_prefix_compiles_parameterized_routes():
+    from server.sync.memory import InMemorySyncRepository
+    import time
+    repository = InMemorySyncRepository()
+    repository.register_device("account-1", "device-1")
+    class FreshAdmin:
+        def verify(self, *_):
+            return {"uid": "account-1", "auth_time": time.time()}
+    app = FastAPI()
+    mount_sync(app, repository, Lifecycle(), FreshAdmin(), prefix="/private-sync")
+    result = TestClient(app).delete("/private-sync/devices/device-1", headers={
+        "Authorization": "Bearer token", "X-Firebase-AppCheck": "check",
+        "X-Sync-Device-Id": "device-1", "X-Sync-Idempotency-Key": "revoke"})
+    assert result.status_code == 200
+    assert result.json()["status"] == "revoked"

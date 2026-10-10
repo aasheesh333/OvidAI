@@ -16,6 +16,7 @@ import 'agent_notification_service.dart';
 import 'device_control_service.dart';
 import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
+import 'cloud_app_check.dart';
 import 'github_service.dart';
 import 'grant_store.dart';
 import 'hook_service.dart';
@@ -48,6 +49,9 @@ import 'settings_actions.dart';
 import 'settings_backup_service.dart';
 import 'presets.dart';
 import 'reset_coordinator.dart';
+import 'private_sync/production.dart';
+import 'private_sync/dto.dart' as private_dto;
+import 'collaboration/production.dart';
 import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
 import 'native_plugin.dart';
@@ -875,6 +879,9 @@ class MessageAttachment {
 }
 
 class Message {
+  /// Stable across pagination, persistence, and edits. Transcript edits under
+  /// this identity remain local and surface a sync conflict, never an overwrite.
+  final String privateSyncId;
   final String role; // 'user' | 'assistant'
   MsgKind kind; // mutable — reasoning → text promote
   String content; // mutable — live streaming updates
@@ -929,7 +936,9 @@ class Message {
     this.feedback,
     this.feedbackNote,
     DateTime? time,
-  }) : time = time ?? DateTime.now();
+    String? privateSyncId,
+  }) : time = time ?? DateTime.now(),
+       privateSyncId = privateSyncId ?? productionId();
 
   /// Local file path for `MsgKind.imageGen` rows — the generated image
   /// saved into the session workspace (rendered in-chat, tappable to open).
@@ -945,6 +954,24 @@ class Message {
   String? feedbackNote;
 
   factory Message.fromJson(Map<String, dynamic> j) => Message(
+    privateSyncId:
+        j['privateSyncId'] as String? ??
+        sha256
+            .convert(
+              utf8.encode(
+                jsonEncode([
+                  j['time'],
+                  j['role'],
+                  j['kind'],
+                  j['content'],
+                  j['toolName'],
+                  j['toolTitle'],
+                  j['toolSummary'],
+                  j['toolDetail'],
+                ]),
+              ),
+            )
+            .toString(),
     role: j['role'] as String? ?? 'user',
     kind: MsgKind.values.firstWhere(
       (k) => k.name == j['kind'],
@@ -972,6 +999,7 @@ class Message {
   );
 
   Map<String, dynamic> toJson() => {
+    'privateSyncId': privateSyncId,
     'role': role,
     'kind': kind.name,
     'content': content,
@@ -1942,7 +1970,172 @@ class AppState extends ChangeNotifier {
   PersistedSessionDecoder? _persistedSessionDecoderForTest;
   late final SessionBootstrapDecoder _sessionBootstrapDecoder;
   late final WorkspaceDeleter _workspaceDeleter;
-  late final AccountLifecycleIntegration _accountLifecycle;
+  late AccountLifecycleIntegration _accountLifecycle;
+  PrivateSyncProduction? privateSync;
+  CollaborationProduction? collaboration;
+  Future<void>? _featureBinding;
+  bool _featureBindQueued = false;
+
+  /// Called by main before readiness begins. Registers the actual singleton
+  /// owners with both account transitions and verified per-feature reset.
+  void registerProductionAccountFeatures({FirebaseService? firebaseService}) {
+    if (privateSync != null) return;
+    final firebase = firebaseService ?? FirebaseService.I;
+    final appCheck = CloudAppCheck(
+      initializeFirebase: firebase.initialize,
+      activatedByFirebase: () => firebase.accountService.enabled,
+    );
+    privateSync = PrivateSyncProduction(
+      rootDirectory: getApplicationSupportDirectory,
+      accountReady: () => firebase.isAvailable && firebase.accountReady,
+      currentUid: () => firebase.uid,
+      idToken: (force) => firebase.getIdToken(forceRefresh: force),
+      appCheckToken: appCheck.getToken,
+      snapshot: _privateTranscriptSnapshot,
+    );
+    collaboration = CollaborationProduction(
+      rootDirectory: getApplicationSupportDirectory,
+      accountReady: () => firebase.isAvailable && firebase.accountReady,
+      currentUid: () => firebase.uid,
+      accessToken: () => firebase.getIdToken(),
+      appCheckToken: appCheck.getToken,
+    );
+    final sync = privateSync!;
+    final collab = collaboration!;
+    _accountLifecycle = AccountLifecycleIntegration.production(
+      dependencies: AccountLifecycleDependencies(
+        onFence: () {
+          sync.fence();
+          collab.fence();
+        },
+        onRevoke: () async {
+          await _featureBinding;
+          await sync.release();
+          await collab.release();
+        },
+        onBind: (_, _) => _queueProductionAccountBind(),
+        onClear: () async {
+          await sync.clear();
+          await collab.clear();
+        },
+        onVerifyEmpty: () async =>
+            await sync.verifyEmpty() && await collab.verifyEmpty(),
+      ),
+      resetDependencies: {
+        ResetStoreKind.privateSync.id: sync.lifecycle,
+        ResetStoreKind.collaboration.id: collab.lifecycle,
+      },
+    );
+    addListener(_queueProductionAccountBind);
+    firebase.addListener(_queueProductionAccountBind);
+    _queueProductionAccountBind();
+  }
+
+  void _queueProductionAccountBind() {
+    if (_settingsBusy || _featureBindQueued || privateSync == null) return;
+    if (!FirebaseService.I.accountReady || !sessionAccountReady) return;
+    _featureBindQueued = true;
+    scheduleMicrotask(() {
+      _featureBindQueued = false;
+      if (_settingsBusy ||
+          !FirebaseService.I.accountReady ||
+          _featureBinding != null) {
+        return;
+      }
+      final uid = FirebaseService.I.uid;
+      if (uid == null) return;
+      final token = _sessionAccountToken;
+      _featureBinding = () async {
+        try {
+          await privateSync!.bind(uid, _deferredSessionGeneration);
+          if (!identical(token, _sessionAccountToken)) return;
+          await collaboration!.bind(uid, _deferredSessionGeneration);
+        } catch (_) {
+          privateSync!.error =
+              'Account sync storage could not be opened. Reopen settings to retry.';
+        } finally {
+          _featureBinding = null;
+        }
+      }();
+    });
+  }
+
+  void setAccountFeaturesForeground(bool value) {
+    unawaited(privateSync?.setForeground(value));
+    collaboration?.setForeground(value);
+    if (value) _queueProductionAccountBind();
+  }
+
+  Iterable<private_dto.SyncUploadRecord> _privateTranscriptSnapshot(
+    String device,
+  ) sync* {
+    yield* privateUsageSnapshot(device, usageAttempts);
+    // Explicit DTO projection only: provider keys, cookies, grants, workspaces,
+    // executable queues, and attachment bytes are never serialized here.
+    for (final provider in providers) {
+      try {
+        yield privateProviderMetadataRecord(
+          device,
+          providerId: provider.id,
+          modelId: provider.selectedModel,
+          endpoint: provider.baseUrl,
+          displayName: provider.name,
+          supportsStreaming: true, // Both supported API formats stream.
+        );
+      } on FormatException {
+        privateSync?.error =
+            'Provider metadata could not be exported safely and remains local.';
+      }
+    }
+    for (final session in sessions) {
+      for (var index = 0; index < session.messages.length; index++) {
+        final message = session.messages[index];
+        if (message.thinking ||
+            message.kind == MsgKind.streaming ||
+            (message.kind == MsgKind.tool && message.toolState == 'running')) {
+          continue;
+        }
+        final id = _privateMessageRecordId(session.id, message);
+        final text = message.kind == MsgKind.tool
+            ? [
+                message.content,
+                message.toolTitle,
+                message.toolSummary,
+                message.toolDetail,
+              ].whereType<String>().join('\n')
+            : message.content;
+        if (text.length > 262144) continue;
+        yield private_dto.SyncUploadRecord(
+          recordId: id,
+          sourceDeviceId: device,
+          conversationId: session.id,
+          createdAt: message.time.toUtc().toIso8601String(),
+          revision: 1,
+          payload: private_dto.TranscriptPayload(
+            messageId: id,
+            parentMessageId: null,
+            kind: message.kind == MsgKind.tool
+                ? private_dto.TranscriptKind.tool
+                : message.role == 'user'
+                ? private_dto.TranscriptKind.user
+                : message.role == 'system'
+                ? private_dto.TranscriptKind.system
+                : private_dto.TranscriptKind.assistant,
+            text: text,
+            providerMetadataRecordId: null,
+            requestPurpose: null,
+            displayTitle: session.title.length <= 256
+                ? session.title
+                : session.title.substring(0, 256),
+          ),
+        );
+      }
+    }
+  }
+
+  String _privateMessageRecordId(String sessionId, Message message) => sha256
+      .convert(utf8.encode('$sessionId:${message.privateSyncId}'))
+      .toString();
 
   /// Durable, secret-scrubbed startup status per canonical plugin/MCP id
   /// (Task 7, spec §5.8). Shared process-wide store.
@@ -6213,12 +6406,42 @@ class AppState extends ChangeNotifier {
     }());
   }
 
-  void deleteSession(String id) {
+  Future<void> deleteSession(String id) async {
     if (_settingsBusy) throw StateError('Settings operation in progress.');
     final s = sessions.where((x) => x.id == id).firstOrNull;
     // A chat owns its subagents: deleting it deletes their transcripts and
     // workspaces too, otherwise orphan children linger invisibly forever.
     final doomed = <ChatSession>[?s, ...descendantsOf(id)];
+    final token = _sessionAccountToken;
+    if (privateSync?.enrolled == true) {
+      final deletedIds = {id, ...doomed.map((session) => session.id)};
+      await _loadDeferredSessionSnapshot();
+      if (!identical(token, _sessionAccountToken)) return;
+      // Discover descendants from saved lineage, not from loaded membership.
+      // Do not schedule destructive cleanup until sync intent is durable.
+      final parents = <String, String?>{};
+      for (final encoded in _deferredSessionJson ?? const <String>[]) {
+        try {
+          final row = jsonDecode(encoded) as Map<String, dynamic>;
+          if (row['id'] is String) {
+            parents[row['id'] as String] = row['parentId'] as String?;
+          }
+        } on FormatException {
+          continue;
+        }
+      }
+      var changed = true;
+      while (changed) {
+        changed = false;
+        for (final entry in parents.entries) {
+          if (deletedIds.contains(entry.value) && deletedIds.add(entry.key)) {
+            changed = true;
+          }
+        }
+      }
+      await privateSync!.recordLocalDeletion(conversationIds: deletedIds);
+      if (!identical(token, _sessionAccountToken)) return;
+    }
     if (_deferredSessionJson != null || _deferredSessionsPending) {
       _deferredDeletedSessionIds.add(id);
       _expandDeferredDeletedSessionIds();
@@ -6245,11 +6468,26 @@ class AppState extends ChangeNotifier {
   /// Remove all messages from [index] onward in the named session
   /// (the session revert action "Revert"/"Edit & resend" semantics). Clearing from index 0 also
   /// resets the compacted summary so the agent truly starts fresh.
-  void deleteMessagesFrom(String sessionId, int index) {
+  Future<void> deleteMessagesFrom(String sessionId, int index) async {
+    if (_settingsBusy) throw StateError('Settings operation in progress.');
     final s = sessions.where((x) => x.id == sessionId).firstOrNull;
-    if (s == null) return;
+    if (s == null) throw StateError('The conversation is no longer available.');
     final idx = index.clamp(0, s.messages.length);
-    s.messages.removeRange(idx, s.messages.length);
+    final removed = s.messages.skip(idx).toList();
+    final token = _sessionAccountToken;
+    if (privateSync?.enrolled == true) {
+      await privateSync!.recordLocalDeletion(
+        recordIds: {
+          for (final message in removed)
+            _privateMessageRecordId(sessionId, message),
+        },
+      );
+      if (!identical(token, _sessionAccountToken) ||
+          !identical(sessionById(sessionId), s)) {
+        throw StateError('The conversation changed. Retry the deletion.');
+      }
+    }
+    s.messages.removeWhere(removed.contains);
     if (idx == 0) {
       s.compactedSummary = null;
       s.compactedAtCount = 0;
@@ -6649,6 +6887,13 @@ class AppState extends ChangeNotifier {
     if (!p.custom) {
       return '"${p.name}" is a built-in provider — it cannot be removed, '
           'only its API key can be cleared.';
+    }
+    if (privateSync?.enrolled == true) {
+      try {
+        await privateSync!.recordLocalDeletion(providerId: providerId);
+      } catch (_) {
+        return 'The provider deletion could not be saved for sync. Retry the deletion.';
+      }
     }
     // Clean up the stored API key.
     try {
@@ -7748,7 +7993,9 @@ class AppState extends ChangeNotifier {
             : isLexicallySafeRelPath(rawCwd)
             ? '$pluginRoot/$rawCwd'
             : null;
-        final rawHeaders = secureBefore['$_kMcpHeadersPrefix$id'];
+        final rawHeaders = await _secureStorage.read(
+          key: '$_kMcpHeadersPrefix$id',
+        );
         final headers = rawHeaders == null || rawHeaders.isEmpty
             ? <String, String>{}
             : (jsonDecode(rawHeaders) as Map<String, dynamic>).map(

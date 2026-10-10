@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
@@ -13,6 +14,7 @@ import 'package:ovid_ai/core/startup_coordinator.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
+import 'package:ovid_ai/ui/settings_screen.dart';
 import 'package:ovid_ai/ui/shell.dart';
 import 'package:ovid_ai/ui/sidebar.dart';
 import 'package:ovid_ai/ui/startup_progress_panel.dart';
@@ -44,6 +46,13 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late AppState app;
   late bool previousDark;
+
+  setUpAll(() async {
+    // Match the shipped theme's font metrics at large text sizes. Ahem wraps
+    // the primary button and artificially consumes the session viewport.
+    await (FontLoader('Inter')
+      ..addFont(rootBundle.load('assets/fonts/Inter.ttf'))).load();
+  });
 
   setUp(() {
     previousDark = Aether.dark;
@@ -164,24 +173,52 @@ void main() {
   }
 
   testWidgets('sidebar remains scrollable with keyboard and filters real sessions', (tester) async {
+    final semantics = tester.ensureSemantics();
     app.sessions.add(ChatSession(id: 'other', title: 'Unrelated conversation', model: 'different-model', mode: 'auto'));
+    app.activeSessionId = 'other';
+    // Keep multiple matching rows so filtering still exercises real scrolling.
+    app.sessions.insertAll(0, List.generate(8, (i) => ChatSession(
+      id: 'research-$i', title: 'Earlier research $i', model: _model,
+    )));
     await pumpAt(tester, const Scaffold(body: SessionsSidebar(isDrawer: false)), size: const Size(360, 640), scale: 2, keyboard: 280);
     final search = find.byType(TextField);
-    await tester.ensureVisible(search);
+    final settings = find.byTooltip('Settings');
+    expect(search.hitTestable(), findsOneWidget);
+    expect(settings.hitTestable(), findsOneWidget);
+    final footerRect = tester.getRect(settings);
+    expect(footerRect.bottom, lessThanOrEqualTo(360));
     await tester.enterText(search, 'research-model');
     await tester.pump();
-    final scrollable = find.descendant(of: find.byType(SessionsSidebar), matching: find.byType(Scrollable)).first;
+    final scrollable = find.descendant(
+      of: find.byType(SessionsSidebar),
+      matching: find.byWidgetPredicate((widget) => widget is Scrollable &&
+          axisDirectionToAxis(widget.axisDirection) == Axis.vertical),
+    );
+    expect(scrollable, findsOneWidget);
+    expect(tester.getSize(scrollable).height, greaterThanOrEqualTo(48));
     final session = find.text('Workspace research with a long conversation title');
-    await tester.scrollUntilVisible(session, 150, scrollable: scrollable);
+    // Restrict gestures to the vertical session viewport, then verify the tap
+    // point. Merely finding an eagerly built session does not make it visible.
+    await reveal(tester, session, scrollable);
+    expect(tester.state<ScrollableState>(scrollable).position.pixels, greaterThan(0));
     expect(find.text('Unrelated conversation'), findsNothing);
+    expect(app.activeSessionId, 'other');
     await tester.tap(session);
     await tester.pump();
     expect(app.activeSessionId, 'ui-finish-11');
-    await tester.scrollUntilVisible(find.text('Settings'), 150, scrollable: scrollable);
-    await tester.pump();
-    expect(find.text('Settings').hitTestable(), findsOneWidget);
+    expect(tester.getRect(settings), footerRect);
+    expect(settings.hitTestable(), findsOneWidget);
+    expect(tester.getSemantics(settings), matchesSemantics(
+      tooltip: 'Settings', isButton: true, hasEnabledState: true,
+      isEnabled: true, isFocusable: true, hasTapAction: true,
+      hasFocusAction: true,
+    ));
+    await tester.tap(settings);
+    await tester.pumpAndSettle();
+    expect(find.byType(SettingsScreen), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
+    semantics.dispose();
   });
 
   testWidgets('running composer queues drafts and Stop targets its session', (tester) async {

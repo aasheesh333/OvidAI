@@ -1,6 +1,8 @@
 /// Typed private-sync request and response envelopes.
 library;
 
+import 'dart:convert';
+
 import 'dto.dart';
 
 const _errorMessages = <String, String>{
@@ -46,11 +48,19 @@ Map<String, Object?> _versioned(Object? value, Set<String> fields) {
 }
 
 String _text(Object? value, {bool empty = false}) {
-  if (value is! String || (!empty && value.isEmpty) || value.length > 128) {
+  if (value is! String || (!empty && value.isEmpty) || value.runes.length > 128) {
     _protocolInvalid();
   }
-  for (final unit in value.codeUnits) {
+  for (final unit in value.runes) {
     if (unit >= 0xD800 && unit <= 0xDFFF) _protocolInvalid();
+  }
+  return value;
+}
+
+String _cursor(Object? value) {
+  if (value is! String || utf8.encode(value).length > 512 ||
+      value.runes.any((unit) => unit >= 0xD800 && unit <= 0xDFFF)) {
+    _protocolInvalid();
   }
   return value;
 }
@@ -231,7 +241,7 @@ class SyncRecordOutcome {
       _protocolInvalid();
     }
     return SyncRecordOutcome(
-      recordId: map['recordId'] as String,
+      recordId: _text(map['recordId']),
       status: status,
       revision: revision,
       changeSequence: sequence,
@@ -280,7 +290,7 @@ class SyncChangePage {
     required String nextCursor,
     required this.hasMore,
     required List<SyncReplayRecord> records,
-  }) : nextCursor = _text(nextCursor, empty: true),
+  }) : nextCursor = _cursor(nextCursor),
        records = List.unmodifiable(records);
 
   factory SyncChangePage.fromWire(Object? value) {
@@ -293,7 +303,7 @@ class SyncChangePage {
     final raw = map['records'];
     if (raw is! List || map['hasMore'] is! bool) _protocolInvalid();
     return SyncChangePage(
-      nextCursor: map['nextCursor'] as String,
+      nextCursor: _cursor(map['nextCursor']),
       hasMore: map['hasMore'] as bool,
       records: raw.map(SyncReplayRecord.fromWire).toList(),
     );
@@ -330,9 +340,9 @@ class SyncEnrollment {
       'status',
     });
     return SyncEnrollment(
-      deviceId: map['deviceId'] as String,
-      deviceName: map['deviceName'] as String,
-      createdAt: map['createdAt'] as String,
+      deviceId: _text(map['deviceId']),
+      deviceName: _text(map['deviceName'], empty: true),
+      createdAt: _timestamp(map['createdAt']),
       status: SyncEnrollmentStatus.fromWire(map['status']),
     );
   }
@@ -359,7 +369,7 @@ class SyncStatePage {
     required String enrollmentStatus,
     required List<String> retentionMarkers,
   }) : accountId = _text(accountId),
-       currentCursor = _text(currentCursor, empty: true),
+        currentCursor = _cursor(currentCursor),
        records = List.unmodifiable(records),
        enrollmentStatus = _text(enrollmentStatus),
        retentionMarkers = List.unmodifiable(retentionMarkers.map(_text));
@@ -377,11 +387,11 @@ class SyncStatePage {
     final markers = map['retentionMarkers'];
     if (records is! List || markers is! List) _protocolInvalid();
     return SyncStatePage(
-      currentCursor: map['currentCursor'] as String,
-      accountId: map['accountId'] as String,
+      currentCursor: _cursor(map['currentCursor']),
+      accountId: _text(map['accountId']),
       records: records.map(SyncReplayRecord.fromWire).toList(),
-      enrollmentStatus: map['enrollmentStatus'] as String,
-      retentionMarkers: markers.cast<String>(),
+      enrollmentStatus: _text(map['enrollmentStatus']),
+      retentionMarkers: markers.map(_text).toList(),
     );
   }
 

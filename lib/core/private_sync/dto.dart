@@ -332,8 +332,8 @@ class ProviderMetadataPayload extends SyncPayload {
     required String? requestPurpose,
     required String? displayName,
     required bool supportsStreaming,
-  })  : providerId = _id(providerId, max: 64),
-        modelId = _idOrNull(modelId),
+  })  : providerId = _text(providerId, 1, 64),
+        modelId = _textOrNull(modelId, 1, 128),
         endpoint = _endpoint(endpoint, providerId),
         requestPurpose = _textOrNull(requestPurpose, 0, 128),
         displayName = _textOrNull(displayName, 0, 256),
@@ -350,12 +350,12 @@ class ProviderMetadataPayload extends SyncPayload {
 
   factory ProviderMetadataPayload.fromWire(Object? value) {
     final m = _closed(value, fields);
-    final providerId = _id(m['providerId'], max: 64);
+    final providerId = _text(m['providerId'], 1, 64);
     final endpoint = m['endpoint'];
     if (endpoint is! String) _invalid('endpoint must be a string');
     return ProviderMetadataPayload(
       providerId: providerId,
-      modelId: _idOrNull(m['modelId']),
+      modelId: _textOrNull(m['modelId'], 1, 128),
       endpoint: endpoint,
       requestPurpose: _textOrNull(m['requestPurpose'], 0, 128),
       displayName: _textOrNull(m['displayName'], 0, 256),
@@ -414,8 +414,8 @@ class UsagePayload extends SyncPayload {
     required int? elapsedMilliseconds,
   })  : logicalRequestId = _id(logicalRequestId),
         attemptId = _id(attemptId),
-        requestedModel = _idOrNull(requestedModel),
-        reportedModel = _idOrNull(reportedModel),
+        requestedModel = _textOrNull(requestedModel, 1, 128),
+        reportedModel = _textOrNull(reportedModel, 1, 128),
         inputTokens = _intOrNull(inputTokens, 0, maxInt32),
         outputTokens = _intOrNull(outputTokens, 0, maxInt32),
         totalTokens = _intOrNull(totalTokens, 0, maxUint32),
@@ -444,8 +444,8 @@ class UsagePayload extends SyncPayload {
     return UsagePayload(
       logicalRequestId: _id(m['logicalRequestId']),
       attemptId: _id(m['attemptId']),
-      requestedModel: _idOrNull(m['requestedModel']),
-      reportedModel: _idOrNull(m['reportedModel']),
+      requestedModel: _textOrNull(m['requestedModel'], 1, 128),
+      reportedModel: _textOrNull(m['reportedModel'], 1, 128),
       outcome: _enum(m['outcome'], UsageOutcome.values, (e) => e.wire),
       inputTokens: _intOrNull(m['inputTokens'], 0, maxInt32),
       outputTokens: _intOrNull(m['outputTokens'], 0, maxInt32),
@@ -762,6 +762,9 @@ SyncUploadRecord _uploadFromMap(Map<String, Object?> m) {
 void _checkIdentity(String recordId, SyncPayload payload) {
   if (payload is UsagePayload && payload.attemptId != recordId) {
     _invalid('usage recordId must equal attemptId');
+  }
+  if (payload is TombstonePayload && payload.targetRecordId == recordId) {
+    _invalid('tombstone recordId must not equal targetRecordId');
   }
 }
 

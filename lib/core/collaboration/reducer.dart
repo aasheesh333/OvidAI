@@ -56,6 +56,7 @@ class CollaborationState {
     required Map<String, Member> members,
     required this.localParticipantId,
     required this.lastSequence,
+    required this.replayThroughSequence,
     required List<CollaborationMessage> messages,
     required Map<String, ParticipantModelState> modelStates,
     required Map<String, PresenceState> presence,
@@ -79,6 +80,7 @@ class CollaborationState {
     required List<Member> members,
     required String localParticipantId,
     required int lastSequence,
+    int replayThroughSequence = 0,
   }) {
     if (lastSequence < 0) throw ArgumentError.value(lastSequence, 'lastSequence');
     final byId = <String, Member>{};
@@ -98,12 +100,13 @@ class CollaborationState {
     }
     final local = byId[localParticipantId];
     final closed = session.lifecycle == SessionLifecycle.closed;
-    final localGone = local == null || !local.isActive;
+    final localGone = (local == null || !local.isActive) && lastSequence >= replayThroughSequence;
     return CollaborationState._(
       session: session,
       members: byId,
       localParticipantId: localParticipantId,
       lastSequence: lastSequence,
+      replayThroughSequence: replayThroughSequence,
       messages: const [],
       modelStates: const {},
       presence: const {},
@@ -124,6 +127,8 @@ class CollaborationState {
 
   /// Highest contiguously applied sequence.
   final int lastSequence;
+  /// Historical departures precede this authenticated replay lease.
+  final int replayThroughSequence;
   final List<CollaborationMessage> messages;
   final Map<String, ParticipantModelState> modelStates;
   final Map<String, PresenceState> presence;
@@ -159,6 +164,7 @@ class CollaborationState {
     members: members ?? this.members,
     localParticipantId: localParticipantId,
     lastSequence: lastSequence ?? this.lastSequence,
+    replayThroughSequence: replayThroughSequence,
     messages: messages ?? this.messages,
     modelStates: modelStates ?? this.modelStates,
     presence: presence ?? this.presence,
@@ -422,7 +428,7 @@ class CollaborationReducer {
             p.action == MembershipAction.revoked ? MemberStatus.revoked : MemberStatus.left;
         final members = {...s.members, p.participantId: target.withStatus(nextStatus)};
         final presence = Map.of(s.presence)..remove(p.participantId);
-        final localRemoved = p.participantId == s.localParticipantId;
+        final localRemoved = p.participantId == s.localParticipantId && seq > s.replayThroughSequence;
         return s._copy(
           lastSequence: seq,
           seenEventIds: seen,

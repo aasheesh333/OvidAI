@@ -25,6 +25,23 @@ Map<String, Object?> replayWire() => {
 };
 
 void main() {
+  test('enrollment accepts Unicode scalar names and cursor allows 512 bytes', () {
+    final enrollment = SyncEnrollment.fromWire({
+      'schemaVersion': 1, 'deviceId': 'device', 'deviceName': '😀' * 128,
+      'createdAt': '2026-10-08T12:00:00Z', 'status': 'active',
+    });
+    expect(enrollment.deviceName.runes.length, 128);
+    final page = SyncChangePage(nextCursor: 'x' * 512, hasMore: false, records: []);
+    expect(SyncChangePage.fromWire(page.toWire()).nextCursor, 'x' * 512);
+    expect(() => SyncChangePage(nextCursor: 'x' * 513, hasMore: false, records: []),
+        throwsA(isA<SyncDtoException>()));
+  });
+
+  test('malformed protocol field types throw fixed DTO failures', () {
+    expect(() => SyncChangePage.fromWire({
+      'schemaVersion': 1, 'nextCursor': 42, 'hasMore': false, 'records': [],
+    }), throwsA(isA<SyncDtoException>()));
+  });
   test('batch request round-trips the server request envelope', () {
     final request = SyncBatchRequest.fromWire({
       'schemaVersion': 1,

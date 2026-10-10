@@ -1,0 +1,10 @@
+# /etc/systemd/system/ovid-retention.service.d/host.conf
+[Service]
+User=ovid-account
+Group=ovid-account
+WorkingDirectory=/opt/ovid-account
+EnvironmentFile=/etc/ovid-account/retention.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/ovid-account/venv/bin/python -m server.account.retention --batch-size 500 --max-batches 4
+ReadWritePaths=/var/lib/ovid-account
+UMask=0077

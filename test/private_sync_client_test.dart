@@ -55,6 +55,94 @@ http.Response jsonResponse(
 );
 
 void main() {
+  test('first enrollment uses real HTTP without a device header', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final transport = http.Client();
+    addTearDown(() async { transport.close(); await server.close(force: true); });
+    final received = server.first.then((request) async {
+      expect(request.headers.value('x-sync-device-id'), isNull);
+      expect(request.headers.value('authorization'), 'Bearer token');
+      expect(request.headers.value('x-firebase-appcheck'), 'app-check');
+      final body = jsonDecode(await utf8.decoder.bind(request).join());
+      expect(body['deviceName'], 'Phone 😀');
+      request.response.headers.set('Cache-Control', 'no-store');
+      request.response.write(jsonEncode({
+        'schemaVersion': 1, 'deviceId': 'opaque-enrolled-device',
+        'deviceName': 'Phone 😀', 'createdAt': '2026-10-08T12:00:00Z', 'status': 'active',
+      }));
+      await request.response.close();
+    });
+    final client = PrivateSyncClient(
+      baseUri: Uri.parse('http://127.0.0.1:${server.port}'), httpClient: transport,
+      idToken: (_) async => 'token', appCheckToken: () async => 'app-check',
+      deviceId: null,
+    );
+    expect((await client.enroll(deviceName: 'Phone 😀', idempotencyKey: 'enroll')).deviceId,
+        'opaque-enrolled-device');
+    await received;
+    await expectLater(client.state(), throwsA(isA<SyncClientException>()));
+  });
+
+  test('state sends bounded pagination parameters', () async {
+    final client = PrivateSyncClient(
+      baseUri: Uri.parse('https://sync.example.test'),
+      httpClient: FakeClient((request) async {
+        expect(request.url.queryParameters, {'cursor': 'position', 'limit': '2'});
+        return jsonResponse(200, {'schemaVersion': 1, 'accountId': 'account',
+          'currentCursor': 'next', 'records': [], 'enrollmentStatus': 'active', 'retentionMarkers': []});
+      }),
+      idToken: (_) async => 'token', appCheckToken: () async => 'app-check', deviceId: 'device',
+    );
+    expect((await client.state(cursor: 'position', limit: 2)).currentCursor, 'next');
+  });
+
+  test('response transport stops reading at the compressed byte bound', () async {
+    var chunks = 0;
+    final client = PrivateSyncClient(
+      baseUri: Uri.parse('https://sync.example.test'),
+      httpClient: StreamingClient(() async* {
+        for (var i = 0; i < 10; i++) {
+          chunks++;
+          yield List.filled(maxCompressedBytes ~/ 2 + 1, 32);
+        }
+      }),
+      idToken: (_) async => 'token', appCheckToken: () async => 'app-check', deviceId: 'device',
+    );
+    await expectLater(client.state(), throwsA(isA<SyncClientException>()
+        .having((e) => e.code, 'code', 'payload_too_large')));
+    expect(chunks, 2);
+  });
+
+  test('non-DTO response field types are sanitized', () async {
+    final client = PrivateSyncClient(
+      baseUri: Uri.parse('https://sync.example.test'),
+      httpClient: FakeClient((_) async => jsonResponse(200, {
+        'schemaVersion': 1, 'nextCursor': 42, 'hasMore': false, 'records': [],
+      })),
+      idToken: (_) async => 'token', appCheckToken: () async => 'app-check', deviceId: 'device',
+    );
+    await expectLater(client.changes(), throwsA(isA<SyncClientException>()
+        .having((e) => e.code, 'code', 'invalid_response')));
+  });
+
+  test('gzip expansion is bounded and request identifiers fail before transport', () async {
+    var calls = 0;
+    final client = PrivateSyncClient(
+      baseUri: Uri.parse('https://sync.example.test'),
+      httpClient: FakeClient((_) async {
+        calls++;
+        return http.Response.bytes(gzip.encode(List.filled(maxBatchBytes + 1, 32)), 200,
+          headers: {'cache-control': 'no-store', 'content-encoding': 'gzip'});
+      }),
+      idToken: (_) async => 'token', appCheckToken: () async => 'check', deviceId: 'device',
+    );
+    await expectLater(client.upload('has space', []), throwsA(isA<SyncClientException>()));
+    await expectLater(client.enroll(deviceName: 'x' * 129, idempotencyKey: 'enroll'),
+        throwsA(isA<SyncClientException>()));
+    expect(calls, 0);
+    await expectLater(client.state(), throwsA(isA<SyncClientException>()
+        .having((e) => e.code, 'code', 'payload_too_large')));
+  });
   test(
     'upload sends authenticated gzip wire request and decodes batch result',
     () async {
@@ -314,4 +402,12 @@ void main() {
 List<int> requestBody(http.BaseRequest request) {
   if (request is http.Request) return request.bodyBytes;
   throw StateError('expected buffered request');
+}
+
+class StreamingClient extends http.BaseClient {
+  StreamingClient(this.body);
+  final Stream<List<int>> Function() body;
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async =>
+      http.StreamedResponse(body(), 200, headers: {'cache-control': 'no-store'});
 }

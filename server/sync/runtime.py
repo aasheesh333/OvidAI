@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 
-from .api import router
+from .api import failure, router
 from .errors import SyncError
 
 
@@ -35,3 +35,19 @@ def mount_sync(app, repository, lifecycle, admin, prefix="/sync/v1"):
                 if hasattr(route, "path_format"):
                     route.path_format = route.path
     app.include_router(routes)
+
+    @app.middleware("http")
+    async def sync_boundary(request, call_next):
+        path = request.url.path
+        if path != prefix and not path.startswith(prefix + "/"):
+            return await call_next(request)
+        try:
+            result = await call_next(request)
+        except Exception:
+            return failure(SyncError("temporarily_unavailable"), 500)
+        if result.status_code >= 400 and result.headers.get("cache-control") != "no-store":
+            code = ("temporarily_unavailable" if result.status_code >= 500 else
+                    "not_found" if result.status_code == 404 else "invalid_request")
+            return failure(SyncError(code), result.status_code)
+        result.headers["Cache-Control"] = "no-store"
+        return result

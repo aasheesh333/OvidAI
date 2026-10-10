@@ -3,6 +3,15 @@
 An AI assistant Flutter app with a production plugin and MCP (Model Context
 Protocol) compatibility layer.
 
+## Account and shared-data server deployment
+
+The [account deployment guide](server/account/DEPLOYMENT.md) covers direct
+PostgreSQL private-sync composition, durable account cleanup, collaboration/share
+routes, bounded retention and nonsecret Docker/systemd/Caddy templates. Configured
+cleanup authorities remain active when their HTTP routes are disabled. Local
+tests verify code behavior; production activation and gateway integration require
+the deployment acceptance steps in that guide.
+
 ## Plugin formats
 
 Ovid installs plugins from GitHub (repo, branch, tag, or commit — no silent
@@ -214,6 +223,40 @@ those items.
   runs to completion (Android limit, documented).
 
 ## Verification
+
+Python tool discovery uses `python3 -m unittest discover -s tool -p '*_test.py'`.
+Deployment configuration tests use the standard library; runtime integration
+checks explicitly skip if their server dependencies are absent. The server CI
+job installs `server/account/requirements.txt` and runs those integration checks
+again, plus pytest against a job-local PostgreSQL 16 service.
+
+CI's default Flutter `Test` step still runs every tracked `test/**/*_test.dart`
+file serially. New files enter that manifest when included in the commit checked
+out by CI. For filesystem coverage (including local untracked/nested tests), use
+the bounded runner after `flutter pub get --enforce-lockfile`:
+
+```sh
+python3 tool/run_flutter_suite.py \
+  --flutter /absolute/path/to/flutter \
+  --output /tmp/flutter-suite-unique-run \
+  --lock /tmp/flutter-suite.lock \
+  --batch-size 20 --batch-timeout 300 --lock-timeout 900
+```
+
+Use a fresh output directory name with an existing parent. All local runs sharing
+an SDK must use the same lock path (this workspace uses
+`/tmp/opencode/parallel-flutter.lock`); the runner owns the lock itself. On manual
+CI dispatch, `bounded_flutter_suite=true` selects this runner instead of the
+per-file step, resolving Flutter from PATH and placing output/lock under
+`RUNNER_TEMP`. The workflow uploads its evidence even after failure.
+
+The runner executes batches sequentially with `--no-pub --concurrency=2 --machine`.
+`inventory.json`, per-attempt logs, tree hashes and `summary.json` account for all
+discovered files. Missing completion, timeout, test/protocol failure or an empty
+inventory fails the run; a successful diagnostic retry does not erase a failure.
+New tests appearing during execution fail coverage; concurrent source changes are
+reported in `tree_changes` and require a fresh run for release evidence. The
+runner's subprocess tests validate orchestration, not Flutter application behavior.
 
 `flutter analyze`, `flutter test` (all regression groups clean), and
 `flutter build apk --debug` constitute the release gate, together with a

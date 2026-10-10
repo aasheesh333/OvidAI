@@ -2,7 +2,7 @@ import json
 from contextlib import contextmanager
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Body, Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from server.collaboration.api import router
@@ -40,27 +40,29 @@ class Repository:
         return {"inviteId": "invite-1", "inviteCode": "c" * 43,
                 "expiresAt": "2026-10-10T12:00:00.000Z", "maxUses": max_uses}
 
-    def join(self, uid, token, invite_code):
-        self.calls.append(("join", uid, token, invite_code))
-        return {"participantId": "pid-alice", "role": "participant", "status": "active"}
+    def join(self, uid, token, invite_code, *, idempotency_key, with_cursor):
+        self.calls.append(("join", uid, token, invite_code, idempotency_key, with_cursor))
+        return {"member": {"participantId": "pid-alice", "role": "participant", "status": "active"},
+                "cursor": "cursor-0"}
 
     def revoke_member(self, uid, token, participant_id):
         self.calls.append(("revoke_member", uid, token, participant_id))
-        return None
+        return {"member": {"participantId": participant_id, "role": "participant", "status": "revoked"}}
 
-    def append(self, uid, token, submitted):
-        self.calls.append(("append", uid, token, submitted))
-        return {"schemaVersion": 1, "eventId": submitted["eventId"], "sessionId": "sid",
+    def append_batch(self, uid, token, events, *, idempotency_key):
+        self.calls.append(("append_batch", uid, token, events, idempotency_key))
+        return {"events": [{"schemaVersion": 1, "eventId": submitted["eventId"], "sessionId": "sid",
                 "eventSequence": 1, "senderParticipantId": "pid-owner",
                 "kind": submitted["kind"], "createdAt": "2026-01-01T00:00:00.000Z",
-                "payload": submitted["payload"]}
+                "payload": submitted["payload"]} for submitted in events],
+                "nextCursor": "cursor-1", "hasMore": False}
 
     def replay(self, uid, token, cursor=None, limit=100, max_bytes=256 * 1024):
         self.calls.append(("replay", uid, token, cursor, limit, max_bytes))
         return {"events": [], "cursor": cursor or "cursor-0", "hasMore": False}
 
-    def close(self, uid, token):
-        self.calls.append(("close", uid, token))
+    def close(self, uid, token, *, idempotency_key):
+        self.calls.append(("close", uid, token, idempotency_key))
         return {**self.session["session"], "lifecycle": "closed"}
 
 
@@ -110,7 +112,7 @@ def test_state_membership_and_close_use_verified_uid(client):
     assert state.status_code == closed.status_code == 200
     assert state.headers["cache-control"] == closed.headers["cache-control"] == "no-store"
     assert repository.calls == [("get_state", "verified-account", token),
-                                ("close", "verified-account", token)]
+                                ("close", "verified-account", token, "close-1")]
     assert state.json()["member"] == repository.session["member"]
 
 
@@ -128,8 +130,7 @@ def test_members_route_supports_owner_invites_and_authenticated_join(client):
     assert invite.status_code == join.status_code == 200
     assert repository.calls == [
         ("create_invite", "verified-account", token, 2, 60, "invite-1"),
-        ("join", "verified-account", token, "invite-secret"),
-        ("get_state", "verified-account", token),
+        ("join", "verified-account", token, "invite-secret", "join-1", True),
     ]
     assert invite.headers["cache-control"] == join.headers["cache-control"] == "no-store"
 
@@ -144,10 +145,43 @@ def test_append_and_replay_are_bounded_and_server_fields_are_not_forwarded(clien
                         params={"cursor": "cursor-0", "limit": "1"}, headers=headers())
 
     assert appended.status_code == replayed.status_code == 200
-    assert repository.calls[0] == ("append", "verified-account", token, event())
+    assert repository.calls[0] == ("append_batch", "verified-account", token, [event()], "append-1")
     assert repository.calls[1] == ("replay", "verified-account", token,
                                    "cursor-0", 1, 256 * 1024)
     assert appended.headers["cache-control"] == replayed.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("limit", ["private-query-sentinel", "0", "101"])
+def test_framework_validation_errors_use_fixed_collaboration_envelope(client, limit):
+    http, repository = client
+    response = http.get("/chat/" + "t" * 43 + "/events",
+                        params={"limit": limit}, headers=headers())
+
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"schemaVersion": 1, "code": "invalid_request",
+                               "message": "Invalid request"}
+    assert repository.calls == []
+
+
+def test_framework_body_validation_uses_fixed_collaboration_envelope():
+    app = FastAPI()
+    repository = Repository()
+
+    def require_body(payload: dict = Body()):
+        return payload
+
+    # Exercise framework body validation before the collaboration endpoint runs.
+    app.include_router(router(repository, Verifier(), admission), prefix="/chat",
+                       dependencies=[Depends(require_body)])
+    response = TestClient(app).post("/chat", content='{"private-body-sentinel":',
+                                    headers={**headers(), "Content-Type": "application/json"})
+
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"schemaVersion": 1, "code": "invalid_request",
+                               "message": "Invalid request"}
+    assert repository.calls == []
 
 
 def test_revoke_uses_path_participant_and_verified_uid(client):
@@ -174,11 +208,15 @@ def test_invalid_body_and_oversized_body_do_not_reach_repository(client):
     http, repository = client
     invalid = http.post("/chat", json={"schemaVersion": 1, "requestId": "x",
                                         "idempotencyKey": "x", "uid": "attacker"}, headers=headers())
+    malformed = http.post("/chat", content="{", headers={**headers(), "Content-Type": "application/json"})
     oversized = http.post("/chat", content=json.dumps({"requestId": "x", "data": "x" * (1024 * 1024)}),
                           headers={**headers(), "Content-Type": "application/json"})
 
-    assert invalid.status_code == 400
+    assert invalid.status_code == malformed.status_code == 400
     assert oversized.status_code == 413
+    assert malformed.headers["cache-control"] == "no-store"
+    assert malformed.json() == {"schemaVersion": 1, "code": "invalid_request",
+                                "message": "Invalid request"}
     assert repository.calls == []
     assert "attacker" not in invalid.text
 
