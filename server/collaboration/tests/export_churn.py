@@ -22,8 +22,10 @@ def export():
         code = repo.create_invite('owner', token, max_uses=9)['inviteCode']
         for i in range(9):
             repo.join(f'u{i}', token, code)
-        state = repo.get_state('u0', token)
-        page = repo.replay('u0', token, state['cursor'])
+        state = {'schemaVersion': 1, **repo.get_state('u0', token)}
+        raw_page = repo.replay('u0', token, state['cursor'])
+        page = {'schemaVersion': 1, 'events': raw_page['events'],
+                'nextCursor': raw_page['cursor'], 'hasMore': raw_page['hasMore']}
         return {'state': state, 'page': page}
 
 if __name__ == '__main__':
