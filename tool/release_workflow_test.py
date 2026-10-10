@@ -9,6 +9,7 @@ contract: push builds signed release APK + AAB when the keystore secret exists,
 and the manual production dispatch keeps the API 36 Play gate.
 """
 import re
+import shlex
 import unittest
 from pathlib import Path
 
@@ -72,6 +73,44 @@ class ReleaseWorkflowTest(unittest.TestCase):
         for step in _steps():
             if step.get("name") == "Build signed release APK + AAB":
                 self.assertEqual(step.get("if"), "env.release_signing == 'true'")
+
+    def test_flutter_tests_use_serialized_complete_shards(self):
+        steps = _steps()
+        test_step = next(step for step in steps if step.get("name") == "Test")
+        run = test_step["run"]
+        self.assertIn("git ls-files 'test/**_test.dart'", run)
+        self.assertIn("for test_file in \"${test_files[@]}\"; do", run)
+        self.assertIn("flutter test \"$test_file\"", run)
+        self.assertNotIn("|| true", run)
+        build = yaml.load(WORKFLOW.read_text(), Loader=_DuplicateKeyLoader)["jobs"]["build"]
+        self.assertGreaterEqual(build["timeout-minutes"], 60)
+
+    def test_server_lane_installs_requirements_and_runs_targeted_pytest(self):
+        doc = yaml.load(WORKFLOW.read_text(), Loader=_DuplicateKeyLoader)
+        server = doc["jobs"]["server-tests"]
+        install_run = next(
+            step["run"] for step in server["steps"]
+            if step.get("name") == "Install server requirements"
+        )
+        self.assertIn("pip install -r server/account/requirements.txt", install_run)
+        server_run = next(
+            step["run"] for step in server["steps"]
+            if step.get("name") == "Test server account, sync, and collaboration"
+        )
+        command = shlex.split(server_run.strip())
+        self.assertEqual(command[0], "pytest")
+        self.assertEqual(
+            command[1:],
+            ["server/account/tests", "server/sync", "server/collaboration", "server/images", "server/shares"],
+        )
+        self.assertNotIn("deploy", server.get("name", "").lower())
+
+    def test_server_lane_has_no_production_deployment(self):
+        text = WORKFLOW.read_text()
+        server_start = text.index("  server-tests:")
+        server_text = text[server_start:]
+        for forbidden in ("production_release", "release_prepare.py", "flutter build", "upload-artifact"):
+            self.assertNotIn(forbidden, server_text)
 
 
 if __name__ == "__main__":

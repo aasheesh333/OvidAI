@@ -36,14 +36,14 @@ CollaborationEvent join(int seq, String participant, {String? author}) => ev(
   seq,
   'membership',
   {'action': 'joined', 'participantId': participant, 'role': 'participant'},
-  author: author,
+  author: author ?? participant,
 );
 
 CollaborationEvent revoke(int seq, String participant, {String? author}) => ev(
   seq,
   'membership',
   {'action': 'revoked', 'participantId': participant, 'role': null},
-  author: author,
+  author: author ?? participant,
 );
 
 CollaborationEvent leave(int seq, String participant) => ev(
@@ -180,7 +180,7 @@ void main() {
     expect(s.messages, isEmpty);
   });
 
-  test('owner join admits a participant up to 10 active members', () {
+  test('server join admits a participant up to 10 active members', () {
     final eight = [for (var i = 1; i <= 8; i++) 'p-$i'];
     final s = reducer.apply(initial(participants: [local, ...eight.take(7)]), join(1, 'p-8'));
     expect(s.lastOutcome, ReduceOutcome.applied);
@@ -215,10 +215,68 @@ void main() {
     );
   });
 
-  test('membership changes from a non-owner are rejected', () {
+  test('server-shaped non-owner membership events are accepted', () {
+    final s = reducer.apply(initial(participants: [local, 'p-2']), revoke(1, 'p-2'));
+    expect(s.lastOutcome, ReduceOutcome.applied);
+    expect(s.members['p-2']!.status, MemberStatus.revoked);
+  });
+
+  test('server-shaped join membership event is applied by the affected participant', () {
+    final s = reducer.apply(initial(), join(1, 'p-new', author: 'p-new'));
+    expect(s.lastOutcome, ReduceOutcome.applied);
+    expect(s.members['p-new']!.status, MemberStatus.active);
+  });
+
+  test('server-shaped revoke membership event is applied by the affected participant', () {
     final s = reducer.apply(initial(participants: [local, 'p-2']), revoke(1, 'p-2', author: 'p-2'));
+    expect(s.lastOutcome, ReduceOutcome.applied);
+    expect(s.members['p-2']!.status, MemberStatus.revoked);
+  });
+
+  test('membership events cannot be authored for a different participant', () {
+    final s = reducer.apply(initial(participants: [local, 'p-2']), revoke(1, 'p-2', author: 'p-3'));
     expect(s.lastOutcome, ReduceOutcome.rejectedUnauthorized);
     expect(s.members['p-2']!.status, MemberStatus.active);
+  });
+
+  test('server rejoin reactivates a revoked participant before their next message', () {
+    final s = applyAll(initial(participants: [local, 'p-2']), [
+      revoke(1, 'p-2'),
+      join(2, 'p-2'),
+      msg(3, 'back', author: 'p-2'),
+    ]);
+    expect(s.members['p-2']!.status, MemberStatus.active);
+    expect(s.messages.single.text, 'back');
+    expect(s.lastSequence, 3);
+  });
+
+  test('buffered server revocation fences later member projections', () {
+    final before = initial(participants: [local, 'p-2']);
+    final snapshot = before.debugSnapshot();
+    final s = applyAll(before, [
+      msg(3, 'late', author: 'p-2'),
+      revoke(2, 'p-2'),
+      msg(1, 'first'),
+    ]);
+    expect(s.members['p-2']!.status, MemberStatus.revoked);
+    expect(s.messages.map((m) => m.text), ['first']);
+    expect(s.lastSequence, 3);
+    expect(s.bufferedCount, 0);
+    expect(before.debugSnapshot(), snapshot);
+  });
+
+  test('buffered local revocation closes and discards pending events', () {
+    final s = applyAll(initial(), [
+      msg(3, 'after'),
+      revoke(2, local),
+      msg(1, 'before'),
+    ]);
+    expect(s.status, CollaborationStatus.closed);
+    expect(s.closeReason, CloseReason.localRemoved);
+    expect(s.lastSequence, 2);
+    expect(s.bufferedCount, 0);
+    expect(s.messages.single.text, 'before');
+    expect(reducer.apply(s, join(3, local)).lastOutcome, ReduceOutcome.ignoredClosed);
   });
 
   test('events from a revoked member are ignored', () {
@@ -258,7 +316,7 @@ void main() {
   });
 
   test('revoking the local member closes the state', () {
-    var s = reducer.apply(initial(), revoke(1, local));
+    var s = reducer.apply(initial(), revoke(1, local, author: local));
     expect(s.status, CollaborationStatus.closed);
     expect(s.closeReason, CloseReason.localRemoved);
     s = reducer.apply(s, msg(2, 'after'));
@@ -337,14 +395,14 @@ void main() {
       RegExp(r'\bFunction\b'),
     ];
 
-    test('collaboration sources have no executor imports or references', () {
-      final dir = Directory('lib/core/collaboration');
-      final files = dir
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.endsWith('.dart'))
-          .toList();
-      expect(files.map((f) => f.uri.pathSegments.last), containsAll(['models.dart', 'reducer.dart']));
+    test('pure projection sources have no executor imports or references', () {
+      // The reducer's closed import allowlist guards its complete dependency
+      // boundary. Transport and persistence live alongside it, but are not
+      // dependencies of the pure projection.
+      final files = [
+        File('lib/core/collaboration/models.dart'),
+        File('lib/core/collaboration/reducer.dart'),
+      ];
       for (final f in files) {
         final lines = f.readAsLinesSync();
         final code = lines

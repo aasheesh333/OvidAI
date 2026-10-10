@@ -210,6 +210,12 @@ extension _SettingsStateIntegration on AppState {
               (await ConversationShareService.production().localShareCount()) ==
                   0,
         ),
+        ResetStoreKind.privateSync: _accountLifecycle.asResetStore(
+          ResetStoreKind.privateSync.id,
+        ),
+        ResetStoreKind.collaboration: _accountLifecycle.asResetStore(
+          ResetStoreKind.collaboration.id,
+        ),
       });
       await coordinator.prepare();
       return (await coordinator.commit()).toSettingsResult();
@@ -246,8 +252,9 @@ extension _SettingsStateIntegration on AppState {
     Future<T> Function(Object token) action,
   ) async {
     _checkSettingsOwner(expectedAccount);
-    if (_settingsBusy)
+    if (_settingsBusy) {
       throw StateError('Settings operation already in progress.');
+    }
     final settled = Completer<void>();
     _settingsOperation = settled.future;
     _settingsBusy = true;

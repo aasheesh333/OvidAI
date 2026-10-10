@@ -24,24 +24,16 @@ class UsageAttemptStore {
     required this.accountRoot,
     required this.terminalHistoryLimit,
     required this.maxJournalBytes,
-    required UsageAttemptStagedWriter writeStagedFile,
-    required List<UsageAttempt> records,
-    required int revision,
-    required bool historyTruncated,
-    required Map<String, int> tombstones,
-    required Set<String> migrationMarkers,
-    required UsageAttemptOwnerFence ownerFence,
-    required UsageAttemptDirectorySync syncDirectory,
-    required String stagingSuffix,
-  }) : _writeStagedFile = writeStagedFile,
-       _records = records,
-       _revision = revision,
-       _historyTruncated = historyTruncated,
-       _tombstones = tombstones,
-       _migrationMarkers = migrationMarkers,
-       _ownerFence = ownerFence,
-       _syncDirectory = syncDirectory,
-       _stagingSuffix = stagingSuffix;
+    required this._writeStagedFile,
+    required this._records,
+    required this._revision,
+    required this._historyTruncated,
+    required this._tombstones,
+    required this._migrationMarkers,
+    required this._ownerFence,
+    required this._syncDirectory,
+    required this._stagingSuffix,
+  });
 
   static const schemaVersion = 1;
   static const journalFileName = 'usage_attempts.json';
@@ -90,8 +82,9 @@ class UsageAttemptStore {
       final bytes = await _readCapped(file, maxJournalBytes, readChunk);
       try {
         final decoded = jsonDecode(utf8.decode(bytes));
-        if (decoded is! Map)
+        if (decoded is! Map) {
           throw const FormatException('Journal must be an object');
+        }
         final json = Map<String, dynamic>.from(decoded);
         document = json;
         _requireKeys(
@@ -103,13 +96,15 @@ class UsageAttemptStore {
             json['schemaVersion'] != schemaVersion ||
             (json['revision'] as int) < 0 ||
             json['historyTruncated'] is! bool ||
-            json['attempts'] is! List)
+            json['attempts'] is! List) {
           throw const FormatException('Malformed journal metadata');
+        }
         revision = json['revision'] as int;
         truncated = json['historyTruncated'] as bool;
         final tombstones = json['tombstones'];
-        if (tombstones != null && tombstones is! Map)
+        if (tombstones != null && tombstones is! Map) {
           throw const FormatException('Malformed tombstones');
+        }
         final markers = json['migrationMarkers'];
         if (markers != null &&
             (markers is! List || !markers.every((item) => item is String))) {
@@ -151,14 +146,16 @@ class UsageAttemptStore {
       final rawTombstones = document['tombstones'];
       if (rawTombstones is Map) {
         store._tombstones = rawTombstones.map((key, value) {
-          if (key is! String || value is! int || value < 1)
+          if (key is! String || value is! int || value < 1) {
             throw const FormatException('Malformed tombstone');
+          }
           return MapEntry(key, value);
         });
       }
       final rawMarkers = document['migrationMarkers'];
-      if (rawMarkers is List)
+      if (rawMarkers is List) {
         store._migrationMarkers = rawMarkers.cast<String>().toSet();
+      }
     }
     if (records.any((item) => item.outcome == UsageOutcome.pending)) {
       if (!await ownerFence()) throw StateError('Stale usage account owner');
@@ -253,8 +250,9 @@ class UsageAttemptStore {
       Set<String>.unmodifiable(_migrationMarkers);
 
   Future<bool> upsert(UsageAttempt record) => _enqueue(() async {
-    if (_invalidated)
+    if (_invalidated) {
       throw StateError('Usage store is invalid after a committed sync failure');
+    }
     if (!await _ownerFence()) throw StateError('Stale usage account owner');
     if (_tombstones.containsKey(record.attemptId)) return false;
     final existingIndex = _records.indexWhere(
@@ -269,10 +267,11 @@ class UsageAttemptStore {
       }
     }
     var next = [..._records];
-    if (existingIndex >= 0)
+    if (existingIndex >= 0) {
       next[existingIndex] = record;
-    else
+    } else {
       next.add(record);
+    }
     final retained = _retain(
       next,
       _tombstones,
@@ -306,8 +305,9 @@ class UsageAttemptStore {
     for (final record in records) {
       if (_tombstones.containsKey(record.attemptId) ||
           _records.any((item) => item.attemptId == record.attemptId) ||
-          imported.any((item) => item.attemptId == record.attemptId))
+          imported.any((item) => item.attemptId == record.attemptId)) {
         continue;
+      }
       imported.add(_legacyRecord(record));
     }
     final next = [..._records, ...imported];
@@ -336,7 +336,7 @@ class UsageAttemptStore {
 
   Future<T> _enqueue<T>(Future<T> Function() operation) {
     final result = _tail.then((_) => operation());
-    _tail = result.then<void>((_) {}, onError: (_, __) {});
+    _tail = result.then<void>((_) {}, onError: (_, _) {});
     return result;
   }
 
@@ -357,8 +357,9 @@ class UsageAttemptStore {
         'migrationMarkers': (migrationMarkers ?? _migrationMarkers).toList(),
       }),
     );
-    if (bytes.length > maxJournalBytes)
+    if (bytes.length > maxJournalBytes) {
       throw StateError('Usage journal exceeds size limit');
+    }
     final target = File('${accountRoot.path}/$journalFileName');
     final temp = File('${target.path}.tmp.$_stagingSuffix');
     try {
@@ -401,8 +402,9 @@ class UsageAttemptStore {
         );
         if (chunk.isEmpty) break;
         bytes.addAll(chunk);
-        if (bytes.length > limit)
+        if (bytes.length > limit) {
           throw const FormatException('Journal exceeds size limit');
+        }
       }
       return bytes;
     } finally {

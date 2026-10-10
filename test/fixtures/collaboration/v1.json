@@ -1,0 +1,198 @@
+{
+  "sessions": [
+    {
+      "name": "active session",
+      "wire": {
+        "schemaVersion": 1,
+        "sessionId": "sess-1",
+        "ownerParticipantId": "p-owner",
+        "lifecycle": "active"
+      }
+    },
+    {
+      "name": "closed session",
+      "wire": {
+        "schemaVersion": 1,
+        "sessionId": "sess-closed",
+        "ownerParticipantId": "p-owner",
+        "lifecycle": "closed"
+      }
+    }
+  ],
+  "events": [
+    {
+      "name": "message",
+      "client": {
+        "schemaVersion": 1,
+        "eventId": "evt-message",
+        "kind": "message",
+        "payload": {"text": "hello collaboration"}
+      },
+      "normalizedClient": {
+        "schemaVersion": 1,
+        "eventId": "evt-message",
+        "kind": "message",
+        "payload": {"text": "hello collaboration"}
+      },
+      "server": {
+        "schemaVersion": 1,
+        "eventId": "evt-message",
+        "sessionId": "sess-1",
+        "eventSequence": 1,
+        "senderParticipantId": "p-owner",
+        "kind": "message",
+        "createdAt": "2026-10-09T12:00:00Z",
+        "payload": {"text": "hello collaboration"}
+      }
+    },
+    {
+      "name": "model status",
+      "client": {
+        "schemaVersion": 1,
+        "eventId": "evt-model",
+        "kind": "modelStatus",
+        "payload": {
+          "providerId": "openai",
+          "requestedModel": "gpt-5",
+          "reportedModel": null,
+          "displayName": "GPT-5",
+          "streaming": true,
+          "status": "running"
+        }
+      },
+      "normalizedClient": {
+        "schemaVersion": 1,
+        "eventId": "evt-model",
+        "kind": "modelStatus",
+        "payload": {
+          "providerId": "openai",
+          "requestedModel": "gpt-5",
+          "reportedModel": null,
+          "displayName": "GPT-5",
+          "streaming": true,
+          "status": "running"
+        }
+      },
+      "server": {
+        "schemaVersion": 1,
+        "eventId": "evt-model",
+        "sessionId": "sess-1",
+        "eventSequence": 2,
+        "senderParticipantId": "p-owner",
+        "kind": "modelStatus",
+        "createdAt": "2026-10-09T12:00:01Z",
+        "payload": {
+          "providerId": "openai",
+          "requestedModel": "gpt-5",
+          "reportedModel": null,
+          "displayName": "GPT-5",
+          "streaming": true,
+          "status": "running"
+        }
+      }
+    },
+    {
+      "name": "unknown usage",
+      "client": {
+        "schemaVersion": 1,
+        "eventId": "evt-usage",
+        "kind": "usage",
+        "payload": {
+          "requestId": "req-1",
+          "attemptId": "att-1",
+          "provenance": "unknown",
+          "inputTokens": null,
+          "outputTokens": null
+        }
+      },
+      "normalizedClient": {
+        "schemaVersion": 1,
+        "eventId": "evt-usage",
+        "kind": "usage",
+        "payload": {
+          "requestId": "req-1",
+          "attemptId": "att-1",
+          "provenance": "unknown",
+          "inputTokens": null,
+          "outputTokens": null
+        }
+      },
+      "server": {
+        "schemaVersion": 1,
+        "eventId": "evt-usage",
+        "sessionId": "sess-1",
+        "eventSequence": 3,
+        "senderParticipantId": "p-owner",
+        "kind": "usage",
+        "createdAt": "2026-10-09T12:00:02Z",
+        "payload": {
+          "requestId": "req-1",
+          "attemptId": "att-1",
+          "provenance": "unknown",
+          "inputTokens": null,
+          "outputTokens": null
+        }
+      }
+    },
+    {
+      "name": "joined membership",
+      "client": {
+        "schemaVersion": 1,
+        "eventId": "evt-join",
+        "kind": "membership",
+        "payload": {"action": "joined", "participantId": "p-two", "role": "participant"}
+      },
+      "normalizedClient": null,
+      "server": {
+        "schemaVersion": 1,
+        "eventId": "evt-join",
+        "sessionId": "sess-1",
+        "eventSequence": 4,
+        "senderParticipantId": "p-owner",
+        "kind": "membership",
+        "createdAt": "2026-10-09T12:00:03Z",
+        "payload": {"action": "joined", "participantId": "p-two", "role": "participant"}
+      }
+    },
+    {
+      "name": "closed system event",
+      "client": {
+        "schemaVersion": 1,
+        "eventId": "evt-close",
+        "kind": "system",
+        "payload": {"code": "sessionClosed"}
+      },
+      "normalizedClient": null,
+      "server": {
+        "schemaVersion": 1,
+        "eventId": "evt-close",
+        "sessionId": "sess-1",
+        "eventSequence": 5,
+        "senderParticipantId": "p-owner",
+        "kind": "system",
+        "createdAt": "2026-10-09T12:00:04Z",
+        "payload": {"code": "sessionClosed"}
+      }
+    }
+  ],
+  "errors": [
+    {
+      "name": "unknown kind",
+      "reason": "unknownKind",
+      "client": {"schemaVersion": 1, "eventId": "evt-error", "kind": "reaction", "payload": {"text": "x"}},
+      "server": {"schemaVersion": 1, "eventId": "evt-error", "sessionId": "sess-1", "eventSequence": 6, "senderParticipantId": "p-owner", "kind": "reaction", "createdAt": "2026-10-09T12:00:05Z", "payload": {"text": "x"}}
+    },
+    {
+      "name": "invalid presence",
+      "reason": "invalidValue",
+      "client": {"schemaVersion": 1, "eventId": "evt-error", "kind": "presence", "payload": {"state": "busy"}},
+      "server": {"schemaVersion": 1, "eventId": "evt-error", "sessionId": "sess-1", "eventSequence": 7, "senderParticipantId": "p-owner", "kind": "presence", "createdAt": "2026-10-09T12:00:06Z", "payload": {"state": "busy"}}
+    },
+    {
+      "name": "missing event id",
+      "reason": "missingField",
+      "client": {"schemaVersion": 1, "kind": "message", "payload": {"text": "x"}},
+      "server": {"schemaVersion": 1, "sessionId": "sess-1", "eventSequence": 8, "senderParticipantId": "p-owner", "kind": "message", "createdAt": "2026-10-09T12:00:07Z", "payload": {"text": "x"}}
+    }
+  ]
+}

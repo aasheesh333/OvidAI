@@ -372,8 +372,9 @@ class _SseMcpChannel {
       }
       _validateDestination(uri);
       final left = timeout - clock.elapsed;
-      if (left <= Duration.zero)
+      if (left <= Duration.zero) {
         throw TimeoutException('SSE request timed out');
+      }
       final req = http.Request(method, uri)..followRedirects = false;
       req.headers.addAll(headers);
       if (body != null) req.body = body;
@@ -2337,8 +2338,8 @@ class McpService {
     // kill the freshly spawned process instead of finishing the handshake.
     bool aborted() =>
         (!identical(_running[key], rs) ||
-            rs.userDisconnected ||
-            !_canPublishStatus(rs));
+        rs.userDisconnected ||
+        !_canPublishStatus(rs));
     try {
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('MCP handshake timed out', Duration.zero);
@@ -2678,9 +2679,7 @@ class McpService {
         if (!identical(_running[key], rs)) return;
         _running.remove(key);
         _lastDeath = (server: key, code: code, at: DateTime.now());
-        if (rs.handshakeDone &&
-            !rs.userDisconnected &&
-            _canPublishStatus(rs)) {
+        if (rs.handshakeDone && !rs.userDisconnected && _canPublishStatus(rs)) {
           _markDisconnected(rs, 'server exited with code $code');
           _scheduleReconnect(server);
         }
@@ -2855,8 +2854,9 @@ class McpService {
     bool refresh,
   ) async {
     final rs = _protocolServer(name, capability);
-    if (!refresh && rs.catalogs.containsKey(method))
+    if (!refresh && rs.catalogs.containsKey(method)) {
       return rs.catalogs[method]!;
+    }
     final version = rs.catalogVersions[method] ?? 0;
     final deadline = _now().add(
       timeout ?? Duration(seconds: _rpcTimeoutSeconds),
@@ -2876,30 +2876,37 @@ class McpService {
         throw StateError('$method invalidated during discovery; retry');
       }
       bytes += utf8.encode(jsonEncode(payload)).length;
-      if (bytes > 4 * 1024 * 1024)
+      if (bytes > 4 * 1024 * 1024) {
         throw StateError('$method catalog exceeds byte limit');
+      }
       final items = payload[field];
-      if (items is! List)
+      if (items is! List) {
         throw FormatException('$method expected $field array');
-      if (entries.length + items.length > 10000)
+      }
+      if (entries.length + items.length > 10000) {
         throw StateError('$method catalog exceeds item limit');
+      }
       for (final item in items) {
-        if (item is! Map<String, dynamic>)
+        if (item is! Map<String, dynamic>) {
           throw FormatException('$method invalid item');
+        }
         _requiredString(item, identity);
         _requiredString(item, 'name');
         _optionalString(item, 'description');
         _optionalString(item, 'title');
-        if (!identities.add(item[identity] as String))
+        if (!identities.add(item[identity] as String)) {
           throw FormatException('$method duplicate identity');
+        }
         if (capability == 'prompts' && item.containsKey('arguments')) {
           final arguments = item['arguments'];
-          if (arguments is! List)
+          if (arguments is! List) {
             throw const FormatException('Invalid prompt arguments');
+          }
           final names = <String>{};
           for (final arg in arguments) {
-            if (arg is! Map<String, dynamic>)
+            if (arg is! Map<String, dynamic>) {
               throw const FormatException('Invalid prompt argument');
+            }
             _requiredString(arg, 'name');
             _optionalString(arg, 'description');
             if (!names.add(arg['name'] as String) ||
@@ -2951,30 +2958,35 @@ class McpService {
   };
 
   static void _resourceContents(dynamic value) {
-    if (value is! Map<String, dynamic>)
+    if (value is! Map<String, dynamic>) {
       throw const FormatException('Invalid resource contents');
+    }
     _requiredString(value, 'uri');
     _optionalString(value, 'mimeType');
     if (value.containsKey('text') == value.containsKey('blob')) {
       throw const FormatException('Resource needs exactly one text or blob');
     }
     if (value.containsKey('text')) {
-      if (value['text'] is! String)
+      if (value['text'] is! String) {
         throw const FormatException('Invalid resource text');
+      }
     } else {
-      if (value['blob'] is! String)
+      if (value['blob'] is! String) {
         throw const FormatException('Invalid resource blob');
+      }
       base64Decode(value['blob'] as String);
     }
   }
 
   static void _promptContent(dynamic value) {
-    if (value is! Map<String, dynamic>)
+    if (value is! Map<String, dynamic>) {
       throw const FormatException('Invalid prompt content');
+    }
     switch (value['type']) {
       case 'text':
-        if (value['text'] is! String)
+        if (value['text'] is! String) {
           throw const FormatException('Invalid prompt text');
+        }
       case 'image':
       case 'audio':
         _requiredString(value, 'mimeType');
@@ -3004,8 +3016,9 @@ class McpService {
     }, timeout ?? Duration(seconds: _rpcTimeoutSeconds));
     _optionalString(payload, 'description');
     final messages = payload['messages'];
-    if (messages is! List)
+    if (messages is! List) {
       throw const FormatException('Expected prompt messages array');
+    }
     for (final message in messages) {
       if (message is! Map<String, dynamic> ||
           !const {'user', 'assistant'}.contains(message['role'])) {
@@ -3027,8 +3040,9 @@ class McpService {
       'uri': uri,
     }, timeout ?? Duration(seconds: _rpcTimeoutSeconds));
     final contents = payload['contents'];
-    if (contents is! List)
+    if (contents is! List) {
       throw const FormatException('Expected resource contents array');
+    }
     for (final content in contents) {
       _resourceContents(content);
     }
@@ -3505,19 +3519,13 @@ class McpService {
     final client = injected ?? http.Client();
     try {
       final authHeaders = await _authHeaders(rs);
-      await _sendMcpHttpRequest(
-        client,
-        'DELETE',
-        Uri.parse(url),
-        {
-          'Mcp-Session-Id': sessionId,
-          if (rs.protocolVersion != null)
-            'MCP-Protocol-Version': rs.protocolVersion!,
-          ...authHeaders,
-          ...rs.server.headers,
-        },
-        timeout: Duration(seconds: rs.server.startupTimeoutS),
-      );
+      await _sendMcpHttpRequest(client, 'DELETE', Uri.parse(url), {
+        'Mcp-Session-Id': sessionId,
+        if (rs.protocolVersion != null)
+          'MCP-Protocol-Version': rs.protocolVersion!,
+        ...authHeaders,
+        ...rs.server.headers,
+      }, timeout: Duration(seconds: rs.server.startupTimeoutS));
     } catch (_) {
       // Best-effort teardown: never let a dead endpoint block disconnect.
     } finally {
@@ -3547,8 +3555,9 @@ class McpService {
       final payload = dataParts.join('\n');
       try {
         final decoded = jsonDecode(payload) as Map<String, dynamic>;
-        if (rs != null && !decoded.containsKey('id'))
+        if (rs != null && !decoded.containsKey('id')) {
           _onNotification(rs, decoded);
+        }
         if (decoded['id']?.toString() == id.toString()) response = decoded;
       } catch (e) {
         Diag.swallow('mcp_service', e);
@@ -3627,9 +3636,7 @@ class McpService {
     if (!identical(token, AppState.I.sessionAccountToken)) return false;
     if (rs.rowRegistered) {
       final canonicalId = rs.server.canonicalId;
-      if (!AppState.I.mcpServers.any(
-        (s) => s.canonicalId == canonicalId,
-      )) {
+      if (!AppState.I.mcpServers.any((s) => s.canonicalId == canonicalId)) {
         return false;
       }
     }

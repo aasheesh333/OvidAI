@@ -2,11 +2,51 @@
 
 import json
 import os
+from importlib import import_module
 from fastapi import FastAPI
 from .api import router
 from .domain import Lifecycle
 from .composition import CleanupData
 from .stores import StoreConfig, open_stores
+
+
+def _activated(name):
+    return os.environ.get(name) == 'true'
+
+
+def _configured_repository(activation, setting, module_name, class_name, **kwargs):
+    """Build an optional repository only after explicit activation/configuration."""
+    if not _activated(activation):
+        return None
+    configured = os.environ.get(setting)
+    if not configured:
+        raise RuntimeError(f'{setting} is required when {activation}=true')
+    module = import_module(module_name)
+    repository = getattr(module, class_name)
+    return repository(configured, **kwargs)
+
+
+def _shared_repositories(account_authority):
+    private_sync = None
+    if _activated('PRIVATE_SYNC_ACTIVATED'):
+        # Sync has deliberately not selected a storage implementation yet. An
+        # explicitly configured factory receives the existing account authority
+        # and is responsible for returning the SyncRepository implementation.
+        factory = os.environ.get('PRIVATE_SYNC_REPOSITORY_FACTORY')
+        if not factory:
+            raise RuntimeError(
+                'PRIVATE_SYNC_REPOSITORY_FACTORY is required when '
+                'PRIVATE_SYNC_ACTIVATED=true')
+        module_name, separator, attribute = factory.partition(':')
+        if not separator:
+            raise ValueError('PRIVATE_SYNC_REPOSITORY_FACTORY must be module:attribute')
+        private_sync = getattr(import_module(module_name), attribute)(
+            account_authority)
+
+    live_collaboration = _configured_repository(
+        'LIVE_COLLABORATION_ACTIVATED', 'LIVE_COLLABORATION_DATABASE_PATH',
+        'server.collaboration.repository', 'CollabRepository')
+    return private_sync, live_collaboration
 
 
 def build():
@@ -29,8 +69,11 @@ def build():
                           headers={'Authorization': 'Bearer ' + os.environ['LITELLM_MASTER_KEY']})
     data = GatewayData(sql_data, RedisData(redis.from_url(
         os.environ['REDIS_URL'], decode_responses=True)), client)
-    return Lifecycle(PostgresStore(os.environ['ACCOUNT_DATABASE_URL']), admin,
-                     CleanupData(data, stores)), admin
+    account_authority = PostgresStore(os.environ['ACCOUNT_DATABASE_URL'])
+    private_sync, live_collaboration = _shared_repositories(account_authority)
+    return Lifecycle(account_authority, admin,
+                     CleanupData(data, stores, private_sync=private_sync,
+                                 live_collaboration=live_collaboration)), admin
 
 
 def create_app():
@@ -40,4 +83,10 @@ def create_app():
     from server.shares.runtime import mount_shares
     mount_shares(app, service.data.stores.shares, service, admin,
                  os.environ['SHARE_BASE_URL'])
+    if _activated('PRIVATE_SYNC_ACTIVATED'):
+        from server.sync.runtime import mount_sync
+        mount_sync(app, service.data.private_sync, service, admin)
+    if _activated('LIVE_COLLABORATION_ACTIVATED'):
+        from server.collaboration.runtime import mount_collaboration
+        mount_collaboration(app, service.data.live_collaboration, service, admin)
     return app

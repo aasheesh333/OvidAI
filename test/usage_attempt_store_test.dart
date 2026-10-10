@@ -4,8 +4,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import '../lib/core/usage_attempt.dart';
-import '../lib/core/usage_attempt_store.dart';
+import 'package:ovid_ai/core/usage_attempt.dart';
+import 'package:ovid_ai/core/usage_attempt_store.dart';
 
 UsageAttempt attempt(
   String id, {
@@ -332,7 +332,7 @@ void main() {
       await expectLater(
         UsageAttemptStore.open(
           accountRoot: root,
-          writeStagedFile: (_, __) async {
+          writeStagedFile: (_, _) async {
             throw const FileSystemException('injected');
           },
         ),
@@ -607,32 +607,38 @@ void main() {
     expect(paths.every((path) => path.contains('.tmp.')), isTrue);
   });
 
-  test('replacement invalidates the prior store instance before later writes', () async {
-    final old = await UsageAttemptStore.open(accountRoot: root);
-    await old.upsert(attempt('old'));
+  test(
+    'replacement invalidates the prior store instance before later writes',
+    () async {
+      final old = await UsageAttemptStore.open(accountRoot: root);
+      await old.upsert(attempt('old'));
 
-    final replacement = await UsageAttemptStore.open(accountRoot: root);
+      final replacement = await UsageAttemptStore.open(accountRoot: root);
 
-    await expectLater(old.upsert(attempt('stale')), throwsStateError);
-    await replacement.upsert(attempt('new'));
-    expect(
-      replacement.snapshot.map((record) => record.attemptId),
-      ['old', 'new'],
-    );
-  });
+      await expectLater(old.upsert(attempt('stale')), throwsStateError);
+      await replacement.upsert(attempt('new'));
+      expect(replacement.snapshot.map((record) => record.attemptId), [
+        'old',
+        'new',
+      ]);
+    },
+  );
 
-  test('stale A to B to A retirement cannot detach the current registry', () async {
-    final firstA = await UsageAttemptStore.open(accountRoot: root);
-    final b = await UsageAttemptStore.open(accountRoot: root);
-    final secondA = await UsageAttemptStore.open(accountRoot: root);
+  test(
+    'stale A to B to A retirement cannot detach the current registry',
+    () async {
+      final firstA = await UsageAttemptStore.open(accountRoot: root);
+      final b = await UsageAttemptStore.open(accountRoot: root);
+      final secondA = await UsageAttemptStore.open(accountRoot: root);
 
-    await firstA.retire();
-    await secondA.upsert(attempt('current'));
-    await b.retire();
-    await secondA.upsert(attempt('still-current'));
-    expect(secondA.snapshot.map((record) => record.attemptId), [
-      'current',
-      'still-current',
-    ]);
-  });
+      await firstA.retire();
+      await secondA.upsert(attempt('current'));
+      await b.retire();
+      await secondA.upsert(attempt('still-current'));
+      expect(secondA.snapshot.map((record) => record.attemptId), [
+        'current',
+        'still-current',
+      ]);
+    },
+  );
 }

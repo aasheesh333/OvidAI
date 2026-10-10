@@ -340,7 +340,7 @@ class CollaborationReducer {
         );
 
       case MembershipPayload p:
-        return _applyMembership(s, e, p, seq, seen, isOwner, authorActive);
+        return _applyMembership(s, e, p, seq, seen);
 
       case SystemPayload(:final code):
         if (!isOwner) return consume(ReduceOutcome.rejectedUnauthorized);
@@ -369,8 +369,6 @@ class CollaborationReducer {
     MembershipPayload p,
     int seq,
     Set<String> seen,
-    bool isOwner,
-    bool authorActive,
   ) {
     CollaborationState consume(ReduceOutcome outcome, {int? violations}) => s._copy(
       lastSequence: seq,
@@ -384,8 +382,12 @@ class CollaborationReducer {
 
     switch (p.action) {
       case MembershipAction.joined:
-        if (!isOwner) return consume(ReduceOutcome.rejectedUnauthorized);
-        if (targetIsOwner) return consume(ReduceOutcome.rejectedUnauthorized);
+        // Membership events are server-emitted with the affected participant
+        // as sender. The event stream, rather than a remote participant's
+        // ordinary presentation events, is the authority for this projection.
+        if (e.author != p.participantId || targetIsOwner) {
+          return consume(ReduceOutcome.rejectedUnauthorized);
+        }
         if (target != null && target.isActive) {
           // Reconnect of an already-active member: no second slot.
           return consume(ReduceOutcome.applied);
@@ -412,10 +414,9 @@ class CollaborationReducer {
 
       case MembershipAction.revoked:
       case MembershipAction.left:
-        final allowed = p.action == MembershipAction.revoked
-            ? isOwner
-            : authorActive && e.author == p.participantId;
-        if (!allowed || targetIsOwner) return consume(ReduceOutcome.rejectedUnauthorized);
+        if (e.author != p.participantId || targetIsOwner) {
+          return consume(ReduceOutcome.rejectedUnauthorized);
+        }
         if (target == null || !target.isActive) return consume(ReduceOutcome.applied);
         final nextStatus =
             p.action == MembershipAction.revoked ? MemberStatus.revoked : MemberStatus.left;

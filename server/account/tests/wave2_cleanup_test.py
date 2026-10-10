@@ -196,6 +196,139 @@ def test_production_build_rejects_absent_store_config_before_external_setup():
             runtime.build()
 
 
+def test_cleanup_has_named_shared_runtime_checkpoints_when_configured(tmp_path):
+    from server.account.composition import CleanupData
+
+    calls = []
+    class Shared:
+        def delete_account(self, uid):
+            calls.append(uid)
+
+    _, stores = configured(tmp_path)
+    data = CleanupData(Data(), stores, private_sync=Shared(),
+                       live_collaboration=Shared())
+    assert [name for name, _ in data.deletion_steps()] == [
+        'gateway', 'private_sync', 'live_collaboration', 'images', 'shares']
+    for name, action in data.deletion_steps():
+        if name in {'private_sync', 'live_collaboration'}:
+            action('alice', {})
+    assert calls == ['alice', 'alice']
+
+
+def test_shared_runtimes_are_disabled_by_default(tmp_path):
+    from server.account.composition import CleanupData
+
+    _, stores = configured(tmp_path)
+    data = CleanupData(Data(), stores)
+    assert [name for name, _ in data.deletion_steps()] == [
+        'gateway', 'images', 'shares']
+
+
+def test_restart_cannot_drop_a_persisted_shared_cleanup_stage(tmp_path):
+    from server.account.composition import CleanupData
+
+    _, stores = configured(tmp_path)
+
+    class Shared:
+        authority_identity = 'shared-authority-v1'
+        fail = False
+
+        def delete_account(self, uid):
+            if self.fail:
+                raise RuntimeError('shared unavailable')
+
+    shared = Shared()
+    service, now = lifecycle(tmp_path, stores)
+    service.data = CleanupData(Data(), stores, private_sync=shared)
+    service.request(CLAIMS, 'deletion-request')
+    now[0] = 87400
+    service.finalize('alice')
+    now[0] += 60
+    shared.fail = True
+    with pytest.raises(RuntimeError, match='shared unavailable'):
+        service.finalize('alice')
+
+    with service.store.locked('alice') as db:
+        row = db.get('alice')
+        assert row['cleanup_context']['cleanup_steps'] == [
+            'gateway', 'private_sync', 'images', 'shares']
+        assert row['cleanup_context']['authority_identities']['private_sync'] == \
+            'shared-authority-v1'
+        row['completed'] = ['keys']
+        db.save(row)
+
+    restarted = Lifecycle(
+        service.store,
+        service.admin,
+        CleanupData(Data(), stores),
+        lambda: now[0],
+    )
+    with pytest.raises(ValueError, match='cleanup stage|authority'):
+        restarted.finalize('alice')
+
+    with service.store.locked('alice') as db:
+        assert db.get('alice')['state'] == 'deleting'
+
+
+def test_cleanup_context_persists_authority_identities_for_sync_and_collaboration(tmp_path):
+    from server.account.composition import CleanupData
+
+    _, stores = configured(tmp_path)
+
+    class Shared:
+        def __init__(self, identity):
+            self.authority_identity = identity
+
+        def delete_account(self, uid):
+            pass
+
+    data = CleanupData(
+        Data(),
+        stores,
+        private_sync=Shared('sync-db-v1'),
+        live_collaboration=Shared('collab-db-v1'),
+    )
+    context = data.prepare('alice')
+    assert context['authority_identities']['private_sync'] == 'sync-db-v1'
+    assert context['authority_identities']['live_collaboration'] == 'collab-db-v1'
+    assert context['cleanup_steps'] == [
+        'gateway', 'private_sync', 'live_collaboration', 'images', 'shares']
+
+
+def test_app_mounts_shared_runtimes_only_when_explicitly_activated(tmp_path):
+    _, stores = configured(tmp_path)
+    service, _ = lifecycle(tmp_path, stores)
+    sync = object()
+    collab = object()
+    service.admin.verify = lambda *args, **kwargs: CLAIMS
+    with patch.object(runtime, 'build', return_value=(service, service.admin)), \
+         patch.dict('os.environ', {
+             'SHARE_BASE_URL': 'https://shares.invalid',
+             'PRIVATE_SYNC_ACTIVATED': 'true',
+             'LIVE_COLLABORATION_ACTIVATED': 'true'}, clear=True), \
+         patch('server.sync.runtime.mount_sync') as mount_sync, \
+         patch('server.collaboration.runtime.mount_collaboration') as mount_collaboration:
+        service.data.private_sync = sync
+        service.data.live_collaboration = collab
+        app = runtime.create_app()
+    mount_sync.assert_called_once_with(app, sync, service, service.admin)
+    mount_collaboration.assert_called_once_with(app, collab, service, service.admin)
+
+
+def test_private_sync_factory_receives_existing_account_authority():
+    authority = object()
+    repository = object()
+    module = SimpleNamespace(build_repository=lambda supplied: (
+        repository if supplied is authority else None))
+    with patch.dict('os.environ', {
+        'PRIVATE_SYNC_ACTIVATED': 'true',
+        'PRIVATE_SYNC_REPOSITORY_FACTORY': 'fixture:build_repository'}, clear=True), \
+         patch.object(runtime, 'import_module', return_value=module):
+        private_sync, collaboration = runtime._shared_repositories(authority)
+    assert private_sync is repository
+    assert collaboration is None
+
+
 def test_bounded_retention_restarts_preserve_pending_and_dedup(tmp_path):
     from server.account.retention import sweep
     _, stores = configured(tmp_path)

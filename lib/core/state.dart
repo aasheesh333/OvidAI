@@ -1828,6 +1828,7 @@ class AppState extends ChangeNotifier {
     PersistedSessionDecoder? persistedSessionDecoder,
     SessionBootstrapDecoder? sessionBootstrapDecoder,
     WorkspaceDeleter? workspaceDeleter,
+    AccountLifecycleIntegration? accountLifecycle,
     Duration sessionPersistDebounce = Duration.zero,
   }) {
     final instance = AppState._(
@@ -1841,11 +1842,27 @@ class AppState extends ChangeNotifier {
       persistedSessionDecoder: persistedSessionDecoder,
       sessionBootstrapDecoder: sessionBootstrapDecoder,
       workspaceDeleter: workspaceDeleter,
+      accountLifecycle: accountLifecycle,
       sessionPersistDebounce: sessionPersistDebounce,
     );
     _testInstance = instance;
     return instance;
   }
+
+  @visibleForTesting
+  static AccountLifecycleIntegration productionAccountLifecycleForTest({
+    required bool accountAvailable,
+  }) => AccountLifecycleIntegration.production(
+    dependencies: accountAvailable
+        ? AccountLifecycleDependencies(
+            onFence: () {},
+            onRevoke: () async {},
+            onBind: (_, _) async {},
+            onClear: () async {},
+            onVerifyEmpty: () async => true,
+          )
+        : null,
+  );
 
   /// Enable the production trailing debounce for session writes. Never called
   /// from tests, which keep a zero window (microtask) so no Timer is left
@@ -1881,6 +1898,7 @@ class AppState extends ChangeNotifier {
     PersistedSessionDecoder? persistedSessionDecoder,
     SessionBootstrapDecoder? sessionBootstrapDecoder,
     WorkspaceDeleter? workspaceDeleter,
+    AccountLifecycleIntegration? accountLifecycle,
     Duration? sessionPersistDebounce,
   }) : _startupStageDelegates = Map.unmodifiable(startupStageDelegates),
        _startupStageTimeouts = Map.unmodifiable(startupStageTimeouts),
@@ -1901,6 +1919,8 @@ class AppState extends ChangeNotifier {
         sessionBootstrapDecoder ??
         (encoded) => jsonDecode(encoded) as Map<String, dynamic>;
     _workspaceDeleter = workspaceDeleter ?? SandboxService.I.deleteWorkspace;
+    _accountLifecycle =
+        accountLifecycle ?? AccountLifecycleIntegration.production();
     _seed();
     // NP1/NP2/NP4: bootstrap all native plugin capabilities so catalog
     // install routing, the agent roster, and dispatch see them from boot.
@@ -1922,6 +1942,7 @@ class AppState extends ChangeNotifier {
   PersistedSessionDecoder? _persistedSessionDecoderForTest;
   late final SessionBootstrapDecoder _sessionBootstrapDecoder;
   late final WorkspaceDeleter _workspaceDeleter;
+  late final AccountLifecycleIntegration _accountLifecycle;
 
   /// Durable, secret-scrubbed startup status per canonical plugin/MCP id
   /// (Task 7, spec §5.8). Shared process-wide store.
@@ -2622,6 +2643,7 @@ class AppState extends ChangeNotifier {
     sessions.clear();
     usageLog.clear();
     activeSessionId = null;
+    _accountLifecycle.fenceSynchronously();
     AgentService.I.sessionAccountChanged();
     final cleanup = _SessionCleanup(() async {
       if (!identical(token, _sessionAccountToken)) return;
@@ -2657,6 +2679,7 @@ class AppState extends ChangeNotifier {
           }
           _pendingAccountCleanup.remove(task);
         }
+        await _accountLifecycle.revoke();
         final prefs = await SharedPreferences.getInstance();
         for (final handoff in List.of(_retainedHandoffs.values)) {
           await _writeAccountHandoff(prefs, handoff);
@@ -2680,6 +2703,7 @@ class AppState extends ChangeNotifier {
         await _loadUsage();
         await _hydrateDeferredSessions();
         if (!identical(token, _sessionAccountToken)) return;
+        await _accountLifecycle.onBind(account, _deferredSessionGeneration);
         _sessionAccountReady = true;
         _sessionNamespaceLoaded = true;
         lastSessionPersistFailed = false;

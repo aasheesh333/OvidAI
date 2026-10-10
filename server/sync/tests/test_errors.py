@@ -26,6 +26,7 @@ SPEC_STATUS = {
     "rate_limited": 429,
     "quota_exhausted": 429,
     "temporarily_unavailable": 503,
+    "reset_required": 409,
 }
 
 
@@ -39,9 +40,8 @@ class ErrorCodeSetTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertEqual(SyncError(code).status, status)
 
-    def test_reset_required_is_not_invented(self):
-        with self.assertRaises(ValueError):
-            SyncError("reset_required")
+    def test_reset_required_is_a_wire_error(self):
+        self.assertEqual(SyncError("reset_required").status, 409)
 
     def test_unknown_code_rejected(self):
         for code in ("", "INVALID_REQUEST", "internal", None, 1):

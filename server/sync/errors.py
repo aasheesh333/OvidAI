@@ -28,6 +28,7 @@ _TABLE = {
     "rate_limited": (429, "Too many requests. Retry later."),
     "quota_exhausted": (429, "The sync quota is exhausted."),
     "temporarily_unavailable": (503, "The sync service is temporarily unavailable."),
+    "reset_required": (409, "The sync state must be reset."),
 }
 
 ERROR_CODES = frozenset(_TABLE)

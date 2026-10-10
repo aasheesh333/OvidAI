@@ -13,10 +13,108 @@ enum ResetStoreKind {
   usage('usage'),
   account('account'),
   imageReceipts('image-receipts'),
-  shares('shares');
+  shares('shares'),
+  privateSync('private-sync'),
+  collaboration('collaboration');
 
   const ResetStoreKind(this.id);
   final String id;
+}
+
+typedef AccountLifecycleFence = void Function();
+typedef AccountLifecycleBind =
+    FutureOr<void> Function(String accountId, int generation);
+typedef AccountLifecycleVerify = FutureOr<bool> Function();
+typedef AccountLifecycleClear = FutureOr<void> Function();
+
+/// The concrete account-scoped owners supplied by an enabled feature bundle.
+/// Keeping this boundary callback-based lets guest/offline builds compose the
+/// app without constructing authenticated transports or durable stores.
+class AccountLifecycleDependencies {
+  const AccountLifecycleDependencies({
+    required this.onFence,
+    required this.onRevoke,
+    required this.onBind,
+    required this.onClear,
+    required this.onVerifyEmpty,
+  });
+
+  final AccountLifecycleFence onFence;
+  final AccountLifecycleClear onRevoke;
+  final AccountLifecycleBind onBind;
+  final AccountLifecycleClear onClear;
+  final AccountLifecycleVerify onVerifyEmpty;
+}
+
+/// Shared lifecycle seam for account-scoped projections.
+///
+/// The fence is deliberately separate from [bind]. It is invoked immediately
+/// when ownership changes, while [bind] runs only after the account namespace
+/// has been restored. No hydration callback is part of this contract: replay
+/// and bootstrap remain coordinator-owned foreground work, never execution
+/// state hydration.
+class AccountLifecycleIntegration {
+  const AccountLifecycleIntegration({
+    required this.onFence,
+    required this.onRevoke,
+    required this.onBind,
+    required this.onClear,
+    required this.onVerifyEmpty,
+  });
+
+  final AccountLifecycleFence onFence;
+  final AccountLifecycleClear onRevoke;
+  final AccountLifecycleBind onBind;
+  final AccountLifecycleClear onClear;
+  final AccountLifecycleVerify onVerifyEmpty;
+
+  /// Composes a real feature bundle only when its dependencies are present.
+  /// Missing auth, endpoint, credentials, or offline setup intentionally
+  /// produces the same safe inert integration used by guest sessions.
+  factory AccountLifecycleIntegration.production({
+    AccountLifecycleDependencies? dependencies,
+  }) {
+    final value = dependencies;
+    if (value == null) {
+      return AccountLifecycleIntegration(
+        onFence: () {},
+        onRevoke: () async {},
+        onBind: (_, _) async {},
+        onClear: () async {},
+        onVerifyEmpty: () async => true,
+      );
+    }
+    return AccountLifecycleIntegration(
+      onFence: value.onFence,
+      onRevoke: value.onRevoke,
+      onBind: value.onBind,
+      onClear: value.onClear,
+      onVerifyEmpty: value.onVerifyEmpty,
+    );
+  }
+
+  /// Runs synchronously at the ownership boundary. Implementations should
+  /// cancel timers and invalidate generations here; durable clearing happens
+  /// later through [asResetStore] or the transition drain.
+  void fenceSynchronously() {
+    onFence();
+  }
+
+  Future<void> fenceAndBind(String accountId, int generation) async {
+    onFence();
+    await onBind(accountId, generation);
+  }
+
+  Future<void> revoke() async => await onRevoke();
+
+  Future<void> clearAccount() async => await onClear();
+
+  ResetStore asResetStore(String name) => FunctionalResetStore(
+    name: name,
+    onStage: () async {},
+    onDelete: () async => await onClear(),
+    onVerifyDeleted: () async => await onVerifyEmpty(),
+  );
 }
 
 /// One app-owned store participating in a verified reset.

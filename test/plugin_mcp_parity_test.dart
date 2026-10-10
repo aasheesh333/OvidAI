@@ -1216,15 +1216,10 @@ void main() {
         const id = '$pluginId/remote';
         var failReconnect = false;
         McpService.I.httpClientForTest = MockClient((request) async {
-          if (failReconnect)
+          if (failReconnect) {
             throw const SocketException('rollback endpoint unavailable');
-          final body =
-              jsonDecode(
-                    request is http.Request
-                        ? request.body
-                        : await request.finalize().bytesToString(),
-                  )
-                  as Map<String, dynamic>;
+          }
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
           final result = switch (body['method']) {
             'initialize' => {
               'protocolVersion': '2024-11-05',

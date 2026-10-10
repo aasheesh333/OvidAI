@@ -86,6 +86,16 @@ class CreateTest(Base):
 
 
 class InviteJoinTest(Base):
+    def test_create_invite_retry_is_durably_rejected_without_new_invite(self):
+        token, _ = self.session()
+        first = self.repo.create_invite('owner', token, idempotency_key='invite-request')
+        restarted = CollabRepository(self.path, clock=self.clock)
+        self.assertError('request_already_used', restarted.create_invite,
+                         'owner', token, idempotency_key='invite-request')
+        with restarted._connection() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM invites').fetchone()[0], 1)
+        self.assertEqual(restarted.join('guest', token, first['inviteCode'])['status'], 'active')
+
     def test_join_with_invite(self):
         token, _ = self.session()
         member = self.repo.join('alice', token, self.invite(token))
@@ -262,7 +272,12 @@ class RemovalTest(Base):
         self.repo.revoke_member('owner', token, member['participantId'])
         self.assertError('membership_revoked', self.repo.join, 'alice', token, stale)
         again = self.repo.join('alice', token, self.invite(token))
-        self.assertEqual(again['status'], 'active')
+        self.assertEqual(again, member)
+        event = self.repo.append('alice', token, message('rejoined'))
+        self.assertEqual(self.repo.replay('alice', token)['events'][-1], event)
+        self.repo.revoke_member('owner', token, member['participantId'])
+        self.assertError('membership_revoked', self.repo.join, 'alice', token, stale)
+        self.assertEqual(self.repo.join('alice', token, self.invite(token)), member)
 
     def test_revoked_member_cannot_read_or_append(self):
         token, _ = self.session()
@@ -375,6 +390,12 @@ class AppendTest(Base):
         self.assertError('session_closed', self.repo.join, 'u9', token, 'code')
         self.assertError('session_closed', self.repo.get_state, 'owner', token)
 
+    def test_closed_session_close_requires_owner_authorization(self):
+        token, _ = self.session()
+        self.repo.close('owner', token)
+        self.assertError('not_owner', self.repo.close, 'stranger', token)
+        self.repo.close('owner', token)
+
     def test_server_kinds_cannot_be_appended(self):
         token, _ = self.session()
         body = {'schemaVersion': 1, 'eventId': 'e1', 'kind': 'system', 'payload': {'code': 'sessionClosed'}}
@@ -451,6 +472,25 @@ class ReplayTest(Base):
 
 
 class AccountDeletionTest(Base):
+    def test_deletion_removes_all_historical_events_from_closed_owned_session(self):
+        token, created = self.session()
+        self.repo.join('guest', token, self.invite(token))
+        self.repo.append('owner', token, message('owner-history'))
+        self.repo.append('guest', token, message('guest-history'))
+        self.repo.leave('guest', token)
+        self.repo.close('owner', token)
+        other, _ = self.session('host', 'host-1')
+        retained = self.repo.append('host', other, message('retained'))
+
+        self.repo.delete_account('owner')
+        self.repo.delete_account('owner')
+
+        with self.repo._connection() as db:
+            self.assertEqual(db.execute(
+                'SELECT count(*) FROM events WHERE session_id=?',
+                (created['session']['sessionId'],)).fetchone()[0], 0)
+        self.assertEqual(self.repo.replay('host', other)['events'], [retained])
+
     def test_deletion_removes_owned_sessions_and_memberships(self):
         token, _ = self.session('owner')
         other, _ = self.session('host', 'host-1')

@@ -227,8 +227,52 @@ void main() {
         'account',
         'image-receipts',
         'shares',
+        'private-sync',
+        'collaboration',
       ]);
       expect(report.success, isTrue);
     },
   );
+
+  test(
+    'account lifecycle integration fences and rebinds without hydration',
+    () async {
+      final calls = <String>[];
+      final integration = AccountLifecycleIntegration(
+        onFence: () => calls.add('fence'),
+        onRevoke: () async => calls.add('revoke'),
+        onBind: (account, generation) async =>
+            calls.add('bind:$account:$generation'),
+        onClear: () async => calls.add('clear'),
+        onVerifyEmpty: () async {
+          calls.add('verify');
+          return true;
+        },
+      );
+
+      await integration.fenceAndBind('firebase:b', 2);
+      expect(calls, ['fence', 'bind:firebase:b:2']);
+      expect(calls, isNot(contains('hydrate')));
+    },
+  );
+
+  test('account lifecycle integration is a truthful reset store', () async {
+    final calls = <String>[];
+    final integration = AccountLifecycleIntegration(
+      onFence: () {},
+      onRevoke: () async {},
+      onBind: (_, _) async {},
+      onClear: () async => calls.add('clear'),
+      onVerifyEmpty: () async {
+        calls.add('verify');
+        return true;
+      },
+    );
+
+    final store = integration.asResetStore('private-sync');
+    await store.stage();
+    await store.delete();
+    expect(await store.verifyDeleted(), isTrue);
+    expect(calls, ['clear', 'verify']);
+  });
 }
