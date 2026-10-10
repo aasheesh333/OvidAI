@@ -10,7 +10,11 @@ import 'collaboration_coordinator_test.dart' show FakeScheduler;
 
 void main() {
   test('cold API to reducer replay preserves churn history and rejoined local member', () async {
-    final result = await Process.run('/tmp/opencode/testvenv/bin/python',
+    // CI and local development use different Python locations.  Keep this
+    // fixture generation independent of the controller's private virtualenv.
+    final python = Platform.environment['OVID_PYTHON'] ??
+        Platform.environment['PYTHON'] ?? 'python3';
+    final result = await Process.run(python,
       ['-m', 'server.collaboration.tests.export_churn']);
     expect(result.exitCode, 0, reason: result.stderr.toString());
     final fixture = jsonDecode(result.stdout as String) as Map;
