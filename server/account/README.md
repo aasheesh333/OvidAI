@@ -1,11 +1,20 @@
 # P3 account lifecycle — deployment artifact, NOT activated
 
 The account app now directly composes the concrete PostgreSQL private-sync
-repository, optional live collaboration, and image/share cleanup authorities.
+repository, optional PostgreSQL/SQLite live collaboration, and image/share cleanup authorities.
 `*_CONFIGURED` retains cleanup responsibility independently of `*_ACTIVATED`
-HTTP routes. Stable authority UUIDs, bounded sync retention, a configuration CLI,
+HTTP routes. Stable authority UUIDs, bounded sync/PostgreSQL collaboration retention, a configuration CLI,
 and Docker/systemd/Caddy templates are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 Local code tests and deployment artifacts are not evidence of real activation.
+
+`LIVE_COLLABORATION_BACKEND=sqlite|postgres` defaults to SQLite for existing
+installations. PostgreSQL uses the same account database and lifecycle schema,
+requires the UUID suffix of the persisted `collaboration:postgres:<uuid>` identity,
+and rejects a configured SQLite path. Runtime does not migrate/provision PostgreSQL
+or fall back to SQLite. See the deployment guide for exact fresh-schema, offline
+SQLite import, full-process restart and rollback-boundary commands. Cleanup refuses
+to resume across backend/authority changes or unbound legacy PostgreSQL contexts
+without an explicit reconciliation plan.
 
 This is real server code and executable fake-backed tests. It has **not** been
 deployed or run against production users/databases. The Flutter deletion action
@@ -247,6 +256,11 @@ not modify a nonexistent tracked mint module or the live `/opt` implementation.
   DDL and must not gain PostgreSQL-only sync objects.
 - Existing database without private sync: explicitly apply
   `migrations/003_private_sync.sql` (additive, repeatable, one transaction).
+- PostgreSQL collaboration: explicitly deploy `schema_collaboration.sql` via
+  `server.collaboration.migrate ... schema`, or apply equivalent
+  `migrations/004_live_collaboration.sql` to the lifecycle schema. SQLite data is
+  imported separately while every consumer is offline; changing the backend flag
+  alone does not migrate data or cleanup checkpoints. See DEPLOYMENT.md.
 - Existing database: explicitly apply `migrations/002_retry_schedule.sql`. It adds
   only a repeatable expression index, keeps the old index, and changes no records,
   columns, states, deadlines, recovery flags or cleanup context. Standard index
@@ -268,8 +282,10 @@ not modify a nonexistent tracked mint module or the live `/opt` implementation.
 python -m pytest -q server/account/tests
 ```
 
-Tests fake Firebase, storage and clock; API tests inject verified claims rather than
-contacting Firebase. They do not prove live IAM, provider enablement, PostgreSQL
+Unit tests fake Firebase, storage and clock; runtime integration tests also exercise
+real PostgreSQL in isolated schemas when `COLLAB_TEST_POSTGRES_DSN` and
+`SYNC_TEST_DATABASE_URL` name a disposable test database. API tests inject verified
+claims rather than contacting Firebase. They do not prove live IAM, provider enablement, PostgreSQL
 failover, LiteLLM cache semantics, or external Auth consistency. No live deletion
 or deployment was used for verification.
 

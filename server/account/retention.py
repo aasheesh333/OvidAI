@@ -3,7 +3,7 @@ import argparse
 import json
 
 
-def sweep(stores, *, private_sync=None, batch_size=500, max_batches=4):
+def sweep(stores, *, private_sync=None, live_collaboration=None, batch_size=500, max_batches=4):
     if type(batch_size) is not int or not 1 <= batch_size <= 10000:
         raise ValueError('Invalid retention batch size')
     if type(max_batches) is not int or not 1 <= max_batches <= 100:
@@ -11,6 +11,12 @@ def sweep(stores, *, private_sync=None, batch_size=500, max_batches=4):
     authorities = {'images': stores.images, 'shares': stores.shares}
     if private_sync is not None:
         authorities['private_sync'] = private_sync
+    if live_collaboration is not None:
+        from server.collaboration.repository import CollabRepository
+        # SQLite has no expiry contract; PostgreSQL retains durable rate rows
+        # and supplies bounded housekeeping. Missing PG contracts must fail.
+        if not isinstance(live_collaboration, CollabRepository):
+            authorities['live_collaboration'] = live_collaboration
     result = {name: 0 for name in authorities}
     result['failed'] = []
     for name, repository in authorities.items():
@@ -35,9 +41,9 @@ def main():
     parser.add_argument('--max-batches', type=int, default=4)
     args = parser.parse_args()
     try:
-        stores, private_sync, _ = build_retention()
+        stores, private_sync, collaboration = build_retention()
         result = sweep(stores, private_sync=private_sync, batch_size=args.batch_size,
-                       max_batches=args.max_batches)
+                       live_collaboration=collaboration, max_batches=args.max_batches)
     except Exception:
         result = {'failed': ['configuration']}
     print(json.dumps(result))

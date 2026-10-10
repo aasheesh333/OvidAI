@@ -4,9 +4,9 @@ Run commands from the reviewed repository root. All host values below must come
 from the operator's actual inventory. Nothing in this repository discovers or
 configures the external mint service, IAM, shared spend authority or proxy.
 
-The concrete `server.sync.postgres.PostgresSyncRepository` is wired directly to
-the account `PostgresStore` when private sync is configured. No external factory
-is needed. Runtime/configuration tests establish code behavior; they do **not**
+The concrete `server.sync.postgres.PostgresSyncRepository` and selected PostgreSQL
+collaboration backend are wired directly to the account `PostgresStore`. No external
+factory is needed. Runtime/configuration tests establish code behavior; they do **not**
 establish real activation, deployed credentials, gateway fences or public routing.
 No production service is enabled by installing these artifacts.
 
@@ -91,9 +91,16 @@ Never reuse that UUID for another database or an independently restored copy.
 The deployment identity is operator-bound, not discovered from a remote server;
 the local configuration check does not prove database connectivity or binding.
 
-`LIVE_COLLABORATION_CONFIGURED=true` requires an absolute
-`LIVE_COLLABORATION_DATABASE_PATH` and `LIVE_COLLABORATION_AUTHORITY_ID`. Bind its
-on-disk identity explicitly before startup, after reviewing any existing content:
+### Collaboration backend selection
+
+`LIVE_COLLABORATION_BACKEND` accepts exactly `postgres` or `sqlite`; unset means
+`sqlite`, preserving existing installations until an explicit migration. Setting
+the backend itself implies configuration/cleanup responsibility. Invalid or empty
+values fail startup, including when HTTP is disabled.
+
+For `sqlite`, `LIVE_COLLABORATION_CONFIGURED=true` requires an absolute
+`LIVE_COLLABORATION_DATABASE_PATH` and canonical UUID `LIVE_COLLABORATION_AUTHORITY_ID`.
+Bind its on-disk identity explicitly before startup, after reviewing existing content:
 
 ```sh
 "$OVID_PYTHON" -m server.account.runtime --provision-collaboration
@@ -106,9 +113,119 @@ Paths must be distinct from the image/share databases. The existing local store
 identity mechanism checks the file's kind and UUID before constructing the repository.
 All writers must use the same physical collaboration file and locking filesystem.
 
+For `postgres`, **unset `LIVE_COLLABORATION_DATABASE_PATH`** in API, worker and
+retention environments; a nonempty SQLite path is rejected, never opened or created.
+There is no separate collaboration DSN or runtime schema override. Runtime uses
+`ACCOUNT_DATABASE_URL` and resolves the schema of `account_deletions` on that
+connection's search path (normally `public`); the collaboration repository is pinned
+to that same schema. Custom-schema deployments must set the account connection's
+search path consistently for every process and explicitly deploy both schemas there.
+Missing lifecycle/collaboration tables, connection failures and identity mismatches
+fail closed; runtime never deploys PostgreSQL DDL, provisions secrets or falls back
+to SQLite. Construction performs database reads even when HTTP is disabled.
+The runtime configuration CLI therefore checks this database
+binding, but does not establish gateway/Firebase or full deployment readiness.
+
+The schema deployment generates a persistent `collab_secrets` row named `authority`
+with value **`collaboration:postgres:<uuid>`**. Set `LIVE_COLLABORATION_AUTHORITY_ID`
+to **only its canonical UUID suffix**, obtained from the identity CLI below; do not
+generate a replacement UUID or use the old SQLite UUID. Runtime adds the
+`collaboration:postgres:` prefix and passes that expected full identity to the
+repository for comparison against the stored row. It never overwrites the returned
+identity. Cleanup checkpoints store that full value, distinct from SQLite's existing
+`live-collaboration:<uuid>` binding. Credentials/DSN aliases may change without
+changing the persisted identity.
+
+### Fresh PostgreSQL collaboration authority
+
+Run from the reviewed source checkout with dependencies installed. The CLI loads
+the SQL artifact from that checkout; these are deployment commands, not API-container
+startup hooks. The following commands use the normal `public` account schema:
+
+```sh
+# Only for a fresh account database; existing installations already have this table.
+psql "$ACCOUNT_DATABASE_URL" -v ON_ERROR_STOP=1 -f server/account/schema.sql
+# Explicit collaboration deployment (repeatable):
+"$OVID_PYTHON" -m server.collaboration.migrate --destination-dsn-env ACCOUNT_DATABASE_URL --schema public schema
+"$OVID_PYTHON" -m server.collaboration.migrate --destination-dsn-env ACCOUNT_DATABASE_URL --schema public identity
+```
+
+`identity` prints JSON: `{"authority":"collaboration:postgres:<uuid>"}`. Record the
+full value in the deployment inventory and put its UUID suffix in the protected
+API/worker/retention environment. For existing account installations the equivalent
+explicit SQL deployment is:
+
+```sh
+psql "$ACCOUNT_DATABASE_URL" -v ON_ERROR_STOP=1 -f server/account/migrations/004_live_collaboration.sql
+```
+
+`schema_collaboration.sql` and migration 004 install the same additive tables and
+bootstrap secrets. Use one deployment route; neither copies SQLite data. For a
+custom schema, use `--schema` with the actual lifecycle schema and ensure `psql`'s
+search path matches it. Then configure all consumers together:
+
+```sh
+export LIVE_COLLABORATION_BACKEND=postgres
+export LIVE_COLLABORATION_CONFIGURED=true
+export LIVE_COLLABORATION_ACTIVATED=false
+unset LIVE_COLLABORATION_DATABASE_PATH
+export LIVE_COLLABORATION_AUTHORITY_ID='<UUID suffix from identity output>'
+"$OVID_PYTHON" -m server.account.runtime
+"$OVID_PYTHON" -m server.account.retention --batch-size 500 --max-batches 4
+```
+
+Persist the same settings in the protected service environment files; shell exports
+do not update systemd/container configuration. Start workers/retention and enable
+HTTP only after the normal deployment acceptance checks.
+
+### Offline migration of existing SQLite collaboration
+
+1. Close admission and drain all source/destination API, account deletion, retention
+   and other collaboration consumers. Stop their timers as well as processes. Take
+   consistent backups of the account PostgreSQL database and SQLite (including WAL
+   state). Do not use a stale SQLite copy as the source.
+2. Before switching, finish in-progress deletions against their original authority,
+   or execute a separately reviewed reconciliation plan under lifecycle UID locks.
+   Saved cleanup identities and completion checkpoints must not be silently rewritten
+   or discarded. In particular, PostgreSQL rejects legacy cleanup contexts with no
+   authority binding. The importer does **not** translate account deletion contexts.
+3. Deploy the collaboration schema and obtain its full identity with the commands
+   above. The destination must be empty except for bootstrap secrets. Keep both
+   authorities offline. Set `COLLAB_SOURCE_SQLITE` to the reviewed, canonical absolute
+   source file and `COLLAB_DESTINATION_ID` to the full identity returned by the CLI:
+
+```sh
+export COLLAB_SOURCE_SQLITE='<canonical absolute authoritative SQLite file>'
+export COLLAB_DESTINATION_ID='collaboration:postgres:<destination UUID>'
+"$OVID_PYTHON" -m server.collaboration.migrate --destination-dsn-env ACCOUNT_DATABASE_URL --schema public import-sqlite \
+  --source-sqlite "$COLLAB_SOURCE_SQLITE" \
+  --confirm-source "$COLLAB_SOURCE_SQLITE" \
+  --confirm-destination "$COLLAB_DESTINATION_ID" --offline
+```
+
+4. Require exit zero and review the returned session/event/request counts and
+   authority. Import is atomic, rejects nonempty destinations and unsupported layouts,
+   preserves credential hashes, cursor signing secret, request-result bytes and
+   deletion fences, and keeps the destination authority identity. It has no merge or
+   overwrite mode; a completed import must not be rerun against a populated target.
+5. Set `LIVE_COLLABORATION_BACKEND=postgres`, remove the SQLite path, and set the
+   expected UUID suffix in **every** consumer's environment. Run the runtime check.
+   Restart **all** processes after import, including any previously constructed
+   destination repository: constructors cache the cursor secret. Validate existing
+   tokens/cursors/replays and deletion/retention in the migrated authority, then reopen
+   admission. Retire the source as a protected offline backup under retention policy.
+
+**Rollback boundary:** before any destination API, deletion or retention writes,
+all consumers may be stopped and returned together to the untouched SQLite source
+and its original backend/path/UUID environment. After any destination write, the old
+file is stale: an environment flip can lose events or resurrect deleted accounts.
+Keep admission closed and roll forward, or use an explicit offline reconciliation/
+restore plan that preserves all post-cutover writes and deletion fences. No reverse
+import or automatic cleanup-checkpoint migration is provided.
+
 `PRIVATE_SYNC_ACTIVATED` and `LIVE_COLLABORATION_ACTIVATED` control **HTTP routes
 only**. Keep `*_CONFIGURED`, IDs and paths in place when disabling routes. Even
-with `*_CONFIGURED=false`, specifying an authority ID/path/factory retains cleanup;
+with `*_CONFIGURED=false`, specifying an authority ID/path/backend/factory retains cleanup;
 route activation also implies configuration for older installations. Boolean values
 must be exactly `true` or `false`. Removing all configuration is a decommissioning
 operation requiring a data inventory, not a way to pause HTTP traffic.
@@ -195,9 +312,11 @@ defaults are 500 and 4. Failures in one store do not starve the other; exit 1 an
 the JSON `failed` names signal retry. It never drops billing/dedup tombstones or
 pending/unknown reservations. It does not need Firebase credentials/activation.
 Construction uses only configured stores and the account PostgreSQL authority,
-without importing Firebase or gateway adapters. Collaboration is opened/identity
-validated for consistent cleanup configuration, but no collaboration expiry sweep
-is claimed: that repository currently exposes no `purge_expired` contract.
+without importing Firebase or gateway adapters. Configured PostgreSQL collaboration
+is constructed even when sync and HTTP are disabled. Its `purge_expired` removes
+only expired rate-admission rows in bounded batches; it does not prune replay,
+invitations, credentials, idempotency or deletion fences. SQLite collaboration has
+no expiry contract and is only opened/identity-validated by the combined timer.
 
 ```sh
 "$OVID_PYTHON" -m server.account.retention --batch-size 500 --max-batches 4
@@ -225,8 +344,9 @@ must be writable). The service account needs config read access. If storage/code
 is under a protected home directory, choose an explicit reviewed systemd policy.
 The unit templates deliberately have no executable/host defaults and cannot run
 until configured. Retention uses `deploy/retention.env.example`: store configuration,
-configured shared authority identities/paths, and the PostgreSQL DSN when sync is
-configured. It needs no Firebase, Redis, LiteLLM or mint secrets. A missing purge
+configured shared authority identities/backend/paths, and the PostgreSQL DSN when
+sync or PostgreSQL collaboration is configured. It needs no Firebase, Redis, LiteLLM
+or mint secrets. A missing PostgreSQL purge
 implementation or invalid result is a nonzero failure, never successful cleanup.
 
 ```sh
@@ -337,11 +457,13 @@ config parser also runs under `python -S` to prove it needs no site packages.
 Installed-but-broken/incompatible dependencies still fail the integration tests.
 
 The `server-tests` job in `.github/workflows/build.yml` installs server dependencies,
-runs deployment CLI tests, and supplies `SYNC_TEST_DATABASE_URL` from a disposable
-PostgreSQL 16 service to pytest. This exercises concrete runtime-composed sync
-cleanup with HTTP disabled, PostgreSQL checkpoints before Auth deletion, replay
-idempotency, and account fencing after restart in an isolated test schema. Local
-equivalents must point `SYNC_TEST_DATABASE_URL` only at a disposable test database.
+runs deployment CLI tests, and supplies both `SYNC_TEST_DATABASE_URL` and
+`COLLAB_TEST_POSTGRES_DSN` with the **same** disposable PostgreSQL 16 service DSN.
+This exercises real sync/collaboration tests, runtime mount/lifecycle admission,
+cleanup with HTTP disabled, PostgreSQL checkpoints before Auth deletion, lost-ack
+replay, identity/migration rejection, retention and fencing after restart. Each test
+uses an isolated schema. Local equivalents must point both variables only at a
+disposable test database; missing collaboration DSN is an explicit test skip.
 The tests apply existing schema artifacts inside test schemas; deployment DDL and
 production activation remain explicit operator actions.
 

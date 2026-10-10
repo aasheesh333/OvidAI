@@ -41,8 +41,42 @@ def _collaboration_entry():
             'store_id': _authority_id('LIVE_COLLABORATION_AUTHORITY_ID')}
 
 
+def _collaboration_backend():
+    backend = os.environ.get('LIVE_COLLABORATION_BACKEND', 'sqlite')
+    if backend not in ('postgres', 'sqlite'):
+        raise ValueError('LIVE_COLLABORATION_BACKEND must be postgres or sqlite')
+    if backend == 'postgres' and os.environ.get('LIVE_COLLABORATION_DATABASE_PATH'):
+        raise ValueError('LIVE_COLLABORATION_DATABASE_PATH must be unset for postgres')
+    return backend
+
+
+def _collaboration_configured():
+    return _configured('LIVE_COLLABORATION', 'LIVE_COLLABORATION_BACKEND',
+                       'LIVE_COLLABORATION_DATABASE_PATH', 'LIVE_COLLABORATION_AUTHORITY_ID')
+
+
+def _account_schema(account_authority):
+    """Resolve the lifecycle table on the very same DSN/search path, read-only."""
+    import psycopg
+    from server.collaboration.postgres import PostgresCollabUnavailable
+    if account_authority is None:
+        raise ValueError('PostgreSQL collaboration requires the account authority')
+    try:
+        with psycopg.connect(account_authority.dsn, connect_timeout=10) as db:
+            row = db.execute("SELECT n.nspname FROM pg_class c JOIN pg_namespace n "
+                             "ON n.oid=c.relnamespace "
+                             "WHERE c.oid=to_regclass('account_deletions')").fetchone()
+    except psycopg.Error:
+        raise PostgresCollabUnavailable() from None
+    if row is None:
+        raise PostgresCollabUnavailable()
+    return row[0]
+
+
 def provision_collaboration():
     """Explicit operator binding, never performed by API/worker startup."""
+    if _collaboration_backend() != 'sqlite':
+        raise ValueError('Use server.collaboration.migrate for PostgreSQL deployment')
     from .stores import _identity
     from server.collaboration.repository import CollabRepository
     entry = _collaboration_entry()
@@ -51,6 +85,7 @@ def provision_collaboration():
 
 
 def _shared_repositories(account_authority):
+    backend = _collaboration_backend()
     private_sync = None
     if _configured('PRIVATE_SYNC', 'PRIVATE_SYNC_REPOSITORY_FACTORY',
                    'PRIVATE_SYNC_AUTHORITY_ID'):
@@ -72,23 +107,31 @@ def _shared_repositories(account_authority):
         CleanupData._authority_identity(private_sync)
 
     live_collaboration = None
-    if _configured('LIVE_COLLABORATION', 'LIVE_COLLABORATION_DATABASE_PATH',
-                   'LIVE_COLLABORATION_AUTHORITY_ID'):
-        from .stores import _identity
-        from server.collaboration.repository import CollabRepository
-        entry = _collaboration_entry()
-        _identity(entry, 'live_collaboration')
-        live_collaboration = CollabRepository(entry['path'])
-        live_collaboration.authority_identity = 'live-collaboration:' + entry['store_id']
+    if _collaboration_configured():
+        if backend == 'postgres':
+            from server.collaboration.postgres import PostgresCollabRepository
+            identity = 'collaboration:postgres:' + _authority_id('LIVE_COLLABORATION_AUTHORITY_ID')
+            live_collaboration = PostgresCollabRepository(
+                account_authority, schema=_account_schema(account_authority), authority_id=identity)
+        else:
+            from .stores import _identity
+            from server.collaboration.repository import CollabRepository
+            entry = _collaboration_entry()
+            _identity(entry, 'live_collaboration')
+            live_collaboration = CollabRepository(entry['path'])
+            live_collaboration.authority_identity = 'live-collaboration:' + entry['store_id']
     return private_sync, live_collaboration
 
 
 def build_retention():
     """Open configured authorities without Firebase, mint, or HTTP dependencies."""
     from .postgres import PostgresStore
+    backend = _collaboration_backend()
     stores = open_stores(StoreConfig.load())
-    authority = PostgresStore(os.environ['ACCOUNT_DATABASE_URL']) if _configured(
-        'PRIVATE_SYNC', 'PRIVATE_SYNC_REPOSITORY_FACTORY', 'PRIVATE_SYNC_AUTHORITY_ID') else None
+    needs_postgres = _configured('PRIVATE_SYNC', 'PRIVATE_SYNC_REPOSITORY_FACTORY',
+                                'PRIVATE_SYNC_AUTHORITY_ID') or (
+        backend == 'postgres' and _collaboration_configured())
+    authority = PostgresStore(os.environ['ACCOUNT_DATABASE_URL']) if needs_postgres else None
     private_sync, collaboration = _shared_repositories(authority)
     return stores, private_sync, collaboration
 
@@ -153,7 +196,10 @@ def main():
     except Exception:
         print('Account authority configuration invalid', flush=True)
         return 1
-    print('Account authority configuration valid (no remote connectivity checked)', flush=True)
+    checked = (not args.provision_collaboration and _collaboration_backend() == 'postgres'
+               and _collaboration_configured())
+    detail = 'PostgreSQL collaboration identity checked' if checked else 'no remote connectivity checked'
+    print(f'Account authority configuration valid ({detail})', flush=True)
     return 0
 
 

@@ -6,11 +6,17 @@ Protocol) compatibility layer.
 ## Account and shared-data server deployment
 
 The [account deployment guide](server/account/DEPLOYMENT.md) covers direct
-PostgreSQL private-sync composition, durable account cleanup, collaboration/share
+PostgreSQL private-sync and selectable PostgreSQL collaboration composition, durable account cleanup, collaboration/share
 routes, bounded retention and nonsecret Docker/systemd/Caddy templates. Configured
 cleanup authorities remain active when their HTTP routes are disabled. Local
 tests verify code behavior; production activation and gateway integration require
 the deployment acceptance steps in that guide.
+
+Collaboration defaults to SQLite until deliberately migrated with
+`LIVE_COLLABORATION_BACKEND=postgres`. PostgreSQL shares the account database/schema,
+checks its persisted authority identity, and retains cleanup/retention with HTTP
+disabled. The guide includes explicit schema deployment, offline SQLite import,
+restart and rollback boundaries; runtime never automatically migrates to PostgreSQL.
 
 ## Plugin formats
 

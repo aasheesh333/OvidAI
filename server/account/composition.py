@@ -42,6 +42,11 @@ class CleanupData:
         if expected is not None and expected != self.stores.identities:
             raise ValueError('Cleanup authority changed during deletion')
         expected_authorities = context.get('authority_identities')
+        if (expected_authorities is None and self.live_collaboration is not None and
+                self._authority_identity(self.live_collaboration).startswith('collaboration:postgres:')):
+            # A legacy checkpoint cannot prove whether SQLite cleanup ran. An
+            # offline import does not translate lifecycle checkpoints or effects.
+            raise ValueError('Cleanup authority is unbound; explicit migration plan required')
         if (expected_authorities is not None and
                 expected_authorities != self.authority_identities()):
             raise ValueError('Cleanup authority changed during deletion')

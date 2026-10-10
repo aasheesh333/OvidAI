@@ -54,16 +54,21 @@ def test_direct_sync_requires_explicit_identity():
         runtime._shared_repositories(SimpleNamespace(dsn=env['ACCOUNT_DATABASE_URL']))
 
 
-def test_collaboration_provisioned_identity_is_checked_with_routes_disabled(tmp_path):
+@pytest.mark.parametrize('backend', [None, 'sqlite'])
+def test_collaboration_provisioned_identity_is_checked_with_routes_disabled(tmp_path, backend):
     env = {'LIVE_COLLABORATION_DATABASE_PATH': str(tmp_path / 'chat.db'),
            'LIVE_COLLABORATION_AUTHORITY_ID': '44444444-4444-4444-8444-444444444444',
            'LIVE_COLLABORATION_ACTIVATED': 'false'}
+    if backend is not None:
+        env['LIVE_COLLABORATION_BACKEND'] = backend
     with patch.dict('os.environ', env, clear=True):
         with pytest.raises(ValueError, match='missing'):
             runtime._shared_repositories(None)
         runtime.provision_collaboration()
         _, repo = runtime._shared_repositories(None)
         assert repo.authority_identity == 'live-collaboration:44444444-4444-4444-8444-444444444444'
+        _, stores = configured(tmp_path)
+        assert sweep(stores, live_collaboration=repo) == {'images': 0, 'shares': 0, 'failed': []}
         env['LIVE_COLLABORATION_AUTHORITY_ID'] = '55555555-5555-4555-8555-555555555555'
     with patch.dict('os.environ', env, clear=True), pytest.raises(ValueError, match='identity'):
         runtime._shared_repositories(None)
