@@ -74,13 +74,14 @@ class ReleaseWorkflowTest(unittest.TestCase):
             if step.get("name") == "Build signed release APK + AAB":
                 self.assertEqual(step.get("if"), "env.release_signing == 'true'")
 
-    def test_flutter_tests_use_serialized_complete_shards(self):
+    def test_flutter_tests_use_bounded_complete_batches(self):
         steps = _steps()
         test_step = next(step for step in steps if step.get("name") == "Test")
         run = test_step["run"]
-        self.assertIn("git ls-files 'test/**_test.dart'", run)
-        self.assertIn("for test_file in \"${test_files[@]}\"; do", run)
-        self.assertIn("flutter test \"$test_file\"", run)
+        self.assertIn("python3 tool/run_flutter_suite.py", run)
+        self.assertIn('--flutter "$(command -v flutter)"', run)
+        self.assertIn("--batch-size 20 --batch-timeout 600", run)
+        self.assertNotIn('flutter test "$test_file"', run)
         self.assertNotIn("|| true", run)
         build = yaml.load(WORKFLOW.read_text(), Loader=_DuplicateKeyLoader)["jobs"]["build"]
         self.assertGreaterEqual(build["timeout-minutes"], 60)

@@ -32,8 +32,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # The complete Flutter suite is intentionally serialized to keep runner
-    # memory stable; allow enough time for the suite plus Android compilation.
+    # Bounded batches reuse Flutter startup across files; two isolates per batch
+    # keep memory bounded. Retain enough time for tests and Android compilation.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -119,16 +119,11 @@ jobs:
         if: inputs.bounded_flutter_suite != true
         shell: bash
         run: |
-          set -euo pipefail
-          mapfile -t test_files < <(git ls-files 'test/**_test.dart')
-          if (( ${#test_files[@]} == 0 )); then
-            echo "No Flutter tests found." >&2
-            exit 1
-          fi
-          for test_file in "${test_files[@]}"; do
-            echo "Running Flutter shard: $test_file"
-            flutter test "$test_file"
-          done
+          python3 tool/run_flutter_suite.py \
+            --flutter "$(command -v flutter)" \
+            --output "$RUNNER_TEMP/flutter-suite-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --lock "$RUNNER_TEMP/flutter-suite.lock" \
+            --batch-size 20 --batch-timeout 600 --lock-timeout 900
 
       - name: Test with bounded Flutter suite runner
         if: inputs.bounded_flutter_suite == true
@@ -138,10 +133,10 @@ jobs:
             --flutter "$(command -v flutter)" \
             --output "$RUNNER_TEMP/flutter-suite-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --lock "$RUNNER_TEMP/flutter-suite.lock" \
-            --batch-size 20 --batch-timeout 300 --lock-timeout 900
+            --batch-size 20 --batch-timeout 600 --lock-timeout 900
 
       - name: Upload bounded Flutter suite evidence
-        if: always() && inputs.bounded_flutter_suite == true
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Flutter-suite-evidence
