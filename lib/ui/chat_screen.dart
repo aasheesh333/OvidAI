@@ -72,7 +72,7 @@ class _ChatTextScaler extends TextScaler {
   double get textScaleFactor => scale(14) / 14;
 }
 
-class ChatTranscript extends StatelessWidget {
+class ChatTranscript extends StatefulWidget {
   final ChatSession session;
   final ScrollController? scrollController;
 
@@ -86,7 +86,31 @@ class ChatTranscript extends StatelessWidget {
   });
 
   @override
+  State<ChatTranscript> createState() => _ChatTranscriptState();
+}
+
+class _ChatTranscriptState extends State<ChatTranscript> {
+  /// Cumulative number of folded items requested; grows by one page per
+  /// "Load earlier" tap so the start of a long child run stays reachable.
+  int _visibleCount = _subagentTranscriptPage;
+
+  @override
+  void didUpdateWidget(covariant ChatTranscript oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.session.id != widget.session.id) {
+      _visibleCount = _subagentTranscriptPage;
+    }
+  }
+
+  void _loadEarlier() {
+    setState(() => _visibleCount += _subagentTranscriptPage);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final session = widget.session;
+    final scrollController = widget.scrollController;
+    final typing = widget.typing;
     return AnimatedBuilder(
       animation: Listenable.merge([AppState.I, AgentService.I]),
       builder: (_, _) {
@@ -96,12 +120,12 @@ class ChatTranscript extends StatelessWidget {
         final window = windowForBounded(
           session.messages,
           pageSize: _subagentTranscriptPage,
-          visibleCount: 0,
+          visibleCount: _visibleCount,
           showReasoning: AppState.I.showReasoning,
         );
         final items = window.visible;
-        // The subagent transcript is bounded; when older rows are omitted,
-        // say so instead of silently truncating the child's history.
+        // The subagent transcript is paged; when older rows are omitted,
+        // offer "Load earlier" instead of silently truncating the history.
         final showOlder = window.hasEarlier;
         final count = items.length + (showOlder ? 1 : 0) + (typing ? 1 : 0);
         final list = ListView.builder(
@@ -109,7 +133,12 @@ class ChatTranscript extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           itemCount: count,
           itemBuilder: (_, i) {
-            if (showOlder && i == 0) return const _OlderMessagesIndicator();
+            if (showOlder && i == 0) {
+              return _OlderMessagesIndicator(
+                hiddenMessages: window.hiddenMessages,
+                onLoadEarlier: _loadEarlier,
+              );
+            }
             final li = showOlder ? i - 1 : i;
             if (li == items.length) return const _TypingBubble();
             return _buildItem(
@@ -6559,25 +6588,34 @@ class _InputBarState extends State<_InputBar> {
   }
 }
 
-/// Minimal "older messages not shown" marker for the bounded subagent
-/// transcript (`ChatTranscript`), so a truncated child run is never silent.
+/// "Load earlier" control for the paged subagent transcript
+/// (`ChatTranscript`), so a truncated child run is never silent and its
+/// start stays reachable.
 class _OlderMessagesIndicator extends StatelessWidget {
-  const _OlderMessagesIndicator();
+  final int hiddenMessages;
+  final VoidCallback onLoadEarlier;
+
+  const _OlderMessagesIndicator({
+    required this.hiddenMessages,
+    required this.onLoadEarlier,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final label = hiddenMessages == 1
+        ? '1 earlier message'
+        : '$hiddenMessages earlier messages';
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.more_horiz, size: 14, color: Aether.textFaint),
-          const SizedBox(width: 6),
-          Text(
-            'Older messages not shown',
-            style: TextStyle(fontSize: 11, color: Aether.textFaint),
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Center(
+        child: TextButton.icon(
+          onPressed: onLoadEarlier,
+          icon: Icon(Icons.expand_less, size: 16, color: Aether.textMuted),
+          label: Text(
+            'Load earlier · $label',
+            style: TextStyle(fontSize: 12, color: Aether.textMuted),
           ),
-        ],
+        ),
       ),
     );
   }

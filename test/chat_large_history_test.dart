@@ -348,6 +348,39 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('ChatTranscript Load earlier reaches the first message', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final session = ChatSession(
+        id: 'sub-long',
+        title: 'sub-long',
+        model: 'm',
+        mode: 'auto',
+        messages: List.generate(450, (i) => _msg('s$i')),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: Scaffold(body: ChatTranscript(session: session)),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.textContaining('250 earlier messages'), findsOneWidget);
+      await tester.tap(find.textContaining('Load earlier'));
+      await tester.pump();
+      expect(find.textContaining('50 earlier messages'), findsOneWidget);
+      await tester.tap(find.textContaining('Load earlier'));
+      await tester.pump();
+      expect(find.textContaining('Load earlier'), findsNothing);
+      expect(find.text('s0'), findsOneWidget);
+    });
+
     testWidgets(
       'ChatTranscript shows an older-messages indicator when truncated',
       (tester) async {
@@ -371,9 +404,9 @@ void main() {
         );
         await tester.pump();
 
-        // The subagent transcript is bounded at 200 and must say so rather
+        // The subagent transcript is paged at 200 and must say so rather
         // than silently dropping older rows.
-        expect(find.textContaining('Older messages not shown'), findsOneWidget);
+        expect(find.textContaining('Load earlier'), findsOneWidget);
 
         final short = ChatSession(
           id: 'sub-short',
@@ -389,7 +422,7 @@ void main() {
           ),
         );
         await tester.pump();
-        expect(find.textContaining('Older messages not shown'), findsNothing);
+        expect(find.textContaining('Load earlier'), findsNothing);
       },
     );
   });
