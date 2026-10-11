@@ -28,8 +28,8 @@ class NativeShareTest {
         shadowOf(MimeTypeMap.getSingleton()).addExtensionMimeTypeMapping("png", "image/png")
     }
 
-    @Test fun `image outside provider roots is copied and granted as content URI`() {
-        val source = File.createTempFile("my image", ".PNG")
+    @Test fun `image in an approved external app root is copied and granted as content URI`() {
+        val source = File.createTempFile("my image", ".PNG", context.getExternalFilesDir(null))
         try {
             source.writeBytes(byteArrayOf(1, 2, 3))
             val intent = NativeShare.fileIntent(context, source.path)
