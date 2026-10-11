@@ -20,6 +20,7 @@ import 'cloud_app_check.dart';
 import 'github_service.dart';
 import 'grant_store.dart';
 import 'hook_service.dart';
+import 'tool_usage_store.dart';
 import 'html_artifact.dart';
 import 'image_receipt_store.dart';
 import 'image_studio.dart';
@@ -1824,6 +1825,27 @@ void registerAllNativePlugins() {
 /// Lifecycle of the deferred first-launch runtime install
 /// (node/python toolchain). `idle` also covers "banner dismissed".
 enum RuntimeInstallState { idle, running, done, failed }
+
+/// Why [AppState.addMarketplaceChecked] refused an input.
+enum MarketplaceAddError { invalid, duplicate }
+
+/// Prefix of the fetch message when no marketplace host could be reached.
+const kMarketplaceOfflinePrefix = "Couldn't reach GitHub for";
+
+/// Per-repo outcome of one marketplace sync.
+class MarketplaceSyncReport {
+  final int fetched;
+
+  /// Normalized repo → failure message.
+  final Map<String, String> failures;
+
+  const MarketplaceSyncReport({required this.fetched, required this.failures});
+
+  /// Every failure was "no host reachable": the device is offline.
+  bool get offline =>
+      failures.isNotEmpty &&
+      failures.values.every((m) => m.startsWith(kMarketplaceOfflinePrefix));
+}
 
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
@@ -3652,6 +3674,7 @@ class AppState extends ChangeNotifier {
     await _loadPluginState();
     await _loadMemories();
     await HookService.I.loadEnabled();
+    await ToolUsageStore.I.load();
     await hydrateRuntimeStatuses();
   }
 
@@ -7423,16 +7446,40 @@ class AppState extends ChangeNotifier {
   /// or null when the input is empty/invalid/already present. The caller is
   /// expected to follow up with [fetchMarketplaceCatalog] — registering alone
   /// imports nothing.
-  String? addMarketplace(String repo) {
-    final normalized = normalizeMarketplace(repo);
-    if (normalized.isEmpty) return null;
-    if (normalized.split('/').length < 2) return null;
-    if (marketplaces.contains(normalized)) return null;
+  String? addMarketplace(String repo) => addMarketplaceChecked(repo).repo;
+
+  /// [addMarketplace] with the reason a rejected input was refused, so the
+  /// add sheet can say "invalid" and "already added" differently. Accepts
+  /// `owner/repo`, GitHub URLs (with or without scheme, `.git`, a trailing
+  /// `/tree/<ref>/…`) and `git@github.com:owner/repo(.git)`.
+  ({String? repo, MarketplaceAddError? error}) addMarketplaceChecked(
+    String repo,
+  ) {
+    var normalized = normalizeMarketplace(
+      repo.trim().replaceFirst(RegExp(r'^git@github\.com:'), ''),
+    );
+    final parts = normalized.split('/');
+    if (parts.length > 2 && (parts[2] == 'tree' || parts[2] == 'blob')) {
+      normalized = '${parts[0]}/${parts[1]}';
+    }
+    final valid = RegExp(
+      r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$',
+    ).hasMatch(normalized);
+    if (!valid) return (repo: null, error: MarketplaceAddError.invalid);
+    if (marketplaces.contains(normalized)) {
+      return (repo: null, error: MarketplaceAddError.duplicate);
+    }
     marketplaces.add(normalized);
     _persistMarketplaces();
     refresh();
-    return normalized;
+    return (repo: normalized, error: null);
   }
+
+  /// When each marketplace last synced successfully this launch.
+  final Map<String, DateTime> marketplaceLastSynced = {};
+
+  /// The last fetch failure per marketplace (cleared on success).
+  final Map<String, String> marketplaceSyncErrors = {};
 
   /// Installed plugins that [removeMarketplace] would uninstall — the
   /// confirmation lists them so the copy matches the behaviour.
@@ -7636,19 +7683,31 @@ class AppState extends ChangeNotifier {
 
   /// Merge every registered marketplace catalog that has not been merged yet
   /// this launch. Returns the number of repos actually fetched.
-  Future<int> syncMarketplaceCatalogs({bool force = false}) async {
+  Future<int> syncMarketplaceCatalogs({bool force = false}) async =>
+      (await syncMarketplaceCatalogsReport(force: force)).fetched;
+
+  /// [syncMarketplaceCatalogs] with each repo's outcome: the Plugins screen
+  /// reports "Couldn't refresh N marketplaces" / offline instead of
+  /// swallowing failures.
+  Future<MarketplaceSyncReport> syncMarketplaceCatalogsReport({
+    bool force = false,
+  }) async {
     var fetched = 0;
+    final failures = <String, String>{};
     for (final repo in List.of(marketplaces)) {
       final normalized = normalizeMarketplace(repo);
       if (!force && _fetchedMarketplaces.contains(normalized)) continue;
       final message = await fetchMarketplaceCatalog(repo);
       // Record the fetch only AFTER it succeeded so a failed attempt stays
       // retryable (startup Retry re-fetches instead of short-circuiting).
-      if (!_marketplaceFetchSucceeded(message)) continue;
+      if (!_marketplaceFetchSucceeded(message)) {
+        failures[normalized] = message;
+        continue;
+      }
       _fetchedMarketplaces.add(normalized);
       fetched++;
     }
-    return fetched;
+    return MarketplaceSyncReport(fetched: fetched, failures: failures);
   }
 
   /// Fetch a marketplace catalog from a GitHub repo and merge plugin/MCP
@@ -7670,6 +7729,18 @@ class AppState extends ChangeNotifier {
   /// `.claude-plugin/marketplace.json`, then the jsdelivr and githack
   /// mirrors for every path (some networks block raw.githubusercontent).
   Future<String> fetchMarketplaceCatalog(String repo) async {
+    final message = await _fetchMarketplaceCatalog(repo);
+    final key = normalizeMarketplace(repo);
+    if (_marketplaceFetchSucceeded(message)) {
+      marketplaceLastSynced[key] = DateTime.now();
+      marketplaceSyncErrors.remove(key);
+    } else {
+      marketplaceSyncErrors[key] = message;
+    }
+    return message;
+  }
+
+  Future<String> _fetchMarketplaceCatalog(String repo) async {
     final normalized = repo.trim();
     if (normalized.isEmpty) return 'Repository name is empty';
     final parts = normalized.split('/');
@@ -7710,6 +7781,9 @@ class AppState extends ChangeNotifier {
       ],
     ];
     String? parseError;
+    // Whether any host answered at all: when none did, the device is offline
+    // (or GitHub and every mirror are blocked) — say so, not "not found".
+    var reachedServer = false;
     for (final url in urls) {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 15);
@@ -7718,6 +7792,7 @@ class AppState extends ChangeNotifier {
             .getUrl(Uri.parse(url))
             .timeout(const Duration(seconds: 15));
         final res = await req.close().timeout(const Duration(seconds: 15));
+        reachedServer = true;
         if (res.statusCode != 200) continue;
         // Bounded read (2 MB cap) — marketplace files are small.
         final builder = BytesBuilder();
@@ -7747,6 +7822,10 @@ class AppState extends ChangeNotifier {
     if (parseError != null) {
       return 'Found a marketplace file in $owner/$name but could not parse '
           'it: $parseError';
+    }
+    if (!reachedServer) {
+      return '$kMarketplaceOfflinePrefix $owner/$name — check your '
+          'connection and try again.';
     }
     return 'No marketplace.json found in $owner/$name '
         '(tried main, master, .claude-plugin/marketplace.json and mirrors). '
@@ -9397,6 +9476,108 @@ class AppState extends ChangeNotifier {
     _persistCustomMcpServers();
     refresh();
     return null;
+  }
+
+  /// Add an MCP server the user configured by hand (Plugins → + → MCP
+  /// server: a stdio command, a remote http/sse url, or a pasted
+  /// `mcpServers` entry). Validates the name (unique, `[A-Za-z0-9_.-]`),
+  /// the command or url, and the transport; then stores env values and
+  /// headers in secure storage (strict — a failed write adds nothing).
+  ///
+  /// Env keys whose value is blank are declared but not stored, so the
+  /// credential sheet asks for them on connect. Returns the new server, or
+  /// the user-facing reason it was refused.
+  Future<({McpServer? server, String? error})> addUserMcpServer({
+    required String name,
+    String command = '',
+    List<String> args = const [],
+    Map<String, String> env = const {},
+    String? url,
+    String? transport,
+    Map<String, String> headers = const {},
+    String? cwd,
+    int? startupTimeoutS,
+    int? toolTimeoutS,
+    McpOAuthConfig? oauth,
+  }) async {
+    final n = name.trim();
+    if (n.isEmpty) return (server: null, error: 'Give the server a name.');
+    if (!RegExp(r'^[A-Za-z0-9_.-]+$').hasMatch(n)) {
+      return (
+        server: null,
+        error: 'Use only letters, digits, ".", "_" or "-" in the name.',
+      );
+    }
+    if (mcpServers.any((s) => s.canonicalId == n || s.name == n)) {
+      return (server: null, error: 'A server named "$n" already exists.');
+    }
+    final trimmedUrl = url?.trim() ?? '';
+    final resolvedTransport =
+        transport ?? (trimmedUrl.isNotEmpty ? 'http' : 'stdio');
+    final remote = resolvedTransport == 'http' || resolvedTransport == 'sse';
+    if (remote) {
+      final uri = Uri.tryParse(trimmedUrl);
+      if (uri == null ||
+          !(uri.scheme == 'https' || uri.scheme == 'http') ||
+          uri.host.isEmpty) {
+        return (
+          server: null,
+          error: 'Enter the server URL (https://…).',
+        );
+      }
+    } else if (command.trim().isEmpty) {
+      return (
+        server: null,
+        error: 'Enter the command that starts the server (e.g. npx -y …).',
+      );
+    }
+    final cleanHeaders = {
+      for (final e in headers.entries)
+        if (e.key.trim().isNotEmpty) e.key.trim(): e.value,
+    };
+    final declaredEnv = [
+      for (final k in env.keys)
+        if (k.trim().isNotEmpty) k.trim(),
+    ];
+    final storedEnv = {
+      for (final e in env.entries)
+        if (e.key.trim().isNotEmpty && e.value.isNotEmpty) e.key.trim(): e.value,
+    };
+    final reason = addCustomMcpServer(
+      name: n,
+      command: remote ? '' : command.trim(),
+      args: remote ? const [] : args,
+      envHint: declaredEnv.isEmpty ? null : declaredEnv.join(','),
+      url: remote ? trimmedUrl : null,
+      headers: cleanHeaders,
+      transport: resolvedTransport,
+      cwd: cwd == null || cwd.trim().isEmpty ? null : cwd.trim(),
+      startupTimeoutS: startupTimeoutS,
+      toolTimeoutS: toolTimeoutS,
+    );
+    if (reason != null) return (server: null, error: reason);
+    final server = mcpServers.lastWhere((s) => s.canonicalId == n);
+    try {
+      await setMcpEnv(n, storedEnv, strict: true);
+      await setMcpHeaders(n, cleanHeaders, strict: true);
+      if (oauth != null && oauth.isUsable) {
+        await McpService.I.setMcpOAuthConfig(n, oauth);
+      }
+    } catch (e) {
+      Diag.swallow('state', e);
+      mcpServers.remove(server);
+      await deleteMcpEnv(n);
+      await deleteMcpHeaders(n);
+      await _persistCustomMcpServers();
+      refresh();
+      return (
+        server: null,
+        error:
+            "Couldn't save the server's credentials to secure storage. "
+            'Nothing was added — try again.',
+      );
+    }
+    return (server: server, error: null);
   }
 
   Future<void> removeMcpServer(McpServer s) async {
