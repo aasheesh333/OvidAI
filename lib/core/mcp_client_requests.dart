@@ -153,13 +153,19 @@ class McpClientRequests extends ChangeNotifier {
         final token = params['progressToken'];
         final progress = params['progress'];
         if (token == null || progress is! num) return true;
-        (_progress[serverName] ??= {})['$token'] = McpProgress(
+        final p = McpProgress(
           server: serverName,
           token: '$token',
           progress: progress.toDouble(),
           total: (params['total'] as num?)?.toDouble(),
           message: params['message'] as String?,
         );
+        (_progress[serverName] ??= {})['$token'] = p;
+        try {
+          _progressListeners['$token']?.call(p);
+        } catch (e) {
+          Diag.swallow('mcp_client_requests.progress', e);
+        }
         notifyListeners();
         return true;
       case 'notifications/message':
@@ -182,6 +188,20 @@ class McpClientRequests extends ChangeNotifier {
     return false;
   }
 
+  final Map<String, void Function(McpProgress)> _progressListeners = {};
+
+  /// Route `notifications/progress` for [token] (the `_meta.progressToken`
+  /// Ovid sent with a request) to [listener] until removed.
+  void addProgressListener(String token, void Function(McpProgress) listener) =>
+      _progressListeners[token] = listener;
+
+  void removeProgressListener(String token) {
+    _progressListeners.remove(token);
+    for (final m in _progress.values) {
+      m.remove(token);
+    }
+  }
+
   /// Server log lines (oldest first, bounded).
   List<McpLogEntry> logsFor(String serverName) =>
       List.unmodifiable(_logs[serverName] ?? const []);
@@ -198,6 +218,7 @@ class McpClientRequests extends ChangeNotifier {
     elicitor = null;
     _logs.clear();
     _progress.clear();
+    _progressListeners.clear();
   }
 }
 

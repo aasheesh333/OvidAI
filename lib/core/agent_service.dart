@@ -44,6 +44,7 @@ import 'presets.dart';
 import 'plan_mode.dart';
 import 'hook_service.dart';
 import 'subagent_tools.dart';
+import 'structured_edits.dart';
 import 'mcp_client_requests.dart';
 import 'html_artifact.dart';
 import 'plugin_manifest.dart';
@@ -8798,6 +8799,67 @@ user which one instead of assuming this one.''';
     {
       'type': 'function',
       'function': {
+        'name': 'multi_edit',
+        'description':
+            'Claude Code MultiEdit: apply several exact string replacements '
+            'to ONE file, in order, atomically — every edit applies to the '
+            'result of the previous one, and if any edit fails nothing is '
+            'written. Each old_string must match exactly once unless '
+            'replace_all is true. Read the file first. To create a file, '
+            'give one edit with an empty old_string.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'file_path': {'type': 'string'},
+            'edits': {
+              'type': 'array',
+              'items': {
+                'type': 'object',
+                'properties': {
+                  'old_string': {'type': 'string'},
+                  'new_string': {'type': 'string'},
+                  'replace_all': {'type': 'boolean'},
+                },
+                'required': ['old_string', 'new_string'],
+              },
+            },
+          },
+          'required': ['file_path', 'edits'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'notebook_edit',
+        'description':
+            'Claude Code NotebookEdit: edit ONE cell of a Jupyter .ipynb '
+            'notebook by cell_id (notebook metadata and other cells/outputs '
+            'are preserved). edit_mode: replace (default, overwrite the '
+            'cell source), insert (new cell AFTER cell_id, or first when '
+            'cell_id is omitted; needs cell_type), delete.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'notebook_path': {'type': 'string'},
+            'cell_id': {'type': 'string'},
+            'new_source': {'type': 'string'},
+            'cell_type': {
+              'type': 'string',
+              'enum': ['code', 'markdown'],
+            },
+            'edit_mode': {
+              'type': 'string',
+              'enum': ['replace', 'insert', 'delete'],
+            },
+          },
+          'required': ['notebook_path', 'new_source'],
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
         'name': 'fs_glob',
         'description':
             'Find files by glob pattern in the workspace.  '
@@ -15539,6 +15601,7 @@ ${await _agentsMdBlock()}
           resolved.tool.name,
           cleanArgs,
           timeout: callTimeout,
+          onProgress: _mcpProgressToCard(),
         );
       case String() when name.startsWith('mcp_'):
         final runSid = _runSession?.id ?? '';
@@ -15580,6 +15643,7 @@ ${await _agentsMdBlock()}
             resolved.tool.name,
             cleanArgs,
             timeout: callTimeout,
+            onProgress: _mcpProgressToCard(),
           );
         }
         // Real MCP proxy — resolve the matched server BY NAME first, then
@@ -15623,6 +15687,7 @@ ${await _agentsMdBlock()}
           action,
           cleanMcpArgs,
           timeout: callTimeout,
+          onProgress: _mcpProgressToCard(),
         );
       case String() when name.startsWith('plugin__'):
         // Native plugin capability tool: plugin__<slug>__<tool>.
@@ -17407,6 +17472,10 @@ ${await _agentsMdBlock()}
 
       case 'fs_edit':
         return await _handleFsEdit(args);
+      case 'multi_edit':
+        return await _handleMultiEdit(args);
+      case 'notebook_edit':
+        return await _handleNotebookEdit(args);
 
       case 'fs_glob':
         return await _handleFsGlob(args);
@@ -18751,6 +18820,8 @@ ${await _agentsMdBlock()}
       case 'resize_image':
       case 'crop_image':
       case 'file_write':
+      case 'multi_edit':
+      case 'notebook_edit':
       case 'run_code':
       case 'dispatch_agent':
       case 'workflow':
@@ -19275,6 +19346,7 @@ ${await _agentsMdBlock()}
           : 'read';
     }
     return switch (toolName) {
+      'multi_edit' || 'notebook_edit' => 'edit',
       'run_shell' => 'terminal',
       'run_code' => 'code',
       'job_start' || 'job_kill' || 'job_list' || 'job_output' => 'terminal',
@@ -19308,6 +19380,8 @@ ${await _agentsMdBlock()}
     'file_read' => 'Read',
     'file_write' => 'Write',
     'fs_edit' => 'Edit',
+    'multi_edit' => 'MultiEdit',
+    'notebook_edit' => 'NotebookEdit',
     'fs_glob' => 'Glob',
     'fs_grep' => 'Grep',
     'web_search' => 'Search',
@@ -19975,6 +20049,164 @@ ${await _agentsMdBlock()}
       }
       return 'upload failed: $e';
     }
+  }
+
+  /// Claude Code `MultiEdit`: sequential, all-or-nothing exact replacements
+  /// on one file (see [applyMultiEdit]). Same gates as `fs_edit`.
+  Future<String> _handleMultiEdit(Map<String, dynamic> args) async {
+    final path = (args['file_path'] ?? args['path'])?.toString() ?? '';
+    if (path.isEmpty) return 'multi_edit: file_path is required';
+    final List<TextEdit> edits;
+    try {
+      edits = TextEdit.parseList(args['edits']);
+    } on StructuredEditException catch (e) {
+      return 'multi_edit: ${e.message}';
+    }
+    return _applyStructuredEdit(
+      tool: 'multi_edit',
+      path: path,
+      allowCreate: edits.first.oldString.isEmpty,
+      transform: (current) => applyMultiEdit(current, edits),
+      describe: (before, after) =>
+          'MULTI-EDIT $path:\n${edits.length} edit(s), '
+          '${before?.length ?? 0} → ${after.length} chars',
+      doneLabel: '${edits.length} edit(s)',
+    );
+  }
+
+  /// Claude Code `NotebookEdit`: one cell of an `.ipynb` (see
+  /// [applyNotebookEdit]). Same gates as `fs_edit`.
+  Future<String> _handleNotebookEdit(Map<String, dynamic> args) async {
+    final path =
+        (args['notebook_path'] ?? args['file_path'] ?? args['path'])
+            ?.toString() ??
+        '';
+    if (path.isEmpty) return 'notebook_edit: notebook_path is required';
+    if (!path.toLowerCase().endsWith('.ipynb')) {
+      return 'notebook_edit: "$path" is not a .ipynb notebook — use fs_edit '
+          'or multi_edit for other files.';
+    }
+    final NotebookEditMode editMode;
+    try {
+      editMode = parseNotebookEditMode(args['edit_mode']);
+    } on StructuredEditException catch (e) {
+      return 'notebook_edit: ${e.message}';
+    }
+    return _applyStructuredEdit(
+      tool: 'notebook_edit',
+      path: path,
+      transform: (current) => applyNotebookEdit(
+        current ??
+            (throw const StructuredEditException('notebook does not exist')),
+        cellId: args['cell_id']?.toString(),
+        newSource: args['new_source']?.toString() ?? '',
+        cellType: args['cell_type']?.toString(),
+        mode: editMode,
+      ),
+      describe: (_, _) =>
+          'NOTEBOOK ${editMode.name.toUpperCase()} $path'
+          '${args['cell_id'] == null ? '' : ' cell ${args['cell_id']}'}',
+      doneLabel: '${editMode.name} cell',
+    );
+  }
+
+  /// Shared write path for whole-file structured edits: repo cache or host
+  /// workspace resolution, read-before-write and CAS freshness gates, the
+  /// strict path-permission model, the approval prompt, Studio draft sync,
+  /// the disk mirror and the diff card — exactly the `fs_edit str_replace`
+  /// contract. [transform] throwing [StructuredEditException] writes nothing.
+  Future<String> _applyStructuredEdit({
+    required String tool,
+    required String path,
+    required String Function(String? current) transform,
+    required String Function(String? before, String after) describe,
+    required String doneLabel,
+    bool allowCreate = false,
+  }) async {
+    final rs = _runSession;
+    final sid = rs?.sandboxId ?? rs?.id ?? 'default';
+    String refused(StructuredEditException e) =>
+        '$tool: ${e.message} — nothing was changed in $path.';
+    String notObserved() =>
+        'FS_NOT_OBSERVED: read "$path" first (file_read or fs_edit view), '
+        'then edit it.';
+
+    final repoContent = _readSessionRepoFile(path);
+    if (repoContent != null) {
+      if (!_readPathsFor(sid).contains(path)) return notObserved();
+      final String updated;
+      try {
+        updated = transform(repoContent);
+      } on StructuredEditException catch (e) {
+        return refused(e);
+      }
+      final ok = await _maybeApprove(tool, path, describe(repoContent, updated));
+      if (!ok) return 'DENIED by user';
+      if (!(_permissionDispatchCtx?.accountCurrent ?? true)) {
+        return 'Cancelled: session account changed.';
+      }
+      RepoCache.I.write(path, updated);
+      openStudioFile(path, updated);
+      await _mirrorToDisk(path, updated);
+      _recordProduced(path, updated.length);
+      _emit('file', 'edited $path');
+      _attachDiffCard(path, repoContent, updated);
+      return 'edited $path ✓ ($tool: $doneLabel)';
+    }
+
+    final resolved = await _resolveFsPath(path, gateTool: tool);
+    if (resolved.denied) return _accessDeniedMessage([path], noun: 'path');
+    final host = resolved.path;
+    if (host == null || !File(host).existsSync()) {
+      if (!allowCreate) return 'file not found: $path';
+      final safe = await _resolveGrantedPath(path, tool: tool);
+      if (safe == null) return _accessDeniedMessage([path], noun: 'path');
+      final String created;
+      try {
+        created = transform(null);
+      } on StructuredEditException catch (e) {
+        return refused(e);
+      }
+      final ok = await _maybeApprove(tool, path, describe(null, created));
+      if (!ok) return 'DENIED by user';
+      _readPathsFor(sid).add(path);
+      return await _writeWorkspaceFile(path, created, toolLabel: 'created');
+    }
+    if (!_readPathsFor(sid).contains(path)) return notObserved();
+    final hf = File(host);
+    if (_fsCheckFresh(path, hf) == false) {
+      return 'FS_STALE_VERSION: "$path" changed since you last read it. '
+          'Read it again, then retry the edit against the new content.';
+    }
+    final String content;
+    try {
+      content = await hf.readAsString();
+    } on FileSystemException {
+      return '$tool: "$path" is not valid UTF-8 — edit it with a shell '
+          'command that keeps its encoding. Nothing was changed.';
+    }
+    final String updated;
+    try {
+      updated = transform(content);
+    } on StructuredEditException catch (e) {
+      return refused(e);
+    }
+    final ok = await _maybeApprove(tool, path, describe(content, updated));
+    if (!ok) return 'DENIED by user';
+    if (!(_permissionDispatchCtx?.accountCurrent ?? true)) {
+      return 'Cancelled: session account changed.';
+    }
+    hf.writeAsStringSync(updated);
+    _fsMarkObserved(path, hf);
+    if (_ownsRepoCache && RepoCache.I.repoFull != null) {
+      RepoCache.I.write(path, updated);
+      RepoCache.I.didSaveWorkspaceFile(path, updated);
+      openStudioFile(path, updated);
+    }
+    _recordProduced(path, updated.length);
+    _emit('file', 'edited $path');
+    _attachDiffCard(path, content, updated);
+    return 'edited $path ✓ ($tool: $doneLabel)';
   }
 
   Future<String> _handleFsEdit(Map<String, dynamic> args) async {
@@ -21465,7 +21697,15 @@ ${await _agentsMdBlock()}
 
   String? _selfSourceBlock(String name, Map<String, dynamic> args) {
     final targets = <String>[
-      for (final key in ['path', 'file', 'command', 'cmd', 'code'])
+      for (final key in [
+        'path',
+        'file_path',
+        'notebook_path',
+        'file',
+        'command',
+        'cmd',
+        'code',
+      ])
         if (args[key] is String) args[key] as String,
     ];
     if (name == 'run_shell' || name == 'job_start' || name == 'run_code') {
@@ -23461,6 +23701,25 @@ ${await _agentsMdBlock()}
   static bool _isAgentContributionTool(String name) =>
       PluginContributionRegistry.I.contributionByToolName(name)?.kind ==
       PluginContributionKind.agent;
+
+  /// MCP `notifications/progress` → the live tool card of the call that
+  /// asked for it (captured now, so a later tool never receives it).
+  void Function(McpProgress) _mcpProgressToCard() {
+    final card = _activeToolMsg;
+    return (p) {
+      if (card == null) return;
+      final pct = p.total != null && p.total! > 0
+          ? ' ${(p.progress / p.total! * 100).clamp(0, 100).round()}%'
+          : ' ${p.progress.toStringAsFixed(p.progress % 1 == 0 ? 0 : 1)}';
+      final line = 'progress$pct${(p.message ?? '').isEmpty ? '' : ' — ${p.message}'}';
+      card.toolSummary = cleanTruncate(line, 140);
+      final detail = '${card.toolDetail ?? ''}$line\n';
+      card.toolDetail = detail.length > 12000
+          ? '…${detail.substring(detail.length - 12000)}'
+          : detail;
+      AppState.I.refresh();
+    };
+  }
 
   /// MCP `roots/list`: the active session's working folder.
   List<McpRoot> _mcpRoots(String serverName) {
