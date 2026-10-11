@@ -295,10 +295,7 @@ void main() {
     );
 
     testWidgets('feedback toggle repaints the row icon', (tester) async {
-      await pumpSession(tester, [
-        _msg('hi'),
-        _answer('hello there'),
-      ]);
+      await pumpSession(tester, [_msg('hi'), _answer('hello there')]);
 
       expect(find.byIcon(Icons.thumb_up_alt_outlined), findsOneWidget);
       await tester.tap(find.byIcon(Icons.thumb_up_alt_outlined));
@@ -346,6 +343,42 @@ void main() {
       await tester.pump();
       expect(controller.text, 'Other draft');
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('long attachment names ellipsize at 320dp (F-133)', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final longName = '${'a-very-long-attachment-name-' * 4}final.pdf';
+      expect(longName.length, greaterThanOrEqualTo(120));
+      final session = ChatSession(
+        id: 'attach',
+        title: 'attach',
+        model: 'm',
+        mode: 'auto',
+        messages: [
+          Message(
+            role: 'user',
+            content: 'see file',
+            attachments: [MessageAttachment(name: longName, size: 2048)],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: Aether.theme(),
+          home: Scaffold(body: ChatTranscript(session: session)),
+        ),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      final text = tester.widget<Text>(find.text(longName));
+      expect(text.overflow, TextOverflow.ellipsis);
+      expect(text.maxLines, 1);
     });
 
     testWidgets('ChatTranscript Load earlier reaches the first message', (

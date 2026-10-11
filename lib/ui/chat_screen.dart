@@ -5118,43 +5118,68 @@ class _MessageView extends StatelessWidget {
   }
 
   /// Attachment chips under a user message (paperclip + name + size).
+  /// Long names ellipsize inside a width cap so they never overflow the
+  /// bubble.
   Widget _attachmentChips() => Padding(
     padding: const EdgeInsets.only(top: 4),
-    child: Wrap(
-      spacing: 6,
-      runSpacing: 4,
-      alignment: WrapAlignment.end,
-      children: [
-        for (final a in m.attachments)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-            decoration: BoxDecoration(
-              color: Aether.surfaceRaised,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Aether.hairline),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(_attachIcon(a.name), size: 13, color: Aether.accent),
-                const SizedBox(width: 5),
-                Text(
-                  a.name,
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w600,
-                    color: Aether.text,
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final cap = constraints.maxWidth.isFinite
+            ? math.min(constraints.maxWidth, 280.0)
+            : 280.0;
+        return Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          alignment: WrapAlignment.end,
+          children: [
+            for (final a in m.attachments)
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: cap),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Aether.surfaceRaised,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Aether.hairline),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(_attachIcon(a.name), size: 13, color: Aether.accent),
+                      const SizedBox(width: 5),
+                      Flexible(
+                        child: Tooltip(
+                          message: a.name,
+                          child: Text(
+                            a.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: Aether.text,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        _fmtSize(a.size),
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 5),
-                Text(
-                  _fmtSize(a.size),
-                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-                ),
-              ],
-            ),
-          ),
-      ],
+              ),
+          ],
+        );
+      },
     ),
   );
 
