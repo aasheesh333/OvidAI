@@ -2,6 +2,10 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+
+import 'package:ovid_ai/core/github_http_error.dart';
+import 'package:ovid_ai/core/repo_cache.dart';
 
 import 'package:ovid_ai/ui/studio_errors.dart';
 
@@ -36,8 +40,11 @@ void main() {
         Exception('contents PUT x failed: 403'),
       ]) {
         final f = StudioFailure.of(e);
-        expect(f.message.toLowerCase(), contains('sign in'),
-            reason: '${f.message} should tell the user to sign in again');
+        expect(
+          f.message.toLowerCase(),
+          contains('sign in'),
+          reason: '${f.message} should tell the user to sign in again',
+        );
       }
     });
 
@@ -83,6 +90,107 @@ void main() {
       final f = StudioFailure.of(Exception('boom\n#0 foo()\n#1 bar()'));
       expect(f.detail, isNot(contains('#0')));
       expect(f.detail, contains('boom'));
+    });
+  });
+  group('StudioFailure classifies by type, not by digits (F-175)', () {
+    test(
+      'a SHA, line number or path with 401/403/404 is not an HTTP status',
+      () {
+        for (final raw in [
+          'commit a403f1c failed',
+          'parse error at line 1401',
+          'cannot open /tmp/x4040/y',
+        ]) {
+          final m = StudioFailure.of(Exception(raw)).message.toLowerCase();
+          expect(m, isNot(contains('sign in')), reason: raw);
+          expect(m, isNot(contains('could not find')), reason: raw);
+        }
+      },
+    );
+
+    test('a 403 rate limit reads as a rate limit with the reset time', () {
+      final reset = DateTime(2026, 10, 11, 14, 5);
+      final e = GitHubHttpException.fromResponse(
+        'repos fetch',
+        http.Response(
+          '{"message":"API rate limit exceeded for user"}',
+          403,
+          headers: {
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': '${reset.millisecondsSinceEpoch ~/ 1000}',
+          },
+        ),
+      );
+      final f = StudioFailure.of(e);
+      expect(f.message.toLowerCase(), contains('limit'));
+      expect(f.message, contains('14:05'));
+      expect(f.message.toLowerCase(), isNot(contains('sign in')));
+    });
+
+    test('"API rate limit exceeded" text maps to rate-limit copy', () {
+      final f = StudioFailure.of(Exception('API rate limit exceeded (403)'));
+      expect(f.message.toLowerCase(), contains('limit'));
+      expect(f.message.toLowerCase(), isNot(contains('sign in')));
+    });
+
+    test('typed 401 maps to sign-in, 404 to not found', () {
+      expect(
+        StudioFailure.of(const GitHubHttpException('x', 401)).message,
+        contains('sign in'),
+      );
+      expect(
+        StudioFailure.of(const GitHubHttpException('x', 404)).message,
+        contains('could not find'),
+      );
+    });
+
+    test('file-system errors never mention GitHub', () {
+      for (final e in [
+        const FileSystemException(
+          'Cannot open file',
+          '/x/y',
+          OSError('No such file or directory', 2),
+        ),
+        const FileSystemException(
+          'Write failed',
+          '/x/y',
+          OSError('No space left on device', 28),
+        ),
+        Exception('OS Error: No such file or directory, errno = 2, x'),
+      ]) {
+        final m = StudioFailure.of(e).message;
+        expect(m, isNot(contains('GitHub')), reason: '$e');
+      }
+      expect(
+        StudioFailure.of(
+          const FileSystemException('w', 'p', OSError('No space', 28)),
+        ).message.toLowerCase(),
+        contains('storage'),
+      );
+    });
+
+    test('a sandbox command timeout is not blamed on GitHub', () {
+      final m = StudioFailure.of('PTY command timed out (60s)').message;
+      expect(m, isNot(contains('GitHub')));
+    });
+
+    test('commit failures map by kind', () {
+      final stale = StudioFailure.of(
+        const CommitFailure(CommitFailureKind.staleApproval, 'raw'),
+      );
+      expect(stale.message.toLowerCase(), contains('review'));
+      final unknown = StudioFailure.of(
+        const CommitFailure(CommitFailureKind.unknown, 'raw', intendedSha: 'a'),
+      );
+      expect(unknown.message.toLowerCase(), contains('check'));
+    });
+
+    test('tokens are redacted from the detail line', () {
+      final f = StudioFailure.of(
+        Exception('fatal: https://x-access-token:ghp_abc123@github.com/o/r'),
+      );
+      expect(f.detail, isNot(contains('ghp_abc123')));
+      expect(f.detail, contains('[redacted]'));
     });
   });
 }

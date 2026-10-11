@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'github_http_error.dart';
 import 'repo_cache.dart';
 import 'sandbox_service.dart';
 import 'secure_store.dart';
@@ -732,7 +733,7 @@ class GitHubService extends ChangeNotifier {
           )
           .timeout(_requestTimeout);
       if (res.statusCode != 200) {
-        throw Exception('repos fetch failed: ${res.statusCode}');
+        throw GitHubHttpException.fromResponse('repos fetch', res);
       }
       return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
     } finally {
@@ -770,7 +771,7 @@ class GitHubService extends ChangeNotifier {
           )
           .timeout(_requestTimeout);
       if (res.statusCode != 200) {
-        throw Exception('branches fetch failed: ${res.statusCode}');
+        throw GitHubHttpException.fromResponse('branches fetch', res);
       }
       return (jsonDecode(res.body) as List)
           .map((e) => (e as Map<String, dynamic>)['name'] as String?)
@@ -809,7 +810,7 @@ class GitHubService extends ChangeNotifier {
           )
           .timeout(_requestTimeout);
       if (res.statusCode != 200) {
-        throw Exception('content fetch failed: ${res.statusCode}');
+        throw GitHubHttpException.fromResponse('content fetch', res);
       }
       final body = jsonDecode(res.body);
       if (body is List) return body.cast<Map<String, dynamic>>();
