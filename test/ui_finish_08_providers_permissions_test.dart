@@ -156,7 +156,7 @@ void main() {
         expect(find.textContaining('all ports and paths'), findsOneWidget);
         await reveal(tester, find.textContaining('Directory and descendants'));
         await reveal(tester, find.textContaining('all ports and paths'));
-        final revoke = find.byKey(ValueKey('revoke-session-path-$_longPath'));
+        final revoke = find.byKey(ValueKey('revoke-session-${session.id}-path-$_longPath'));
         await reveal(tester, revoke);
         await tester.tap(revoke);
         await tester.pumpAndSettle();
@@ -204,10 +204,10 @@ void main() {
     await AgentService.I.revokeSessionPermissionGrant(grant);
     await tester.pump();
     expect(find.text('host research.example.test'), findsNothing);
-    expect(find.textContaining('No decisions for this session yet'), findsOneWidget);
+    expect(find.textContaining('No remembered decisions in any chat yet'), findsOneWidget);
   });
 
-  testWidgets('open revoke confirmation cannot remove another conversation decision', (tester) async {
+  testWidgets('grants of every chat are listed by chat and revoke only their own chat', (tester) async {
     final first = ChatSession(id: 'first-08', title: 'First', model: 'research-chat');
     final second = ChatSession(id: 'second-08', title: 'Second', model: 'research-chat');
     first.grants.add(PermissionGrant.path(_longPath, sessionId: first.id));
@@ -215,18 +215,22 @@ void main() {
     app.sessions.addAll([first, second]);
     app.activeSessionId = first.id;
     await host(tester, const PermissionsScreen());
-    final revoke = find.byKey(ValueKey('revoke-session-path-$_longPath'));
+    // F-110: both chats are listed, each named, not just the active one.
+    expect(find.byKey(const ValueKey('chat-decisions-first-08')), findsOneWidget);
+    expect(find.byKey(const ValueKey('chat-decisions-second-08')), findsOneWidget);
+    final revoke = find.byKey(ValueKey('revoke-session-second-08-path-$_longPath'));
     await reveal(tester, revoke);
     await tester.tap(revoke);
     await tester.pumpAndSettle();
+    // Switching the active chat while the confirmation is open must not
+    // retarget the revoke.
     app.activeSessionId = second.id;
     app.refresh();
     await tester.pump();
     await tester.tap(find.text('Revoke').last);
     await tester.pumpAndSettle();
     expect(first.grants.length, 1);
-    expect(second.grants.length, 1);
-    expect(find.text('This decision is no longer in the current session.'), findsOneWidget);
+    expect(second.grants, isEmpty);
   });
 
   testWidgets('built-in free provider and empty add sheet remain readable at large text', (tester) async {

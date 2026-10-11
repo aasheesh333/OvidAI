@@ -2331,10 +2331,7 @@ class AgentService extends ChangeNotifier {
     final r = _runs.remove(sessionId);
     // Keyed per (session, mode), so drop every mode variant for this session —
     // plus the bare legacy key.
-    _alwaysAllowedTools.removeWhere(
-      (k, _) => k == sessionId || k.startsWith('$sessionId|'),
-    );
-    _deniedApprovals.remove(sessionId);
+    _forgetToolDecisions(sessionId);
     if (r == null) return;
     r.cancelRequested = true;
     try {
@@ -5945,14 +5942,117 @@ user which one instead of assuming this one.''';
   ChatSession? get currentSession => _runSession;
 
   /// Revokes a session-scoped grant, persists the session, and refreshes —
-  /// the Settings → Permissions revoke action for current-session grants.
-  Future<void> revokeSessionPermissionGrant(PermissionGrant grant) async {
-    final s = _runSession;
+  /// the Settings → Permissions revoke action. [session] names the chat the
+  /// grant belongs to (the Permissions screen lists every chat, F-110);
+  /// without it the grant's own [PermissionGrant.sessionId] is used, then
+  /// the current session.
+  Future<void> revokeSessionPermissionGrant(
+    PermissionGrant grant, {
+    ChatSession? session,
+  }) async {
+    final s =
+        session ??
+        AppState.I.sessions
+            .where((c) => c.id == grant.sessionId)
+            .firstOrNull ??
+        _runSession;
     if (s == null) return;
     s.grants.removeWhere((g) => g.kind == grant.kind && g.value == grant.value);
     await AppState.I.persistSessions();
     notifyListeners();
   }
+
+  /// Removes every remembered decision of [session]: its file and website
+  /// grants AND its in-memory tool "Always allow" / denial memory.
+  Future<void> revokeAllSessionDecisions(ChatSession session) async {
+    session.grants.clear();
+    _forgetToolDecisions(session.id);
+    await AppState.I.persistSessions();
+    notifyListeners();
+  }
+
+  /// Removes every remembered decision in every chat (Permissions screen
+  /// "Revoke all").
+  Future<void> revokeAllRememberedDecisions() async {
+    for (final s in AppState.I.sessions) {
+      s.grants.clear();
+    }
+    _alwaysAllowedTools.clear();
+    _deniedApprovals.clear();
+    await AppState.I.persistSessions();
+    notifyListeners();
+  }
+
+  void _forgetToolDecisions(String sessionId) {
+    _alwaysAllowedTools.removeWhere(
+      (k, _) => k == sessionId || k.startsWith('$sessionId|'),
+    );
+    _deniedApprovals.remove(sessionId);
+  }
+
+  /// Tool names the user chose "Always allow" for in [sessionId] (F-109).
+  /// In-memory only: they end with the process or the session's run.
+  Set<String> alwaysAllowedToolsFor(String sessionId) => {
+    for (final e in _alwaysAllowedTools.entries)
+      if (e.key == sessionId || e.key.startsWith('$sessionId|')) ...e.value,
+  };
+
+  /// Remembered denials of [sessionId]: approvals the user (or the timeout)
+  /// denied, which are refused again without asking until revoked.
+  List<RememberedToolDenial> rememberedDenialsFor(String sessionId) => [
+    for (final key in _deniedApprovals[sessionId] ?? const <String>{})
+      RememberedToolDenial.fromKey(key),
+  ];
+
+  /// Session ids holding any in-memory tool decision.
+  Set<String> get sessionsWithToolDecisions => {
+    for (final k in _alwaysAllowedTools.keys)
+      if (_alwaysAllowedTools[k]!.isNotEmpty) k.split('|').first,
+    for (final e in _deniedApprovals.entries)
+      if (e.value.isNotEmpty) e.key,
+  };
+
+  /// Forgets "Always allow" for [tool] in [sessionId]: the next call asks
+  /// again. True when something was removed.
+  bool revokeAlwaysAllowedTool(String sessionId, String tool) {
+    var removed = false;
+    for (final e in _alwaysAllowedTools.entries) {
+      if (e.key == sessionId || e.key.startsWith('$sessionId|')) {
+        removed = e.value.remove(tool) || removed;
+      }
+    }
+    _alwaysAllowedTools.removeWhere((_, v) => v.isEmpty);
+    if (removed) notifyListeners();
+    return removed;
+  }
+
+  /// Forgets a remembered denial: the next identical request asks again.
+  bool revokeRememberedDenial(String sessionId, RememberedToolDenial denial) {
+    final set = _deniedApprovals[sessionId];
+    final removed = set?.remove(denial.key) ?? false;
+    if (set != null && set.isEmpty) _deniedApprovals.remove(sessionId);
+    if (removed) notifyListeners();
+    return removed;
+  }
+
+  /// Test seam: records "Always allow" for [tool] in [sessionId] exactly as
+  /// an approved "Always allow" card does.
+  @visibleForTesting
+  void rememberAlwaysAllowForTest(String sessionId, String tool) {
+    _alwaysAllowedTools
+        .putIfAbsent(_alwaysAllowKey(sessionId, mode.name), () => {})
+        .add(tool);
+    notifyListeners();
+  }
+
+  /// Test seam: whether [tool] would skip the approval prompt in
+  /// [sessionId] via "Always allow".
+  @visibleForTesting
+  bool isToolAlwaysAllowedForTest(String sessionId, String tool) =>
+      _alwaysAllowedTools[_alwaysAllowKey(sessionId, mode.name)]?.contains(
+        tool,
+      ) ??
+      false;
 
   /// Per-session "always allow" memory: `"<sessionId>|"` →
   /// remembered tool names. Never persisted; entries die with the session (see
@@ -23675,4 +23775,41 @@ class AgentTool {
   final String name;
   final String description;
   const AgentTool(this.name, this.description);
+}
+
+/// One remembered tool denial, decoded for display and revocation (F-109).
+/// [key] is the exact memory key the approval gate consults.
+class RememberedToolDenial {
+  const RememberedToolDenial({
+    required this.key,
+    required this.tool,
+    required this.summary,
+  });
+
+  final String key;
+  final String tool;
+
+  /// What was asked, e.g. the command or URL (may be empty).
+  final String summary;
+
+  /// Keys are JSON lists `[tool, …details]`; anything else is shown raw.
+  factory RememberedToolDenial.fromKey(String key) {
+    try {
+      final decoded = jsonDecode(key);
+      if (decoded is List && decoded.isNotEmpty) {
+        final parts = [
+          for (final p in decoded.skip(1))
+            if (p != null && p.toString().trim().isNotEmpty) p.toString().trim(),
+        ];
+        return RememberedToolDenial(
+          key: key,
+          tool: decoded.first.toString(),
+          summary: parts.isEmpty ? '' : parts.first,
+        );
+      }
+    } catch (_) {
+      // Fall through to the raw form.
+    }
+    return RememberedToolDenial(key: key, tool: key, summary: '');
+  }
 }

@@ -15,19 +15,21 @@ import 'widgets/aether_primitives.dart';
 ///   intentionally **ignored** at runtime. The section still renders so the
 ///   user can see and clean up those stale entries. Nothing here mutates
 ///   runtime policy.
-/// * **Granted scopes** — allow/deny decisions THIS session holds, with full
-///   scope descriptions and revoke actions that preserve the recursive/
-///   exact-path and host/path distinctions in [PermissionGrant].
+/// * **Granted scopes** — every remembered decision in EVERY chat, grouped
+///   by chat title (F-110): file and website allow/deny grants (persisted
+///   per chat) and tool-level "Always allow" approvals and remembered
+///   denials (in memory, F-109). Each chat has Open chat and Revoke all;
+///   the section has a global Revoke all.
 /// * **Pending requests** — reserved for interactive approval prompts routed
 ///   through the main overlay. The permissions screen is a passive viewer of
 ///   the current state and does not host active prompts, so this section
 ///   explains that explicitly and is empty by design.
 ///
-/// All existing semantics are preserved: session grants come from
-/// [AgentService.currentSession.grants], legacy all-sessions grants come from
-/// [AppState.globalPermissionGrants], and revocation routes through the same
-/// owner methods ([AgentService.revokeSessionPermissionGrant] and
-/// [AppState.revokeGlobalPermissionGrant]). No new state is introduced.
+/// Session grants come from each [ChatSession.grants], tool decisions from
+/// [AgentService.alwaysAllowedToolsFor] / [AgentService.rememberedDenialsFor],
+/// legacy all-sessions grants from [AppState.globalPermissionGrants]; every
+/// revoke routes through the owner methods on [AgentService] and
+/// [AppState.revokeGlobalPermissionGrant]. No new state is introduced.
 class PermissionsScreen extends StatefulWidget {
   const PermissionsScreen({super.key});
 
@@ -50,7 +52,7 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
         listenable: Listenable.merge([AppState.I, AgentService.I]),
         builder: (context, _) {
           final legacy = AppState.I.globalPermissionGrants;
-          final sessionGrants = _currentSessionGrants();
+          final groups = _decisionGroups();
           return SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
             child: Column(
@@ -73,15 +75,39 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
                 const AetherSectionTitle(
                   eyebrow: 'Granted scopes',
                   subtitle:
-                      'Decisions apply across modes in THIS conversation. '
-                      'They persist across restarts and are removed when the '
-                      'session is deleted.',
+                      'Decisions you made in each chat. File and website '
+                      'decisions persist across restarts until the chat is '
+                      'deleted; tool decisions last until the app closes.',
                 ),
                 const SizedBox(height: 12),
-                _GrantedScopesCard(
-                  grants: sessionGrants,
-                  onRevoke: (g) => _revokeSession(context, g),
-                ),
+                if (groups.isEmpty)
+                  const _NoDecisionsCard()
+                else ...[
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      key: const ValueKey('revoke-all-decisions'),
+                      icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                      label: const Text('Revoke all'),
+                      onPressed: () => _revokeEverything(context),
+                    ),
+                  ),
+                  for (final group in groups)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: _ChatDecisionsCard(
+                        group: group,
+                        onOpenChat: () => _openChat(context, group.session),
+                        onRevokeAll: () => _revokeChat(context, group.session),
+                        onRevokeGrant: (g) =>
+                            _revokeSession(context, group.session, g),
+                        onRevokeTool: (tool) =>
+                            _revokeTool(context, group.session, tool),
+                        onRevokeDenial: (d) =>
+                            _revokeDenial(context, group.session, d),
+                      ),
+                    ),
+                ],
                 const SizedBox(height: 24),
                 const AetherSectionTitle(
                   eyebrow: 'Pending requests',
@@ -135,13 +161,13 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
 
   Future<void> _revokeSession(
     BuildContext context,
+    ChatSession session,
     PermissionGrant grant,
   ) async {
-    final session = AgentService.I.currentSession;
-    // A confirmation can remain open while the selected conversation changes.
-    // Do not let its old row revoke an identically named scope in the new one.
-    if (session == null ||
-        session.id != grant.sessionId ||
+    // Each row is bound to ITS chat; a confirmation left open while the
+    // chat is deleted or the decision changes must not touch another one.
+    final live = AppState.I.sessions.any((s) => identical(s, session));
+    if (!live ||
         !_isSingleGrantIdentity(
           session.grants
               .where((g) => g.kind == grant.kind && g.value == grant.value)
@@ -150,23 +176,125 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
         )) {
       _showRevokeMessage(
         context,
-        'This decision is no longer in the current session.',
+        'This decision is no longer saved in "${_chatTitle(session)}".',
       );
       return;
     }
-    await AgentService.I.revokeSessionPermissionGrant(grant);
+    await AgentService.I.revokeSessionPermissionGrant(grant, session: session);
     if (!context.mounted) return;
-    final remaining = AgentService.I.currentSession?.grants.any(
-      (g) => _sameGrantIdentity(g, grant),
-    ) ?? true;
+    final remaining = session.grants.any((g) => _sameGrantIdentity(g, grant));
     _showRevokeMessage(
       context,
       !remaining
-          ? 'Removed from the current session: ${_label(grant)}. Persistence is not confirmed; retry if it returns after reopening.'
+          ? 'Removed from "${_chatTitle(session)}": ${_label(grant)}. Persistence is not confirmed; retry if it returns after reopening.'
           : 'No durable change confirmed for ${_label(grant)}. Retry.',
-      retry: () => _revokeSession(context, grant),
+      retry: () => _revokeSession(context, session, grant),
     );
     if (mounted) setState(() {});
+  }
+
+  Future<void> _revokeTool(
+    BuildContext context,
+    ChatSession session,
+    String tool,
+  ) async {
+    if (!await _confirm(
+      context,
+      title: 'Stop always allowing $tool?',
+      body:
+          'The agent will ask before using $tool again in '
+          '"${_chatTitle(session)}".',
+    )) {
+      return;
+    }
+    final removed = AgentService.I.revokeAlwaysAllowedTool(session.id, tool);
+    if (!context.mounted) return;
+    _showRevokeMessage(
+      context,
+      removed
+          ? '$tool will ask again in "${_chatTitle(session)}".'
+          : 'This decision is no longer remembered.',
+    );
+  }
+
+  Future<void> _revokeDenial(
+    BuildContext context,
+    ChatSession session,
+    RememberedToolDenial denial,
+  ) async {
+    final removed = AgentService.I.revokeRememberedDenial(session.id, denial);
+    if (!context.mounted) return;
+    _showRevokeMessage(
+      context,
+      removed
+          ? '${denial.tool} will ask again in "${_chatTitle(session)}".'
+          : 'This decision is no longer remembered.',
+    );
+  }
+
+  Future<void> _revokeChat(BuildContext context, ChatSession session) async {
+    if (!await _confirm(
+      context,
+      title: 'Revoke all decisions in this chat?',
+      body:
+          'Removes every remembered file, website and tool decision in '
+          '"${_chatTitle(session)}". The agent will ask again.',
+    )) {
+      return;
+    }
+    await AgentService.I.revokeAllSessionDecisions(session);
+    if (!context.mounted) return;
+    _showRevokeMessage(
+      context,
+      'Removed all remembered decisions in "${_chatTitle(session)}".',
+    );
+  }
+
+  Future<void> _revokeEverything(BuildContext context) async {
+    if (!await _confirm(
+      context,
+      title: 'Revoke all remembered decisions?',
+      body:
+          'Removes every remembered file, website and tool decision in '
+          'every chat. The agent will ask again.',
+    )) {
+      return;
+    }
+    await AgentService.I.revokeAllRememberedDecisions();
+    if (!context.mounted) return;
+    _showRevokeMessage(context, 'Removed all remembered decisions.');
+  }
+
+  void _openChat(BuildContext context, ChatSession session) {
+    AppState.I.selectSession(session.id);
+    Navigator.of(context).popUntil((r) => r.isFirst);
+  }
+
+  Future<bool> _confirm(
+    BuildContext context, {
+    required String title,
+    required String body,
+  }) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        scrollable: true,
+        backgroundColor: Aether.surface,
+        title: Text(title, style: const TextStyle(fontSize: 15)),
+        content: Text(body, style: const TextStyle(fontSize: 13)),
+        actions: [
+          TextButton(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(d).pop(false),
+          ),
+          TextButton(
+            child: const Text('Revoke'),
+            onPressed: () => Navigator.of(d).pop(true),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
   }
 
   void _showRevokeMessage(
@@ -185,19 +313,57 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
   }
 }
 
-/// Session-scoped grants held by the current session (global grants are shown
-/// in the Autonomy section as inert, matching their runtime status).
-List<PermissionGrant> _currentSessionGrants() {
-  final session = AgentService.I.currentSession;
-  if (session == null) return const [];
-  return session.grants
-      .where(
-        (g) =>
-            g.scope == PermissionGrant.scopeSession &&
-            g.sessionId == session.id,
-      )
-      .toList();
+/// Everything one chat remembers, for the Granted scopes section.
+class _ChatDecisions {
+  const _ChatDecisions({
+    required this.session,
+    required this.isCurrent,
+    required this.grants,
+    required this.tools,
+    required this.denials,
+  });
+
+  final ChatSession session;
+  final bool isCurrent;
+  final List<PermissionGrant> grants;
+  final List<String> tools;
+  final List<RememberedToolDenial> denials;
 }
+
+/// Remembered decisions of EVERY chat (F-110), current chat first, then in
+/// the session list's order; chats with nothing remembered are omitted.
+List<_ChatDecisions> _decisionGroups() {
+  final current =
+      AgentService.I.currentSession ?? AppState.I.activeSession;
+  final out = <_ChatDecisions>[];
+  for (final session in AppState.I.sessions) {
+    final grants = session.grants
+        .where(
+          (g) =>
+              g.scope == PermissionGrant.scopeSession &&
+              g.sessionId == session.id,
+        )
+        .toList();
+    final tools = AgentService.I.alwaysAllowedToolsFor(session.id).toList()
+      ..sort();
+    final denials = AgentService.I.rememberedDenialsFor(session.id);
+    if (grants.isEmpty && tools.isEmpty && denials.isEmpty) continue;
+    out.add(
+      _ChatDecisions(
+        session: session,
+        isCurrent: current != null && current.id == session.id,
+        grants: grants,
+        tools: tools,
+        denials: denials,
+      ),
+    );
+  }
+  out.sort((a, b) => (b.isCurrent ? 1 : 0) - (a.isCurrent ? 1 : 0));
+  return out;
+}
+
+String _chatTitle(ChatSession s) =>
+    s.title.trim().isEmpty ? 'Untitled chat' : s.title.trim();
 
 bool _isSingleGrantIdentity(
   List<PermissionGrant> candidates,
@@ -395,60 +561,199 @@ class _AutonomyMode extends StatelessWidget {
   }
 }
 
-/// Granted scopes retain the full value, coverage description and revoke action.
-class _GrantedScopesCard extends StatelessWidget {
-  const _GrantedScopesCard({required this.grants, required this.onRevoke});
-
-  final List<PermissionGrant> grants;
-  final Future<void> Function(PermissionGrant) onRevoke;
+/// Empty state: no chat remembers any decision.
+class _NoDecisionsCard extends StatelessWidget {
+  const _NoDecisionsCard();
 
   @override
   Widget build(BuildContext context) {
-    if (grants.isEmpty) {
-      return AetherCard(
-        padding: const EdgeInsets.all(20),
-        child: Row(
-          children: [
-            Icon(Icons.verified_user_outlined, size: 20, color: Aether.textFaint),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                'No decisions for this session yet. File and host access '
-                'appear here after Allow, Always allow, or Deny.',
-                style: AetherType.bodyMuted,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
     return AetherCard(
+      padding: const EdgeInsets.all(20),
+      child: Row(
+        children: [
+          Icon(Icons.verified_user_outlined, size: 20, color: Aether.textFaint),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'No remembered decisions in any chat yet. File, website and '
+              'tool access appear here after Allow, Always allow, or Deny.',
+              style: AetherType.bodyMuted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One chat's remembered decisions: grants with full scope descriptions,
+/// always-allowed tools and remembered denials, each revocable, plus Open
+/// chat and Revoke all for the chat.
+class _ChatDecisionsCard extends StatelessWidget {
+  const _ChatDecisionsCard({
+    required this.group,
+    required this.onOpenChat,
+    required this.onRevokeAll,
+    required this.onRevokeGrant,
+    required this.onRevokeTool,
+    required this.onRevokeDenial,
+  });
+
+  final _ChatDecisions group;
+  final VoidCallback onOpenChat;
+  final Future<void> Function() onRevokeAll;
+  final Future<void> Function(PermissionGrant) onRevokeGrant;
+  final Future<void> Function(String tool) onRevokeTool;
+  final Future<void> Function(RememberedToolDenial) onRevokeDenial;
+
+  @override
+  Widget build(BuildContext context) {
+    final sid = group.session.id;
+    final count = group.grants.length + group.tools.length + group.denials.length;
+    return AetherCard(
+      key: ValueKey('chat-decisions-$sid'),
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            '${grants.length} grant${grants.length == 1 ? '' : 's'}',
+            _chatTitle(group.session),
             style: AetherType.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
+          Text(
+            '$count decision${count == 1 ? '' : 's'}'
+            '${group.isCurrent ? ' · current chat' : ''}',
+            style: AetherType.caption,
+          ),
           Wrap(
+            spacing: 4,
             children: [
-              _PermissionScopeBadge(
-                label: 'THIS SESSION',
-                color: Aether.textMuted,
-                icon: Icons.chat_bubble_outline,
+              TextButton.icon(
+                key: ValueKey('open-chat-$sid'),
+                icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                label: const Text('Open chat'),
+                onPressed: onOpenChat,
+              ),
+              TextButton.icon(
+                key: ValueKey('revoke-chat-$sid'),
+                icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                label: const Text('Revoke all'),
+                onPressed: onRevokeAll,
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          for (final g in grants)
+          const SizedBox(height: 8),
+          for (final g in group.grants)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: _GrantRow(grant: g, global: false, onRevoke: () => onRevoke(g)),
+              child: _GrantRow(
+                grant: g,
+                global: false,
+                onRevoke: () => onRevokeGrant(g),
+              ),
             ),
+          if (group.tools.isNotEmpty || group.denials.isNotEmpty) ...[
+            Text(
+              'Tools in this chat',
+              style: AetherType.label.copyWith(color: Aether.textMuted),
+            ),
+            const SizedBox(height: 6),
+            for (final tool in group.tools)
+              _ToolDecisionRow(
+                key: ValueKey('tool-allowed-$sid-$tool'),
+                title: tool,
+                subtitle: 'Always allowed · until the app closes',
+                denied: false,
+                revokeKey: ValueKey('revoke-tool-$sid-$tool'),
+                revokeTooltip: 'Stop always allowing $tool',
+                onRevoke: () => onRevokeTool(tool),
+              ),
+            for (final d in group.denials)
+              _ToolDecisionRow(
+                key: ValueKey('tool-denied-$sid-${d.key}'),
+                title: d.tool,
+                subtitle: [
+                  'Denied',
+                  if (d.summary.isNotEmpty) d.summary,
+                ].join(' · '),
+                denied: true,
+                revokeKey: ValueKey('revoke-denial-$sid-${d.key}'),
+                revokeTooltip: 'Forget denial of ${d.tool}',
+                onRevoke: () => onRevokeDenial(d),
+              ),
+          ],
         ],
+      ),
+    );
+  }
+}
+
+/// One tool-level remembered decision with a revoke button.
+class _ToolDecisionRow extends StatelessWidget {
+  const _ToolDecisionRow({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.denied,
+    required this.revokeKey,
+    required this.revokeTooltip,
+    required this.onRevoke,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool denied;
+  final Key revokeKey;
+  final String revokeTooltip;
+  final Future<void> Function() onRevoke;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
+        decoration: BoxDecoration(
+          color: Aether.surfaceAlt,
+          borderRadius: BorderRadius.circular(AetherRadius.rMd),
+          border: Border.all(color: Aether.hairline),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              denied ? Icons.block_outlined : Icons.build_outlined,
+              size: 18,
+              color: denied ? Aether.dangerC : Aether.accentC,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: AetherType.body.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    subtitle,
+                    style: AetherType.caption,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              key: revokeKey,
+              tooltip: revokeTooltip,
+              icon: const Icon(Icons.close, size: 18),
+              onPressed: onRevoke,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -475,7 +780,7 @@ class _GrantRow extends StatelessWidget {
     final subtitle =
         '${isPath ? (grant.recursive ? 'Directory and descendants' : 'Exact path') : 'Host and subdomains, all ports and paths'} · '
         '${grant.isDeny ? 'denied' : 'allowed'} · '
-        '${global ? 'legacy (not applied)' : 'this session, all modes'}';
+        '${global ? 'legacy (not applied)' : 'this chat, all modes'}';
 
     return Container(
       padding: const EdgeInsets.all(10),
@@ -503,7 +808,9 @@ class _GrantRow extends StatelessWidget {
             message: 'Revoke',
             child: TextButton.icon(
               key: ValueKey(
-                'revoke-${global ? 'global' : 'session'}-${grant.kind}-${grant.value}',
+                global
+                    ? 'revoke-global-${grant.kind}-${grant.value}'
+                    : 'revoke-session-${grant.sessionId}-${grant.kind}-${grant.value}',
               ),
               icon: const Icon(Icons.delete_outline, size: 18),
               label: const Text('Revoke'),
