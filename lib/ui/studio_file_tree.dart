@@ -61,6 +61,10 @@ List<StudioTreeNode> buildStudioTree(
   Iterable<String> paths,
   Set<String> expandedDirs,
 ) {
+  assert(() {
+    debugStudioTreeBuilds++;
+    return true;
+  }());
   final dirs = <String>{};
   final files = <String>{};
   for (final raw in paths) {
@@ -115,6 +119,10 @@ List<StudioTreeNode> buildStudioTree(
   return out;
 }
 
+/// [buildStudioTree] call counter for rebuild-scope tests (debug builds only).
+@visibleForTesting
+int debugStudioTreeBuilds = 0;
+
 /// The repository file explorer bound to [RepoCache].
 class StudioFileTree extends StatefulWidget {
   const StudioFileTree({super.key});
@@ -129,6 +137,29 @@ class _StudioFileTreeState extends State<StudioFileTree> {
   final Set<String> _loading = <String>{};
   int _generation = RepoCache.I.bindingGeneration;
 
+  // Tree memo. Rebuilding the row list walks every path (2,000+ in a real
+  // repo), so it reruns only when the cache notified (a tree/working-copy
+  // change) or the expanded set changed — not on agent notifications.
+  int _cacheRevision = 0;
+  int _expandedRevision = 0;
+  Object? _treeKey;
+  List<StudioTreeNode> _tree = const [];
+
+  List<StudioTreeNode> _nodes(RepoCache cache) {
+    final key = (
+      _cacheRevision,
+      _expandedRevision,
+      cache.treePaths.length,
+      cache.files.length,
+    );
+    if (key == _treeKey) return _tree;
+    // Union of the tree and the live working copy: an agent-written file
+    // that was never in the git tree still has to be reachable.
+    final paths = <String>{...cache.treePaths, ...cache.files.keys, ...cache.pendingPaths};
+    _treeKey = key;
+    return _tree = buildStudioTree(paths, _expanded);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -136,9 +167,11 @@ class _StudioFileTreeState extends State<StudioFileTree> {
   }
 
   void _bindingChanged() {
+    _cacheRevision++;
     if (_generation == RepoCache.I.bindingGeneration) return;
     _generation = RepoCache.I.bindingGeneration;
     _expanded.clear();
+    _expandedRevision++;
     _failed.clear();
     _loading.clear();
   }
@@ -158,6 +191,7 @@ class _StudioFileTreeState extends State<StudioFileTree> {
     if (node.isDirectory) {
       setState(() {
         if (!_expanded.remove(node.path)) _expanded.add(node.path);
+        _expandedRevision++;
       });
       return;
     }
@@ -217,15 +251,14 @@ class _StudioFileTreeState extends State<StudioFileTree> {
 
   @override
   Widget build(BuildContext context) {
+    // The agent side only matters for the active-file highlight, so listen
+    // to the narrow Studio tabs state rather than all of AgentService.
     return AnimatedBuilder(
-      animation: Listenable.merge([RepoCache.I, AgentService.I]),
+      animation: Listenable.merge([RepoCache.I, AgentService.I.studioTabs]),
       builder: (context, _) {
         final cache = RepoCache.I;
-        // Union of the tree and the live working copy: an agent-written file
-        // that was never in the git tree still has to be reachable.
-        final paths = <String>{...cache.treePaths, ...cache.files.keys, ...cache.pendingPaths};
-        final nodes = buildStudioTree(paths, _expanded);
-        final active = AgentService.I.activeFilePath;
+        final nodes = _nodes(cache);
+        final active = AgentService.I.studioTabs.value.activePath;
 
         return Container(
           decoration: BoxDecoration(

@@ -1442,6 +1442,38 @@ class ChatSession {
   final List<Message> messages;
   final DateTime createdAt;
 
+  // [hasImage] cache: the scan covered `messages[0.._imageScanLength)` and
+  // `_imageScanLast` was the last message it saw.
+  int _imageScanLength = 0;
+  Message? _imageScanLast;
+  bool _hasImageCache = false;
+
+  /// True when the transcript contains a generated image (the sidebar icon).
+  ///
+  /// [messages] is mutated in place everywhere, so this cannot be a stored
+  /// flag. Appends only scan the new tail; any other change (truncation,
+  /// edit, replace) triggers one full rescan. A list row reading this no
+  /// longer walks the whole transcript on every rebuild.
+  bool get hasImage {
+    final length = messages.length;
+    final last = length == 0 ? null : messages[length - 1];
+    if (length == _imageScanLength && identical(last, _imageScanLast)) {
+      return _hasImageCache;
+    }
+    final appended =
+        length > _imageScanLength &&
+        (_imageScanLength == 0 ||
+            identical(messages[_imageScanLength - 1], _imageScanLast));
+    var found = appended && _hasImageCache;
+    for (var i = appended ? _imageScanLength : 0; !found && i < length; i++) {
+      if (messages[i].kind == MsgKind.imageGen) found = true;
+    }
+    _imageScanLength = length;
+    _imageScanLast = last;
+    _hasImageCache = found;
+    return found;
+  }
+
   /// The assembled system prompt sent on this session's most recent turn.
   /// Surfaced as a collapsible "System prompt" disclosure so the user can
   /// see exactly what the model was told (context visibility parity).
@@ -6173,8 +6205,29 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  ChatSession? get activeSession =>
-      sessions.where((s) => s.id == activeSessionId).firstOrNull;
+  // [activeSession] memo. [sessions] is mutated in place all over the app, so
+  // the hit is only trusted after an O(1) check that the slot still holds the
+  // same session with the active id; anything else falls back to a scan.
+  ChatSession? _activeSessionMemo;
+  int _activeSessionMemoIndex = -1;
+
+  ChatSession? get activeSession {
+    final id = activeSessionId;
+    if (id == null) return null;
+    final memo = _activeSessionMemo;
+    final index = _activeSessionMemoIndex;
+    if (memo != null &&
+        memo.id == id &&
+        index >= 0 &&
+        index < sessions.length &&
+        identical(sessions[index], memo)) {
+      return memo;
+    }
+    final found = sessions.indexWhere((s) => s.id == id);
+    _activeSessionMemoIndex = found;
+    _activeSessionMemo = found < 0 ? null : sessions[found];
+    return _activeSessionMemo;
+  }
 
   /// Session lookup by id (used by the agent to keep a RUNNING run's
   /// writes bound to its own session even if the user switches chats).

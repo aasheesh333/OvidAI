@@ -7,12 +7,15 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart' show IconData, Icons, Color;
+import 'package:flutter/widgets.dart'
+    show WidgetsBinding, WidgetsBindingObserver;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+
 import '../core/theme.dart';
 import 'format.dart';
 import 'model_failure.dart';
@@ -25,6 +28,7 @@ import 'usage_attempt_recorder.dart';
 import 'grant_store.dart';
 import 'global_repo_registry.dart';
 import 'sandbox_service.dart';
+import 'webview_pool.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
 import 'workspace_files.dart';
@@ -145,6 +149,73 @@ class BrowserTab {
 
   BrowserTab({required this.url, bool? desktopMode, this.sessionId = ''})
     : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
+}
+
+/// Snapshot of the active session's Studio tabs (see
+/// [AgentService.studioTabs]). Buffers compare by identity: a changed map or
+/// content string means something rewrote them.
+@immutable
+class StudioTabsState {
+  const StudioTabsState({
+    required this.openFiles,
+    required this.activePath,
+    required this.buffer,
+    required this.activeContent,
+  });
+
+  final List<String> openFiles;
+  final String? activePath;
+  final Map<String, String> buffer;
+  final String? activeContent;
+
+  @override
+  bool operator ==(Object other) =>
+      other is StudioTabsState &&
+      other.activePath == activePath &&
+      identical(other.buffer, buffer) &&
+      identical(other.activeContent, activeContent) &&
+      listEquals(other.openFiles, openFiles);
+
+  @override
+  int get hashCode => Object.hash(
+    activePath,
+    identityHashCode(buffer),
+    identityHashCode(activeContent),
+    Object.hashAll(openFiles),
+  );
+}
+
+/// Narrow browser listenable (see [AgentService.browserTabsListenable]).
+/// Re-checks a small signature of the browser state on each [AgentService]
+/// notification while it has listeners, and notifies only when it changed.
+class BrowserTabsListenable extends ChangeNotifier {
+  BrowserTabsListenable._(this._agent);
+
+  final AgentService _agent;
+  List<Object?>? _signature;
+
+  @override
+  void addListener(VoidCallback listener) {
+    if (!hasListeners) _signature = _agent._browserSignature();
+    super.addListener(listener);
+  }
+
+  void _check() {
+    if (!hasListeners) return;
+    final next = _agent._browserSignature();
+    if (_signature != null && listEquals(next, _signature)) return;
+    _signature = next;
+    notifyListeners();
+  }
+}
+
+class _BrowserMemoryObserver with WidgetsBindingObserver {
+  _BrowserMemoryObserver(this.onPressure);
+
+  final VoidCallback onPressure;
+
+  @override
+  void didHaveMemoryPressure() => onPressure();
 }
 
 /// ═══════════════════════════════════════════════════════════════════
@@ -898,11 +969,16 @@ class AgentService extends ChangeNotifier {
     // hook_service import (circular).
     AppState.I.onSessionDeleted = (sessionId) {
       dropSessionRun(sessionId);
+      _busyNotifiers.remove(sessionId);
+      _liveTicksBySession.remove(sessionId);
       SkillService.I.dropSession(sessionId);
       // Drop the session's browser bucket AND its native profile (cookie jar +
       // web storage). Without this, deleting a chat would leave a logged-in
       // cookie jar behind on disk that a later session id could reuse.
-      _sessionBrowsers.remove(sessionId);
+      for (final tab in _sessionBrowsers.remove(sessionId) ?? <BrowserTab>[]) {
+        _webViewPool.forget(tab);
+        _releaseTabWebView(tab);
+      }
       _sessionActiveTab.remove(sessionId);
       unawaited(_dropSessionBrowserPrefs(sessionId));
       unawaited(
@@ -971,6 +1047,10 @@ class AgentService extends ChangeNotifier {
     //    (that method PERFORMS the stop).
     HookService.I.userStopChecker = (sid) =>
         _runs[sid]?.cancelRequested ?? false;
+    // Run state also changes on paths that only refresh AppState; keep the
+    // per-session busy notifiers in step with those too.
+    AppState.I.addListener(_syncBusyNotifiers);
+    AppState.I.addListener(_syncStudioTabs);
   }
 
   @override
@@ -2865,6 +2945,91 @@ class AgentService extends ChangeNotifier {
 
   bool browserBusy = false; // true while an agent browser tool is running
 
+  /// Fires only when something the browser UI shows changed (tab list,
+  /// active tab, url/title/loading/progress, held popups, agent activity),
+  /// not on every [AgentService] notification.
+  late final BrowserTabsListenable browserTabsListenable =
+      BrowserTabsListenable._(this);
+
+  /// What [BrowserTabsListenable] compares between notifications.
+  List<Object?> _browserSignature() {
+    final tabs = browserTabs;
+    return <Object?>[
+      _browserKey(),
+      activeTabIndex,
+      browserBusy,
+      busy,
+      for (final t in tabs) ...[
+        t.id,
+        t.url,
+        t.title,
+        t.loading,
+        t.progress,
+        t.desktopMode,
+        t.localPreviewPath,
+        t.popupRequests.length,
+        t.controller,
+      ],
+    ];
+  }
+
+  /// Tabs per session. Opening one more drops the oldest inactive tab.
+  static const maxTabsPerSession = 10;
+
+  /// Tabs that keep a live WebView: at most three, see [LruWebViewPool].
+  late final LruWebViewPool<BrowserTab> _webViewPool =
+      LruWebViewPool<BrowserTab>(maxLive: 3, release: _releaseTabWebView);
+  _BrowserMemoryObserver? _browserMemoryObserver;
+
+  /// Tabs currently holding a live WebView, least recently used first.
+  @visibleForTesting
+  List<BrowserTab> get liveWebViewTabsForTest => _webViewPool.live;
+
+  /// Tabs that must keep their WebView: the active tab on screen and the
+  /// active tab of every session with a run in flight (agent tools drive the
+  /// active tab).
+  Set<BrowserTab> _pinnedBrowserTabs() {
+    final pinned = <BrowserTab>{};
+    final current = _browserKey();
+    _sessionBrowsers.forEach((key, tabs) {
+      if (tabs.isEmpty) return;
+      if (key != current && !busyFor(key)) return;
+      final index = _sessionActiveTab[key] ?? 0;
+      if (index >= 0 && index < tabs.length) pinned.add(tabs[index]);
+    });
+    return pinned;
+  }
+
+  /// Drops [tab]'s WebView but keeps its url/title, so the next
+  /// [controllerForTab] recreates it and reloads the page. The old view is
+  /// detached from the tab first and then navigated to about:blank so its
+  /// page memory is freed without its callbacks touching the tab.
+  void _releaseTabWebView(BrowserTab tab) {
+    final controller = tab.controller;
+    if (controller == null) return;
+    tab.controller = null;
+    tab.fileSelectorRegistration = null;
+    tab.loadedOnce = false;
+    tab.profileBound = false;
+    tab.loading = false;
+    tab.progress = 0;
+    unawaited(() async {
+      try {
+        await controller.setNavigationDelegate(NavigationDelegate());
+        await controller.loadRequest(Uri.parse('about:blank'));
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
+    }());
+  }
+
+  /// [WidgetsBindingObserver.didHaveMemoryPressure]: keep only the WebViews
+  /// that are pinned (on screen or agent-driven).
+  void _onBrowserMemoryPressure() {
+    _webViewPool.releaseAllExcept(_pinnedBrowserTabs());
+    notifyListeners();
+  }
+
   /// Browser bucket key for the current execution context.
   ///
   /// Inside a run this is the RUNNING session (carried in the run Zone) so a
@@ -2901,6 +3066,15 @@ class AgentService extends ChangeNotifier {
     final key = _browserKey();
     final tabs = _browserBucketFor(key);
     final tab = BrowserTab(url: url, sessionId: key);
+    // Tab cap: drop the oldest tab that is not the active one.
+    while (tabs.length >= maxTabsPerSession) {
+      final active = activeTabIndex;
+      final drop = active == 0 && tabs.length > 1 ? 1 : 0;
+      final removed = tabs.removeAt(drop);
+      _webViewPool.forget(removed);
+      _releaseTabWebView(removed);
+      if (active > drop) activeTabIndex = active - 1;
+    }
     tabs.add(tab);
     activeTabIndex = tabs.length - 1;
     return tab;
@@ -3516,7 +3690,9 @@ class AgentService extends ChangeNotifier {
   void closeBrowserTab(int index) {
     final tabs = browserTabs;
     if (index < 0 || index >= tabs.length) return;
-    tabs.removeAt(index);
+    final removed = tabs.removeAt(index);
+    _webViewPool.forget(removed);
+    _releaseTabWebView(removed);
     if (tabs.isEmpty) {
       _newTabInternal(_defaultBrowserUrl);
     } else if (activeTabIndex >= tabs.length) {
@@ -4472,6 +4648,14 @@ if (!window.__ovidBlankHooked) {
               Diag.swallow('agent_service', e);
             }
           },
+          // SPA navigations (pushState) change the URL and history without a
+          // page load; publish them so the omnibar and back/forward follow.
+          onUrlChange: (change) {
+            final url = change.url;
+            if (url == null || url == tab.url) return;
+            tab.url = url;
+            notifyListeners();
+          },
           onWebResourceError: (_) {
             tab.loading = false;
             tab.networkLog.add((
@@ -4676,6 +4860,12 @@ if (!window.__ovidBlankHooked) {
         _emit('err', 'page permission handler failed: $error');
       }
     }
+    _webViewPool.touch(tab, pinned: _pinnedBrowserTabs());
+    if (_browserMemoryObserver == null) {
+      final observer = _BrowserMemoryObserver(_onBrowserMemoryPressure);
+      _browserMemoryObserver = observer;
+      WidgetsBinding.instance.addObserver(observer);
+    }
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
       // Everything that must happen before the first navigation — the profile
@@ -4848,6 +5038,44 @@ if (!window.__ovidBlankHooked) {
 
   /// Open-file tab list — scoped to the ACTIVE session.
   List<String> get studioOpenFiles => _studio.openFiles;
+
+  ValueNotifier<StudioTabsState>? _studioTabs;
+
+  /// The Studio tab strip / editor view of the active session: open tabs,
+  /// active path, the buffer map and the active buffer's content. Notifies
+  /// only when one of those changes, so Studio widgets no longer rebuild on
+  /// every [AgentService] notification. Always computed for the UI's
+  /// session, even when a background run triggers the notification.
+  ValueListenable<StudioTabsState> get studioTabs =>
+      _studioTabs ??= ValueNotifier<StudioTabsState>(_computeStudioTabs());
+
+  StudioTabsState _computeStudioTabs() => Zone.root.run(() {
+    final studio = _studio;
+    final active = studio.activeFilePath;
+    return StudioTabsState(
+      openFiles: List<String>.unmodifiable(studio.openFiles),
+      activePath: active,
+      buffer: studio.fileBuffer,
+      activeContent: active == null ? null : studio.fileBuffer[active],
+    );
+  });
+
+  void _syncStudioTabs() {
+    final notifier = _studioTabs;
+    if (notifier == null) return;
+    final next = _computeStudioTabs();
+    if (next != notifier.value) notifier.value = next;
+  }
+
+  /// Re-reads the Studio state now (publishing a change to [studioTabs]
+  /// listeners) and returns it. For callers reacting to a non-agent
+  /// notification, e.g. a session switch in [AppState].
+  StudioTabsState syncStudioTabs() {
+    final notifier = _studioTabs;
+    if (notifier == null) return studioTabs.value;
+    _syncStudioTabs();
+    return notifier.value;
+  }
 
   bool get _ownsRepoCache =>
       (RepoCache.I.boundSessionId == null ||
@@ -5754,6 +5982,31 @@ user which one instead of assuming this one.''';
   /// makes session B blink or show a wrong stop/send button.  This was the
   /// "both sessions blinking + old session shows send" bug.
   bool busyFor(String sessionId) => _runs[sessionId]?.activeRunId != null;
+
+  /// Per-session busy flags for list rows. Each notifier only fires when its
+  /// own session's [busyFor] flips, so a sidebar tile no longer rebuilds on
+  /// every [AgentService] notification (one per streamed event).
+  final Map<String, ValueNotifier<bool>> _busyNotifiers = {};
+
+  /// A listenable that tracks [busyFor] for [sessionId]. Synced on every
+  /// [notifyListeners] and on every [AppState] refresh.
+  ValueListenable<bool> busyListenable(String sessionId) => _busyNotifiers
+      .putIfAbsent(sessionId, () => ValueNotifier<bool>(busyFor(sessionId)));
+
+  void _syncBusyNotifiers() {
+    if (_busyNotifiers.isEmpty) return;
+    for (final entry in _busyNotifiers.entries) {
+      entry.value.value = busyFor(entry.key);
+    }
+  }
+
+  @override
+  void notifyListeners() {
+    _syncBusyNotifiers();
+    _syncStudioTabs();
+    super.notifyListeners();
+    browserTabsListenable._check();
+  }
 
   /// Live status line for [sessionId] ("retrying in 9s…", "running npm test").
   /// Null when idle or when nothing has been reported yet.
@@ -12441,15 +12694,22 @@ ${await _agentsMdBlock()}
     String? reportedModel,
     Map<String, dynamic>? usage,
   }) async {
-    unawaited(attempt.complete(
-      outcome: outcome,
-      reportedModel: reportedModel,
-      usage: usage,
-    ).then<void>((_) {
-      if (!attempt.captureResult.captured) {
-        _emit('think', 'usage accounting incomplete (storage unavailable)');
-      }
-    }));
+    unawaited(
+      attempt
+          .complete(
+            outcome: outcome,
+            reportedModel: reportedModel,
+            usage: usage,
+          )
+          .then<void>((_) {
+            if (!attempt.captureResult.captured) {
+              _emit(
+                'think',
+                'usage accounting incomplete (storage unavailable)',
+              );
+            }
+          }),
+    );
   }
 
   void _captureUsageUpdate(
@@ -12873,6 +13133,9 @@ ${await _agentsMdBlock()}
     );
     s.messages.add(_liveMsg!);
     _liveSession = s;
+    // A new row changes the transcript structure: one full refresh here, then
+    // per-token ticks only repaint this row (see [liveBubbleTicks]).
+    AppState.I.refresh();
   }
 
   /// Coalesces stream-driven UI refreshes.
@@ -12886,6 +13149,27 @@ ${await _agentsMdBlock()}
   /// always painted.
   Timer? _streamRefreshTimer;
   bool _streamRefreshPending = false;
+
+  /// Ticks once per throttled stream publication. Only the live tail bubble
+  /// (and transcript views) listen to it, so a streaming token no longer
+  /// rebuilds every widget listening to [AppState]. The end-of-turn flush
+  /// still calls `AppState.I.refresh()` so everything else settles once.
+  final ValueNotifier<int> liveBubbleTicks = ValueNotifier<int>(0);
+
+  /// [liveBubbleTicks] scoped to one session, for views of a single
+  /// transcript (subagent screen) that must ignore other sessions' streams.
+  final Map<String, ValueNotifier<int>> _liveTicksBySession = {};
+
+  ValueListenable<int> liveBubbleTicksFor(String sessionId) =>
+      _liveTicksBySession.putIfAbsent(sessionId, () => ValueNotifier<int>(0));
+
+  /// Test seam: publish one live-bubble tick for [sessionId].
+  @visibleForTesting
+  void debugTickLiveBubbleForTest(String sessionId) {
+    liveBubbleTicks.value++;
+    _liveTicksBySession[sessionId]?.value++;
+  }
+
   int _streamPublicationCount = 0;
   static const _streamRefreshInterval = Duration(milliseconds: 16);
 
@@ -12911,19 +13195,35 @@ ${await _agentsMdBlock()}
     _streamPublicationCount++;
   }
 
+  /// The transcript only rebuilds its tail row on [liveBubbleTicks]. When the
+  /// live bubble is not the last message, fall back to a full refresh.
+  void _notifyLiveBubble() {
+    final session = _liveSession;
+    final message = _liveMsg;
+    if (session != null &&
+        message != null &&
+        session.messages.isNotEmpty &&
+        identical(session.messages.last, message)) {
+      liveBubbleTicks.value++;
+      _liveTicksBySession[session.id]?.value++;
+    } else {
+      AppState.I.refresh();
+    }
+  }
+
   void _refreshStreamThrottled() {
     if (_streamRefreshTimer != null) {
       _streamRefreshPending = true;
       return;
     }
     _publishLiveBubble();
-    AppState.I.refresh();
+    _notifyLiveBubble();
     _streamRefreshTimer = Timer(_streamRefreshInterval, () {
       _streamRefreshTimer = null;
       if (!_streamRefreshPending) return;
       _streamRefreshPending = false;
       _publishLiveBubble();
-      AppState.I.refresh();
+      _notifyLiveBubble();
     });
   }
 

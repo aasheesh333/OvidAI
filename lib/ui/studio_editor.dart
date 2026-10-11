@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -87,11 +88,13 @@ class StudioEditorTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AgentService.I,
-      builder: (context, _) {
-        final tabs = AgentService.I.studioOpenFiles;
-        final active = AgentService.I.activeFilePath;
+    // Only tab-list / active-tab changes rebuild the strip, not every agent
+    // notification.
+    return ValueListenableBuilder<StudioTabsState>(
+      valueListenable: AgentService.I.studioTabs,
+      builder: (context, studio, _) {
+        final tabs = studio.openFiles;
+        final active = studio.activePath;
         // A horizontal ListView needs a bounded cross axis, and the strip has
         // to grow with the OS text scale rather than clip it — hence a computed
         // height instead of the old fixed 38px. The selected tab's 2px accent
@@ -242,10 +245,33 @@ class _StudioEditorState extends State<StudioEditor> {
 
   TextEditingController? get _ctrl => _buffers[_boundKey];
 
+  /// What [_bind] reads, as of the last bind. Notifications that change none
+  /// of it (streamed tokens, tool events, unrelated refreshes) skip the bind,
+  /// the find recompute and the rebuild entirely.
+  List<Object?>? _bindInputs;
+
+  List<Object?> _currentBindInputs(StudioTabsState studio) {
+    final cache = RepoCache.I;
+    final session = AppState.I.activeSession;
+    final path = studio.activePath;
+    return [
+      studio,
+      path == null ? null : cache.files[path],
+      cache.boundSessionId,
+      cache.workspaceFolder,
+      cache.repoFull,
+      cache.defaultBranch,
+      session?.id,
+      session?.workspaceFolder,
+      session?.repo,
+      session?.branch,
+    ];
+  }
+
   @override
   void initState() {
     super.initState();
-    AgentService.I.addListener(_onServiceChanged);
+    AgentService.I.studioTabs.addListener(_onServiceChanged);
     RepoCache.I.addListener(_onServiceChanged);
     AppState.I.addListener(_onServiceChanged);
     _findCtrl.addListener(_onQueryChanged);
@@ -255,7 +281,7 @@ class _StudioEditorState extends State<StudioEditor> {
 
   @override
   void dispose() {
-    AgentService.I.removeListener(_onServiceChanged);
+    AgentService.I.studioTabs.removeListener(_onServiceChanged);
     RepoCache.I.removeListener(_onServiceChanged);
     AppState.I.removeListener(_onServiceChanged);
     _findCtrl.removeListener(_onQueryChanged);
@@ -287,6 +313,11 @@ class _StudioEditorState extends State<StudioEditor> {
 
   void _onServiceChanged() {
     if (!mounted) return;
+    // May publish a studioTabs change (and re-enter here) for a session
+    // switch that only notified AppState; the input check below dedupes.
+    final studio = AgentService.I.syncStudioTabs();
+    final inputs = _currentBindInputs(studio);
+    if (_bindInputs != null && listEquals(inputs, _bindInputs)) return;
     _bind(notify: true);
   }
 
@@ -313,8 +344,9 @@ class _StudioEditorState extends State<StudioEditor> {
   /// Never called from `build` — that was the source of the "controller mutated
   /// during build" and "caret dumped at EOF" pair of bugs.
   void _bind({required bool notify}) {
-    final a = AgentService.I;
-    final path = a.activeFilePath;
+    final studio = AgentService.I.studioTabs.value;
+    _bindInputs = _currentBindInputs(studio);
+    final path = studio.activePath;
 
     if (path == null) {
       _boundPath = null;
@@ -323,8 +355,8 @@ class _StudioEditorState extends State<StudioEditor> {
       return;
     }
 
-    var content = a.fileBuffer[path] ?? RepoCache.I.read(path) ?? '';
-    final key = (a.fileBuffer, path);
+    var content = studio.buffer[path] ?? RepoCache.I.read(path) ?? '';
+    final key = (studio.buffer, path);
     final switched = _boundKey != key;
     _boundPath = path;
     _boundKey = key;
@@ -534,9 +566,10 @@ class _StudioEditorState extends State<StudioEditor> {
   // ── layout ──────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AgentService.I,
-      builder: (context, _) {
+    // No AnimatedBuilder here: [_bind] already refreshes this state when the
+    // bound file changes, and every other notification is filtered out.
+    return Builder(
+      builder: (context) {
         final path = _boundPath;
         final ctrl = _ctrl;
         if (path == null || ctrl == null) return const _NoFileView();
@@ -885,19 +918,47 @@ class _StudioEditorState extends State<StudioEditor> {
     );
   }
 
+  // Line-start index of the text last measured. Rebuilt only when the text
+  // object changes; a caret move or any other rebuild is a binary search.
+  String? _lineIndexText;
+  List<int> _lineStarts = const [0];
+
   _EditorPosition _positionOf(TextEditingController ctrl) {
     final text = ctrl.text;
+    if (!identical(text, _lineIndexText)) {
+      assert(() {
+        StudioEditorDebug.lineIndexBuilds++;
+        return true;
+      }());
+      final starts = <int>[0];
+      for (var i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) {
+        starts.add(i + 1);
+      }
+      _lineIndexText = text;
+      _lineStarts = starts;
+    }
     final offset = ctrl.selection.isValid
         ? ctrl.selection.start.clamp(0, text.length)
         : 0;
-    final before = text.substring(0, offset);
-    final lastBreak = before.lastIndexOf('\n');
-    return _EditorPosition(
-      '\n'.allMatches(before).length + 1,
-      offset - lastBreak,
-      '\n'.allMatches(text).length + 1,
-    );
+    // Last line start <= offset.
+    var lo = 0, hi = _lineStarts.length - 1;
+    while (lo < hi) {
+      final mid = (lo + hi + 1) >> 1;
+      if (_lineStarts[mid] <= offset) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return _EditorPosition(lo + 1, offset - _lineStarts[lo] + 1, _lineStarts.length);
   }
+}
+
+/// Editor work counters for rebuild-scope tests (debug builds only).
+@visibleForTesting
+abstract final class StudioEditorDebug {
+  /// Full-text line index scans behind the line/column readout.
+  static int lineIndexBuilds = 0;
 }
 
 /// Case-insensitive, non-overlapping match scan.

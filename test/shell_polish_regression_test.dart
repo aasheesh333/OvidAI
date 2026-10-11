@@ -52,6 +52,7 @@ void main() {
     for (final width in [840.0, 839.0, 1024.0, 500.0]) {
       tester.view.physicalSize = Size(width, 900);
       app.lastSessionPersistFailed = !app.lastSessionPersistFailed;
+      app.refresh(); // production flips always notify
       await tester.pump(const Duration(seconds: 3));
       await tester.pump();
       final current = tester.widget<TextField>(composer);
@@ -70,6 +71,7 @@ void main() {
     final warning = find.textContaining("Chat history isn't being saved");
     expect(warning, findsNothing);
     app.lastSessionPersistFailed = true;
+    app.refresh(); // production flips always notify
     await tester.pump(const Duration(seconds: 3));
     final rect = tester.getRect(warning);
     expect(rect.top, greaterThanOrEqualTo(32));
@@ -77,6 +79,7 @@ void main() {
     expect(rect.right, lessThanOrEqualTo(839 - 24));
     expect(tester.getSemantics(warning).flagsCollection.isLiveRegion, isTrue);
     app.lastSessionPersistFailed = false;
+    app.refresh(); // production flips always notify
     await tester.pump(const Duration(seconds: 3));
     expect(warning, findsNothing);
     expect(tester.takeException(), isNull);
