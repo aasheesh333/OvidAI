@@ -16,6 +16,12 @@ const int collaborationSchemaVersion = 1;
 /// Hard cap on active members, including the owner.
 const int maxActiveMembers = 10;
 
+/// Server-stamped author names are at most this many characters.
+const int maxDisplayNameLength = 64;
+
+/// Roles a shared chat message can carry.
+enum MessageRole { user, assistant }
+
 /// 256 KiB canonical UTF-8 bytes per event.
 const int maxEventCanonicalBytes = 256 * 1024;
 
@@ -239,9 +245,12 @@ final _timestampPattern = RegExp(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9
 final _controlChars = RegExp(r'[\x00-\x1F\x7F]');
 
 class _Closed {
-  _Closed(Object? raw, Set<String> allowed) : _map = _asMap(raw) {
+  _Closed(Object? raw, Set<String> allowed, {Set<String> optional = const {}})
+    : _map = _asMap(raw) {
     for (final key in _map.keys) {
-      if (!allowed.contains(key)) _rejectUnknownKey(key);
+      if (!allowed.contains(key) && !optional.contains(key)) {
+        _rejectUnknownKey(key);
+      }
     }
     for (final key in allowed) {
       if (!_map.containsKey(key)) _reject(CollaborationWireReason.missingField);
@@ -262,6 +271,18 @@ class _Closed {
   }
 
   Object? raw(String key) => _map[key];
+
+  bool has(String key) => _map.containsKey(key);
+
+  /// Optional server-stamped author label (verified identity, max 64).
+  String? displayName(String key) {
+    if (!_map.containsKey(key)) return null;
+    final v = label(key);
+    if (_unicodeLength(v) > maxDisplayNameLength) {
+      _reject(CollaborationWireReason.invalidValue);
+    }
+    return v;
+  }
 
   String string(String key) {
     final v = _map[key];
@@ -388,14 +409,24 @@ class CollaborationSession {
 }
 
 class Member {
-  const Member({required this.participantId, required this.role, required this.status});
+  const Member({
+    required this.participantId,
+    required this.role,
+    required this.status,
+    this.displayName,
+  });
 
   factory Member.fromWire(Map<String, Object?> json) {
-    final r = _Closed(json, const {'participantId', 'role', 'status'});
+    final r = _Closed(
+      json,
+      const {'participantId', 'role', 'status'},
+      optional: const {'displayName'},
+    );
     return Member(
       participantId: r.id('participantId'),
       role: r.enumValue('role', MemberRole.values),
       status: r.enumValue('status', MemberStatus.values),
+      displayName: r.displayName('displayName'),
     );
   }
 
@@ -403,15 +434,23 @@ class Member {
   final MemberRole role;
   final MemberStatus status;
 
+  /// Server-derived author label (verified account name or email prefix).
+  final String? displayName;
+
   bool get isActive => status == MemberStatus.active;
 
-  Member withStatus(MemberStatus next) =>
-      Member(participantId: participantId, role: role, status: next);
+  Member withStatus(MemberStatus next) => Member(
+    participantId: participantId,
+    role: role,
+    status: next,
+    displayName: displayName,
+  );
 
   Map<String, Object?> toWire() => {
     'participantId': participantId,
     'role': role.name,
     'status': status.name,
+    if (displayName != null) 'displayName': displayName,
   };
 
   @override
@@ -419,10 +458,11 @@ class Member {
       other is Member &&
       other.participantId == participantId &&
       other.role == role &&
-      other.status == status;
+      other.status == status &&
+      other.displayName == displayName;
 
   @override
-  int get hashCode => Object.hash(participantId, role, status);
+  int get hashCode => Object.hash(participantId, role, status, displayName);
 }
 
 // ---------------------------------------------------------------------------
@@ -563,16 +603,40 @@ sealed class CollaborationPayload {
 }
 
 /// Private message text, preserved verbatim (no redaction, no screening).
+///
+/// [role], [model] and [replyTo] are optional so legacy `{text}` payloads
+/// stay valid. A null [role] renders as a plain participant message.
 class MessagePayload extends CollaborationPayload {
-  const MessagePayload(this.text);
+  const MessagePayload(this.text, {this.role, this.model, this.replyTo});
 
-  factory MessagePayload._fromWire(Object? json) =>
-      MessagePayload(_Closed(json, const {'text'}).string('text'));
+  factory MessagePayload._fromWire(Object? json) {
+    final r = _Closed(
+      json,
+      const {'text'},
+      optional: const {'role', 'model', 'replyTo'},
+    );
+    return MessagePayload(
+      r.string('text'),
+      role: r.has('role') ? r.enumValue('role', MessageRole.values) : null,
+      model: r.has('model') ? r.nullableLabel('model') : null,
+      replyTo: r.has('replyTo') && r.raw('replyTo') != null
+          ? r.id('replyTo')
+          : null,
+    );
+  }
 
   final String text;
+  final MessageRole? role;
+  final String? model;
+  final String? replyTo;
 
   @override
-  Map<String, Object?> toWire() => {'text': text};
+  Map<String, Object?> toWire() => {
+    'text': text,
+    if (role != null) 'role': role!.name,
+    if (model != null) 'model': model,
+    if (replyTo != null) 'replyTo': replyTo,
+  };
 }
 
 class ModelStatusPayload extends CollaborationPayload {
@@ -694,6 +758,7 @@ class CollaborationEvent {
     required this.type,
     required this.createdAt,
     required this.payload,
+    this.senderDisplayName,
   });
 
   static const _fields = {
@@ -709,7 +774,7 @@ class CollaborationEvent {
 
   /// Strictly parses a v1 server envelope. Throws [CollaborationWireException].
   factory CollaborationEvent.fromWire(Map<String, Object?> json) {
-    final r = _Closed(json, _fields);
+    final r = _Closed(json, _fields, optional: const {'senderDisplayName'});
     r.schemaVersion();
     final sequence = r.integer('eventSequence');
     if (sequence < 1) _reject(CollaborationWireReason.invalidValue);
@@ -722,6 +787,7 @@ class CollaborationEvent {
       type: type,
       createdAt: r.timestamp('createdAt'),
       payload: CollaborationPayload.fromWire(type, r.raw('payload')),
+      senderDisplayName: r.displayName('senderDisplayName'),
     );
     try {
       if (_canonicalUtf8Bytes(event.toWire()).length > maxEventCanonicalBytes) {
@@ -752,6 +818,9 @@ class CollaborationEvent {
   final String createdAt;
   final CollaborationPayload payload;
 
+  /// Server-stamped from the sender's verified identity; never client-set.
+  final String? senderDisplayName;
+
   Map<String, Object?> toWire() => {
     'schemaVersion': collaborationSchemaVersion,
     'eventId': clientEventId,
@@ -761,5 +830,6 @@ class CollaborationEvent {
     'kind': type.name,
     'createdAt': createdAt,
     'payload': payload.toWire(),
+    if (senderDisplayName != null) 'senderDisplayName': senderDisplayName,
   };
 }

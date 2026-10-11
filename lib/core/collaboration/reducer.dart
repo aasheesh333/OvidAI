@@ -40,13 +40,29 @@ class CollaborationMessage {
     required this.author,
     required this.createdAt,
     required this.text,
+    this.role,
+    this.model,
+    this.replyTo,
+    this.authorName,
   });
 
   final int sequence;
   final String clientEventId;
+
+  /// Participant id of the sender (for AI replies: whose model answered).
   final String author;
   final String createdAt;
   final String text;
+  final MessageRole? role;
+
+  /// Display label of the model that produced an assistant reply.
+  final String? model;
+  final String? replyTo;
+
+  /// Server-stamped name at send time; prefer [CollaborationState.nameOf].
+  final String? authorName;
+
+  bool get isAssistant => role == MessageRole.assistant;
 }
 
 /// Immutable client projection of a collaboration session.
@@ -66,7 +82,9 @@ class CollaborationState {
     required this.closeReason,
     required this.capacityViolations,
     required this.lastOutcome,
-  }) : members = UnmodifiableMapView(Map.of(members)),
+    Map<String, String> names = const {},
+  }) : names = UnmodifiableMapView(Map.of(names)),
+       members = UnmodifiableMapView(Map.of(members)),
        messages = List.unmodifiable(messages),
        modelStates = UnmodifiableMapView(Map.of(modelStates)),
        presence = UnmodifiableMapView(Map.of(presence)),
@@ -84,7 +102,9 @@ class CollaborationState {
   }) {
     if (lastSequence < 0) throw ArgumentError.value(lastSequence, 'lastSequence');
     final byId = <String, Member>{};
+    final names = <String, String>{};
     for (final m in members) {
+      if (m.displayName != null) names[m.participantId] = m.displayName!;
       if (byId.containsKey(m.participantId)) throw ArgumentError('duplicate member');
       byId[m.participantId] = m;
     }
@@ -118,8 +138,17 @@ class CollaborationState {
           : (closed ? CloseReason.sessionClosed : null),
       capacityViolations: 0,
       lastOutcome: ReduceOutcome.bootstrapped,
+      names: names,
     );
   }
+
+  /// Latest server-stamped display name per participant id.
+  final Map<String, String> names;
+
+  /// Author label for UI: verified name, else a neutral role-based fallback.
+  String nameOf(String participantId) =>
+      names[participantId] ??
+      (participantId == session.ownerParticipantId ? 'Owner' : 'Member');
 
   final CollaborationSession session;
   final Map<String, Member> members;
@@ -158,6 +187,7 @@ class CollaborationState {
     CollaborationStatus? status,
     CloseReason? closeReason,
     int? capacityViolations,
+    Map<String, String>? names,
     required ReduceOutcome lastOutcome,
   }) => CollaborationState._(
     session: session ?? this.session,
@@ -174,6 +204,7 @@ class CollaborationState {
     closeReason: closeReason ?? this.closeReason,
     capacityViolations: capacityViolations ?? this.capacityViolations,
     lastOutcome: lastOutcome,
+    names: names ?? this.names,
   );
 
   CollaborationState _withOutcome(ReduceOutcome outcome) => _copy(lastOutcome: outcome);
@@ -267,6 +298,16 @@ class CollaborationReducer {
   /// Applies an event whose sequence is exactly `lastSequence + 1`. The
   /// sequence is always consumed, even when the event is ignored/rejected.
   CollaborationState _applyContiguous(CollaborationState s, CollaborationEvent e) {
+    final next = _applyContiguousEvent(s, e);
+    final name = e.senderDisplayName;
+    if (name == null || next.names[e.author] == name) return next;
+    return next._copy(
+      names: {...next.names, e.author: name},
+      lastOutcome: next.lastOutcome,
+    );
+  }
+
+  CollaborationState _applyContiguousEvent(CollaborationState s, CollaborationEvent e) {
     final seq = e.sequence;
     if (s._seenEventIds.contains(e.clientEventId)) {
       return s._copy(lastSequence: seq, lastOutcome: ReduceOutcome.duplicate);
@@ -281,7 +322,7 @@ class CollaborationReducer {
 
     final payload = e.payload;
     switch (payload) {
-      case MessagePayload(:final text):
+      case MessagePayload(:final text, :final role, :final model, :final replyTo):
         if (!authorActive) return consume(ReduceOutcome.ignoredInactiveAuthor);
         return s._copy(
           lastSequence: seq,
@@ -294,6 +335,10 @@ class CollaborationReducer {
               author: e.author,
               createdAt: e.createdAt,
               text: text,
+              role: role,
+              model: model,
+              replyTo: replyTo,
+              authorName: e.senderDisplayName,
             ),
           ],
           lastOutcome: ReduceOutcome.applied,

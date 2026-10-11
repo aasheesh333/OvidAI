@@ -38,11 +38,62 @@ class _Timer implements CollaborationTimer {
   void cancel() => timer.cancel();
 }
 
+/// Runs one AI turn on THIS device's own provider/model/key and returns the
+/// reply text. Injected (AgentService in production) so this owner never
+/// imports an agent runtime; remote events can never invoke it.
+typedef CollaborationTurnRunner =
+    Future<String> Function({
+      required String providerId,
+      required String model,
+      required List<Map<String, dynamic>> messages,
+    });
+
+/// A message copied from the owner's local chat when Collab starts.
+class CollaborationSeedMessage {
+  const CollaborationSeedMessage(this.role, this.text);
+  final MessageRole role;
+  final String text;
+}
+
+/// User-facing reason for a collaboration failure (never echoes tokens).
+String collaborationErrorMessage(Object error) {
+  if (error is CollaborationClientException) {
+    return switch (error.code) {
+      'session_full' => 'This session is full (10/10).',
+      'invite_invalid' || 'invite_not_found' =>
+        'This link was revoked or has expired. Ask the owner for a new link.',
+      'membership_revoked' => 'The owner removed you from this session.',
+      'session_not_found' => 'This live session no longer exists.',
+      'session_closed' => 'The owner ended this live session.',
+      'not_member' => 'You are no longer a member of this session.',
+      'rate_limited' => 'This session is busy. Wait a moment and retry.',
+      'quota_exhausted' => 'This session reached its message limit.',
+      'unauthenticated' || 'credential_unavailable' =>
+        'Sign in again to use live sessions.',
+      'account_deleted' || 'account_deletion_pending' =>
+        'This account is unavailable.',
+      'request_timeout' => 'The request timed out. Check your connection and retry.',
+      _ => 'Live session request failed. Check your connection and retry.',
+    };
+  }
+  if (error is StateError) return error.message;
+  return 'Live session request failed. Check your connection and retry.';
+}
+
 /// Owns the real account-scoped collaboration transport and inert projection.
-/// There is deliberately no AgentService or execution callback in this owner.
+/// Model turns run only through the injected [turnRunner], and only for text
+/// the LOCAL user explicitly sends; remote events never reach it.
 class CollaborationProduction extends ChangeNotifier {
   CollaborationProduction({
-    this.endpoint = const String.fromEnvironment('OVID_COLLABORATION_BASE_URL'),
+    this.endpoint = const String.fromEnvironment(
+      'OVID_COLLABORATION_BASE_URL',
+      defaultValue: 'https://api.ovidsi.com',
+    ),
+    this.publicOrigin = const String.fromEnvironment(
+      'OVID_PUBLIC_SHARE_ORIGIN',
+      defaultValue: 'https://ovidsi.com',
+    ),
+    this.turnRunner,
     required this.rootDirectory,
     required this.accountReady,
     required this.currentUid,
@@ -53,6 +104,8 @@ class CollaborationProduction extends ChangeNotifier {
   }) : httpClientFactory = httpClientFactory ?? http.Client.new;
 
   final String endpoint;
+  final String publicOrigin;
+  final CollaborationTurnRunner? turnRunner;
   final Future<Directory> Function() rootDirectory;
   final bool Function() accountReady;
   final String? Function() currentUid;
@@ -84,6 +137,40 @@ class CollaborationProduction extends ChangeNotifier {
   bool get isOwner =>
       state?.localParticipantId == state?.session.ownerParticipantId &&
       state != null;
+
+  /// Owner's current share link, or null when none/revoked.
+  String? get shareLink {
+    final token = sessionToken;
+    final code = available ? _metadata['linkCode'] as String? : null;
+    final origin = configuredHttpsEndpoint(publicOrigin);
+    if (token == null || code == null || origin == null) return null;
+    return '${origin.toString().replaceFirst(RegExp(r'/+$'), '')}/s/$token/$code';
+  }
+
+  /// Local chat session this live session was started from (owner only).
+  String? get sourceSessionId =>
+      available ? _metadata['sourceSessionId'] as String? : null;
+
+  /// Participant ids whose model is currently producing a reply.
+  Iterable<String> get respondingParticipants =>
+      (state?.modelStates.entries ?? const [])
+          .where(
+            (e) =>
+                e.value.status == ModelExecutionStatus.running ||
+                e.value.status == ModelExecutionStatus.queued,
+          )
+          .map((e) => e.key);
+
+  bool _live = false;
+
+  /// True while the live session screen is visible: long-poll for ~1 s delivery.
+  set live(bool value) {
+    _live = value;
+    _coordinator?.live = value;
+  }
+
+  bool _turnRunning = false;
+  bool get turnRunning => _turnRunning;
   bool _owns(int epoch) => epoch == _epoch && available;
 
   AccountLifecycleDependencies get lifecycle => AccountLifecycleDependencies(
@@ -207,6 +294,274 @@ class CollaborationProduction extends ChangeNotifier {
     _start();
     notifyListeners();
   });
+
+  /// Owner: create a live session from a local chat, copy its recent visible
+  /// messages in as context, and mint a multi-use share link.
+  Future<void> startFromConversation({
+    required String sourceSessionId,
+    required List<CollaborationSeedMessage> seed,
+  }) async {
+    if (sessionToken != null) {
+      if (sourceSessionId == this.sourceSessionId && isOwner) {
+        if (shareLink == null) await newLink();
+        return;
+      }
+      throw StateError(
+        'You are already in a live session. Leave it before starting another.',
+      );
+    }
+    await create();
+    await _serialize(() async {
+      _check();
+      final token = sessionToken;
+      if (token == null) throw StateError('Live session was not created.');
+      _metadata['sourceSessionId'] = sourceSessionId;
+      await _save();
+      final events = <Map<String, Object?>>[
+        _event('presence', const PresencePayload(PresenceState.online)),
+        for (final message in seed.length > maxSeedMessages
+            ? seed.sublist(seed.length - maxSeedMessages)
+            : seed)
+          if (message.text.trim().isNotEmpty)
+            _event('message', MessagePayload(message.text, role: message.role)),
+      ];
+      await _append(token, events);
+    });
+    await newLink();
+  }
+
+  /// Owner: (re)issue the share link. Revokes the previous link first.
+  Future<void> newLink() => _serialize(() async {
+    _check();
+    final token = sessionToken;
+    if (!isOwner || token == null) throw StateError('Owner permission required');
+    final epoch = _epoch;
+    final old = _metadata['linkInviteId'] as String?;
+    if (old != null) {
+      try {
+        await _client!.revokeInvite(token, inviteId: old);
+      } on CollaborationClientException catch (error) {
+        if (error.code != 'invite_not_found') rethrow;
+      }
+    }
+    final key = await _requestKey('link:$token:${old ?? 'first'}');
+    if (!_owns(epoch)) return;
+    final invite = await _client!.createInvite(
+      token,
+      idempotencyKey: key,
+      maxUses: maxCollaborationInviteUses,
+      ttlSeconds: 7 * 86400,
+    );
+    if (!_owns(epoch)) return;
+    _metadata
+      ..remove('request:link:$token:${old ?? 'first'}')
+      ..['linkInviteId'] = invite.inviteId
+      ..['linkCode'] = invite.inviteCode
+      ..['linkExpiresAt'] = invite.expiresAt.toIso8601String();
+    await _save();
+    if (_owns(epoch)) notifyListeners();
+  });
+
+  /// Owner: stop the link admitting anyone new. Members stay.
+  Future<void> revokeLink() => _serialize(() async {
+    _check();
+    final token = sessionToken;
+    final inviteId = _metadata['linkInviteId'] as String?;
+    if (!isOwner || token == null) throw StateError('Owner permission required');
+    final epoch = _epoch;
+    if (inviteId != null) {
+      try {
+        await _client!.revokeInvite(token, inviteId: inviteId);
+      } on CollaborationClientException catch (error) {
+        if (error.code != 'invite_not_found') rethrow;
+      }
+    }
+    if (!_owns(epoch)) return;
+    _metadata
+      ..remove('linkInviteId')
+      ..remove('linkCode')
+      ..remove('linkExpiresAt');
+    await _save();
+    if (_owns(epoch)) notifyListeners();
+  });
+
+  /// Joiner: accept a `/s/<token>/<code>` link. A different current session
+  /// must be left first (the UI confirms that with the user).
+  Future<void> joinLink(String token, String code) async {
+    if (sessionToken == token) return;
+    if (sessionToken != null) {
+      throw StateError(
+        'You are already in a live session. Leave it before joining another.',
+      );
+    }
+    await join(token, code);
+    await _serialize(() async {
+      _check();
+      // Presence stamps this member's verified name for everyone's roster.
+      await _append(token, [
+        _event('presence', const PresencePayload(PresenceState.online)),
+      ]);
+    });
+  }
+
+  /// Sends the local user's prompt, then answers it with THIS user's own
+  /// provider/model/key and publishes the reply. Everyone sees both.
+  Future<void> sendTurn(
+    String text, {
+    required String providerId,
+    required String model,
+    required String modelLabel,
+  }) async {
+    final runner = turnRunner;
+    if (runner == null) throw StateError('Live replies are unavailable in this build.');
+    if (text.trim().isEmpty) throw StateError('Type a message first.');
+    if (_turnRunning) throw StateError('Wait for your current reply to finish.');
+    _turnRunning = true;
+    notifyListeners();
+    try {
+      late String promptId;
+      late List<Map<String, dynamic>> context;
+      await _serialize(() async {
+        _check();
+        final token = _liveToken();
+        final prompt = _event('message', MessagePayload(text, role: MessageRole.user));
+        promptId = prompt['eventId']! as String;
+        await _append(token, [
+          prompt,
+          _event('modelStatus', _status(providerId, model, modelLabel, ModelExecutionStatus.running)),
+        ]);
+        context = _context(state!);
+      });
+      String reply;
+      try {
+        reply = await runner(providerId: providerId, model: model, messages: context);
+      } catch (error) {
+        await _serialize(() async {
+          _check();
+          await _append(_liveToken(), [
+            _event('modelStatus', _status(providerId, model, modelLabel, ModelExecutionStatus.failed)),
+          ]);
+        });
+        rethrow;
+      }
+      await _serialize(() async {
+        _check();
+        await _append(_liveToken(), [
+          _event(
+            'message',
+            MessagePayload(
+              _bounded(reply),
+              role: MessageRole.assistant,
+              model: modelLabel,
+              replyTo: promptId,
+            ),
+          ),
+          _event('modelStatus', _status(providerId, model, modelLabel, ModelExecutionStatus.completed)),
+        ]);
+      });
+    } finally {
+      _turnRunning = false;
+      notifyListeners();
+    }
+  }
+
+  static const maxSeedMessages = 40;
+  static const _maxMessageChars = 60000;
+
+  static String _bounded(String text) => text.length <= _maxMessageChars
+      ? text
+      : '${text.substring(0, _maxMessageChars)}\n\n[Reply truncated for the live session]';
+
+  String _liveToken() {
+    final token = sessionToken;
+    if (token == null ||
+        state == null ||
+        state!.status != projection.CollaborationStatus.live) {
+      throw StateError('This live session is not active.');
+    }
+    return token;
+  }
+
+  ModelStatusPayload _status(
+    String providerId,
+    String model,
+    String label,
+    ModelExecutionStatus status,
+  ) => ModelStatusPayload(
+    providerId: providerId,
+    requestedModel: model,
+    reportedModel: null,
+    displayName: label,
+    streaming: false,
+    status: status,
+  );
+
+  Map<String, Object?> _event(String kind, CollaborationPayload payload) => {
+    'schemaVersion': collaborationSchemaVersion,
+    'eventId': productionId(),
+    'kind': kind,
+    'payload': payload.toWire(),
+  };
+
+  Future<void> _append(String token, List<Map<String, Object?>> events) async {
+    final epoch = _epoch;
+    final store = _store!;
+    final generation = store.sessionGeneration;
+    for (var i = 0; i < events.length; i += maxCollaborationEvents) {
+      final batch = events.sublist(i, min(i + maxCollaborationEvents, events.length));
+      final key = batch.first['eventId']! as String;
+      final result = await _client!.appendEvents(token, events: batch, idempotencyKey: key);
+      if (!_owns(epoch)) return;
+      if (generation != null) {
+        await store.applyAcknowledgement(
+          ownerFence: _uid!,
+          sessionGeneration: generation,
+          page: result.events,
+        );
+      }
+    }
+    if (_owns(epoch)) {
+      _coordinator?.refresh();
+      notifyListeners();
+    }
+  }
+
+  /// Shared transcript as chat turns for the local model. Other people's
+  /// prompts are attributed by name so the model can tell speakers apart.
+  static List<Map<String, dynamic>> contextFor(
+    projection.CollaborationState state, {
+    int maxMessages = 40,
+    int maxChars = 120000,
+  }) {
+    final rows = <Map<String, dynamic>>[];
+    var used = 0;
+    for (final message in state.messages.reversed) {
+      if (rows.length >= maxMessages || used + message.text.length > maxChars) break;
+      used += message.text.length;
+      rows.add(
+        message.isAssistant
+            ? {'role': 'assistant', 'content': message.text}
+            : {
+                'role': 'user',
+                'content': '${state.nameOf(message.author)}: ${message.text}',
+              },
+      );
+    }
+    return [
+      {
+        'role': 'system',
+        'content':
+            'You are an AI assistant inside a shared live chat with several '
+            'people. Each user message starts with the author\'s name. Earlier '
+            'assistant replies may come from other people\'s models. Answer the '
+            'latest user message, addressing its author.',
+      },
+      ...rows.reversed,
+    ];
+  }
+
+  List<Map<String, dynamic>> _context(projection.CollaborationState state) =>
+      contextFor(state);
 
   Future<void> sendMessage(String text) => _serialize(() async {
     _check();
@@ -351,6 +706,7 @@ class CollaborationProduction extends ChangeNotifier {
         unawaited(_serialize(() => _disconnect(epoch, token)).catchError((Object _) {}));
       },
     )..start();
+    _coordinator!.live = _live;
   }
 
   void setForeground(bool value) {

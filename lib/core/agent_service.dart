@@ -11671,6 +11671,7 @@ ${await _agentsMdBlock()}
     _titledSessions.clear();
     titleLlmForTest = null;
     promptLlmForTest = null;
+    collaborationLlmForTest = null;
   }
 
   /// Test seam: replaces the prompt-capability sub-model call (NP5).
@@ -12039,6 +12040,64 @@ ${await _agentsMdBlock()}
     return s.title != 'New chat' &&
         !s.title.endsWith('…') &&
         s.title != AppState.autoTitle(s.messages.first.content);
+  }
+
+  /// Test seam: replaces the collaboration-turn LLM call. Null in production.
+  @visibleForTesting
+  static Future<String?> Function(
+    ProviderConfig provider,
+    String model,
+    List<Map<String, dynamic>> messages,
+  )?
+  collaborationLlmForTest;
+
+  /// Runs ONE live-collaboration turn on THIS device's provider [providerId]
+  /// and [model], using this user's own key (never another participant's).
+  ///
+  /// No tools, no agent loop, nothing streamed into any local transcript:
+  /// [messages] is the shared session context already shaped as chat turns.
+  /// Returns the reply text, or throws [StateError] with a user-facing reason.
+  Future<String> completeCollaborationTurn({
+    required String providerId,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+  }) async {
+    final p = AppState.I.providerById(providerId);
+    if (p == null || (p.requiresApiKey && !p.hasKey)) {
+      throw StateError('Choose a model with a connected provider to reply.');
+    }
+    final override = collaborationLlmForTest;
+    if (override != null) {
+      final text = await override(p, model, messages);
+      if (text == null || text.trim().isEmpty) {
+        throw StateError('The model returned no reply.');
+      }
+      return text;
+    }
+    final scratch = ChatSession(
+      id: 'collab-${DateTime.now().microsecondsSinceEpoch}',
+      title: 'Live session',
+      model: model,
+      providerId: p.id,
+    );
+    final r = await _callLlm(
+      p,
+      messages,
+      scratch,
+      includeTools: false,
+      streamToTranscript: false,
+      purpose: 'collaboration',
+    );
+    final streamed = r?['content'];
+    if (streamed is String && streamed.trim().isNotEmpty) return streamed;
+    final choices = (r?['choices'] as List?)?.whereType<Map>().toList() ?? [];
+    final content = choices.isEmpty
+        ? null
+        : choices.first['message']?['content'] as String?;
+    if (content == null || content.trim().isEmpty) {
+      throw StateError('The model returned no reply. Check your provider and retry.');
+    }
+    return content;
   }
 
   /// One cheap non-tool LLM call producing a cleaned title, or null on any

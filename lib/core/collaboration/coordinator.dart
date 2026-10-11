@@ -7,6 +7,12 @@ import 'store.dart';
 const collaborationPollCadence = Duration(seconds: 15);
 const collaborationStaleAfter = Duration(seconds: 45);
 
+/// Server hold for live (foreground, on-screen) long polls.
+const collaborationLiveWaitSeconds = 25;
+
+/// Gap between consecutive live long polls.
+const collaborationLiveGap = Duration(milliseconds: 300);
+
 abstract interface class CollaborationTimer {
   void cancel();
 }
@@ -45,6 +51,19 @@ class CollaborationCoordinator {
   CollaborationTimer? _reconnectTimer;
   Duration? reconnectDelay;
   client.CollaborationCursor? cursor;
+
+  /// When true, polls long-poll the server (~1 s delivery) instead of
+  /// sleeping [collaborationPollCadence] between short polls.
+  bool _live = false;
+  bool get live => _live;
+  set live(bool value) {
+    if (_live == value) return;
+    _live = value;
+    if (_started && value && !_busy && _bootstrapped) {
+      _pollTimer?.cancel();
+      unawaited(_poll(_generation));
+    }
+  }
 
   bool get isStale => _stale;
 
@@ -157,7 +176,7 @@ class CollaborationCoordinator {
     if (!_valid(generation) || _busy) return;
     _busy = true;
     try {
-      await _replay(generation);
+      await _replay(generation, wait: _live);
       if (_valid(generation)) {
         _failures = 0;
         reconnectDelay = null;
@@ -200,11 +219,16 @@ class CollaborationCoordinator {
     onTerminal?.call(error);
   }
 
-  Future<void> _replay(int generation) async {
+  Future<void> _replay(int generation, {bool wait = false}) async {
     var pages = 0;
     var more = true;
     while (more && pages++ < 4) {
-      final page = await _client.replay(_sessionToken, cursor: cursor);
+      final page = await _client.replay(
+        _sessionToken,
+        cursor: cursor,
+        // Only an up-to-date first page may wait; catch-up pages never hold.
+        waitSeconds: wait && pages == 1 ? collaborationLiveWaitSeconds : 0,
+      );
       if (!_valid(generation)) return;
       final applied = await _store.applyPage(
         ownerFence: _accountId,
@@ -222,7 +246,8 @@ class CollaborationCoordinator {
 
   void _schedulePoll(int generation) {
     _pollTimer?.cancel();
-    _pollTimer = scheduler.schedule(collaborationPollCadence, () {
+    _pollTimer = scheduler.schedule(
+        _live ? collaborationLiveGap : collaborationPollCadence, () {
       unawaited(_poll(generation));
     });
   }
