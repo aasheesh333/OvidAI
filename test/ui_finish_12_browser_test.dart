@@ -152,7 +152,7 @@ void main() {
         await tester.tap(secondLabel);
         await tester.pump();
         expect(AgentService.I.activeTabIndex, 1);
-        expect(tester.widget<TextField>(field).controller!.text, 'Second research page');
+        expect(tester.widget<TextField>(field).controller!.text, 'second.test');
         await tester.tap(field);
         await tester.pump();
         expect(tester.widget<TextField>(field).controller!.text, 'https://second.test/page');
@@ -169,7 +169,8 @@ void main() {
         await tester.tap(secondClose);
         await tester.pump();
         expect(AgentService.I.browserTabs, [first]);
-        expect(tester.widget<TextField>(field).controller!.text, 'First research page');
+        // The omnibar shows where the page is, never its <title> (F-028).
+        expect(tester.widget<TextField>(field).controller!.text, 'example.test');
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());
       });

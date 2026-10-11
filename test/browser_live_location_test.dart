@@ -31,7 +31,7 @@ void main() {
     AppState.resetTestInstance();
   });
 
-  testWidgets('omnibar shows title until tapped, then reveals live URL', (
+  testWidgets('omnibar shows host until tapped, then reveals live URL', (
     tester,
   ) async {
     final tab = BrowserTab(url: 'https://example.test/live')
@@ -45,7 +45,8 @@ void main() {
 
     final field = find.byType(TextField);
     expect(field, findsOneWidget);
-    expect(tester.widget<TextField>(field).controller!.text, 'Live page title');
+    // The host, never the page <title> (F-028).
+    expect(tester.widget<TextField>(field).controller!.text, 'example.test');
 
     await tester.tap(field);
     await tester.pump();
