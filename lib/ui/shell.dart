@@ -45,6 +45,118 @@ class _PersistWarningBanner extends StatelessWidget {
   }
 }
 
+/// Shows the one-time telemetry consent dialog (Play policy).
+///
+/// Every `FirebaseService` notification during startup used to call the
+/// prompt again, and nothing guarded an already-open dialog, so two or three
+/// copies could stack. The dialog was also barrier/back-dismissible while a
+/// dismissal recorded nothing, so it came back on every launch. This shows
+/// at most one dialog, stops listening once it has been shown, and only an
+/// explicit choice closes it.
+class TelemetryConsentPrompter {
+  TelemetryConsentPrompter({
+    required this.source,
+    required this.isAvailable,
+    required this.consentAsked,
+    required this.setConsent,
+  });
+
+  /// Production wiring against [FirebaseService.I].
+  factory TelemetryConsentPrompter.firebase() {
+    final fb = FirebaseService.I;
+    return TelemetryConsentPrompter(
+      source: fb,
+      isAvailable: () => fb.isAvailable,
+      consentAsked: () => fb.consentAsked,
+      setConsent: fb.setConsent,
+    );
+  }
+
+  final Listenable source;
+  final bool Function() isAvailable;
+  final bool Function() consentAsked;
+  final Future<void> Function(bool allow) setConsent;
+
+  BuildContext Function()? _context;
+  bool _listening = false;
+  bool _showing = false;
+  bool _shown = false;
+
+  /// Starts watching [source]; asks after the first frame and whenever the
+  /// source becomes available, until the dialog has been shown once.
+  void attach(BuildContext Function() context) {
+    _context = context;
+    if (!_listening) {
+      source.addListener(_onSourceChanged);
+      _listening = true;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => maybeAsk());
+  }
+
+  void detach() {
+    _stopListening();
+    _context = null;
+  }
+
+  void _stopListening() {
+    if (!_listening) return;
+    source.removeListener(_onSourceChanged);
+    _listening = false;
+  }
+
+  void _onSourceChanged() {
+    if (!isAvailable()) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => maybeAsk());
+  }
+
+  void maybeAsk() {
+    final context = _context?.call();
+    if (_showing || _shown || context == null || !context.mounted) return;
+    if (!isAvailable()) return;
+    if (consentAsked()) {
+      _stopListening();
+      return;
+    }
+    _showing = true;
+    _shown = true;
+    _stopListening();
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (d) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text(
+            'Help improve Ovid AI?',
+            style: TextStyle(fontSize: 16),
+          ),
+          content: const Text(
+            'Share anonymous crash reports and usage stats (Firebase Crashlytics & Analytics) to help fix bugs faster. '
+            'This is optional and off unless you allow it. See our privacy policy for details.',
+            style: TextStyle(fontSize: 13, height: 1.5),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                setConsent(false);
+                Navigator.pop(d);
+              },
+              child: const Text('No thanks'),
+            ),
+            FilledButton(
+              onPressed: () {
+                setConsent(true);
+                Navigator.pop(d);
+              },
+              child: const Text('Allow'),
+            ),
+          ],
+        ),
+      ),
+    ).whenComplete(() => _showing = false);
+  }
+}
+
 /// Chat-first shell, DeepSeek-web style. The chat IS the app; everything
 /// else (Studio, Browser, Plugins, Settings) lives behind icons/drawer.
 ///
@@ -67,6 +179,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   /// surfaces a persistent banner instead of failing invisibly.
   Timer? _persistWarnTimer;
   bool _persistWarned = false;
+  final _consent = TelemetryConsentPrompter.firebase();
 
   @override
   void initState() {
@@ -76,9 +189,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     // Foreground-notification wiring (agent keep-alive): registers the
     // notification Stop-button handler.
     unawaited(AgentNotificationService.I.init());
-    FirebaseService.I.addListener(_onFirebaseReady);
     // Ask for telemetry consent once (Play policy) after first frame.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
+    _consent.attach(() => context);
     // First-run welcome notice moved to LoginGate (post-login overlay).
     // Studio first-open owns the sandbox install now (mandatory full
     // install incl. Node.js/Python via openStudio). The shell still kicks
@@ -98,12 +210,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     });
   }
 
-  void _onFirebaseReady() {
-    if (FirebaseService.I.isAvailable) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
-    }
-  }
-
   void _revealControlChat(String sessionId) {
     if (!mounted) return;
     Navigator.of(context).popUntil((route) => route.isFirst);
@@ -116,7 +222,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     }
     _persistWarnTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
-    FirebaseService.I.removeListener(_onFirebaseReady);
+    _consent.detach();
     super.dispose();
   }
 
@@ -168,41 +274,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
         unawaited(McpService.I.disconnectAll());
         break;
     }
-  }
-
-  void _maybeAskConsent() {
-    final fb = FirebaseService.I;
-    if (!fb.isAvailable || fb.consentAsked || !mounted) return;
-    showDialog<void>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text(
-          'Help improve Ovid AI?',
-          style: TextStyle(fontSize: 16),
-        ),
-        content: const Text(
-          'Share anonymous crash reports and usage stats (Firebase Crashlytics & Analytics) to help fix bugs faster. '
-          'This is optional and off unless you allow it. See our privacy policy for details.',
-          style: TextStyle(fontSize: 13, height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              fb.setConsent(false);
-              Navigator.pop(d);
-            },
-            child: const Text('No thanks'),
-          ),
-          FilledButton(
-            onPressed: () {
-              fb.setConsent(true);
-              Navigator.pop(d);
-            },
-            child: const Text('Allow'),
-          ),
-        ],
-      ),
-    );
   }
 
   @override
