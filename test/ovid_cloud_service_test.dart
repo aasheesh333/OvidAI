@@ -86,10 +86,7 @@ void main() {
     cloud.applyPersistedJson({
       'baseUrl': 'https://cloud.dhanuksoftwares.com/v1/models?region=us',
     });
-    expect(
-      cloud.baseUrl,
-      'https://api.ovidsi.com/v1/models?region=us',
-    );
+    expect(cloud.baseUrl, 'https://api.ovidsi.com/v1/models?region=us');
     expect(Uri.parse(cloud.baseUrl).host, 'api.ovidsi.com');
 
     final generic = ProviderConfig(
@@ -120,7 +117,7 @@ void main() {
     final rejected = MockClient((r) async => http.Response('no', 401));
     expect(
       (await OvidCloudService.I.bindOvidCloud(client: rejected)).status,
-      MintStatus.rejected,
+      MintStatus.sessionExpired,
     );
     rejected.close();
 

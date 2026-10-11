@@ -8,7 +8,6 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter/widgets.dart' show Brightness, WidgetsBinding;
-import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -182,7 +181,7 @@ class ProviderConfig {
     final persistedBaseUrl = entry['baseUrl'] as String?;
     if (persistedBaseUrl != null) {
       baseUrl = id == AppState.ovidCloudProviderId
-          ? _normalizeOvidCloudBaseUrl(persistedBaseUrl)
+          ? normalizeOvidCloudBaseUrl(persistedBaseUrl)
           : persistedBaseUrl;
     }
     final fmt = entry['apiFormat'];
@@ -205,7 +204,7 @@ class ProviderConfig {
     }
   }
 
-  static String _normalizeOvidCloudBaseUrl(String value) {
+  static String normalizeOvidCloudBaseUrl(String value) {
     final uri = Uri.tryParse(value);
     if (uri == null || uri.host != 'cloud.dhanuksoftwares.com') return value;
     return uri.replace(host: 'api.ovidsi.com').toString();
@@ -6612,56 +6611,11 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Live-refresh the Ovid Cloud model list from the gateway's `/v1/models`.
-  ///
-  /// Models the owner adds in the LiteLLM dashboard are published by the
-  /// gateway's OpenAI-compatible `/v1/models`, so this makes them appear in
-  /// Ovid without an app update. `auto` is always preserved so Auto mode
-  /// survives an empty/early fetch. Best-effort: a network/auth failure leaves
-  /// the existing list untouched and returns false (never throws, never clears).
-  Future<bool> refreshOvidCloudModels({http.Client? client}) async {
-    final provider = providerById(ovidCloudProviderId);
-    if (provider == null) return false;
-    var base = provider.baseUrl.trim();
-    if (base.isEmpty) return false;
-    if (!base.endsWith('/')) base += '/';
-    final uri = Uri.parse('${base}models');
-    final cleanKey = provider.cleanApiKey;
-    final c = client ?? http.Client();
-    try {
-      final res = await c
-          .get(
-            uri,
-            headers: {
-              if (cleanKey.isNotEmpty) 'Authorization': 'Bearer $cleanKey',
-            },
-          )
-          .timeout(const Duration(seconds: 15));
-      if (res.statusCode != 200) return false;
-      final body = jsonDecode(res.body);
-      final List fetched =
-          (body is Map ? (body['data'] ?? body['models']) : null) as List? ??
-          const [];
-      final ids = <String>[
-        for (final m in fetched)
-          if (m is! Map ||
-              (m['output_modality'] != 'image' && m['id'] != 'ovid-image'))
-            (m is Map ? (m['id'] ?? m['name'] ?? '') : '$m').toString(),
-      ].where((s) => s.isNotEmpty).toList();
-      if (ids.isEmpty) return false;
-      final merged = <String>{'auto', ...ids}.toList();
-      provider.models
-        ..clear()
-        ..addAll(merged);
-      reconcileProviderModels(ovidCloudProviderId);
-      return true;
-    } catch (e) {
-      Diag.swallow('state.refreshOvidCloudModels', e);
-      return false;
-    } finally {
-      if (client == null) c.close();
-    }
-  }
+  /// One-shot notice when a remembered Ovid Cloud model left the catalog and
+  /// was replaced by Auto. The chat screen shows it once and clears it.
+  final ValueNotifier<String?> ovidCloudModelFallbackNotice = ValueNotifier(
+    null,
+  );
 
   void reconcileProviderModels(String providerId) {
     final provider = providerById(providerId);
@@ -6670,14 +6624,37 @@ class AppState extends ChangeNotifier {
         !provider.models.contains(_baseModel(provider.selectedModel!))) {
       provider.selectedModel = null;
     }
+    // Ovid Cloud always serves the server-side `auto` alias, so a model that
+    // left its catalog falls back to Auto instead of 'Select a provider'.
+    final cloudFallback =
+        providerId == ovidCloudProviderId && provider.models.contains('auto');
+    final removed = <String>{};
     for (final session in sessions) {
       if (session.providerId == providerId &&
           !provider.models.contains(_baseModel(session.model))) {
-        session
-          ..providerId = null
-          ..model = 'Select a provider';
+        if (cloudFallback) {
+          removed.add(_baseModel(session.model));
+          session.model = 'auto';
+        } else {
+          session
+            ..providerId = null
+            ..model = 'Select a provider';
+        }
         _markSessionDirty(session.id);
       }
+    }
+    if (cloudFallback &&
+        lastSelectedProviderId == providerId &&
+        lastSelectedModel.isNotEmpty &&
+        !provider.models.contains(_baseModel(lastSelectedModel))) {
+      removed.add(_baseModel(lastSelectedModel));
+      lastSelectedModel = 'auto';
+      unawaited(_persistLastSelection());
+    }
+    if (removed.isNotEmpty) {
+      ovidCloudModelFallbackNotice.value = removed.length == 1
+          ? '${removed.single} is no longer available — switched to Auto.'
+          : 'Some models are no longer available — switched to Auto.';
     }
     refresh();
     persistProviderState();

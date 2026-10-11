@@ -21,7 +21,7 @@ class CloudAppCheck {
     }
   }
 
-  Future<String> getToken() async {
+  Future<String> getToken({bool forceRefresh = false}) async {
     try {
       try {
         await (_initialization ??= _initialize());
@@ -29,7 +29,7 @@ class CloudAppCheck {
         _initialization = null;
         rethrow;
       }
-      final token = await FirebaseAppCheck.instance.getToken();
+      final token = await FirebaseAppCheck.instance.getToken(forceRefresh);
       if (token == null || token.trim().isEmpty) {
         throw const AppCheckUnavailable();
       }

@@ -10170,6 +10170,16 @@ user which one instead of assuming this one.''';
       if (scheduledTask != null) throw StateError(error);
       return;
     }
+    if (provider.id == AppState.ovidCloudProviderId &&
+        !OvidCloudService.I.keyOwnedByCurrentAccount) {
+      // Never send a key minted for a previous account (it would bill them).
+      const error =
+          'Ovid Cloud is still connecting your account. Try again in a moment.';
+      unawaited(OvidCloudService.I.ensureConnected());
+      _appendAssistant('Provider setup required: $error', session: s);
+      if (scheduledTask != null) throw StateError(error);
+      return;
+    }
     if (scheduledTask != null &&
         (schedules.stopped || scheduledTask['status'] != 'running')) {
       throw StateError('Scheduled execution stopped before admission');
@@ -12041,11 +12051,17 @@ ${await _agentsMdBlock()}
         s.title != AppState.autoTitle(s.messages.first.content);
   }
 
+  /// An Ovid Cloud key is sent only while it is bound to the signed-in
+  /// account; any other provider's key is the user's own.
+  static bool _keySendable(ProviderConfig p) =>
+      p.id != AppState.ovidCloudProviderId ||
+      OvidCloudService.I.ownsKey(p.cleanApiKey);
+
   /// One cheap non-tool LLM call producing a cleaned title, or null on any
   /// failure / unusable reply.
   Future<String?> _generateTitleFor(ChatSession s) async {
     final p = AppState.I.providerById(s.providerId);
-    if (p == null || !p.hasKey) return null;
+    if (p == null || !p.hasKey || !_keySendable(p)) return null;
     try {
       final firstExchange = s.messages
           .take(6)
@@ -12466,7 +12482,7 @@ ${await _agentsMdBlock()}
             onTimeout: () => throw Exception('connect timeout'),
           );
       if (!owner.registerRequest(req)) return null;
-      final key = p.cleanApiKey;
+      final key = _keySendable(p) ? p.cleanApiKey : '';
       if (key.isNotEmpty) {
         req.headers.set('Authorization', 'Bearer $key');
       }
@@ -13128,7 +13144,7 @@ ${await _agentsMdBlock()}
             onTimeout: () => throw Exception('connect timeout'),
           );
       if (!owner.registerRequest(req)) return null;
-      final key = p.cleanApiKey;
+      final key = _keySendable(p) ? p.cleanApiKey : '';
       if (key.isNotEmpty) req.headers.set('x-api-key', key);
       req.headers.set('anthropic-version', '2023-06-01');
       req.headers.set('Content-Type', 'application/json');

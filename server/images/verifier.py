@@ -5,6 +5,7 @@ budget authority. No second account/key store or independently mintable image ke
 """
 import hmac
 import json
+import logging
 from dataclasses import dataclass
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ from starlette.concurrency import run_in_threadpool
 
 from .service import ALIAS, ImageError, MAX_BYTES
 from .catalog import PublicCatalog
+
+log = logging.getLogger('ovid.images.verifier')
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,31 @@ class VerifierAuth:
         return Identity(uid, key_id, tier)
 
 
-def mount_images(mint, service=None, *, admission=None, auth=None, private_backends=(), account_access=None):
+def _catalog_error(result):
+    """Map a non-200 LiteLLM /v1/models reply to a client-actionable error.
+
+    A rejected key must surface as 401 so the app re-mints instead of retrying
+    a dead key; only genuine upstream failure stays 503.
+    """
+    status = result.status_code
+    # LiteLLM reports an exhausted key budget as 400 (and on some versions as
+    # 401/429) with "budget" in the message.
+    if status in (400, 401, 403, 429) and 'budget' in result.text.lower():
+        return ImageError(402, 'budget_exceeded')
+    if status in (401, 403):
+        return ImageError(401, 'key_invalid')
+    if status == 429:
+        return ImageError(429, 'rate_limited')
+    return ImageError(503, 'catalog_unavailable')
+
+
+# Clients treat a 503 from a gateway that sends this header as an outage, not
+# as a rejected key (older gateways reported every failure as 503).
+CATALOG_HEADERS = {'Cache-Control': 'no-store', 'X-Ovid-Gateway': '2'}
+
+
+def mount_images(mint, service=None, *, admission=None, auth=None, private_backends=(), account_access=None,
+                 models_transport=None):
     """admission(identity) is a context manager from the shared budget ledger.
 
     It yields (budget_window, remaining_budget_excluding_image_ledger). It must
@@ -106,18 +133,26 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
             authorization = request.headers.get('authorization', '')
             if not authorization.lower().startswith('bearer '):
                 raise ImageError(401, 'sign_in_required')
-            async with httpx.AsyncClient(base_url=mint.LITELLM_BASE, timeout=15) as client:
+            async with httpx.AsyncClient(base_url=mint.LITELLM_BASE, timeout=15,
+                                         transport=models_transport) as client:
                 result = await client.get('/v1/models', headers={'Authorization': authorization})
             if result.status_code != 200:
-                raise ImageError(401 if result.status_code in (401, 403) else 503)
+                # Status only: never log the bearer key or the upstream body.
+                log.warning('model catalog upstream status %s', result.status_code)
+                raise _catalog_error(result)
             rows = [{'model': row['id']} for row in result.json().get('data', []) if isinstance(row.get('id'), str)]
             # Image capability is deliberately not advertised to a text-key
             # request. Its separate authenticated capability endpoint does so.
             catalog = projection.models(rows)
             catalog['data'] = [row for row in catalog['data'] if row['id'] != ALIAS]
-            return JSONResponse(catalog, headers={'Cache-Control': 'no-store'})
-        except Exception:
-            return JSONResponse({'error': {'code': 'catalog_unavailable'}}, status_code=503)
+            return JSONResponse(catalog, headers=CATALOG_HEADERS)
+        except ImageError as error:
+            return JSONResponse({'error': {'code': error.code}}, status_code=error.status,
+                                headers=CATALOG_HEADERS)
+        except Exception as error:
+            log.warning('model catalog failed: %s', type(error).__name__)
+            return JSONResponse({'error': {'code': 'catalog_unavailable'}}, status_code=503,
+                                headers=CATALOG_HEADERS)
 
     def execute(identity, request_id, operation, body):
         with account_access(identity) if account_access else nullcontext():

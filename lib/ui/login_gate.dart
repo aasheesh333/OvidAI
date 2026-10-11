@@ -113,7 +113,8 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
         _firebase.isAvailable &&
         _firebase.accountReady &&
         widget.bindCloud == null) {
-      unawaited(OvidCloudService.I.ensureConnected());
+      // Backed off after failures so an outage is not stampeded by resumes.
+      unawaited(OvidCloudService.I.ensureConnectedOnResume());
     }
   }
 
