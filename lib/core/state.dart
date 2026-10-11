@@ -6954,6 +6954,12 @@ class AppState extends ChangeNotifier {
   List<UsageAttempt> get usageAttempts =>
       _usageAttemptStore?.snapshot ?? const [];
   int get usageRevision => _usageAttemptStore?.revision ?? 0;
+
+  /// Cheap change key for usage-derived UI. Changes whenever the attempt
+  /// journal is mutated or replaced (account switch) — unlike
+  /// [usageAttempts], reading it copies nothing, so screens can compare it on
+  /// every [AppState] notification and re-aggregate only when it moves.
+  Object get usageMemoKey => (_usageAttemptStore, usageRevision);
   bool get usageHistoryTruncated =>
       _usageAttemptStore?.historyTruncated ?? false;
   Object? get usageStorageError => _usageStorageError;

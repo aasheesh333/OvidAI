@@ -688,4 +688,34 @@ void main() {
     expect(find.text('1 requests · 20 in · 10 out'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets(
+    'usage aggregate is not recomputed on notifies without a revision change',
+    (tester) async {
+      OvidCloudService.httpClientFactoryForTest = () =>
+          MockClient((_) async => usage(0.8));
+      UsageSnapshot.debugReset();
+      await addRowInTest(tester, tokens: 20);
+      await tester.pumpWidget(const MaterialApp(home: UsageScreen()));
+      await tester.pumpAndSettle();
+      final afterOpen = UsageSnapshot.debugAggregations;
+      expect(afterOpen, 1);
+      expect(find.text('30'), findsOneWidget);
+
+      // Streamed tokens / unrelated settings: AppState notifies, journal
+      // revision unchanged -> no re-aggregation.
+      for (var i = 0; i < 50; i++) {
+        AppState.I.refresh();
+        await tester.pump();
+      }
+      expect(UsageSnapshot.debugAggregations, afterOpen);
+
+      // A real journal write moves the revision and re-aggregates once.
+      await addRowInTest(tester, tokens: 40);
+      await tester.pumpAndSettle();
+      expect(UsageSnapshot.debugAggregations, afterOpen + 1);
+      expect(find.text('80'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 }
