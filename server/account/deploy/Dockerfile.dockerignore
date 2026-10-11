@@ -21,6 +21,12 @@ server/sync/*
 !server/collaboration/
 server/collaboration/*
 !server/collaboration/*.py
+!server/billing/
+server/billing/*
+!server/billing/requirements.txt
+!server/reports/
+server/reports/*
+!server/reports/*.py
 !server/account/deploy/
 server/account/deploy/*
 !server/account/deploy/Dockerfile
