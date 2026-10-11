@@ -305,32 +305,16 @@ class _HtmlArtifactViewState extends State<HtmlArtifactView>
     required bool compact,
   }) {
     if (compact) {
-      return Tooltip(
-        message: label,
-        child: TextButton(
-          onPressed: onPressed,
-          style: TextButton.styleFrom(
-            foregroundColor: Aether.textMuted,
-            minimumSize: const Size(48, 48),
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-          ),
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
-            child: SizedBox(
-              width: 48,
-              height: 48,
-              child: Center(
-                child: Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
+      // Under 560dp (every phone in portrait) or at large text, show the
+      // icon alone at a full 48dp target; the tooltip carries the label and
+      // the semantics. (Scaling the text label into a 48dp box rendered it
+      // at ~6sp.)
+      return IconButton(
+        tooltip: label,
+        onPressed: onPressed,
+        color: Aether.textMuted,
+        constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+        icon: Icon(icon, size: 20),
       );
     }
     // The shared ghost label button is fixed at 44dp. At enlarged text sizes
