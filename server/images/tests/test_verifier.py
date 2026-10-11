@@ -136,6 +136,7 @@ class ModelCatalogRouteTest(unittest.TestCase):
 
         response = self.catalog(handler)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['x-ovid-gateway'], '2')
         self.assertEqual(seen['auth'], 'Bearer sk-user')
         self.assertEqual([row['id'] for row in response.json()['data']], ['auto', 'manual-a'])
 
@@ -148,6 +149,8 @@ class ModelCatalogRouteTest(unittest.TestCase):
             (httpx.Response(401, json={'error': 'invalid key'}), 401, 'key_invalid'),
             (httpx.Response(403, json={'error': 'blocked'}), 401, 'key_invalid'),
             (httpx.Response(400, json={'error': {'message': 'ExceededBudget: Crossed budget'}}), 402, 'budget_exceeded'),
+            (httpx.Response(401, json={'error': {'message': 'Budget has been exceeded'}}), 402, 'budget_exceeded'),
+            (httpx.Response(502, json={}), 503, 'catalog_unavailable'),
             (httpx.Response(429, json={}), 429, 'rate_limited'),
             (httpx.Response(500, json={}), 503, 'catalog_unavailable'),
         ]
@@ -155,6 +158,7 @@ class ModelCatalogRouteTest(unittest.TestCase):
             with self.subTest(upstream=upstream.status_code, code=code):
                 response = self.catalog(lambda request, upstream=upstream: upstream)
                 self.assertEqual((response.status_code, response.json()['error']['code']), (status, code))
+                self.assertEqual(response.headers['x-ovid-gateway'], '2')
                 self.assertNotIn('sk-user', response.text)
 
     def test_network_failure_is_503(self):

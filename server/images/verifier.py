@@ -90,13 +90,20 @@ def _catalog_error(result):
     a dead key; only genuine upstream failure stays 503.
     """
     status = result.status_code
+    # LiteLLM reports an exhausted key budget as 400 (and on some versions as
+    # 401/429) with "budget" in the message.
+    if status in (400, 401, 403, 429) and 'budget' in result.text.lower():
+        return ImageError(402, 'budget_exceeded')
     if status in (401, 403):
         return ImageError(401, 'key_invalid')
     if status == 429:
         return ImageError(429, 'rate_limited')
-    if status == 400 and 'budget' in result.text.lower():
-        return ImageError(402, 'budget_exceeded')
     return ImageError(503, 'catalog_unavailable')
+
+
+# Clients treat a 503 from a gateway that sends this header as an outage, not
+# as a rejected key (older gateways reported every failure as 503).
+CATALOG_HEADERS = {'Cache-Control': 'no-store', 'X-Ovid-Gateway': '2'}
 
 
 def mount_images(mint, service=None, *, admission=None, auth=None, private_backends=(), account_access=None,
@@ -138,14 +145,14 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
             # request. Its separate authenticated capability endpoint does so.
             catalog = projection.models(rows)
             catalog['data'] = [row for row in catalog['data'] if row['id'] != ALIAS]
-            return JSONResponse(catalog, headers={'Cache-Control': 'no-store'})
+            return JSONResponse(catalog, headers=CATALOG_HEADERS)
         except ImageError as error:
             return JSONResponse({'error': {'code': error.code}}, status_code=error.status,
-                                headers={'Cache-Control': 'no-store'})
+                                headers=CATALOG_HEADERS)
         except Exception as error:
             log.warning('model catalog failed: %s', type(error).__name__)
             return JSONResponse({'error': {'code': 'catalog_unavailable'}}, status_code=503,
-                                headers={'Cache-Control': 'no-store'})
+                                headers=CATALOG_HEADERS)
 
     def execute(identity, request_id, operation, body):
         with account_access(identity) if account_access else nullcontext():
