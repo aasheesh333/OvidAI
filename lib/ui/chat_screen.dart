@@ -7341,6 +7341,64 @@ class _ApprovalDockState extends State<_ApprovalDock> {
   // grants are per mode + per session by construction, so there is no scope to
   // pick. `AgentService.approve(false, note:)` still exists for programmatic
   // callers.
+
+  /// Taps that land this soon after a NEW request replaces the card are
+  /// ignored: a double-tap on Allow, or a tap aimed at the previous card,
+  /// must not approve a request the user has not had a chance to read.
+  static const _armDelay = Duration(milliseconds: 300);
+
+  /// Details longer than this are shown in a scrollable box with a
+  /// "Show all (N lines)" toggle instead of being clamped.
+  static const _detailPreviewLines = 8;
+
+  ApprovalRequest? _shown;
+  bool _armed = false;
+  bool _expanded = false;
+  Timer? _armTimer;
+
+  @override
+  void dispose() {
+    _armTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Called from build: (re)arms the tap guard whenever a different request
+  /// is rendered. Only mutates plain fields; the timer's setState runs later.
+  void _track(ApprovalRequest req) {
+    if (identical(req, _shown)) return;
+    _shown = req;
+    _armed = false;
+    _expanded = false;
+    _armTimer?.cancel();
+    _armTimer = Timer(_armDelay, () {
+      if (mounted) setState(() => _armed = true);
+    });
+  }
+
+  /// Resolves exactly the request [req] the card rendered — never whatever
+  /// happens to be pending by the time the tap is delivered.
+  void _decide(ApprovalRequest req, {required bool ok, bool always = false}) {
+    if (!_armed || !identical(req, _shown)) return;
+    if (always) {
+      AgentService.I.approveAlwaysRequest(req);
+    } else {
+      AgentService.I.approveRequest(req, ok);
+    }
+  }
+
+  static String _toolLabel(String tool) {
+    final words = tool
+        .replaceAll(RegExp(r'[_\-.]+'), ' ')
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty)
+        .toList();
+    if (words.isEmpty) return 'Approval needed';
+    final first = words.first;
+    words[0] = first[0].toUpperCase() + first.substring(1);
+    return words.join(' ');
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -7367,116 +7425,202 @@ class _ApprovalDockState extends State<_ApprovalDock> {
           return _QuestionsCard(req, key: ObjectKey(req));
         }
         // ── Standard approve/deny card: exactly three actions ──
-        return Container(
-          margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: Aether.warnLight.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Icon(
+        _track(req);
+        return _standardCard(context, req);
+      },
+    );
+  }
+
+  Widget _standardCard(BuildContext context, ApprovalRequest req) {
+    // Title says WHICH tool is asking; the monospace box below shows exactly
+    // what will run. When there is no separate detail, the summary itself is
+    // the thing being approved, so it goes in the (never clamped) box.
+    final hasDetail = req.detail.isNotEmpty && req.detail != req.summary;
+    final title = hasDetail && req.summary.trim().isNotEmpty
+        ? req.summary.trim()
+        : _toolLabel(req.tool);
+    final body = hasDetail ? req.detail : req.summary;
+    final lines = body.split('\n');
+    final long = lines.length > _detailPreviewLines;
+    final isCommit = req.tool == 'commit';
+    final screenH = MediaQuery.sizeOf(context).height;
+    final maxBoxH = _expanded ? math.max(180.0, screenH * 0.5) : 180.0;
+    final monoStyle = TextStyle(
+      fontSize: 12,
+      height: 1.4,
+      color: Aether.text,
+      fontFamily: Aether.mono,
+    );
+
+    final buttonText = const TextStyle(fontSize: 13);
+    final deny = OutlinedButton(
+      key: const ValueKey('approval-deny'),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: Aether.dangerC,
+        side: BorderSide(color: Aether.dangerC.withValues(alpha: 0.6)),
+        minimumSize: const Size(64, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+      ),
+      onPressed: () => _decide(req, ok: false),
+      child: Text('Deny', style: buttonText),
+    );
+    final allow = FilledButton(
+      key: const ValueKey('approval-allow'),
+      style: FilledButton.styleFrom(
+        backgroundColor: Aether.successLight,
+        foregroundColor: Colors.white,
+        minimumSize: const Size(64, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+      ),
+      onPressed: () => _decide(req, ok: true),
+      child: Text('Allow', style: buttonText),
+    );
+    // No scope choice: an Always Allow is recorded for THIS mode and THIS
+    // session, persists across restarts, and is purged when the session is
+    // deleted.
+    final always = req.allowAlways
+        ? TextButton(
+            key: const ValueKey('approval-always'),
+            style: TextButton.styleFrom(
+              foregroundColor: Aether.accentC,
+              minimumSize: const Size(64, 48),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+            ),
+            onPressed: () => _decide(req, ok: true, always: true),
+            child: Text(
+              'Always Allow',
+              textAlign: TextAlign.center,
+              style: buttonText,
+            ),
+          )
+        : null;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      decoration: BoxDecoration(
+        color: Aether.warnLight.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
+      ),
+      child: Semantics(
+        container: true,
+        liveRegion: true,
+        label: 'Approval required: $title',
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 1),
+                  child: Icon(
                     Icons.warning_amber_rounded,
                     size: 16,
                     color: Aether.warnLight,
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: req.tool == 'commit'
-                        ? SizedBox(
-                            key: const ValueKey('commit-approval-detail'),
-                            height: 180,
-                            child: Scrollbar(
-                              child: SingleChildScrollView(
-                                key: ObjectKey(req),
-                                child: SelectionArea(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      for (final line in req.detail.split('\n'))
-                                        Text(
-                                          line,
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            height: 1.4,
-                                            color: Aether.text,
-                                            fontFamily: Aether.mono,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          )
-                        : Text(
-                            req.detail.isNotEmpty && req.detail != req.summary
-                                ? req.detail
-                                : req.summary,
-                            maxLines: 8,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12,
-                              height: 1.4,
-                              color: Aether.text,
-                              fontFamily: Aether.mono,
-                            ),
-                          ),
-                  ),
-                  const SizedBox(width: 6),
-                  // EXACTLY THREE actions (owner requirement, 2026-09-24):
-                  // Deny, Allow, Always Allow. The card used to carry a fourth
-                  // "Deny with a note" icon button plus a This session /
-                  // All sessions scope row. The note dialog is gone, and the
-                  // scope choice is gone with it — grants are now per MODE and
-                  // per session by construction, so there is nothing to choose.
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Aether.danger,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: Size.zero,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Aether.text,
                     ),
-                    child: const Text('Deny', style: TextStyle(fontSize: 12)),
-                    onPressed: () => AgentService.I.approve(false),
                   ),
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Aether.successLight,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: Size.zero,
-                    ),
-                    child: const Text('Allow', style: TextStyle(fontSize: 12)),
-                    onPressed: () => AgentService.I.approve(true),
-                  ),
-                  if (req.allowAlways)
-                    TextButton(
-                      style: TextButton.styleFrom(
-                        foregroundColor: Aether.accent,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: Size.zero,
+                ),
+              ],
+            ),
+            if (body.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              // Detail on its own full-width row (never squeezed beside the
+              // buttons) and never clamped: anything past the box height
+              // scrolls, so every byte being approved is reachable.
+              ConstrainedBox(
+                key: ValueKey(
+                  isCommit ? 'commit-approval-detail' : 'approval-detail',
+                ),
+                constraints: BoxConstraints(maxHeight: maxBoxH),
+                child: Scrollbar(
+                  child: SingleChildScrollView(
+                    key: ObjectKey(req),
+                    child: SelectionArea(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (final line in lines) Text(line, style: monoStyle),
+                        ],
                       ),
-                      child: const Text(
-                        'Always Allow',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                      // No scope choice: an Always Allow is recorded for THIS
-                      // mode and THIS session, persists across restarts, and is
-                      // purged when the session is deleted.
-                      onPressed: () => AgentService.I.approveAlways(),
                     ),
-                ],
+                  ),
+                ),
               ),
+              if (long)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: Aether.textMuted,
+                      minimumSize: const Size(48, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                    ),
+                    onPressed: () => setState(() => _expanded = !_expanded),
+                    child: Text(
+                      _expanded
+                          ? 'Show less'
+                          : 'Show all (${lines.length} lines)',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
             ],
-          ),
-        );
-      },
+            const SizedBox(height: 8),
+            // Full-width action row. Narrow widths (or large text) move
+            // Always Allow onto its own row so Deny / Allow keep a wide,
+            // well-separated 48dp target.
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final scale = MediaQuery.textScalerOf(context).scale(1);
+                final oneRow =
+                    always == null || constraints.maxWidth / scale >= 300;
+                if (oneRow) {
+                  return Row(
+                    children: [
+                      Expanded(child: deny),
+                      if (always != null) ...[
+                        const SizedBox(width: 8),
+                        Expanded(child: always),
+                      ],
+                      const SizedBox(width: 8),
+                      Expanded(child: allow),
+                    ],
+                  );
+                }
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(child: deny),
+                        const SizedBox(width: 8),
+                        Expanded(child: allow),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    always,
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

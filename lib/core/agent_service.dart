@@ -5919,6 +5919,26 @@ user which one instead of assuming this one.''';
     notifyListeners();
   }
 
+  /// Resolves [req] only if it is STILL the pending approval.
+  ///
+  /// The approval card captures the request it rendered and calls this, so a
+  /// double-tap on Allow, or a tap that lands while the card is being swapped
+  /// for the next tool's request, can never approve a request the user has
+  /// not seen. Returns whether [req] was resolved.
+  bool approveRequest(ApprovalRequest req, bool ok, {String? note}) {
+    if (!identical(pendingApproval, req)) return false;
+    approve(ok, note: note);
+    return true;
+  }
+
+  /// [approveAlways] bound to the request the card rendered; see
+  /// [approveRequest].
+  bool approveAlwaysRequest(ApprovalRequest req) {
+    if (!identical(pendingApproval, req)) return false;
+    approveAlways();
+    return true;
+  }
+
   /// Approve AND remember the requesting tool for the rest of this session:
   /// future approvals for the same tool complete immediately without
   /// prompting. Only requests carrying [ApprovalRequest.allowAlways] record
