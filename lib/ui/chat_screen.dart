@@ -862,6 +862,11 @@ class _ChatScreenState extends State<ChatScreen>
   bool _restoringDraft = false;
   String _observedDraftText = '';
   final Map<String, ({int id, String original})> _queueEdits = {};
+
+  /// True while a composer slash command is executing. Guards against a
+  /// double Send running `/compact`, `/clear` or `/new` twice and drives the
+  /// Send button's busy state.
+  bool _executingCommand = false;
   String? _draftBindScheduledFor;
 
   void _recordDraftEdit() {
@@ -958,6 +963,28 @@ class _ChatScreenState extends State<ChatScreen>
     _showJumpFab = false;
     _visibleCount = _pageSize; // lazy paging resets per session
     _followScheduled = false; // tip-follow re-arms for the new transcript
+  }
+
+  void _showSkillUnavailable(
+    BuildContext context,
+    Skill skill,
+    String sessionId,
+  ) {
+    final reason = AgentService.I.skillUnavailableReason(skill, sessionId);
+    final canonicalId = skill.canonicalId;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          "Skill ${skill.name} isn't available in this session"
+          '${reason == null ? '' : ' ($reason)'}.',
+        ),
+        behavior: SnackBarBehavior.floating,
+        action: SnackBarAction(
+          label: 'Plugins',
+          onPressed: () => _openPlugins(context, focusCanonicalId: canonicalId),
+        ),
+      ),
+    );
   }
 
   void _openPlugins(BuildContext context, {String? focusCanonicalId}) {
@@ -1795,6 +1822,7 @@ class _ChatScreenState extends State<ChatScreen>
                               // the composer — the user answers the card, not the box.
                               locked: AgentService.I.pendingApproval != null,
                               editingQueue: _queueEdits.containsKey(s?.id),
+                              commandBusy: _executingCommand,
                               onCancelQueueEdit: () => setState(() {
                                 _queueEdits.remove(s?.id);
                               }),
@@ -1802,7 +1830,8 @@ class _ChatScreenState extends State<ChatScreen>
                                 if (s == null ||
                                     _boundSessionId != s.id ||
                                     AppState.I.activeSessionId != s.id ||
-                                    AgentService.I.pendingApproval != null) {
+                                    AgentService.I.pendingApproval != null ||
+                                    _executingCommand) {
                                   return;
                                 }
                                 final submitted = _input.text;
@@ -1852,9 +1881,15 @@ class _ChatScreenState extends State<ChatScreen>
 
                                 // ── Composer command system ───────────────────────
                                 if (t.startsWith('/')) {
-                                  final result = await CommandService.I.execute(
-                                    t,
-                                  );
+                                  setState(() => _executingCommand = true);
+                                  final CommandResult? result;
+                                  try {
+                                    result = await CommandService.I.execute(t);
+                                  } finally {
+                                    if (mounted) {
+                                      setState(() => _executingCommand = false);
+                                    }
+                                  }
                                   if (!mounted || !context.mounted) return;
                                   if (result != null) {
                                     if (result.clearInput &&
@@ -1939,6 +1974,14 @@ class _ChatScreenState extends State<ChatScreen>
                                             skill,
                                             s.id,
                                           )) {
+                                        // Never fail silently: say why and
+                                        // offer the plugin settings. The
+                                        // draft is kept.
+                                        _showSkillUnavailable(
+                                          context,
+                                          skill,
+                                          s.id,
+                                        );
                                         return;
                                       }
                                       final content =
@@ -5589,6 +5632,9 @@ class _InputBar extends StatefulWidget {
   /// composer is disabled until the user answers it (the approval takeover parity).
   final bool locked;
   final bool editingQueue;
+
+  /// A slash command is executing: Send is disabled and shows a spinner.
+  final bool commandBusy;
   final VoidCallback onCancelQueueEdit;
 
   /// Shared width axis: the composer card is capped to [ChatLayout.composerWidth]
@@ -5606,6 +5652,7 @@ class _InputBar extends StatefulWidget {
     this.coordinator,
     this.locked = false,
     this.editingQueue = false,
+    this.commandBusy = false,
     required this.onCancelQueueEdit,
     required this.onSend,
   });
@@ -6532,6 +6579,7 @@ class _InputBarState extends State<_InputBar> {
                           AppState.I.activeSessionId == sessionId &&
                           hasDraft &&
                           !locked &&
+                          !widget.commandBusy &&
                           AgentService.I.pendingApproval == null &&
                           (!widget.editingQueue ||
                               AgentService.I.pendingAttachments.isEmpty);
@@ -6571,6 +6619,7 @@ class _InputBarState extends State<_InputBar> {
                                   ? Icons.check
                                   : Icons.arrow_upward,
                               iconOnly: true,
+                              loading: widget.commandBusy,
                               onPressed: canSubmit ? onSend : null,
                             ),
                           ],

@@ -21611,6 +21611,22 @@ ${await _agentsMdBlock()}
       'Its canonical contributions live under "plugin:$pluginId/…" and are '
       'scope-enforced. Nothing was executed.';
 
+  /// Short user-facing reason why [isSkillAvailableForSession] is false for
+  /// [skill], or `null` when it is available.
+  String? skillUnavailableReason(Skill skill, String sessionId) {
+    if (isSkillAvailableForSession(skill, sessionId)) return null;
+    final pluginId = skill.pluginId;
+    final canonicalId = skill.canonicalId;
+    if (pluginId == null || canonicalId == null) return null;
+    if (!PluginContributionRegistry.I.isPluginActiveForSession(
+      pluginId,
+      sessionId,
+    )) {
+      return 'plugin $pluginId is not enabled for this chat';
+    }
+    return 'not in the current manifest of plugin $pluginId';
+  }
+
   bool isSkillAvailableForSession(Skill skill, String sessionId) {
     final pluginId = skill.pluginId;
     if (pluginId == null) return true;

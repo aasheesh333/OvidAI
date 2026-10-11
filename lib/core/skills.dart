@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
 import 'diag.dart';
@@ -367,6 +369,18 @@ class SkillService {
 
   void dropSession(String sessionId) => invalidateSession(sessionId);
 
+  /// Test seam: publish [skills] as [sessionId]'s catalog without scanning.
+  @visibleForTesting
+  void publishSessionSkillsForTest(String sessionId, List<Skill> skills) {
+    final generation = (_sessionGenerations[sessionId] ?? 0) + 1;
+    _sessionGenerations[sessionId] = generation;
+    _sessionSnapshots[sessionId] = SkillCatalogSnapshot(
+      sessionId: sessionId,
+      generation: generation,
+      skills: List.of(skills),
+    );
+  }
+
   /// Register a search root (workspace, custom dirs, etc).
   void addRoot(String path) {
     if (path.trim().isEmpty) return;
@@ -480,7 +494,9 @@ class SkillService {
           if (s != null) target.add(s);
         }
       }
-    } catch (e) { Diag.swallow('skills', e); }
+    } catch (e) {
+      Diag.swallow('skills', e);
+    }
   }
 
   Future<Skill?> _parse(

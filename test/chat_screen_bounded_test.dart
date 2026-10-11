@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/commands.dart';
+import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
@@ -562,6 +563,62 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
+
+  testWidgets('double-tapping Send runs a slash command once (F-131)', (
+    tester,
+  ) async {
+    final result = Completer<CommandResult>();
+    var calls = 0;
+    CommandService.I.register(
+      AgentCommand(
+        name: 'boundedcount',
+        description: 'Count',
+        handler: (_) {
+          calls++;
+          return result.future;
+        },
+      ),
+    );
+    await pumpChat(tester);
+    await tester.enterText(composer, '/boundedcount');
+    await tester.pump();
+    // Two taps before the frame that disables Send: the re-entrancy guard
+    // must drop the second one.
+    await tester.tap(find.byTooltip('Send'));
+    await tester.tap(find.byTooltip('Send'), warnIfMissed: false);
+    await tester.pump();
+    expect(calls, 1);
+    result.complete(const CommandResult());
+    await tester.pump();
+    expect(calls, 1);
+  });
+
+  testWidgets('unavailable /skill explains itself and keeps the draft', (
+    tester,
+  ) async {
+    SkillService.I.publishSessionSkillsForTest(a.id, [
+      Skill(
+        name: 'zz-unavailable-skill',
+        description: 'Test skill',
+        whenToUse: '',
+        content: 'BODY',
+        path: '/nonexistent/zz/SKILL.md',
+        modelInvocable: true,
+        userInvocable: true,
+        pluginId: 'acme/zz-kit',
+      ),
+    ]);
+    addTearDown(() => SkillService.I.invalidateSession(a.id));
+    await pumpChat(tester);
+    await tester.enterText(composer, '/zz-unavailable-skill');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining("isn't available"), findsOneWidget);
+    expect(find.widgetWithText(SnackBarAction, 'Plugins'), findsOneWidget);
+    expect(draft(tester), '/zz-unavailable-skill');
+  });
 
   testWidgets('async command completion after disposal is harmless', (
     tester,
