@@ -7,6 +7,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart' show IconData, Icons, Color;
+import 'package:flutter/widgets.dart'
+    show WidgetsBinding, WidgetsBindingObserver;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
@@ -26,6 +28,7 @@ import 'usage_attempt_recorder.dart';
 import 'grant_store.dart';
 import 'global_repo_registry.dart';
 import 'sandbox_service.dart';
+import 'webview_pool.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
 import 'workspace_files.dart';
@@ -146,6 +149,39 @@ class BrowserTab {
 
   BrowserTab({required this.url, bool? desktopMode, this.sessionId = ''})
     : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
+}
+
+/// Narrow browser listenable (see [AgentService.browserTabsListenable]).
+/// Re-checks a small signature of the browser state on each [AgentService]
+/// notification while it has listeners, and notifies only when it changed.
+class BrowserTabsListenable extends ChangeNotifier {
+  BrowserTabsListenable._(this._agent);
+
+  final AgentService _agent;
+  List<Object?>? _signature;
+
+  @override
+  void addListener(VoidCallback listener) {
+    if (!hasListeners) _signature = _agent._browserSignature();
+    super.addListener(listener);
+  }
+
+  void _check() {
+    if (!hasListeners) return;
+    final next = _agent._browserSignature();
+    if (_signature != null && listEquals(next, _signature)) return;
+    _signature = next;
+    notifyListeners();
+  }
+}
+
+class _BrowserMemoryObserver with WidgetsBindingObserver {
+  _BrowserMemoryObserver(this.onPressure);
+
+  final VoidCallback onPressure;
+
+  @override
+  void didHaveMemoryPressure() => onPressure();
 }
 
 /// ═══════════════════════════════════════════════════════════════════
@@ -904,7 +940,10 @@ class AgentService extends ChangeNotifier {
       // Drop the session's browser bucket AND its native profile (cookie jar +
       // web storage). Without this, deleting a chat would leave a logged-in
       // cookie jar behind on disk that a later session id could reuse.
-      _sessionBrowsers.remove(sessionId);
+      for (final tab in _sessionBrowsers.remove(sessionId) ?? <BrowserTab>[]) {
+        _webViewPool.forget(tab);
+        _releaseTabWebView(tab);
+      }
       _sessionActiveTab.remove(sessionId);
       unawaited(_dropSessionBrowserPrefs(sessionId));
       unawaited(
@@ -2866,6 +2905,91 @@ class AgentService extends ChangeNotifier {
 
   bool browserBusy = false; // true while an agent browser tool is running
 
+  /// Fires only when something the browser UI shows changed (tab list,
+  /// active tab, url/title/loading/progress, held popups, agent activity),
+  /// not on every [AgentService] notification.
+  late final BrowserTabsListenable browserTabsListenable =
+      BrowserTabsListenable._(this);
+
+  /// What [BrowserTabsListenable] compares between notifications.
+  List<Object?> _browserSignature() {
+    final tabs = browserTabs;
+    return <Object?>[
+      _browserKey(),
+      activeTabIndex,
+      browserBusy,
+      busy,
+      for (final t in tabs) ...[
+        t.id,
+        t.url,
+        t.title,
+        t.loading,
+        t.progress,
+        t.desktopMode,
+        t.localPreviewPath,
+        t.popupRequests.length,
+        t.controller,
+      ],
+    ];
+  }
+
+  /// Tabs per session. Opening one more drops the oldest inactive tab.
+  static const maxTabsPerSession = 10;
+
+  /// Tabs that keep a live WebView: at most three, see [LruWebViewPool].
+  late final LruWebViewPool<BrowserTab> _webViewPool =
+      LruWebViewPool<BrowserTab>(maxLive: 3, release: _releaseTabWebView);
+  _BrowserMemoryObserver? _browserMemoryObserver;
+
+  /// Tabs currently holding a live WebView, least recently used first.
+  @visibleForTesting
+  List<BrowserTab> get liveWebViewTabsForTest => _webViewPool.live;
+
+  /// Tabs that must keep their WebView: the active tab on screen and the
+  /// active tab of every session with a run in flight (agent tools drive the
+  /// active tab).
+  Set<BrowserTab> _pinnedBrowserTabs() {
+    final pinned = <BrowserTab>{};
+    final current = _browserKey();
+    _sessionBrowsers.forEach((key, tabs) {
+      if (tabs.isEmpty) return;
+      if (key != current && !busyFor(key)) return;
+      final index = _sessionActiveTab[key] ?? 0;
+      if (index >= 0 && index < tabs.length) pinned.add(tabs[index]);
+    });
+    return pinned;
+  }
+
+  /// Drops [tab]'s WebView but keeps its url/title, so the next
+  /// [controllerForTab] recreates it and reloads the page. The old view is
+  /// detached from the tab first and then navigated to about:blank so its
+  /// page memory is freed without its callbacks touching the tab.
+  void _releaseTabWebView(BrowserTab tab) {
+    final controller = tab.controller;
+    if (controller == null) return;
+    tab.controller = null;
+    tab.fileSelectorRegistration = null;
+    tab.loadedOnce = false;
+    tab.profileBound = false;
+    tab.loading = false;
+    tab.progress = 0;
+    unawaited(() async {
+      try {
+        await controller.setNavigationDelegate(NavigationDelegate());
+        await controller.loadRequest(Uri.parse('about:blank'));
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
+    }());
+  }
+
+  /// [WidgetsBindingObserver.didHaveMemoryPressure]: keep only the WebViews
+  /// that are pinned (on screen or agent-driven).
+  void _onBrowserMemoryPressure() {
+    _webViewPool.releaseAllExcept(_pinnedBrowserTabs());
+    notifyListeners();
+  }
+
   /// Browser bucket key for the current execution context.
   ///
   /// Inside a run this is the RUNNING session (carried in the run Zone) so a
@@ -2902,6 +3026,15 @@ class AgentService extends ChangeNotifier {
     final key = _browserKey();
     final tabs = _browserBucketFor(key);
     final tab = BrowserTab(url: url, sessionId: key);
+    // Tab cap: drop the oldest tab that is not the active one.
+    while (tabs.length >= maxTabsPerSession) {
+      final active = activeTabIndex;
+      final drop = active == 0 && tabs.length > 1 ? 1 : 0;
+      final removed = tabs.removeAt(drop);
+      _webViewPool.forget(removed);
+      _releaseTabWebView(removed);
+      if (active > drop) activeTabIndex = active - 1;
+    }
     tabs.add(tab);
     activeTabIndex = tabs.length - 1;
     return tab;
@@ -3517,7 +3650,9 @@ class AgentService extends ChangeNotifier {
   void closeBrowserTab(int index) {
     final tabs = browserTabs;
     if (index < 0 || index >= tabs.length) return;
-    tabs.removeAt(index);
+    final removed = tabs.removeAt(index);
+    _webViewPool.forget(removed);
+    _releaseTabWebView(removed);
     if (tabs.isEmpty) {
       _newTabInternal(_defaultBrowserUrl);
     } else if (activeTabIndex >= tabs.length) {
@@ -4473,6 +4608,14 @@ if (!window.__ovidBlankHooked) {
               Diag.swallow('agent_service', e);
             }
           },
+          // SPA navigations (pushState) change the URL and history without a
+          // page load; publish them so the omnibar and back/forward follow.
+          onUrlChange: (change) {
+            final url = change.url;
+            if (url == null || url == tab.url) return;
+            tab.url = url;
+            notifyListeners();
+          },
           onWebResourceError: (_) {
             tab.loading = false;
             tab.networkLog.add((
@@ -4676,6 +4819,12 @@ if (!window.__ovidBlankHooked) {
       } catch (error) {
         _emit('err', 'page permission handler failed: $error');
       }
+    }
+    _webViewPool.touch(tab, pinned: _pinnedBrowserTabs());
+    if (_browserMemoryObserver == null) {
+      final observer = _BrowserMemoryObserver(_onBrowserMemoryPressure);
+      _browserMemoryObserver = observer;
+      WidgetsBinding.instance.addObserver(observer);
     }
     if (!tab.loadedOnce) {
       tab.loadedOnce = true;
@@ -5777,6 +5926,7 @@ user which one instead of assuming this one.''';
   void notifyListeners() {
     _syncBusyNotifiers();
     super.notifyListeners();
+    browserTabsListenable._check();
   }
 
   /// Live status line for [sessionId] ("retrying in 9s…", "running npm test").

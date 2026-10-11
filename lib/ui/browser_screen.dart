@@ -83,8 +83,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
         agent.newBrowserTab(requestedUrl);
       }
     }
-    agent.addListener(_onAgentChanged);
+    agent.browserTabsListenable.addListener(_onBrowserChanged);
     _urlFocus.addListener(_onUrlFocusChanged);
+    _historyKey = _historySignature();
     unawaited(_refreshHistoryAvailability());
     // Omnibar initial value.
     final t = agent.browserTabs.isNotEmpty
@@ -108,7 +109,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
     return ha.isNotEmpty && ha == hb;
   }
 
-  void _onAgentChanged() {
+  /// What back/forward availability depends on. History is only re-queried
+  /// over the platform channel when this changes (a navigation, a tab switch
+  /// or a new controller), never per rebuild or per progress tick.
+  Object? _historyKey;
+
+  Object? _historySignature() {
+    final tab = _activeTab;
+    if (tab == null) return null;
+    return (tab.id, tab.url, tab.loading, tab.controller);
+  }
+
+  void _onBrowserChanged() {
     if (!mounted) return;
     // Keep the omnibar synced with the active tab (agent navigations too).
     final tab = _activeTab;
@@ -116,7 +128,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
       _url.text = _omnibarText(tab);
     }
     setState(() {});
-    unawaited(_refreshHistoryAvailability());
+    final key = _historySignature();
+    if (key != _historyKey) {
+      _historyKey = key;
+      unawaited(_refreshHistoryAvailability());
+    }
   }
 
   Future<void> _refreshHistoryAvailability() async {
@@ -198,7 +214,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   @override
   void dispose() {
-    _agent.removeListener(_onAgentChanged);
+    _agent.browserTabsListenable.removeListener(_onBrowserChanged);
     _urlFocus.removeListener(_onUrlFocusChanged);
     _urlFocus.dispose();
     _url.dispose();
@@ -260,11 +276,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final controller = tab == null || browserWebViewBuilderForTest != null
         ? tab?.controller
         : agent.controllerForTab(tab);
-    if (controller != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) unawaited(_refreshHistoryAvailability());
-      });
-    }
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
@@ -282,13 +293,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
             : null,
         actions: [
           // Agent-activity indicator: blue pulsing while agent drives.
-          AnimatedBuilder(
-            animation: agent,
-            builder: (_, _) => Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: Center(
-                child: _AgentDot(busy: agent.browserBusy || agent.busy),
-              ),
+          // browserBusy/busy are part of the browser listenable's signature,
+          // so this screen rebuilds when they flip.
+          Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: Center(
+              child: _AgentDot(busy: agent.browserBusy || agent.busy),
             ),
           ),
           if (!stackedActions) ...actions,
@@ -536,7 +546,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 backgroundColor: Aether.hairline,
                 color: Aether.accent,
               ),
-            // WebView — IndexedStack keeps every tab's platform view alive.
+            // WebView — only the active tab is mounted. Background tabs keep
+            // their controller (bounded by AgentService's WebView pool), so
+            // switching back re-hosts the same page without a reload.
             //
             // DESKTOP MODE (2026-09-24): a desktop tab is now laid out at REAL
             // desktop dimensions and scaled to fit, instead of being squeezed
@@ -555,25 +567,23 @@ class _BrowserScreenState extends State<BrowserScreen> {
                         },
                       ),
                     )
-                  : IndexedStack(
-                      index: agent.activeTabIndex,
-                      children: [
-                        for (final t in agent.browserTabs)
-                          _SizedBrowserView(
-                            // Key on the tab's STABLE id, not its URL:
-                            // in-page navigation (t.url changes constantly)
-                            // must not tear down and recreate the platform
-                            // view. desktopMode stays in the key because the
-                            // controller is intentionally recreated on toggle.
-                            key: ValueKey('tab_${t.id}_${t.desktopMode}'),
-                            tab: t,
-                            child:
-                                browserWebViewBuilderForTest?.call(t) ??
-                                WebViewWidget(
-                                  controller: agent.controllerForTab(t),
-                                ),
-                          ),
-                      ],
+                  : tab == null
+                  ? const SizedBox.shrink()
+                  : _SizedBrowserView(
+                      // Key on the tab's STABLE id, not its URL: in-page
+                      // navigation (tab.url changes constantly) must not tear
+                      // down and recreate the platform view. desktopMode
+                      // stays in the key because the controller is
+                      // intentionally recreated on toggle; the controller
+                      // stays in it because an evicted tab gets a new one.
+                      key: ValueKey(
+                        'tab_${tab.id}_${tab.desktopMode}_'
+                        '${identityHashCode(controller)}',
+                      ),
+                      tab: tab,
+                      child:
+                          browserWebViewBuilderForTest?.call(tab) ??
+                          WebViewWidget(controller: controller!),
                     ),
             ),
           ],
