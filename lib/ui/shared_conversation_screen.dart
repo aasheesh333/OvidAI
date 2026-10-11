@@ -6,16 +6,21 @@ import '../core/theme.dart';
 import '../core/state.dart';
 import 'auth_screen.dart';
 import 'widgets/aether_primitives.dart';
+import 'widgets/read_only_markdown.dart';
 
 class SharedConversationScreen extends StatefulWidget {
   const SharedConversationScreen({
     super.key,
     required this.token,
+    this.service,
     @visibleForTesting this.loadSnapshot,
   });
   final String token;
 
-  /// Overrides the public snapshot fetch (tests).
+  /// Test seam; production builds the default service.
+  final ConversationShareService? service;
+
+  /// Overrides only the public snapshot fetch (tests).
   final Future<ConversationSnapshot> Function(String token)? loadSnapshot;
 
   @override
@@ -23,15 +28,25 @@ class SharedConversationScreen extends StatefulWidget {
 }
 
 class _SharedConversationScreenState extends State<SharedConversationScreen> {
-  late final Future<ConversationSnapshot> _snapshot = _load();
+  // Mutable: a timeout/offline failure must be retryable (F-181).
+  late Future<ConversationSnapshot> _snapshot = _load();
   late final String _forkRequestId = ConversationShareService.newRequestId();
   bool _busy = false;
   String? _error;
 
-  Future<ConversationSnapshot> _load() async {
-    final load = widget.loadSnapshot;
-    if (load != null) return load(widget.token);
-    return ConversationShareService.production().publicSnapshot(widget.token);
+  ConversationShareService get _service =>
+      widget.service ?? ConversationShareService.production();
+
+  Future<ConversationSnapshot> _load() =>
+      widget.loadSnapshot?.call(widget.token) ??
+      _service.publicSnapshot(widget.token);
+
+  Future<void> _reload() {
+    final next = _load();
+    setState(() {
+      _snapshot = next;
+    });
+    return next.then((_) {}, onError: (Object _) {});
   }
 
   Future<void> _continue() async {
@@ -60,7 +75,7 @@ class _SharedConversationScreenState extends State<SharedConversationScreen> {
       if (!accountIsCurrent()) {
         throw const ConversationShareException('Account changed. Please reopen the shared link.');
       }
-      final id = await ConversationShareService.production().fork(
+      final id = await _service.fork(
         widget.token,
         requestId: _forkRequestId,
       );
@@ -87,51 +102,122 @@ class _SharedConversationScreenState extends State<SharedConversationScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Shared conversation')),
+    appBar: AppBar(
+      title: const Text('Shared conversation'),
+      actions: [
+        IconButton(
+          tooltip: 'Refresh',
+          icon: const Icon(Icons.refresh),
+          onPressed: _reload,
+        ),
+      ],
+    ),
     body: FutureBuilder<ConversationSnapshot>(
       future: _snapshot,
       builder: (context, state) {
-        if (state.hasError) return const Center(child: Text('This link is unavailable or expired.'));
-        if (!state.hasData) return const Center(child: CircularProgressIndicator());
+        if (state.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (state.hasError) {
+          final error = state.error;
+          return AetherEmptyState(
+            icon: Icons.link_off,
+            title: 'Could not open this link',
+            message: error is ConversationShareException
+                ? error.message
+                : 'This link is unavailable or expired.',
+            action: AetherGhostButton(
+              label: 'Retry',
+              icon: Icons.refresh,
+              onPressed: _reload,
+            ),
+          );
+        }
         final snapshot = state.data!;
         final messages = snapshot.messages;
-        // Up to 500 × 20k-char messages: build only the visible cards.
-        return CustomScrollView(
-          slivers: [
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-              sliver: SliverList.list(
-                children: [
-                  Text('Read-only snapshot', style: AetherType.h2),
-                  const SizedBox(height: 8),
-                ],
-              ),
-            ),
-            SliverPadding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              sliver: SliverList.builder(
-                itemCount: messages.length,
-                itemBuilder: (context, i) => Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: AetherCard(child: Text(messages[i].content)),
-                ),
-              ),
-            ),
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-              sliver: SliverList.list(
-                children: [
-                  if (_error != null) Text(_error!, style: TextStyle(color: Aether.danger)),
-                  AetherPrimaryButton(
-                    label: _busy ? 'Continuing…' : 'Continue in Ovid Si',
-                    onPressed: _busy ? null : _continue,
-                  ),
-                ],
-              ),
-            ),
-          ],
+        // Up to 500 × 20k-char messages: build only the visible bubbles.
+        return RefreshIndicator(
+          onRefresh: _reload,
+          child: ListView.builder(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            itemCount: messages.length + 1,
+            itemBuilder: (context, i) {
+              if (i == 0) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Read only', style: AetherType.label),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Shared by its owner. Pull down to load the latest version.',
+                      style: AetherType.bodyMuted,
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                );
+              }
+              return SharedMessageBubble(message: messages[i - 1]);
+            },
+          ),
         );
       },
     ),
+    // Pinned so the conversion action is always reachable (F-182).
+    bottomNavigationBar: SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(_error!, style: TextStyle(color: Aether.danger)),
+              ),
+            AetherPrimaryButton(
+              label: _busy ? 'Continuing…' : 'Continue this chat in Ovid',
+              icon: Icons.forum_outlined,
+              onPressed: _busy ? null : _continue,
+            ),
+          ],
+        ),
+      ),
+    ),
   );
+}
+
+/// One shared message with its role label (F-179) and Markdown (F-180).
+class SharedMessageBubble extends StatelessWidget {
+  const SharedMessageBubble({super.key, required this.message});
+  final SharedMessage message;
+
+  @override
+  Widget build(BuildContext context) {
+    final user = message.role == 'user';
+    return Align(
+      alignment: user ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 640),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: user ? Aether.accent.withValues(alpha: 0.08) : Aether.surface,
+            borderRadius: BorderRadius.circular(AetherRadius.rMd),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(user ? 'User' : 'Assistant', style: AetherType.label),
+              const SizedBox(height: 4),
+              ReadOnlyMarkdown(message.content),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

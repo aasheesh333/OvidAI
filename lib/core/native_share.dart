@@ -20,6 +20,10 @@ class NativeShare {
     'title': 'Share Ovid',
   });
 
+  /// Shares a link (read-only or live-session invite) via the system sheet.
+  static Future<void> link(String url, {String title = 'Share link'}) =>
+      _send('shareText', {'text': url, 'title': title});
+
   static Future<void> file(String path) =>
       _send('shareFile', {'filePath': path, 'title': 'Share file'});
 

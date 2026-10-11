@@ -80,11 +80,13 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Read-only (/s/<token>) and Collab (/s/<token>/<invite>) links.
+                 Verified via https://<host>/.well-known/assetlinks.json. -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="ovidsi.com" android:pathPrefix="/s/" />
+                <data android:scheme="https" android:host="${ovidShareHost}" android:pathPrefix="/s/" />
             </intent-filter>
         </activity>
         <!-- MCP OAuth redirect (RFC 8252 private-use scheme). A trampoline

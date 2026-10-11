@@ -2270,6 +2270,13 @@ class AppState extends ChangeNotifier {
       snapshot: _privateTranscriptSnapshot,
     );
     collaboration = CollaborationProduction(
+      // Each participant's turns run on THEIR device, model and key.
+      turnRunner: ({required providerId, required model, required messages}) =>
+          AgentService.I.completeCollaborationTurn(
+            providerId: providerId,
+            model: model,
+            messages: messages,
+          ),
       rootDirectory: getApplicationSupportDirectory,
       accountReady: () => firebase.isAvailable && firebase.accountReady,
       currentUid: () => firebase.uid,

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import inspect
 import re
+import time
 import zlib
 from typing import Any
 
@@ -12,15 +14,17 @@ from fastapi import APIRouter, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 
-from .events import EventRejected, canonical_bytes
-from .repository import CollabError, MAX_BATCH_BYTES
+from .events import EventRejected, canonical_bytes, display_name
+from .repository import CollabError, MAX_BATCH_BYTES, MAX_LONG_POLL_SECONDS
 
 MAX_BODY_BYTES = 1024 * 1024
 MAX_EVENTS = 100
 MAX_CURSOR_BYTES = 512
 MAX_REPLAY_EVENTS = 100
 MAX_REPLAY_BYTES = 256 * 1024
+LONG_POLL_INTERVAL_SECONDS = 1.0
 
 _MESSAGES = {
     "unauthenticated": "Authentication required",
@@ -203,9 +207,12 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
                 data["schemaVersion"] == 1 and
                 type(data["invitationCode"]) is str and
                 type(data["idempotencyKey"]) is str):
+            name = display_name(claims)
+
             def join_operation(uid):
                 return repository.join(uid, token, data["invitationCode"],
-                                       idempotency_key=data["idempotencyKey"], with_cursor=True)
+                                       idempotency_key=data["idempotencyKey"], with_cursor=True,
+                                       display_name=name)
             return ok(call(claims, join_operation))
         if (keys <= {"schemaVersion", "maxUses", "ttlSeconds", "idempotencyKey"} and
                 "schemaVersion" in keys and "idempotencyKey" in keys and
@@ -218,6 +225,17 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
                  uid, token, max_uses=max_uses, ttl_seconds=ttl,
                  idempotency_key=data["idempotencyKey"]))})
         raise CollabError("invalid_request")
+
+    @routes.delete("/{session_token}/invites/{invite_id}")
+    async def revoke_invite(session_token: str, invite_id: str,
+                            authorization: str = Header(default=""),
+                            x_firebase_appcheck: str = Header(default="")):
+        def operation(uid):
+            if not re.fullmatch(r'i[0-9a-f]{32}', invite_id):
+                raise CollabError("invite_not_found")
+            repository.revoke_invite(uid, session_token, invite_id)
+            return {"inviteId": invite_id, "revoked": True}
+        return await handle(lambda: ok(auth_action(authorization, x_firebase_appcheck, operation)))
 
     @routes.delete("/{session_token}/members/me")
     async def leave(session_token: str, authorization: str = Header(default=""),
@@ -248,23 +266,54 @@ def router(repository, verifier, admission, *, prefix="") -> APIRouter:
         events = data["events"]
         if type(events) is not list or not 1 <= len(events) <= MAX_EVENTS:
             raise CollabError("invalid_request")
+        name = display_name(claims)
         result = call(claims, lambda uid: repository.append_batch(
-            uid, token, events, idempotency_key=data["idempotencyKey"]))
+            uid, token, events, idempotency_key=data["idempotencyKey"], display_name=name))
         return ok(result)
 
     @routes.get("/{session_token}/events")
     async def replay(session_token: str, cursor: str | None = Query(default=None),
                limit: int = Query(default=100, ge=1, le=100),
+               wait: int = Query(default=0, ge=0, le=MAX_LONG_POLL_SECONDS),
                authorization: str = Header(default=""),
                x_firebase_appcheck: str = Header(default="")):
+        probe = getattr(repository, "head_sequence", None)
+
         def operation(uid):
             if cursor is not None and len(cursor.encode()) > MAX_CURSOR_BYTES:
                 raise CollabError("cursor_reset")
+            # Probe BEFORE replay: an empty page then proves the cursor is at
+            # this head, so a later larger head means new events exist.
+            before = probe(session_token) if wait and probe else None
             result = repository.replay(uid, session_token, cursor, limit=limit,
                                        max_bytes=MAX_REPLAY_BYTES)
-            return {"schemaVersion": 1, "events": result["events"],
-                    "nextCursor": result["cursor"], "hasMore": result["hasMore"]}
-        return await handle(lambda: ok(auth_action(authorization, x_firebase_appcheck, operation)))
+            return before, {"schemaVersion": 1, "events": result["events"],
+                            "nextCursor": result["cursor"], "hasMore": result["hasMore"]}
+
+        async def action():
+            claims = authenticate(authorization, x_firebase_appcheck)
+            before, page = call(claims, operation)
+            if not wait or page["events"] or page["hasMore"] or before is None:
+                return ok(page)
+            # Long poll: cheap head probes off the event loop, then one
+            # fully authorized replay as soon as anything was appended.
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                await asyncio.sleep(min(LONG_POLL_INTERVAL_SECONDS,
+                                        max(0.0, deadline - time.monotonic())))
+                head = await run_in_threadpool(probe, session_token)
+                if head is None or head[1] != "active" or head[0] > before[0]:
+                    _, page = call(claims, operation_without_probe)
+                    break
+            return ok(page)
+
+        def operation_without_probe(uid):
+            result = repository.replay(uid, session_token, cursor, limit=limit,
+                                       max_bytes=MAX_REPLAY_BYTES)
+            return None, {"schemaVersion": 1, "events": result["events"],
+                          "nextCursor": result["cursor"], "hasMore": result["hasMore"]}
+
+        return await handle(action)
 
     @routes.post("/{session_token}/close")
     async def close(session_token: str, request: Request,

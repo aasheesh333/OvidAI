@@ -127,6 +127,10 @@ android {
         }
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Share/Collab App Links host (/s/...). Must match the app's
+        // OVID_PUBLIC_SHARE_ORIGIN and serve /.well-known/assetlinks.json.
+        manifestPlaceholders["ovidShareHost"] =
+            (project.findProperty("ovidShareHost") as String?) ?: "ovidsi.com"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

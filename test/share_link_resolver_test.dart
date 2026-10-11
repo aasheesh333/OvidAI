@@ -22,6 +22,9 @@ void main() {
       Uri.parse('https://evil.example/s/$token'),
       Uri.parse('https://ovidsi.com/s/$token?token=$token'),
       Uri.parse('https://user:pass@ovidsi.com/s/$token'),
+      Uri.parse('https://ovidsi.com/s/$token/short'),
+      Uri.parse('https://ovidsi.com/s/$token/$token/$token'),
+      Uri.parse('https://ovidsi.com/s/$token#$token'),
     ]) {
       expect(ShareLinkResolver.parse(uri), isNull);
     }
@@ -32,6 +35,28 @@ void main() {
     expect(route, isA<ShareViewerRoute>());
     expect((route! as ShareViewerRoute).token, token);
     expect(route.toString(), isNot(contains(token)));
+  });
+
+  test('parses Collab links into a join route', () {
+    final invite = 'b' * 43;
+    final uri = Uri.parse('https://ovidsi.com/s/$token/$invite');
+    expect(ShareLinkResolver.parse(uri), ShareLink(token, invite: invite));
+    final route = ShareLinkResolver.route(uri);
+    expect(route, isA<CollabJoinRoute>());
+    expect((route! as CollabJoinRoute).invite, invite);
+    expect(route.toString(), isNot(contains(invite)));
+    expect(ShareLinkResolver.uriFor(ShareLink(token, invite: invite)), uri);
+  });
+
+  test('Collab install referrer survives install and restores the join link', () async {
+    final invite = 'c' * 43;
+    final play = ShareLinkResolver.playStoreUri(ShareLink(token, invite: invite));
+    expect(play.queryParameters['referrer'], 'share_token=$token&invite=$invite');
+    final resolver = ShareLinkResolver(store: MemoryDeferredShareStore());
+    await resolver.saveInstallReferrer(play.queryParameters['referrer']);
+    expect(await resolver.restoreDeferred(), ShareLink(token, invite: invite));
+    await resolver.saveInstallReferrer('share_token=$token&invite=bad');
+    expect(await resolver.restoreDeferred(), isNull);
   });
 
   test('restores a deferred token once and clears it from storage', () async {

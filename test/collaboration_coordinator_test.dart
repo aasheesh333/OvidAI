@@ -279,7 +279,7 @@ class FakeClient extends client.CollaborationClient {
     return stateResult(sessionToken);
   }
   @override
-  Future<client.CollaborationEventPage> replay(String sessionToken, {client.CollaborationCursor? cursor}) {
+  Future<client.CollaborationEventPage> replay(String sessionToken, {client.CollaborationCursor? cursor, int waitSeconds = 0}) {
     cursors.add(cursor?.value);
     return replayResult(sessionToken, cursor);
   }

@@ -57,7 +57,7 @@ void main() {
       final session = shareSession();
       Widget host() => MaterialApp(
         home: Scaffold(
-          body: ConversationShareSheet(session: session, service: service()),
+          body: ConversationShareSheet(initialMode: ShareMode.readOnly, session: session, service: service()),
         ),
       );
       await tester.pumpWidget(host());
@@ -112,7 +112,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: ConversationShareSheet(
+            body: ConversationShareSheet(initialMode: ShareMode.readOnly, 
               session: shareSession(),
               service: service,
             ),
@@ -176,7 +176,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: ConversationShareSheet(
+          body: ConversationShareSheet(initialMode: ShareMode.readOnly, 
             session: shareSession(),
             service: service,
           ),
@@ -202,7 +202,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: ConversationShareSheet(
+          body: ConversationShareSheet(initialMode: ShareMode.readOnly, 
             session: shareSession(),
             service: ConversationShareService(
               baseUrl: '',
@@ -239,7 +239,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: ConversationShareSheet(
+          body: ConversationShareSheet(initialMode: ShareMode.readOnly, 
             session: shareSession(),
             service: service,
           ),
@@ -270,7 +270,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: ConversationShareSheet(session: session, service: service),
+            body: ConversationShareSheet(initialMode: ShareMode.readOnly, session: session, service: service),
           ),
         ),
       );
@@ -306,7 +306,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: ConversationShareSheet(
+            body: ConversationShareSheet(initialMode: ShareMode.readOnly, 
               session: shareSession(),
               service: service,
             ),
@@ -340,7 +340,7 @@ void main() {
           child: child!,
         ),
         home: Scaffold(
-          body: ConversationShareSheet(
+          body: ConversationShareSheet(initialMode: ShareMode.readOnly, 
             session: shareSession(),
             service: ConversationShareService(
               baseUrl: '',

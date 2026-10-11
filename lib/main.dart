@@ -19,6 +19,7 @@ import 'ui/mcp_oauth_sheet.dart';
 import 'ui/shell.dart';
 import 'core/share_link_resolver.dart';
 import 'l10n/l10n.dart';
+import 'ui/collab_session_screen.dart';
 import 'ui/shared_conversation_screen.dart';
 import 'ui/widgets/error_views.dart';
 
@@ -27,8 +28,8 @@ export 'ui/app_router.dart' show appNavigatorKey;
 bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
   final route = ShareLinkResolver.route(uri);
   final navigator = navigatorKey.currentState;
-  if (route is! ShareViewerRoute || navigator == null) return false;
-  navigator.push(_shareViewerRoute(route.token));
+  if (route == null || navigator == null) return false;
+  navigator.push(_routeFor(route));
   return true;
 }
 
@@ -36,7 +37,20 @@ Route<void> _shareViewerRoute(String token) => MaterialPageRoute<void>(
   builder: (_) => SharedConversationScreen(token: token),
 );
 
-/// Opens `/s/<token>` share links on the app navigator.
+/// Read-only links open the viewer; Collab links (`/s/<token>/<invite>`)
+/// open the join screen.
+Route<void> _routeFor(
+  ShareRoute route, [
+  Route<void> Function(String token) viewer = _shareViewerRoute,
+]) => switch (route) {
+  ShareViewerRoute(:final token) => viewer(token),
+  CollabJoinRoute(:final token, :final invite) => MaterialPageRoute<void>(
+    builder: (_) => CollabJoinScreen(token: token, invite: invite),
+  ),
+};
+
+/// Opens `/s/<token>` share links (and `/s/<token>/<invite>` Collab links)
+/// on the app navigator.
 ///
 /// Only *in-flight* opens are de-duplicated: a token is held from the moment
 /// a link arrives (covering the initial link racing the first stream event)
@@ -66,13 +80,14 @@ class ShareLinkOpener {
   Set<String> get inFlightTokens => Set.unmodifiable(_inFlight);
 
   void open(Uri uri) {
-    final route = ShareLinkResolver.route(uri);
-    if (route is! ShareViewerRoute || !_isActive()) return;
-    if (!_inFlight.add(route.token)) return;
-    _attempt(route.token, 0);
+    final link = ShareLinkResolver.parse(uri);
+    final route = ShareLinkResolver.routeFor(link);
+    if (link == null || route == null || !_isActive()) return;
+    if (!_inFlight.add(link.key)) return;
+    _attempt(link.key, route, 0);
   }
 
-  void _attempt(String token, int attempt) {
+  void _attempt(String token, ShareRoute route, int attempt) {
     SchedulerBinding.instance.addPostFrameCallback((_) {
       if (!_isActive()) {
         _inFlight.remove(token);
@@ -88,11 +103,11 @@ class ShareLinkOpener {
           );
           return;
         }
-        _attempt(token, attempt + 1);
+        _attempt(token, route, attempt + 1);
         return;
       }
       navigator
-          .push(_routeBuilder(token))
+          .push(_routeFor(route, _routeBuilder))
           .whenComplete(() => _inFlight.remove(token));
     });
     SchedulerBinding.instance.scheduleFrame();
@@ -227,9 +242,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     try {
       final deferred = await _resolver.restoreDeferred();
       if (deferred != null) {
-        _openShare(
-          Uri.parse('${ShareLinkResolver.canonicalOrigin}/s/${deferred.token}'),
-        );
+        _openShare(ShareLinkResolver.uriFor(deferred));
       }
     } on Object {
       // Deferred links are optional and may fail when the provider is absent.

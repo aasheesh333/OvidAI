@@ -112,6 +112,32 @@ class ShareRepository:
                     'request_id': body['request_id'],
                     'created_at': now, 'expires_at': now + self.ttl}
 
+    def update(self, uid, token, body):
+        """Atomically replace the snapshot of a live link owned by `uid`.
+
+        The token, owner and expiry are unchanged, so a revoked or expired link
+        can never be revived. `request_id` is accepted for wire symmetry only.
+        """
+        if not isinstance(uid, str) or not uid.strip():
+            raise ShareError(401, 'invalid_identity')
+        if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', token):
+            raise ShareError(404, 'share_not_found')
+        body = CreateShare.model_validate(body).model_dump()
+        snapshot = json.dumps({'messages': body['messages']}, ensure_ascii=False,
+                              sort_keys=True, separators=(',', ':'))
+        with self._connection(write=True) as db:
+            now = self.clock()
+            if db.execute('SELECT 1 FROM deleted_accounts WHERE uid=?', (uid,)).fetchone():
+                raise ShareError(403, 'account_deleted')
+            row = db.execute('SELECT * FROM shares WHERE owner_uid=? AND token=? AND revoked=0 '
+                             'AND snapshot IS NOT NULL AND expires_at>?', (uid, token, now)).fetchone()
+            if row is None or row['session_id'] != body['session_id']:
+                raise ShareError(404, 'share_not_found')
+            # Keep `fingerprint` bound to the ORIGINAL create so a retried
+            # create with the original request ID still deduplicates/conflicts.
+            db.execute('UPDATE shares SET snapshot=? WHERE token=?', (snapshot, token))
+            return self._receipt(row)
+
     def list(self, uid, session_id=None):
         with self._connection() as db:
             rows = db.execute('''SELECT * FROM shares WHERE owner_uid=? AND revoked=0

@@ -2,14 +2,23 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 
 class ShareLink {
-  const ShareLink(this.token);
+  const ShareLink(this.token, {this.invite});
   final String token;
 
-  @override
-  bool operator ==(Object other) => other is ShareLink && other.token == token;
+  /// Present for Collab links (`/s/<sessionToken>/<inviteCode>`).
+  final String? invite;
+
+  bool get isCollab => invite != null;
+
+  /// Opaque key for de-duplicating opens; never logged.
+  String get key => invite == null ? token : '$token/$invite';
 
   @override
-  int get hashCode => token.hashCode;
+  bool operator ==(Object other) =>
+      other is ShareLink && other.token == token && other.invite == invite;
+
+  @override
+  int get hashCode => Object.hash(token, invite);
 }
 
 sealed class ShareRoute {
@@ -22,6 +31,15 @@ class ShareViewerRoute extends ShareRoute {
 
   @override
   String toString() => 'ShareViewerRoute(<redacted>)';
+}
+
+class CollabJoinRoute extends ShareRoute {
+  const CollabJoinRoute(this.token, this.invite);
+  final String token;
+  final String invite;
+
+  @override
+  String toString() => 'CollabJoinRoute(<redacted>)';
 }
 
 abstract interface class DeferredShareStore {
@@ -77,32 +95,50 @@ class ShareLinkResolver {
   final DeferredShareStore store;
   static const _native = MethodChannel('ovid/native');
 
+  /// `/s/<token>` (read only) or `/s/<sessionToken>/<inviteCode>` (Collab)
+  /// on the configured public origin only.
   static ShareLink? parse(Uri uri) {
     final origin = Uri.tryParse(canonicalOrigin);
+    final segments = uri.pathSegments;
     if (origin == null || uri.scheme != origin.scheme || uri.host != origin.host ||
         uri.port != origin.port ||
         uri.userInfo.isNotEmpty || uri.query.isNotEmpty ||
-        uri.fragment.isNotEmpty || uri.pathSegments.length != 2 ||
-        uri.pathSegments.first != 's') {
+        uri.fragment.isNotEmpty || segments.length < 2 || segments.length > 3 ||
+        segments.first != 's') {
       return null;
     }
-    final token = uri.pathSegments.last;
-    return _token.hasMatch(token) ? ShareLink(token) : null;
+    if (!segments.skip(1).every(_token.hasMatch)) return null;
+    return ShareLink(
+      segments[1],
+      invite: segments.length == 3 ? segments[2] : null,
+    );
   }
 
-  static ShareRoute? route(Uri uri) {
-    final share = parse(uri);
-    return share == null ? null : ShareViewerRoute(share.token);
-  }
+  static ShareRoute? route(Uri uri) => routeFor(parse(uri));
 
-  Future<void> saveDeferred(ShareLink share) => store.write(share.token);
+  static ShareRoute? routeFor(ShareLink? share) => share == null
+      ? null
+      : share.invite == null
+      ? ShareViewerRoute(share.token)
+      : CollabJoinRoute(share.token, share.invite!);
+
+  static Uri uriFor(ShareLink share) =>
+      Uri.parse('$canonicalOrigin/s/${share.key}');
+
+  Future<void> saveDeferred(ShareLink share) => store.write(share.key);
 
   Future<void> saveInstallReferrer(String? referrer) async {
     if (referrer == null || referrer.isEmpty) return;
     try {
-      final token = Uri.splitQueryString(referrer)['share_token'];
+      final values = Uri.splitQueryString(referrer);
+      final token = values['share_token'];
+      final invite = values['invite'];
       if (token != null && _token.hasMatch(token)) {
-        await store.write(token);
+        if (invite == null) {
+          await store.write(token);
+        } else if (_token.hasMatch(invite)) {
+          await store.write('$token/$invite');
+        }
       }
     } on FormatException {
       // Ignore malformed Play payloads; never persist unvalidated input.
@@ -120,16 +156,26 @@ class ShareLinkResolver {
   }
 
   Future<ShareLink?> restoreDeferred() async {
-    final token = await store.take();
-    return token != null && _token.hasMatch(token) ? ShareLink(token) : null;
+    final value = await store.take();
+    if (value == null) return null;
+    final parts = value.split('/');
+    if (parts.isEmpty || parts.length > 2 || !parts.every(_token.hasMatch)) {
+      return null;
+    }
+    return ShareLink(parts.first, invite: parts.length == 2 ? parts[1] : null);
   }
+
+  static const androidApplicationId = 'com.dhanuk.ovidai';
 
   static Uri playStoreUri(ShareLink share) => Uri.https(
     'play.google.com',
     '/store/apps/details',
     <String, String>{
-      'id': 'com.dhanuk.ovidai',
-      'referrer': 'share_token=${Uri.encodeComponent(share.token)}',
+      'id': androidApplicationId,
+      'referrer': Uri(queryParameters: {
+        'share_token': share.token,
+        if (share.invite != null) 'invite': share.invite!,
+      }).query,
     },
   );
 }

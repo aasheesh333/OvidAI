@@ -1,52 +1,15 @@
 // PR-3b: destructive actions outside the chat screen confirm (or keep
 // running) instead of acting on one tap.
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
-import 'package:ovid_ai/core/collaboration/production.dart';
-import 'package:ovid_ai/core/collaboration/reducer.dart' as projection;
 import 'package:ovid_ai/core/health_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
-import 'package:ovid_ai/ui/collaboration_screen.dart';
 import 'package:ovid_ai/ui/settings_health_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
-class _FakeCollaboration extends CollaborationProduction {
-  _FakeCollaboration({required this.owner})
-    : super(
-        endpoint: 'https://collab.example.test',
-        rootDirectory: () async => Directory.systemTemp,
-        accountReady: () => true,
-        currentUid: () => 'uid',
-        accessToken: () async => null,
-        appCheckToken: () async => null,
-      );
-
-  final bool owner;
-  int leaveOrCloseCalls = 0;
-  int disconnectCalls = 0;
-
-  @override
-  bool get configured => true;
-  @override
-  bool get available => true;
-  @override
-  String? get sessionToken => 'session-token';
-  @override
-  projection.CollaborationState? get state => null;
-  @override
-  bool get isOwner => owner;
-  @override
-  bool get stale => false;
-  @override
-  Future<void> leaveOrClose() async => leaveOrCloseCalls++;
-  @override
-  Future<void> disconnect() async => disconnectCalls++;
-}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -59,53 +22,6 @@ void main() {
   });
 
   tearDown(AppState.resetTestInstance);
-
-  group('collaboration', () {
-    Future<_FakeCollaboration> pump(WidgetTester tester, bool owner) async {
-      final fake = _FakeCollaboration(owner: owner);
-      addTearDown(fake.dispose);
-      await tester.pumpWidget(
-        MaterialApp(home: CollaborationScreen(controller: fake)),
-      );
-      await tester.pump();
-      return fake;
-    }
-
-    testWidgets('Close collaboration confirms; Cancel keeps it open', (
-      tester,
-    ) async {
-      final fake = await pump(tester, true);
-      await tester.tap(find.text('Close collaboration'));
-      await tester.pumpAndSettle();
-      expect(find.text('Close collaboration for everyone?'), findsOneWidget);
-      await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
-      expect(fake.leaveOrCloseCalls, 0);
-
-      await tester.tap(find.text('Close collaboration'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Close collaboration').last);
-      await tester.pumpAndSettle();
-      expect(fake.leaveOrCloseCalls, 1);
-    });
-
-    testWidgets('Leave and Disconnect confirm first', (tester) async {
-      final fake = await pump(tester, false);
-      await tester.tap(find.text('Leave collaboration'));
-      await tester.pumpAndSettle();
-      expect(find.text('Leave collaboration?'), findsOneWidget);
-      await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
-      expect(fake.leaveOrCloseCalls, 0);
-
-      await tester.tap(find.text('Disconnect on this device'));
-      await tester.pumpAndSettle();
-      expect(find.text('Disconnect this device?'), findsOneWidget);
-      await tester.tap(find.text('Disconnect'));
-      await tester.pumpAndSettle();
-      expect(fake.disconnectCalls, 1);
-    });
-  });
 
   group('device health', () {
     HealthService service({

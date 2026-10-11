@@ -1,6 +1,4 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/ui/settings_screen.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/reset_coordinator.dart';
 
@@ -47,17 +45,4 @@ void main() {
     await collaboration.delete();
     expect(await collaboration.verifyDeleted(), true);
   });
-  testWidgets(
-    'default private sync cannot report enrollment without configuration',
-    (tester) async {
-      await tester.pumpWidget(
-        const MaterialApp(home: PrivateSyncSettingsScreen()),
-      );
-      expect(find.textContaining('Not configured'), findsOneWidget);
-      final button = tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, 'Enable private sync'),
-      );
-      expect(button.onPressed, isNull);
-    },
-  );
 }

@@ -74,7 +74,7 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(
             home: Scaffold(
-              body: ConversationShareSheet(
+              body: ConversationShareSheet(initialMode: ShareMode.readOnly, 
                 session: shareSession(),
                 service: serviceWithActiveLink(),
               ),
@@ -84,7 +84,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.byType(AetherSheet), findsOneWidget);
-        expect(find.text('Share conversation'), findsOneWidget);
+        expect(find.text('Read-only link'), findsOneWidget);
         expect(find.text('Shareable link'), findsOneWidget);
         // The pure-Dart QR renderer paints into a CustomPaint grid.
         expect(find.byType(CustomPaint), findsWidgets);

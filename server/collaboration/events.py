@@ -25,7 +25,10 @@ SERVER_KINDS = ('membership', 'system')
 ALL_KINDS = CLIENT_KINDS + SERVER_KINDS
 
 CLIENT_ENVELOPE_FIELDS = ('schemaVersion', 'eventId', 'kind', 'payload')
-SERVER_ENVELOPE_FIELDS = ('sessionId', 'eventSequence', 'senderParticipantId', 'createdAt')
+SERVER_ENVELOPE_FIELDS = ('sessionId', 'eventSequence', 'senderParticipantId', 'createdAt',
+                          'senderDisplayName')
+MESSAGE_ROLES = ('user', 'assistant')
+MAX_DISPLAY_NAME_LENGTH = 64
 
 MODEL_STATUSES = ('idle', 'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted')
 PROVENANCES = ('reported', 'estimated', 'unknown')
@@ -115,13 +118,13 @@ def _screen_metadata(value):
 # ---------------------------------------------------------------------------
 
 class _Closed:
-    def __init__(self, raw, allowed, *, server_fields=()):
+    def __init__(self, raw, allowed, *, server_fields=(), optional=()):
         if not isinstance(raw, dict):
             _reject('wrongType')
         if any(not isinstance(key, str) for key in raw):
             _reject('wrongType')
         for key in raw:
-            if key in allowed:
+            if key in allowed or key in optional:
                 continue
             if key in server_fields:
                 _reject('serverField')
@@ -188,7 +191,16 @@ class _Closed:
 # ---------------------------------------------------------------------------
 
 def _message(raw):
-    return {'text': _Closed(raw, ('text',)).string('text')}
+    # `role`, `model` and `replyTo` are optional so legacy {text} payloads stay valid.
+    r = _Closed(raw, ('text',), optional=('role', 'model', 'replyTo'))
+    result = {'text': r.string('text')}
+    if 'role' in r.map:
+        result['role'] = r.enum('role', MESSAGE_ROLES)
+    if 'model' in r.map:
+        result['model'] = r.nullable_label('model')
+    if 'replyTo' in r.map:
+        result['replyTo'] = None if r.map['replyTo'] is None else r.id('replyTo')
+    return result
 
 
 def _model_status(raw):
@@ -249,6 +261,27 @@ def _classify_kind(kind):
     if any(part in _normalize_key(kind) for part in _EXECUTABLE_KIND_PARTS):
         _reject('executableKind')
     _reject('unknownKind')
+
+
+_NAME_CONTROL = re.compile(r'[\x00-\x1F\x7F\u200B-\u200F\u202A-\u202E\u2066-\u2069]')
+
+
+def display_name(claims):
+    """Author label from VERIFIED identity claims only; never full email."""
+    def get(name):
+        value = claims.get(name) if isinstance(claims, dict) else getattr(claims, name, None)
+        return value if isinstance(value, str) else ''
+    for candidate in (get('name'), get('email').split('@', 1)[0]):
+        cleaned = ' '.join(_NAME_CONTROL.sub('', candidate).split())[:MAX_DISPLAY_NAME_LENGTH].strip()
+        if not cleaned:
+            continue
+        try:
+            # Clients validate labels with the same screen; never emit one they reject.
+            _screen_metadata(cleaned)
+        except EventRejected:
+            continue
+        return cleaned
+    return 'Ovid user'
 
 
 def canonical_bytes(value):

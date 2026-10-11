@@ -40,7 +40,8 @@ class Repository:
         return {"inviteId": "invite-1", "inviteCode": "c" * 43,
                 "expiresAt": "2026-10-10T12:00:00.000Z", "maxUses": max_uses}
 
-    def join(self, uid, token, invite_code, *, idempotency_key, with_cursor):
+    def join(self, uid, token, invite_code, *, idempotency_key, with_cursor, display_name=None):
+        self.names = getattr(self, "names", []) + [display_name]
         self.calls.append(("join", uid, token, invite_code, idempotency_key, with_cursor))
         return {"member": {"participantId": "pid-alice", "role": "participant", "status": "active"},
                 "cursor": "cursor-0"}
@@ -49,7 +50,8 @@ class Repository:
         self.calls.append(("revoke_member", uid, token, participant_id))
         return {"member": {"participantId": participant_id, "role": "participant", "status": "revoked"}}
 
-    def append_batch(self, uid, token, events, *, idempotency_key):
+    def append_batch(self, uid, token, events, *, idempotency_key, display_name=None):
+        self.names = getattr(self, "names", []) + [display_name]
         self.calls.append(("append_batch", uid, token, events, idempotency_key))
         return {"events": [{"schemaVersion": 1, "eventId": submitted["eventId"], "sessionId": "sid",
                 "eventSequence": 1, "senderParticipantId": "pid-owner",

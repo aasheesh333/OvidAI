@@ -10,6 +10,12 @@ const maxCollaborationBatchBytes = 8 * 1024 * 1024;
 const maxCollaborationEvents = 100;
 const maxCollaborationResponseBytes = maxCollaborationBatchBytes + 128 * 1024;
 
+/// Multi-use link invites; the 10-member cap is enforced at join time.
+const maxCollaborationInviteUses = 50;
+
+/// Longest server-side long-poll hold for replay (seconds).
+const maxCollaborationLongPollSeconds = 25;
+
 const _errorMessages = <String, String>{
   'unauthenticated': 'Authentication required',
   'invalid_request': 'Invalid request',
@@ -225,7 +231,8 @@ class CollaborationClient {
     int ttlSeconds = 86400,
   }) async {
     _segment(sessionToken);
-    if (maxUses < 1 || maxUses > 9 || ttlSeconds < 1 || ttlSeconds > 7 * 86400) {
+    if (maxUses < 1 || maxUses > maxCollaborationInviteUses ||
+        ttlSeconds < 1 || ttlSeconds > 7 * 86400) {
       _invalidRequest();
     }
     final data = await _request('POST', '/chat/$sessionToken/members', body: {
@@ -238,12 +245,23 @@ class CollaborationClient {
     final expiresAt = DateTime.tryParse(expires);
     final uses = data['maxUses'];
     final code = _string(data, 'inviteCode');
-    if (expiresAt == null || !expires.endsWith('Z') || uses is! int || uses < 1 || uses > 9 ||
+    if (expiresAt == null || !expires.endsWith('Z') || uses is! int || uses < 1 ||
+        uses > maxCollaborationInviteUses ||
         !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(code)) {
       _invalidResponse();
     }
     return CollaborationInvite(inviteId: _string(data, 'inviteId'), inviteCode: code,
       expiresAt: expiresAt, maxUses: uses);
+  }
+
+  /// Owner-only: the link stops admitting new members; members stay.
+  Future<void> revokeInvite(String sessionToken, {required String inviteId}) async {
+    _segment(sessionToken);
+    if (!RegExp(r'^i[0-9a-f]{32}$').hasMatch(inviteId)) _invalidRequest();
+    final data = await _request('DELETE', '/chat/$sessionToken/invites/$inviteId');
+    _exact(data, const {'schemaVersion', 'inviteId', 'revoked'});
+    _version(data);
+    if (data['inviteId'] != inviteId || data['revoked'] != true) _invalidResponse();
   }
 
   Future<Member> revokeMember(String sessionToken, {required String participantId}) async {
@@ -272,18 +290,30 @@ class CollaborationClient {
     CollaborationCursor? cursor,
   }) => replay(sessionToken, cursor: cursor);
 
+  /// [waitSeconds] > 0 long-polls: the server holds the request until new
+  /// events exist or the wait elapses (then returns an empty page).
   Future<CollaborationEventPage> replay(
     String sessionToken, {
     CollaborationCursor? cursor,
+    int waitSeconds = 0,
   }) async {
     _segment(sessionToken);
     if (cursor != null && (cursor.value.isEmpty || utf8.encode(cursor.value).length > 512)) {
       _invalidRequest();
     }
+    if (waitSeconds < 0 || waitSeconds > maxCollaborationLongPollSeconds) {
+      _invalidRequest();
+    }
     final data = await _request(
       'GET',
       '/chat/$sessionToken/events',
-      query: cursor == null ? null : {'cursor': cursor.value},
+      query: {
+        if (cursor != null) 'cursor': cursor.value,
+        if (waitSeconds > 0) 'wait': '$waitSeconds',
+      },
+      timeout: waitSeconds > 0
+          ? requestTimeout + Duration(seconds: waitSeconds)
+          : null,
     );
     _exact(data, const {'schemaVersion', 'events', 'nextCursor', 'hasMore'});
     _version(data);
@@ -358,11 +388,12 @@ class CollaborationClient {
     String path, {
     Map<String, String>? query,
     Map<String, Object?>? body,
+    Duration? timeout,
   }) async {
     final abort = Completer<void>();
     try {
       return await _performRequest(method, path, query: query, body: body, abort: abort)
-          .timeout(requestTimeout, onTimeout: () {
+          .timeout(timeout ?? requestTimeout, onTimeout: () {
         if (!abort.isCompleted) abort.complete();
         throw const CollaborationClientException('Collaboration request timed out.', code: 'request_timeout');
       });
@@ -408,7 +439,7 @@ class CollaborationClient {
         : path;
     final uri = baseUri.replace(
       path: '$basePath$routePath',
-      queryParameters: query,
+      queryParameters: query == null || query.isEmpty ? null : query,
     );
     final headers = <String, String>{
       'Authorization': 'Bearer $token',
