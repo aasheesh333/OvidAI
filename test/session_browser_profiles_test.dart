@@ -339,8 +339,10 @@ void main() {
       for (final needle in allowed) {
         expect(agentSrc.contains(needle), isTrue, reason: needle);
       }
+      // about:blank (the WebView pool blanking an evicted tab, PR-2) loads
+      // no site and carries no profile, so it is not a navigation.
       final rawLoads = RegExp(
-        r'\.loadRequest\(Uri\.parse',
+        r"\.loadRequest\(Uri\.parse\((?!'about:blank')",
       ).allMatches(agentSrc).length;
       // _bindProfileThenLoad + navigateTab only.
       expect(rawLoads, 2);

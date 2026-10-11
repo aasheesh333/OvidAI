@@ -117,7 +117,10 @@ void main() {
     await _settle(tester);
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
-    await tester.tap(find.text('Cancel'));
+    // Cancel is irreversible, so it confirms first (F-062).
+    await tester.tap(find.text('Cancel task'));
+    await _settle(tester);
+    await tester.tap(find.text('Cancel task').last);
     await _settle(tester);
     expect(s.schedules.single['status'], 'cancelled');
     expect(find.text('cancelled'), findsOneWidget);
@@ -142,10 +145,14 @@ void main() {
     await _settle(tester);
     expect(find.text('Edit schedule'), findsOneWidget);
     await tester.enterText(find.byType(TextField).at(0), 'Updated task');
+    await tester.tap(find.text('Advanced'));
+    await _settle(tester);
     await tester.enterText(
-      find.byType(TextField).at(1),
+      find.byKey(const ValueKey('schedule-time')),
       '2026-12-01T12:00:00Z',
     );
+    await tester.ensureVisible(find.text('Save'));
+    await _settle(tester);
     await tester.tap(find.text('Save'));
     await _settle(tester);
     await tester.pump(const Duration(milliseconds: 400));
