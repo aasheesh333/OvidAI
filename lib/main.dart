@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 
+import 'core/cert_pinning.dart';
 import 'core/state.dart';
 import 'core/agent_service.dart';
 import 'core/theme.dart';
@@ -27,6 +28,8 @@ bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // M7: no-op unless built with OVID_CERT_PINNING=true AND pins configured.
+  installOvidCertificatePinning();
   AppState.I.registerProductionAccountFeatures();
   // Coalesce session writes in production; tests keep the zero-window default.
   AppState.enableSessionPersistDebounce();
