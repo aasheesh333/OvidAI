@@ -140,8 +140,18 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
 
   void _onThemeChanged() {
     if (!mounted || Aether.dark == _builtDark) return;
+    _applyPalette();
+  }
+
+  /// Rebuilds for a light/dark flip. `Theme.of` and `context.aether` readers
+  /// update through [MaterialApp.themeMode]; widgets that still read the
+  /// static `Aether.*` getters (const subtrees, cached builder children, open
+  /// sheets and dialogs) are marked dirty explicitly so nothing keeps
+  /// painting the old palette.
+  void _applyPalette() {
     _builtDark = Aether.dark;
     setState(() {});
+    Aether.rebuildAll(context);
   }
 
   @override
@@ -161,10 +171,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
       final isLight = brightness == Brightness.light;
       AppState.I.lightTheme = isLight;
       Aether.dark = !isLight;
-      if (mounted && Aether.dark != _builtDark) {
-        _builtDark = Aether.dark;
-        setState(() {});
-      }
+      if (mounted && Aether.dark != _builtDark) _applyPalette();
     }
   }
 
@@ -183,7 +190,11 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
       title: 'Ovid',
       navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
-      theme: Aether.theme(),
+      theme: Aether.themeFor(dark: false),
+      darkTheme: Aether.themeFor(dark: true),
+      // The app resolves "system" itself (didChangePlatformBrightness) so the
+      // static palette and the Theme always agree on the same frame.
+      themeMode: _builtDark ? ThemeMode.dark : ThemeMode.light,
       home: const LoginGate(child: OvidShell()),
     );
   }
