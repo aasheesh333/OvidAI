@@ -5176,8 +5176,23 @@ class _MessageView extends StatelessWidget {
   Widget _turnTail() => _TurnTailRow(m);
 
   Widget _imageGen(BuildContext context) {
-    final file = m.imagePath != null ? File(m.imagePath!) : null;
-    final exists = file != null && file.existsSync();
+    final path = m.imagePath;
+    if (path == null) return _imageGenCard(context, null, false, null);
+    // The file is stat'ed once, asynchronously, and cached — never with
+    // existsSync/lengthSync inside build on every rebuild.
+    return _ImageFileInfo(
+      path: path,
+      builder: (context, exists, size) =>
+          _imageGenCard(context, File(path), exists, size),
+    );
+  }
+
+  Widget _imageGenCard(
+    BuildContext context,
+    File? file,
+    bool exists,
+    int? size,
+  ) {
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
@@ -5190,12 +5205,12 @@ class _MessageView extends StatelessWidget {
         children: [
           // The real generated image, saved in the session workspace.
           GestureDetector(
-            onTap: exists ? () => _showFullscreenImage(context, file) : null,
+            onTap: exists ? () => _showFullscreenImage(context, file!) : null,
             child: AspectRatio(
               aspectRatio: 1,
               child: exists
                   ? Image.file(
-                      file,
+                      file!,
                       fit: BoxFit.cover,
                       cacheWidth: Aether.imageCacheWidth(context),
                       errorBuilder: (_, _, _) => _imageGenFallback(),
@@ -5219,7 +5234,7 @@ class _MessageView extends StatelessWidget {
                       _imageAction(
                         Icons.fullscreen,
                         'Fullscreen',
-                        () => _showFullscreenImage(context, file),
+                        () => _showFullscreenImage(context, file!),
                       ),
                       const SizedBox(width: 14),
                       _imageAction(
@@ -5233,11 +5248,16 @@ class _MessageView extends StatelessWidget {
                         'Share',
                         () => _shareLocalFile(context, m.imagePath!),
                       ),
-                      const SizedBox(width: 14),
-                      Text(
-                        '${(file.lengthSync() / 1024).toStringAsFixed(0)} KB',
-                        style: TextStyle(fontSize: 11, color: Aether.textFaint),
-                      ),
+                      if (size != null) ...[
+                        const SizedBox(width: 14),
+                        Text(
+                          '${(size / 1024).toStringAsFixed(0)} KB',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                      ],
                     ] else
                       Text(
                         'image file not in workspace',
@@ -5673,6 +5693,7 @@ class _InputBarState extends State<_InputBar> {
 
   @override
   void dispose() {
+    _mentionFilesTimer?.cancel();
     _coordinator.removeListener(_onStartupChanged);
     controller.removeListener(_onTextChanged);
     super.dispose();
@@ -5704,6 +5725,71 @@ class _InputBarState extends State<_InputBar> {
   bool _mentionActive = false;
   String _mentionQuery = '';
   int _mentionStart = -1;
+
+  /// `@file` listing cache. Listing a workspace used to run synchronously
+  /// inside build on every composer rebuild, freezing typing in large
+  /// workspaces. Now one folder is listed at a time, asynchronously, after a
+  /// short debounce and capped at [_mentionFileCap] entries.
+  static const _mentionFileCap = 500;
+  static const _mentionFileDebounce = Duration(milliseconds: 120);
+  String? _mentionFilesKey;
+  ({String root, List<FileSystemEntity> entries})? _mentionFiles;
+  String? _mentionFilesPendingKey;
+  Timer? _mentionFilesTimer;
+
+  /// Cached entries for [parent]'s workspace folder at [leading], or null
+  /// while that folder is still loading (a load is scheduled).
+  ({String root, List<FileSystemEntity> entries})? _mentionFilesFor(
+    ChatSession parent,
+    List<String> leading,
+  ) {
+    final key = [
+      parent.id,
+      parent.workspaceFolder ?? '',
+      ...leading.take(3),
+    ].join('\u0000');
+    if (key == _mentionFilesKey) return _mentionFiles;
+    if (key != _mentionFilesPendingKey) {
+      _mentionFilesPendingKey = key;
+      _mentionFilesTimer?.cancel();
+      _mentionFilesTimer = Timer(
+        _mentionFileDebounce,
+        () => unawaited(_loadMentionFiles(key, parent, leading)),
+      );
+    }
+    return null;
+  }
+
+  Future<void> _loadMentionFiles(
+    String key,
+    ChatSession parent,
+    List<String> leading,
+  ) async {
+    var root = '';
+    final entries = <FileSystemEntity>[];
+    try {
+      final ws = AgentService.I.workspaceRootFor(parent);
+      root = ws.path;
+      // Descent: walk the leading segments as directories (depth cap 3).
+      var dir = ws;
+      for (var i = 0; i < leading.length && i < 3; i++) {
+        final next = Directory('${dir.path}/${leading[i]}');
+        if (await next.exists()) dir = next;
+      }
+      await for (final e in dir.list(recursive: false)) {
+        entries.add(e);
+        if (entries.length >= _mentionFileCap) break;
+      }
+    } catch (_) {
+      // Workspace not ready — files just don't appear.
+    }
+    if (!mounted || key != _mentionFilesPendingKey) return;
+    setState(() {
+      _mentionFilesKey = key;
+      _mentionFiles = (root: root, entries: entries);
+      _mentionFilesPendingKey = null;
+    });
+  }
 
   /// Fuzzy score for [candidate] against [query].
   ///
@@ -5871,23 +5957,18 @@ class _InputBarState extends State<_InputBar> {
     // fuzzy-match INSIDE it). The model receives the chip expanded with
     // a section heading at send time.
     var fileHits = 0;
-    try {
-      final ws = agent.workspaceRootFor(parent);
-      // Descent: any `/` in the query means we're INSIDE a subfolder —
-      // list that folder (depth-capped) and match on the LAST segment.
-      var dir = ws;
-      var lastSeg = query;
-      if (query.contains('/')) {
-        final parts = query.split('/')..removeWhere((p) => p.isEmpty);
-        // Walk the leading segments as directories (depth cap 3).
-        for (var i = 0; i < parts.length - 1 && i < 3; i++) {
-          final next = Directory('${dir.path}/${parts[i]}');
-          if (next.existsSync()) dir = next;
-        }
-        lastSeg = parts.last;
-      }
-      final entities = dir.listSync(recursive: false);
-      for (final e in entities) {
+    // The listing itself is loaded off the build path (debounced, async,
+    // capped) and cached per folder; build only filters the cached entries.
+    final parts = query.split('/')..removeWhere((p) => p.isEmpty);
+    final descending = query.contains('/');
+    final lastSeg = descending ? (parts.isEmpty ? '' : parts.last) : query;
+    final leading = descending && parts.isNotEmpty
+        ? parts.sublist(0, parts.length - 1)
+        : const <String>[];
+    final listing = _mentionFilesFor(parent, leading);
+    if (listing != null) {
+      final wsPath = listing.root;
+      for (final e in listing.entries) {
         final base = e.path.split('/').last;
         if (base.startsWith('.')) continue; // .spill etc.
         final isDir = e is Directory;
@@ -5895,8 +5976,8 @@ class _InputBarState extends State<_InputBar> {
         if (score == null) continue;
         fileHits++;
         // Display path relative to the workspace root for descent rows.
-        final rel = e.path.startsWith(ws.path) && e.path != ws.path
-            ? e.path.substring(ws.path.length + 1)
+        final rel = e.path.startsWith(wsPath) && e.path != wsPath
+            ? e.path.substring(wsPath.length + 1)
             : base;
         scored.add((
           score: score,
@@ -5915,12 +5996,12 @@ class _InputBarState extends State<_InputBar> {
           ),
         ));
       }
-    } catch (_) {
-      // Workspace not ready — files just don't appear.
     }
     // PR23/M2: an EMPTY menu looks like a dead feature — show a hint row
     // explaining what @ can reference instead of rendering nothing.
-    if (fileHits == 0 && agent.subagentsOf(parent.id).isEmpty) {
+    if (listing != null &&
+        fileHits == 0 &&
+        agent.subagentsOf(parent.id).isEmpty) {
       scored.add((
         score: 999,
         order: order++,
@@ -6004,6 +6085,12 @@ class _InputBarState extends State<_InputBar> {
         mentionQuery != _mentionQuery ||
         mentionStart != _mentionStart) {
       setState(() {
+        // A fresh `@` re-lists the workspace (the agent may have added files).
+        if (mention && !_mentionActive) {
+          _mentionFilesKey = null;
+          _mentionFiles = null;
+          _mentionFilesPendingKey = null;
+        }
         _slashActive = active;
         _slashQuery = query;
         _mentionActive = mention;
@@ -9003,5 +9090,68 @@ class _RuntimeInstallBanner extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+/// Image-row file facts, resolved once per path with an async `stat` and
+/// shared across rebuilds and remounts.
+final Map<String, ({bool exists, int size})> _imageFileInfoCache = {};
+const _imageFileInfoCacheCap = 512;
+
+/// Resolves whether [path] exists and its size off the build path. Until the
+/// first stat lands the file is assumed present (the image itself falls back
+/// on a load error), so a row never flashes "missing".
+class _ImageFileInfo extends StatefulWidget {
+  const _ImageFileInfo({required this.path, required this.builder});
+
+  final String path;
+  final Widget Function(BuildContext context, bool exists, int? size) builder;
+
+  @override
+  State<_ImageFileInfo> createState() => _ImageFileInfoState();
+}
+
+class _ImageFileInfoState extends State<_ImageFileInfo> {
+  ({bool exists, int size})? _info;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolve();
+  }
+
+  @override
+  void didUpdateWidget(_ImageFileInfo oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path) _resolve();
+  }
+
+  void _resolve() {
+    final path = widget.path;
+    _info = _imageFileInfoCache[path];
+    if (_info != null) return;
+    unawaited(() async {
+      ({bool exists, int size}) info;
+      try {
+        final stat = await File(path).stat();
+        info = (
+          exists: stat.type != FileSystemEntityType.notFound,
+          size: stat.size,
+        );
+      } catch (_) {
+        info = (exists: false, size: 0);
+      }
+      if (_imageFileInfoCache.length >= _imageFileInfoCacheCap) {
+        _imageFileInfoCache.remove(_imageFileInfoCache.keys.first);
+      }
+      _imageFileInfoCache[path] = info;
+      if (mounted && widget.path == path) setState(() => _info = info);
+    }());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final info = _info;
+    return widget.builder(context, info?.exists ?? true, info?.size);
   }
 }
