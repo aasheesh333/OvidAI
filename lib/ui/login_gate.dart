@@ -7,8 +7,10 @@ import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
 import '../core/auth_identity.dart';
+import '../core/legal_links.dart';
 import 'auth_methods.dart';
 import 'widgets/aether_primitives.dart';
+import 'widgets/external_link.dart';
 import 'widgets/ovid_mark.dart';
 
 /// Mandatory Firebase sign-in gate with server account acknowledgement.
@@ -750,22 +752,57 @@ class _LoginScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: AetherSpacing.space6),
-                Text(
-                  'By continuing you agree to use Ovid responsibly. '
-                  'Abuse, automated farming, or sharing accounts may '
-                  'lead to suspension.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 13,
-                    height: 1.5,
-                    color: Aether.textMuted,
-                  ),
-                ),
+                const _LegalConsent(),
               ],
             ),
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Terms and Privacy links shown before an account is created. Each link is a
+/// 48dp target announced as a link.
+class _LegalConsent extends StatelessWidget {
+  const _LegalConsent();
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(fontSize: 13, height: 1.5, color: Aether.textMuted);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'By continuing you agree to the Ovid Terms of Service and '
+          'Privacy Policy.',
+          textAlign: TextAlign.center,
+          style: style,
+        ),
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: AetherSpacing.space2,
+          children: [
+            ExternalLinkButton(
+              label: 'Terms of Service',
+              url: LegalLinks.terms,
+              style: style.copyWith(color: Aether.accentC),
+            ),
+            ExternalLinkButton(
+              label: 'Privacy Policy',
+              url: LegalLinks.privacyPolicy,
+              style: style.copyWith(color: Aether.accentC),
+            ),
+          ],
+        ),
+        const SizedBox(height: AetherSpacing.space2),
+        Text(
+          'Use Ovid responsibly. Abuse, automated farming, or sharing '
+          'accounts may lead to suspension.',
+          textAlign: TextAlign.center,
+          style: style,
+        ),
+      ],
     );
   }
 }
