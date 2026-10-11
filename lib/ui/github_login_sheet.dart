@@ -27,11 +27,12 @@ void showGithubLoginSheet(
 }
 
 class GithubLoginSheet extends StatefulWidget {
-  const GithubLoginSheet({super.key, this.client});
+  const GithubLoginSheet({super.key, this.client, this.waitForNextPoll});
 
   /// Optional HTTP client override for the device-flow requests. Production
   /// callers leave this null; widget tests inject a mock.
   final http.Client? client;
+  final Future<void> Function(Duration interval)? waitForNextPoll;
 
   @override
   State<GithubLoginSheet> createState() => _GithubLoginSheetState();
@@ -148,7 +149,7 @@ class _GithubLoginSheetState extends State<GithubLoginSheet>
         maxWait: authorization.expiresIn,
         client: widget.client,
         isCancelled: () => _cancelled,
-        waitForNextPoll: _waitForNextPoll,
+        waitForNextPoll: widget.waitForNextPoll ?? _waitForNextPoll,
       );
       if (!mounted || _cancelled) return;
       setState(() => _state = _State.done);

@@ -86,14 +86,23 @@ void main() {
   });
 
   group('GithubLoginSheet', () {
-    Future<void> open(WidgetTester tester, http.Client client) async {
+    Future<void> open(
+      WidgetTester tester,
+      http.Client client, {
+      Future<void> Function(Duration interval)? waitForNextPoll,
+    }) async {
       await tester.runAsync(() async {
         // The singleton serializes token writes across tests: run its async
         // work in the real zone (same pattern as share_sheets_test).
         await GitHubService.I.signOut();
         await tester.pumpWidget(
           MaterialApp(
-            home: Scaffold(body: GithubLoginSheet(client: client)),
+             home: Scaffold(
+               body: GithubLoginSheet(
+                 client: client,
+                 waitForNextPoll: waitForNextPoll,
+               ),
+             ),
           ),
         );
         await tester.pump();
@@ -128,7 +137,7 @@ void main() {
         }
         return http.Response(jsonEncode({'access_token': 'tok'}), 200);
       });
-      await open(tester, client);
+      await open(tester, client, waitForNextPoll: (_) async {});
       expect(find.text('ABCD-1234'), findsOneWidget);
 
       for (
