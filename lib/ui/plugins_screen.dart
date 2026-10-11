@@ -266,7 +266,7 @@ Future<bool> confirmAndUninstallPlugin(
   final removed = <String>[
     if (plugin.runtimeId != null) ...[
       'its permission grant',
-      'stored plugin secrets',
+      'its saved settings and secrets',
       'installed files and dependencies',
     ] else
       'its installed files',
@@ -2308,6 +2308,10 @@ class PluginDetailScreen extends StatelessWidget {
                 ),
                 pluginName: plugin.runtimeId!,
                 fields: configFieldsForSettings(settingsFields),
+                installedPluginIds: [
+                  for (final p in AppState.I.plugins)
+                    if (p.runtimeId != null) p.runtimeId!,
+                ],
               ),
             ),
           ],

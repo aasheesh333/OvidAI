@@ -248,7 +248,7 @@ void main() {
     await tester.tap(save);
     await _frames(tester);
     expect(saves, 1);
-    const key = 'native_plugin_finish_review_long_scopes__token';
+    final key = NativePluginConfigStore.storageKeyFor(_id, 'token');
     expect(await const FlutterSecureStorage().read(key: key), 'fixture-secret');
     expect((await SharedPreferences.getInstance()).getString(key), isNull);
     await reveal(tester, find.byKey(const ValueKey('plugin-settings-saved')));

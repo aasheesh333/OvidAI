@@ -302,8 +302,11 @@ void main() {
 
   group('PluginSettingsPanel (schema-driven settings surface)', () {
     const pluginName = 'acme/settings-kit';
-    const endpointPrefsKey = 'native_plugin_acme_settings_kit__endpoint';
-    const tokenSecureKey = 'native_plugin_acme_settings_kit__api_token';
+    // Installed plugins have their own collision-free namespace (F-108).
+    final endpointPrefsKey =
+        NativePluginConfigStore.storageKeyFor(pluginName, 'endpoint');
+    final tokenSecureKey =
+        NativePluginConfigStore.storageKeyFor(pluginName, 'api_token');
 
     const fields = <NativePluginConfigField>[
       NativePluginConfigField(
