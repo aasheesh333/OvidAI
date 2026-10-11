@@ -877,13 +877,34 @@ class PluginPermissionGrant {
 
   final DateTime approvedAt;
 
+  /// Capabilities the plugin requested that the user explicitly DECLINED
+  /// on the approval sheet. A declined capability is a decision, not a gap:
+  /// the approval is complete, and the runtime skips every contribution
+  /// that needs it ("disabled by you") instead of refusing the plugin.
+  final Set<PluginCapability> declinedCapabilities;
+
+  /// Separate opt-in for dependency lifecycle scripts (npm `postinstall`,
+  /// pip source builds). Deliberately NOT implied by
+  /// [PluginCapability.shellExecute]: a hook's shell grant must never
+  /// silently let third-party packages run code at install time. Absent in
+  /// older grants, which therefore install with scripts disabled.
+  final bool allowDependencyScripts;
+
   const PluginPermissionGrant({
     required this.pluginId,
     required this.manifestDigest,
     required this.capabilities,
     this.environmentReadNames = const {},
     required this.approvedAt,
+    this.declinedCapabilities = const {},
+    this.allowDependencyScripts = false,
   });
+
+  /// Every capability the user decided on, granted or declined.
+  Set<PluginCapability> get decidedCapabilities => {
+    ...capabilities,
+    ...declinedCapabilities,
+  };
 
   Map<String, dynamic> toJson() => {
     'pluginId': pluginId,
@@ -891,6 +912,9 @@ class PluginPermissionGrant {
     'capabilities': capabilities.map((c) => c.name).toList(),
     'environmentReadNames': environmentReadNames.toList(),
     'approvedAt': approvedAt.toIso8601String(),
+    if (declinedCapabilities.isNotEmpty)
+      'declinedCapabilities': declinedCapabilities.map((c) => c.name).toList(),
+    if (allowDependencyScripts) 'allowDependencyScripts': true,
   };
 
   factory PluginPermissionGrant.fromJson(Map<String, dynamic> j) =>
@@ -907,6 +931,11 @@ class PluginPermissionGrant {
         approvedAt:
             DateTime.tryParse(j['approvedAt'] as String? ?? '') ??
             DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+        declinedCapabilities: pluginCapabilitiesFromNames(
+          j['declinedCapabilities'],
+        ),
+        // Fail closed: only an explicit `true` opts into install scripts.
+        allowDependencyScripts: j['allowDependencyScripts'] == true,
       );
 }
 

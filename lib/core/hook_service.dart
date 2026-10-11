@@ -1270,6 +1270,17 @@ class HookService extends ChangeNotifier {
       }
       for (final h in m.hooks) {
         if (h.event != canonical) continue;
+        // F-106: the user declined a capability this hook needs on the
+        // approval sheet — it stays installed but never runs.
+        final declined = PluginContributionRegistry.I
+            .declinedCapabilityForHook(pid, h);
+        if (declined != null) {
+          _noteBlocker(
+            pid,
+            'hook on $canonical disabled by you (declined ${declined.name})',
+          );
+          continue;
+        }
         out.add((pid, h, canonical));
       }
     }

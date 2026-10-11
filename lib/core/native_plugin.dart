@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'native_plugins/utility_limits.dart';
+import 'plugin_manifest.dart' show isCanonicalPluginId;
 import 'secure_store.dart';
 
 /// A single tool exposed by a native plugin capability.
@@ -49,12 +52,21 @@ abstract class NativePluginCapability {
   });
 }
 
-/// Persistent configuration storage for native plugin capabilities.
+/// Persistent configuration storage for native plugin capabilities and
+/// installed plugins' declared settings.
 ///
 /// Secrets (fields declared with `secret: true`) are stored in
 /// [FlutterSecureStorage]; non-sensitive settings are stored in
-/// [SharedPreferences]. Keys are namespaced per plugin slug:
-/// `native_plugin_<slug>__<field_key>`.
+/// [SharedPreferences].
+///
+/// Two key namespaces that can never collide (F-108):
+///  * native capabilities (display names such as `Native JSON`):
+///    `native_plugin_<slug>__<field_key>`;
+///  * installed plugins (canonical `publisher/name` runtime ids):
+///    `plugin_cfg_<base64url(runtimeId)>__<field_key>`. The encoding is
+///    injective, so `acme/foo-bar` and `acme-foo/bar` — which slugify
+///    alike — get different keys, and no plugin can pre-fill (or later
+///    read) another plugin's or a native capability's secret.
 class NativePluginConfigStore {
   NativePluginConfigStore({FlutterSecureStorage? secureStorage})
       : _secure = secureStorage ?? ovidSecureStorage();
@@ -63,11 +75,38 @@ class NativePluginConfigStore {
 
   final FlutterSecureStorage _secure;
 
+  /// Prefix of every installed-plugin settings key.
+  static const String installedPluginKeyPrefix = 'plugin_cfg_';
+
+  /// True when [pluginName] names an installed plugin (a canonical
+  /// `publisher/name` runtime id) rather than a native capability.
+  static bool isInstalledPluginName(String pluginName) =>
+      isCanonicalPluginId(pluginName);
+
+  /// Collision-free namespace of an installed plugin's settings.
+  static String installedPluginNamespace(String runtimeId) =>
+      '$installedPluginKeyPrefix'
+      '${base64Url.encode(utf8.encode(runtimeId)).replaceAll('=', '')}__';
+
+  /// The pre-F-108 slug namespace, kept only for the one-time migration.
+  static String _legacyNamespace(String pluginName) =>
+      'native_plugin_${NativePluginRegistry.slugify(pluginName)}__';
+
+  static String _namespace(String pluginName) =>
+      isInstalledPluginName(pluginName)
+      ? installedPluginNamespace(pluginName)
+      : _legacyNamespace(pluginName);
+
+  /// The storage key of [key] for [pluginName] (same in prefs and secure
+  /// storage).
+  static String storageKeyFor(String pluginName, String key) =>
+      '${_namespace(pluginName)}$key';
+
   static String _prefsKey(String pluginName, String key) =>
-      'native_plugin_${NativePluginRegistry.slugify(pluginName)}__$key';
+      storageKeyFor(pluginName, key);
 
   static String _secureKey(String pluginName, String key) =>
-      'native_plugin_${NativePluginRegistry.slugify(pluginName)}__$key';
+      storageKeyFor(pluginName, key);
 
   /// Persists [values], routing each entry to secure storage or prefs
   /// based on the matching [fields] declaration. Unknown keys throw
@@ -127,6 +166,89 @@ class NativePluginConfigStore {
       if (value != null) out[field.key] = value;
     }
     return out;
+  }
+
+  /// One-time move of an installed plugin's settings out of the old slug
+  /// namespace (`native_plugin_<slug>__`) into its own (F-108).
+  ///
+  /// The old namespace is ambiguous by construction, so a value moves ONLY
+  /// when exactly one known plugin could own it: no other id in
+  /// [installedPluginIds] and no registered native capability slugifies to
+  /// the same name. Otherwise it is left for the user to re-enter — handing
+  /// it to the wrong plugin is the very leak this fixes. Values already in
+  /// the new namespace win. Returns the number of keys moved.
+  Future<int> migrateLegacyInstalledSettings({
+    required String pluginName,
+    required List<NativePluginConfigField> fields,
+    required Iterable<String> installedPluginIds,
+  }) async {
+    if (!isInstalledPluginName(pluginName) || fields.isEmpty) return 0;
+    final slug = NativePluginRegistry.slugify(pluginName);
+    final contested =
+        installedPluginIds.any(
+          (id) => id != pluginName && NativePluginRegistry.slugify(id) == slug,
+        ) ||
+        NativePluginRegistry.I.capabilityForSlug(slug) != null;
+    if (contested) return 0;
+    final legacy = _legacyNamespace(pluginName);
+    final prefs = await SharedPreferences.getInstance();
+    var moved = 0;
+    for (final field in fields) {
+      final oldKey = '$legacy${field.key}';
+      final newKey = storageKeyFor(pluginName, field.key);
+      if (field.secret) {
+        final value = await _secure.read(key: oldKey);
+        if (value == null) continue;
+        if (await _secure.read(key: newKey) == null) {
+          await _secure.write(key: newKey, value: value);
+          moved++;
+        }
+        await _secure.delete(key: oldKey);
+      } else {
+        final value = prefs.getString(oldKey);
+        if (value == null) continue;
+        if (prefs.getString(newKey) == null) {
+          await prefs.setString(newKey, value);
+          moved++;
+        }
+        await prefs.remove(oldKey);
+      }
+    }
+    return moved;
+  }
+
+  /// Deletes EVERY saved setting of the installed plugin [runtimeId] —
+  /// secrets and plain values, whatever fields the manifest declares now
+  /// (the namespace is the plugin's own, so a prefix sweep is exact). Also
+  /// clears [legacyFields] from the old slug namespace unless a native
+  /// capability shares that slug. Used by uninstall (F-107).
+  Future<void> clearInstalledPlugin(
+    String runtimeId, {
+    List<NativePluginConfigField> legacyFields = const [],
+  }) async {
+    if (!isInstalledPluginName(runtimeId)) return;
+    final namespace = installedPluginNamespace(runtimeId);
+    final secure = await _secure.readAll();
+    for (final key in secure.keys.toList()) {
+      if (key.startsWith(namespace)) await _secure.delete(key: key);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    for (final key in prefs.getKeys().toList()) {
+      if (key.startsWith(namespace)) await prefs.remove(key);
+    }
+    final slug = NativePluginRegistry.slugify(runtimeId);
+    if (legacyFields.isEmpty ||
+        NativePluginRegistry.I.capabilityForSlug(slug) != null) {
+      return;
+    }
+    final legacy = _legacyNamespace(runtimeId);
+    for (final field in legacyFields) {
+      if (field.secret) {
+        await _secure.delete(key: '$legacy${field.key}');
+      } else {
+        await prefs.remove('$legacy${field.key}');
+      }
+    }
   }
 
   /// Clears every value in [fields] for [pluginName].

@@ -26,11 +26,18 @@ class PluginSettingsPanel extends StatefulWidget {
     required this.fields,
     this.store,
     this.onSaved,
+    this.installedPluginIds,
   });
 
+  /// Runtime ids of every installed plugin. When given, values an installed
+  /// plugin saved under the old ambiguous slug namespace move into its own
+  /// namespace on first load — only when no other plugin could own them
+  /// ([NativePluginConfigStore.migrateLegacyInstalledSettings]).
+  final Iterable<String>? installedPluginIds;
+
   /// Config-storage namespace — the canonical `publisher/name` id for an
-  /// installed plugin, the display name for a native capability.
-  /// [NativePluginConfigStore] slugifies it into its storage keys.
+  /// installed plugin (its own collision-free namespace), the display name
+  /// for a native capability (slug namespace). See [NativePluginConfigStore].
   final String pluginName;
 
   /// The declarative fields to render (shared model — see
@@ -106,6 +113,14 @@ class _PluginSettingsPanelState extends State<PluginSettingsPanel> {
 
   Future<void> _load() async {
     try {
+      final installed = widget.installedPluginIds;
+      if (installed != null) {
+        await _store.migrateLegacyInstalledSettings(
+          pluginName: widget.pluginName,
+          fields: widget.fields,
+          installedPluginIds: installed,
+        );
+      }
       final values = await _store.readAll(
         pluginName: widget.pluginName,
         fields: widget.fields,

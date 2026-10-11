@@ -2725,6 +2725,13 @@ class AppState extends ChangeNotifier {
     plugin.migrationRequired = false;
     plugin.runtimeReason = null;
     if (runtimeId != null) {
+      // Captured before the runtime unregisters the manifest: the fields
+      // that may still sit in the pre-F-108 slug namespace.
+      final legacySettingsFields = [
+        for (final f
+            in PluginContributionRegistry.I.settingsFieldsForPlugin(runtimeId))
+          NativePluginConfigField(key: f.key, label: f.key, secret: f.secret),
+      ];
       // Task 7: runtime-managed rows tear down the atomic install
       // (registry, committed content, dependency sandbox, activation
       // record, grant + owned secrets) before the legacy surfaces below.
@@ -2732,6 +2739,16 @@ class AppState extends ChangeNotifier {
         await PluginRuntimeManager.I.uninstall(runtimeId);
       } catch (e) {
         Diag.swallow('state', e);
+      }
+      // F-107: the plugin's saved settings (secrets included) leave with
+      // it, so nothing survives for a later install to inherit.
+      try {
+        await NativePluginConfigStore.I.clearInstalledPlugin(
+          runtimeId,
+          legacyFields: legacySettingsFields,
+        );
+      } catch (e) {
+        Diag.swallow('state.uninstall.settings', e);
       }
     }
     await persistPluginState();

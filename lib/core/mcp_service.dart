@@ -16,6 +16,7 @@ import 'native_mcp.dart';
 import 'sandbox_service.dart';
 import 'secure_store.dart';
 import 'plugin_manifest.dart';
+import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
 import 'plugin_user_config.dart';
 import 'state.dart';
@@ -1100,6 +1101,13 @@ class McpService {
       case PluginActivation.sessionActive:
       case PluginActivation.globalActive:
       case PluginActivation.degraded:
+        // F-106: declined on the approval sheet — installed, never mounted.
+        final declined = PluginContributionRegistry.I
+            .declinedCapabilityForMcpServer(owner, server.name);
+        if (declined != null) {
+          return 'disabled by you — you declined '
+              '"${pluginCapabilityTitle(declined)}" when installing "$owner"';
+        }
         return null;
       case PluginActivation.pendingGlobal:
         return 'owning plugin "$owner" is enabled but activates on restart — '

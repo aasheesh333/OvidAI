@@ -19,11 +19,13 @@ import 'package:ovid_ai/ui/plugins_screen.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  // NativePluginConfigStore namespaces keys by slugified plugin name:
-  // 'acme/settings-kit' → 'acme_settings_kit'.
+  // NativePluginConfigStore namespaces an installed plugin's keys by the
+  // base64url of its canonical id (F-108) — never the ambiguous slug.
   const pluginName = 'acme/settings-kit';
-  const endpointPrefsKey = 'native_plugin_acme_settings_kit__endpoint';
-  const tokenSecureKey = 'native_plugin_acme_settings_kit__api_token';
+  final endpointPrefsKey =
+      NativePluginConfigStore.storageKeyFor(pluginName, 'endpoint');
+  final tokenSecureKey =
+      NativePluginConfigStore.storageKeyFor(pluginName, 'api_token');
 
   const fields = [
     NativePluginConfigField(

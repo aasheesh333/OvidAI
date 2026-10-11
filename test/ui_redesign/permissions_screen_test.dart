@@ -93,7 +93,7 @@ void main() {
 
       expect(
         find.textContaining(
-          'No decisions for this session yet',
+          'No remembered decisions in any chat yet',
         ),
         findsOneWidget,
       );

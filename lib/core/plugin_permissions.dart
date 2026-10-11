@@ -12,6 +12,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'plugin_manifest.dart';
@@ -298,6 +299,87 @@ List<CapabilityExplanation> explainCapabilities(
   return out;
 }
 
+/// Plain-language title for [cap] — what users see instead of the enum
+/// name on consent and status surfaces.
+String pluginCapabilityTitle(PluginCapability cap) => switch (cap) {
+  PluginCapability.workspaceRead => 'Read workspace files',
+  PluginCapability.workspaceWrite => 'Change workspace files',
+  PluginCapability.shellExecute => 'Run shell commands',
+  PluginCapability.networkConnect => 'Connect to the internet',
+  PluginCapability.processSpawn => 'Start background processes',
+  PluginCapability.environmentRead => 'Read saved credentials',
+  PluginCapability.mcpRegister => 'Add MCP servers',
+  PluginCapability.hooksObserve => 'Watch agent activity',
+  PluginCapability.hooksBlock => 'Block or change agent actions',
+  PluginCapability.sessionRead => 'Read this chat',
+  PluginCapability.sessionWrite => 'Write to this chat',
+  PluginCapability.deviceControl => 'Control this device',
+};
+
+/// Capabilities the user may decline on the approval sheet while still
+/// installing the rest of the plugin (F-106). Each one gates a contribution
+/// kind the runtime can skip independently — hooks (all, shell-running,
+/// blocking), MCP servers (all, process-spawning, network) — or is not
+/// exercised by any runtime path at all (`deviceControl`, which is only
+/// ever DECLARED). Everything else (reading the plugin's own commands and
+/// skills, the env names its servers need) is the plugin itself: declining
+/// it would leave nothing to install, so it stays all-or-nothing.
+const Set<PluginCapability> kDeclinablePluginCapabilities = {
+  PluginCapability.hooksObserve,
+  PluginCapability.hooksBlock,
+  PluginCapability.shellExecute,
+  PluginCapability.mcpRegister,
+  PluginCapability.processSpawn,
+  PluginCapability.networkConnect,
+  PluginCapability.deviceControl,
+};
+
+/// The capabilities [hook] needs to run — mirrors [inferRequestedCapabilities].
+Set<PluginCapability> capabilitiesForHook(PluginHook hook) => {
+  PluginCapability.hooksObserve,
+  if (hook.type == 'command') PluginCapability.shellExecute,
+  if (hook.canBlock) PluginCapability.hooksBlock,
+};
+
+/// The capabilities [server] needs to mount — mirrors
+/// [inferRequestedCapabilities].
+Set<PluginCapability> capabilitiesForMcpServer(PluginMcpServer server) => {
+  PluginCapability.mcpRegister,
+  if (server.transport == 'stdio') PluginCapability.processSpawn,
+  if (server.transport == 'http') PluginCapability.networkConnect,
+};
+
+/// The first declined capability that keeps a contribution needing
+/// [required] from running, or null when nothing it needs was declined.
+PluginCapability? firstDeclinedCapability(
+  Set<PluginCapability> required,
+  Set<PluginCapability> declined,
+) {
+  for (final c in PluginCapability.values) {
+    if (required.contains(c) && declined.contains(c)) return c;
+  }
+  return null;
+}
+
+/// True when [grant] decides on every capability in [requested]: each one
+/// is either granted or declined — and only [kDeclinablePluginCapabilities]
+/// can be declined. A declined non-declinable capability (a tampered or
+/// future-format record) does NOT count, so the grant fails closed.
+bool grantCoversRequested(
+  PluginPermissionGrant grant,
+  Set<PluginCapability> requested,
+) {
+  for (final c in requested) {
+    if (grant.capabilities.contains(c)) continue;
+    if (grant.declinedCapabilities.contains(c) &&
+        kDeclinablePluginCapabilities.contains(c)) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 /// The NEW capabilities a manifest requests relative to a stored grant
 /// (spec §5.1: "a later update requesting new capabilities pauses
 /// activation until the delta is approved"). Null [granted] means
@@ -452,7 +534,7 @@ class PluginPermissionStore {
     final requested = manifest.requestedCapabilities.isNotEmpty
         ? manifest.requestedCapabilities
         : inferRequestedCapabilities(manifest);
-    if (!stored.capabilities.containsAll(requested)) return null;
+    if (!grantCoversRequested(stored, requested)) return null;
     final environmentNames = <String>{...manifest.environmentReadNames};
     for (final server in manifest.mcpServers) {
       environmentNames.addAll(server.envNames);
@@ -467,6 +549,8 @@ class PluginPermissionStore {
       // Preserve the original approval time — a re-key is not a re-approval,
       // and stamping now would misreport how long this grant has been live.
       approvedAt: stored.approvedAt,
+      declinedCapabilities: stored.declinedCapabilities,
+      allowDependencyScripts: stored.allowDependencyScripts,
     );
     await save(migrated);
     return migrated;
@@ -497,14 +581,40 @@ class PluginPermissionStore {
     final requested = manifest.requestedCapabilities.isNotEmpty
         ? manifest.requestedCapabilities
         : inferRequestedCapabilities(manifest);
-    if (!grant.capabilities.containsAll(requested)) return null;
+    if (!grantCoversRequested(grant, requested)) return null;
     final environmentNames = <String>{...manifest.environmentReadNames};
     for (final server in manifest.mcpServers) {
       environmentNames.addAll(server.envNames);
     }
     if (!grant.environmentReadNames.containsAll(environmentNames)) return null;
+    _noteDeclined(grant);
     return grant;
   }
+
+  /// Declined capabilities per plugin id, as of the last grant this process
+  /// loaded, saved or revoked. A SYNCHRONOUS view for the hook and MCP
+  /// dispatch paths, which cannot await storage per event. Boot activation
+  /// resolves every installed plugin's grant through [effectiveRuntimeGrant]
+  /// before registering it, so the view is populated before anything runs.
+  static final Map<String, Set<PluginCapability>> _declinedByPlugin = {};
+
+  /// What the user declined for [pluginId] (empty when nothing was).
+  static Set<PluginCapability> declinedCapabilitiesFor(String pluginId) =>
+      _declinedByPlugin[pluginId] ?? const {};
+
+  static void _noteDeclined(PluginPermissionGrant grant) {
+    final declined = grant.declinedCapabilities.intersection(
+      kDeclinablePluginCapabilities,
+    );
+    if (declined.isEmpty) {
+      _declinedByPlugin.remove(grant.pluginId);
+    } else {
+      _declinedByPlugin[grant.pluginId] = Set.unmodifiable(declined);
+    }
+  }
+
+  @visibleForTesting
+  static void resetDeclinedCacheForTest() => _declinedByPlugin.clear();
 
   /// Persists [grant] (replacing any previous record for its plugin id).
   Future<void> save(PluginPermissionGrant grant) async {
@@ -514,10 +624,35 @@ class PluginPermissionStore {
       final map = Map<String, String>.of(_confirmedMap(prefs));
       map[grant.pluginId] = jsonEncode(grant.toJson());
       await _commitMap(prefs, map);
+      _noteDeclined(grant);
       // Only an explicit approval begun after the revoke may lift its denial.
       if (identical(_tombstones(prefs)[grant.pluginId], revokedAtStart)) {
         _tombstones(prefs).remove(grant.pluginId);
       }
+    });
+  }
+
+  /// Undoes an approval that was saved for an install which then FAILED:
+  /// the grant is removed (or [restore]d to the record that existed before
+  /// the approval sheet), so a later install of the same digest prompts
+  /// again instead of silently reusing consent for content that never
+  /// installed. Unlike [revoke] this never touches plugin-owned secrets —
+  /// an earlier installed revision may still own them — and leaves no
+  /// revocation tombstone.
+  Future<void> discardApproval(
+    String pluginId, {
+    PluginPermissionGrant? restore,
+  }) async {
+    if (restore != null && restore.pluginId == pluginId) {
+      await save(restore);
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    return _withWriteLock(() async {
+      final map = Map<String, String>.of(_confirmedMap(prefs));
+      if (map.remove(pluginId) == null) return;
+      await _commitMap(prefs, map);
+      _declinedByPlugin.remove(pluginId);
     });
   }
 
@@ -530,6 +665,7 @@ class PluginPermissionStore {
     final prefs = await SharedPreferences.getInstance();
     _tombstones(prefs)[pluginId] = Object();
     _confirmedMap(prefs); // deny before waiting for any pending write
+    _declinedByPlugin.remove(pluginId);
     return _withWriteLock(() async {
       Object? persistenceError;
       StackTrace? persistenceStack;

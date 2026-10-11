@@ -34,6 +34,7 @@
 library;
 
 import 'plugin_manifest.dart';
+import 'plugin_permissions.dart';
 import 'state.dart';
 
 /// The contribution kind — the segment after `plugin:<plugin-id>/` in a
@@ -203,7 +204,44 @@ class _Registration {
 /// scoping. One process-wide instance ([I]) serves the agent roster and
 /// dispatch; tests may build isolated instances.
 class PluginContributionRegistry {
-  PluginContributionRegistry({this.sessionLineage});
+  PluginContributionRegistry({
+    this.sessionLineage,
+    Set<PluginCapability> Function(String pluginId)? declinedCapabilities,
+  }) : declinedCapabilities =
+           declinedCapabilities ??
+           PluginPermissionStore.declinedCapabilitiesFor;
+
+  /// Capabilities the user declined for a plugin on its approval sheet
+  /// (F-106). Contributions needing one are "disabled by you": hooks are
+  /// not resolved and MCP servers do not connect. Defaults to the grant
+  /// store's synchronous view.
+  final Set<PluginCapability> Function(String pluginId) declinedCapabilities;
+
+  /// The declined capability that disables [hook] of [pluginId], or null
+  /// when the hook may run.
+  PluginCapability? declinedCapabilityForHook(
+    String pluginId,
+    PluginHook hook,
+  ) => firstDeclinedCapability(
+    capabilitiesForHook(hook),
+    declinedCapabilities(pluginId),
+  );
+
+  /// The declined capability that disables MCP server [serverName] of
+  /// [pluginId], or null when it may mount. Unknown servers are never
+  /// reported as declined (ownership checks handle them).
+  PluginCapability? declinedCapabilityForMcpServer(
+    String pluginId,
+    String serverName,
+  ) {
+    final declined = declinedCapabilities(pluginId);
+    if (declined.isEmpty) return null;
+    final server = _registrations[pluginId]?.manifest.mcpServers
+        .where((s) => s.name == serverName)
+        .firstOrNull;
+    if (server == null) return null;
+    return firstDeclinedCapability(capabilitiesForMcpServer(server), declined);
+  }
 
   static final PluginContributionRegistry I = PluginContributionRegistry(
     sessionLineage: (id) => AppState.I.lineageOf(id).map((s) => s.id),
@@ -338,7 +376,9 @@ class PluginContributionRegistry {
       if (!_visible(reg, sessionId)) continue;
       out.addAll(
         reg.contributions.where(
-          (c) => c.kind == PluginContributionKind.mcpServer,
+          (c) =>
+              c.kind == PluginContributionKind.mcpServer &&
+              declinedCapabilityForMcpServer(c.pluginId, c.name) == null,
         ),
       );
     }

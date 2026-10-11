@@ -1454,6 +1454,15 @@ class PluginRuntimeManager extends ChangeNotifier {
       );
     }
     for (final declared in manifest.mcpServers) {
+      // Declined on the approval sheet (F-106): disabled by the user, not
+      // a health failure of the plugin.
+      if (PluginContributionRegistry.I.declinedCapabilityForMcpServer(
+            pluginId,
+            declared.name,
+          ) !=
+          null) {
+        continue;
+      }
       final canonicalId = '$pluginId/${declared.name}';
       McpServer? server;
       for (final candidate in AppState.I.mcpServers) {
@@ -1653,9 +1662,12 @@ class PluginRuntimeManager extends ChangeNotifier {
     final requested = manifest.requestedCapabilities.isNotEmpty
         ? manifest.requestedCapabilities
         : inferRequestedCapabilities(manifest);
+    // A capability counts as decided when it is granted or (for the
+    // independently enforceable ones) explicitly declined — the runtime
+    // then skips just the contributions that need it (F-106).
     final missing = [
       for (final c in requested)
-        if (!grant.capabilities.contains(c)) c.name,
+        if (!grantCoversRequested(grant, {c})) c.name,
     ];
     if (missing.isNotEmpty) {
       throw PluginRuntimeException(
