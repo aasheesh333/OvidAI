@@ -201,17 +201,18 @@ void main() {
     var syncs = 0;
     studioRepoSyncOverrideForTest = () async {
       syncs++;
-      return SyncReport(
-        requested: 2000,
-        fetched: 2000,
-        skippedByFilter: 0,
-        treeTruncated: false,
-        droppedByCap: 10,
-        failedPaths: const [],
-        unattemptedPaths: const [],
-        preservedPaths: const [],
-      );
     };
+    studioRepoSyncReportOverrideForTest = SyncReport(
+      requested: 2000,
+      fetched: 2000,
+      skippedByFilter: 0,
+      treeTruncated: false,
+      droppedByCap: 10,
+      failedPaths: const [],
+      unattemptedPaths: const [],
+      preservedPaths: const [],
+    );
+    addTearDown(() => studioRepoSyncReportOverrideForTest = null);
 
     await pumpStudio(tester);
     await tester.pump();

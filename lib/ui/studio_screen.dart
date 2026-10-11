@@ -58,9 +58,13 @@ studioListBranchesOverrideForTest;
 
 /// Test seam: overrides the repo re-sync so host widget tests can exercise
 /// the binding flow without network. Production is null (RepoCache.sync).
-/// Returning a [SyncReport] lets a test drive the partial-sync banner.
 @visibleForTesting
-Future<Object?> Function()? studioRepoSyncOverrideForTest;
+Future<void> Function()? studioRepoSyncOverrideForTest;
+
+/// Test seam: the [SyncReport] an overridden sync "returned", so a test can
+/// drive the partial-sync banner. Production ignores it.
+@visibleForTesting
+SyncReport? studioRepoSyncReportOverrideForTest;
 
 @visibleForTesting
 GlobalRepoRegistry? studioRegistryOverrideForTest;
@@ -85,7 +89,7 @@ const Key studioPickerSearchKey = ValueKey('studio-picker-search');
 /// `onLine` callback instead of dropping it. The plain override wins when both
 /// are set, which keeps every existing test working untouched.
 @visibleForTesting
-Future<Object?> Function(void Function(String line) onLine)?
+Future<void> Function(void Function(String line) onLine)?
 studioRepoSyncProgressOverrideForTest;
 
 /// Branch to bind when a repo is picked: the repo's `default_branch`, else
@@ -338,13 +342,13 @@ class _StudioScreenState extends State<StudioScreen> {
   Future<SyncReport?> _runSync(void Function(String) onLine) async {
     final legacy = studioRepoSyncOverrideForTest;
     if (legacy != null) {
-      final r = await legacy();
-      return r is SyncReport ? r : null;
+      await legacy();
+      return studioRepoSyncReportOverrideForTest;
     }
     final progress = studioRepoSyncProgressOverrideForTest;
     if (progress != null) {
-      final r = await progress(onLine);
-      return r is SyncReport ? r : null;
+      await progress(onLine);
+      return studioRepoSyncReportOverrideForTest;
     }
     return RepoCache.I.sync(onLine: onLine);
   }
