@@ -7,6 +7,7 @@ import '../core/format.dart';
 
 import '../core/agent_service.dart';
 import '../core/state.dart';
+import '../core/subagent_tools.dart';
 import '../core/theme.dart';
 import 'chat_screen.dart';
 import 'widgets/aether_primitives.dart';
@@ -450,6 +451,7 @@ class _StatusStripState extends State<_StatusStrip> {
       _ => Aether.success,
     };
     final bits = <String>[
+      if (sub != null && sub.agentType != 'general-purpose') sub.agentType,
       if (sub != null) formatCompactDuration(sub.elapsed),
       '${session.messages.length} rows',
       if (sub != null && sub.messages.isNotEmpty)
@@ -481,7 +483,8 @@ class _StatusStripState extends State<_StatusStrip> {
           ),
           if (session.agentAllowedTools.isNotEmpty)
             Tooltip(
-              message: 'Tools: ${session.agentAllowedTools.join(', ')}',
+              message:
+                  'Tools: ${SubagentToolPolicy.fromStored(session.agentAllowedTools).describe()}',
               child: Icon(
                 Icons.lock_outline,
                 size: 13,

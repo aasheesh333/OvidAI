@@ -10,6 +10,7 @@ import 'package:ovid_ai/core/native_plugins/utility_limits.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'github_service.dart';
+import 'mcp_client_requests.dart';
 import 'mcp_config_parse.dart';
 import 'mcp_oauth_discovery.dart';
 import 'native_mcp.dart';
@@ -352,7 +353,7 @@ class _SseMcpChannel {
     try {
       final decoded = jsonDecode(data);
       if (decoded is Map<String, dynamic>) {
-        if (!decoded.containsKey('id')) {
+        if (!decoded.containsKey('id') || decoded.containsKey('method')) {
           _onNotification(decoded);
         } else {
           _pending.add(decoded);
@@ -2109,11 +2110,7 @@ class McpService {
           rethrow;
         }
       }
-      final initResult = await _rpcSse(rs, 'initialize', {
-        'protocolVersion': '2024-11-05',
-        'capabilities': {},
-        'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      }, timeout: phaseTimeout('initialize'));
+      final initResult = await _rpcSse(rs, 'initialize', McpClientRequests.initializeParams(), timeout: phaseTimeout('initialize'));
       if (initResult.isTimeout) {
         throw TimeoutException('initialize timed out', timeoutFor());
       }
@@ -2593,11 +2590,7 @@ class McpService {
       if (url == null || url.isEmpty) {
         throw Exception('no url configured for HTTP transport');
       }
-      final initResult = await _rpcHttp(rs, 'initialize', {
-        'protocolVersion': '2024-11-05',
-        'capabilities': {},
-        'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      }, timeout: phaseTimeout('initialize'));
+      final initResult = await _rpcHttp(rs, 'initialize', McpClientRequests.initializeParams(), timeout: phaseTimeout('initialize'));
       if (initResult.isTimeout) {
         throw TimeoutException('initialize timed out', timeoutFor());
       }
@@ -2910,11 +2903,7 @@ class McpService {
       );
 
       // ── MCP handshake ──────────────────────────────────────────────
-      final initResult = await _rpc(rs, 'initialize', {
-        'protocolVersion': '2024-11-05',
-        'capabilities': {},
-        'clientInfo': {'name': 'ovid-ai', 'version': '1.0.0'},
-      }, timeout: phaseTimeout('initialize'));
+      final initResult = await _rpc(rs, 'initialize', McpClientRequests.initializeParams(), timeout: phaseTimeout('initialize'));
       if (initResult.isTimeout) {
         throw TimeoutException('initialize timed out', timeoutFor());
       }
@@ -3199,12 +3188,19 @@ class McpService {
   }
 
   void _onNotification(_RunningServer rs, Map<String, dynamic> message) {
-    if (message.containsKey('id') ||
-        !identical(_running[_key(rs.server)], rs) ||
-        rs.userDisconnected) {
+    if (!identical(_running[_key(rs.server)], rs) || rs.userDisconnected) {
       return;
     }
+    // Server→client REQUEST (Phase 2.3): `ping`, `roots/list`,
+    // `sampling/createMessage`, `elicitation/create`. It carries an `id`, so
+    // the old early return dropped it and the server waited forever.
+    if (McpClientRequests.isServerRequest(message)) {
+      unawaited(_answerServerRequest(rs, message));
+      return;
+    }
+    if (message.containsKey('id')) return; // a response, not ours to route
     final method = message['method'];
+    McpClientRequests.I.handleNotification(rs.server.name, message);
     if (method == 'notifications/tools/list_changed') {
       unawaited(_rediscoverTools(_key(rs.server)));
     }
@@ -3220,6 +3216,42 @@ class McpService {
       rs.catalogVersions[catalog] = (rs.catalogVersions[catalog] ?? 0) + 1;
       rs.catalogs.remove(catalog);
     }
+  }
+
+  /// Answer one server→client request over the server's own transport.
+  Future<void> _answerServerRequest(
+    _RunningServer rs,
+    Map<String, dynamic> request,
+  ) async {
+    final response = await McpClientRequests.I.handle(rs.server.name, request);
+    if (!identical(_running[_key(rs.server)], rs) || rs.userDisconnected) {
+      return;
+    }
+    try {
+      switch (rs.server.transport) {
+        case 'http':
+          await _postMessageHttp(rs, response);
+        case 'sse':
+          final channel = rs.sseChannel;
+          if (channel == null || !channel.isOpen) return;
+          final headers = {...rs.server.headers, ...await _authHeaders(rs)};
+          await channel.post(
+            response,
+            headers,
+            timeout: Duration(seconds: _rpcTimeoutSeconds),
+          );
+        default:
+          rs.process?.stdin.writeln(jsonEncode(response));
+      }
+    } catch (e) {
+      Diag.swallow('mcp_service.serverRequest', e);
+    }
+  }
+
+  @visibleForTesting
+  void deliverInboundForTest(String serverName, Map<String, dynamic> message) {
+    final rs = _running[_keyForName(serverName)];
+    if (rs != null) _onNotification(rs, message);
   }
 
   _RunningServer _protocolServer(String name, String capability) {
@@ -3816,6 +3848,18 @@ class McpService {
     String method,
     Map<String, dynamic> params, {
     Duration? timeout,
+  }) => _postMessageHttp(rs, {
+    'jsonrpc': '2.0',
+    'method': method,
+    'params': params,
+  }, timeout: timeout);
+
+  /// POST one JSON-RPC message that expects no response body (a notification
+  /// or our response to a server request). Best-effort.
+  Future<void> _postMessageHttp(
+    _RunningServer rs,
+    Map<String, dynamic> message, {
+    Duration? timeout,
   }) async {
     final url = _urlFor(rs.server);
     if (url == null) return;
@@ -3838,11 +3882,7 @@ class McpService {
           ...authHeaders,
           ...rs.server.headers,
         },
-        body: jsonEncode({
-          'jsonrpc': '2.0',
-          'method': method,
-          'params': params,
-        }),
+        body: jsonEncode(message),
         timeout: timeout ?? Duration(seconds: rs.server.startupTimeoutS),
       );
       _rememberSessionId(rs, res.headers);
@@ -4061,10 +4101,14 @@ class McpService {
       final payload = dataParts.join('\n');
       try {
         final decoded = jsonDecode(payload) as Map<String, dynamic>;
-        if (rs != null && !decoded.containsKey('id')) {
+        final inbound =
+            !decoded.containsKey('id') || decoded.containsKey('method');
+        if (rs != null && inbound) {
           _onNotification(rs, decoded);
         }
-        if (decoded['id']?.toString() == id.toString()) response = decoded;
+        if (!inbound && decoded['id']?.toString() == id.toString()) {
+          response = decoded;
+        }
       } catch (e) {
         Diag.swallow('mcp_service', e);
       }
@@ -4196,7 +4240,8 @@ class McpService {
         return;
       }
       // Tolerate string ids — some servers echo the id as "1" instead of 1.
-      if (j['id']?.toString() == id.toString()) {
+      // A server→client request may reuse the same id; it is not our answer.
+      if (j['id']?.toString() == id.toString() && !j.containsKey('method')) {
         if (j.containsKey('error')) {
           final err = j['error'];
           completer.complete(

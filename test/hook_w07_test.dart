@@ -218,7 +218,7 @@ void main() {
   );
 
   test(
-    '[CC] alias matcher accepts Ovid names without altering stdin name',
+    '[CC] alias matcher accepts Ovid names; [CC] stdin speaks Claude Code',
     () async {
       register(
         'cc',
@@ -242,8 +242,13 @@ void main() {
       final calls = <String>[];
       HookService.I.stdinExecutorForTest = (cmd, _, input) async {
         calls.add(cmd);
+        final j = jsonDecode(input) as Map<String, dynamic>;
+        // Phase 2.2: every [CC]-format plugin (both fixtures here, whatever
+        // vocabulary its matcher uses) reads the Claude Code tool name; the
+        // native name stays available as `ovid_tool_name`.
+        expect(j['tool_name'], isIn(['Bash', 'Read', 'Edit', 'Write']));
         expect(
-          jsonDecode(input)['tool_name'],
+          j['ovid_tool_name'],
           isIn(['run_shell', 'file_read', 'fs_edit', 'file_write']),
         );
         return (0, '');

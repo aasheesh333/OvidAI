@@ -42,6 +42,8 @@ import 'session_lifecycle_service.dart';
 import 'presets.dart';
 import 'plan_mode.dart';
 import 'hook_service.dart';
+import 'subagent_tools.dart';
+import 'mcp_client_requests.dart';
 import 'html_artifact.dart';
 import 'plugin_manifest.dart';
 import 'native_plugin.dart';
@@ -644,6 +646,15 @@ class SubagentInfo {
   final DateTime startedAt = DateTime.now();
   DateTime? finishedAt;
 
+  /// Claude Code `agent_type`: the definition name (`general-purpose` for an
+  /// ad-hoc dispatch, `plugin:agent` for a plugin-shipped agent). Hooks
+  /// receive it and SubagentStart/SubagentStop matchers filter on it.
+  String agentType;
+
+  /// `hookSpecificOutput.additionalContext` returned by SubagentStart hooks —
+  /// added to the subagent's context before its first prompt.
+  String startContext = '';
+
   SubagentInfo({
     required this.id,
     required this.label,
@@ -652,6 +663,7 @@ class SubagentInfo {
     required this.parentMode,
     required this.prompt,
     this.background = false,
+    this.agentType = 'general-purpose',
   });
 
   String get state => finished
@@ -789,6 +801,10 @@ class AgentRun {
   final List<AgentEvent> runEvents = [];
   String? activeRunId;
   bool cancelRequested = false;
+
+  /// Claude Code `stop_hook_active`: true while the run continues because a
+  /// Stop hook blocked the previous stop.
+  bool stopHookActive = false;
 
   /// Run generation counter (stop/output rendering): bumped on every
   /// [runTask] start and on every stop ([_cancelBucket]). Each run chain
@@ -1106,6 +1122,15 @@ class AgentService extends ChangeNotifier {
     // per-session busy notifiers in step with those too.
     AppState.I.addListener(_syncBusyNotifiers);
     AppState.I.addListener(_syncStudioTabs);
+    // 3. Hooks fired inside a subagent carry its identity (Claude Code
+    //    `agent_id` / `agent_type`, main-session `session_id`).
+    HookService.agentIdentityResolver = _hookAgentIdentity;
+    // 4. MCP client capabilities: server→client roots / sampling (with user
+    //    approval) are answered through this agent (elicitation is a UI sheet
+    //    wired by the app shell).
+    McpClientRequests.I.rootsProvider ??= _mcpRoots;
+    McpClientRequests.I.samplingApprover ??= _approveMcpSampling;
+    McpClientRequests.I.sampler ??= _runMcpSampling;
   }
 
   @override
@@ -7443,11 +7468,33 @@ user which one instead of assuming this one.''';
                 );
           }).toList()
         : gated;
+    // ── Subagent roster projection (Claude Code tool scoping) ──
+    // A child sees only what its definition grants: its `tools` allowlist
+    // (empty = inherit all, incl. MCP), minus `disallowedTools`, minus the
+    // spawn tools and user-facing tools — whatever the definition lists. The
+    // dispatch gate (`_subagentToolBlock`) reads the SAME policy object.
+    final runningChild = _runSession;
+    final childGated = runningChild != null && runningChild.isSubagent
+        ? () {
+            final policy = SubagentToolPolicy.fromStored(
+              runningChild.agentAllowedTools,
+            );
+            return planGated.where((t) {
+              final fn = t['function'];
+              final name = fn is Map ? fn['name'] as String? : null;
+              return name != null &&
+                  policy.allows(
+                    name,
+                    isAgentContribution: _isAgentContributionTool(name),
+                  );
+            }).toList();
+          }()
+        : planGated;
     // Request-time schema compactor: shrink only the PROSE (description
     // fields). Names, parameter names, types, enums, required and defaults
     // are never touched, so every tool stays fully callable and every
     // feature keeps working — the payload just carries less redundant text.
-    return planGated.map(_compactTool).toList();
+    return childGated.map(_compactTool).toList();
   }
 
   /// Budgets for the request-time tool-schema compactor (characters).
@@ -9157,6 +9204,13 @@ user which one instead of assuming this one.''';
               'type': 'string',
               'description':
                   'Short title for the subagent session (shown to the user)',
+            },
+            'subagent_type': {
+              'type': 'string',
+              'description':
+                  'Optional subagent definition to run (a plugin/user agent '
+                  'name such as "my-plugin:reviewer"); its instructions, '
+                  'tools, skills and model apply. Default: general-purpose.',
             },
             'mode': {
               'type': 'string',
@@ -10988,15 +11042,24 @@ user which one instead of assuming this one.''';
   };
 
   String? _subagentToolBlock(ChatSession child, String name) {
+    final isAgentContribution = _isAgentContributionTool(name);
+    if (SubagentToolPolicy.isSpawnTool(
+      name,
+      isAgentContribution: isAgentContribution,
+    )) {
+      return 'SUBAGENT: a subagent cannot start another subagent ("$name"). '
+          'Do the work yourself with the tools you have, or report back to '
+          'the parent agent with what you need.';
+    }
     if (_childDeniedTools.contains(name)) {
       return 'SUBAGENT: "$name" is not available to a subagent (no user is '
           'watching this session). Decide yourself, or report back to the '
           'parent agent with what you need.';
     }
-    final allowed = child.agentAllowedTools;
-    if (allowed.isNotEmpty && !allowed.contains(name)) {
-      return 'SUBAGENT: "$name" is outside the tool set your parent granted '
-          '(${allowed.join(', ')}). Use only those tools.';
+    final policy = SubagentToolPolicy.fromStored(child.agentAllowedTools);
+    if (!policy.allows(name, isAgentContribution: isAgentContribution)) {
+      return 'SUBAGENT: "$name" is outside the tool set your definition '
+          'grants (${policy.describe()}). Use only those tools.';
     }
     return null;
   }
@@ -11570,13 +11633,14 @@ Execution tiers: run_shell picks the best tier automatically.
   works the same in every tier via the catalog_* tools.
 ${s.isSubagent ? '''
 ${(s.agentPersona ?? '').isEmpty ? '' : '\nPERSONA: ${s.agentPersona}\n'}
+${(subagentForSession(s.id)?.startContext ?? '').isEmpty ? '' : '\nSUBAGENT START CONTEXT (from SubagentStart hooks):\n${subagentForSession(s.id)!.startContext}\n'}
 ${(s.agentOutputHint ?? '').isEmpty ? '' : '\nREQUIRED FINAL OUTPUT SHAPE: ${s.agentOutputHint}\nYour FINAL message must match this shape exactly — the parent parses it.\n'}
 
 YOU ARE A SUBAGENT.
 Your parent agent dispatched you with the task below; you do NOT see the
 parent chat's history, so work only from what you were given. You are
 unattended: ask_user_question, exit_plan_mode and request_permission are
-blocked${s.agentAllowedTools.isEmpty ? '' : ', and you may only use these tools: ${s.agentAllowedTools.join(', ')}'}.
+blocked${s.agentAllowedTools.isEmpty ? '' : ', and you may only use these tools: ${SubagentToolPolicy.fromStored(s.agentAllowedTools).describe()}'}. You cannot start other subagents.
 Decide for yourself, finish the task, and end with ONE final message that is
 your report to the parent: what you did, what you found, and any file paths
 or commands that matter. Keep it tight — the parent reads only that message.
@@ -12097,16 +12161,23 @@ ${await _agentsMdBlock()}
           // settling. A user-initiated stop always wins — fireStop
           // short-circuits to allow without running any hook when the
           // run's cancel flag is set.
-          final stopResult = await HookService.I.fireStop(
-            s.id,
-            payload: {
-              'turn': turn,
-              'steps': ctx.run.steps,
-              'transcript_path': _transcriptPathFor(s.id),
-            },
-            model: s.model,
-            userStopRequested: ctx.run.cancelRequested,
-          );
+          // Claude Code: `Stop` fires only for the MAIN agent. A subagent's
+          // natural stop is gated by `SubagentStop` in _runSubagentSession.
+          final stopResult = s.isSubagent
+              ? const HookStopResult.allow()
+              : await HookService.I.fireStop(
+                  s.id,
+                  payload: {
+                    'turn': turn,
+                    'steps': ctx.run.steps,
+                    'stop_hook_active': ctx.run.stopHookActive,
+                    'last_assistant_message': msg['content'] ?? '',
+                    'transcript_path': _transcriptPathFor(s.id),
+                  },
+                  model: s.model,
+                  userStopRequested: ctx.run.cancelRequested,
+                );
+          if (!s.isSubagent) ctx.run.stopHookActive = !stopResult.stopAllowed;
           if (!stopResult.stopAllowed) {
             // Vetoed — re-enter the model loop. The final answer is already
             // in the transcript; keep it in the request too so the next
@@ -14611,27 +14682,33 @@ ${await _agentsMdBlock()}
           }),
         );
       }
-      // PR24: on_post_tool — fire-and-forget after every tool completes
-      // (indexers, loggers). Never blocks the loop.
+      // CLAUDE CODE PostToolUse (master plan Phase 2.1): AWAITED, with the
+      // full `tool_input` and the untruncated `tool_response` on stdin. The
+      // tool already ran, so a hook can only shape what the model sees:
+      // `decision:"block"` + reason and exit-2 stderr are appended to the
+      // result, `additionalContext` is added, `updatedToolOutput` replaces it.
       if (HookService.I.hasHookListeners(
         'post_tool',
         sessionId: ledgerSid ?? '',
       )) {
-        unawaited(
-          HookService.I.fire(
-            'post_tool',
-            ledgerSid ?? '',
-            payload: {
-              'tool': name,
-              'ms': sw.elapsedMilliseconds,
-              'ok': !res.startsWith('DENIED') && !_looksLikeToolError(res),
-              'is_error': res.startsWith('DENIED') || _looksLikeToolError(res),
-              'result': cleanTruncate(res, 400),
-              'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
-            },
-            model: _runSession?.model,
-          ),
+        final failed = res.startsWith('DENIED') || _looksLikeToolError(res);
+        final post = await HookService.I.firePostTool(
+          ledgerSid ?? '',
+          payload: {
+            'tool': name,
+            'args': args,
+            'tool_response': res,
+            'duration_ms': sw.elapsedMilliseconds,
+            'ms': sw.elapsedMilliseconds,
+            'ok': !failed,
+            'is_error': failed,
+            // Legacy bounded preview for env-payload consumers.
+            'result': cleanTruncate(res, 400),
+            'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
+          },
+          model: _runSession?.model,
         );
+        return post.apply(res);
       }
       return res;
     } catch (e) {
@@ -14650,21 +14727,22 @@ ${await _agentsMdBlock()}
         'post_tool',
         sessionId: ledgerSid ?? '',
       )) {
-        unawaited(
-          HookService.I.fire(
-            'post_tool',
-            ledgerSid ?? '',
-            payload: {
-              'tool': name,
-              'ms': sw.elapsedMilliseconds,
-              'ok': false,
-              'is_error': true,
-              // Exceptions may embed credentials or operational arguments.
-              'error': 'Tool execution failed',
-              'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
-            },
-            model: _runSession?.model,
-          ),
+        // PostToolUseFailure — awaited like PostToolUse; observe-only here
+        // because the exception is rethrown to the caller.
+        await HookService.I.firePostTool(
+          ledgerSid ?? '',
+          payload: {
+            'tool': name,
+            'args': args,
+            'ms': sw.elapsedMilliseconds,
+            'duration_ms': sw.elapsedMilliseconds,
+            'ok': false,
+            'is_error': true,
+            // Exceptions may embed credentials or operational arguments.
+            'error': 'Tool execution failed',
+            'transcript_path': _transcriptPathFor(ledgerSid ?? ''),
+          },
+          model: _runSession?.model,
         );
       }
       rethrow;
@@ -18474,7 +18552,8 @@ ${await _agentsMdBlock()}
     // `summary` carries the raw command for run_shell/job_start/run_code.
     if ((tool == 'run_shell' || tool == 'job_start' || tool == 'run_code') &&
         (_isDestructiveCommand(summary) || _isDestructiveCommand(detail))) {
-      if (running != null && running.isSubagent) return false;
+      // Claude Code parity: a subagent's prompt is passed through to the
+      // user (labelled with the subagent in `_askUser`), never auto-decided.
       return await askAndAudit(
         '⚠ $tool',
         'Destructive command needs approval',
@@ -18515,11 +18594,10 @@ ${await _agentsMdBlock()}
       _emit('think', 'approved by a plugin hook — no prompt shown');
       return true;
     }
-    // Subagent sessions run unattended — nobody is looking at their
-    // composer, so an approval prompt there would deadlock the child.
-    // Their privileges are already bounded by the inherited mode, the
-    // read-only gate and the parent's allowed_tools filter.
-    if (running != null && running.isSubagent) return true;
+    // Subagent approvals follow the SAME mode policy as the main agent
+    // (Claude Code: "permission prompts are passed through to you"); the
+    // prompt names the subagent that asks (`_askUser`). Their privileges are
+    // additionally bounded by the inherited mode and the definition's tools.
     // "Always allow for this command": per-session memory for plain tool
     // approvals. Checked after the destructive and subagent gates above,
     // so a remembered tool never bypasses them.
@@ -18859,7 +18937,9 @@ ${await _agentsMdBlock()}
     if (!alwaysAsk &&
         mode == AgentMode.drive &&
         planBody == null &&
-        t != 'exit_plan_mode') {
+        t != 'exit_plan_mode' &&
+        // An MCP server spending the user's model quota is always asked.
+        t != 'mcp_sampling') {
       return true;
     }
     final session = _runSession ?? AppState.I.activeSession;
@@ -18867,9 +18947,27 @@ ${await _agentsMdBlock()}
     if (_deniedApprovals[session?.id]?.contains(denialKey) ?? false) {
       return false;
     }
+    // Claude Code parity: a prompt raised inside a subagent surfaces in the
+    // normal approval UI and names the subagent that is asking. Concurrent
+    // children queue behind an open card instead of replacing it.
+    final asker = session != null && session.isSubagent
+        ? subagentForSession(session.id)
+        : null;
+    if (session != null && session.isSubagent) {
+      while (true) {
+        final open = pendingApproval;
+        if (open == null || open.completer.isCompleted) break;
+        await open.completer.future;
+      }
+    }
+    final label = session != null && session.isSubagent
+        ? '[subagent ${asker?.id ?? session.agentId ?? session.id}'
+              '${asker == null ? '' : ' · ${asker.agentType}'}'
+              ' · ${session.agentLabel ?? session.title}] '
+        : '';
     final req = ApprovalRequest(
       tool: t,
-      summary: s,
+      summary: '$label$s',
       detail: d,
       planBody: planBody,
       allowAlways: allowAlways,
@@ -22379,6 +22477,14 @@ ${await _agentsMdBlock()}
   Future<String> dispatchForTest(String name, Map<String, dynamic> args) =>
       _dispatch(name, args);
 
+  /// Test seams for the MCP sampling approval + completion wiring.
+  @visibleForTesting
+  Future<bool> approveMcpSamplingForTest(McpSamplingRequest req) =>
+      _approveMcpSampling(req);
+  @visibleForTesting
+  Future<Map<String, dynamic>?> runMcpSamplingForTest(McpSamplingRequest req) =>
+      _runMcpSampling(req);
+
   /// PR25 test seam: arm an active tool card (as a real run's _toolStart
   /// would) so edit paths have somewhere to attach the diff.
   @visibleForTesting
@@ -22838,16 +22944,13 @@ ${await _agentsMdBlock()}
       // inlining the instructions so the work still happens.
       if (c.kind == PluginContributionKind.agent &&
           !(_runSession?.isSubagent ?? false)) {
-        final body = await _skillContentWithFiles(mounted, rawArgs: '');
         final input = (args['input'] ?? args['arguments'])?.toString() ?? '';
-        return _handleDispatchAgent({
-          'prompt': input.isEmpty
-              ? 'Carry out your role as defined in your instructions.'
-              : input,
-          'label': mounted.name,
-          'persona': body,
-          'allowed_tools': mounted.allowedTools.toList(),
-        }, modelOverride: mounted.model);
+        final defArgs = await _agentDefinitionDispatchArgs(mounted, input);
+        // `model:` is resolved (inherit / alias / full id) before dispatch.
+        return _handleDispatchAgent(
+          defArgs,
+          modelOverride: defArgs['_model'] as String?,
+        );
       }
       _emit('think', 'plugin ${c.pluginId} ${c.kindLabel}: ${c.name}');
       // Same scoping + bundled-file surfacing as the `skill` tool path.
@@ -23274,7 +23377,10 @@ ${await _agentsMdBlock()}
       child,
       reason: SessionStartReason.subagent,
     );
-    await HookService.I.fire(
+    // Claude Code SubagentStart: cannot block, but
+    // `hookSpecificOutput.additionalContext` is added to the subagent's
+    // context before its first prompt.
+    final start = await HookService.I.fireDetailed(
       'subagent_start',
       child.id,
       payload: {
@@ -23282,10 +23388,180 @@ ${await _agentsMdBlock()}
         'parentSessionId': parent.id,
         'label': sub.label,
         'background': background,
+        'agent_id': sub.id,
+        'agent_type': sub.agentType,
         'transcript_path': _transcriptPathFor(child.id),
       },
       model: child.model,
     );
+    final contexts = [
+      for (final out in start.hookOutputs)
+        ?HookOutputContract.parse(out).additionalContext,
+    ];
+    sub.startContext = contexts.join('\n\n');
+  }
+
+  // ── Claude Code subagent parity helpers ─────────────────────────────────
+
+  /// [HookService.agentIdentityResolver]: the Claude Code identity of the
+  /// subagent running in [sessionId], or null for a main-conversation session.
+  Map<String, dynamic>? _hookAgentIdentity(String sessionId) {
+    final session = AppState.I.sessionById(sessionId);
+    final sub = subagentForSession(sessionId);
+    if (sub == null && (session == null || !session.isSubagent)) return null;
+    final lineage = AppState.I.lineageOf(sessionId);
+    final root = lineage.isEmpty ? null : lineage.first;
+    final hasRoot = root != null && root.id != sessionId;
+    return {
+      'agent_id': sub?.id ?? session?.agentId ?? sessionId,
+      'agent_type': sub?.agentType ?? 'general-purpose',
+      if (hasRoot) 'root_session_id': root.id,
+      if (hasRoot) 'root_transcript_path': _transcriptPathFor(root.id),
+    };
+  }
+
+  /// The zone identity a subagent's run executes under (tool-usage and MCP
+  /// attribution read it via [SubagentScope.current]).
+  SubagentScope _subagentScope(SubagentInfo sub) {
+    final lineage = AppState.I.lineageOf(sub.sessionId);
+    return SubagentScope(
+      agentId: sub.id,
+      agentType: sub.agentType,
+      sessionId: sub.sessionId,
+      rootSessionId: lineage.isEmpty ? sub.parentSessionId : lineage.first.id,
+    );
+  }
+
+  /// True when [name] is a plugin `agents/*.md` contribution tool — calling
+  /// it dispatches a subagent, so it is a spawn tool for a child.
+  static bool _isAgentContributionTool(String name) =>
+      PluginContributionRegistry.I.contributionByToolName(name)?.kind ==
+      PluginContributionKind.agent;
+
+  /// MCP `roots/list`: the active session's working folder.
+  List<McpRoot> _mcpRoots(String serverName) {
+    final folder = AppState.I.activeSession?.workspaceFolder;
+    if (folder == null || folder.isEmpty) return const [];
+    return [McpRoot.directory(folder, name: 'workspace')];
+  }
+
+  /// MCP `sampling/createMessage` needs the user's explicit approval — in
+  /// every mode, Full Access included: a server is asking to spend the user's
+  /// model quota with a prompt the user did not write.
+  Future<bool> _approveMcpSampling(McpSamplingRequest req) => _askUser(
+    'mcp_sampling',
+    'MCP server "${req.server}" wants to use your model',
+    'The MCP server "${req.server}" asked Ovid to run a model completion '
+        '(up to ${req.maxTokens} tokens) with this prompt:\n\n'
+        '${req.preview}\n\nApprove only if you trust this server.',
+  );
+
+  /// Run an approved sampling request as an invisible, tool-less completion
+  /// on the active session's provider.
+  Future<Map<String, dynamic>?> _runMcpSampling(McpSamplingRequest req) async {
+    final session = AppState.I.activeSession;
+    final p = session == null ? null : AppState.I.providerForSession(session);
+    if (session == null || p == null || !p.isConfigured) return null;
+    final msgs = <Map<String, dynamic>>[
+      if ((req.systemPrompt ?? '').isNotEmpty)
+        {'role': 'system', 'content': req.systemPrompt},
+      for (final m in req.messages) {'role': m.role, 'content': m.text},
+    ];
+    final override = promptLlmForTest;
+    final r = override != null
+        ? _normalizePromptFixture(await override(p, msgs, session))
+        : await _callLlm(
+            p,
+            msgs,
+            session,
+            includeTools: false,
+            streamToTranscript: false,
+            purpose: 'mcp_sampling',
+          );
+    if (r == null) return null;
+    return {
+      'role': 'assistant',
+      'content': {'type': 'text', 'text': (r['content'] as String? ?? '')},
+      'model': session.model,
+      'stopReason': 'endTurn',
+    };
+  }
+
+  /// Resolve a Claude Code subagent definition (a mounted `agents/*.md`
+  /// contribution) by [type]: exact name, plugin-scoped `plugin:agent`, or
+  /// the canonical id. Null when unknown.
+  Skill? _agentDefinitionFor(String sessionId, String type) {
+    final t = type.trim();
+    if (t.isEmpty || t == 'general-purpose') return null;
+    for (final a in SkillService.I.agentsForSession(sessionId)) {
+      if (a.name == t || a.canonicalId == t || _agentTypeOf(a) == t) return a;
+    }
+    return null;
+  }
+
+  /// Claude Code `agent_type` for an agent definition: `plugin:agent` for a
+  /// plugin-shipped agent, the bare name otherwise.
+  static String _agentTypeOf(Skill agent) {
+    final pid = agent.pluginId;
+    if (pid == null) return agent.name;
+    final pluginName =
+        PluginContributionRegistry.I.manifestFor(pid)?.name ??
+        pid.split('/').last;
+    return '$pluginName:${agent.name}';
+  }
+
+  /// Dispatch args for a Claude Code agent definition: system prompt (body),
+  /// `tools` / `disallowedTools` scope, preloaded `skills`, and `model`.
+  Future<Map<String, dynamic>> _agentDefinitionDispatchArgs(
+    Skill agent,
+    String prompt, {
+    String? label,
+  }) async {
+    final runSid = _runSession?.id ?? '';
+    final body = await _skillContentWithFiles(agent, rawArgs: '');
+    final fm = agent.frontmatter;
+    final tools = fm.containsKey('tools')
+        ? parseFrontmatterList(fm['tools'])
+        : agent.allowedTools.toList();
+    final disallowed = parseFrontmatterList(
+      fm['disallowedTools'] ?? fm['disallowed-tools'],
+    );
+    // `skills:` preloads the FULL content of each named skill into the
+    // subagent's context (Claude Code; first 32, model-invocable only).
+    final preload = StringBuffer();
+    var loaded = 0;
+    for (final name in parseFrontmatterList(fm['skills'])) {
+      if (loaded >= 32) break;
+      final skill = SkillService.I.resolveForSession(runSid, name).unique;
+      if (skill == null || !skill.modelInvocable || skill.isAgent) continue;
+      final content = await _skillContentWithFiles(skill, rawArgs: '');
+      preload.write(
+        '\n\n<preloaded_skill name="${skill.name}">\n$content\n'
+        '</preloaded_skill>',
+      );
+      loaded++;
+    }
+    final parent = _runSession;
+    final model = resolveSubagentModel(
+      agent.model,
+      parentModel: parent?.model ?? '',
+      providerModels: parent == null
+          ? const []
+          : (AppState.I.providerForSession(parent)?.models ?? const []),
+    );
+    return {
+      'prompt': prompt.isEmpty
+          ? 'Carry out your role as defined in your instructions.'
+          : prompt,
+      'label': (label ?? '').trim().isNotEmpty ? label!.trim() : agent.name,
+      'persona': '$body$preload',
+      'allowed_tools': SubagentToolPolicy.encode(
+        tools: tools,
+        disallowed: disallowed,
+      ),
+      '_agent_type': _agentTypeOf(agent),
+      '_model': ?model,
+    };
   }
 
   Future<String> _handleDispatchAgent(
@@ -23300,13 +23576,41 @@ ${await _agentsMdBlock()}
     final label = ((args['label'] as String?)?.trim().isNotEmpty ?? false)
         ? (args['label'] as String).trim()
         : cleanTruncate(prompt, 60);
-    final allowed =
+    var allowed =
         (args['allowed_tools'] as List?)?.whereType<String>().toList() ??
         const <String>[];
-    final persona = (args['persona'] as String? ?? '').trim();
+    var persona = (args['persona'] as String? ?? '').trim();
     final outputHint = (args['output_schema_hint'] as String? ?? '').trim();
     final parent = _runSession;
     if (parent == null) return 'No active session to dispatch from.';
+    // Claude Code `Agent`/`Task` parity: `subagent_type` names a subagent
+    // definition (a mounted agents/*.md, e.g. `my-plugin:reviewer`) whose
+    // body, tools, skills and model drive the child.
+    var agentType = (args['_agent_type'] as String?) ?? 'general-purpose';
+    final requestedType = (args['subagent_type'] as String? ?? '').trim();
+    if (!parent.isSubagent &&
+        args['_agent_type'] == null &&
+        requestedType.isNotEmpty &&
+        requestedType != 'general-purpose') {
+      final def = _agentDefinitionFor(parent.id, requestedType);
+      if (def == null) {
+        return 'Unknown subagent_type "$requestedType". Available: '
+            '${['general-purpose', for (final a in SkillService.I.agentsForSession(parent.id)) _agentTypeOf(a)].join(', ')}.';
+      }
+      final defArgs = await _agentDefinitionDispatchArgs(
+        def,
+        prompt,
+        label: args['label'] as String?,
+      );
+      agentType = defArgs['_agent_type'] as String;
+      persona = [
+        defArgs['persona'] as String,
+        if (persona.isNotEmpty) persona,
+      ].join('\n\n');
+      if (allowed.isEmpty) allowed = defArgs['allowed_tools'] as List<String>;
+      modelOverride ??= defArgs['_model'] as String?;
+    }
+    modelOverride ??= args['_model'] as String?;
 
     // Zero nesting: a subagent is already a child, so it may not spawn one.
     // Lineage is durable (`parentId`), so this cannot be escaped by starting
@@ -23366,6 +23670,7 @@ ${await _agentsMdBlock()}
       parentMode: parentMode,
       prompt: prompt,
       background: background,
+      agentType: agentType,
     );
     _subagents[id] = sub;
     AppState.I.refresh();
@@ -23660,8 +23965,9 @@ ${await _agentsMdBlock()}
   /// never wedge a settled child.
   Future<String?> _subagentStopBlockReason(
     ChatSession child,
-    SubagentInfo sub,
-  ) async {
+    SubagentInfo sub, {
+    bool stopHookActive = false,
+  }) async {
     if (!HookService.I.hasHookListeners('subagent_end', sessionId: child.id)) {
       return null;
     }
@@ -23669,22 +23975,51 @@ ${await _agentsMdBlock()}
       final res = await HookService.I.fireDetailed(
         'subagent_end',
         child.id,
-        payload: {
-          'subagentId': sub.id,
-          'parentSessionId': sub.parentSessionId,
-          'state': sub.state,
-          'interrupted': sub.interrupted,
-          'result': cleanTruncate(sub.result, 400),
-          'transcript_path': _transcriptPathFor(child.id),
-        },
+        payload: _subagentStopPayload(
+          child,
+          sub,
+          state: sub.state,
+          stopHookActive: stopHookActive,
+        ),
         model: child.model,
       );
-      return res.blockedReason;
+      // Claude Code SubagentStop decision contract: exit 2 (stderr) OR
+      // `{"decision":"block","reason":…}` keeps the subagent running with the
+      // reason as its next instruction.
+      if (res.blockedReason != null) return res.blockedReason;
+      for (final out in res.hookOutputs) {
+        final reason = HookService.jsonBlockReason(out);
+        if (reason != null) return reason;
+      }
+      return res.promptBlockReason;
     } catch (e) {
       Diag.swallow('agent_service.subagentStopHook', e);
       return null;
     }
   }
+
+  /// SubagentStop stdin fields (Claude Code): `agent_id`, `agent_type`,
+  /// `agent_transcript_path` (the child's own transcript), the MAIN session's
+  /// `transcript_path` (via the identity resolver), `last_assistant_message`
+  /// and `stop_hook_active`. Legacy Ovid keys are kept for older hooks.
+  Map<String, dynamic> _subagentStopPayload(
+    ChatSession child,
+    SubagentInfo sub, {
+    required String state,
+    bool stopHookActive = false,
+  }) => {
+    'subagentId': sub.id,
+    'parentSessionId': sub.parentSessionId,
+    'state': state,
+    'interrupted': sub.interrupted,
+    'result': cleanTruncate(sub.result, 400),
+    'agent_id': sub.id,
+    'agent_type': sub.agentType,
+    'agent_transcript_path': _transcriptPathFor(child.id),
+    'last_assistant_message': sub.result,
+    'stop_hook_active': stopHookActive,
+    'transcript_path': _transcriptPathFor(child.id),
+  };
 
   Future<void> _runSubagentSession(
     SubagentInfo sub,
@@ -23775,14 +24110,16 @@ ${await _agentsMdBlock()}
         if (sub.interrupted || !currentOwner()) break;
         // A full run: streaming bubbles, tool cards, compaction, jobs — all
         // inside the child's own session and workspace.
-        await runZoned(
-          () => runTask(
-            next,
-            sessionId: child.id,
-            freshTurn: false,
-            expandRefsFor: expandNext ? child : null,
+        await _subagentScope(sub).run(
+          () => runZoned(
+            () => runTask(
+              next,
+              sessionId: child.id,
+              freshTurn: false,
+              expandRefsFor: expandNext ? child : null,
+            ),
+            zoneValues: {#subagentRunOwner: sub},
           ),
-          zoneValues: {#subagentRunOwner: sub},
         );
         if (!currentOwner()) break;
         sub.result = _lastAssistantText(child);
@@ -23793,7 +24130,11 @@ ${await _agentsMdBlock()}
           // stderr as its next instruction. Bounded so a hook that always
           // blocks cannot spin forever.
           endHookFired = true;
-          final block = await _subagentStopBlockReason(child, sub);
+          final block = await _subagentStopBlockReason(
+            child,
+            sub,
+            stopHookActive: stopBlocks > 0,
+          );
           if (sub.interrupted || !currentOwner()) break;
           // A follow-up can arrive while the hook awaits. Recheck before the
           // synchronous settlement below releases ownership and its slot.
@@ -23829,18 +24170,15 @@ ${await _agentsMdBlock()}
           await HookService.I.fire(
             'subagent_end',
             child.id,
-            payload: {
-              'subagentId': sub.id,
-              'parentSessionId': sub.parentSessionId,
-              'state': failed
+            payload: _subagentStopPayload(
+              child,
+              sub,
+              state: failed
                   ? 'failed'
                   : sub.interrupted
                   ? 'stopped'
                   : 'finished',
-              'interrupted': sub.interrupted,
-              'result': cleanTruncate(sub.result, 400),
-              'transcript_path': _transcriptPathFor(child.id),
-            },
+            ),
             model: child.model,
           );
         } catch (e) {

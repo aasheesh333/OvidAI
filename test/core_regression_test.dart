@@ -2684,23 +2684,20 @@ libncursesw.so.6.5←./lib/libncurses.so.6
       expect(res, isNot(contains('root:')));
     });
 
-    test('SEC4: destructive gate runs before subagent auto-approve', () {
+    test('SEC4: subagent approvals are passed through, never auto-decided', () {
+      // Claude Code parity: "permission prompts are passed through to you"
+      // for a subagent — no silent auto-approve, no silent auto-deny.
       final src = File('lib/core/agent_service.dart').readAsStringSync();
       final maybeIdx = src.indexOf('Future<bool> _maybeApprove');
-      final subIdx = src.indexOf('running.isSubagent');
-      final destIdx = src.indexOf('_isDestructiveCommand(summary)');
       expect(maybeIdx, greaterThanOrEqualTo(0));
-      expect(subIdx, greaterThan(maybeIdx));
-      expect(destIdx, greaterThan(maybeIdx));
-      expect(
-        destIdx,
-        lessThan(subIdx),
-        reason: 'destructive check must come BEFORE subagent early-return',
-      );
+      final body = src.substring(maybeIdx, maybeIdx + 14000);
+      expect(body, contains('_isDestructiveCommand(summary)'));
+      expect(body, isNot(contains('running.isSubagent) return true')));
+      expect(body, isNot(contains('running.isSubagent) return false')));
     });
 
     test(
-      'SEC4b: subagent attempting destructive command is immediately denied without prompt',
+      'SEC4b: subagent destructive command raises a prompt labelled with the subagent',
       () async {
         final app = AppState.I;
         final parent = ChatSession(
@@ -2723,14 +2720,23 @@ libncursesw.so.6.5←./lib/libncurses.so.6
           AgentService.I.pendingApproval = null;
           app.sessions.removeWhere((x) => x.id == 'sec4-p' || x.id == child.id);
         });
-        // Destructive command in subagent should be denied immediately without popping an approval prompt.
-        // We race with a short timeout so that if it blocks on _askUser, it fails fast.
         final resFuture = AgentService.I.dispatchForTest('run_shell', {
           'command': 'rm -rf /',
         });
-        final res = await resFuture.timeout(const Duration(milliseconds: 500));
+        final deadline = DateTime.now().add(const Duration(seconds: 3));
+        while (AgentService.I.pendingApproval == null &&
+            DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        final req = AgentService.I.pendingApproval;
+        expect(req, isNotNull, reason: 'the user is asked, not bypassed');
+        expect(req!.summary, contains('[subagent'));
+        expect(req.summary, contains('sub'));
+        // PR-1c binding: the card answers exactly the request it rendered,
+        // and that includes a subagent-labelled request.
+        expect(AgentService.I.approveRequest(req, false), isTrue);
+        final res = await resFuture.timeout(const Duration(seconds: 3));
         expect(res, equals('DENIED by user'));
-        expect(AgentService.I.pendingApproval, isNull);
       },
     );
 

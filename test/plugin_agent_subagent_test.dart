@@ -73,7 +73,8 @@ void main() {
       // plugin agent's model, not the inline <skill_content> return.
       expect(body, contains('c.kind == PluginContributionKind.agent'));
       expect(body, contains('_handleDispatchAgent('));
-      expect(body, contains('modelOverride: mounted.model'));
+      // The declared model is resolved (inherit / alias / full id) first.
+      expect(body, contains("modelOverride: defArgs['_model']"));
       // Zero-nesting fallback: an agent invoked from within a subagent still
       // inlines (a subagent cannot spawn a subagent).
       expect(body, contains('_runSession?.isSubagent ?? false'));
