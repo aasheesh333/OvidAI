@@ -14,7 +14,7 @@ fix list (see README). Focus: sync IO on UI isolate, unsaved-changes loss,
 large-file handling, terminal lifecycle, credential handling, mobile ergonomics.
 
 ## Status
-in progress
+complete — sections 1–10 + group summary (2026-10-11)
 
 ---
 
@@ -434,3 +434,498 @@ tap to open, per-file "⋮" staging menu (mode 100755/100644, stage deletion).
 - Widget test: tapping a 5 MB workspace file does not call `readAsBytesSync` (IOOverrides)
   and shows the large-file viewer.
 
+
+---
+
+## 6. StudioTerminalTabs (multi-terminal pane) — `studio_terminal_tabs.dart` (+ `core/studio_terminal.dart`)
+
+**What it is / how reached:** bottom pane of `StudioScreen` (`studio_screen.dart:1139-1155`),
+always mounted; collapses to its 44dp header strip on short viewports. The strip is a
+segmented control ("bash 1", "bash 2", …) plus Close / New / Collapse buttons and doubles
+as the vertical resize handle. Each tab owns a `StudioShellSession` (persistent piped
+`bash` in the sandbox via `PtyPool`, owner-scoped so agent Stop never kills it) with a
+5 000-line scrollback, a one-line command field and a Stop / Clear affordance. Falls back
+to one-shot `SandboxService.exec` when no persistent shell can be spawned.
+
+**Findings**
+
+- **P1 · functional (dead control) · `studio_terminal_tabs.dart:423-435`** — the Stop
+  button is the field's `suffixIcon`, but the same `TextField` is `enabled: !s.busy`.
+  A disabled `TextField` wraps its whole `InputDecorator` (suffix included) in
+  `IgnorePointer(ignoring: !_isEnabled)` (`flutter/.../material/text_field.dart:1802-1803`),
+  so the Stop button is drawn exactly when it cannot receive taps. **Impact:** a hung
+  command (`npm start`, `tail -f`, a dev server, a prompt) wedges the tab for the full
+  5-minute watchdog (`studio_terminal.dart:39`); the only escape is closing the tab and
+  losing its scrollback. No test taps Stop (neither `test/studio_terminal_widget_test.dart` nor
+  `test/ui_finish_06_studio_test.dart` references it). **Fix:** keep the field enabled and use `readOnly: s.busy`, or
+  move Stop out of the decoration into the trailing `Row` slot next to Clear; add a
+  widget test that taps Stop while busy and asserts `busy == false`.
+- **P1 · functional (interactive commands) · `studio_terminal.dart:111-114`;
+  `studio_terminal_tabs.dart:435`** — commands are written to bash stdin followed by
+  `echo "<token>"`; the input is disabled while busy and there is no way to send stdin
+  or Ctrl-C. Anything that reads stdin (`read`, `npm init`, `apt install` y/N, `python`
+  without args, `git commit` without `-m` opening an editor, `ssh` host-key prompt)
+  either **swallows the token line as its input** or blocks until the 5-minute watchdog,
+  which then kills the shell (losing `cd`/exports). An unbalanced quote or heredoc
+  (`echo "foo`) also consumes the token. **Impact:** the most common first commands a
+  developer types on a fresh project hang silently for 5 minutes. **Fix:** (a) while
+  busy, keep the field enabled and route submissions to `shell.writeStdin` (label the
+  hint "stdin for running command…"); (b) add a Ctrl-C action that signals the
+  foreground process group instead of discarding the shell; (c) export
+  `GIT_EDITOR=true PAGER=cat GIT_PAGER=cat DEBIAN_FRONTEND=noninteractive CI=1
+  NPM_CONFIG_YES=true` in the spawned shell; (d) refuse to dispatch commands with
+  unbalanced quotes ("Unclosed quote"); (e) replace the hard 5-minute kill with an
+  "idle 60 s without output — Still running · Stop" notice.
+- **P2 · bug (stale state) · `studio_terminal_tabs.dart:119-126` vs `:162-174`** — the
+  segmented `options` (with the busy `Icons.sync` / idle chevron) are computed in
+  `_strip` *outside* the `AnimatedBuilder` that is supposed to refresh them, so the
+  builder rebuilds with the captured list and the busy icon only changes when the parent
+  happens to `setState`. **Impact:** a background tab running a build looks idle.
+  **Fix:** build `options` inside the `AnimatedBuilder` builder.
+- **P2 · UX / destructive · `studio_terminal_tabs.dart:68-80`, `:123`, `:183-188`** —
+  "Close terminal" on a busy tab kills the running process with no confirmation, and tab
+  labels are derived from the list index, so closing "bash 1" silently renames "bash 2"
+  to "bash 1" (the tooltip "Close terminal N" also shifts). **Impact:** users close the
+  wrong shell / kill a long build. **Fix:** stable labels from the session sequence
+  number (or the shell's cwd basename), confirm "Stop the running command and close?"
+  when `shell.busy`.
+- **P2 · lifecycle / data loss · `studio_terminal_tabs.dart:82-88`** — terminals are owned
+  by the widget; leaving Studio (Android back, or `openStudio` → setup) disposes every
+  `_TerminalSession`, discarding the shell (`studio_terminal.dart:202-215`) and its
+  scrollback. **Impact:** a 3-minute `npm install` dies the moment the user goes back to
+  chat to ask a question. **Fix:** hoist sessions into a core `StudioTerminalRegistry`
+  keyed by chat/sandbox session that outlives `StudioScreen`; dispose only on explicit
+  close, session delete or app teardown; show a "1 terminal running" chip in the chat
+  header/Studio entry point.
+- **P2 · output fidelity · `studio_terminal_tabs.dart:361-377`; `pty_service.dart:87-98`** —
+  output is a pipe, not a PTY, and lines are rendered verbatim: ANSI SGR/cursor escapes
+  from tools that force colour show as `[0;32m` garbage, `\r` progress frames from
+  `pip`/`git clone`/`curl` are not collapsed, stderr arrives as `[stderr] …` in the muted
+  colour, the exit status is never shown, and *any* output line starting with `$` is
+  coloured as a prompt. **Fix:** strip (or render) SGR codes, keep only the text after
+  the last `\r` per line, colour `[stderr]` lines as warnings, change the sentinel to
+  `echo "<token> $?"` and print a trailing "exit 1" chip in danger colour for non-zero.
+- **P2 · perf · `studio_terminal_tabs.dart:333-381`; `studio_terminal.dart:47-52`,
+  `:154-166`, `:192-199`** — every output line calls `notifyListeners`, which rebuilds the
+  entire pane (ListView + input row) and queues a post-frame scroll; each visible line is
+  its own `SelectableText` (own gesture recognisers + focus node). A verbose build can
+  emit hundreds of lines per second → hundreds of rebuilds per second on the UI isolate.
+  **Fix:** coalesce notifications to one per frame inside `StudioShellSession`
+  (`SchedulerBinding.scheduleFrameCallback` guard), render plain `Text` rows under one
+  `SelectionArea`, and give rows `itemExtent`/`prototypeItem` for cheap scrolling.
+- **P2 · a11y / copy · `studio_terminal_tabs.dart:340-343`, `:362`** — selection is per
+  line (cannot select a multi-line stack trace), there is no "Copy all output", and
+  command completion is never announced to TalkBack users (output just grows silently).
+  **Fix:** `SelectionArea` over the list, a "Copy output" action in the strip overflow,
+  `SemanticsService.announce('Command finished, exit 0')` on busy→idle.
+- **P2 · error copy · `studio_terminal_tabs.dart:309-311`, `:321-324`** — any spawn
+  failure is swallowed and retried via one-shot exec; when that also fails the user sees
+  only the raw first line of the exception (Dart type + message) with no route to fix
+  it. **Fix:** when the failure is "sandbox missing", print the human message plus an
+  inline "Set up sandbox" action that calls `openStudio`.
+
+**Missing features**
+- Command history (↑/↓ recall, persisted per repo) and Tab completion of paths.
+- Extra-keys row above the soft keyboard (Esc, Tab, Ctrl, ←↑↓→, `|`, `~`, `/`, `-`) as in
+  Termux — essential on Android keyboards.
+- Real PTY (`forkpty`) so `top`, `less`, `vim`, `git log` pager and colour work; until then
+  a clear "non-interactive terminal" notice.
+- Rename tab / show cwd in tab label; "Run in terminal" from the editor (run current file,
+  `npm test`); link-detection for `localhost:PORT` that opens the in-app browser.
+- Background-running indicator and notification when a long command finishes while the
+  user is in chat.
+
+**Test to add**
+- Widget test: spawner override that runs `sleep 30`; tap the Stop button → `busy` is
+  false and the field is enabled (fails today because of `IgnorePointer`).
+- Unit test: `StudioShellSession.runPersistent('read x')` with a fake shell → the
+  completion token must not be consumed as stdin (or a stdin path exists to answer it).
+- Widget test: two tabs, tab 2 busy → its segment shows `Icons.sync` without a parent
+  rebuild.
+- Perf test: push 10 000 lines in one burst → ≤ 2 pane rebuilds per frame.
+
+---
+
+## 7. Studio layout + shared chrome — `studio_layout.dart` (+ `_workspace` split, `studio_screen.dart:1043-1158`)
+
+**What it is / how reached:** not a screen of its own; the geometry and primitives every
+Studio surface uses: `StudioMetrics` (compact < 600 / medium < 840 / expanded window
+classes, tree width, terminal height and text-scale-aware minimums),
+`StudioPaneViewport` (scrolls banners above a min-height pane), `StudioIconButton`,
+`StudioTapTarget`, `StudioPaneDivider`, `showStudioSheet` + `StudioSheetHeader` +
+`StudioSheetTile`, `showStudioToast`, and the sync-progress parsers. Reviewed together
+with the split that consumes it in `StudioScreen._workspace`.
+
+**Findings**
+
+- **P1 · state loss (layout) · `studio_screen.dart:1102-1135`** — on compact widths,
+  opening the file panel swaps the `Expanded` child from `split` (a `Row`) to
+  `Stack([split, scrim, panel])`. Different widget type at the same slot → Flutter
+  unmounts the whole `Row` subtree, so `StudioEditorTabs` / `StudioEditor` state is
+  disposed and rebuilt every time the panel is opened **and** closed. **Impact:** on a
+  phone (the primary form factor) each tap on the folder icon discards undo history,
+  find-bar state, scroll position and the in-widget dirty flags — which, combined with
+  the §4 P0, makes an unsaved draft re-appear as **SAVED**. **Fix:** always build
+  `Stack(children: [split, if (overlay) scrim, if (overlay) panel])` (stable first child),
+  or give the editor column a `GlobalKey`; add a widget test (below).
+- **P2 · a11y (double announce) · `studio_layout.dart:376-399`** — `StudioIconButton` wraps
+  an `IconButton` in `Semantics(button, label)` **and** `Tooltip(message)` (which adds
+  its own semantics label), so TalkBack reads e.g. "New terminal, New terminal, button".
+  Same pattern in `_CopyChip` and `StudioTapTarget` users that also pass a `Tooltip`.
+  **Fix:** `IconButton(tooltip: tooltip, …)` alone (it supplies label + tooltip), drop the
+  outer `Semantics`/`Tooltip`; run `meetsGuideline(labeledTapTargetGuideline)` plus a
+  semantics-tree snapshot in `test/studio_a11y_test.dart`.
+- **P2 · a11y (tap target) · `studio_layout.dart:20`, `:384-391`, `:414-415`** —
+  `kStudioTapTarget = 44`, while Android / Material require 48dp
+  (`androidTapTargetGuideline`); `StudioSheetTile` already uses 48 (`:597`), so Studio
+  ships two standards. Every Studio icon button, tree row and tab close fails Google's
+  Accessibility Scanner. **Fix:** set the constant to 48 (layout code already derives
+  from it) and switch the test pin to `androidTapTargetGuideline`.
+- **P2 · a11y (gesture-only) · `studio_layout.dart:466-513`;
+  `studio_terminal_tabs.dart:130-134`** — the tree divider and terminal header resize only
+  by drag; the semantics hint says "Drag to resize" but exposes no `onIncrease` /
+  `onDecrease`, so TalkBack / Switch Access / keyboard users cannot resize at all, and the
+  double-tap reset is undiscoverable. **Fix:** add `Semantics(onIncrease:, onDecrease:)`
+  stepping 24dp, a `value` ("File panel 260 of 340"), and arrow-key shortcuts via
+  `FocusableActionDetector`.
+- **P2 · UX consistency · `studio_layout.dart:518-532`** — `showStudioSheet` has no drag
+  handle (`showDragHandle`), defaults `isScrollControlled: false` (sheet capped at
+  9⁄16 of the height, so the repo picker at large text shows ~3 rows), and does not use
+  `useSafeArea`/`AetherSheet` like the GitHub sheet does — Studio sheets look and behave
+  differently from every other sheet in the app. **Fix:** build it on `AetherSheet`, set
+  `showDragHandle: true, useSafeArea: true, isScrollControlled: true` with a
+  `DraggableScrollableSheet(maxChildSize: .9)` for list sheets.
+- **P2 · error UX · `studio_layout.dart:627-666`** — `showStudioToast` has no action slot
+  (no Retry / Copy details / Sign in), uses the default 4 s duration even for two-line
+  error toasts (too short at 2× text or with TalkBack), and `hideCurrentSnackBar` drops an
+  earlier error unseen when two arrive back-to-back. **Fix:** add `action` and
+  `duration` params (errors ≥ 8 s or until dismissed), queue instead of hide for errors.
+- **P2 · design-system drift · `studio_layout.dart:552`, `:561`, `:608`, `:613`, `:647`,
+  `:659`** — hard-coded `fontSize: 15 / 13.5 / 12 / 13` and `Colors.white70` instead of
+  `AetherType.*` / `Aether.*` tokens; also the `textScale` doc comment is duplicated
+  (`:170-177`). **Fix:** use the theme tokens so light/dark and future type changes
+  apply to Studio too.
+
+**Missing features**
+- Persist the user's tree width / terminal height / collapsed state per device
+  (`_treeWidthOverride` etc. reset on every Studio open).
+- Tablet / foldable: a "focus editor" mode that hides tree + terminal with one tap, and
+  hinge-aware split on foldables (`DisplayFeature`).
+- Landscape phone: auto-collapse the terminal when the IME is open (today the
+  `StudioPaneViewport` min-height of 120 dp is all the editor gets).
+
+**Test to add**
+- Widget test (360×740): open a file, type, tap the folder toggle twice → the
+  `EditableTextState` is the same instance and the tab still reads UNSAVED.
+- `meetsGuideline(androidTapTargetGuideline)` and `labeledTapTargetGuideline` over a
+  pumped `StudioScreen` at 1.0× and 2.0× text scale.
+- Semantics test: the tree divider exposes `SemanticsAction.increase/decrease`.
+
+---
+
+## 8. StudioFailure (error copy mapper) — `studio_errors.dart`
+
+**What it is / how reached:** not a screen; the single mapper that turns exceptions into
+Studio's user-facing copy (`message`) + a secondary raw first line (`detail`). Used by
+the sync banner (`studio_screen.dart:315`, `:679`), toasts (`studio_editor.dart:524`,
+`studio_file_tree.dart:186`, `studio_screen.dart:839`), sign-out (`:2140`) and the
+terminal fallback (`studio_terminal_tabs.dart:324`).
+
+**Findings**
+
+- **P1 · wrong copy / misdirection · `studio_errors.dart:46-47`, `:64`** — classification is
+  a substring test on the whole raw string: `has('401') || has('403')` and `has('404')`
+  match any commit SHA, byte count, line number, port or path containing those digits
+  (`"a403f1c"`, `"line 1401"`, `"/tmp/x4040"`). GitHub's **rate-limit** response is also
+  HTTP 403, so "API rate limit exceeded" becomes "GitHub rejected your sign-in. Please
+  sign in to GitHub again." **Impact:** users are sent to re-authenticate (which does not
+  help and burns another device flow) for unrelated or rate-limit failures. **Fix:**
+  classify typed errors first (introduce a `GitHubHttpException(status)` — today only
+  `GitHubAuthException` / `CommitFailure` exist — plus the existing
+  `FetchFailure` enum used in `studio_file_tree.dart:198-205`, `SocketException`,
+  `TimeoutException`, `FileSystemException`), fall back to word-bounded patterns
+  (`\b(HTTP|status)\s*40[134]\b`), and add a rate-limit case: "GitHub's hourly limit is
+  reached. Try again after HH:MM." using `X-RateLimit-Reset`.
+- **P1 · wrong copy (domain) · `studio_errors.dart:50-66`** — local and sandbox failures
+  are attributed to GitHub: `OS Error: No such file or directory` (local-folder mode, no
+  GitHub involved) → "GitHub could not find that repository, branch or file."; a sandbox
+  command `timeout` → "GitHub took too long to respond."; any message containing
+  "network" → "Ovid could not reach GitHub." **Impact:** local-folder users who never
+  connected GitHub are told GitHub is broken, and real file-system problems are hidden.
+  **Fix:** check `FileSystemException` / `ProcessException` / sandbox errors before the
+  HTTP rules and give them their own copy ("That file no longer exists in the folder.",
+  "The command took too long and was stopped.").
+- **P2 · copy contradiction · `studio_errors.dart:79` with `studio_editor.dart:524`,
+  `studio_file_tree.dart:186`, `studio_screen.dart:839`** — the fallback says "Something
+  went wrong. The details are below." but these three call sites pass only `.message`
+  to `showStudioToast` (no `detail`), so nothing is below. **Fix:** pass
+  `detail: f.detail` at every toast site (or make `showStudioToast` accept a
+  `StudioFailure`), and use "Something went wrong. Try again." when detail is empty.
+- **P2 · missing mappings · `studio_errors.dart:34-80`** — no copy for the failures
+  developers actually hit: `No space left on device` (ENOSPC), push rejected / non-fast-
+  forward (HTTP 409/422, `[rejected]`), protected branch, file > 100 MB, `index.lock`
+  exists, merge conflict, SSO-enforced org (`Resource protected by organization SAML
+  enforcement`). All fall to the generic line. **Fix:** add these cases with an action
+  hint each (Free space / Pull first / Create a branch / Authorize SSO).
+- **P2 · privacy (defensive) · `studio_errors.dart:29-32`; `sandbox_service.dart:179`** —
+  `detail` is shown verbatim in banners, toasts and the terminal and is the thing users
+  screenshot for support. The sandbox writes a `https://x-access-token:<token>@github.com`
+  credential line; any git/curl error that echoes a remote URL or that file would surface
+  the token. **Fix:** redact `ghp_|gho_|ghu_|github_pat_[A-Za-z0-9_]+` and
+  `//user:secret@` in `_firstLine` before it leaves the mapper.
+- **P2 · l10n · whole file** — copy is matched and produced as English literals; an
+  `Intl`-based app cannot translate it and non-English OS error text (localized
+  `OS Error:` strings) will not match. **Fix:** map to an enum + ARB keys.
+
+**Missing features**
+- A "Copy error details" / "Report a problem" affordance attached to every Studio failure
+  (detail + app version + repo binding, token-redacted).
+
+**Test to add**
+- Unit (extend `test/studio_errors_test.dart`): `"commit a403f1c failed"` must **not** map
+  to the sign-in message; `"API rate limit exceeded"` (403) maps to the rate-limit copy;
+  `FileSystemException('x', 'p', OSError('No such file or directory', 2))` must not mention
+  GitHub; `detail` of `"https://x-access-token:ghp_abc@github.com"` is redacted.
+
+---
+
+## 9. SandboxSetupScreen + `openStudio()` — `sandbox_setup.dart`
+
+**What it is / how reached:** `openStudio(context)` is the single Studio entry point
+(composer folder chip, sidebar, sandbox banner). First open — or any time
+`StudioSetupCoordinator.needsAttention` (running / partial / failed / unsupported) —
+pushes `SandboxSetupScreen`; otherwise it probes `SandboxService.checkExisting()` and
+pushes `StudioScreen`. The setup screen has four views: **approval** ("Set up Studio" /
+Install sandbox / Not now), **progress** (overall bar + %, elapsed, 7 or 9 step cards each
+with a "Repair" button, a 220 dp live log), **error** (raw error box, step cards, log,
+Retry / Continue without sandbox / Close) and **done** (Sandbox ready or "core ready"
+partial, badges, Open Studio / Retry runtime setup / Back to chat). `gateMode: true` is
+pushed by Health → hard reset (`health_screen.dart:78-83`): core-only install, no Back,
+auto-hand-off to `OvidShell`.
+
+**Findings**
+
+- **P1 · dead end · `sandbox_setup.dart:220-221`, `:601-614`** — in `gateMode` the route
+  has `PopScope(canPop: false)` and the error view offers only "Retry install" (the
+  "Close" button and the "Continue without sandbox" escape exist only for
+  `!gateMode` / `_unsupported`). If the core reinstall fails for any reason other than
+  "unsupported" (storage full, corrupt bundled asset, `_SetupPersistenceException`), the
+  user — who already **deleted** the sandbox from Health — is trapped on this screen with
+  no route to chat; the only exit is force-stopping the app. **Impact:** chat (which does
+  not need the sandbox) becomes unreachable from this route. **Fix:** in the error view
+  always offer "Continue to chat without sandbox" (same hand-off as `:582-590`) and a
+  "Copy log" action; keep Retry primary.
+- **P1 · raw errors · `sandbox_setup.dart:555-563`, `:665`;
+  `studio_setup_coordinator.dart:227`** — the coordinator stores `_error = '$e'`, and the
+  screen renders it verbatim in a monospace box as the main content of the error view,
+  and prefixes it to the partial-success sentence (`'${_error!} Runtime verification is
+  incomplete.'`). Users see e.g. "FileSystemException: Cannot create file, path = '/data/
+  user/0/…/usr/bin/node' (OS Error: No space left on device, errno = 28) Runtime
+  verification is incomplete." **Fix:** map to a human headline + action ("Not enough
+  storage — free ~600 MB and retry", "Download interrupted — retry on Wi-Fi", "This
+  device is not supported"), keep the raw line collapsed under "Details"; for `partial`
+  always use the coordinator's friendly sentence, never the raw `$e`.
+- **P2 · UX (misleading controls) · `sandbox_setup.dart:262-311`** — every step card (7–9
+  of them) carries its own "Repair" button, but all of them call the same full
+  `_runInstall()`; on a successful/queued step "Repair" is meaningless, and the list
+  reads like nine separate fix actions. **Fix:** remove per-step Repair; show one
+  "Repair setup" button in the error/partial views only; mark the failed step with the
+  reason instead.
+- **P2 · UX (back affordance that does nothing) · `sandbox_setup.dart:224-231`** — in
+  gate mode `leading: null` lets `AppBar` imply a Back arrow (the route can pop), which
+  `PopScope(canPop: false)` then silently swallows. **Fix:** `automaticallyImplyLeading:
+  !widget.gateMode`; add `onPopInvokedWithResult` that shows "Setup must finish before
+  continuing" if back is pressed.
+- **P2 · re-entrancy · `sandbox_setup.dart:30-47`** — `openStudio` awaits
+  `checkExisting()` with no busy state, no `catchError`, and no guard: double-tapping the
+  entry point pushes two `StudioScreen`s, and a thrown probe makes the tap silently do
+  nothing. **Fix:** a static `_opening` flag (or `Completer`) around the probe, a toast on
+  failure ("Could not check the sandbox. Try again."), and show a small inline spinner on
+  the entry chip while probing.
+- **P2 · data / consent · `sandbox_setup.dart:319-367`** — the approval card says "uses
+  network data and device storage and may take several minutes" but gives no size, does
+  not check free space up front, and does not warn on metered/cellular connections.
+  **Impact:** a multi-hundred-MB Node + Python download over mobile data without a
+  number; failures from a full disk only surface mid-install as raw errors. **Fix:** show
+  "≈ N MB download · ≈ M MB on device" from the installer manifest, pre-check
+  `StatFs` free space, and if on a metered network show "Wait for Wi-Fi / Use mobile data".
+- **P2 · readability / a11y · `sandbox_setup.dart:482-489`, `:498-513`, `:423-426`** — the log
+  uses `fontSize: 11` / `10.5` / `11.5` (below the 12sp floor Studio itself enforces in
+  `kStudioMinFontSize`), `fontFamily: Aether.mono` **without** the `monospace` fallback
+  (so it renders proportional — the exact bug `studio_layout.dart:31-40` documents),
+  plain `Text` (not selectable / copyable), and `_lineColor` paints any line containing
+  "error" red (e.g. "0 errors"). **Fix:** reuse the Studio terminal row style
+  (`kStudioMinFontSize`, `kStudioMonoFallback`), wrap in `SelectionArea`, add "Copy log",
+  colour only `⚠`/`ERROR:` prefixes.
+- **P2 · perf · `sandbox_setup.dart:128-130`, `:146-154`** — a 1 s `Timer.periodic` rebuilds
+  the whole screen (all step cards, the log list) just to update the elapsed label, and
+  every coordinator log line triggers another full rebuild + post-frame jump. **Fix:**
+  isolate the elapsed label in its own `StreamBuilder`/`ValueListenableBuilder`, and
+  rebuild only the log list on log changes.
+- **P2 · copy / jargon · `sandbox_setup.dart:86-106`, `:688-703`** — step names
+  ("Setting exec bits", "Linking tool aliases", "Configuring prefix", "Verifying native
+  exec") and badges ("NATIVE BIONIC", "NO ROOT") are engineering vocabulary; the
+  percentage shows one decimal ("43.7%") that jitters. **Fix:** user-level steps
+  ("Preparing", "Unpacking tools", "Checking it works", "Installing Node.js", "Installing
+  Python"), drop the badges or explain them, whole-number percent.
+- **P2 · state truth · `sandbox_setup.dart:171-178`, `:402`** — phases are equal-weighted,
+  so the bar sits near 78 % (7 of 9 done) while the two runtime downloads — the bulk of
+  the time and data — have not started; "Step 8 of 9" then sits for minutes. **Fix:**
+  weight phases by expected duration/bytes (or show runtime download bytes as
+  "Node.js 34 / 52 MB").
+
+**Missing features**
+- Notification (foreground service) while installing, so the user can leave the app and
+  Android does not kill the install; "Studio is ready" notification/toast when it
+  finishes while the user is in chat.
+- Pause / cancel install; resume an interrupted download instead of restarting.
+- "Copy / share setup log" for support; "Free up space" link to storage settings.
+- Optional runtime choice (Node only / Python only) to cut download size.
+
+**Test to add**
+- Widget test: `SandboxSetupScreen(gateMode: true)` with the coordinator in `failed`
+  (non-unsupported) → a "Continue to chat" button exists and pushes `OvidShell`.
+- Widget test: coordinator error `'FileSystemException: … errno = 28'` → no text containing
+  `FileSystemException` is visible; storage copy is.
+- Widget test: double-tap the Studio entry with a delayed `checkExisting` → exactly one
+  `StudioScreen` route is pushed.
+
+---
+
+## 10. GithubLoginSheet (OAuth device flow) — `github_login_sheet.dart`
+
+**What it is / how reached:** `showGithubLoginSheet` — a non-dismissible (`isDismissible:
+false`) scroll-controlled `AetherSheet` "Connect GitHub". Opened automatically by
+`StudioScreen` when the user is signed out (`studio_screen.dart:215`, `:252`), from the
+account chip's "Sign in" action (`:799`) and from the plugins screen
+(`plugins_screen.dart:2806`). Flow: starting spinner → one-time code (disabled
+`AetherField`), verification URL with Copy URL, Copy code chip, "Sign in" (opens the
+external browser), "Waiting for sign-in · mm:ss remaining" → done ("GitHub connected",
+Continue) / expired (Retry) / error (Retry). Pinned Cancel. Requests scope
+`repo read:user` (`github_service.dart:504`).
+
+**Findings**
+
+- **P1 · a11y (announcement flood) · `github_login_sheet.dart:80-82`, `:240-247`** — the
+  status `Semantics` is a `liveRegion` whose label contains the countdown
+  (`"… waiting, 14:59 remaining"`) and the whole sheet `setState`s every second. Each
+  label change of a live region is announced, so TalkBack speaks a new sentence **every
+  second for up to 15 minutes**, talking over the code the user is trying to hear and
+  over the browser after they switch apps (announcements continue while the sheet is
+  mounted). **Fix:** keep `liveRegion` on a label that changes only on state transitions
+  ("Waiting for you to approve in the browser"); render the countdown in a separate
+  `ExcludeSemantics` text (optionally announce at 5 / 1 minute remaining); drive the
+  countdown with a small `StreamBuilder` instead of rebuilding the whole sheet.
+- **P1 · fragile flow (mobile network) · `github_service.dart:589-603` via
+  `github_login_sheet.dart:93-124`** — any single transport error while polling
+  (`SocketException`, the 20 s `TimeoutException`, a 5xx) throws out of `pollForToken`
+  and the sheet switches to the error state, abandoning a still-valid device code. On
+  Android this is the normal case: the user switches to the browser, the app is
+  backgrounded, network access is restricted / Wi-Fi hands over to LTE, and the next poll
+  fails. **Impact:** user approves in the browser, returns to Ovid, and sees "Something
+  went wrong" with a raw exception and must start over with a new code (and the browser
+  approval was wasted). **Fix:** treat transport errors and 5xx as `authorization_pending`
+  with backoff until the code's `expiresIn`; pause polling on `AppLifecycleState.paused`
+  and poll immediately on `resumed`; only surface an error for OAuth errors.
+- **P1 · raw errors · `github_login_sheet.dart:84-88`, `:116-121`, `:316-322`** — non-auth
+  failures are shown as `'$e'` under "Something went wrong" (e.g. "ClientException with
+  SocketException: Failed host lookup: 'github.com' (OS Error: No address associated with
+  hostname, errno = 7), uri=https://github.com/login/device/code"). **Fix:** route through
+  `StudioFailure.of(e)` (after the §8 fixes) — "Ovid could not reach GitHub. Check your
+  connection and try again." — with the raw line collapsed under Details.
+- **P2 · functional (lost success callback) · `github_login_sheet.dart:18-27`, `:154-159`,
+  `:168-169`** — `onConnected` fires only for `pop(true)` from "Continue". The pinned
+  "Cancel" stays visible in the done state, and Android back / drag-down also pop with
+  `null`, so a user who is already connected but dismisses the success view (very common)
+  never triggers `onConnected` — the plugins-screen caller (`plugins_screen.dart:2806-2809`)
+  then never enables the GitHub MCP server it was connecting. Cancel in the done state also reads as "undo".
+  **Fix:** compute the result from `GitHubService.I.isLoggedIn` in the `.then` (not the
+  pop value); hide Cancel (or relabel "Close") once `_state == done`; auto-close after
+  ~1 s on success.
+- **P2 · UX (extra steps / clarity) · `github_login_sheet.dart:205-225`** — the code — the
+  one thing the user must carry to the browser — is rendered in a **disabled** text field
+  (reduced-contrast disabled styling, proportional font, normal size), and "Sign in" does
+  not copy it, so the user must tap Copy code, then Sign in, then paste. GitHub CLI and
+  every TV-login flow show the code large and copy it automatically. **Fix:** render the
+  code as large monospace selectable text (`AetherType.mono`, ~28sp, letter-spaced) with
+  `Semantics(label: spelled-out characters)`; make "Sign in" copy the code and show
+  "Code copied — paste it on GitHub"; open
+  `verification_uri_complete` when GitHub returns it.
+- **P2 · UX (unwanted auto-prompt) · `studio_screen.dart:243-252`** — every Studio open by
+  a signed-out user immediately starts a device flow and pushes this non-dismissible sheet,
+  including users who only use a local folder and never want GitHub; each open mints a new
+  device code (GitHub rate-limits device-code creation). **Fix:** show a "Connect GitHub"
+  card in the repo bar instead of auto-opening, or auto-open only when the session has a
+  bound repo; remember "Not now".
+- **P2 · security transparency · `github_service.dart:504`; `sandbox_service.dart:170-185`** —
+  scope `repo` grants read/write to **all** of the user's public and private repos, and the
+  token is written to `$PREFIX/.ovid-git-credentials`, readable by any command in the
+  sandbox — including commands the AI agent runs (prompt-injection exfiltration path).
+  The sheet says nothing about what is granted. **Fix:** state the access in the sheet
+  ("Ovid will be able to read and push to your repositories"), link to GitHub's
+  "Authorized OAuth Apps" page to revoke, and longer term move to a GitHub App with
+  per-repo installation + short-lived tokens, served to git through a credential helper
+  that refuses agent-initiated reads.
+- **P2 · a11y · `github_login_sheet.dart:387-437`, `:360-362`** — `_CopyChip` puts
+  `Semantics(button: true)` on the inner `Text`, not on the `InkWell`, so the focusable
+  node and the labelled node differ (TalkBack can land on an unlabeled tappable); the
+  "Copied" state is not announced; the URL is labelled "Verification URL. Selectable
+  text." which reads the implementation, not the content. **Fix:** `Semantics(button:
+  true, label:…, child: InkWell)` with `SemanticsService.announce('Code copied')`; label
+  the URL row "GitHub sign-in address, github.com/login/device".
+
+**Missing features**
+- Personal access token / fine-grained token entry as an alternative (enterprise users,
+  devices without a browser profile), and GitHub Enterprise Server host.
+- Account switcher / sign-out from inside the sheet; show the signed-in avatar before
+  Continue.
+- "I approved it" manual check button (poll now) for when the user returns before the
+  next interval.
+
+**Test to add**
+- Widget test with a mock client: the first poll throws `SocketException`, the second
+  returns a token → state reaches `done` (fails today).
+- Semantics test: pump 5 s in the code state → the live-region label is unchanged.
+- Widget test: reach `done`, then tap Cancel / system back → `onConnected` is still
+  invoked.
+
+---
+
+## Group summary
+
+**Counts (sections 1–10):** see tally line at the end. Studio's biggest risks are, in
+order: silent loss of user code (editor drafts, API-mode edits, layout remounts), a
+terminal that wedges on the commonest commands, UI-isolate file IO / whole-file layout
+on large or binary files, and error copy that is either raw or points at the wrong cause.
+
+**Top 10 fixes, in the order to do them**
+
+| # | Fix | Sections | Sev | Effort |
+|---|---|---|---|---|
+| 1 | **Never lose a draft:** move dirty/baseline state into core `_SessionStudio`; `PopScope` with Save all / Discard / Cancel; dirty check on tab close; 2 s debounced draft autosave + save on `paused`; keep the editor mounted when the compact file panel opens (stable `Stack` child). | §4 P0, §7 P1 | P0 | M |
+| 2 | **Persist API-mode working copies** (app-private drafts dir) and stop `unbind()`/sign-out from discarding uncommitted edits without a confirm. | §1 P1 ×2 | P1 | M |
+| 3 | **Terminal unwedge:** make Stop tappable (`readOnly` instead of `enabled:false`), add stdin-while-busy + Ctrl-C, non-interactive env (`GIT_EDITOR`, `PAGER`, `DEBIAN_FRONTEND`, `CI`), idle notice instead of the 5-min kill. | §6 P1 ×2 | P1 | S (Stop) + M |
+| 4 | **Get file IO off the UI isolate:** async `RepoCache.readAsync` with size cap; move `validateApproval` / `_commitContent` staging reads off `_cacheChanged`; debounce. | §2 P1, §5 P1 | P1 | M |
+| 5 | **Large / binary files:** read-only virtualised viewer above ~256 KB, binary detection by NUL-byte sniff (not extension list) so binaries are never decoded/re-encoded; prune per-tab controllers and replace `IndexedStack`. | §4 P1 ×3 | P1 | M |
+| 6 | **Commit review that is reviewable:** real line diff (Myers, `package:diff_match_patch`) with hunks, lazy `ListView` rendering, per-file collapse; human error copy in the dialog. | §2 P1 ×3 | P1 | M |
+| 7 | **Error copy overhaul:** typed classification in `StudioFailure` (no digit substrings, rate-limit case, FS vs GitHub domains, token redaction); route setup-screen and GitHub-sheet errors through it; pass `detail` to every toast. | §8 P1 ×2, §9 P1, §10 P1, §2 P1 | P1 | M |
+| 8 | **GitHub sign-in that survives Android:** poll through transient network errors, pause/resume with lifecycle, stop the per-second live-region announcement, auto-copy the code, honour success on any dismissal; repo picker pagination + search so >30-repo users can pick a repo. | §10 P1 ×2, §3 P1 | P1 | S–M |
+| 9 | **Surface partial sync** (`SyncReport.partial/summary`) in the banner + file-tree footer with Retry. | §1 P1, §5 P2 | P1 | S |
+| 10 | **Setup gate escape + honest setup UX:** "Continue to chat" in the gate-mode error view, no phantom Back arrow, single Repair, size/metered-network notice, selectable log with mono fallback; rebuild-scope fixes for the editor/tree (`AgentService` listeners) and terminal (coalesce per frame). | §9 P1, §4 P1, §6 P2 | P1 | S + M |
+
+**Suggested PR grouping**
+1. `studio-drafts-safety` (#1, #2) — highest user-trust impact; needs core + UI.
+2. `studio-terminal-input` (#3) — Stop fix is a one-liner and can ship first on its own.
+3. `studio-io-and-large-files` (#4, #5).
+4. `studio-commit-diff` (#6).
+5. `studio-errors-and-github-auth` (#7, #8, #9).
+6. `studio-setup-polish` (#10) + the P2 a11y batch (48dp targets, double announcements,
+   resize semantics actions, sheet drag handles).
+
+**Cross-group notes**
+- The 44 vs 48 dp tap-target constant (§7) and the hard-coded font sizes should be
+  decided once in the design-system group (08) and applied here.
+- Token exposure to agent-run sandbox commands (§10) belongs in the security PR of the
+  master plan, not in a Studio UI PR.
+
+**Tally (all 10 sections):** P0 = 1 · P1 = 23 · P2 = 58. Sections 6–10 (this pass) add P1 = 10, P2 = 30.
