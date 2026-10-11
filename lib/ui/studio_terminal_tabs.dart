@@ -346,7 +346,7 @@ class _TerminalPaneState extends State<_TerminalPane> {
                   itemCount: s.history.length + (s.busy ? 1 : 0),
                   itemBuilder: (_, i) {
                     if (i == s.history.length) {
-                      return const Padding(
+                      return Padding(
                         padding: EdgeInsets.only(top: 2),
                         child: SizedBox(
                           width: 13,
@@ -371,7 +371,7 @@ class _TerminalPaneState extends State<_TerminalPane> {
                             : l.startsWith('⚠')
                                 ? Aether.danger
                                 : l.endsWith('✓') || l.startsWith('✓')
-                                    ? Aether.successLight
+                                    ? Aether.success
                                     : Aether.textMuted,
                       ),
                     );
@@ -413,7 +413,7 @@ class _TerminalPaneState extends State<_TerminalPane> {
                         border: InputBorder.none,
                         enabledBorder: InputBorder.none,
                         focusedBorder: InputBorder.none,
-                        prefixIcon: const Icon(
+                        prefixIcon: Icon(
                           Icons.chevron_right,
                           size: 16,
                           color: Aether.accent,

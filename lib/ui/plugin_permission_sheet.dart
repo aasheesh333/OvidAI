@@ -157,7 +157,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                       Icon(
                         Icons.verified_outlined,
                         size: 18,
-                        color: Aether.successLight,
+                        color: Aether.success,
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -244,12 +244,12 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(Icons.error_outline, color: Aether.danger),
+                        Icon(Icons.error_outline, color: Aether.danger),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
                             _error!,
-                            style: AetherType.body.copyWith(color: Aether.dangerC),
+                            style: AetherType.body.copyWith(color: Aether.danger),
                           ),
                         ),
                       ],
@@ -263,7 +263,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(Icons.info_outline, size: 18, color: Aether.accent),
+                    Icon(Icons.info_outline, size: 18, color: Aether.accent),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(

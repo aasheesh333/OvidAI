@@ -183,9 +183,9 @@ class ChatToolCallCard extends StatefulWidget {
   /// Pill color for [state]; matches the transcript's state-dot palette.
   static Color stateColor(ChatToolState state) => switch (state) {
     ChatToolState.running => Aether.accent,
-    ChatToolState.done => Aether.successC,
-    ChatToolState.error => Aether.dangerC,
-    ChatToolState.stopped => Aether.warnLight,
+    ChatToolState.done => Aether.success,
+    ChatToolState.error => Aether.danger,
+    ChatToolState.stopped => Aether.warn,
     ChatToolState.unknown => Aether.textFaint,
   };
 

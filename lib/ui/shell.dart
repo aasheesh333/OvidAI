@@ -24,7 +24,7 @@ class _PersistWarningBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: Aether.danger.withValues(alpha: 0.16),
-      child: const Padding(
+      child: Padding(
         padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           children: [

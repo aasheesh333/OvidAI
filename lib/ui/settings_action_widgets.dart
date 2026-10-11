@@ -108,7 +108,7 @@ class _SettingsSwitchTileState extends State<SettingsSwitchTile> {
                 : widget.subtitleOff),
         style: TextStyle(
           fontSize: 11.5,
-          color: _error == null ? Aether.textFaint : Aether.dangerC,
+          color: _error == null ? Aether.textFaint : Aether.danger,
         ),
       ),
       trailing: Switch(

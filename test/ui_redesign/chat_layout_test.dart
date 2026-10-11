@@ -160,7 +160,7 @@ void main() {
 
     final pill = tester.widget<AetherPill>(find.byType(AetherPill));
     expect(pill.label, 'Error');
-    expect(pill.color, Aether.dangerC);
+    expect(pill.color, Aether.danger);
     expect(tester.takeException(), isNull);
   });
 

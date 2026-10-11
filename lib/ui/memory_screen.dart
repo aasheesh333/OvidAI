@@ -335,7 +335,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: AetherSpacing.space3),
-                child: Text(_error!, style: TextStyle(color: Aether.dangerC)),
+                child: Text(_error!, style: TextStyle(color: Aether.danger)),
               ),
             if (_store == null && _error == null)
               const Padding(
@@ -560,7 +560,7 @@ class _MemoryFileRow extends StatelessWidget {
               child: Icon(
                 pinned ? Icons.push_pin : Icons.push_pin_outlined,
                 size: 16,
-                color: pinned ? Aether.accentC : Aether.textFaint,
+                color: pinned ? Aether.accent : Aether.textFaint,
               ),
             ),
             const SizedBox(width: AetherSpacing.space3),
@@ -606,7 +606,7 @@ class _MemoryFileRow extends StatelessWidget {
                     style: TextStyle(
                       color: onDelete == null
                           ? Aether.textFaint
-                          : Aether.dangerC,
+                          : Aether.danger,
                     ),
                   ),
                 ),
@@ -707,7 +707,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
           if (_error != null)
             Text(
               _error!,
-              style: TextStyle(fontSize: 12, color: Aether.dangerC),
+              style: TextStyle(fontSize: 12, color: Aether.danger),
             )
           else
             Text(

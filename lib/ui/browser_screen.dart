@@ -470,7 +470,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       color: tab?.localPreviewPath != null
                           ? Aether.accent
                           : (tab?.url ?? '').startsWith('https')
-                          ? Aether.successLight
+                          ? Aether.success
                           : Aether.textFaint,
                     ),
                   ),
@@ -723,7 +723,7 @@ class _AgentDot extends StatelessWidget {
           width: 10,
           height: 10,
           decoration: BoxDecoration(
-            color: busy ? Aether.accent : Aether.successLight,
+            color: busy ? Aether.accent : Aether.success,
             shape: BoxShape.circle,
           ),
         ),

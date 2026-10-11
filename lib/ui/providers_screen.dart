@@ -127,7 +127,7 @@ class _OvidCloudTile extends StatelessWidget {
     final paid = app.ovidCloudIsPaid;
     final connected = provider.hasKey;
     final statusLabel = paid ? tier.toUpperCase() : 'FREE';
-    final statusColor = paid ? Aether.accent : Aether.successLight;
+    final statusColor = paid ? Aether.accent : Aether.success;
     return AetherCard(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -191,7 +191,7 @@ class _ProviderTileState extends State<_ProviderTile> {
   String? _fetchResult;
 
   Color get _statusColor {
-    if (!provider.requiresApiKey) return Aether.successLight;
+    if (!provider.requiresApiKey) return Aether.success;
     if (provider.hasKey) return Aether.accent;
     if (provider.isFree) return Aether.accent;
     return Aether.textFaint;
@@ -220,7 +220,7 @@ class _ProviderTileState extends State<_ProviderTile> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+            child: Text('Delete', style: TextStyle(color: Aether.danger)),
           ),
         ],
       ),
@@ -376,7 +376,7 @@ class _ProviderTileState extends State<_ProviderTile> {
                                       Text(
                                         'FREE',
                                         style: AetherType.caption.copyWith(
-                                          color: Aether.successLight,
+                                          color: Aether.success,
                                         ),
                                       )
                                     else if (!provider.custom)
@@ -476,10 +476,10 @@ class _ProviderTileState extends State<_ProviderTile> {
                       color: _fetchState == _FetchState.busy
                           ? Aether.accent
                           : _fetchState == _FetchState.success
-                          ? Aether.successLight
+                          ? Aether.success
                           : _fetchState == _FetchState.empty
                           ? Aether.textMuted
-                          : Aether.dangerC,
+                          : Aether.danger,
                     ),
                     const SizedBox(width: 6),
                     Expanded(
@@ -611,7 +611,7 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
         if (widget.provider.hasKey)
           TextButton(
             onPressed: _saving ? null : _clear,
-            child: const Text('Clear', style: TextStyle(color: Aether.danger)),
+            child: Text('Clear', style: TextStyle(color: Aether.danger)),
           ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
@@ -647,7 +647,7 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
               liveRegion: true,
               child: Text(
                 _error!,
-                style: AetherType.body.copyWith(color: Aether.dangerC),
+                style: AetherType.body.copyWith(color: Aether.danger),
               ),
             ),
           ],
@@ -712,7 +712,7 @@ class _EditProviderSheetState extends State<_EditProviderSheet> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: const Text('Add', style: TextStyle(color: Aether.accent)),
+            child: Text('Add', style: TextStyle(color: Aether.accent)),
           ),
         ],
       ),
@@ -1076,7 +1076,7 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
               }
               navigator.pop();
             },
-            child: const Text('Add', style: TextStyle(color: Aether.accent)),
+            child: Text('Add', style: TextStyle(color: Aether.accent)),
           ),
         ],
         child: Column(

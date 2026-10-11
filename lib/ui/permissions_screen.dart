@@ -237,7 +237,7 @@ class _AutonomyCard extends StatelessWidget {
             children: [
               _PermissionScopeBadge(
                 label: 'SESSION ONLY',
-                color: Aether.accentC,
+                color: Aether.accent,
                 icon: Icons.shield_outlined,
               ),
             ],
@@ -357,7 +357,7 @@ class _AutonomyMode extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = active ? Aether.accentC : Aether.textFaint;
+    final c = active ? Aether.accent : Aether.textFaint;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -490,7 +490,7 @@ class _GrantRow extends StatelessWidget {
           Icon(
             icon,
             size: 18,
-            color: grant.isDeny ? Aether.dangerC : Aether.accentC,
+            color: grant.isDeny ? Aether.danger : Aether.accent,
           ),
           const SizedBox(height: 8),
           Text(

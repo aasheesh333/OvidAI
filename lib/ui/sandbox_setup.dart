@@ -182,7 +182,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
     if (l.startsWith('⚠') || l.toLowerCase().contains('error')) {
       return Aether.danger;
     }
-    if (l.endsWith('✓') || l.startsWith('✓')) return Aether.successLight;
+    if (l.endsWith('✓') || l.startsWith('✓')) return Aether.success;
     return Aether.textMuted;
   }
 
@@ -327,7 +327,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.terminal, size: 44, color: Aether.accent),
+                Icon(Icons.terminal, size: 44, color: Aether.accent),
                 const SizedBox(height: 18),
                 Text('Set up Studio', style: AetherType.h2),
                 const SizedBox(height: 12),
@@ -379,7 +379,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             padding: const EdgeInsets.all(16),
             title: Row(
               children: [
-                const SizedBox(
+                SizedBox(
                   width: 16,
                   height: 16,
                   child: CircularProgressIndicator(
@@ -409,7 +409,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     value: _overall.clamp(0.01, 1.0),
                     minHeight: 6,
                     backgroundColor: Aether.surfaceAlt,
-                    valueColor: const AlwaysStoppedAnimation(Aether.accent),
+                    valueColor: AlwaysStoppedAnimation(Aether.accent),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -420,7 +420,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                         '${(_overall * 100).toStringAsFixed(1)}%',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11.5,
                           fontWeight: FontWeight.w700,
                           color: Aether.accent,
@@ -529,7 +529,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             padding: const EdgeInsets.all(16),
             title: Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.error_outline,
                   size: 20,
                   color: Aether.danger,
@@ -638,10 +638,10 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                       width: 72,
                       height: 72,
                       decoration: BoxDecoration(
-                        color: Aether.successLight.withValues(alpha: 0.12),
+                        color: Aether.success.withValues(alpha: 0.12),
                         shape: BoxShape.circle,
                         border: Border.all(
-                          color: Aether.successLight.withValues(alpha: 0.5),
+                          color: Aether.success.withValues(alpha: 0.5),
                         ),
                       ),
                       child: Icon(
@@ -649,7 +649,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                             ? Icons.warning_amber_rounded
                             : Icons.check_rounded,
                         size: 38,
-                        color: _partial ? Aether.accent : Aether.successLight,
+                        color: _partial ? Aether.accent : Aether.success,
                       ),
                     ),
                   ),
@@ -687,7 +687,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   children: [
                     _SetupBadge(
                       label: 'NATIVE BIONIC',
-                      color: Aether.successLight,
+                      color: Aether.success,
                     ),
                     _SetupBadge(
                       label: _partial || _setup.coreOnly
@@ -781,7 +781,7 @@ class _SetupPrimaryButton extends StatelessWidget {
     icon: Icon(icon, size: 16),
     label: Text(label, textAlign: TextAlign.center),
     style: FilledButton.styleFrom(
-      backgroundColor: Aether.accent,
+      backgroundColor: Aether.accentFill,
       foregroundColor: Colors.white,
       minimumSize: const Size(0, 44),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),

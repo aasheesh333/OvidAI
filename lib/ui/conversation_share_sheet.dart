@@ -182,7 +182,7 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                           Text(
                             'Sharing is unavailable: deployment is not configured.',
                             style: AetherType.body.copyWith(
-                              color: Aether.warnLight,
+                              color: Aether.warn,
                             ),
                           ),
                         ],
@@ -210,14 +210,14 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                             Icon(
                               Icons.error_outline,
                               size: 16,
-                              color: Aether.dangerC,
+                              color: Aether.danger,
                             ),
                             const SizedBox(width: 10),
                             Expanded(
                               child: Text(
                                 _error!,
                                 style: AetherType.body.copyWith(
-                                  color: Aether.dangerC,
+                                  color: Aether.danger,
                                 ),
                               ),
                             ),
@@ -260,7 +260,7 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                         Text(
                           'No shareable text, or snapshot exceeds the 500-message / 200 KB / 20,000-character-per-message limit.',
                           style: AetherType.caption.copyWith(
-                            color: Aether.warnLight,
+                            color: Aether.warn,
                           ),
                         ),
                     ],
@@ -338,7 +338,7 @@ class _ActiveShareCard extends StatelessWidget {
       title: Text('Shareable link', style: AetherType.title),
       trailing: AetherPill(
         label: 'LIVE',
-        color: Aether.successLight,
+        color: Aether.success,
         icon: Icons.check_circle_outline,
       ),
       child: Column(

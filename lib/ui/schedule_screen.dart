@@ -368,7 +368,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                   child: Text(
                     _error!,
                     style: TextStyle(
-                      color: Aether.dangerC,
+                      color: Aether.danger,
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
                     ),

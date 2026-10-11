@@ -1701,7 +1701,7 @@ class _ChatScreenState extends State<ChatScreen>
                                                           .maxScrollExtent,
                                                     );
                                                   },
-                                                  child: const Padding(
+                                                  child: Padding(
                                                     padding:
                                                         EdgeInsets.symmetric(
                                                           horizontal: 10,
@@ -2054,7 +2054,7 @@ class _ChatScreenState extends State<ChatScreen>
                     style: TextStyle(fontSize: 11, color: Aether.textMuted),
                   ),
                   trailing: AppState.I.activeSession?.presetId == p.id
-                      ? const Icon(Icons.check, size: 16, color: Aether.accent)
+                      ? Icon(Icons.check, size: 16, color: Aether.accent)
                       : null,
                   onTap: () async {
                     Navigator.pop(context);
@@ -2198,7 +2198,7 @@ class _ChatScreenState extends State<ChatScreen>
                 children: [
                   Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.terminal_outlined,
                         size: 16,
                         color: Aether.accent,
@@ -2690,7 +2690,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           Text(managed.name, style: AetherType.title),
-          const AetherPill(label: 'MANAGED', color: Aether.accent),
+          AetherPill(label: 'MANAGED', color: Aether.accent),
         ],
       ),
       child: body,
@@ -2740,7 +2740,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
           if (p.isFree) ...[
             AetherPill(label: 'FREE', color: Aether.successLight),
           ],
-          const AetherPill(label: 'KEY', color: Aether.accent),
+          AetherPill(label: 'KEY', color: Aether.accent),
         ],
       ),
       child: Column(
@@ -2851,7 +2851,7 @@ class _ModelTile extends StatelessWidget {
         providerId == AppState.ovidCloudProviderId &&
         baseModel.toLowerCase() == 'auto';
     final AetherPill modePill = isAutoRow
-        ? const AetherPill(label: 'Auto', color: Aether.accent)
+        ? AetherPill(label: 'Auto', color: Aether.accent)
         : AetherPill(label: 'Manual', color: Aether.textMuted);
 
     Widget buildCurrentBadge() {
@@ -2862,7 +2862,7 @@ class _ModelTile extends StatelessWidget {
           color: Aether.accentSoft,
           borderRadius: BorderRadius.circular(4),
         ),
-        child: const Text(
+        child: Text(
           'CURRENT',
           style: TextStyle(
             fontSize: 9.5,
@@ -2915,7 +2915,7 @@ class _ModelTile extends StatelessWidget {
                 )
               : null,
           trailing: selected
-              ? const Icon(Icons.check, size: 18, color: Aether.accent)
+              ? Icon(Icons.check, size: 18, color: Aether.accent)
               : null,
           onTap: () {
             app.setModel(providerId, model);
@@ -2956,7 +2956,7 @@ class _ModelTile extends StatelessWidget {
               : (effortVariant != null
                     ? Text(
                         effortVariant,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
                           color: Aether.accent,
                         ),
@@ -3035,7 +3035,7 @@ class _EmptyState extends StatelessWidget {
                     width: 52,
                     height: 52,
                     decoration: BoxDecoration(
-                      color: Aether.accent,
+                      color: Aether.signalRed,
                       borderRadius: BorderRadius.circular(15),
                     ),
                     child: const Center(
@@ -3133,7 +3133,7 @@ class _ReasoningCardState extends State<_ReasoningCard> {
                 child: Row(
                   children: [
                     if (isStreaming)
-                      const _ChaseDot(Aether.accent)
+                      _ChaseDot(Aether.accent)
                     else
                       Icon(
                         Icons.psychology_outlined,
@@ -3311,7 +3311,7 @@ class _ToolCardState extends State<_ToolCard>
                       else if (stopped)
                         _StateDot(Aether.warnLight)
                       else if (running)
-                        const _ChaseDot(Aether.accent)
+                        _ChaseDot(Aether.accent)
                       else
                         Icon(
                           _iconFor(iconKind),
@@ -5008,7 +5008,7 @@ class _MessageView extends StatelessWidget {
           TextButton(onPressed: navigator.pop, child: const Text('Cancel')),
           TextButton(
             onPressed: () => send(c.text),
-            child: const Text(
+            child: Text(
               'Edit in composer',
               style: TextStyle(color: Aether.accent),
             ),
@@ -5218,7 +5218,7 @@ class _MessageView extends StatelessWidget {
 
   Widget _imageGenFallback() => Container(
     color: Aether.surfaceAlt,
-    child: const Center(
+    child: Center(
       child: Icon(Icons.auto_awesome, color: Aether.accent, size: 40),
     ),
   );
@@ -6603,7 +6603,7 @@ class _TypingBubble extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 10),
           child: Row(
             children: [
-              const _ChaseDot(Aether.accent),
+              _ChaseDot(Aether.accent),
               const SizedBox(width: 10),
               Expanded(
                 child: _ShimmerText(
@@ -6846,7 +6846,7 @@ class _TodoDockState extends State<_TodoDock> {
                         color: Aether.textFaint,
                       ),
                       const SizedBox(width: 6),
-                      const Icon(
+                      Icon(
                         Icons.checklist_outlined,
                         size: 13,
                         color: Aether.accent,
@@ -6865,7 +6865,7 @@ class _TodoDockState extends State<_TodoDock> {
                         Container(
                           width: 6,
                           height: 6,
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: Aether.accent,
                           ),
@@ -6873,7 +6873,7 @@ class _TodoDockState extends State<_TodoDock> {
                         const SizedBox(width: 4),
                         Text(
                           '$inProg active',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 10,
                             color: Aether.accent,
                           ),
@@ -7539,7 +7539,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Row(
+          Row(
             children: [
               Icon(Icons.help_outline, size: 14, color: Aether.accent),
               SizedBox(width: 6),
@@ -7625,7 +7625,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
               const SizedBox(width: 4),
               FilledButton(
                 style: FilledButton.styleFrom(
-                  backgroundColor: Aether.accent,
+                  backgroundColor: Aether.accentFill,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 14,
@@ -8107,7 +8107,7 @@ class _ModeChip extends StatelessWidget {
                     ),
                   ),
                   trailing: AgentService.I.mode == m
-                      ? const Icon(Icons.check, size: 18, color: Aether.accent)
+                      ? Icon(Icons.check, size: 18, color: Aether.accent)
                       : null,
                   onTap: () async {
                     Navigator.pop(context);
@@ -8632,7 +8632,7 @@ class _OvidMarkdown extends StatelessWidget {
           color: body,
         ),
         tableBody: TextStyle(fontSize: fontSize - 1, height: 1.4, color: body),
-        a: const TextStyle(
+        a: TextStyle(
           color: Aether.accent,
           decoration: TextDecoration.underline,
         ),
@@ -8886,7 +8886,7 @@ class _RuntimeInstallBanner extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   else
-                    const Icon(
+                    Icon(
                       Icons.warning_amber_rounded,
                       size: 17,
                       color: Aether.danger,
@@ -8937,7 +8937,7 @@ class _RuntimeInstallBanner extends StatelessWidget {
                     value: progress.clamp(0.0, 1.0),
                     minHeight: 4,
                     backgroundColor: Aether.surfaceAlt,
-                    valueColor: const AlwaysStoppedAnimation(Aether.accent),
+                    valueColor: AlwaysStoppedAnimation(Aether.accent),
                   ),
                 ),
               ],

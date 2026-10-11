@@ -163,11 +163,12 @@ class AetherCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasHeader = title != null || trailing != null;
-    final resolvedColor = color ?? Aether.surface;
+    final c = context.aether;
+    final resolvedColor = color ?? c.surface;
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(AetherRadius.rLg),
-        border: Border.all(color: Aether.hairline),
+        border: Border.all(color: c.hairline),
         boxShadow: AetherShadows.shadowS,
       ),
       clipBehavior: Clip.antiAlias,
@@ -193,13 +194,13 @@ class AetherCard extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 12),
-                Divider(height: 1, thickness: 1, color: Aether.hairline),
+                Divider(height: 1, thickness: 1, color: c.hairline),
                 const SizedBox(height: 12),
               ],
               child,
               if (footer != null) ...[
                 const SizedBox(height: 12),
-                Divider(height: 1, thickness: 1, color: Aether.hairline),
+                Divider(height: 1, thickness: 1, color: c.hairline),
                 const SizedBox(height: 12),
                 footer!,
               ],
@@ -306,24 +307,29 @@ class _AetherButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final effectiveOnPressed = (loading || onPressed == null) ? null : onPressed;
+    final c = context.aether;
+    final filled =
+        kind == _AetherBtnKind.primary || kind == _AetherBtnKind.danger;
+    // Disabled solid buttons use the M3 recipe (onSurface @38% label on
+    // onSurface @12% fill) instead of white70 on a 40% red, which measured
+    // about 1.6:1 and read as "pale", not "disabled".
+    final disabledFill = c.text.withValues(alpha: 0.12);
+    final disabledLabel = c.text.withValues(alpha: 0.38);
 
     if (iconOnly) {
-      final fg =
-          (kind == _AetherBtnKind.primary || kind == _AetherBtnKind.danger)
-          ? Colors.white
-          : Aether.text;
+      final fg = !filled
+          ? c.text
+          : effectiveOnPressed == null
+          ? disabledLabel
+          : c.onAccent;
       final bg = switch (kind) {
-        _AetherBtnKind.primary => effectiveOnPressed == null
-            ? Aether.accent.withValues(alpha: 0.4)
-            : Aether.accent,
-        _AetherBtnKind.danger => effectiveOnPressed == null
-            ? Aether.danger.withValues(alpha: 0.4)
-            : Aether.danger,
-        _AetherBtnKind.secondary => Aether.surfaceAlt,
+        _AetherBtnKind.primary || _AetherBtnKind.danger =>
+          effectiveOnPressed == null ? disabledFill : c.accentFill,
+        _AetherBtnKind.secondary => c.surfaceAlt,
         _AetherBtnKind.ghost => Colors.transparent,
       };
       final border = switch (kind) {
-        _AetherBtnKind.secondary => Border.all(color: Aether.hairlineStrong),
+        _AetherBtnKind.secondary => Border.all(color: c.hairlineStrong),
         _AetherBtnKind.ghost => null,
         _ => null,
       };
@@ -374,9 +380,7 @@ class _AetherButton extends StatelessWidget {
             child: CircularProgressIndicator(
               strokeWidth: 2,
               valueColor: AlwaysStoppedAnimation<Color>(
-                kind == _AetherBtnKind.primary || kind == _AetherBtnKind.danger
-                    ? Colors.white
-                    : Aether.text,
+                filled ? c.onAccent : c.text,
               ),
             ),
           )
@@ -421,10 +425,10 @@ class _AetherButton extends StatelessWidget {
         button = FilledButton(
           onPressed: effectiveOnPressed,
           style: FilledButton.styleFrom(
-            backgroundColor: Aether.accent,
-            foregroundColor: Colors.white,
-            disabledBackgroundColor: Aether.accent.withValues(alpha: 0.4),
-            disabledForegroundColor: Colors.white70,
+            backgroundColor: c.accentFill,
+            foregroundColor: c.onAccent,
+            disabledBackgroundColor: disabledFill,
+            disabledForegroundColor: disabledLabel,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
             ),
@@ -439,8 +443,8 @@ class _AetherButton extends StatelessWidget {
         button = OutlinedButton(
           onPressed: effectiveOnPressed,
           style: OutlinedButton.styleFrom(
-            foregroundColor: Aether.text,
-            side: BorderSide(color: Aether.hairlineStrong),
+            foregroundColor: c.text,
+            side: BorderSide(color: c.hairlineStrong),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
             ),
@@ -455,7 +459,7 @@ class _AetherButton extends StatelessWidget {
         button = TextButton(
           onPressed: effectiveOnPressed,
           style: TextButton.styleFrom(
-            foregroundColor: Aether.textMuted,
+            foregroundColor: c.textMuted,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
             ),
@@ -470,10 +474,10 @@ class _AetherButton extends StatelessWidget {
         button = FilledButton(
           onPressed: effectiveOnPressed,
           style: FilledButton.styleFrom(
-            backgroundColor: Aether.danger,
-            foregroundColor: Colors.white,
-            disabledBackgroundColor: Aether.danger.withValues(alpha: 0.4),
-            disabledForegroundColor: Colors.white70,
+            backgroundColor: c.accentFill,
+            foregroundColor: c.onAccent,
+            disabledBackgroundColor: disabledFill,
+            disabledForegroundColor: disabledLabel,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
             ),
@@ -701,6 +705,7 @@ class AetherField extends StatelessWidget {
   Widget build(BuildContext context) {
     final hasError = errorText != null && errorText!.isNotEmpty;
     final r = radius ?? AetherRadius.rMd;
+    final c = context.aether;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -727,9 +732,9 @@ class AetherField extends StatelessWidget {
             style: AetherType.body,
             decoration: InputDecoration(
               filled: true,
-              fillColor: Aether.surfaceAlt,
+              fillColor: c.surfaceAlt,
               hintText: hint,
-              hintStyle: TextStyle(color: Aether.textFaint, fontSize: 14),
+              hintStyle: TextStyle(color: c.textFaint, fontSize: 14),
               prefixIcon: prefixIcon,
               suffixIcon: suffix,
               contentPadding:
@@ -738,20 +743,20 @@ class AetherField extends StatelessWidget {
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(r),
                 borderSide: BorderSide(
-                  color: hasError ? Aether.danger : Aether.hairline,
+                  color: hasError ? c.danger : c.inputBorder,
                 ),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(r),
                 borderSide: BorderSide(
-                  color: hasError ? Aether.danger : Aether.accent,
+                  color: hasError ? c.danger : c.accent,
                   width: 1.2,
                 ),
               ),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(r),
                 borderSide: BorderSide(
-                  color: hasError ? Aether.danger : Aether.hairline,
+                  color: hasError ? c.danger : c.inputBorder,
                 ),
               ),
             ),
@@ -766,7 +771,7 @@ class AetherField extends StatelessWidget {
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w500,
-                color: Aether.dangerC,
+                color: c.danger,
               ),
             ),
           ),
@@ -1210,7 +1215,7 @@ class _AetherOtpFieldState extends State<AetherOtpField> {
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w500,
-                color: Aether.dangerC,
+                color: Aether.danger,
               ),
             ),
           ),
@@ -1269,7 +1274,7 @@ class _OtpCell extends StatelessWidget {
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
               borderSide: BorderSide(
-                color: hasError ? Aether.danger : Aether.hairline,
+                color: hasError ? Aether.danger : Aether.inputBorder,
               ),
             ),
             focusedBorder: OutlineInputBorder(
@@ -1282,7 +1287,7 @@ class _OtpCell extends StatelessWidget {
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
               borderSide: BorderSide(
-                color: hasError ? Aether.danger : Aether.hairline,
+                color: hasError ? Aether.danger : Aether.inputBorder,
               ),
             ),
           ),

@@ -14,7 +14,7 @@ void main() {
     final src = File('lib/ui/studio_screen.dart').readAsStringSync();
     expect(src.contains('Sandbox ready'), isFalse);
     expect(src.contains('isLoggedIn'), isTrue);
-    expect(src.contains('Aether.dangerC'), isTrue);
+    expect(src.contains('Aether.danger'), isTrue);
   });
 
   test('a new session starts with the home page tab, never blank', () {

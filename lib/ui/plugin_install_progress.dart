@@ -268,7 +268,7 @@ class _PluginInstallProgressSheetState
                   Icon(
                     p.ok ? Icons.check_circle : Icons.error,
                     size: 18,
-                    color: p.ok ? Aether.successLight : Aether.danger,
+                    color: p.ok ? Aether.success : Aether.danger,
                   ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -308,14 +308,14 @@ class _PluginInstallProgressSheetState
                     Icon(
                       p.ok ? Icons.check_circle : Icons.error_outline,
                       size: 16,
-                      color: p.ok ? Aether.successLight : Aether.dangerC,
+                      color: p.ok ? Aether.success : Aether.danger,
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
                         p.summary,
                         style: AetherType.body.copyWith(
-                          color: p.ok ? Aether.successLight : Aether.dangerC,
+                          color: p.ok ? Aether.success : Aether.danger,
                         ),
                       ),
                     ),

@@ -111,11 +111,11 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
     if (failed) return Aether.danger;
     return switch (kind) {
       'turn_start' => Aether.accent,
-      'turn_end' => Aether.successLight,
+      'turn_end' => Aether.success,
       'tool_start' => Aether.textMuted,
       'tool_end' => Aether.textMuted,
       'subagent_end' => Aether.textMuted,
-      'checkpoint' => Aether.warnLight,
+      'checkpoint' => Aether.warn,
       'note' => Aether.danger,
       _ => Aether.textFaint,
     };
@@ -302,7 +302,7 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                                     style: AetherType.caption.copyWith(
                                       color: _isFailed(e)
                                           ? Aether.danger
-                                          : Aether.successLight,
+                                          : Aether.success,
                                     ),
                                   ),
                                 ],

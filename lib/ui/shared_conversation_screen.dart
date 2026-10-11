@@ -94,7 +94,7 @@ class _SharedConversationScreenState extends State<SharedConversationScreen> {
               padding: const EdgeInsets.only(bottom: 16),
               child: AetherCard(child: Text(message.content)),
             ),
-            if (_error != null) Text(_error!, style: TextStyle(color: Aether.dangerC)),
+            if (_error != null) Text(_error!, style: TextStyle(color: Aether.danger)),
             AetherPrimaryButton(
               label: _busy ? 'Continuing…' : 'Continue in Ovid Si',
               onPressed: _busy ? null : _continue,

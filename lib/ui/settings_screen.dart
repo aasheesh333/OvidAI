@@ -694,8 +694,8 @@ class _DeviceIntegrityTile extends StatelessWidget {
             color: !app.securityChecked || !complete
                 ? Aether.textMuted
                 : compromised
-                ? Aether.warnLight
-                : Aether.successLight,
+                ? Aether.warn
+                : Aether.success,
           ),
           title: const Text('Device integrity', style: TextStyle(fontSize: 14)),
           subtitle: Text(
@@ -1807,7 +1807,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+            child: Text('Delete', style: TextStyle(color: Aether.danger)),
           ),
         ],
       ),
@@ -1887,7 +1887,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
                   ),
                   child: Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.auto_fix_high_outlined,
                         size: 18,
                         color: Aether.accent,
@@ -2121,7 +2121,7 @@ class _PresetsScreen extends StatelessWidget {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+            child: Text('Delete', style: TextStyle(color: Aether.danger)),
           ),
         ],
       ),
@@ -2368,8 +2368,8 @@ class _PresetTileState extends State<_PresetTile> {
                         style: const TextStyle(fontSize: 11),
                       ),
                       selected: p.planAllowedTools.contains(tool),
-                      selectedColor: Aether.warnLight.withValues(alpha: 0.2),
-                      checkmarkColor: Aether.warnLight,
+                      selectedColor: Aether.warn.withValues(alpha: 0.2),
+                      checkmarkColor: Aether.warn,
                       onSelected: (selected) {
                         final current = List<String>.from(p.planAllowedTools);
                         if (selected) {
