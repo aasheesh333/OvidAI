@@ -31,13 +31,47 @@ class McpOAuthConfig {
   final List<String> scopes;
   final String? redirectUri;
 
+  /// Client secret issued by dynamic client registration (rare: Ovid
+  /// registers as a public client). Sent as `client_secret` on token
+  /// requests when present; lives only in secure storage.
+  final String? clientSecret;
+
+  /// RFC 8707 resource indicator (the MCP server's canonical URL), sent on
+  /// the authorize, token and refresh requests.
+  final String? resource;
+
+  /// Authorization-server issuer from discovery, checked against an RFC
+  /// 9207 `iss` callback parameter.
+  final String? issuer;
+
+  /// True when this config came from automatic discovery + dynamic client
+  /// registration rather than a hand-written `oauth` block.
+  final bool discovered;
+
   const McpOAuthConfig({
     this.authorizationUrl,
     this.tokenUrl,
     this.clientId,
     this.scopes = const [],
     this.redirectUri,
+    this.clientSecret,
+    this.resource,
+    this.issuer,
+    this.discovered = false,
   });
+
+  /// Copy with a redirect URI filled in (static configs may omit it).
+  McpOAuthConfig withRedirectUri(String redirect) => McpOAuthConfig(
+    authorizationUrl: authorizationUrl,
+    tokenUrl: tokenUrl,
+    clientId: clientId,
+    scopes: scopes,
+    redirectUri: redirect,
+    clientSecret: clientSecret,
+    resource: resource,
+    issuer: issuer,
+    discovered: discovered,
+  );
 
   bool get isUsable =>
       (authorizationUrl ?? '').isNotEmpty && (clientId ?? '').isNotEmpty;
@@ -48,6 +82,10 @@ class McpOAuthConfig {
     'client_id': clientId,
     'scopes': scopes,
     'redirect_uri': redirectUri,
+    if (clientSecret != null) 'client_secret': clientSecret,
+    if (resource != null) 'resource': resource,
+    if (issuer != null) 'issuer': issuer,
+    if (discovered) 'discovered': true,
   };
 
   factory McpOAuthConfig.fromJson(Map<String, dynamic> j) => McpOAuthConfig(
@@ -58,6 +96,10 @@ class McpOAuthConfig {
       for (final s in (j['scopes'] as List? ?? const [])) s.toString(),
     ],
     redirectUri: j['redirect_uri'] as String?,
+    clientSecret: j['client_secret'] as String?,
+    resource: j['resource'] as String?,
+    issuer: j['issuer'] as String?,
+    discovered: j['discovered'] == true,
   );
 }
 
@@ -92,6 +134,7 @@ McpOAuthConfig? parseMcpOAuthConfig(
     clientId: str('client_id'),
     scopes: scopes,
     redirectUri: str('redirect_uri'),
+    resource: str('resource'),
   );
   // An empty `oauth: {}` declares nothing.
   if (!cfg.isUsable &&
