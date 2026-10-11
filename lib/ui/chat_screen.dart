@@ -1216,8 +1216,15 @@ class _ChatScreenState extends State<ChatScreen>
                 ),
           appBar: AppBar(
             automaticallyImplyLeading: !wide,
-            title: GestureDetector(
+            // A11Y: a labelled button with a 48dp-tall hit area.
+            title: Semantics(
+              button: true,
+              label: 'Change model',
+              child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
               onTap: () => _modelPicker(context),
+              child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1233,6 +1240,8 @@ class _ChatScreenState extends State<ChatScreen>
                   const SizedBox(width: 4),
                   Icon(Icons.unfold_more, size: 16, color: Aether.textFaint),
                 ],
+              ),
+              ),
               ),
             ),
             actions: [
@@ -1266,7 +1275,6 @@ class _ChatScreenState extends State<ChatScreen>
                     children: [
                       IconButton(
                         tooltip: 'Background jobs',
-                        visualDensity: VisualDensity.compact,
                         icon: const Icon(Icons.terminal_outlined, size: 19),
                         onPressed: () => _showJobsPopover(context, s!.id),
                       ),
@@ -1280,7 +1288,7 @@ class _ChatScreenState extends State<ChatScreen>
                           ),
                           decoration: BoxDecoration(
                             color: running > 0
-                                ? Aether.accent
+                                ? Aether.accentFill
                                 : Aether.textFaint,
                             borderRadius: BorderRadius.circular(6),
                           ),
@@ -1300,7 +1308,6 @@ class _ChatScreenState extends State<ChatScreen>
               ),
               IconButton(
                 tooltip: 'Studio — code & terminal',
-                visualDensity: VisualDensity.compact,
                 icon: const Icon(Icons.code, size: 19),
                 onPressed: () => openStudio(context),
               ),
@@ -1319,7 +1326,6 @@ class _ChatScreenState extends State<ChatScreen>
                     children: [
                       IconButton(
                         tooltip: 'Browser — agent & login',
-                        visualDensity: VisualDensity.compact,
                         icon: const Icon(Icons.public, size: 19),
                         onPressed: () => Navigator.of(context).push(
                           MaterialPageRoute(
@@ -1346,7 +1352,6 @@ class _ChatScreenState extends State<ChatScreen>
               ),
               IconButton(
                 tooltip: 'New session',
-                visualDensity: VisualDensity.compact,
                 icon: const Icon(Icons.edit_square, size: 18),
                 onPressed: app.newSession,
               ),
@@ -4648,22 +4653,22 @@ class _MessageView extends StatelessWidget {
 
   Widget _actionRow(BuildContext context, bool isUser, bool isLast) {
     final items = <Widget>[];
+    // Secondary actions (Branch, Revert) live in a "More actions" menu so
+    // the row fits on a phone with full 48dp targets.
+    final overflow = <(IconData, String, VoidCallback)>[];
+    // A11Y: every action is a 48x48dp target (Play pre-launch scanner,
+    // Material guidance); the Tooltip supplies the semantics label.
+    Widget target(String tip, VoidCallback fn, Widget icon) => Tooltip(
+      message: tip,
+      waitDuration: const Duration(milliseconds: 500),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(24),
+        onTap: fn,
+        child: SizedBox(width: 48, height: 48, child: Center(child: icon)),
+      ),
+    );
     void add(IconData icon, String tip, VoidCallback fn) {
-      items.add(
-        Tooltip(
-          message: tip,
-          waitDuration: const Duration(milliseconds: 500),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(4),
-            onTap: fn,
-            child: Padding(
-              // A11Y: minimum 48dp tap target per Material guidelines.
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-              child: Icon(icon, size: 15, color: Aether.textFaint),
-            ),
-          ),
-        ),
-      );
+      items.add(target(tip, fn, Icon(icon, size: 16, color: Aether.textFaint)));
     }
 
     final copyText = _copyText();
@@ -4690,11 +4695,11 @@ class _MessageView extends StatelessWidget {
         if (!await _deleteHistory(context)) return;
         onAction();
       });
-      add(Icons.replay_outlined, 'Revert', () async {
+      overflow.add((Icons.replay_outlined, 'Revert', () async {
         if (!_canChangeHistory) return;
         if (!await _deleteHistory(context)) return;
         onAction();
-      });
+      }));
     }
     // Earlier user messages: edit & resend (truncates conversation).
     if (canEdit && isUser && !isLast) {
@@ -4706,64 +4711,50 @@ class _MessageView extends StatelessWidget {
     // Re-clicking the same value retracts. A down-vote offers a note.
     if (!isUser && m.kind == MsgKind.text && !m.thinking) {
       items.add(
-        Tooltip(
-          message: m.feedback == 'up' ? 'Retract like' : 'Good answer',
-          waitDuration: const Duration(milliseconds: 500),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(4),
-            onTap: () {
-              m.feedback = m.feedback == 'up' ? null : 'up';
-              m.feedbackNote = null;
-              AppState.I.persistSessions();
-              onAction();
-            },
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-              child: Icon(
-                m.feedback == 'up'
-                    ? Icons.thumb_up_alt
-                    : Icons.thumb_up_alt_outlined,
-                size: 15,
-                color: m.feedback == 'up' ? Aether.accent : Aether.textFaint,
-              ),
-            ),
+        target(
+          m.feedback == 'up' ? 'Retract like' : 'Good answer',
+          () {
+            m.feedback = m.feedback == 'up' ? null : 'up';
+            m.feedbackNote = null;
+            AppState.I.persistSessions();
+            onAction();
+          },
+          Icon(
+            m.feedback == 'up'
+                ? Icons.thumb_up_alt
+                : Icons.thumb_up_alt_outlined,
+            size: 16,
+            color: m.feedback == 'up' ? Aether.accent : Aether.textFaint,
           ),
         ),
       );
       items.add(
-        Tooltip(
-          message: m.feedback == 'down' ? 'Retract dislike' : 'Bad answer',
-          waitDuration: const Duration(milliseconds: 500),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(4),
-            onTap: () {
-              if (m.feedback == 'down') {
-                m.feedback = null;
-                m.feedbackNote = null;
-                AppState.I.persistSessions();
-                onAction();
-                return;
-              }
-              m.feedback = 'down';
-              _askFeedbackNote(context);
-            },
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-              child: Icon(
-                m.feedback == 'down'
-                    ? Icons.thumb_down_alt
-                    : Icons.thumb_down_alt_outlined,
-                size: 15,
-                color: m.feedback == 'down' ? Aether.danger : Aether.textFaint,
-              ),
-            ),
+        target(
+          m.feedback == 'down' ? 'Retract dislike' : 'Bad answer',
+          () {
+            if (m.feedback == 'down') {
+              m.feedback = null;
+              m.feedbackNote = null;
+              AppState.I.persistSessions();
+              onAction();
+              return;
+            }
+            m.feedback = 'down';
+            _askFeedbackNote(context);
+          },
+          Icon(
+            m.feedback == 'down'
+                ? Icons.thumb_down_alt
+                : Icons.thumb_down_alt_outlined,
+            size: 16,
+            color: m.feedback == 'down' ? Aether.danger : Aether.textFaint,
           ),
         ),
       );
     }
     // Branch into a new conversation from this assistant message.
     if (!isUser && m.kind == MsgKind.text && !m.thinking) {
-      add(Icons.call_split, 'Branch into a new conversation', () {
+      overflow.add((Icons.call_split, 'Branch into a new conversation', () {
         final branch = AppState.I.branchSessionFrom(session.id, msgIndex);
         if (branch != null && context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -4773,7 +4764,7 @@ class _MessageView extends StatelessWidget {
             ),
           );
         }
-      });
+      }));
     }
     // Regenerate: re-send the last user message to get a new response.
     if (canEdit && !isUser && isLast && m.kind == MsgKind.text && !m.thinking) {
@@ -4814,10 +4805,38 @@ class _MessageView extends StatelessWidget {
         );
       });
     }
+    if (overflow.isNotEmpty) {
+      items.add(
+        PopupMenuButton<VoidCallback>(
+          tooltip: 'More actions',
+          child: SizedBox(
+            width: 48,
+            height: 48,
+            child: Icon(Icons.more_horiz, size: 18, color: Aether.textFaint),
+          ),
+          onSelected: (fn) => fn(),
+          itemBuilder: (_) => [
+            for (final (icon, label, fn) in overflow)
+              PopupMenuItem(
+                value: fn,
+                child: Row(
+                  children: [
+                    Icon(icon, size: 18, color: Aether.textMuted),
+                    const SizedBox(width: 12),
+                    Flexible(child: Text(label)),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, top: 2),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      // Wrap, not Row: 48dp targets plus the timestamp must not overflow a
+      // narrow bubble at large text scales.
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           ...items,
           if (!isUser && m.elapsedMs != null)

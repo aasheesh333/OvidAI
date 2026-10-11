@@ -192,9 +192,16 @@ void main() {
         if (action == 'Regenerate' || action == 'Revert') {
           await tester.enterText(composer, 'Unsubmitted draft');
         }
-        await tester.tap(
-          find.byTooltip(action == 'Earlier edit' ? 'Edit & resend' : action),
-        );
+        if (action == 'Revert') {
+          // Revert lives in the message row's "More actions" menu.
+          await tester.tap(find.byTooltip('More actions'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Revert'));
+        } else {
+          await tester.tap(
+            find.byTooltip(action == 'Earlier edit' ? 'Edit & resend' : action),
+          );
+        }
         if (action == 'Earlier edit') {
           await tester.pumpAndSettle();
           await tester.enterText(

@@ -343,18 +343,36 @@ class _AetherButton extends StatelessWidget {
               ),
             )
           : Icon(icon ?? Icons.arrow_upward, size: 18, color: fg);
-      final btn = Material(
-        color: bg,
-        shape: const CircleBorder(),
-        child: InkWell(
-          customBorder: const CircleBorder(),
+      final visual = iconSize < 44 ? 44.0 : iconSize;
+      // A11Y: the visible circle may stay 44dp, but the hit box is 48dp
+      // (Material guidance / Play pre-launch scanner). Taps in the margin
+      // around the circle reach the same callback.
+      final hit = visual < 48 ? 48.0 : visual;
+      final btn = SizedBox(
+        width: hit,
+        height: hit,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onTap: effectiveOnPressed,
-          child: Container(
-            width: iconSize < 44 ? 44 : iconSize,
-            height: iconSize < 44 ? 44 : iconSize,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(shape: BoxShape.circle, border: border),
-            child: ExcludeSemantics(child: content),
+          child: Center(
+            child: Material(
+              color: bg,
+              shape: const CircleBorder(),
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: effectiveOnPressed,
+                child: Container(
+                  width: visual,
+                  height: visual,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: border,
+                  ),
+                  child: ExcludeSemantics(child: content),
+                ),
+              ),
+            ),
           ),
         ),
       );

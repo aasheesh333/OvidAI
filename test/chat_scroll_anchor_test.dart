@@ -74,9 +74,11 @@ void main() {
   // 44 messages with a 40-item page. Indices 0..3 are the page that gets
   // prepended (tall, so a maxScrollExtent delta extrapolated from the short
   // tail badly overshoots); index 4 is the top visible row before paging
-  // (ANCHOR); 5..43 are the short tail.
+  // (ANCHOR); 5..43 are the short tail. The tall rows must still fit the
+  // sliver cache together (48dp message action rows since PR-6b), or the
+  // coarse fallback path, covered by the next test, takes over.
   List<Message> anchoredMessages() => <Message>[
-    for (var i = 0; i < 4; i++) _msg('TALL$i ${'x' * 300}'),
+    for (var i = 0; i < 4; i++) _msg('TALL$i ${'x' * 240}'),
     _msg('ANCHOR'),
     for (var i = 5; i < 44; i++) _msg('m$i'),
   ];
