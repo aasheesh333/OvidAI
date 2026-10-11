@@ -10,6 +10,8 @@ import '../core/state.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
 import 'share_actions.dart';
+import '../core/content_report_service.dart';
+import 'content_report_sheet.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/read_only_markdown.dart';
 
@@ -239,10 +241,22 @@ class _CollabSessionScreenState extends State<CollabSessionScreen> {
                       itemCount: state.messages.length,
                       itemBuilder: (context, index) {
                         final message = state.messages[state.messages.length - 1 - index];
+                        final mine = message.author == state.localParticipantId;
                         return CollabMessageBubble(
                           message: message,
                           authorName: state.nameOf(message.author),
-                          mine: message.author == state.localParticipantId,
+                          mine: mine,
+                          // Play UGC policy: other people's messages and
+                          // their AI replies can be reported (audit §6).
+                          onReport: mine
+                              ? null
+                              : () => showContentReportSheet(
+                                  context,
+                                  kind: ContentReportKind.collabMessage,
+                                  targetId: message.clientEventId,
+                                  excerpt: message.text,
+                                  model: message.model,
+                                ),
                         );
                       },
                     ),
@@ -389,11 +403,15 @@ class CollabMessageBubble extends StatelessWidget {
     required this.message,
     required this.authorName,
     required this.mine,
+    this.onReport,
   });
 
   final CollaborationMessage message;
   final String authorName;
   final bool mine;
+
+  /// Opens the content report sheet; null for the user's own messages.
+  final VoidCallback? onReport;
 
   @override
   Widget build(BuildContext context) {
@@ -438,6 +456,16 @@ class CollabMessageBubble extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (onReport != null)
+                    IconButton(
+                      tooltip: 'Report message',
+                      icon: Icon(
+                        Icons.flag_outlined,
+                        size: 16,
+                        color: Aether.textMuted,
+                      ),
+                      onPressed: onReport,
+                    ),
                 ],
               ),
               const SizedBox(height: 4),
@@ -533,8 +561,21 @@ class _CollabMembersSheetState extends State<CollabMembersSheet> {
                         : state.nameOf(member.participantId),
                   ),
                   subtitle: Text(member.role == MemberRole.owner ? 'Owner' : 'Member'),
-                  trailing: owner && member.role != MemberRole.owner
-                      ? TextButton(
+                  trailing: member.participantId != state.localParticipantId
+                      ? Wrap(
+                          children: [
+                            // Play UGC policy: report a participant (§6).
+                            TextButton(
+                              onPressed: () => showContentReportSheet(
+                                context,
+                                kind: ContentReportKind.collabParticipant,
+                                targetId: member.participantId,
+                                excerpt: state.nameOf(member.participantId),
+                              ),
+                              child: const Text('Report'),
+                            ),
+                            if (owner && member.role != MemberRole.owner)
+                              TextButton(
                           onPressed: _busy
                               ? null
                               : () async {
@@ -551,6 +592,8 @@ class _CollabMembersSheetState extends State<CollabMembersSheet> {
                                   );
                                 },
                           child: const Text('Remove'),
+                        ),
+                          ],
                         )
                       : null,
                 ),

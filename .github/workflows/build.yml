@@ -236,8 +236,13 @@ jobs:
       - name: Build signed release APK + AAB
         if: env.release_signing == 'true'
         run: |
-          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED"
-          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED"
+          # The Play profile (targetSdk 36, Play manifest overlay, sandbox and
+          # Control gated) applies to production_release builds. The APK gets
+          # it too: the artifact gate below expects target 36 for both.
+          play_define=""
+          if [ "${{ inputs.production_release }}" = "true" ]; then play_define="--dart-define=OVID_PLAY_BUILD=true"; fi
+          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
+          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
 
       # Manual production_release enforces the API 36 Play floor.
       - name: Gate release artifacts
@@ -326,4 +331,4 @@ jobs:
         run: python -m unittest -v tool.deployment_config_test
 
       - name: Test server account, sync, and collaboration
-        run: pytest server/account/tests server/sync server/collaboration server/images server/shares server/billing
+        run: pytest server/account/tests server/sync server/collaboration server/images server/shares server/billing server/reports

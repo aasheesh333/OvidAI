@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 
+import '../core/content_report_service.dart';
 import '../core/conversation_share_service.dart';
 import '../core/firebase_service.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import 'auth_screen.dart';
+import 'content_report_sheet.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/read_only_markdown.dart';
 
@@ -105,6 +107,16 @@ class _SharedConversationScreenState extends State<SharedConversationScreen> {
     appBar: AppBar(
       title: const Text('Shared conversation'),
       actions: [
+        // Play UGC policy: in-app reporting (PLAY_COMPLIANCE_AUDIT §6).
+        IconButton(
+          tooltip: 'Report',
+          icon: const Icon(Icons.flag_outlined),
+          onPressed: () => showContentReportSheet(
+            context,
+            kind: ContentReportKind.sharedConversation,
+            targetId: widget.token,
+          ),
+        ),
         IconButton(
           tooltip: 'Refresh',
           icon: const Icon(Icons.refresh),
