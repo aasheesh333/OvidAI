@@ -43,6 +43,7 @@ import 'session_browser_profiles.dart';
 import 'session_data_sharing.dart';
 import 'conversation_share_service.dart';
 import 'session_lifecycle_service.dart';
+import 'session_history_store.dart';
 import 'session_search.dart';
 import 'session_ledger.dart';
 import 'settings_actions.dart';
@@ -2889,9 +2890,12 @@ class AppState extends ChangeNotifier {
           throw StateError('Account search cleanup incomplete');
         }
         // No provisional guest transcript is ever attributed to a Firebase UID.
-        _deferredSessionJson = List.of(
-          prefs.getStringList(_accountKey(_kSessions)) ?? const [],
+        final storedRows = await SessionHistoryRepository.I.readRows(
+          prefs,
+          _accountKey(_kSessions),
         );
+        if (!identical(token, _sessionAccountToken)) return;
+        _deferredSessionJson = List.of(storedRows ?? const <String>[]);
         activeSessionId = prefs.getString(_accountKey(_kActive));
         await _loadUsage();
         await _hydrateDeferredSessions();
@@ -2922,7 +2926,8 @@ class AppState extends ChangeNotifier {
     _AccountHandoff handoff,
   ) async {
     if (handoff.rows.isNotEmpty) {
-      if (!await prefs.setStringList(
+      if (!await SessionHistoryRepository.I.writeRows(
+        prefs,
         _accountKey(_kSessions, handoff.account),
         handoff.rows,
       )) {
@@ -4194,7 +4199,11 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       if (!identical(token, _sessionAccountToken)) return;
-      final raw = prefs.getStringList(_accountKey(_kSessions));
+      final raw = await SessionHistoryRepository.I.readRows(
+        prefs,
+        _accountKey(_kSessions),
+      );
+      if (!identical(token, _sessionAccountToken)) return;
       _sessionNamespaceLoaded = true;
       if (raw != null && raw.isNotEmpty) {
         final loaded = raw.map(_decodeSessionSync).toList();
@@ -4251,7 +4260,11 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       if (!identical(token, _sessionAccountToken)) return;
       final requestedActiveId = prefs.getString(_accountKey(_kActive));
-      raw = prefs.getStringList(_accountKey(_kSessions));
+      raw = await SessionHistoryRepository.I.readRows(
+        prefs,
+        _accountKey(_kSessions),
+      );
+      if (!identical(token, _sessionAccountToken)) return;
       _sessionNamespaceLoaded = true;
       final requestedActiveRaw = _activeRawSession(
         raw ?? const [],
@@ -4376,9 +4389,14 @@ class AppState extends ChangeNotifier {
     if (generation != _deferredSessionGeneration || !_deferredSessionsPending) {
       return;
     }
-    _deferredSessionJson = List<String>.of(
-      prefs.getStringList(_accountKey(_kSessions)) ?? const [],
+    final rows = await SessionHistoryRepository.I.readRows(
+      prefs,
+      _accountKey(_kSessions),
     );
+    if (generation != _deferredSessionGeneration || !_deferredSessionsPending) {
+      return;
+    }
+    _deferredSessionJson = List<String>.of(rows ?? const <String>[]);
     _deferredSessionsPending = false;
     _expandDeferredDeletedSessionIds();
   }
@@ -4953,7 +4971,11 @@ class AppState extends ChangeNotifier {
       } catch (e) {
         Diag.swallow('state', e);
       }
-      if (!await prefs.setStringList(sessionsKey, encoded)) {
+      if (!await SessionHistoryRepository.I.writeRows(
+        prefs,
+        sessionsKey,
+        encoded,
+      )) {
         throw StateError('Session storage rejected write');
       }
       final activeSaved = activeIdWritten != null
@@ -5168,6 +5190,11 @@ class AppState extends ChangeNotifier {
       _memoryOpening = null;
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
+      try {
+        await SessionHistoryRepository.I.deleteAll();
+      } catch (e) {
+        Diag.swallow('history.deleteAll', e);
+      }
       await runtimeStatusStore.clear();
       _clearDeferredSessions();
       for (final s in List.of(sessions)) {

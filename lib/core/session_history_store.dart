@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
 
@@ -65,7 +66,8 @@ class SessionHistoryRepository {
   bool _backgroundSearch = true;
   Database? _db;
   Future<Database>? _opening;
-  Future<void> _tail = Future<void>.value();
+  bool _busy = false;
+  final List<Completer<void>> _waiters = [];
 
   /// Namespaces read successfully in this process. A namespace that already
   /// holds rows can only be rewritten after it was read, so a failed load can
@@ -115,11 +117,28 @@ class SessionHistoryRepository {
     _dbPath = path ?? _dbPath;
   }
 
-  Future<T> _serial<T>(Future<T> Function() op) {
-    final result = _tail.then((_) => op());
-    _tail = result.then<void>((_) {}, onError: (_) {});
-    return result;
+  /// One storage operation at a time. An idle repository runs [op] directly
+  /// (no chained futures from another zone, which fake-async tests rely on).
+  Future<T> _serial<T>(Future<T> Function() op) async {
+    if (_busy) {
+      final turn = Completer<void>();
+      _waiters.add(turn);
+      await turn.future;
+    }
+    _busy = true;
+    try {
+      return await op();
+    } finally {
+      if (_waiters.isNotEmpty) {
+        _waiters.removeAt(0).complete();
+      } else {
+        _busy = false;
+      }
+    }
   }
+
+  /// Plain legacy mode: prefs is the only store and nothing to roll back.
+  bool get _plainLegacy => !_sqliteEnabled && !_rollbackRequested;
 
   // ── Opening ─────────────────────────────────────────────────────────────
 
@@ -237,21 +256,23 @@ class SessionHistoryRepository {
   // ── Public API (all operations serialised) ──────────────────────────────
 
   /// Ordered raw rows of [key], or null when the namespace holds nothing.
-  Future<List<String>?> readRows(SharedPreferences prefs, String key) =>
-      _serial(() async {
-        final db = await _resolve(prefs, key);
-        if (db == null) return prefs.getStringList(key);
-        final rows = [
-          for (final r in db.select(
-            'SELECT row_key, raw FROM history_rows WHERE ns = ? ORDER BY pos',
-            [key],
-          ))
-            (key: r.columnAt(0) as String, raw: r.columnAt(1) as String),
-        ];
-        _readNamespaces.add(key);
-        _known[key] = {for (final r in rows) r.key: r.raw};
-        return rows.isEmpty ? null : [for (final r in rows) r.raw];
-      });
+  Future<List<String>?> readRows(SharedPreferences prefs, String key) async {
+    if (_plainLegacy) return prefs.getStringList(key);
+    return _serial(() async {
+      final db = await _resolve(prefs, key);
+      if (db == null) return prefs.getStringList(key);
+      final rows = [
+        for (final r in db.select(
+          'SELECT row_key, raw FROM history_rows WHERE ns = ? ORDER BY pos',
+          [key],
+        ))
+          (key: r.columnAt(0) as String, raw: r.columnAt(1) as String),
+      ];
+      _readNamespaces.add(key);
+      _known[key] = {for (final r in rows) r.key: r.raw};
+      return rows.isEmpty ? null : [for (final r in rows) r.raw];
+    });
+  }
 
   /// Replace [key]'s rows ([rows] null or empty removes the namespace).
   /// Returns false when the backend rejected the write (legacy prefs).
@@ -259,16 +280,17 @@ class SessionHistoryRepository {
     SharedPreferences prefs,
     String key,
     List<String>? rows,
-  ) => _serial(() async {
-    final db = await _resolve(prefs, key);
-    if (db == null) {
-      return rows == null
-          ? await prefs.remove(key)
-          : await prefs.setStringList(key, rows);
-    }
-    _writeSqlite(db, key, rows ?? const []);
-    return true;
-  });
+  ) async {
+    Future<bool> legacy() =>
+        rows == null ? prefs.remove(key) : prefs.setStringList(key, rows);
+    if (_plainLegacy) return legacy();
+    return _serial(() async {
+      final db = await _resolve(prefs, key);
+      if (db == null) return legacy();
+      _writeSqlite(db, key, rows ?? const []);
+      return true;
+    });
+  }
 
   /// Remove [key] (verified reset).
   Future<bool> removeRows(SharedPreferences prefs, String key) =>
