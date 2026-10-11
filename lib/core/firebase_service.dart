@@ -12,6 +12,7 @@ import 'account_service.dart';
 import 'account_session.dart';
 import 'state.dart';
 import 'image_studio.dart';
+import 'ovid_cloud_service.dart';
 import 'auth_identity.dart';
 import 'auth_phone_flow.dart';
 import 'auth_providers.dart';
@@ -478,6 +479,9 @@ class FirebaseService extends ChangeNotifier {
     _accountAdmission = null;
     _accountAdmissionUid = null;
     ImageStudio.I.bindAccount(null);
+    // The managed Ovid Cloud key belongs to this account; never leave it for
+    // the next one to use (and bill).
+    OvidCloudService.I.clearAccountKey();
     if (!_available) return;
     _accountSession.clear();
     _user = null;
@@ -508,6 +512,7 @@ class FirebaseService extends ChangeNotifier {
     _accountAdmission = null;
     _accountAdmissionUid = null;
     ImageStudio.I.bindAccount(null);
+    OvidCloudService.I.clearAccountKey();
     _accountSession.clear();
     _user = null;
     notifyListeners();

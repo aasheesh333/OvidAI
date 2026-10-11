@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,8 +17,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth_login_gate_test.dart' show GateService;
 
-http.Response mint() => http.Response(
-  '{"key":"scoped-key","tier":"free","base_url":"https://example.test/v1"}',
+http.Response mint([String key = 'scoped-key']) => http.Response(
+  '{"key":"$key","tier":"free","base_url":"https://example.test/v1"}',
   200,
 );
 http.Response catalog() => http.Response(
@@ -50,6 +51,8 @@ void main() {
     OvidCloudService.idTokenOverrideForTest = null;
     OvidCloudService.appCheckTokenProvider = null;
     OvidCloudService.httpClientFactoryForTest = null;
+    OvidCloudService.forceRefreshIdTokenOverrideForTest = null;
+    OvidCloudService.clockForTest = DateTime.now;
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
   });
@@ -126,6 +129,8 @@ void main() {
         ..accountReady = true;
       service.initialization.complete();
       var mints = 0;
+      var now = DateTime(2026, 10, 11, 12);
+      OvidCloudService.clockForTest = () => now;
       OvidCloudService.httpClientFactoryForTest = () =>
           MockClient((request) async {
             if (request.url.path == '/mint') {
@@ -144,6 +149,13 @@ void main() {
       service.notifyListeners();
       await tester.pumpAndSettle();
       expect(mints, 1);
+      // A resume inside the backoff window does not hit the gateway.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.runAsync(() async {});
+      await tester.pumpAndSettle();
+      expect(mints, 1);
+      now = now.add(const Duration(minutes: 1));
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.runAsync(() async {});
@@ -206,13 +218,18 @@ void main() {
           find.text(OvidCloudService.I.connectionFor(app).error!),
           findsOneWidget,
         );
-        // Persisted Auto is not advertised as a successfully fetched catalog.
+        // The server-side Auto alias stays usable; the catalog is marked
+        // possibly stale instead of being hidden.
         expect(
           find.descendant(
             of: find.byType(ListTile),
             matching: find.text('Auto'),
           ),
-          findsNothing,
+          findsWidgets,
+        );
+        expect(
+          find.byKey(const ValueKey('cloud-catalog-stale')),
+          findsOneWidget,
         );
         await tester.tap(find.text('Retry'));
         await tester.runAsync(() async {});
@@ -315,8 +332,8 @@ void main() {
       OvidCloudService.appCheckTokenProvider = () async => 'attestation';
       for (final entry in {
         402: MintStatus.freeLimitReached,
-        401: MintStatus.rejected,
-        403: MintStatus.rejected,
+        401: MintStatus.sessionExpired,
+        403: MintStatus.deviceUnverified,
         503: MintStatus.unavailable,
       }.entries) {
         final client = MockClient(
@@ -397,20 +414,27 @@ void main() {
     () async {
       var mints = 0;
       var models = 0;
+      final mintBodies = <String>[];
       final client = MockClient((request) async {
         if (request.url.path == '/mint') {
-          mints++;
-          return mint();
+          mintBodies.add(request.body);
+          return ++mints == 1 ? mint() : mint('rotated-key');
         }
         return ++models == 1 ? http.Response('private reason', 401) : catalog();
       });
-      await OvidCloudService.I.ensureConnected(client: client);
-      expect(
-        OvidCloudService.I.connectionFor(AppState.I).error,
-        contains('401'),
-      );
+      // A freshly minted key that the catalog rejects is rotated once in
+      // the same flight; a second Retry is not needed.
       await OvidCloudService.I.ensureConnected(client: client);
       expect(mints, 2);
+      expect(models, 2);
+      // The re-mint names the rejected key by hash so the gateway rotates it.
+      expect(mintBodies.first, isEmpty);
+      expect(jsonDecode(mintBodies.last), {
+        'reason': 'key_rejected',
+        'key_id': sha256.convert(utf8.encode('scoped-key')).toString(),
+      });
+      expect(mintBodies.last, isNot(contains('scoped-key')));
+      expect(AppState.I.providerById('ovid-cloud')!.apiKey, 'rotated-key');
       expect(
         OvidCloudService.I.connectionFor(AppState.I).status,
         CloudConnectionStatus.ready,
@@ -426,8 +450,7 @@ void main() {
       var models = 0;
       final client = MockClient((request) async {
         if (request.url.path == '/mint') {
-          mints++;
-          return mint();
+          return ++mints == 1 ? mint() : mint('rotated-key');
         }
         return switch (++models) {
           1 => http.Response('down', 500),

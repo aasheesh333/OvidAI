@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -29,7 +32,10 @@ enum MintStatus {
   ok,
   notSignedIn,
   freeLimitReached, // HTTP 402
-  rejected, // 401/403 — bad/again-needed token, banned
+  rejected, // account/provider changed or the account is not allowed
+  sessionExpired, // /mint 401 even after a force-refreshed ID token
+  deviceUnverified, // /mint 403 or App Check missing/invalid
+  repairing, // /mint handed back the key the catalog just rejected
   unavailable, // network / 5xx / timeout
 }
 
@@ -87,6 +93,26 @@ class OvidCloudService extends ChangeNotifier {
   _CloudRequestScope? _recoveryScope;
   Future<MintOutcome>? _recoveryFlight;
 
+  /// The scoped key the catalog last rejected (401/key_invalid, or a legacy
+  /// gateway's 503 catalog_unavailable), with its owner. The next mint asks
+  /// the server to rotate it; getting it back means the gateway is repairing.
+  String? _rejectedKey;
+  Object? _rejectedKeyIdentity;
+
+  /// Resume-triggered recovery backoff (30 s doubling to 10 min, jittered).
+  /// Reset by a ready connection or an explicit Retry.
+  int _recoveryFailures = 0;
+  DateTime? _resumeNotBefore;
+  Object? _backoffIdentity;
+
+  static const Duration _backoffBase = Duration(seconds: 30);
+  static const Duration _backoffCap = Duration(minutes: 10);
+  static final math.Random _random = math.Random();
+
+  /// Test seam: the clock used for resume backoff.
+  @visibleForTesting
+  static DateTime Function() clockForTest = DateTime.now;
+
   CloudConnectionState connectionFor(AppState state) {
     final scope = _connectionScope;
     if (scope == null || !identical(scope.state, state) || !scope.isCurrent) {
@@ -107,9 +133,75 @@ class OvidCloudService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// True only when the provider's current key was minted for (and bound
+  /// to) the signed-in account in this process. Chat requests must not send
+  /// an Ovid Cloud key that belongs to a previous account.
+  bool get keyOwnedByCurrentAccount {
+    final provider = AppState.I.providerById(AppState.ovidCloudProviderId);
+    final key = provider?.cleanApiKey ?? '';
+    return provider != null &&
+        key.isNotEmpty &&
+        _keyIdentity == accountIdentity &&
+        identical(_keyProvider, provider) &&
+        _boundKey == key;
+  }
+
+  /// Whether [key] is the managed key bound to the signed-in account.
+  bool ownsKey(String key) =>
+      key.isNotEmpty && keyOwnedByCurrentAccount && key == _boundKey;
+
+  /// App resume: like [ensureConnected], but failed recovery is retried with
+  /// exponential backoff so a gateway outage is not hit by every resume of
+  /// every client.
+  Future<MintOutcome> ensureConnectedOnResume({
+    AppState? app,
+    http.Client? client,
+  }) {
+    final state = app ?? AppState.I;
+    _authChanged();
+    final notBefore = _resumeNotBefore;
+    if (notBefore != null &&
+        _backoffIdentity == accountIdentity &&
+        clockForTest().isBefore(notBefore) &&
+        connectionFor(state).status != CloudConnectionStatus.ready) {
+      final current = connectionFor(state);
+      return Future.value(
+        MintOutcome(
+          current.mintStatus ?? MintStatus.unavailable,
+          message: current.error,
+        ),
+      );
+    }
+    return ensureConnected(app: state, client: client, userInitiated: false);
+  }
+
+  void _recordRecovery(AppState state, Object identity) {
+    if (identity != accountIdentity) return;
+    if (connectionFor(state).status == CloudConnectionStatus.ready) {
+      _recoveryFailures = 0;
+      _resumeNotBefore = null;
+      _backoffIdentity = null;
+      return;
+    }
+    _recoveryFailures++;
+    final exponent = math.min(_recoveryFailures - 1, 10);
+    var delay = _backoffBase * (1 << exponent);
+    if (delay > _backoffCap) delay = _backoffCap;
+    // Up to +20% jitter spreads a fleet of clients across the window.
+    delay += delay * (_random.nextDouble() * 0.2);
+    _backoffIdentity = identity;
+    _resumeNotBefore = clockForTest().add(delay);
+  }
+
   /// Login, explicit Retry and resume share one flight for the current owner.
   /// A catalog failure keeps its bound key and retries only the catalog.
-  Future<MintOutcome> ensureConnected({AppState? app, http.Client? client}) {
+  /// [force] re-fetches the catalog even when the connection is ready.
+  Future<MintOutcome> ensureConnected({
+    AppState? app,
+    http.Client? client,
+    bool force = false,
+    bool userInitiated = true,
+  }) {
     final state = app ?? AppState.I;
     _authChanged();
     final pending = _recoveryScope;
@@ -119,8 +211,12 @@ class OvidCloudService extends ChangeNotifier {
         pending.isCurrent) {
       return _recoveryFlight!;
     }
-    if (connectionFor(state).status == CloudConnectionStatus.ready) {
+    if (!force && connectionFor(state).status == CloudConnectionStatus.ready) {
       return Future.value(const MintOutcome(MintStatus.ok));
+    }
+    if (userInitiated) {
+      _recoveryFailures = 0;
+      _resumeNotBefore = null;
     }
     final scope = _CloudRequestScope(this, state);
     _recoveryScope = scope;
@@ -153,12 +249,22 @@ class OvidCloudService extends ChangeNotifier {
               if (client == null) c.close();
             }
           }
-          return _mint(state, client);
+          final outcome = await _mint(state, client);
+          // The catalog rejected the key that was just minted (a stale cached
+          // key server-side). Ask once for a rotation within the same flight.
+          if (outcome.ok &&
+              _keyIdentity == null &&
+              _rejectedKey != null &&
+              _rejectedKeyIdentity == scope.identity) {
+            return await _mint(state, client);
+          }
+          return outcome;
         }, const MintOutcome(MintStatus.rejected)).whenComplete(() {
           if (identical(_recoveryFlight, flight)) {
             _recoveryFlight = null;
             _recoveryScope = null;
           }
+          _recordRecovery(state, scope.identity);
         });
     _recoveryFlight = flight;
     _publishConnection(
@@ -181,9 +287,44 @@ class OvidCloudService extends ChangeNotifier {
   void _authChanged() {
     final uid = _currentUid;
     if (uid == _uid) return;
+    final previous = _uid;
     _uid = uid;
     _accountGeneration++;
+    // A → signed out or A → B: the previous account's key must not stay on
+    // the provider, or B's chats would be billed to A.
+    if (previous != null) clearAccountKey();
     notifyListeners();
+  }
+
+  /// Forget the managed key, its ownership and the plan tier. Called on
+  /// sign-out and account switch.
+  void clearAccountKey({AppState? app}) {
+    _keyIdentity = null;
+    _keyProvider = null;
+    _boundKey = null;
+    _boundBaseUrl = null;
+    _rejectedKey = null;
+    _rejectedKeyIdentity = null;
+    _confirmedIdentity = null;
+    _confirmedTier = null;
+    _recoveryFailures = 0;
+    _resumeNotBefore = null;
+    _backoffIdentity = null;
+    final AppState state;
+    try {
+      state = app ?? AppState.I;
+    } catch (_) {
+      return;
+    }
+    state.setOvidCloudTier('free');
+    final provider = state.providerById(AppState.ovidCloudProviderId);
+    if (provider != null && provider.apiKey.isNotEmpty) {
+      unawaited(
+        state.updateProviderApiKey(provider, '').catchError((Object e) {
+          Diag.swallow('ovid_cloud.clear_key', e);
+        }),
+      );
+    }
   }
 
   /// Includes a session generation: A → signed out → A is a new owner.
@@ -244,7 +385,7 @@ class OvidCloudService extends ChangeNotifier {
     activatedByFirebase: () => FirebaseService.I.accountService.enabled,
   );
 
-  Future<String> _appCheckToken() async {
+  Future<String> _appCheckToken({bool forceRefresh = false}) async {
     try {
       final override = appCheckTokenProvider;
       // Preserve existing SDK-free ID-token tests. Production always uses
@@ -252,7 +393,7 @@ class OvidCloudService extends ChangeNotifier {
       if (override == null && idTokenOverrideForTest != null) return '';
       final token = override != null
           ? await override()
-          : await _appCheck.getToken();
+          : await _appCheck.getToken(forceRefresh: forceRefresh);
       // App Check is enforced by the gateway when enabled. Keep client-side
       // attestation best-effort so sideloaded/dev builds can still reach a
       // gateway configured with APPCHECK_ENABLED=false; the server remains
@@ -263,15 +404,20 @@ class OvidCloudService extends ChangeNotifier {
     }
   }
 
-  Future<Map<String, String>> _headers(_CloudRequestScope scope) async {
-    final token = idTokenOverrideForTest != null
+  Future<Map<String, String>> _headers(
+    _CloudRequestScope scope, {
+    bool forceRefresh = false,
+  }) async {
+    final token = forceRefresh && forceRefreshIdTokenOverrideForTest != null
+        ? await forceRefreshIdTokenOverrideForTest!()
+        : idTokenOverrideForTest != null
         ? await idTokenOverrideForTest!()
-        : await FirebaseService.I.getIdToken();
+        : await FirebaseService.I.getIdToken(forceRefresh: forceRefresh);
     scope.check();
     if (token == null || token.isEmpty) {
       throw const CloudUsageException('Sign in to view your cloud allowance.');
     }
-    final appCheck = await _appCheckToken();
+    final appCheck = await _appCheckToken(forceRefresh: forceRefresh);
     scope.check();
     return {
       'Authorization': 'Bearer $token',
@@ -319,6 +465,11 @@ class OvidCloudService extends ChangeNotifier {
 
   @visibleForTesting
   static Future<String?> Function()? appCheckTokenProvider;
+
+  /// Test seam: the ID token returned when /mint asks for a force refresh
+  /// (falls back to [idTokenOverrideForTest] when unset).
+  @visibleForTesting
+  static Future<String?> Function()? forceRefreshIdTokenOverrideForTest;
 
   /// Test seam: builds the HTTP client used when a caller passes none (lets
   /// widget tests drive the real /usage and test-mode /upgrade flows).
@@ -398,14 +549,36 @@ class OvidCloudService extends ChangeNotifier {
   ) async {
     final c = client ?? _newClient();
     try {
-      final headers = await _headers(scope);
-      final res = await c
-          .post(
-            Uri.parse(mintUrl),
-            headers: {...headers, 'Content-Type': 'application/json'},
-          )
-          .timeout(const Duration(seconds: 20));
-      scope.check();
+      final rejectedKey = _rejectedKeyIdentity == scope.identity
+          ? _rejectedKey
+          : null;
+      // Tell the gateway which key the catalog just rejected so it rotates
+      // it instead of handing back its cached copy. Only a hash is sent.
+      final mintBody = rejectedKey == null
+          ? null
+          : jsonEncode({
+              'reason': 'key_rejected',
+              'key_id': sha256.convert(utf8.encode(rejectedKey)).toString(),
+            });
+      Future<http.Response> post({bool forceRefresh = false}) async {
+        final headers = await _headers(scope, forceRefresh: forceRefresh);
+        final res = await c
+            .post(
+              Uri.parse(mintUrl),
+              headers: {...headers, 'Content-Type': 'application/json'},
+              body: mintBody,
+            )
+            .timeout(const Duration(seconds: 20));
+        scope.check();
+        return res;
+      }
+
+      var res = await post();
+      // A stale/revoked ID token or a transient App Check failure: retry
+      // once with freshly minted tokens before asking the user to act.
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        res = await post(forceRefresh: true);
+      }
 
       if (res.statusCode == 402) {
         return const MintOutcome(
@@ -414,9 +587,29 @@ class OvidCloudService extends ChangeNotifier {
         );
       }
       if (res.statusCode == 401 || res.statusCode == 403) {
-        return MintOutcome(
-          MintStatus.rejected,
-          message: 'Sign-in could not be verified (${res.statusCode}).',
+        final detail = res.body.toLowerCase();
+        final appCheck = RegExp(r'app[ _-]?check').hasMatch(detail);
+        Diag.swallow(
+          'ovid_cloud.mint_rejected',
+          'HTTP ${res.statusCode}${appCheck ? ' (app check)' : ''}',
+        );
+        if (res.statusCode == 403 || appCheck) {
+          return const MintOutcome(
+            MintStatus.deviceUnverified,
+            message:
+                'This device could not be verified. Update Ovid from '
+                'Google Play, then retry.',
+          );
+        }
+        return const MintOutcome(
+          MintStatus.sessionExpired,
+          message: 'Your session expired. Sign in again to use Ovid Cloud.',
+        );
+      }
+      if (res.statusCode == 429) {
+        return const MintOutcome(
+          MintStatus.unavailable,
+          message: 'Ovid Cloud is busy. Retry in a moment.',
         );
       }
       if (res.statusCode != 200) {
@@ -434,6 +627,15 @@ class OvidCloudService extends ChangeNotifier {
         return const MintOutcome(
           MintStatus.unavailable,
           message: 'Ovid Cloud returned no key.',
+        );
+      }
+
+      if (rejectedKey != null && key == rejectedKey) {
+        // The gateway has not rotated the dead key yet. Binding it again
+        // would only loop Retry → rejected → Retry.
+        return const MintOutcome(
+          MintStatus.repairing,
+          message: 'Ovid Cloud is being repaired. Try again in a few minutes.',
         );
       }
 
@@ -503,6 +705,8 @@ class OvidCloudService extends ChangeNotifier {
     _keyIdentity = accountIdentity;
     _keyProvider = provider;
     _boundKey = r.key;
+    _rejectedKey = null;
+    _rejectedKeyIdentity = null;
     _boundBaseUrl = scope.baseUrl;
     _confirmTier(r.tier);
     state.setOvidCloudTier(r.tier);
@@ -519,6 +723,17 @@ class OvidCloudService extends ChangeNotifier {
           : (models.isNotEmpty ? models.first : 'auto');
       state.setModel(AppState.ovidCloudProviderId, auto);
     }
+  }
+
+  /// Gateways from `X-Ovid-Gateway: 2` on report a rejected key as 401
+  /// `key_invalid`; their 503 is a genuine upstream outage.
+  static bool _modernGateway(http.Response res) {
+    for (final entry in res.headers.entries) {
+      if (entry.key.toLowerCase() == 'x-ovid-gateway') {
+        return (int.tryParse(entry.value.trim()) ?? 0) >= 2;
+      }
+    }
+    return false;
   }
 
   static String? _errorCode(String body) {
@@ -583,8 +798,12 @@ class OvidCloudService extends ChangeNotifier {
         // predate key_invalid report a rejected key as catalog_unavailable.
         if (res.statusCode == 401 ||
             res.statusCode == 403 ||
-            (res.statusCode == 503 && code == 'catalog_unavailable')) {
+            (res.statusCode == 503 &&
+                code == 'catalog_unavailable' &&
+                !_modernGateway(res))) {
           _keyIdentity = null;
+          _rejectedKey = scope.key;
+          _rejectedKeyIdentity = scope.identity;
         }
         failed(switch (res.statusCode) {
           401 || 403 =>
