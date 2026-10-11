@@ -151,6 +151,40 @@ class BrowserTab {
     : desktopMode = desktopMode ?? AppState.I.browserDesktopMode;
 }
 
+/// Snapshot of the active session's Studio tabs (see
+/// [AgentService.studioTabs]). Buffers compare by identity: a changed map or
+/// content string means something rewrote them.
+@immutable
+class StudioTabsState {
+  const StudioTabsState({
+    required this.openFiles,
+    required this.activePath,
+    required this.buffer,
+    required this.activeContent,
+  });
+
+  final List<String> openFiles;
+  final String? activePath;
+  final Map<String, String> buffer;
+  final String? activeContent;
+
+  @override
+  bool operator ==(Object other) =>
+      other is StudioTabsState &&
+      other.activePath == activePath &&
+      identical(other.buffer, buffer) &&
+      identical(other.activeContent, activeContent) &&
+      listEquals(other.openFiles, openFiles);
+
+  @override
+  int get hashCode => Object.hash(
+    activePath,
+    identityHashCode(buffer),
+    identityHashCode(activeContent),
+    Object.hashAll(openFiles),
+  );
+}
+
 /// Narrow browser listenable (see [AgentService.browserTabsListenable]).
 /// Re-checks a small signature of the browser state on each [AgentService]
 /// notification while it has listeners, and notifies only when it changed.
@@ -1016,6 +1050,7 @@ class AgentService extends ChangeNotifier {
     // Run state also changes on paths that only refresh AppState; keep the
     // per-session busy notifiers in step with those too.
     AppState.I.addListener(_syncBusyNotifiers);
+    AppState.I.addListener(_syncStudioTabs);
   }
 
   @override
@@ -5000,6 +5035,44 @@ if (!window.__ovidBlankHooked) {
   /// Open-file tab list — scoped to the ACTIVE session.
   List<String> get studioOpenFiles => _studio.openFiles;
 
+  ValueNotifier<StudioTabsState>? _studioTabs;
+
+  /// The Studio tab strip / editor view of the active session: open tabs,
+  /// active path, the buffer map and the active buffer's content. Notifies
+  /// only when one of those changes, so Studio widgets no longer rebuild on
+  /// every [AgentService] notification. Always computed for the UI's
+  /// session, even when a background run triggers the notification.
+  ValueListenable<StudioTabsState> get studioTabs =>
+      _studioTabs ??= ValueNotifier<StudioTabsState>(_computeStudioTabs());
+
+  StudioTabsState _computeStudioTabs() => Zone.root.run(() {
+    final studio = _studio;
+    final active = studio.activeFilePath;
+    return StudioTabsState(
+      openFiles: List<String>.unmodifiable(studio.openFiles),
+      activePath: active,
+      buffer: studio.fileBuffer,
+      activeContent: active == null ? null : studio.fileBuffer[active],
+    );
+  });
+
+  void _syncStudioTabs() {
+    final notifier = _studioTabs;
+    if (notifier == null) return;
+    final next = _computeStudioTabs();
+    if (next != notifier.value) notifier.value = next;
+  }
+
+  /// Re-reads the Studio state now (publishing a change to [studioTabs]
+  /// listeners) and returns it. For callers reacting to a non-agent
+  /// notification, e.g. a session switch in [AppState].
+  StudioTabsState syncStudioTabs() {
+    final notifier = _studioTabs;
+    if (notifier == null) return studioTabs.value;
+    _syncStudioTabs();
+    return notifier.value;
+  }
+
   bool get _ownsRepoCache =>
       (RepoCache.I.boundSessionId == null ||
           RepoCache.I.boundSessionId == _runSession?.id) &&
@@ -5926,6 +5999,7 @@ user which one instead of assuming this one.''';
   @override
   void notifyListeners() {
     _syncBusyNotifiers();
+    _syncStudioTabs();
     super.notifyListeners();
     browserTabsListenable._check();
   }
