@@ -16,7 +16,9 @@ import 'sandbox_service.dart';
 import 'secure_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
+import 'plugin_user_config.dart';
 import 'state.dart';
+import 'tool_usage_store.dart';
 import 'diag.dart';
 
 /// Sends one Streamable-HTTP request without allowing the HTTP client to
@@ -655,6 +657,19 @@ class McpService {
 
   String _key(McpServer server) => server.canonicalId;
 
+  /// Saved plugin settings per owning plugin, refreshed at every connect.
+  final Map<String, Map<String, String>> _userConfigByPlugin = {};
+
+  /// [server]'s url with `${user_config.<key>}` resolved for plugin-owned
+  /// servers. The persisted row keeps the template (a secret setting must
+  /// never land in the plaintext roster).
+  String? _urlFor(McpServer server) {
+    final url = server.url;
+    final owner = server.ownerPluginId;
+    if (url == null || owner == null) return url;
+    return substituteUserConfig(url, _userConfigByPlugin[owner] ?? const {});
+  }
+
   String _keyForName(String serverName) {
     if (_running.containsKey(serverName)) return serverName;
     final match = AppState.I.mcpServers
@@ -678,6 +693,26 @@ class McpService {
   @visibleForTesting
   Map<String, dynamic> capabilitiesForTest(String serverName) =>
       _running[_keyForName(serverName)]?.capabilities ?? const {};
+
+  /// Capabilities [serverName] advertised in its initialize result (empty
+  /// when not connected). The MCP detail screen uses this to decide whether
+  /// to list resources and prompts.
+  Map<String, dynamic> capabilitiesFor(String serverName) {
+    final rs = _running[_keyForName(serverName)];
+    if (rs == null || !rs.handshakeDone) return const {};
+    return rs.capabilities;
+  }
+
+  /// Protocol version negotiated with [serverName], or null.
+  String? protocolVersionFor(String serverName) =>
+      _running[_keyForName(serverName)]?.protocolVersion;
+
+  /// The last [lines] stderr lines of a stdio server (diagnostics only).
+  List<String> stderrTail(String serverName, {int lines = 20}) {
+    final all = _running[_keyForName(serverName)]?.stderrLines;
+    if (all == null || all.isEmpty) return const [];
+    return List.unmodifiable(all.skip(max(0, all.length - lines)));
+  }
 
   /// Test seam: the remembered `Mcp-Session-Id` for [serverName].
   @visibleForTesting
@@ -877,7 +912,15 @@ class McpService {
         return McpConnectOutcome(McpConnectOutcomeKind.needsSetup, reason);
       }
       if (server.ownerPluginId != null) {
-        server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
+        // Plugin userConfig parity: `${user_config.<key>}` in stored headers
+        // (and the url, via [_urlFor]) resolves to the saved setting.
+        final values = await pluginUserConfigValues(server.ownerPluginId!);
+        _userConfigByPlugin[server.ownerPluginId!] = values;
+        server.headers = {
+          for (final e
+              in (await AppState.I.getMcpHeaders(server.canonicalId)).entries)
+            e.key: substituteUserConfig(e.value, values),
+        };
         _requireCurrent(rs);
       }
       // Probe only; this wait is covered by the same overall budget.
@@ -1665,7 +1708,7 @@ class McpService {
       rs.sseChannel = channel;
       try {
         await channel.open(
-          server.url!,
+          _urlFor(server)!,
           headers,
           timeout: phaseTimeout('sse/open'),
         );
@@ -1680,7 +1723,7 @@ class McpService {
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('MCP handshake timed out', Duration.zero);
       }
-      final url = server.url;
+      final url = _urlFor(server);
       if (url == null || url.isEmpty) {
         throw Exception('no url configured for SSE transport');
       }
@@ -2176,7 +2219,7 @@ class McpService {
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('MCP handshake timed out', Duration.zero);
       }
-      final url = server.url;
+      final url = _urlFor(server);
       if (url == null || url.isEmpty) {
         throw Exception('no url configured for HTTP transport');
       }
@@ -2406,13 +2449,23 @@ class McpService {
       // Per-server env vars (API keys etc.) from secure storage.
       final secretEnv = await AppState.I.getMcpEnv(server.canonicalId);
       final runtimeRoot = _runtimeRoot(server);
+      // Plugin userConfig parity: saved plugin settings reach the server as
+      // CLAUDE_PLUGIN_OPTION_<KEY> and through `${user_config.<key>}`.
+      final userConfig = server.ownerPluginId == null
+          ? const <String, String>{}
+          : await pluginUserConfigValues(server.ownerPluginId!);
       final env = {
         if (runtimeRoot != null)
           ...SandboxService.pluginRuntimeEnv(runtimeRoot),
         if (server.ownerPluginId != null)
           ..._pluginRootEnv(server.ownerPluginId!),
-        ...secretEnv,
+        ...pluginOptionEnv(userConfig),
+        for (final e in secretEnv.entries)
+          e.key: substituteUserConfig(e.value, userConfig),
       };
+      final spawnArgs = [
+        for (final a in server.args) substituteUserConfig(a, userConfig),
+      ];
       // Optional working directory for the spawned server (best-effort:
       // only used when the resolved directory actually exists).
       final cwdDir = _resolveWorkingDirectory(server, sandbox.prefixPath);
@@ -2422,12 +2475,12 @@ class McpService {
       // A test spawn override runs the command directly on the host.
       final proc = testSpawn != null
           ? await testSpawn(
-              [server.command, ...server.args],
+              [server.command, ...spawnArgs],
               env: env.isEmpty ? null : env,
               hostWorkDir: cwdDir,
             )
           : await sandbox.spawn(
-              [server.command, ...server.args],
+              [server.command, ...spawnArgs],
               env: env.isEmpty ? null : env,
               hostWorkDir: cwdDir,
             );
@@ -2516,7 +2569,13 @@ class McpService {
     process.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen(rs.stderrLines.add);
+        .listen((line) {
+          // Bounded: a chatty server must not grow this without limit.
+          rs.stderrLines.add(line);
+          if (rs.stderrLines.length > 200) {
+            rs.stderrLines.removeRange(0, rs.stderrLines.length - 200);
+          }
+        });
     rs.stdoutLines.stream.listen((line) {
       try {
         final json = jsonDecode(line) as Map<String, dynamic>;
@@ -3109,7 +3168,45 @@ class McpService {
   /// come back as an explicit `MCP error: …` string so the model knows the
   /// call failed — they used to masquerade as results (or as the text
   /// "null").
+  ///
+  /// Every finished call is recorded in [ToolUsageStore] under the server's
+  /// canonical id (and owning plugin), feeding the per-server usage block.
   Future<String> callTool(
+    String serverName,
+    String toolName,
+    Map<String, dynamic> args, {
+    Duration? timeout,
+    UtilityCancellation? cancellation,
+  }) async {
+    final sw = Stopwatch()..start();
+    final key = _keyForName(serverName);
+    final server =
+        _running[key]?.server ??
+        AppState.I.mcpServers.where((s) => s.canonicalId == key).firstOrNull;
+    final result = await _callTool(
+      serverName,
+      toolName,
+      args,
+      timeout: timeout,
+      cancellation: cancellation,
+    );
+    final failed = result.startsWith('MCP error:');
+    final cancelled = failed && result.endsWith('was cancelled.');
+    if (!cancelled) {
+      ToolUsageStore.I.record(
+        kind: ToolUsageKind.mcp,
+        tool: toolName,
+        mcpServerId: server?.canonicalId ?? key,
+        pluginId: server?.ownerPluginId,
+        ok: !failed,
+        elapsed: sw.elapsed,
+        error: failed ? result.substring('MCP error:'.length).trim() : null,
+      );
+    }
+    return result;
+  }
+
+  Future<String> _callTool(
     String serverName,
     String toolName,
     Map<String, dynamic> args, {
@@ -3333,7 +3430,7 @@ class McpService {
     Map<String, dynamic> params, {
     Duration? timeout,
   }) async {
-    final url = rs.server.url;
+    final url = _urlFor(rs.server);
     if (url == null) return;
     final client = httpClientForTest ?? http.Client();
     final ownsClient = httpClientForTest == null;
@@ -3393,7 +3490,7 @@ class McpService {
     Duration? timeout,
     bool cancelOnTimeout = false,
   }) async {
-    final url = rs.server.url;
+    final url = _urlFor(rs.server);
     if (url == null) {
       return McpRpcResult._error('no url configured');
     }
@@ -3529,7 +3626,7 @@ class McpService {
   /// Best-effort HTTP DELETE terminating a Streamable-HTTP session. Never
   /// throws — a server that can't be reached still disconnects locally.
   Future<void> _deleteHttpSession(_RunningServer rs) async {
-    final url = rs.server.url;
+    final url = _urlFor(rs.server);
     final sessionId = rs.sessionId;
     if (url == null || sessionId == null) return;
     final injected = httpClientForTest;
