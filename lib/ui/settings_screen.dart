@@ -37,7 +37,10 @@ import 'providers_screen.dart';
 import 'plugins_screen.dart';
 import 'usage_screen.dart';
 import 'widgets/aether_primitives.dart';
+import 'widgets/error_views.dart';
+import 'user_error.dart';
 import '../core/diag.dart';
+import '../l10n/l10n.dart';
 import 'widgets/ovid_mark.dart';
 
 /// Settings hub — Aether premium reskin.
@@ -831,6 +834,23 @@ class _StorageTile extends StatelessWidget {
   }
 }
 
+/// Result copy for "Clear browser cookies". Per-session jars exist only where
+/// the WebView supports profiles; elsewhere every session shares the default
+/// jar, so only a shortfall on a profile-capable WebView is a partial result.
+@visibleForTesting
+String cookieClearMessage(
+  AppLocalizations l, {
+  required int profiles,
+  required int cleared,
+  required bool profilesSupported,
+}) {
+  final failed = profilesSupported ? (profiles - cleared).clamp(0, profiles) : 0;
+  return failed == 0 ? l.storageCookiesCleared : l.storageCookiesPartial(failed);
+}
+
+@visibleForTesting
+Widget storageScreenForTest() => const _StorageScreen();
+
 /// Per-section on-device storage with working clear actions.
 class _StorageScreen extends StatefulWidget {
   const _StorageScreen();
@@ -844,6 +864,7 @@ class _StorageScreenState extends State<_StorageScreen> {
   int _cache = 0;
   int _support = 0;
   bool _clearing = false;
+  UserError? _measureError;
 
   @override
   void initState() {
@@ -864,13 +885,31 @@ class _StorageScreenState extends State<_StorageScreen> {
         _docs = results[0];
         _cache = results[1];
         _support = results[2];
+        _measureError = null;
         _measuring = false;
       });
-    } catch (_) {
+    } catch (e, st) {
       if (!mounted) return;
-      setState(() => _measuring = false);
+      // Never present a failed measurement as "0 B": sizes show "—" and the
+      // screen offers a retry.
+      setState(() {
+        _docs = 0;
+        _cache = 0;
+        _support = 0;
+        _measureError = UserError.from(
+          e,
+          l10n: context.l10n,
+          stack: st,
+          log: 'settings_screen.storage_measure',
+        );
+        _measuring = false;
+      });
     }
   }
+
+  String _size(int bytes) => _measureError != null
+      ? context.l10n.storageSizeUnknown
+      : formatStorageBytes(bytes);
 
   Future<void> _confirmClearCache() async {
     final ok = await showDialog<bool>(
@@ -936,23 +975,28 @@ class _StorageScreenState extends State<_StorageScreen> {
         profiles: profiles,
         urls: const [],
       );
-      final cleared = await WebViewCookieManager().clearCookies();
+      // `false` only means the default jar was already empty.
+      await WebViewCookieManager().clearCookies();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Default jar: ${cleared ? 'cookies removed' : 'no removal reported'}. '
-            '$perProfile session profile(s) reported cleared. '
-            'All-session completion cannot be verified; origin records retained for retry.',
+            cookieClearMessage(
+              context.l10n,
+              profiles: profiles.length,
+              cleared: perProfile,
+              profilesSupported: SessionBrowserProfiles.I.supported,
+            ),
           ),
           behavior: SnackBarBehavior.floating,
         ),
       );
-    } catch (_) {
+    } catch (e, st) {
+      Diag.swallow('settings_screen.clear_cookies', e, st);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not clear cookies on this device.'),
+        SnackBar(
+          content: Text(context.l10n.storageCookiesFailed),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -977,6 +1021,35 @@ class _StorageScreenState extends State<_StorageScreen> {
               child: Center(child: CircularProgressIndicator()),
             )
           else ...[
+            if (_measureError != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.error_outline, size: 18, color: Aether.dangerC),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Semantics(
+                            liveRegion: true,
+                            child: Text(
+                              context.l10n.storageMeasureFailed,
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: _refresh,
+                          child: Text(context.l10n.actionRetry),
+                        ),
+                      ],
+                    ),
+                    ErrorDetails(detail: _measureError!.detail),
+                  ],
+                ),
+              ),
             ListTile(
               dense: true,
               leading: Icon(
@@ -993,7 +1066,7 @@ class _StorageScreenState extends State<_StorageScreen> {
                 style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
               ),
               trailing: Text(
-                formatStorageBytes(_docs),
+                _size(_docs),
                 style: const TextStyle(fontSize: 13),
               ),
             ),
@@ -1013,7 +1086,7 @@ class _StorageScreenState extends State<_StorageScreen> {
                     style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                   ),
                   Text(
-                    formatStorageBytes(_cache),
+                    _size(_cache),
                     style: const TextStyle(fontSize: 13),
                   ),
                   TextButton(
@@ -1041,7 +1114,7 @@ class _StorageScreenState extends State<_StorageScreen> {
                 style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
               ),
               trailing: Text(
-                formatStorageBytes(_support),
+                _size(_support),
                 style: const TextStyle(fontSize: 13),
               ),
             ),
@@ -1073,7 +1146,7 @@ class _StorageScreenState extends State<_StorageScreen> {
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
               ),
               trailing: Text(
-                formatStorageBytes(total),
+                _size(total),
                 style: const TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
@@ -1532,11 +1605,18 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
-    } catch (e) {
+    } catch (e, st) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
+      final l = context.l10n;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            l.settingsExportFailed(
+              friendlyError(e, l10n: l, stack: st, log: 'settings_screen.export'),
+            ),
+          ),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1701,6 +1781,10 @@ class _AboutScreen extends StatelessWidget {
 /// folder (`<docs>/skills`) that SkillService scans on every run, so the
 /// agent can use them in any chat via the `skill` tool, `/skill-name`
 /// invocation, or the composer slash menu.
+/// Test seam: replaces [AgentService.refreshSkills] for the Skills screen.
+@visibleForTesting
+Future<void> Function()? refreshSkillsForTest;
+
 class SkillsScreen extends StatefulWidget {
   const SkillsScreen({super.key});
   @override
@@ -1710,6 +1794,7 @@ class SkillsScreen extends StatefulWidget {
 class _SkillsScreenState extends State<SkillsScreen> {
   List<Skill> _skills = const [];
   bool _loading = true;
+  UserError? _error;
 
   @override
   void initState() {
@@ -1718,21 +1803,64 @@ class _SkillsScreenState extends State<SkillsScreen> {
   }
 
   Future<void> _reload() async {
-    setState(() => _loading = true);
-    await AgentService.I.refreshSkills();
-    if (!mounted) return;
-    // Show ONLY global user-uploaded skills here — workspace skills are
-    // managed by the agent inside each session.
-    final docs = await getApplicationDocumentsDirectory();
-    final root = '${docs.path}/skills';
-    final all = SkillService.I.skills.where((s) => s.path.startsWith(root));
     setState(() {
-      _skills = all.toList()..sort((a, b) => a.name.compareTo(b.name));
-      _loading = false;
+      _loading = true;
+      _error = null;
     });
+    try {
+      await (refreshSkillsForTest ?? AgentService.I.refreshSkills)();
+      if (!mounted) return;
+      // Show ONLY global user-uploaded skills here — workspace skills are
+      // managed by the agent inside each session.
+      final docs = await getApplicationDocumentsDirectory();
+      final root = '${docs.path}/skills';
+      final all = SkillService.I.skills.where((s) => s.path.startsWith(root));
+      if (!mounted) return;
+      setState(() {
+        _skills = all.toList()..sort((a, b) => a.name.compareTo(b.name));
+      });
+    } catch (e, st) {
+      if (!mounted) return;
+      setState(() {
+        _error = UserError.from(
+          e,
+          l10n: context.l10n,
+          stack: st,
+          log: 'settings_screen.skills_reload',
+        );
+      });
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   Future<void> _upload() async {
+    final l = context.l10n;
+    try {
+      await _uploadFiles(l);
+    } catch (e, st) {
+      // Picker (PlatformException) and folder creation failures used to
+      // escape as uncaught async errors with no feedback.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            l.skillsUploadFailed(
+              friendlyError(
+                e,
+                l10n: l,
+                stack: st,
+                log: 'settings_screen.skills_upload',
+              ),
+            ),
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<void> _uploadFiles(AppLocalizations l) async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: const ['md'],
@@ -1776,8 +1904,18 @@ class _SkillsScreenState extends State<SkillsScreen> {
         }
         await srcFile.copy(dest.path);
         ok++;
-      } catch (e) {
-        errors.add('$name — $e');
+      } catch (e, st) {
+        errors.add(
+          l.skillsUploadFileFailed(
+            name,
+            friendlyError(
+              e,
+              l10n: l,
+              stack: st,
+              log: 'settings_screen.skills_upload_file',
+            ),
+          ),
+        );
       }
     }
     await _reload();
@@ -1867,6 +2005,13 @@ class _SkillsScreenState extends State<SkillsScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
+          : _error != null
+          ? ErrorRetryView(
+              message:
+                  '${context.l10n.skillsLoadFailed} ${_error!.message}',
+              detail: _error!.detail,
+              onRetry: _reload,
+            )
           : _skills.isEmpty
           ? _empty(context)
           : ListView.separated(
