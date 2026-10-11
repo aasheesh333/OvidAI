@@ -3586,7 +3586,21 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
   // silently on failure was the only signal before.
   final messenger = ScaffoldMessenger.maybeOf(context);
   final outcome = await app.toggleMcpServer(server);
-  _showMcpConnectOutcome(messenger, server, outcome.ok, outcome.detail);
+  // A remote server that answered 401 gets a direct "Sign in" (F-193),
+  // whether or not it ships a hand-written oauth block.
+  final needsSignIn =
+      !outcome.ok && McpService.I.mcpNeedsOAuthSignIn(server.canonicalId);
+  _showMcpConnectOutcome(
+    messenger,
+    server,
+    outcome.ok,
+    outcome.detail,
+    onSignIn: needsSignIn
+        ? () {
+            if (context.mounted) unawaited(signInToMcpServer(context, server));
+          }
+        : null,
+  );
 }
 
 /// User-facing copy for a finished connect: "Connected · 12 tools",
@@ -3624,8 +3638,9 @@ void _showMcpConnectOutcome(
   ScaffoldMessengerState? messenger,
   McpServer server,
   bool ok,
-  String? detail,
-) {
+  String? detail, {
+  VoidCallback? onSignIn,
+}) {
   if (messenger == null || !messenger.mounted) return;
   final lower = (detail ?? '').toLowerCase();
   // Setup/runtime failures need the credential or runtime sheet, not a
@@ -3639,7 +3654,9 @@ void _showMcpConnectOutcome(
     SnackBar(
       content: Text(mcpConnectOutcomeMessage(server, ok, detail)),
       behavior: SnackBarBehavior.floating,
-      action: !retryable
+      action: onSignIn != null
+          ? SnackBarAction(label: 'Sign in', onPressed: onSignIn)
+          : !retryable
           ? null
           : SnackBarAction(
               label: 'Retry',
@@ -4213,6 +4230,71 @@ class _LiveMcpOAuthService implements McpOAuthService {
   @override
   void cancelAuthorization(String serverKey) =>
       McpService.I.cancelMcpOAuthAuthorization(serverKey);
+
+  @override
+  Future<DateTime?> attemptExpiry(String serverKey) =>
+      McpService.I.mcpOAuthAttemptExpiry(serverKey);
+}
+
+/// Test seam: replaces the production OAuth service used by the detail
+/// screen's Sign in / Re-authenticate buttons.
+@visibleForTesting
+McpOAuthService? mcpOAuthServiceForTest;
+
+/// Test seam: replaces [connectMcpServer] after a successful sign-in.
+@visibleForTesting
+Future<void> Function(BuildContext context, McpServer server)?
+mcpConnectAfterSignInForTest;
+
+/// Open the MCP sign-in sheet for [server] and act on the result (F-196):
+/// on success say so, (re)connect the server so the new token is used, and
+/// return true. A cancel returns false without touching the connection.
+Future<bool> signInToMcpServer(BuildContext context, McpServer server) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final ok = await showMcpOAuthSheet(
+    context,
+    serverKey: server.canonicalId,
+    serverName: server.name,
+    service: mcpOAuthServiceForTest ?? const _LiveMcpOAuthService(),
+  );
+  if (ok != true) return false;
+  if (messenger != null && messenger.mounted) {
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('Signed in to ${server.name}'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+  if (!context.mounted) return true;
+  final connect = mcpConnectAfterSignInForTest ?? connectMcpServer;
+  if (server.connected) {
+    // Reconnect so the session is re-established with the new token.
+    await AppState.I.toggleMcpServer(server);
+    if (!context.mounted) return true;
+  }
+  await connect(context, server);
+  return true;
+}
+
+/// "Signed in · expires in 52 min" for a stored token.
+@visibleForTesting
+String mcpOAuthTokenStatus(McpOAuthToken token, {DateTime? now}) {
+  final at = token.expiresAt;
+  if (at == null) return 'Signed in';
+  final left = at.difference(now ?? DateTime.now());
+  if (left.isNegative) {
+    return token.canRefresh
+        ? 'Signed in · token refreshes on next use'
+        : 'Sign-in expired';
+  }
+  final text = left.inDays >= 1
+      ? '${left.inDays} d'
+      : left.inHours >= 1
+      ? '${left.inHours} h'
+      : '${left.inMinutes.clamp(1, 59)} min';
+  return 'Signed in · expires in $text';
 }
 
 /// MCP detail — connect/disconnect with config preview.
@@ -4246,13 +4328,165 @@ class _McpCredState {
       storedHeaders.isEmpty;
 }
 
+/// OAuth snapshot for the detail screen's sign-in row.
+class _McpAuthState {
+  final McpOAuthConfig? config;
+  final McpOAuthToken? token;
+  const _McpAuthState(this.config, this.token);
+}
+
 class _McpDetailScreenState extends State<McpDetailScreen> {
   late Future<_McpCredState> _credFuture;
+  late Future<_McpAuthState> _authFuture;
 
   @override
   void initState() {
     super.initState();
     _credFuture = _loadCreds();
+    _authFuture = _loadAuth();
+  }
+
+  Future<_McpAuthState> _loadAuth() async {
+    final key = widget.server.canonicalId;
+    return _McpAuthState(
+      await McpService.I.mcpOAuthConfigForAsync(key),
+      await McpService.I.mcpOAuthTokenFor(key),
+    );
+  }
+
+  void _reloadAuth() {
+    if (!mounted) return;
+    final next = _loadAuth();
+    setState(() {
+      _authFuture = next;
+    });
+  }
+
+  /// Sign-in row for remote servers (F-193/F-196): shown when the server
+  /// answered 401, ships an oauth block, or already holds a token. Offers
+  /// Sign in, or Re-authenticate + Sign out with the token's expiry.
+  Widget _authSection(BuildContext context, McpServer s) {
+    if (s.transport != 'http' && s.transport != 'sse') {
+      return const SizedBox.shrink();
+    }
+    return FutureBuilder<_McpAuthState>(
+      future: _authFuture,
+      builder: (context, snap) {
+        final auth = snap.data;
+        final needsSignIn = McpService.I.mcpNeedsOAuthSignIn(s.canonicalId);
+        final token = auth?.token;
+        final hasConfig = auth?.config?.isUsable ?? false;
+        if (token == null && !needsSignIn && !hasConfig) {
+          return const SizedBox.shrink();
+        }
+        final status = token != null
+            ? mcpOAuthTokenStatus(token)
+            : needsSignIn
+            ? 'Sign-in required — the server rejected the connection'
+            : 'Not signed in';
+        Future<void> signIn() async {
+          final ok = await signInToMcpServer(context, s);
+          if (ok) {
+            _reloadAuth();
+            _reloadCreds();
+          }
+        }
+
+        return Container(
+          key: ValueKey('mcp-auth-${s.canonicalId}'),
+          margin: const EdgeInsets.only(top: 8),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Aether.surfaceAlt,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    token != null
+                        ? Icons.verified_user_outlined
+                        : Icons.lock_outline,
+                    size: 15,
+                    color: token != null
+                        ? Aether.successLight
+                        : Aether.textMuted,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      status,
+                      key: ValueKey('mcp-auth-status-${s.canonicalId}'),
+                      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      key: ValueKey('mcp-auth-sign-in-${s.canonicalId}'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: token == null
+                            ? Aether.accent
+                            : Aether.surfaceRaised,
+                      ),
+                      icon: Icon(
+                        token == null ? Icons.login : Icons.refresh,
+                        size: 16,
+                      ),
+                      label: Text(
+                        token == null ? 'Sign in' : 'Re-authenticate',
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      onPressed: signIn,
+                    ),
+                  ),
+                  if (token != null) ...[
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        key: ValueKey('mcp-auth-sign-out-${s.canonicalId}'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Aether.textMuted,
+                          side: BorderSide(color: Aether.hairlineStrong),
+                        ),
+                        icon: const Icon(Icons.logout, size: 16),
+                        label: const Text(
+                          'Sign out',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        onPressed: () async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          if (s.connected) {
+                            await AppState.I.toggleMcpServer(s);
+                          }
+                          await McpService.I.clearMcpOAuthToken(
+                            s.canonicalId,
+                          );
+                          _reloadAuth();
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text('Signed out of ${s.name}'),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -4260,6 +4494,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.server, widget.server)) {
       _credFuture = _loadCreds();
+      _authFuture = _loadAuth();
       _catalog = null;
       _catalogConnected = false;
     }
@@ -4281,8 +4516,10 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
   void _reloadCreds() {
     if (!mounted) return;
     final next = _loadCreds();
+    final auth = _loadAuth();
     setState(() {
       _credFuture = next;
+      _authFuture = auth;
     });
   }
 
@@ -4929,27 +5166,6 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         leading: const BackButton(),
         title: Text(s.name),
         actions: [
-          // OAuth entry hook: shown only when this server carries a usable
-          // OAuth config.
-          FutureBuilder<McpOAuthConfig?>(
-            future: McpService.I.mcpOAuthConfigForAsync(s.canonicalId),
-            builder: (context, snapshot) {
-              final config = snapshot.data;
-              if (config == null || !config.isUsable) {
-                return const SizedBox.shrink();
-              }
-              return IconButton(
-                tooltip: 'Authorize with OAuth',
-                icon: const Icon(Icons.lock_open_outlined, size: 19),
-                onPressed: () => showMcpOAuthSheet(
-                  context,
-                  serverKey: s.canonicalId,
-                  serverName: s.name,
-                  service: const _LiveMcpOAuthService(),
-                ),
-              );
-            },
-          ),
           // Pencil — edit the mcp.json config in place (user request).
           // Only user-added servers: plugin-owned rows are managed by their
           // manifest and built-in seeds would not persist the edit.
@@ -5157,6 +5373,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               return const SizedBox.shrink();
             },
           ),
+          _authSection(context, s),
           const SizedBox(height: 8),
           Row(
             children: [
