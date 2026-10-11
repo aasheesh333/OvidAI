@@ -14,6 +14,8 @@ import 'package:ovid_ai/ui/widgets/ovid_mark.dart';
 /// Firebase, cloud, or auth plumbing is reached. Tracks retry/sign-out calls
 /// so tests can assert tap wiring.
 class _GateService extends ChangeNotifier implements FirebaseService {
+  @override
+  bool get firstUserKnown => false;
   final initialization = Completer<void>();
   @override
   bool isAvailable = false;

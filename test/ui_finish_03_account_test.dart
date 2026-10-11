@@ -28,6 +28,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 // AuthScreen, auth picker, deletion panel, avatar and billing route render here.
 class _AccountFixture extends ChangeNotifier implements FirebaseService {
   @override
+  bool get firstUserKnown => false;
+  @override
   bool isSignedIn = true;
   @override
   String? uid = 'account-0123456789abcdefghijklmnopqrstuvwxyz0123456789';

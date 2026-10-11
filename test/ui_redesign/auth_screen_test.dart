@@ -20,6 +20,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Modeled on the `_GateService` pattern in test/ui_redesign/login_gate_test.dart.
 class _FakeFirebaseService extends ChangeNotifier implements FirebaseService {
   @override
+  bool get firstUserKnown => false;
+  @override
   bool isSignedIn = false;
   @override
   String? uid;

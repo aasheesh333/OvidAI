@@ -43,6 +43,7 @@ import 'session_browser_profiles.dart';
 import 'session_data_sharing.dart';
 import 'conversation_share_service.dart';
 import 'session_lifecycle_service.dart';
+import 'session_history_store.dart';
 import 'session_search.dart';
 import 'session_ledger.dart';
 import 'settings_actions.dart';
@@ -1474,6 +1475,25 @@ class ChatSession {
     return found;
   }
 
+  /// Last user-visible activity (F-046): touched on send and on reply
+  /// completion. Null for sessions persisted before it existed; see
+  /// [lastActivityAt] for the derived value the sidebar sorts by.
+  DateTime? updatedAt;
+
+  /// Most recent of [updatedAt], the newest message time and [createdAt].
+  DateTime get lastActivityAt {
+    var latest = createdAt;
+    final touched = updatedAt;
+    if (touched != null && touched.isAfter(latest)) latest = touched;
+    if (messages.isNotEmpty && messages.last.time.isAfter(latest)) {
+      latest = messages.last.time;
+    }
+    return latest;
+  }
+
+  /// Mark new activity now (send / reply complete).
+  void touch([DateTime? at]) => updatedAt = at ?? DateTime.now();
+
   /// The assembled system prompt sent on this session's most recent turn.
   /// Surfaced as a collapsible "System prompt" disclosure so the user can
   /// see exactly what the model was told (context visibility parity).
@@ -1525,6 +1545,7 @@ class ChatSession {
     List<Map<String, String>>? todos,
     List<Map<String, dynamic>>? schedules,
     DateTime? createdAt,
+    this.updatedAt,
     SessionAnalytics? analytics,
     this.titleGenerated = false,
     Iterable<String> referencedSessionIds = const [],
@@ -1597,6 +1618,9 @@ class ChatSession {
     createdAt: j['createdAt'] != null
         ? DateTime.tryParse(j['createdAt'] as String) ?? DateTime.now()
         : DateTime.now(),
+    updatedAt: j['updatedAt'] is String
+        ? DateTime.tryParse(j['updatedAt'] as String)
+        : null,
     analytics: SessionAnalytics.fromJson(
       j['analytics'] is Map
           ? Map<String, dynamic>.from(j['analytics'] as Map)
@@ -1646,6 +1670,7 @@ class ChatSession {
     'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
+    if (updatedAt != null) 'updatedAt': updatedAt!.toIso8601String(),
     'analytics': analytics.toJson(),
     if (titleGenerated) 'titleGenerated': true,
     if (referencedSessionIds.isNotEmpty)
@@ -1753,6 +1778,27 @@ ChatSession _decodePersistedSessionTail(String encoded) {
     Map<String, dynamic>.from(json)..['messages'] = messages.sublist(start),
   );
 }
+
+/// Full decode of every stored row for hydration (runs in an isolate for
+/// large histories). Null marks a row that must stay opaque.
+List<ChatSession?> _decodePersistedSessions(List<String> rows) => [
+  for (final encoded in rows)
+    () {
+      try {
+        final json = jsonDecode(encoded) as Map<String, dynamic>;
+        final id = json['id'];
+        if (id is! String || id.isEmpty) return null;
+        return ChatSession.fromJson(json);
+      } catch (_) {
+        return null;
+      }
+    }(),
+];
+
+// Top-level so the isolate closure captures only [rows], never AppState.
+Future<List<ChatSession?>> _decodePersistedSessionsInIsolate(
+  List<String> rows,
+) => Isolate.run(() => _decodePersistedSessions(rows));
 
 String _sessionSourceFingerprint(String encoded) =>
     sha256.convert(utf8.encode(encoded)).toString();
@@ -3047,9 +3093,12 @@ class AppState extends ChangeNotifier {
           throw StateError('Account search cleanup incomplete');
         }
         // No provisional guest transcript is ever attributed to a Firebase UID.
-        _deferredSessionJson = List.of(
-          prefs.getStringList(_accountKey(_kSessions)) ?? const [],
+        final storedRows = await SessionHistoryRepository.I.readRows(
+          prefs,
+          _accountKey(_kSessions),
         );
+        if (!identical(token, _sessionAccountToken)) return;
+        _deferredSessionJson = List.of(storedRows ?? const <String>[]);
         activeSessionId = prefs.getString(_accountKey(_kActive));
         await _loadUsage();
         await _hydrateDeferredSessions();
@@ -3080,7 +3129,8 @@ class AppState extends ChangeNotifier {
     _AccountHandoff handoff,
   ) async {
     if (handoff.rows.isNotEmpty) {
-      if (!await prefs.setStringList(
+      if (!await SessionHistoryRepository.I.writeRows(
+        prefs,
         _accountKey(_kSessions, handoff.account),
         handoff.rows,
       )) {
@@ -4339,6 +4389,11 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Stored history size (UTF-16 code units) from which hydration decodes in
+  /// a background isolate. Tests lower it to exercise that path.
+  @visibleForTesting
+  static int hydrationIsolateThreshold = 512 * 1024;
+
   /// Finish only deferred history; never reload over live edits for a query.
   Future<void> loadSessionsForSearch() => _hydrateDeferredSessions();
 
@@ -4352,7 +4407,11 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       if (!identical(token, _sessionAccountToken)) return;
-      final raw = prefs.getStringList(_accountKey(_kSessions));
+      final raw = await SessionHistoryRepository.I.readRows(
+        prefs,
+        _accountKey(_kSessions),
+      );
+      if (!identical(token, _sessionAccountToken)) return;
       _sessionNamespaceLoaded = true;
       if (raw != null && raw.isNotEmpty) {
         final loaded = raw.map(_decodeSessionSync).toList();
@@ -4409,7 +4468,11 @@ class AppState extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       if (!identical(token, _sessionAccountToken)) return;
       final requestedActiveId = prefs.getString(_accountKey(_kActive));
-      raw = prefs.getStringList(_accountKey(_kSessions));
+      raw = await SessionHistoryRepository.I.readRows(
+        prefs,
+        _accountKey(_kSessions),
+      );
+      if (!identical(token, _sessionAccountToken)) return;
       _sessionNamespaceLoaded = true;
       final requestedActiveRaw = _activeRawSession(
         raw ?? const [],
@@ -4534,9 +4597,14 @@ class AppState extends ChangeNotifier {
     if (generation != _deferredSessionGeneration || !_deferredSessionsPending) {
       return;
     }
-    _deferredSessionJson = List<String>.of(
-      prefs.getStringList(_accountKey(_kSessions)) ?? const [],
+    final rows = await SessionHistoryRepository.I.readRows(
+      prefs,
+      _accountKey(_kSessions),
     );
+    if (generation != _deferredSessionGeneration || !_deferredSessionsPending) {
+      return;
+    }
+    _deferredSessionJson = List<String>.of(rows ?? const <String>[]);
     _deferredSessionsPending = false;
     _expandDeferredDeletedSessionIds();
   }
@@ -4690,19 +4758,40 @@ class AppState extends ChangeNotifier {
     final raw = _deferredSessionJson;
     if (raw == null) return;
     final generation = _deferredSessionGeneration;
+    // Large histories decode off the UI isolate in one batch (F-045); small
+    // ones keep the incremental, yielding decode below.
+    List<ChatSession?>? predecoded;
+    if (raw.fold<int>(0, (n, row) => n + row.length) >=
+        hydrationIsolateThreshold) {
+      final rows = List<String>.of(raw);
+      predecoded = await _decodePersistedSessionsInIsolate(rows);
+      if (!identical(token, _sessionAccountToken) ||
+          generation != _deferredSessionGeneration) {
+        return;
+      }
+    }
     final loaded = <ChatSession>[];
     final unparsed = <String>[];
     for (var index = 0; index < raw.length; index++) {
       if (generation != _deferredSessionGeneration) return;
       final encoded = raw[index];
       try {
-        final fullJson = jsonDecode(encoded) as Map<String, dynamic>;
-        final id = fullJson['id'] as String?;
-        if (id == null || id.isEmpty) {
-          throw const FormatException('Missing session identity');
+        final ChatSession full;
+        if (predecoded != null) {
+          full =
+              predecoded[index] ??
+              (throw const FormatException('Unreadable session row'));
+          if (_deferredDeletedSessionIds.contains(full.id)) continue;
+        } else {
+          final fullJson = jsonDecode(encoded) as Map<String, dynamic>;
+          final id = fullJson['id'] as String?;
+          if (id == null || id.isEmpty) {
+            throw const FormatException('Missing session identity');
+          }
+          if (_deferredDeletedSessionIds.contains(id)) continue;
+          full = ChatSession.fromJson(fullJson);
         }
-        if (_deferredDeletedSessionIds.contains(id)) continue;
-        final full = ChatSession.fromJson(fullJson);
+        final id = full.id;
         final live = sessionById(id);
         if (live != null && id != _deferredActiveSessionId) {
           _deferredProjectionPrefix(full, live);
@@ -4712,7 +4801,7 @@ class AppState extends ChangeNotifier {
         unparsed.add(encoded);
         _startupStageRecorder?.call('local.hydrate.corrupt');
       }
-      if (index % 20 == 19) {
+      if (predecoded == null && index % 20 == 19) {
         await Future<void>.delayed(Duration.zero);
       }
     }
@@ -4909,6 +4998,7 @@ class AppState extends ChangeNotifier {
       session.sandboxId,
       session.systemPromptSnapshot,
       session.titleGenerated,
+      session.updatedAt,
       _sessionNestedSignature(session.analytics.toJson()),
       _sessionNestedSignature(session.goal),
       _sessionNestedSignature(session.todos),
@@ -5111,7 +5201,11 @@ class AppState extends ChangeNotifier {
       } catch (e) {
         Diag.swallow('state', e);
       }
-      if (!await prefs.setStringList(sessionsKey, encoded)) {
+      if (!await SessionHistoryRepository.I.writeRows(
+        prefs,
+        sessionsKey,
+        encoded,
+      )) {
         throw StateError('Session storage rejected write');
       }
       final activeSaved = activeIdWritten != null
@@ -5326,6 +5420,11 @@ class AppState extends ChangeNotifier {
       _memoryOpening = null;
       final prefs = await SharedPreferences.getInstance();
       await prefs.clear();
+      try {
+        await SessionHistoryRepository.I.deleteAll();
+      } catch (e) {
+        Diag.swallow('history.deleteAll', e);
+      }
       await runtimeStatusStore.clear();
       _clearDeferredSessions();
       for (final s in List.of(sessions)) {
@@ -6239,6 +6338,100 @@ class AppState extends ChangeNotifier {
   List<ChatSession> get rootSessions =>
       sessions.where((s) => !s.isSubagent).toList();
 
+  /// Message-content search for the sidebar (F-047): the SQLite FTS5 index
+  /// when available (off the UI isolate), else a bounded in-memory scan.
+  /// One hit per root chat, best first; deleted/hidden chats are dropped.
+  Future<List<SessionContentHit>> searchSessionContent(
+    String query, {
+    int limit = 20,
+  }) async {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return const [];
+    List<SessionContentHit>? hits;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      hits = await SessionHistoryRepository.I.searchContent(
+        prefs,
+        _accountKey(_kSessions),
+        trimmed,
+        limit: limit,
+      );
+    } catch (e) {
+      Diag.swallow('history.search', e);
+    }
+    if (hits != null) {
+      return [
+        for (final hit in hits)
+          if (sessionById(hit.sessionId) case final s? when !s.isSubagent) hit,
+      ];
+    }
+    return _scanSessionContent(trimmed, limit);
+  }
+
+  List<SessionContentHit> _scanSessionContent(String query, int limit) {
+    final needle = query.toLowerCase();
+    final out = <SessionContentHit>[];
+    for (final session in rootSessionsByRecency) {
+      for (var i = session.messages.length - 1; i >= 0; i--) {
+        final m = session.messages[i];
+        if (m.kind != MsgKind.text ||
+            (m.role != 'user' && m.role != 'assistant')) {
+          continue;
+        }
+        final lower = m.content.toLowerCase();
+        final at = lower.indexOf(needle);
+        if (at < 0) continue;
+        if (lower.length != m.content.length) {
+          // Case folding changed offsets; show the head without highlight.
+          out.add(
+            SessionContentHit(
+              sessionId: session.id,
+              messageIndex: i,
+              role: m.role,
+              snippet: m.content.length > 100
+                  ? '${m.content.substring(0, 100)}…'
+                  : m.content,
+            ),
+          );
+          break;
+        }
+        final start = (at - 40).clamp(0, m.content.length);
+        final end = (at + needle.length + 60).clamp(0, m.content.length);
+        out.add(
+          SessionContentHit(
+            sessionId: session.id,
+            messageIndex: i,
+            role: m.role,
+            snippet:
+                '${start > 0 ? '…' : ''}${m.content.substring(start, at)}'
+                '${SessionHistoryRepository.highlightStart}'
+                '${m.content.substring(at, at + needle.length)}'
+                '${SessionHistoryRepository.highlightEnd}'
+                '${m.content.substring(at + needle.length, end)}'
+                '${end < m.content.length ? '…' : ''}',
+          ),
+        );
+        break;
+      }
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  /// Root sessions, most recent activity first (sidebar order, F-046).
+  /// Compared at one-second resolution and stable for ties, so chats touched
+  /// in the same second keep their stored (newest-created-first) order.
+  List<ChatSession> get rootSessionsByRecency {
+    final roots = rootSessions;
+    final order = {for (var i = 0; i < roots.length; i++) roots[i]: i};
+    int second(ChatSession s) =>
+        s.lastActivityAt.millisecondsSinceEpoch ~/ 1000;
+    return roots..sort((a, b) {
+      final byTime = second(b).compareTo(second(a));
+      return byTime != 0 ? byTime : order[a]!.compareTo(order[b]!);
+    });
+  }
+
   /// Direct children of [sessionId], oldest first.
   List<ChatSession> childrenOf(String sessionId) =>
       sessions.where((s) => s.parentId == sessionId).toList().reversed.toList();
@@ -6701,6 +6894,7 @@ class AppState extends ChangeNotifier {
   void sendMessage(String text) {
     final s = _ensureActiveSession();
     s.messages.add(Message(role: 'user', content: text));
+    s.touch();
     // Auto-name session from first message (smart: strip markdown/prompt fluff)
     if (s.title == 'New chat' || s.title.isEmpty) {
       s.title = _autoTitle(text);

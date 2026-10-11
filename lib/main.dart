@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'core/state.dart';
 import 'core/agent_service.dart';
+import 'core/session_history_store.dart';
 import 'core/theme.dart';
 import 'ui/login_gate.dart';
 import 'ui/shell.dart';
@@ -30,6 +31,9 @@ Future<void> main() async {
   AppState.I.registerProductionAccountFeatures();
   // Coalesce session writes in production; tests keep the zero-window default.
   AppState.enableSessionPersistDebounce();
+  // Chat history lives in SQLite (one-time verified migration from prefs).
+  // Kill switch: replace with `disableSqlite()` to roll history back.
+  SessionHistoryRepository.I.enableSqlite();
   await AppState.I.initializeForFirstFrame();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   if (AppState.I.themeMode == 'system') {

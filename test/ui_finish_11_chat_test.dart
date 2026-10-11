@@ -187,7 +187,7 @@ void main() {
     expect(settings.hitTestable(), findsOneWidget);
     final footerRect = tester.getRect(settings);
     expect(footerRect.bottom, lessThanOrEqualTo(360));
-    await tester.enterText(search, 'research-model');
+    await tester.enterText(search, 'research');
     await tester.pump();
     final scrollable = find.descendant(
       of: find.byType(SessionsSidebar),

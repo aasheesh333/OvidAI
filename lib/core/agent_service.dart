@@ -11935,6 +11935,7 @@ ${await _agentsMdBlock()}
       m.thinking = false;
       m.content = '*⏹ stopped by user*';
     }
+    s.touch();
     _flushStreamRefresh();
     _liveContent.clear();
     _liveReasoning.clear();
@@ -13309,6 +13310,8 @@ ${await _agentsMdBlock()}
       m.thinking = false;
       m.content = cleanReasoningText(_liveReasoning.toString());
     }
+    // Reply complete: the chat moves to the top of the sidebar (F-046).
+    s.touch();
     _flushStreamRefresh();
     _liveContent.clear();
     _liveReasoning.clear();

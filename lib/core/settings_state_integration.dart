@@ -62,7 +62,10 @@ extension _SettingsStateIntegration on AppState {
               await _workspaceDeleter(sandboxId);
             }
             final prefs = await SharedPreferences.getInstance();
-            await prefs.remove(_accountKey(AppState._kSessions));
+            await SessionHistoryRepository.I.removeRows(
+              prefs,
+              _accountKey(AppState._kSessions),
+            );
             await prefs.remove(_accountKey(AppState._kActive));
             await prefs.remove(_accountKey(AppState._kSessionBootstrap));
             await prefs.reload();
@@ -77,7 +80,10 @@ extension _SettingsStateIntegration on AppState {
           onVerifyDeleted: () async {
             final prefs = await SharedPreferences.getInstance();
             await prefs.reload();
-            final rows = prefs.getStringList(_accountKey(AppState._kSessions));
+            final rows = await SessionHistoryRepository.I.readRows(
+              prefs,
+              _accountKey(AppState._kSessions),
+            );
             return (rows == null || rows.isEmpty) &&
                 sessions.isEmpty &&
                 _deferredSessionJson == null &&
@@ -523,7 +529,8 @@ extension _SettingsStateIntegration on AppState {
         settingKey: prefs.get(settingKey),
     };
     final key = _accountKey(AppState._kSessions);
-    final oldRows = prefs.getStringList(key);
+    final oldRows = await SessionHistoryRepository.I.readRows(prefs, key);
+    _checkSettingsOwner(token);
     final liveBefore = _sessionJsonForPersistence();
     final activeBefore = activeSessionId;
     final existingIds = <String>{
@@ -669,7 +676,10 @@ extension _SettingsStateIntegration on AppState {
       checkUnchanged();
       await prefs.reload();
       checkUnchanged();
-      if (!listEquals(oldRows, prefs.getStringList(key))) {
+      if (!listEquals(
+        oldRows,
+        await SessionHistoryRepository.I.readRows(prefs, key),
+      )) {
         throw StateError('Session storage changed during restore.');
       }
       // One authoritative write: append without rewriting a single existing
@@ -743,11 +753,15 @@ extension _SettingsStateIntegration on AppState {
     String key,
     List<String>? rows,
   ) async {
-    final accepted = rows == null
-        ? await prefs.remove(key)
-        : await prefs.setStringList(key, rows);
+    final history = SessionHistoryRepository.I;
+    final accepted = await history.writeRows(prefs, key, rows);
     await prefs.reload();
-    if (!accepted || !listEquals(rows, prefs.getStringList(key))) {
+    final readBack = await history.readRows(prefs, key);
+    if (!accepted ||
+        !listEquals(
+          rows == null || rows.isEmpty ? null : rows,
+          readBack == null || readBack.isEmpty ? null : readBack,
+        )) {
       throw StateError('Session storage write/readback failed.');
     }
   }

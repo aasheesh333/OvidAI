@@ -62,12 +62,16 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _firebase.addListener(_onAuth);
-    _kickFirebaseInit();
+    // Initialization may have started elsewhere and already observed the user.
+    if (_firebase.isAvailable && _firebase.firstUserKnown) {
+      _initializing = false;
+    }
+    _kickFirebaseInit(initial: true);
   }
 
-  Future<void> _kickFirebaseInit() async {
+  Future<void> _kickFirebaseInit({bool initial = false}) async {
     if (_initializationRetrying) return;
-    if (!_initializing) {
+    if (!initial && !_initializing) {
       setState(() => _initializationRetrying = true);
     }
     try {
@@ -93,6 +97,11 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
   void _onAuth() {
     if (!mounted) return;
     final fb = _firebase;
+    // The user is known before history hydration finishes: leave the splash
+    // and let the account-not-ready screen cover hydration.
+    if (_initializing && fb.isAvailable && fb.firstUserKnown) {
+      _initializing = false;
+    }
     final owner = OvidCloudService.I.accountIdentity;
     if (_bindOwner != owner) {
       _bindOwner = owner;

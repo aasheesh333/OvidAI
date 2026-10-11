@@ -8,6 +8,8 @@ import 'package:ovid_ai/core/firebase_service.dart';
 import 'package:ovid_ai/ui/login_gate.dart';
 
 class GateService extends ChangeNotifier implements FirebaseService {
+  @override
+  bool get firstUserKnown => false;
   final initialization = Completer<void>();
   @override
   bool isAvailable = false;
