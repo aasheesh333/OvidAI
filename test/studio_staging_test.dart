@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'studio_commit_approval_test.dart' show revealInReview;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
@@ -67,7 +68,10 @@ void main() {
     await open(tester, StudioCommitDialog(client: git.client));
     await tester.tap(find.text('Review changes'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('old mode 100644\nnew mode 100755'), findsOneWidget);
+    // Real line diff (F-169): mode lines are separate rows of the review.
+    await revealInReview(tester, find.text('new mode 100755'));
+    expect(find.text('old mode 100644'), findsOneWidget);
+    expect(find.text('new mode 100755'), findsOneWidget);
     await tester.tap(find.text('Approve and commit'));
     await tester.pumpAndSettle();
     final tree = git.requests.singleWhere((r) => r.method == 'POST' && r.url.path.endsWith('/trees'));
@@ -97,6 +101,7 @@ void main() {
     expect(git.mutations, isEmpty);
     await tester.tap(find.text('Review changes'));
     await tester.pumpAndSettle();
+    await revealInReview(tester, find.textContaining('deleted file mode 100644'));
     expect(find.textContaining('deleted file mode 100644'), findsOneWidget);
   });
 
@@ -114,7 +119,8 @@ void main() {
     expect(find.widgetWithText(CheckboxListTile, 'a.sh'), findsOneWidget);
     await tester.tap(find.text('Review changes'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('-same\n'), findsOneWidget);
+    await revealInReview(tester, find.text('-same'));
+    expect(find.text('-same'), findsOneWidget);
     await tester.tap(find.text('Approve and commit'));
     await tester.pumpAndSettle();
     expect(cache.hasPending, isFalse);

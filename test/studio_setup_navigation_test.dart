@@ -163,7 +163,11 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Studio'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('Download interrupted'), findsOneWidget);
+      expect(
+        find.textContaining('Sandbox setup did not finish'),
+        findsOneWidget,
+      );
+      expect(coordinator.errorDetail, contains('Download interrupted'));
       expect(find.text('Retry install'), findsOneWidget);
       expect(installs, 1);
       expect(AppState.I.studioFirstOpenDone, isFalse);

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/pty_service.dart';
 import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/core/studio_terminal.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/studio_screen.dart';
 
@@ -31,11 +32,8 @@ void main() {
         dir.deleteSync(recursive: true);
       } catch (_) {}
     });
-    studioPtySpawnerOverrideForTest = () => Process.start(
-      _bash(),
-      ['--norc'],
-      workingDirectory: '/tmp',
-    );
+    studioPtySpawnerOverrideForTest = () =>
+        Process.start(_bash(), ['--norc'], workingDirectory: '/tmp');
 
     await tester.pumpWidget(
       MaterialApp(
@@ -66,6 +64,68 @@ void main() {
       reason: 'busy clears when the command completes',
     );
   });
+
+  testWidgets('Stop is tappable while a command runs and clears busy', (
+    tester,
+  ) async {
+    studioPtySpawnerOverrideForTest = () =>
+        Process.start(_bash(), ['--norc'], workingDirectory: '/tmp');
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Aether.theme(),
+        home: const Scaffold(body: StudioTerminalTabs()),
+      ),
+    );
+    await tester.pump();
+
+    final input = find.byType(TextField).first;
+    await tester.enterText(input, 'sleep 30');
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+    });
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byKey(studioTerminalStopKey), findsOneWidget);
+    expect(
+      tester.widget<TextField>(input).enabled ?? true,
+      isTrue,
+      reason: 'the field stays enabled so stdin can be typed',
+    );
+
+    await tester.tap(find.byKey(studioTerminalStopKey));
+    await tester.pump();
+    await _settle(
+      tester,
+      () => find.byType(CircularProgressIndicator).evaluate().isEmpty,
+      reason: 'Stop to end the command',
+      debug: () => _terminalTexts(tester).toList().toString(),
+    );
+    expect(find.byKey(studioTerminalStopKey), findsNothing);
+  });
+
+  testWidgets('an unclosed quote is refused, not dispatched', (tester) async {
+    studioPtySpawnerOverrideForTest = () =>
+        Process.start(_bash(), ['--norc'], workingDirectory: '/tmp');
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Aether.theme(),
+        home: const Scaffold(body: StudioTerminalTabs()),
+      ),
+    );
+    await tester.pump();
+    final input = find.byType(TextField).first;
+    await tester.enterText(input, 'echo "foo');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+    expect(
+      _terminalTexts(tester).any((s) => s.contains('Unclosed quote')),
+      isTrue,
+    );
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(StudioShellSession.incompleteReason('echo "foo'), isNotNull);
+  });
 }
 
 Iterable<String> _terminalTexts(WidgetTester tester) => tester
@@ -86,7 +146,7 @@ Future<void> _send(WidgetTester tester, Finder input, String cmd) async {
   // command; `_run` drops commands while busy.
   await _settle(
     tester,
-    () => tester.widget<TextField>(input).enabled ?? false,
+    () => find.byType(CircularProgressIndicator).evaluate().isEmpty,
     reason: 'command "$cmd" to finish',
   );
 }

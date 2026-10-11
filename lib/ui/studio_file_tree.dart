@@ -322,7 +322,11 @@ class _StudioFileTreeState extends State<StudioFileTree> {
                   itemBuilder: (_, i) => _row(nodes[i], active, cache),
                 ),
               SliverToBoxAdapter(
-                child: _TreeFooter(ready: cache.isReady, count: cache.files.length),
+                child: _TreeFooter(
+                  ready: cache.isReady,
+                  count: cache.files.length,
+                  report: cache.lastSyncReport,
+                ),
               ),
             ],
           ),
@@ -578,14 +582,30 @@ class _TreeEmpty extends StatelessWidget {
 }
 
 class _TreeFooter extends StatelessWidget {
-  const _TreeFooter({required this.ready, required this.count});
+  const _TreeFooter({required this.ready, required this.count, this.report});
 
   final bool ready;
   final int count;
 
+  /// The last sync's report: a partial sync must not read "Synced".
+  final SyncReport? report;
+
   @override
   Widget build(BuildContext context) {
-    final text = ready ? 'Synced · $count files' : 'Not connected';
+    final r = report;
+    final partial = r != null && r.partial;
+    final missing = r == null
+        ? 0
+        : r.droppedByCap + r.failedPaths.length + r.unattemptedPaths.length;
+    final text = !ready && r == null
+        ? 'Not connected'
+        : partial
+        ? (missing > 0
+              ? 'Partial · $count files loaded, $missing not loaded'
+              : 'Partial · $count files loaded')
+        : r?.localWorkspace == true
+        ? 'Local folder · $count files'
+        : 'Synced · $count files';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -597,9 +617,17 @@ class _TreeFooter extends StatelessWidget {
         child: Row(
           children: [
             Icon(
-              ready ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+              partial
+                  ? Icons.warning_amber_rounded
+                  : ready
+                  ? Icons.cloud_done_outlined
+                  : Icons.cloud_off_outlined,
               size: 15,
-              color: ready ? Aether.successLight : Aether.textFaint,
+              color: partial
+                  ? Aether.warnLight
+                  : ready
+                  ? Aether.successLight
+                  : Aether.textFaint,
             ),
             const SizedBox(width: 7),
             Expanded(

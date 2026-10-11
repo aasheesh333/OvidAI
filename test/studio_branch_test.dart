@@ -193,6 +193,40 @@ void main() {
     expect(RepoCache.I.files, isEmpty, reason: 'stale files must not remain');
   });
 
+  testWidgets('a partial sync shows "N files not loaded" with Retry (F-168)', (
+    tester,
+  ) async {
+    app.activeSession!.repo = 'owner/repo';
+    AgentService.I.repoFull = 'owner/repo';
+    var syncs = 0;
+    studioRepoSyncOverrideForTest = () async {
+      syncs++;
+    };
+    studioRepoSyncReportOverrideForTest = SyncReport(
+      requested: 2000,
+      fetched: 2000,
+      skippedByFilter: 0,
+      treeTruncated: false,
+      droppedByCap: 10,
+      failedPaths: const [],
+      unattemptedPaths: const [],
+      preservedPaths: const [],
+    );
+    addTearDown(() => studioRepoSyncReportOverrideForTest = null);
+
+    await pumpStudio(tester);
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('10 files not loaded'), findsOneWidget);
+    expect(find.textContaining('left out by the sync cap'), findsOneWidget);
+    final before = syncs;
+    await tester.tap(find.byTooltip('Retry sync'));
+    await tester.pump();
+    await tester.pump();
+    expect(syncs, before + 1);
+  });
+
   test('branchForPickedRepo resets to the default branch or main', () {
     expect(
       branchForPickedRepo({'full_name': 'o/r', 'default_branch': 'trunk'}),

@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'diag.dart';
+import 'github_http_error.dart';
+import 'line_diff.dart';
 import 'studio_drafts.dart';
 import 'workspace_files.dart';
 
@@ -181,39 +184,122 @@ class CommitApproval {
   final Map<String, String?> _stagedModes, _revisions;
   List<String> get paths => List.unmodifiable(contents.keys);
 
-  /// Full-file unified hunks avoid a misleading truncated/summary-only diff.
-  /// Missing trailing newlines are explicit, including for empty files.
-  String get diff {
-    final out = StringBuffer();
-    List<String> lines(String? text) {
-      if (text == null || text.isEmpty) return [];
-      final parts = text.split('\n');
-      if (parts.last.isEmpty) parts.removeLast();
-      return parts;
+  final _DiffCache _diffCache = _DiffCache();
+
+  List<FileDiffInput> _diffInput() => [
+    for (final path in paths)
+      (
+        path: path,
+        before: originals[path],
+        after: contents[path],
+        oldMode: originalModes[path],
+        newMode: modes[path],
+      ),
+  ];
+
+  /// Per-file unified diff (real line diff, 3 lines of context), computed
+  /// once and cached on the approval. Missing trailing newlines are explicit.
+  List<FileDiff> get fileDiffs =>
+      _diffCache.files ??= List.unmodifiable(buildFileDiffs(_diffInput()));
+
+  /// Same as [fileDiffs], but large inputs are diffed off the UI isolate.
+  Future<List<FileDiff>> fileDiffsAsync() async {
+    final cached = _diffCache.files;
+    if (cached != null) return cached;
+    final input = _diffInput();
+    var size = 0;
+    for (final f in input) {
+      size += (f.before?.length ?? 0) + (f.after?.length ?? 0);
     }
-    void body(String? text, String prefix) {
-      for (final line in lines(text)) { out.writeln('$prefix$line'); }
-      if (text != null && text.isNotEmpty && !text.endsWith('\n')) {
-        out.writeln(r'\ No newline at end of file');
+    if (size < _isolateDiffThreshold) return fileDiffs;
+    final result = await Isolate.run(() => buildFileDiffs(input));
+    return _diffCache.files ??= List.unmodifiable(result);
+  }
+
+  static const int _isolateDiffThreshold = 256 * 1024;
+
+  /// The whole review as unified-diff text (agent approval prompt, tests).
+  String get diff => _diffCache.text ??= fileDiffs
+      .expand((f) => [...f.header, ...f.lines])
+      .map((l) => '$l\n')
+      .join();
+}
+
+/// What [buildFileDiffs] diffs for one approved path.
+typedef FileDiffInput = ({
+  String path,
+  String? before,
+  String? after,
+  String? oldMode,
+  String? newMode,
+});
+
+class _DiffCache {
+  List<FileDiff>? files;
+  String? text;
+}
+
+/// One file's section of a commit review.
+@immutable
+class FileDiff {
+  const FileDiff({
+    required this.path,
+    required this.header,
+    required this.lines,
+    required this.added,
+    required this.removed,
+  });
+
+  final String path;
+
+  /// `diff --git`, mode and `---`/`+++` lines.
+  final List<String> header;
+
+  /// Hunk headers and bodies (`@@ …`, ` ctx`, `-old`, `+new`, `\ No newline…`).
+  final List<String> lines;
+  final int added, removed;
+}
+
+/// Builds per-file diffs. Top-level so it can run in `Isolate.run`.
+List<FileDiff> buildFileDiffs(List<FileDiffInput> input) {
+  final out = <FileDiff>[];
+  for (final f in input) {
+    final quoted = jsonEncode(f.path);
+    final header = <String>['diff --git $quoted $quoted'];
+    if (f.before == null) {
+      header.add('new file mode ${f.newMode}');
+    } else if (f.after == null) {
+      header.add('deleted file mode ${f.oldMode}');
+    } else if (f.oldMode != f.newMode) {
+      header..add('old mode ${f.oldMode}')..add('new mode ${f.newMode}');
+    } else {
+      header.add('file mode ${f.newMode} (unchanged)');
+    }
+    if (f.before == f.after) {
+      out.add(FileDiff(path: f.path, header: header, lines: const [],
+          added: 0, removed: 0));
+      continue;
+    }
+    header
+      ..add('--- ${f.before == null ? '/dev/null' : 'a/$quoted'}')
+      ..add('+++ ${f.after == null ? '/dev/null' : 'b/$quoted'}');
+    final hunks = unifiedHunks(f.before, f.after);
+    var added = 0, removed = 0;
+    for (final h in hunks) {
+      for (final l in h.lines) {
+        if (l.kind == '+') added++;
+        if (l.kind == '-') removed++;
       }
     }
-    for (final path in paths) {
-      final before = originals[path], after = contents[path];
-      final quoted = jsonEncode(path);
-      out.writeln('diff --git $quoted $quoted');
-      out.writeln(before == null ? 'new file mode ${modes[path]}' :
-          after == null ? 'deleted file mode ${originalModes[path]}' :
-          originalModes[path] != modes[path] ? 'old mode ${originalModes[path]}\nnew mode ${modes[path]}' :
-          'file mode ${modes[path]} (unchanged)');
-      if (before == after) continue;
-      out.writeln('--- ${before == null ? '/dev/null' : 'a/$quoted'}');
-      out.writeln('+++ ${after == null ? '/dev/null' : 'b/$quoted'}');
-      out.writeln('@@ -${lines(before).isEmpty ? 0 : 1},${lines(before).length} +${lines(after).isEmpty ? 0 : 1},${lines(after).length} @@');
-      body(before, '-');
-      body(after, '+');
-    }
-    return out.toString();
+    out.add(FileDiff(
+      path: f.path,
+      header: List.unmodifiable(header),
+      lines: List.unmodifiable(renderHunks(hunks)),
+      added: added,
+      removed: removed,
+    ));
   }
+  return out;
 }
 
 /// What the last successful [RepoCache.commitAll] actually did.
@@ -1097,7 +1183,7 @@ class RepoCache extends ChangeNotifier {
       ),
     );
     if (res.statusCode != 200) {
-      throw Exception('tree fetch ${res.statusCode}');
+      throw GitHubHttpException.fromResponse('tree fetch', res);
     }
     final j = jsonDecode(res.body) as Map<String, dynamic>;
     final entries =
@@ -1611,7 +1697,12 @@ class RepoCache extends ChangeNotifier {
       });
       _ensureBinding(generation);
       if (response.statusCode != 200) {
-        throw Exception('commit preview fetch failed: ${response.statusCode} — no non-atomic fallback; per-file commits require explicit approval');
+        throw GitHubHttpException.fromResponse(
+          'commit preview fetch',
+          response,
+          note: 'no non-atomic fallback; per-file commits require explicit '
+              'approval',
+        );
       }
       return jsonDecode(response.body) as Map<String, dynamic>;
     }
@@ -1824,17 +1915,20 @@ class RepoCache extends ChangeNotifier {
       }
     }
 
-    Exception failed(String operation, int status) => Exception(
-      '$operation failed: $status — '
-      'no non-atomic fallback; per-file commits require explicit approval',
-    );
+    Exception failed(String operation, http.Response res) =>
+        GitHubHttpException.fromResponse(
+          operation,
+          res,
+          note: 'no non-atomic fallback; per-file commits require explicit '
+              'approval',
+        );
 
     // 1. Branch tip.
     final refUri = _apiUri('repos/$repo/git/ref/heads/$branch');
     final refRes = await get(refUri);
     _ensureBinding(generation);
     if (refRes.statusCode != 200) {
-      throw failed('ref fetch for branch "$branch"', refRes.statusCode);
+      throw failed('ref fetch for branch "$branch"', refRes);
     }
     final refObject =
         (jsonDecode(refRes.body) as Map<String, dynamic>)['object'];
@@ -1862,7 +1956,7 @@ class RepoCache extends ChangeNotifier {
       final res = await post('repos/$repo/git/blobs', body);
       _ensureBinding(generation);
       if (res.statusCode != 201 && res.statusCode != 200) {
-        throw failed('blob create for "$p"', res.statusCode);
+        throw failed('blob create for "$p"', res);
       }
       final sha = (jsonDecode(res.body) as Map<String, dynamic>)['sha']
           as String?;
@@ -1886,7 +1980,7 @@ class RepoCache extends ChangeNotifier {
     final treeRes = await post('repos/$repo/git/trees', treeBody);
     _ensureBinding(generation);
     if (treeRes.statusCode != 201 && treeRes.statusCode != 200) {
-      throw failed('tree create', treeRes.statusCode);
+      throw failed('tree create', treeRes);
     }
     final treeSha = (jsonDecode(treeRes.body) as Map<String, dynamic>)['sha']
         as String?;
@@ -1901,7 +1995,7 @@ class RepoCache extends ChangeNotifier {
     final commitRes = await post('repos/$repo/git/commits', commitBody);
     _ensureBinding(generation);
     if (commitRes.statusCode != 201 && commitRes.statusCode != 200) {
-      throw failed('commit create', commitRes.statusCode);
+      throw failed('commit create', commitRes);
     }
     final commitSha =
         (jsonDecode(commitRes.body) as Map<String, dynamic>)['sha'] as String?;
@@ -1953,7 +2047,7 @@ class RepoCache extends ChangeNotifier {
     if (status != null && status >= 400 && status < 500 && status != 408) {
       await _clearIntent(intentKey);
       _ensureBinding(generation);
-      throw failed('ref update for "$branch"', status);
+      throw failed('ref update for "$branch"', patchRes!);
     }
 
     String? observed;
@@ -2011,9 +2105,16 @@ class RepoCache extends ChangeNotifier {
 
 /// A transient HTTP status whose retry budget was exhausted (audit
 /// 2026-09-25 §8) — carries the status so callers can classify it.
-class _TransientExhausted implements Exception {
-  _TransientExhausted(this.status, this.attempts, {this.retryAfter});
-  final int status;
+class _TransientExhausted extends GitHubHttpException {
+  _TransientExhausted(int status, this.attempts, {this.retryAfter})
+    : super(
+        'GitHub request',
+        status,
+        rateLimited: status == 429 || status == 403,
+        rateLimitReset: retryAfter == null || (status != 429 && status != 403)
+            ? null
+            : DateTime.now().add(retryAfter),
+      );
   final int attempts;
   final Duration? retryAfter;
   @override

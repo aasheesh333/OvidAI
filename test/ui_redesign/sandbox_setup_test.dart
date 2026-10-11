@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +7,7 @@ import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/studio_setup_coordinator.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/sandbox_setup.dart';
+import 'package:ovid_ai/ui/shell.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -208,6 +210,19 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Install interrupted'), findsOneWidget);
+      // The raw exception is never the headline (F-171): human copy first,
+      // the original line only behind Details.
+      expect(
+        find.textContaining('Sandbox setup did not finish'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('simulated kernel check failure'),
+        findsNothing,
+      );
+      await tester.ensureVisible(find.text('Details'));
+      await tester.tap(find.text('Details'));
+      await tester.pump();
       expect(
         find.textContaining('simulated kernel check failure'),
         findsOneWidget,
@@ -315,4 +330,53 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+  testWidgets(
+    'gate mode failure is not a dead end: Continue to chat hands off to '
+    'OvidShell (F-176)',
+    (tester) async {
+      tallViewport(tester);
+      useCoordinator(
+        install: (_, _) async => throw StateError('corrupt bundled asset'),
+      );
+      await tester.pumpWidget(host(gateMode: true));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('Install interrupted'), findsOneWidget);
+      expect(find.text('Retry install'), findsOneWidget);
+      expect(find.text('Copy log'), findsOneWidget);
+      final cont = find.text('Continue to chat without sandbox');
+      expect(cont, findsOneWidget);
+      await tester.ensureVisible(cont);
+      await tester.tap(cont);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.byType(OvidShell), findsOneWidget);
+      expect(AppState.I.sandboxSkipped, isTrue);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets('errno = 28 shows storage copy, never FileSystemException text', (
+    tester,
+  ) async {
+    tallViewport(tester);
+    useCoordinator(
+      install: (_, _) async => throw const FileSystemException(
+        'Cannot create file',
+        '/data/user/0/x/usr/bin/node',
+        OSError('No space left on device', 28),
+      ),
+    );
+    await tester.pumpWidget(host());
+    await tester.pump();
+    await tester.tap(find.text('Install sandbox'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Not enough storage'), findsOneWidget);
+    expect(find.textContaining('FileSystemException'), findsNothing);
+    expect(find.textContaining('errno'), findsNothing);
+  });
 }

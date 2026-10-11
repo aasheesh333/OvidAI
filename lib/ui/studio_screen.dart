@@ -32,7 +32,10 @@ import 'widgets/aether_primitives.dart';
 export 'studio_editor.dart' show StudioEditor, StudioEditorTabs;
 export 'studio_file_tree.dart' show StudioFileTree;
 export 'studio_terminal_tabs.dart'
-    show StudioTerminalTabs, studioPtySpawnerOverrideForTest;
+    show
+        StudioTerminalTabs,
+        studioPtySpawnerOverrideForTest,
+        studioTerminalStopKey;
 
 /// Test seam: overrides the device directory picker for the Studio
 /// working-folder affordance so host widget tests can drive "change folder"
@@ -58,8 +61,28 @@ studioListBranchesOverrideForTest;
 @visibleForTesting
 Future<void> Function()? studioRepoSyncOverrideForTest;
 
+/// Test seam: the [SyncReport] an overridden sync "returned", so a test can
+/// drive the partial-sync banner. Production ignores it.
+@visibleForTesting
+SyncReport? studioRepoSyncReportOverrideForTest;
+
 @visibleForTesting
 GlobalRepoRegistry? studioRegistryOverrideForTest;
+
+/// Test seams for the repo picker's paged list and name search.
+@visibleForTesting
+Future<List<Map<String, dynamic>>> Function({int page})?
+studioListReposOverrideForTest;
+@visibleForTesting
+Future<List<Map<String, dynamic>>> Function(
+  String query, {
+  Iterable<String> owners,
+})?
+studioSearchReposOverrideForTest;
+
+/// The picker search field (test seam).
+@visibleForTesting
+const Key studioPickerSearchKey = ValueKey('studio-picker-search');
 
 /// Test seam: same as [studioRepoSyncOverrideForTest] but receives the
 /// progress sink, so a test can assert that Studio surfaces [RepoCache.sync]'s
@@ -141,6 +164,10 @@ class _StudioScreenState extends State<StudioScreen> {
   /// Human message for a failed sync; [_syncErrorDetail] keeps the raw text.
   String? _syncError;
   String? _syncErrorDetail;
+
+  /// The last sync's report when it was PARTIAL (file cap, truncated tree,
+  /// failed fetches, deadline). A partial copy must never look complete.
+  SyncReport? _partialReport;
   String? _cloneStatus;
   String? _workspaceKey;
 
@@ -312,11 +339,17 @@ class _StudioScreenState extends State<StudioScreen> {
   /// The one sync path. Production wires [RepoCache.sync]'s `onLine` progress
   /// callback, which Studio used to drop — a serial fetch of up to 400 files
   /// could run for minutes behind an 11px spinner.
-  Future<void> _runSync(void Function(String) onLine) {
+  Future<SyncReport?> _runSync(void Function(String) onLine) async {
     final legacy = studioRepoSyncOverrideForTest;
-    if (legacy != null) return legacy();
+    if (legacy != null) {
+      await legacy();
+      return studioRepoSyncReportOverrideForTest;
+    }
     final progress = studioRepoSyncProgressOverrideForTest;
-    if (progress != null) return progress(onLine);
+    if (progress != null) {
+      await progress(onLine);
+      return studioRepoSyncReportOverrideForTest;
+    }
     return RepoCache.I.sync(onLine: onLine);
   }
 
@@ -344,10 +377,12 @@ class _StudioScreenState extends State<StudioScreen> {
       _syncing = true;
       _syncError = null;
       _syncErrorDetail = null;
+      _partialReport = null;
       _syncProgress = 'Syncing…';
       _syncFraction = null;
     });
     StudioFailure? failure;
+    SyncReport? report;
     int? binding;
     int? syncOperation;
     final workspaceKey = _workspaceKey;
@@ -367,7 +402,7 @@ class _StudioScreenState extends State<StudioScreen> {
         }
       });
       syncOperation = RepoCache.I.syncOperation;
-      await syncing;
+      report = await syncing;
     } catch (e) {
       failure = StudioFailure.of(e);
     }
@@ -379,6 +414,11 @@ class _StudioScreenState extends State<StudioScreen> {
       _syncFraction = null;
     });
     if (failure != null) succeeded = false;
+    if (failure == null && report != null && report.partial &&
+        binding == RepoCache.I.bindingGeneration &&
+        workspaceKey == _workspaceKey) {
+      setState(() => _partialReport = report);
+    }
     if (failure != null && binding == RepoCache.I.bindingGeneration &&
         syncOperation == RepoCache.I.syncOperation && workspaceKey == _workspaceKey) {
       // A missing branch/ref must surface, not be swallowed — and the previous
@@ -747,15 +787,30 @@ class _StudioScreenState extends State<StudioScreen> {
       return;
     }
     try {
-      List<Map<String, dynamic>> repos = const [];
+      final repos = <Map<String, dynamic>>[];
       if (!mounted) return;
       final picked = await showStudioSheet<String>(
         context,
-        child: StudioRepoSheet(
-          loader: () async {
-            repos = await GitHubService.I.listRepos();
-            return repos;
-          },
+        scrollable: true,
+        child: FractionallySizedBox(
+          heightFactor: 0.85,
+          child: StudioRepoSheet(
+            pageLoader: (page) async {
+              final next = await (studioListReposOverrideForTest ??
+                  GitHubService.I.listRepos)(page: page);
+              repos.addAll(next);
+              return next;
+            },
+            search: (query) async {
+              final owners = {
+                for (final r in repos) ?repoFullNameOf(r)?.split('/').first,
+              };
+              final hits = await (studioSearchReposOverrideForTest ??
+                  GitHubService.I.searchRepos)(query, owners: owners);
+              repos.addAll(hits);
+              return hits;
+            },
+          ),
         ),
       );
       if (picked == null) return;
@@ -876,10 +931,13 @@ class _StudioScreenState extends State<StudioScreen> {
     if (_committing) return;
     setState(() => _committing = true);
     try {
-      final count = await showDialog<int>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const StudioCommitDialog(),
+      // Full-screen route, not an AlertDialog: a review of many files (or a
+      // lockfile) needs the whole screen, a lazy list and room for the IME.
+      final count = await Navigator.of(context).push<int>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => const StudioCommitDialog(),
+        ),
       );
       if (!mounted || count == null) return;
       final mode = RepoCache.I.lastCommit?.mode == CommitMode.atomic
@@ -982,6 +1040,12 @@ class _StudioScreenState extends State<StudioScreen> {
                       _syncError = null;
                       _syncErrorDetail = null;
                     }),
+                  ),
+                if (_partialReport != null && _syncError == null)
+                  _SyncPartialBanner(
+                    report: _partialReport!,
+                    onRetry: _syncing ? null : _autoSync,
+                    onDismiss: () => setState(() => _partialReport = null),
                   ),
                 if (_cloneStatus != null) _StatusBanner(_cloneStatus!),
                 if (_syncing)
@@ -1242,9 +1306,25 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
   late final List<String> _paths = RepoCache.I.pendingPaths.toList();
   late final Set<String> _selected = _paths.toSet();
   CommitApproval? _approval;
+  List<FileDiff>? _diffs;
   String? _error;
+  String? _errorDetail;
+
+  /// Set when GitHub did not confirm a publication: the intended commit SHA
+  /// the user can copy and check (CommitFailureKind.unknown).
+  String? _unknownSha;
   bool _busy = false;
   int _revision = 0;
+  final Set<String> _collapsed = {};
+  final Set<String> _showFull = {};
+  bool _showErrorDetail = false;
+
+  /// Rendered diff lines per file before "Show full diff" (large lockfiles
+  /// and minified bundles must not lay out megabytes of text).
+  static const int maxRenderedLinesPerFile = 400;
+
+  /// A single rendered diff line is clipped to this many characters.
+  static const int maxRenderedLineChars = 400;
 
   @override
   void initState() {
@@ -1255,7 +1335,39 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
 
   void _invalidate() {
     if (!mounted) return;
-    setState(() { _revision++; _approval = null; });
+    setState(() { _revision++; _approval = null; _diffs = null; });
+  }
+
+  void _setError(Object e) {
+    final f = StudioFailure.of(e);
+    _error = e is StateError && '$e'.contains('No unresolved commit intent')
+        ? 'There is no interrupted commit to check.'
+        : f.message;
+    _errorDetail = f.detail == _error ? null : f.detail;
+    _showErrorDetail = false;
+    _unknownSha = e is CommitFailure && e.kind == CommitFailureKind.unknown
+        ? e.intendedSha
+        : _unknownSha;
+  }
+
+  void _clearError() {
+    _error = null;
+    _errorDetail = null;
+  }
+
+  void _setApproval(CommitApproval approval) {
+    _approval = approval;
+    _diffs = null;
+    final revision = _revision;
+    approval.fileDiffsAsync().then((diffs) {
+      if (mounted && identical(_approval, approval) && revision == _revision) {
+        setState(() => _diffs = diffs);
+      }
+    }, onError: (Object e) {
+      if (mounted && identical(_approval, approval)) {
+        setState(() => _setError(e));
+      }
+    });
   }
 
   void _cacheChanged() {
@@ -1278,19 +1390,19 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
       RepoCache.I.validateApprovalRevision(_approval!);
     } catch (e) {
       _invalidate();
-      setState(() => _error = '$e');
+      setState(() => _setError(e));
     }
   }
 
   Future<void> _review() async {
     final revision = _revision;
-    setState(() { _busy = true; _error = null; _approval = null; });
+    setState(() { _busy = true; _clearError(); _approval = null; _diffs = null; });
     try {
       final approval = await RepoCache.I.prepareCommit(_message.text,
           paths: _selected, client: widget.client);
-      if (mounted && revision == _revision) setState(() => _approval = approval);
+      if (mounted && revision == _revision) setState(() => _setApproval(approval));
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _setError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1299,29 +1411,32 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
   Future<void> _publish() async {
     final approval = _approval;
     if (approval == null) return;
-    setState(() { _busy = true; _error = null; });
+    setState(() { _busy = true; _clearError(); });
     try {
       final count = await RepoCache.I.commitApproved(approval, client: widget.client);
       if (mounted) Navigator.of(context).pop(count);
     } catch (e) {
-      if (mounted) setState(() { _error = '$e'; _approval = null; });
+      if (mounted) setState(() { _setError(e); _approval = null; _diffs = null; });
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   Future<void> _reconcile() async {
-    setState(() { _busy = true; _error = null; });
+    setState(() { _busy = true; _clearError(); });
     try {
       final count = await RepoCache.I.reconcilePending(client: widget.client);
       if (!mounted) return;
       if (count != null) {
         Navigator.of(context).pop(count);
       } else {
-        setState(() => _error = 'No unresolved commit intent');
+        setState(() {
+          _unknownSha = null;
+          _error = 'There is no interrupted commit to check.';
+        });
       }
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _setError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1367,52 +1482,207 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
     super.dispose();
   }
 
+  Color _diffColor(String line) {
+    if (line.startsWith('@@')) return Aether.accent;
+    if (line.startsWith('+')) return Aether.successLight;
+    if (line.startsWith('-')) return Aether.danger;
+    return Aether.textMuted;
+  }
+
+  Widget _diffLine(String line) {
+    final shown = line.length > maxRenderedLineChars
+        ? '${line.substring(0, maxRenderedLineChars)}… (${line.length - maxRenderedLineChars} more characters)'
+        : line;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Text(
+        shown,
+        softWrap: true,
+        style: TextStyle(
+          fontFamily: Aether.mono,
+          fontFamilyFallback: kStudioMonoFallback,
+          fontSize: kStudioMinFontSize,
+          height: 1.45,
+          color: _diffColor(line),
+        ),
+      ),
+    );
+  }
+
+  /// The review body as lazily-built rows: only what is on screen is laid
+  /// out, so a large diff cannot jank or exhaust memory.
+  List<WidgetBuilder> _rows(CommitApproval? approval) {
+    final rows = <WidgetBuilder>[
+      (_) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Text('${RepoCache.I.repoFull} · ${RepoCache.I.defaultBranch}',
+            style: AetherType.bodyMuted),
+      ),
+      for (final path in _paths)
+        (_) => CheckboxListTile(
+          title: Text(path), value: _selected.contains(path),
+          subtitle: Text(RepoCache.I.isStagedDeletion(path)
+              ? 'Staged deletion · disk unchanged'
+              : RepoCache.I.stagedMode(path) == null
+              ? 'Content · review exact diff'
+              : 'Staged Git mode ${RepoCache.I.stagedMode(path)}'),
+          secondary: StudioStagingMenu(path: path, enabled: !_busy),
+          onChanged: _busy ? null : (value) {
+            _invalidate();
+            setState(() { if (value == true) { _selected.add(path); } else { _selected.remove(path); } });
+          },
+        ),
+      if (RepoCache.I.workspaceFolder != null)
+        (_) => Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(onPressed: _busy ? null : _stageMissingDeletion,
+              child: const Text('Stage missing file deletion')),
+        ),
+      (_) => const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: Text('Staging does not change disk files or permissions.'),
+      ),
+    ];
+    if (approval != null) {
+      final base = approval.baseCommit;
+      rows.add((_) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+        child: SelectableText(
+          'Repository: ${approval.repo}\nBranch: ${approval.branch}\n'
+          'Base: ${base.length > 7 ? base.substring(0, 7) : base}\n'
+          'Message: ${approval.message}\n'
+          'Selected paths:\n${approval.paths.map((p) => '  $p').join('\n')}',
+        ),
+      ));
+      final diffs = _diffs;
+      if (diffs == null) {
+        rows.add((_) => const Padding(
+          padding: EdgeInsets.all(16),
+          child: Text('Preparing diff…'),
+        ));
+      } else {
+        for (final f in diffs) {
+          final collapsed = _collapsed.contains(f.path);
+          rows.add((_) => InkWell(
+            onTap: () => setState(() {
+              if (!_collapsed.remove(f.path)) _collapsed.add(f.path);
+            }),
+            child: Container(
+              color: Aether.surfaceAlt,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(children: [
+                Icon(collapsed ? Icons.chevron_right : Icons.expand_more, size: 18),
+                const SizedBox(width: 6),
+                Expanded(child: Text(f.path, style: const TextStyle(fontWeight: FontWeight.w600))),
+                Text('+${f.added} −${f.removed}', style: AetherType.caption),
+              ]),
+            ),
+          ));
+          if (collapsed) continue;
+          final body = [...f.header.skip(1), ...f.lines];
+          final full = _showFull.contains(f.path);
+          final shown = full || body.length <= maxRenderedLinesPerFile
+              ? body.length
+              : maxRenderedLinesPerFile;
+          for (var i = 0; i < shown; i++) {
+            final line = body[i];
+            rows.add((_) => _diffLine(line));
+          }
+          if (shown < body.length) {
+            rows.add((_) => Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () => setState(() => _showFull.add(f.path)),
+                child: Text('Show full diff (${body.length - shown} more lines)'),
+              ),
+            ));
+          }
+        }
+      }
+    }
+    if (_error != null) {
+      rows.add((context) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+          if (_unknownSha != null) ...[
+            const SizedBox(height: 6),
+            SelectableText('Intended commit: $_unknownSha',
+                style: TextStyle(fontFamily: Aether.mono,
+                    fontFamilyFallback: kStudioMonoFallback, fontSize: 12)),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _busy ? null : _reconcile,
+                icon: const Icon(Icons.fact_check_outlined, size: 18),
+                label: const Text('Check status'),
+              ),
+            ),
+          ],
+          if (_errorDetail != null && _errorDetail!.isNotEmpty) ...[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () => setState(() => _showErrorDetail = !_showErrorDetail),
+                child: Text(_showErrorDetail ? 'Hide details' : 'Details'),
+              ),
+            ),
+            if (_showErrorDetail)
+              Text(_errorDetail!, style: TextStyle(fontSize: kStudioMinFontSize,
+                  color: Aether.textFaint)),
+          ],
+        ]),
+      ));
+    }
+    return rows;
+  }
+
   @override
   Widget build(BuildContext context) {
     final approval = _approval;
-    return PopScope(canPop: !_busy, child: AlertDialog(
-      scrollable: true,
-      title: const Text('Review commit'),
-      content: SizedBox(width: 640, child: SingleChildScrollView(child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('${RepoCache.I.repoFull} · ${RepoCache.I.defaultBranch}'),
-          TextField(controller: _message, enabled: !_busy,
-              decoration: const InputDecoration(labelText: 'Commit message')),
-          for (final path in _paths) CheckboxListTile(
-            title: Text(path), value: _selected.contains(path),
-            subtitle: Text(RepoCache.I.isStagedDeletion(path)
-                ? 'Staged deletion · disk unchanged'
-                : RepoCache.I.stagedMode(path) == null
-                ? 'Content · review exact diff'
-                : 'Staged Git mode ${RepoCache.I.stagedMode(path)}'),
-            secondary: StudioStagingMenu(path: path, enabled: !_busy),
-            onChanged: _busy ? null : (value) {
-              _invalidate();
-              setState(() { if (value == true) { _selected.add(path); } else { _selected.remove(path); } });
-            },
+    final rows = _rows(approval);
+    return PopScope(canPop: !_busy, child: Scaffold(
+      appBar: AppBar(
+        automaticallyImplyLeading: false,
+        title: const Text('Review commit'),
+      ),
+      body: SelectionArea(
+        child: ListView.builder(
+          itemCount: rows.length,
+          itemBuilder: (context, i) => rows[i](context),
+        ),
+      ),
+      // The message and the primary action stay pinned above the keyboard.
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.viewInsetsOf(context).bottom,
           ),
-          if (RepoCache.I.workspaceFolder != null)
-            TextButton(onPressed: _busy ? null : _stageMissingDeletion,
-                child: const Text('Stage missing file deletion')),
-          const Text('Staging does not change disk files or permissions.'),
-          if (approval != null) ...[
-            Text('Repository: ${approval.repo}\nBranch: ${approval.branch}\nBase: ${approval.baseCommit}\nMessage: ${approval.message}\nSelected paths: ${approval.paths.join(', ')}'),
-            SelectableText(approval.diff, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
-          ],
-          if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-          if (_busy) const LinearProgressIndicator(),
-        ],
-      ))),
-      actions: [
-        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        TextButton(onPressed: _busy ? null : _reconcile, child: const Text('Reconcile pending commit')),
-        if (approval == null)
-          FilledButton(onPressed: _busy || _selected.isEmpty ? null : _review, child: const Text('Review changes'))
-        else
-          FilledButton(onPressed: _busy ? null : _publish, child: const Text('Approve and commit')),
-      ],
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            if (_busy) const LinearProgressIndicator(minHeight: 2),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: TextField(controller: _message, enabled: !_busy,
+                  decoration: const InputDecoration(labelText: 'Commit message')),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 4,
+                children: [
+                  TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
+                  TextButton(onPressed: _busy ? null : _reconcile, child: const Text('Reconcile pending commit')),
+                  if (approval == null)
+                    FilledButton(onPressed: _busy || _selected.isEmpty || _message.text.trim().isEmpty ? null : _review, child: const Text('Review changes'))
+                  else
+                    FilledButton(onPressed: _busy ? null : _publish, child: const Text('Approve and commit')),
+                ],
+              ),
+            ),
+          ]),
+        ),
+      ),
     ));
   }
 }
@@ -1703,6 +1973,92 @@ class _SyncErrorBanner extends StatelessWidget {
   }
 }
 
+/// Files the last sync could not load, counted from a [SyncReport].
+@visibleForTesting
+int syncReportMissingCount(SyncReport r) =>
+    r.droppedByCap + r.failedPaths.length + r.unattemptedPaths.length;
+
+/// Amber "N files not loaded — Retry" banner for a PARTIAL sync: the
+/// working copy is not the whole repository and must not look like it.
+class _SyncPartialBanner extends StatelessWidget {
+  const _SyncPartialBanner({
+    required this.report,
+    required this.onRetry,
+    required this.onDismiss,
+  });
+
+  final SyncReport report;
+  final VoidCallback? onRetry;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final missing = syncReportMissingCount(report);
+    final message = missing > 0
+        ? '$missing file${missing == 1 ? '' : 's'} not loaded'
+        : 'Some files were not loaded';
+    final detail = report.issues.join(' · ');
+    return Semantics(
+      liveRegion: true,
+      container: true,
+      label: 'Sync incomplete. $message. $detail',
+      child: Container(
+        width: double.infinity,
+        color: Aether.warnLight.withValues(alpha: 0.12),
+        padding: const EdgeInsets.only(left: 12, right: 2, top: 2, bottom: 2),
+        child: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, size: 16, color: Aether.warnLight),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ExcludeSemantics(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        message,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: Aether.warnLight,
+                        ),
+                      ),
+                      if (detail.isNotEmpty)
+                        Text(
+                          detail,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: kStudioMinFontSize,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            StudioIconButton(
+              icon: Icons.refresh,
+              tooltip: 'Retry sync',
+              iconSize: 18,
+              onPressed: onRetry,
+            ),
+            StudioIconButton(
+              icon: Icons.close,
+              tooltip: 'Dismiss',
+              iconSize: 16,
+              onPressed: onDismiss,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Live sync progress. Replaces "an 11px spinner for several minutes".
 class _SyncProgressBanner extends StatelessWidget {
   const _SyncProgressBanner({required this.label, required this.fraction});
@@ -1867,20 +2223,38 @@ class _AuthBadge extends StatelessWidget {
 /// The repository picker sheet. Public so the null-tolerance of the payload
 /// can be tested without a network round-trip.
 class StudioRepoSheet extends StatelessWidget {
-  const StudioRepoSheet({this.repos, this.loader, super.key})
-      : assert(repos != null || loader != null);
+  const StudioRepoSheet({
+    this.repos,
+    this.loader,
+    this.pageLoader,
+    this.search,
+    this.pageSize = GitHubService.repoPageSize,
+    super.key,
+  }) : assert(repos != null || loader != null || pageLoader != null);
 
   final List<Map<String, dynamic>>? repos;
   final Future<List<Map<String, dynamic>>> Function()? loader;
+
+  /// Pages through the user's repos as they scroll (preferred over [loader]).
+  final Future<List<Map<String, dynamic>>> Function(int page)? pageLoader;
+
+  /// Server-side name search for repos not loaded yet.
+  final Future<List<Map<String, dynamic>>> Function(String query)? search;
+  final int pageSize;
 
   @override
   Widget build(BuildContext context) {
     if (repos != null) return _repoList(context, repos!);
     return _AsyncPickerSheet<Map<String, dynamic>>(
       title: 'Your repositories',
-      loader: loader!,
+      loader: loader,
+      pageLoader: pageLoader,
+      pageSize: pageSize,
       emptyMessage: 'No repositories are available for this account.',
       itemBuilder: (context, repo) => _RepoTile(repo: repo),
+      searchTextOf: (repo) => repoFullNameOf(repo) ?? '',
+      remoteSearch: search,
+      keyOf: repoFullNameOf,
     );
   }
 
@@ -1981,15 +2355,36 @@ class _BranchTile extends StatelessWidget {
 class _AsyncPickerSheet<T> extends StatefulWidget {
   const _AsyncPickerSheet({
     required this.title,
-    required this.loader,
     required this.emptyMessage,
     required this.itemBuilder,
-  });
+    this.loader,
+    this.pageLoader,
+    this.pageSize = 100,
+    this.searchTextOf,
+    this.remoteSearch,
+    this.keyOf,
+  }) : assert(loader != null || pageLoader != null);
 
   final String title;
-  final Future<List<T>> Function() loader;
+
+  /// Loads the whole list at once (branches).
+  final Future<List<T>> Function()? loader;
+
+  /// Loads one 1-based page; a page shorter than [pageSize] is the last one.
+  /// Further pages load as the user scrolls near the end.
+  final Future<List<T>> Function(int page)? pageLoader;
+  final int pageSize;
   final String emptyMessage;
   final Widget Function(BuildContext context, T value) itemBuilder;
+
+  /// Enables the search field: filters loaded values by this text.
+  final String Function(T value)? searchTextOf;
+
+  /// Optional server-side search for values pagination has not reached.
+  final Future<List<T>> Function(String query)? remoteSearch;
+
+  /// Identity used to merge remote search hits with loaded values.
+  final Object? Function(T value)? keyOf;
 
   @override
   State<_AsyncPickerSheet<T>> createState() => _AsyncPickerSheetState<T>();
@@ -1999,68 +2394,185 @@ class _AsyncPickerSheetState<T> extends State<_AsyncPickerSheet<T>> {
   List<T>? _values;
   Object? _error;
   bool _loading = false;
+  int _page = 0;
+  bool _hasMore = false;
+  final _scroll = ScrollController();
+  final _search = TextEditingController();
+  String _query = '';
+  Timer? _searchDebounce;
+  List<T> _remote = const [];
+  bool _searchingRemote = false;
+  int _searchSeq = 0;
 
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_maybeLoadMore);
     _load();
   }
 
-  Future<void> _load() async {
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _scroll.dispose();
+    _search.dispose();
+    super.dispose();
+  }
+
+  void _maybeLoadMore() {
+    if (!_hasMore || _loading || !_scroll.hasClients) return;
+    if (_scroll.position.extentAfter < 400) unawaited(_load(more: true));
+  }
+
+  Future<void> _load({bool more = false}) async {
     if (_loading) return;
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final values = await widget.loader();
-      if (mounted) setState(() => _values = values);
+      final pageLoader = widget.pageLoader;
+      if (pageLoader != null) {
+        final next = more ? _page + 1 : 1;
+        final page = await pageLoader(next);
+        if (!mounted) return;
+        setState(() {
+          _page = next;
+          _values = [if (more) ...?_values, ...page];
+          _hasMore = page.length >= widget.pageSize;
+        });
+      } else {
+        final values = await widget.loader!();
+        if (mounted) setState(() => _values = values);
+      }
     } catch (e) {
       if (mounted) setState(() => _error = e);
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+    // A short first page may not fill the viewport: keep paging.
+    if (mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _maybeLoadMore();
+      });
+    }
+  }
+
+  void _onQueryChanged(String q) {
+    setState(() {
+      _query = q.trim().toLowerCase();
+      _remote = const [];
+    });
+    _searchDebounce?.cancel();
+    final remote = widget.remoteSearch;
+    if (remote == null || _query.length < 2) return;
+    _searchDebounce = Timer(const Duration(milliseconds: 400), () async {
+      final seq = ++_searchSeq;
+      setState(() => _searchingRemote = true);
+      try {
+        final hits = await remote(q.trim());
+        if (!mounted || seq != _searchSeq) return;
+        setState(() => _remote = hits);
+      } catch (_) {
+        // Local filtering still works; the remote search is best-effort.
+      } finally {
+        if (mounted && seq == _searchSeq) {
+          setState(() => _searchingRemote = false);
+        }
+      }
+    });
+  }
+
+  List<T> _visible(List<T> values) {
+    final textOf = widget.searchTextOf;
+    if (textOf == null || _query.isEmpty) return values;
+    final local = [
+      for (final v in values)
+        if (textOf(v).toLowerCase().contains(_query)) v,
+    ];
+    if (_remote.isEmpty) return local;
+    final keyOf = widget.keyOf ?? (T v) => v;
+    final seen = {for (final v in local) keyOf(v)};
+    return [
+      ...local,
+      for (final v in _remote)
+        if (seen.add(keyOf(v))) v,
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
     final values = _values;
-    return ListView(
-      shrinkWrap: true,
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      children: [
-        StudioSheetHeader(title: widget.title),
-        if (_loading && values == null)
-          const Padding(
-            padding: EdgeInsets.all(28),
-            child: Center(child: CircularProgressIndicator()),
-          )
-        else if (_error != null && values == null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text('Could not load this list. Check your connection and try again.'),
-                const SizedBox(height: 10),
-                OutlinedButton.icon(
-                  onPressed: _loading ? null : _load,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Retry'),
-                ),
-              ],
+    final visible = values == null ? null : _visible(values);
+    final Widget body;
+    if (_loading && values == null) {
+      body = const Padding(
+        padding: EdgeInsets.all(28),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    } else if (_error != null && values == null) {
+      body = Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(StudioFailure.of(_error!).message),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _loading ? null : _load,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Retry'),
             ),
-          )
-        else if (values == null || values.isEmpty)
+          ],
+        ),
+      );
+    } else if (visible == null || visible.isEmpty) {
+      body = Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+        child: Text(
+          _query.isNotEmpty
+              ? (_searchingRemote
+                    ? 'Searching…'
+                    : 'Nothing matches "${_search.text.trim()}".')
+              : widget.emptyMessage,
+        ),
+      );
+    } else {
+      final footer = _loading || _searchingRemote;
+      // Lazy: only visible tiles are built (users with hundreds of repos).
+      body = ListView.builder(
+        controller: _scroll,
+        padding: const EdgeInsets.only(bottom: 10),
+        itemCount: visible.length + (footer ? 1 : 0),
+        itemBuilder: (context, i) => i == visible.length
+            ? const LinearProgressIndicator(minHeight: 2)
+            : widget.itemBuilder(context, visible[i]),
+      );
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 8),
+        StudioSheetHeader(title: widget.title),
+        if (widget.searchTextOf != null)
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
-            child: Text(widget.emptyMessage),
-          )
-        else ...[
-          for (final value in values) widget.itemBuilder(context, value),
-          if (_loading) const LinearProgressIndicator(minHeight: 2),
-        ],
-        const SizedBox(height: 10),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: TextField(
+              key: studioPickerSearchKey,
+              controller: _search,
+              onChanged: _onQueryChanged,
+              autocorrect: false,
+              textInputAction: TextInputAction.search,
+              decoration: const InputDecoration(
+                isDense: true,
+                prefixIcon: Icon(Icons.search, size: 18),
+                hintText: 'Search',
+              ),
+            ),
+          ),
+        Flexible(child: body),
       ],
     );
   }

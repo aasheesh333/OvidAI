@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import '../core/theme.dart';
 import '../core/github_service.dart';
+import 'studio_errors.dart';
 import 'widgets/aether_primitives.dart';
 
 /// GitHub login flow — shown as an Aether modal bottom sheet.
@@ -38,35 +40,92 @@ class GithubLoginSheet extends StatefulWidget {
   State<GithubLoginSheet> createState() => _GithubLoginSheetState();
 }
 
-class _GithubLoginSheetState extends State<GithubLoginSheet> {
+class _GithubLoginSheetState extends State<GithubLoginSheet>
+    with WidgetsBindingObserver {
   _State _state = _State.idle;
   final _codeController = TextEditingController();
   String _userCode = '';
   String _verifyUri = '';
   String? _error;
-  Timer? _expiryTimer;
+  String? _errorDetail;
+  bool _showDetail = false;
   DateTime? _expiresAt;
   bool _cancelled = false;
+
+  /// Polling pauses while the app is in the background (Android restricts
+  /// network there; the user is approving in the browser) and polls at once
+  /// on resume instead of waiting out the interval.
+  bool _paused = false;
+  Completer<void>? _wake;
+  Timer? _pollTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _start();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _cancelled = true;
-    _expiryTimer?.cancel();
+    _wakePolling();
     _codeController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.paused || AppLifecycleState.hidden:
+        _paused = true;
+        _pollTimer?.cancel();
+        _pollTimer = null;
+      case AppLifecycleState.resumed:
+        _paused = false;
+        _wakePolling();
+      case AppLifecycleState.inactive || AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  void _wakePolling() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    final wake = _wake;
+    _wake = null;
+    if (wake != null && !wake.isCompleted) wake.complete();
+  }
+
+  Future<void> _waitForNextPoll(Duration interval) {
+    final wake = Completer<void>();
+    _wake = wake;
+    if (_cancelled) {
+      wake.complete();
+    } else if (!_paused) {
+      _pollTimer = Timer(interval, () {
+        if (!wake.isCompleted) wake.complete();
+      });
+    }
+    return wake.future;
+  }
+
+  void _showError(Object e) {
+    final f = StudioFailure.of(e);
+    setState(() {
+      _error = f.message;
+      _errorDetail = f.detail;
+      _showDetail = false;
+      _state = _State.error;
+    });
   }
 
   Future<void> _start() async {
     setState(() => _state = _State.starting);
     _cancelled = false;
     _error = null;
-    _expiryTimer?.cancel();
+    _errorDetail = null;
     try {
       final authorization = await GitHubService.I.startDeviceFlow(
         client: widget.client,
@@ -77,16 +136,10 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
       _expiresAt = DateTime.now().add(authorization.expiresIn);
       _codeController.text = _userCode;
       setState(() => _state = _State.codeShown);
-      _expiryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted) setState(() {});
-      });
       unawaited(_beginPolling(authorization));
     } catch (e) {
       if (!mounted || _cancelled) return;
-      setState(() {
-        _error = '$e';
-        _state = _State.error;
-      });
+      _showError(e);
     }
   }
 
@@ -98,36 +151,21 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
         maxWait: authorization.expiresIn,
         client: widget.client,
         isCancelled: () => _cancelled,
+        waitForNextPoll: _waitForNextPoll,
       );
       if (!mounted || _cancelled) return;
-      _expiryTimer?.cancel();
       setState(() => _state = _State.done);
     } on GitHubAuthException catch (e) {
       if (!mounted || _cancelled || e.code == 'cancelled') return;
-      _expiryTimer?.cancel();
       if (e.code == 'expired_token' || e.code == 'timeout') {
         setState(() => _state = _State.expired);
       } else {
-        setState(() {
-          _error = e.message;
-          _state = _State.error;
-        });
+        _showError(e);
       }
     } catch (e) {
       if (!mounted || _cancelled) return;
-      _expiryTimer?.cancel();
-      setState(() {
-        _error = '$e';
-        _state = _State.error;
-      });
+      _showError(e);
     }
-  }
-
-  String get _remaining {
-    final seconds = (_expiresAt?.difference(DateTime.now()).inSeconds ?? 0)
-        .clamp(0, 60 * 60);
-    final minutes = seconds ~/ 60;
-    return '$minutes:${(seconds % 60).toString().padLeft(2, '0')}';
   }
 
   Future<void> _openVerificationPage() async {
@@ -137,7 +175,10 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
     // Open in the user's EXTERNAL browser — the device-flow verification
     // page must not be trapped in the in-app WebView.
     try {
-      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
       if (launched) return;
     } catch (_) {
       // Platform launch failures use the same recoverable browser message.
@@ -153,8 +194,8 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
 
   void _cancel() {
     _cancelled = true;
-    _expiryTimer?.cancel();
     // Polling observes _cancelled and exits at its next checkpoint.
+    _wakePolling();
     Navigator.pop(context);
   }
 
@@ -210,7 +251,9 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
       ),
       const SizedBox(height: 8),
       _UrlCopyRow(
-        url: _verifyUri.isEmpty ? 'https://github.com/login/device' : _verifyUri,
+        url: _verifyUri.isEmpty
+            ? 'https://github.com/login/device'
+            : _verifyUri,
       ),
       const SizedBox(height: 8),
       Align(
@@ -236,16 +279,24 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
             ),
           ),
           const SizedBox(width: 10),
+          // The live region only changes on state transitions: a per-second
+          // countdown inside it made TalkBack speak every second for up to
+          // 15 minutes. The countdown is excluded from semantics and only
+          // announces at 5 and 1 minute left.
           Flexible(
-           child: Semantics(
-             liveRegion: true,
-             label: 'GitHub sign-in status: waiting, $_remaining remaining',
-             child: Text(
-               'Waiting for sign-in · $_remaining remaining',
-               style: AetherType.bodyMuted,
-             ),
-           ),
+            child: Semantics(
+              key: githubLoginStatusKey,
+              liveRegion: true,
+              label:
+                  'GitHub sign-in status: waiting for you to approve in '
+                  'the browser',
+              child: ExcludeSemantics(
+                child: Text('Waiting for sign-in', style: AetherType.bodyMuted),
+              ),
+            ),
           ),
+          if (_expiresAt != null)
+            Flexible(child: _Countdown(expiresAt: _expiresAt!)),
         ],
       ),
       const SizedBox(height: 8),
@@ -316,10 +367,23 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
       Text('Something went wrong', style: AetherType.title),
       const SizedBox(height: 4),
       Text(
-        _error ?? 'Unknown error',
+        _error ?? 'GitHub sign-in did not finish. Try again.',
         textAlign: TextAlign.center,
         style: AetherType.bodyMuted,
       ),
+      if ((_errorDetail ?? '').isNotEmpty && _errorDetail != _error) ...[
+        const SizedBox(height: 4),
+        AetherGhostButton(
+          label: _showDetail ? 'Hide details' : 'Details',
+          onPressed: () => setState(() => _showDetail = !_showDetail),
+        ),
+        if (_showDetail)
+          SelectableText(
+            _errorDetail!,
+            textAlign: TextAlign.center,
+            style: AetherType.mono.copyWith(color: Aether.textFaint),
+          ),
+      ],
       const SizedBox(height: 16),
       AetherPrimaryButton(
         label: 'Retry',
@@ -331,6 +395,70 @@ class _GithubLoginSheetState extends State<GithubLoginSheet> {
 }
 
 enum _State { idle, starting, codeShown, done, expired, error }
+
+/// The waiting-status live region (test seam).
+@visibleForTesting
+const Key githubLoginStatusKey = ValueKey('github-login-status');
+
+/// Self-contained countdown: ticks only itself (not the whole sheet), is
+/// hidden from semantics, and makes a polite announcement at 5 and 1 minute
+/// remaining.
+class _Countdown extends StatefulWidget {
+  const _Countdown({required this.expiresAt});
+  final DateTime expiresAt;
+
+  @override
+  State<_Countdown> createState() => _CountdownState();
+}
+
+class _CountdownState extends State<_Countdown> {
+  late final Stream<int> _ticks;
+  int? _lastAnnounced;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticks = Stream<int>.periodic(
+      const Duration(seconds: 1),
+      (_) => _secondsLeft(),
+    );
+  }
+
+  int _secondsLeft() =>
+      widget.expiresAt.difference(DateTime.now()).inSeconds.clamp(0, 60 * 60);
+
+  void _maybeAnnounce(int seconds) {
+    for (final mark in const [300, 60]) {
+      if (seconds <= mark && seconds > mark - 5 && _lastAnnounced != mark) {
+        _lastAnnounced = mark;
+        final view = View.maybeOf(context);
+        if (view == null) return;
+        unawaited(
+          SemanticsService.sendAnnouncement(
+            view,
+            '${mark ~/ 60} minute${mark == 60 ? '' : 's'} left to approve '
+            'GitHub sign-in',
+            Directionality.of(context),
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => StreamBuilder<int>(
+    stream: _ticks,
+    initialData: _secondsLeft(),
+    builder: (context, snapshot) {
+      final seconds = snapshot.data ?? 0;
+      _maybeAnnounce(seconds);
+      final text =
+          ' · ${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')} '
+          'remaining';
+      return ExcludeSemantics(child: Text(text, style: AetherType.bodyMuted));
+    },
+  );
+}
 
 class _CopyChip extends StatefulWidget {
   final String text;
@@ -394,7 +522,9 @@ class _CopyChipState extends State<_CopyChip> {
           } catch (_) {
             if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Could not copy code. Please retry.')),
+              const SnackBar(
+                content: Text('Could not copy code. Please retry.'),
+              ),
             );
             return;
           }
@@ -420,11 +550,11 @@ class _CopyChipState extends State<_CopyChip> {
                 color: copied ? Aether.successLight : Aether.textFaint,
               ),
               const SizedBox(width: 5),
-               Semantics(
-                 button: true,
-                 label: copied ? '$semantics copied' : semantics,
-                 child: Text(
-                   copied ? 'Copied' : widget.label,
+              Semantics(
+                button: true,
+                label: copied ? '$semantics copied' : semantics,
+                child: Text(
+                  copied ? 'Copied' : widget.label,
                   style: TextStyle(
                     fontSize: 12,
                     color: copied ? Aether.successLight : Aether.textFaint,

@@ -41,6 +41,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('owner/repo'), findsWidgets);
       expect(find.textContaining('Base: base'), findsOneWidget);
+      await revealInReview(tester, find.textContaining('+approved'));
       expect(find.textContaining('+approved'), findsOneWidget);
       expect(find.textContaining('+unselected'), findsNothing);
       expect(find.textContaining('Message: chosen message'), findsOneWidget);
@@ -103,4 +104,21 @@ void main() {
     expect(cache.lastCommit?.commitSha, 'intended');
     expect(git.mutations.length, mutations);
   });
+}
+
+/// The commit review is a lazy list: scroll a diff line into view first.
+Future<void> revealInReview(
+  WidgetTester tester,
+  Finder finder, {
+  double delta = 120,
+}) async {
+  await tester.scrollUntilVisible(
+    finder,
+    delta,
+    scrollable: find
+        .byWidgetPredicate(
+          (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+        )
+        .first,
+  );
 }

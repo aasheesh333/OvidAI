@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/theme.dart';
 import '../core/state.dart';
@@ -113,6 +114,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   bool get _verified => _setup.status == StudioSetupStatus.ready;
   bool get _partial => _setup.status == StudioSetupStatus.partial;
   String? get _error => _setup.error;
+  bool _showErrorDetail = false;
   bool get _unsupported => _setup.status == StudioSetupStatus.unsupported;
   // Guards the gate-mode hand-off: the auto-advance timer and the manual
   // "Start chatting" button must not push the shell twice.
@@ -544,23 +546,39 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 ),
               ],
             ),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Aether.surfaceAlt,
-                borderRadius: BorderRadius.circular(AetherRadius.rMd),
-                border: Border.all(color: Aether.hairline),
-              ),
-              child: Text(
-                _error!,
-                style: TextStyle(
-                  fontFamily: Aether.mono,
-                  fontSize: 11.5,
-                  height: 1.6,
-                  color: Aether.textMuted,
-                ),
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(_error!, style: AetherType.body.copyWith(height: 1.5)),
+                if ((_setup.errorDetail ?? '').isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  AetherGhostButton(
+                    label: _showErrorDetail ? 'Hide details' : 'Details',
+                    onPressed: () =>
+                        setState(() => _showErrorDetail = !_showErrorDetail),
+                  ),
+                  if (_showErrorDetail)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Aether.surfaceAlt,
+                        borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                        border: Border.all(color: Aether.hairline),
+                      ),
+                      child: SelectableText(
+                        _setup.errorDetail!,
+                        style: TextStyle(
+                          fontFamily: Aether.mono,
+                          fontFamilyFallback: const ['monospace'],
+                          fontSize: 12,
+                          height: 1.6,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ),
+                ],
+              ],
             ),
           ),
           const SizedBox(height: 12),
@@ -576,22 +594,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
             _SetupPrimaryButton(
               label: 'Continue to chat without sandbox',
               icon: Icons.chat_bubble_outline,
-              onPressed: () async {
-                await AppState.I.setSandboxSkipped(true);
-                if (!mounted) return;
-                if (widget.gateMode) {
-                  // Same hand-off as a successful gate install.
-                  Navigator.of(
-                    context,
-                    rootNavigator: true,
-                  ).pushAndRemoveUntil(
-                    MaterialPageRoute(builder: (_) => const OvidShell()),
-                    (_) => false,
-                  );
-                } else {
-                  Navigator.pop(context);
-                }
-              },
+              onPressed: _continueWithoutSandbox,
             ),
             const SizedBox(height: 8),
             AetherGhostButton(
@@ -604,7 +607,17 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
               icon: Icons.refresh,
               onPressed: () => unawaited(_runInstall()),
             ),
+            // Never a dead end: in gate mode (after a Health hard reset)
+            // this route cannot be popped, and chat does not need the
+            // sandbox.
+            const SizedBox(height: 8),
+            AetherGhostButton(
+              label: 'Continue to chat without sandbox',
+              onPressed: _continueWithoutSandbox,
+            ),
           ],
+          const SizedBox(height: 4),
+          AetherGhostButton(label: 'Copy log', onPressed: _copyLog),
           if (!widget.gateMode) ...[
             const SizedBox(height: 4),
             AetherGhostButton(
@@ -615,6 +628,43 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _continueWithoutSandbox() async {
+    await AppState.I.setSandboxSkipped(true);
+    if (!mounted) return;
+    if (widget.gateMode) {
+      if (_navigated) return;
+      _navigated = true;
+      // Same hand-off as a successful gate install.
+      Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const OvidShell()),
+        (_) => false,
+      );
+    } else {
+      Navigator.pop(context);
+    }
+  }
+
+  Future<void> _copyLog() async {
+    final text = [
+      ?_error,
+      if ((_setup.errorDetail ?? '').isNotEmpty) _setup.errorDetail!,
+      ..._log,
+    ].join('\n');
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not copy the log. Please retry.')),
+      );
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Setup log copied')));
   }
 
   Widget _doneView() {
