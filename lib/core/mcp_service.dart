@@ -47,6 +47,49 @@ Future<http.Response> _sendMcpHttpRequest(
   return http.Response.fromStream(response).timeout(timeout);
 }
 
+/// Incremental `text/event-stream` parser: feed decoded chunks with [add],
+/// get back the `data` payload of every COMPLETE event (multi-line `data:`
+/// joined with newlines per the SSE spec; comments, `event:`, `id:` and
+/// `retry:` lines are ignored).
+class McpSseParser {
+  final StringBuffer _buf = StringBuffer();
+
+  List<String> add(String chunk) {
+    _buf.write(chunk);
+    var text = _buf.toString().replaceAll('\r\n', '\n');
+    final out = <String>[];
+    while (true) {
+      final sep = text.indexOf('\n\n');
+      if (sep < 0) break;
+      final data = _dataOf(text.substring(0, sep));
+      if (data != null) out.add(data);
+      text = text.substring(sep + 2);
+    }
+    _buf
+      ..clear()
+      ..write(text);
+    return out;
+  }
+
+  /// Flush a final event the server did not terminate with a blank line.
+  List<String> close() {
+    final data = _dataOf(_buf.toString().replaceAll('\r\n', '\n'));
+    _buf.clear();
+    return data == null ? const [] : [data];
+  }
+
+  static String? _dataOf(String event) {
+    final parts = <String>[];
+    for (final line in event.split('\n')) {
+      if (line.startsWith('data:')) {
+        final v = line.substring(5);
+        parts.add(v.startsWith(' ') ? v.substring(1) : v);
+      }
+    }
+    return parts.isEmpty ? null : parts.join('\n');
+  }
+}
+
 /// OAuth access token for one MCP server (item 6). Stored per-server in
 /// secure storage via [McpService.storeMcpOAuthToken] — never in the
 /// config file or prefs. Expired tokens are refreshed automatically when
@@ -3571,19 +3614,32 @@ class McpService {
     Map<String, dynamic> args, {
     Duration? timeout,
     UtilityCancellation? cancellation,
+    void Function(McpProgress progress)? onProgress,
   }) async {
     final sw = Stopwatch()..start();
     final key = _keyForName(serverName);
     final server =
         _running[key]?.server ??
         AppState.I.mcpServers.where((s) => s.canonicalId == key).firstOrNull;
-    final result = await _callTool(
-      serverName,
-      toolName,
-      args,
-      timeout: timeout,
-      cancellation: cancellation,
-    );
+    // Progress (Phase 2.3): every tools/call carries `_meta.progressToken`
+    // so servers can stream `notifications/progress`, routed to [onProgress].
+    final progressToken = 'ovid-${_nextProgressToken++}';
+    if (onProgress != null) {
+      McpClientRequests.I.addProgressListener(progressToken, onProgress);
+    }
+    final String result;
+    try {
+      result = await _callTool(
+        serverName,
+        toolName,
+        args,
+        timeout: timeout,
+        cancellation: cancellation,
+        progressToken: progressToken,
+      );
+    } finally {
+      McpClientRequests.I.removeProgressListener(progressToken);
+    }
     final failed = result.startsWith('MCP error:');
     final cancelled = failed && result.endsWith('was cancelled.');
     if (!cancelled) {
@@ -3606,6 +3662,7 @@ class McpService {
     Map<String, dynamic> args, {
     Duration? timeout,
     UtilityCancellation? cancellation,
+    String? progressToken,
   }) async {
     if (cancellation?.isCancelled ?? false) {
       return 'MCP error: "$toolName" on "$serverName" was cancelled.';
@@ -3619,25 +3676,24 @@ class McpService {
           '${_lastDeathOf(key)}';
     }
     final effectiveTimeout = _effectiveToolTimeout(rs.server, timeout);
+    final callParams = <String, dynamic>{
+      'name': toolName,
+      'arguments': args,
+      if (progressToken != null) '_meta': {'progressToken': progressToken},
+    };
     final pending = rs.server.transport == 'http'
         ? _rpcHttp(
             rs,
             'tools/call',
-            {'name': toolName, 'arguments': args},
+            callParams,
             timeout: effectiveTimeout,
             cancelOnTimeout: true,
           )
         : rs.server.transport == 'sse'
-        ? _rpcSse(rs, 'tools/call', {
-            'name': toolName,
-            'arguments': args,
-          }, timeout: effectiveTimeout)
+        ? _rpcSse(rs, 'tools/call', callParams, timeout: effectiveTimeout)
         : rs.server.transport == 'native'
         ? _callNativeTool(rs, toolName, args, timeout: effectiveTimeout)
-        : _rpc(rs, 'tools/call', {
-            'name': toolName,
-            'arguments': args,
-          }, timeout: effectiveTimeout);
+        : _rpc(rs, 'tools/call', callParams, timeout: effectiveTimeout);
     final res = await _withCancellation(pending, cancellation);
     if (res.isCancelled) {
       return 'MCP error: "$toolName" on "$serverName" was cancelled.';
@@ -3787,6 +3843,7 @@ class McpService {
   // ── internals ─────────────────────────────────────────────────────────
 
   int _nextId = 1;
+  int _nextProgressToken = 1;
 
   /// RPC deadline. Tests shorten it so timeout paths run in milliseconds
   /// instead of the production 60 s. Null in production so the per-server
@@ -3907,9 +3964,14 @@ class McpService {
       // silent OAuth refresh + retry.
       Future<(http.Response, Map<String, dynamic>?)> doPost() async {
         _requireCurrent(rs);
-        final res = await _sendMcpHttpRequest(
+        // Streamed (Phase 2.3): a `text/event-stream` response is parsed
+        // incrementally, so server→client requests and progress/log
+        // notifications that arrive BEFORE the result are handled and
+        // answered immediately — a server that waits for our sampling or
+        // elicitation answer before finishing the call no longer deadlocks.
+        return _postRpcStreaming(
+          rs,
           client,
-          'POST',
           Uri.parse(url),
           {
             'Content-Type': 'application/json',
@@ -3920,36 +3982,15 @@ class McpService {
             ...authHeaders,
             ...rs.server.headers,
           },
-          body: jsonEncode({
+          jsonEncode({
             'jsonrpc': '2.0',
             'id': id,
             'method': method,
             'params': params,
           }),
-          timeout: timeout ?? Duration(seconds: _rpcTimeoutSeconds),
+          id,
+          timeout ?? Duration(seconds: _rpcTimeoutSeconds),
         );
-        _rememberSessionId(rs, res.headers);
-        if (rs.userDisconnected) {
-          if (rs.sessionId != null) unawaited(_deleteHttpSession(rs));
-          _requireCurrent(rs);
-        }
-        // A single-object JSON response is the common case; a
-        // "text/event-stream" response carries one or more SSE events
-        // (`event:` + `data:` lines separated by blank lines). Take the
-        // event whose `data` decodes to our `id` (earlier events are
-        // unrelated notifications the server may have flushed first).
-        final contentType = res.headers['content-type'] ?? '';
-        Map<String, dynamic>? j;
-        if (contentType.contains('text/event-stream')) {
-          j = _parseSseResponse(res.body, id, rs: rs);
-        } else if (res.body.trim().isNotEmpty) {
-          try {
-            j = jsonDecode(res.body) as Map<String, dynamic>;
-          } catch (e) {
-            Diag.swallow('mcp_service', e);
-          }
-        }
-        return (res, j);
       }
 
       var (res, j) = await doPost();
@@ -4017,6 +4058,120 @@ class McpService {
     }
   }
 
+  /// POST one JSON-RPC request and resolve its response. A JSON body is read
+  /// whole. A `text/event-stream` body is consumed event by event: inbound
+  /// requests/notifications go to [_onNotification] as they arrive (requests
+  /// are answered right away on the same session), and the event whose id
+  /// matches [id] resolves the call. The [timeout] restarts whenever the
+  /// server reports progress, as the MCP spec allows.
+  Future<(http.Response, Map<String, dynamic>?)> _postRpcStreaming(
+    _RunningServer rs,
+    http.Client client,
+    Uri uri,
+    Map<String, String> headers,
+    String body,
+    int id,
+    Duration timeout,
+  ) async {
+    final request = http.Request('POST', uri)
+      ..followRedirects = false
+      ..headers.addAll(headers)
+      ..body = body;
+    final streamed = await client.send(request).timeout(timeout);
+    if (const {301, 302, 303, 307, 308}.contains(streamed.statusCode)) {
+      unawaited(streamed.stream.listen(null).cancel());
+      throw StateError('MCP HTTP redirect rejected');
+    }
+    // The session id must be known before we answer a mid-stream request.
+    _rememberSessionId(rs, streamed.headers);
+    if (rs.userDisconnected) {
+      if (rs.sessionId != null) unawaited(_deleteHttpSession(rs));
+      _requireCurrent(rs);
+    }
+    final contentType = streamed.headers['content-type'] ?? '';
+    if (!contentType.contains('text/event-stream')) {
+      final res = await http.Response.fromStream(streamed).timeout(timeout);
+      Map<String, dynamic>? j;
+      if (res.body.trim().isNotEmpty) {
+        try {
+          j = jsonDecode(res.body) as Map<String, dynamic>;
+        } catch (e) {
+          Diag.swallow('mcp_service', e);
+        }
+      }
+      return (res, j);
+    }
+    final parser = McpSseParser();
+    final done = Completer<Map<String, dynamic>?>();
+    Map<String, dynamic>? response;
+    late final StreamSubscription<String> sub;
+    Timer? timer;
+    void arm() {
+      timer?.cancel();
+      timer = Timer(timeout, () {
+        if (done.isCompleted) return;
+        done.completeError(TimeoutException('MCP response timed out'));
+        unawaited(sub.cancel());
+      });
+    }
+
+    void onData(String data) {
+      Map<String, dynamic> decoded;
+      try {
+        decoded = jsonDecode(data) as Map<String, dynamic>;
+      } catch (e) {
+        Diag.swallow('mcp_service', e);
+        return;
+      }
+      final inbound =
+          !decoded.containsKey('id') || decoded.containsKey('method');
+      if (inbound) {
+        if (decoded['method'] == 'notifications/progress') arm();
+        _onNotification(rs, decoded);
+        return;
+      }
+      if (decoded['id']?.toString() == id.toString() && response == null) {
+        response = decoded;
+        timer?.cancel();
+        // Notifications the server flushes right after the response (e.g.
+        // list_changed) still belong to this exchange: keep draining until
+        // the server closes the stream, but never hang the call on a server
+        // that leaves it open.
+        Timer(const Duration(milliseconds: 250), () {
+          if (!done.isCompleted) done.complete(response);
+        });
+      }
+    }
+
+    arm();
+    sub = streamed.stream
+        .transform(utf8.decoder)
+        .listen(
+          (chunk) {
+            for (final data in parser.add(chunk)) {
+              onData(data);
+            }
+          },
+          onError: (Object e) {
+            timer?.cancel();
+            if (!done.isCompleted) done.completeError(e);
+          },
+          onDone: () {
+            timer?.cancel();
+            for (final data in parser.close()) {
+              onData(data);
+            }
+            if (!done.isCompleted) done.complete(response);
+          },
+          cancelOnError: true,
+        );
+    final j = await done.future;
+    return (
+      http.Response('', streamed.statusCode, headers: streamed.headers),
+      j,
+    );
+  }
+
   /// Remember a `Mcp-Session-Id` header (case-insensitive) so subsequent
   /// requests to the SAME server re-use the session (Streamable-HTTP spec).
   void _rememberSessionId(_RunningServer rs, Map<String, String> headers) {
@@ -4052,43 +4207,6 @@ class McpService {
     } finally {
       if (injected == null) client.close();
     }
-  }
-
-  /// Parse a `text/event-stream` body into the JSON-RPC response whose `id`
-  /// matches [id]. Handles `event:` lines and multi-line `data:` blocks
-  /// (joined per the SSE spec). Returns null if no matching event is found.
-  Map<String, dynamic>? _parseSseResponse(
-    String body,
-    int id, {
-    _RunningServer? rs,
-  }) {
-    final events = body.split(RegExp(r'\r?\n\r?\n'));
-    Map<String, dynamic>? response;
-    for (final event in events) {
-      final dataParts = <String>[];
-      for (final rawLine in event.split('\n')) {
-        final line = rawLine.trimRight();
-        if (line.startsWith('data:')) {
-          dataParts.add(line.substring(5).trim());
-        }
-      }
-      if (dataParts.isEmpty) continue;
-      final payload = dataParts.join('\n');
-      try {
-        final decoded = jsonDecode(payload) as Map<String, dynamic>;
-        final inbound =
-            !decoded.containsKey('id') || decoded.containsKey('method');
-        if (rs != null && inbound) {
-          _onNotification(rs, decoded);
-        }
-        if (!inbound && decoded['id']?.toString() == id.toString()) {
-          response = decoded;
-        }
-      } catch (e) {
-        Diag.swallow('mcp_service', e);
-      }
-    }
-    return response;
   }
 
   /// An HTTP server has no process to watch for death, so a connection-
