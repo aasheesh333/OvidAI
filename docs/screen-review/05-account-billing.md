@@ -17,7 +17,7 @@ login → token mint → model catalog → model selection path end to end (P0
 in-app account deletion works in release builds.
 
 ## Status
-in progress
+complete
 
 ## Cross-cutting: release build flags (read first)
 - **P0 · Play policy / broken flow · `lib/core/account_service.dart:58` + `.github/workflows/build.yml:221-222`** —
@@ -365,3 +365,378 @@ re-auth; an emailed receipt of the deletion request.
 **Test to add:** release-flag test asserting `AccountService().enabled == true` when built with the
 production defines; widget test that restoring from the panel clears `lastDeletionReceipt`.
 
+
+## Plans & Billing screen (`billing_screen.dart:16-604`)
+**What it is / how reached:** Settings → Plans & Billing (`settings_screen.dart:364`), Account → plan card
+(`auth_screen.dart:340`), Providers → Ovid Cloud "Plans" (`providers_screen.dart:166`). Gradient
+current-plan header (tier pill, blurb, allowance bar, `CloudUsageStatus`, "Upgrade" to next tier),
+four hard-coded plan cards (Free / Plus ₹499 / Pro ₹899 / Max ₹1699), and an upgrade bottom sheet whose
+"Pay now" calls `OvidCloudService.upgrade` → POST `https://api.ovidsi.com/upgrade` (server-gated by
+`ALLOW_TEST_UPGRADE`, `ovid_cloud_service.dart:289-291, 657-711`).
+
+**Findings**
+- **P0 · Play policy / revenue · `billing_screen.dart:450-471` + `ovid_cloud_service.dart:289-291`** — the
+  only purchase path is a TEST endpoint that grants a tier with no payment; there is no Google Play
+  Billing integration (`pubspec.yaml` has no `in_app_purchase`). Play Payments policy requires Play
+  Billing for digital subscriptions sold in an Android app; shipping this sheet with
+  `ALLOW_TEST_UPGRADE` on gives paid tiers away free, and with it off every "Pay now" ends in
+  "Could not complete the upgrade. Try again." — a dead CTA on the revenue screen. · **User impact:**
+  either free paid plans or a broken purchase flow that invites 1-star reviews; app rejection risk.
+  · **Fix:** integrate `in_app_purchase` (Play Billing v7) with server-side purchase-token verification
+  (`/billing/verify` + RTDN webhook) that sets the tier; until then hide the plan CTAs in release builds
+  (`kReleaseMode` / a server flag `billing_enabled`) and show "Paid plans coming soon".
+- P1 · broken flow · `billing_screen.dart:391-398` — a paid user has no way to cancel or downgrade to
+  Free (the Free card just says "Included with your account"), and "Change plan" to a lower paid tier
+  calls the same `upgrade()` with no proration / period-end semantics. · **Fix:** with Play Billing,
+  open the Play subscription centre (`https://play.google.com/store/account/subscriptions?sku=…&package=…`)
+  for cancel/downgrade, and show "Renews on / Ends on <date>" in the header.
+- P1 · copy / pricing transparency · `billing_screen.dart:57, 67, 77, 510` — prices show no billing
+  period ("₹499" — per month? one-off?), no tax note, and "Pay now · ₹499" gives no renewal terms.
+  Play requires clear subscription terms before purchase. · **Fix:** "₹499 / month", auto-renew line,
+  cancel-anytime line, links to Terms and Privacy in the sheet; take price strings from
+  `ProductDetails.price` (localised by Play, not hard-coded INR, so non-India users see their currency).
+- P1 · UX · `billing_screen.dart:58-82` — plan cards describe value only as "3×/7×/15× the Free base
+  allowance"; users cannot tell what that means (messages/day? which models? image generation?). ·
+  **Fix:** server-provided feature list per tier (models included, approximate messages, image quota,
+  priority), rendered from `/usage` or a `/plans` endpoint so copy and limits never drift.
+- P1 · state · `billing_screen.dart:456-470` — the sheet is dismissible (swipe / back / scrim) while
+  `_busy`; the request keeps running and the snackbar may appear later on a different screen, and if the
+  button was disposed meanwhile `_busy` stays true for a re-opened sheet of a re-used state. Failure
+  also pops the sheet, so the user loses context to retry. · **Fix:** `isDismissible: !_busy`,
+  `enableDrag: !_busy`, `PopScope(canPop: !_busy)`; on failure keep the sheet open and show the error
+  inline with a Retry.
+- P1 · error copy · `billing_screen.dart:465-467` + `ovid_cloud_service.dart:690-708` — every failure
+  (network, 403 test-upgrade disabled, 402, timeout, App Check) collapses into "Could not complete the
+  upgrade. Try again." · **Fix:** have `upgrade()` return a result enum (`ok / offline / notAvailable /
+  rejected / unknown`) and map each to specific copy; never suggest retrying when the server said the
+  feature is disabled.
+- P2 · perf · `billing_screen.dart:119-121` — the whole `ListView` (header + 4 cards) rebuilds on every
+  `AppState` notification (streaming tokens of a background run) although it only reads the tier. ·
+  **Fix:** drop `app` from the merge; listen to `OvidCloudService.I` + `_store` (tier changes already go
+  through `setOvidCloudTier` → store configuration).
+- P2 · duplicate loading UI · `billing_screen.dart:249-257` — while loading, the header shows its own
+  16dp spinner **and** `CloudUsageStatus` shows a REFRESHING pill, a second spinner and "Refreshing
+  allowance…". · **Fix:** let `CloudUsageStatus` own the loading state; header shows a skeleton bar.
+- P2 · unknown-tier state · `billing_screen.dart:122, 392, 399-400` — before `/usage` returns (or when
+  it fails) tier is `''`: header says "Plan unavailable", paid cards say "Plan status unavailable", but
+  the Free card still says "Included with your account", and there is no full-screen error/Retry if the
+  device is offline. · **Fix:** one top-level error state with Retry when `tier` is unknown and
+  `store.error != null`; skeleton cards while loading.
+- P2 · consistency · `billing_screen.dart:42-84` vs `auth_screen.dart:358-366` — tier → name mapping
+  ('3x'→Plus etc.) is duplicated in two files plus `ovidPlanMultipliers`. · **Fix:** one
+  `OvidPlan` enum in core with `title`, `multiplier`, `rank`; both screens read it.
+- P2 · a11y · `billing_screen.dart:300-317` — `LinearProgressIndicator` has no semantics label/value;
+  TalkBack reads nothing meaningful. Plan cards are not grouped (`MergeSemantics`) so a card reads as 5
+  disconnected nodes; the current plan is indicated only by a coloured border. · **Fix:**
+  `Semantics(label: 'Allowance', value: '62% remaining')`, `MergeSemantics` per card, and a visible
+  "Current" pill/`selected: true` semantics on the active card.
+- P2 · layout · `billing_screen.dart:278-286` — the decorative `AetherGradientHeader(height: 110)` sits
+  behind a card that is taller than 110dp, so the wash ends mid-card at a hard edge on tall text scales.
+  · **Fix:** `Positioned.fill` gradient behind only the top inset, or drop the Stack.
+- P2 · dead code · `billing_screen.dart:103-107` — `_tierRank` returns `-1` for unknown tiers and the
+  local `i` adds nothing; `isBelow` (`:340`) is true for every plan when `currentRank == -1` is not
+  checked first in all branches. Works by branch order only. · **Fix:** fold into the `OvidPlan` enum.
+
+**Missing features:** Play Billing purchase / restore purchases / manage subscription; renewal date and
+billing history (ChatGPT and Claude both show plan, renewal date and "Manage subscription"); an
+annual-plan option; a comparison table; a "usage resets in …" line in the header (the server sends
+`budget_window` but it is never shown here); promo codes.
+**Test to add:** widget test that with `kReleaseMode`-equivalent flag and no billing backend the
+"Pay now" CTA is hidden; test that the upgrade sheet cannot be dismissed while busy and keeps the sheet
+open with an inline error on failure; rebuild-count test that `AppState.notifyListeners()` does not
+rebuild `_PlanCard`.
+
+## Cloud usage status (`cloud_usage_status.dart:13-103`)
+**What it is / how reached:** Shared freshness/error block embedded in the billing header
+(`billing_screen.dart:257`) and the Usage screen Ovid Cloud card (`usage_screen.dart:706`). Driven by
+`CloudUsageStore` (`lib/core/cloud_usage_store.dart`): pill UNAVAILABLE / REFRESHING / STALE, caption,
+Retry.
+
+**Findings**
+- P2 · raw error · `cloud_usage_store.dart:139-141` + `ovid_cloud_service.dart:636-638` — the error
+  caption shows "Cloud allowance unavailable (503). Retry to refresh." — HTTP status codes in user copy,
+  and 401/402/429 get the same text. · **Fix:** map status → copy ("You're offline", "Sign in again",
+  "Daily allowance used up — resets in 3h", "Service busy, try again shortly"); keep the code in Diag.
+- P2 · flicker · `cloud_usage_store.dart:83-89, 108-111` — `refresh()` sets `stale = true` before the
+  fetch starts and resume/refresh during the 2 s cooldown leaves the block showing a yellow STALE pill
+  with no explanation and no spinner; on every screen open the pill flashes STALE → REFRESHING. ·
+  **Fix:** treat "pending, not yet in flight" as loading for display, or only show STALE when
+  `usage != null && age > N min`.
+- P2 · UX · `cloud_usage_status.dart:22-39` — when there is no usage yet, not loading and no error (e.g.
+  between cooldown ticks) the block is a lone STALE pill — meaningless to users. · **Fix:** render
+  nothing in that state.
+- P2 · a11y · `cloud_usage_status.dart:70-90` — error caption is not a live region, so TalkBack users
+  are not told the allowance failed to load; the pill text is all-caps abbreviations read letter by
+  letter on some engines. · **Fix:** `Semantics(liveRegion: true)` around the error row; sentence-case
+  semantic label on the pill.
+- P2 · freshness · `cloud_usage_status.dart:65` — "Last known allowance · may be out of date" gives no
+  timestamp. · **Fix:** store `fetchedAt` in `CloudUsageStore` and show "Updated 5 min ago".
+
+**Missing features:** "resets at <local time>" from `budget_window`; offline detection (connectivity)
+instead of a generic error.
+**Test to add:** widget test that a 503 shows friendly copy without the status code, and that no STALE
+pill renders on first open while the initial fetch is pending.
+
+## Usage screen (`usage_screen.dart:138-408`, hero `:612-816`, provider card `:825-1017`)
+**What it is / how reached:** Settings → Usage (`settings_screen.dart:372`). Ovid Cloud hero
+(server-authoritative plan pill, "% remaining", per-model remaining rows, `CloudUsageStatus`), a local
+"Retained observed history" strip (today's provider-reported tokens, in/out totals), "By provider"
+cards aggregated from `AppState.usageAttempts` (tap → `ProviderUsageScreen`, inline "Show N models"),
+overflow menu → Image receipts.
+
+**Findings**
+- P1 · perf · `usage_screen.dart:308-313` — `_aggregate(app)` (full pass over the attempt journal, up to
+  500 records, with a linear `p.models.where(...)` per record, `:231`) plus the "today" filters run inside
+  an `AnimatedBuilder(animation: app)`, i.e. on **every** `AppState` notification — on HEAD that includes
+  every streamed token of a background run. Opening Usage during a long run causes visible jank on
+  low-end Android. · **Fix:** listen to a `ValueListenable<int> usageRevision` (or select on
+  `app.usageRevision`) and memoise the aggregate by revision; use a `Map<String, UsageModelUsage>` per
+  provider. (`perf/streaming-rebuilds` reduces but does not remove the problem — any other `refresh()`
+  still re-aggregates.)
+- P1 · data correctness / copy · `usage_screen.dart:316-330, 535` + `usage_attempt_store.dart:60` — the
+  journal keeps only the last 500 terminal attempts / 1 MiB, but the UI labels figures as "Today" and
+  "Last 14 days" with no hint of truncation; heavy users (agent runs make many attempts) see today's
+  count silently undercounted. `AppState.usageHistoryTruncated` and `usageStorageError` exist but are
+  never rendered anywhere in `lib/ui`. · **Fix:** show "History limited to the last 500 requests" when
+  `usageHistoryTruncated`, and an error banner when `usageStorageError != null`; consider daily roll-up
+  buckets so per-day totals survive truncation.
+- P1 · UX / product · whole screen — the screen answers "how many tokens did my device observe" but not
+  the questions users have: "how much can I still use, when does it reset, what costs most". The server
+  sends `budget_window` and `requests_today` (`ovid_cloud_service.dart:818-823`) but neither is shown; no
+  reset time, no upgrade CTA from the hero when `pct < 0.1`. · **Fix:** hero shows "Resets in 4h 12m" from
+  `budget_window`, today's request count, and an "Upgrade" button (→ `BillingScreen`) when low or empty.
+- P2 · copy · `usage_screen.dart:571-581` — when some values are unknown the strip renders
+  "Input · output · some values unavailable" **and** a separate "Unavailable" word **and** the numbers
+  ("1.2K in · Unavailable out") — reads as a glitch. Elsewhere jargon such as "Token provenance ·
+  Derived · Legacy · Reported", "Measured · …", "Estimated/legacy · …", "ACTIVITY SCOPE",
+  "Server-authoritative" is engineering vocabulary, not user copy. · **Fix:** drop the stray
+  "Unavailable" Text; collapse provenance details behind an (i) info sheet; plain labels
+  ("Tokens used today", "Includes estimates").
+- P2 · dead code · `usage_screen.dart:22-73, 96-97, 224-229` — the `_Pricing` table (stale list prices)
+  and `costUsd` / `hasPricedModel` are computed for every record but never rendered ("Internal only").
+  · **Fix:** delete, or actually show "≈ $0.42 estimated" for BYOK providers (a real ChatGPT/Claude-Code
+  parity feature: Claude Code's `/cost` shows session cost) behind a toggle.
+- P2 · UX / interaction · `usage_screen.dart:843-986` — whole card is an `InkWell` under an opaque
+  `AetherCard` (ripple is painted underneath, so no visible feedback), and a second overlapping
+  `open_in_new` InkWell (`:962-983`, 34×34dp, below 48dp) navigates to the same place; the "Show models"
+  button sits inside the tappable card, so mis-taps navigate away. · **Fix:** single explicit chevron
+  `IconButton` (48dp) or make the card `Material`+`InkWell` on top; remove the duplicate icon.
+- P2 · a11y · `usage_screen.dart:1370-1376` — chart bars expose `onTap` only through `Semantics`, so
+  sighted users cannot tap a bar to see its value, while TalkBack announces 14 "buttons" with ISO dates
+  ("2026-10-11: 0 tokens"). · **Fix:** `GestureDetector`/tooltip on bars for touch users, localised
+  date in the label, and merge zero days ("No activity").
+- P2 · perf · `usage_screen.dart:1047-1098` — `ProviderUsageScreen` re-runs the whole-journal
+  `_aggregate` and a second full pass for the 14-day buckets on every `AppState` **and**
+  `OvidCloudService` notification. · **Fix:** same memoisation by `usageRevision`.
+- P2 · a11y / text scale · `usage_screen.dart:444, 1259-1268, 1328, 1343` — fixed 9.5–10.5 sp labels in
+  `textFaint` on `surface` (likely < 4.5:1 contrast; see 08 theme review). · **Fix:** minimum 12 sp and
+  `textMuted` for informative labels.
+- P2 · empty state · `usage_screen.dart:379-384` — "No usage yet" is shown even when
+  `usageStorageError` means history could not be read. · **Fix:** distinguish load error from empty.
+- P2 · discoverability · `usage_screen.dart:287-305` — Image receipts (a recovery path for paid image
+  jobs) is hidden in an unlabeled overflow menu. · **Fix:** a visible "Image receipts" list tile under the
+  hero when the account has any receipts.
+
+**Missing features:** reset countdown; usage per conversation / per agent run (Claude Code `/cost`,
+`/usage` parity); export CSV; date-range picker (7/30 days); "Clear local usage history" action;
+cross-device usage (server totals rather than per-device journal).
+**Test to add:** widget test that the aggregate is not recomputed when `AppState.notifyListeners()`
+fires without a `usageRevision` change; test that `usageHistoryTruncated == true` renders the
+truncation notice; golden at 2.0× text scale for the provider card.
+
+## Image receipts screen + panel (`usage_screen.dart:414-436`, `image_receipt_panel.dart:10-339`)
+**What it is / how reached:** Usage → ⋮ → "Image receipts" (`usage_screen.dart:287-305`) pushes
+`ImageReceiptsScreen`, which hosts `ImageReceiptPanel` bound to `ImageStudio.I` and
+`OvidCloudService.I.imageHeaders`. One card per saved image request (state pill, "Exact charge",
+request ID + copy, result notice, "Recover image" / "Check status" → `ImageStudio.recover`, GET-only).
+Receipts are loaded at sign-in by `firebase_service.dart:221,265`.
+
+**Findings**
+- P1 · UX · `image_receipt_panel.dart:178-301` + `image_receipt_store.dart:83-96` — a receipt has no
+  timestamp, prompt, thumbnail or conversation link; each card is identified only by an opaque
+  `image-<32 base64 chars>` ID. With more than one or two receipts the user cannot tell which image a
+  card is for. · **Fix:** persist `createdAt` and a truncated prompt (or conversation id) in
+  `ImageRequestRecord` at submission time; show "Oct 11, 14:02 · 'a red fox in…'" as the card title,
+  newest first, with the request ID collapsed under "Details".
+- P1 · broken flow · `image_receipt_panel.dart:257-267` — after a successful "Recover image" the bytes are
+  only previewed at 180dp; there is no Save to gallery / Share / Open-in-chat action, so the recovery path
+  cannot actually give the user their (paid) image. Bytes live only in widget state and vanish on back.
+  · **Fix:** add Save (MediaStore via `image_gallery_saver`/`gal`) and Share (`share_plus` XFile.fromData)
+  buttons; tap to open the shared image viewer; persist recovered bytes into the originating conversation.
+- P1 · copy / currency · `image_receipt_panel.dart:195-197` + `image_receipt_store.dart:56-64` —
+  "Exact charge: 0.04" renders the server's decimal string with no unit (and the validator also admits
+  scientific notation like `4E-2`). It is an internal USD amount, contradicting the billing screen's
+  "never surface USD" rule and meaningless to a plan user whose allowance is a percentage. · **Fix:** show
+  allowance impact ("Used ~1% of today's allowance") or hide the amount; if money is shown, format with
+  currency via `NumberFormat.simpleCurrency` and never raw strings.
+- P2 · loading state · `image_receipt_panel.dart:32-37, 168-177` — the panel never triggers
+  `loadReceipts()` on open; it relies on the sign-in load. If that load silently produced an empty list
+  (e.g. journal still being written) the user sees "No loaded image receipts for this account." with no
+  refresh affordance (Retry only appears on error). "No loaded" is also odd copy. · **Fix:** call
+  `loadReceipts()` in `initState` (or add pull-to-refresh / app-bar refresh) and use "No image
+  receipts yet — images you generate with Ovid Cloud appear here."
+- P2 · perf / memory · `image_receipt_panel.dart:145-147, 258-263` + `usage_screen.dart:425-432` — a
+  `SingleChildScrollView` nested inside the host `ListView` builds every card eagerly, and
+  `Image.memory` decodes recovered images at full resolution (multi-MP PNGs) without `cacheHeight`. ·
+  **Fix:** let the host own scrolling (`ListView.builder` over receipts), `cacheHeight: (180 * dpr).round()`.
+- P2 · redundancy / copy · `image_receipt_panel.dart:188-204, 252-255, 269-271` — state is shown twice
+  (uppercase pill and "Status: …"), and each card carries two long disclaimers about "paid jobs" and
+  "accounting, not image availability" — internal engineering wording repeated N times. · **Fix:** one
+  explanatory line at the top of the screen; per card only the pill + friendly state text.
+- P2 · UX · `image_receipt_panel.dart:97-103` — any failure (offline, 401 expired key, 404 expired result)
+  shows the same "Receipt could not be checked. Keep this request ID; do not submit a replacement." ·
+  **Fix:** map `ImageStudioError` kinds to specific copy; offer "Contact support" with the request ID
+  pre-filled for terminal failures.
+- P2 · a11y · `image_receipt_panel.dart:232-250` — outcome/notice updates after a check are not live
+  regions; the "Request ID copied" state never resets and gives no snackbar/announcement. · **Fix:**
+  `Semantics(liveRegion: true)` on the result block; snackbar "Request ID copied"; reset after 2 s.
+- P2 · layout · `image_receipt_panel.dart:272-296` — "Recover image" is full-width while "Check status" is
+  left-aligned below it; inconsistent button alignment. · **Fix:** a `Wrap` / `OverflowBar` with both.
+
+**Missing features:** filter by state (pending / failed); "Request refund / report a problem" for failed
+charged jobs; a receipt link from the image bubble in chat.
+**Test to add:** widget test that a recovered image shows Save and Share actions; test that the panel
+calls `loadReceipts()` on open; test that `charged` is never rendered as a bare number.
+
+## Providers screen + sheets (`providers_screen.dart:43-1133`)
+**What it is / how reached:** Settings → Providers (`settings_screen.dart:123`). Ovid Cloud tile
+(plan pill, "Signed in", model count, "Manage plan" → `BillingScreen`), BYOK provider tiles (status,
+model count, expand to cached model chips, "Fetch models", "API key", ⋮ Edit / Remove), and three bottom
+sheets: API key (`_ApiKeySheet :536-658`), Edit provider (`_EditProviderSheet :662-822`: base URL, API
+format, add/remove models), Add custom provider (`_AddProviderSheet :1028-1133`).
+
+**Findings**
+- **P1 · broken copy (shipped placeholder) · `providers_screen.dart:86, 773, 1087, 1117`** — user-visible
+  strings read "Add an **[OI]**-compatible endpoint", "**[OI]**-compatible" (API format chip, twice) and
+  "Connect an **[OI]**-compatible or Anthropic endpoint." — a redaction placeholder for "OpenAI" leaked
+  into UI copy. · **User impact:** looks broken/unprofessional on a core setup screen; users cannot tell
+  which format to pick. · **Fix:** replace with "OpenAI-compatible" (all 4 sites); add a lint/test that
+  greps `lib/` for `\[OI\]`.
+- **P1 · broken flow (P0 follow-through) · `providers_screen.dart:119-172`** — the Ovid Cloud tile derives
+  "Signed in" from `provider.hasKey` and shows "N models" but ignores
+  `OvidCloudService.connectionFor(...)`; when mint or the catalog fails (the "models not loading" P0) it
+  still says "Signed in · 0 models" with no error and no Retry. This is the screen users open to fix it. ·
+  **Fix:** listen to `OvidCloudService.I`; show `connecting / failed (reason) / ready` with a
+  "Retry connection" button calling `OvidCloudService.I.ensureConnected()` (it already re-mints when not ready), and "Refresh models" when ready.
+- P1 · state / persistence · `providers_screen.dart:289-298` — "Fetch models" mutates
+  `provider.models.add(id)` directly on the config object (bypassing the `AppState` mutation API the class
+  doc promises, `:36-40`), relying on `reconcileProviderModels` to persist; it only ever merges, so models
+  the provider retired stay forever and fail at send time. · **Fix:** add
+  `AppState.replaceProviderModels(provider, ids, {keepManual: true})` that tracks manual vs fetched ids,
+  removes stale fetched ones, and persists once.
+- P1 · raw error · `providers_screen.dart:309, 319` — "Failed: HTTP 401 — check key/URL" and
+  `'Fetch failed: $e'` (e.g. `ClientException with SocketConnection failed…`, `type 'List<dynamic>' is not
+  a subtype…` when the body is a JSON array or HTML, `:283-284`) are shown verbatim. · **Fix:** map
+  401/403 → "Key rejected by provider", 404 → "No /models endpoint at this URL — check the base URL",
+  timeout/socket → "Couldn't reach provider", parse errors → "Unexpected response"; guard `j is Map`.
+- P1 · missing verification · `providers_screen.dart:200-205, 561-585` — saving a key never tests it;
+  tiles stay "Key saved · not verified" indefinitely and users discover a bad key only when a chat fails.
+  · **Fix:** after Save, run a lightweight `/models` probe and show "Key verified ✓ · 42 models" or the
+  mapped error in the sheet before closing; store `verifiedAt` for the status label.
+- P2 · security · `state.dart:6781-6793` (called from `providers_screen.dart:686-693`) + `:265-280` — base
+  URL validation accepts `http://`, so a BYOK key can be sent in cleartext (and a built-in provider's URL
+  can be repointed to any host while keeping its saved key). · **Fix:** require `https` except for
+  loopback / RFC1918 hosts (local gateways), and warn + confirm "Your saved key will be sent to <host>"
+  when a built-in provider's host changes.
+- P2 · security / UX · `providers_screen.dart:552, 637-643` — the API key sheet pre-fills the full stored
+  secret into the TextField (obscured, but in widget memory and accessible to a11y/IME); there is no
+  reveal toggle or masked preview. · **Fix:** start empty with a masked hint "sk-…a1b2 saved — paste to
+  replace"; keep Clear for removal.
+- P2 · UX · `providers_screen.dart:1063-1078` — Add-provider has no inline validation or busy state;
+  errors go to a snackbar on the root Scaffold **behind** the modal sheet (same for `_addModel :722-725`,
+  format chips `:781-789`, model remove `:998-1004`), so users often never see them, and a double tap on
+  "Add" submits twice. · **Fix:** inline `errorText` under the offending field, `_saving` flag disabling
+  Add, and no snackbars from inside sheets.
+- P2 · consistency · `providers_screen.dart:129` — Ovid Cloud pill shows `tier.toUpperCase()` → "3X" /
+  "7X" / "15X", while Account/Billing/Usage show PLUS/PRO/MAX. · **Fix:** shared `OvidPlan.title` (see
+  billing).
+- P2 · copy · `providers_screen.dart:163-164, 116-117` — "Manage plan" uses an `open_in_new` (external)
+  icon for an in-app route; tile doc mentions "mint/revoke the gateway token" which BillingScreen does not
+  offer. · **Fix:** chevron icon; fix the doc comment.
+- P2 · UX · `providers_screen.dart:207-226` — dialog title "Remove X?" but destructive button "Delete";
+  removing a provider whose model is selected in an open chat gives no warning. · **Fix:** consistent
+  "Remove"; mention "Chats using this provider will switch to Ovid Cloud Auto".
+- P2 · perf · `providers_screen.dart:55-57, 731-733` — screen and Edit sheet rebuild on every `AppState`
+  notification (streaming); each `_ModelChip` calls `ModelLimits.compactLabel` per build. · **Fix:**
+  narrower listenable (provider revision) or `Selector`-style rebuild.
+- P2 · a11y · `providers_screen.dart:981-988` — model chip text 11 sp `textMuted` mono; the remove
+  `IconButton` inside a 7-radius chip makes each chip ~48dp tall but chips wrap tightly so adjacent "×"
+  targets abut. · **Fix:** `InputChip` with `onDeleted` (built-in semantics and spacing).
+- P2 · i18n/design · `providers_screen.dart:330-332, 139` — monogram uses `substring(0,1)` (breaks on
+  emoji/surrogate pairs) and providers have no logos. · **Fix:** `characters.first`; ship logo assets for
+  built-ins.
+
+**Missing features:** "Test connection" button; per-provider default model; model search/filter in long
+lists (OpenRouter returns 300+ ids, paged 10 at a time with "More"); enable/disable a model without
+deleting it (the class doc claims "enable or disable models" but only add/remove exist); import provider
+from a config URL/QR; per-provider usage link to `ProviderUsageScreen`.
+**Test to add:** golden/grep test that no user-visible string in `lib/ui` contains `[OI]`; widget test
+that the Ovid Cloud tile shows a Retry when `setConnectionForTest(failed)`; test that fetch with a JSON
+array body shows "Unexpected response", not a type error.
+
+## Profile avatar (`profile_avatar.dart:12-96`)
+**What it is / how reached:** Shared widget used by the sidebar header (`sidebar.dart:401`), Settings
+profile row (`settings_screen.dart:419`) and Account header (`auth_screen.dart:554`). Circle with
+`Image.network(photoUrl)` (https only) and an initial/person-icon fallback.
+
+**Findings**
+- P2 · perf / offline · `profile_avatar.dart:54-60` — plain `Image.network` with no disk cache and no
+  `cacheWidth`: the photo re-downloads on every cold start, shows the fallback while offline, and the
+  sidebar (rebuilt often) relies on the in-memory `ImageCache` only. · **Fix:** `cached_network_image`
+  (or `Image(image: ResizeImage(NetworkImage(url), width: (radius*2*dpr).round()))`) and request a
+  size-appropriate Google photo (`=s${px}-c`).
+- P2 · consistency · `settings_screen.dart:419` — Settings passes no `displayName`, so it shows the
+  generic person icon while Account shows the initial for the same user. · **Fix:** pass
+  `displayName: fb.displayName` at every call site (or make it required).
+- P2 · i18n · `profile_avatar.dart:86-95` — the "first cased letter" rule skips caseless scripts, so
+  "राम Kumar" renders "K" and "李 Wei" renders "W" — wrong initial for the primary (India) market. ·
+  **Fix:** use the first grapheme of the first word (`name.characters.first`), uppercased when cased.
+- P2 · a11y / text scale · `profile_avatar.dart:74-82` — the initial's font scales with system text size,
+  so at 2.0× a 22-radius avatar's glyph overflows/clips the circle. · **Fix:**
+  `textScaler: TextScaler.noScaling` (the avatar is a fixed-size graphic) or `FittedBox`.
+- P2 · a11y · `profile_avatar.dart:33-36` — semantics label is always "Profile image" with no name; in
+  the sidebar header TalkBack reads "Profile image" without saying whose account is active. · **Fix:**
+  label "Profile picture for <name>" (or exclude it when the adjacent name text is already read).
+- P2 · polish · `profile_avatar.dart:58-59` — image pops in with no fade, and on the error path there is
+  no retry once connectivity returns (error is cached for the URL). · **Fix:** `frameBuilder` fade-in;
+  evict the URL from `imageCache` on resume after an error.
+
+**Missing features:** change/upload profile photo (Account only edits the name); deterministic
+background colour per user for the fallback (helps distinguish accounts when switching).
+**Test to add:** widget test at `textScaleFactor 2.0` that the initial stays within the circle; test
+that "राम Kumar" yields "र".
+
+## Group summary
+**Totals for this file:** 5 × P0, 29 × P1, 84 × P2 (all sections, including the earlier login/auth/
+account/deletion work). The two release-blocking themes are **Play policy** (in-app deletion is dead in
+release; paid plans are sold through a test endpoint with no Play Billing) and the **Ovid Cloud
+connection/catalog path** (users see "no models" with no way to recover from the screens they open).
+
+**Top 10 fixes, in order**
+| # | Fix | Where | Sev | Effort |
+|---|---|---|---|---|
+| 1 | Add `--dart-define=OVID_ACCOUNT_ENABLED=true` to both release builds + CI guard; until the server is live, show a working "Request deletion" web/mail link instead of the disabled button; route panel Restore through `fb.restoreAccount` | `build.yml:221-222`, `account_service.dart:58`, `account_deletion_panel.dart:146-201,313` | P0 | S (client) + M (server §8) |
+| 2 | Hide "Pay now"/Upgrade CTAs in release (server `billing_enabled` flag) now; then integrate Play Billing (`in_app_purchase` + server token verification + RTDN), manage/cancel via Play subscription centre, show "/ month" and renewal terms | `billing_screen.dart:383-406,450-531`, `ovid_cloud_service.dart:289-291,657-711` | P0 | S now / L full |
+| 3 | Picker always shows `auto` + last-good Ovid Cloud models when status is `failed`, with "Retry" subtitle | `chat_screen.dart:2412-2414,2455-2458,2681` | P0 | S |
+| 4 | Re-mint after catalog rejection must rotate the key (client sends `reason:key_rejected` + key hash; VPS `/mint` rotates); publish a distinct "repairing" state if the same key comes back | `ovid_cloud_service.dart:400-404`, server `mint.py` | P0 | M |
+| 5 | Clear the `ovid-cloud` key, bound identity and tier on sign-out / uid change; refuse to send with a key not owned by the current account | `firebase_service.dart:473-493`, `ovid_cloud_service.dart` `_authChanged`, `agent_service.dart:12469` | P1 | S |
+| 6 | Providers → Ovid Cloud tile shows real connection state (connecting / failed + reason / ready) with "Retry connection" and "Refresh models" | `providers_screen.dart:119-172` | P1 | S |
+| 7 | Replace leaked "[OI]-compatible" placeholder copy (4 sites) with "OpenAI-compatible" and add a grep test | `providers_screen.dart:86,773,1087,1117` | P1 | S |
+| 8 | Mint 401 → retry once with force-refreshed ID/App Check token; resume-triggered recovery with exponential backoff + jitter; map mint/catalog/usage/upgrade/fetch-models errors to friendly copy (no HTTP codes, no `$e`) | `ovid_cloud_service.dart:413-423,567-569,636-638`, `login_gate.dart:110-118`, `providers_screen.dart:309,319`, `billing_screen.dart:465-467` | P1 | M |
+| 9 | Usage & Billing: stop re-aggregating on every `AppState` notify (memoise by `usageRevision`, drop `app` from billing merge); render `usageHistoryTruncated` / `usageStorageError`; show reset countdown from `budget_window` + Upgrade CTA when low | `usage_screen.dart:308-346,1047-1098`, `billing_screen.dart:119-121` | P1 | M |
+| 10 | Image receipts: add timestamp/prompt to records, Save/Share for recovered images, never show bare `charged` amount, load on open | `image_receipt_panel.dart:178-271`, `image_receipt_store.dart:83-96` | P1 | M |
+
+**Next tier (do alongside related work):** upgrade sheet non-dismissible while busy + inline error
+(`billing_screen.dart:456-531`, S); verify BYOK key on save and https-only base URLs except
+loopback/LAN (`providers_screen.dart:561-585`, `state.dart:6781-6793`, S); "Fetch models" replaces stale
+ids via an `AppState` API instead of mutating `provider.models` (`providers_screen.dart:289-298`, S);
+single `OvidPlan` enum for PLUS/PRO/MAX naming across Account/Billing/Usage/Providers (S);
+legal links (Terms/Privacy) on login and in the purchase sheet (S); avatar caching, i18n initials and
+non-scaling glyph (`profile_avatar.dart`, S).
+
+**Suggested order:** 1 → 2 (hide CTAs) → 3 → 5 → 7 → 6 ship as one small release-hardening PR; 4 + 8 with
+VPS Phase 1B; 9 + 10 in the usage/billing UX PR; full Play Billing (2) as its own project.
+
+**Parity notes (ChatGPT / Claude apps, Claude Code):** missing data export, active-sessions list,
+subscription management/renewal date, usage reset countdown, per-conversation cost/usage (Claude Code
+`/cost`, `/usage`), "Test connection" for BYOK providers, and profile photo change.
