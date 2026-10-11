@@ -13,6 +13,7 @@ COPY server/images/*.py /app/server/images/
 COPY server/shares/*.py /app/server/shares/
 COPY server/sync/*.py /app/server/sync/
 COPY server/collaboration/*.py /app/server/collaboration/
+COPY server/reports/*.py /app/server/reports/
 USER 10001:10001
 EXPOSE 8080
 CMD ["python", "-m", "uvicorn", "server.account.runtime:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--no-access-log", "--no-proxy-headers"]
