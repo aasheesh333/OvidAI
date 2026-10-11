@@ -3,6 +3,7 @@ package com.dhanuk.ovidai
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.os.Environment
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import java.io.File
@@ -25,9 +26,41 @@ object NativeShare {
         }
     }
 
-    fun fileIntent(context: Context, path: String): Intent {
-        val source = File(path)
+    /** Roots a share source may come from: the app's own file, cache and
+     * Flutter documents dirs, its external app dirs, and shared storage. */
+    private fun allowedRoots(context: Context): List<String> {
+        val roots = mutableListOf(
+            context.filesDir, context.cacheDir, File(context.applicationInfo.dataDir, "app_flutter"),
+        )
+        context.getExternalFilesDirs(null).filterNotNull().forEach { roots.add(it) }
+        context.externalCacheDirs.filterNotNull().forEach { roots.add(it) }
+        @Suppress("DEPRECATION")
+        Environment.getExternalStorageDirectory()?.let { roots.add(it) }
+        return roots.mapNotNull { runCatching { it.canonicalPath }.getOrNull() }
+    }
+
+    /** App-private state that is never shared even under an allowed root. */
+    private fun deniedRoots(context: Context): List<String> {
+        val data = File(context.applicationInfo.dataDir)
+        return listOf(
+            File(data, "shared_prefs"), File(data, "databases"), File(data, "no_backup"),
+            File(data, "code_cache"), context.noBackupFilesDir, context.codeCacheDir,
+            File(context.filesDir, "datastore"),
+        ).mapNotNull { runCatching { it.canonicalPath }.getOrNull() }
+    }
+
+    /** Validates an untrusted source path (M2) and returns its canonical file. */
+    private fun shareableSource(context: Context, path: String): File {
+        val source = runCatching { File(path).canonicalFile }.getOrNull()
+            ?: throw IOException("File is unavailable")
         if (!source.isFile || !source.canRead()) throw IOException("File is unavailable")
+        ShareSourcePolicy.refusal(source.path, allowedRoots(context), deniedRoots(context))
+            ?.let { throw IOException(it) }
+        return source
+    }
+
+    fun fileIntent(context: Context, path: String): Intent {
+        val source = shareableSource(context, path)
         val target = File(shareDirectory(context), source.name)
         source.inputStream().use { input -> target.outputStream().use { input.copyTo(it) } }
         return streamIntent(context, target)
