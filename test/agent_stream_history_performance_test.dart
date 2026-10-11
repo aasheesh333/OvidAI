@@ -65,30 +65,69 @@ void main() {
   });
 
   for (final historyLength in [0, 100, 10000]) {
-    test('tail streaming has bounded reads with $historyLength old messages', () {
-      for (var i = 0; i < historyLength; i++) {
-        messages.add(Message(role: 'user', content: 'History $i'));
-      }
-      agent.streamToBubbleForTest(session, 'start:');
-      final bubble = messages.last;
-      messages.resetCounts();
-      agent.resetStreamPublicationCountForTest();
+    test(
+      'tail streaming has bounded reads with $historyLength old messages',
+      () {
+        for (var i = 0; i < historyLength; i++) {
+          messages.add(Message(role: 'user', content: 'History $i'));
+        }
+        agent.streamToBubbleForTest(session, 'start:');
+        final bubble = messages.last;
+        messages.resetCounts();
+        agent.resetStreamPublicationCountForTest();
 
-      for (var i = 0; i < 200; i++) {
-        agent.streamToBubbleForTest(session, 'x');
-      }
-      agent.flushStreamRefreshForTest();
+        for (var i = 0; i < 200; i++) {
+          agent.streamToBubbleForTest(session, 'x');
+        }
+        agent.flushStreamRefreshForTest();
 
-      expect(messages.containsCalls, 0);
-      expect(messages.reads, lessThanOrEqualTo(200));
-      expect(agent.streamPublicationCountForTest, 1);
-      expect(messages.length, historyLength + 1);
-      expect(messages.last, same(bubble));
-      expect(bubble.content, 'start:${List.filled(200, 'x').join()}');
-      expect(bubble.kind, MsgKind.streaming);
-      expect(bubble.thinking, isFalse);
-    });
+        expect(messages.containsCalls, 0);
+        expect(messages.reads, lessThanOrEqualTo(200));
+        expect(agent.streamPublicationCountForTest, 1);
+        expect(messages.length, historyLength + 1);
+        expect(messages.last, same(bubble));
+        expect(bubble.content, 'start:${List.filled(200, 'x').join()}');
+        expect(bubble.kind, MsgKind.streaming);
+        expect(bubble.thinking, isFalse);
+      },
+    );
   }
+
+  test('streaming tokens tick the live bubble, not global app state', () {
+    agent.streamToBubbleForTest(session, 'start');
+    agent.flushStreamRefreshForTest();
+    var appNotifications = 0;
+    var ticks = 0;
+    void onApp() => appNotifications++;
+    void onTick() => ticks++;
+    AppState.I.addListener(onApp);
+    agent.liveBubbleTicks.addListener(onTick);
+    addTearDown(() {
+      AppState.I.removeListener(onApp);
+      agent.liveBubbleTicks.removeListener(onTick);
+    });
+
+    for (var i = 0; i < 50; i++) {
+      agent.streamToBubbleForTest(session, 'x');
+    }
+
+    expect(ticks, greaterThan(0));
+    expect(appNotifications, 0);
+  });
+
+  test('a live bubble behind another message falls back to a full refresh', () {
+    agent.streamToBubbleForTest(session, 'Hello');
+    agent.flushStreamRefreshForTest();
+    messages.add(Message(role: 'user', content: 'interleaved'));
+    var appNotifications = 0;
+    void onApp() => appNotifications++;
+    AppState.I.addListener(onApp);
+    addTearDown(() => AppState.I.removeListener(onApp));
+
+    agent.streamToBubbleForTest(session, ' world');
+
+    expect(appNotifications, greaterThan(0));
+  });
 
   test('a live bubble behind another message is reused', () {
     agent.streamToBubbleForTest(session, 'Hello');
@@ -133,10 +172,7 @@ void main() {
       expect(messages.single.content, 'private thought');
 
       final request = agent.buildRequestMessages(session, 'system');
-      expect(
-        request.where((m) => m['content'] == 'private thought'),
-        isEmpty,
-      );
+      expect(request.where((m) => m['content'] == 'private thought'), isEmpty);
     } finally {
       AppState.I.showReasoning = previousShowReasoning;
     }

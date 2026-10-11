@@ -70,6 +70,17 @@ class _ChatTextScaler extends TextScaler {
 
   @override
   double get textScaleFactor => scale(14) / 14;
+
+  // A new scaler is built on every rebuild; value equality keeps MediaQuery
+  // from treating that as a text-scale change that relayouts every message.
+  @override
+  bool operator ==(Object other) =>
+      other is _ChatTextScaler &&
+      other.inherited == inherited &&
+      other.zoom == zoom;
+
+  @override
+  int get hashCode => Object.hash(inherited, zoom);
 }
 
 class ChatTranscript extends StatelessWidget {
@@ -88,7 +99,11 @@ class ChatTranscript extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([AppState.I, AgentService.I]),
+      animation: Listenable.merge([
+        AppState.I,
+        AgentService.I,
+        AgentService.I.liveBubbleTicks,
+      ]),
       builder: (_, _) {
         final layout = ChatLayout(
           viewportWidth: MediaQuery.of(context).size.width,
@@ -1633,18 +1648,29 @@ class _ChatScreenState extends State<ChatScreen>
                                                       return KeyedSubtree(
                                                         key: rowKey,
                                                         child: AnimatedBuilder(
-                                                          animation: AppState.I,
-                                                          builder: (_, _) =>
-                                                              _buildItem(
-                                                                item,
-                                                                s,
-                                                                onAction: () =>
-                                                                    setState(
-                                                                      () {},
-                                                                    ),
-                                                                input: _input,
-                                                                layout: layout,
-                                                              ),
+                                                          animation:
+                                                              Listenable.merge([
+                                                                AppState.I,
+                                                                AgentService
+                                                                    .I
+                                                                    .liveBubbleTicks,
+                                                              ]),
+                                                          builder: (_, _) {
+                                                            // Streaming ticks rebuild only
+                                                            // this row, so keep following
+                                                            // the tip from here too.
+                                                            _maybeFollowTip();
+                                                            return _buildItem(
+                                                              item,
+                                                              s,
+                                                              onAction: () =>
+                                                                  setState(
+                                                                    () {},
+                                                                  ),
+                                                              input: _input,
+                                                              layout: layout,
+                                                            );
+                                                          },
                                                         ),
                                                       );
                                                     }

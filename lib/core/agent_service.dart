@@ -12388,15 +12388,22 @@ ${await _agentsMdBlock()}
     String? reportedModel,
     Map<String, dynamic>? usage,
   }) async {
-    unawaited(attempt.complete(
-      outcome: outcome,
-      reportedModel: reportedModel,
-      usage: usage,
-    ).then<void>((_) {
-      if (!attempt.captureResult.captured) {
-        _emit('think', 'usage accounting incomplete (storage unavailable)');
-      }
-    }));
+    unawaited(
+      attempt
+          .complete(
+            outcome: outcome,
+            reportedModel: reportedModel,
+            usage: usage,
+          )
+          .then<void>((_) {
+            if (!attempt.captureResult.captured) {
+              _emit(
+                'think',
+                'usage accounting incomplete (storage unavailable)',
+              );
+            }
+          }),
+    );
   }
 
   void _captureUsageUpdate(
@@ -12820,6 +12827,9 @@ ${await _agentsMdBlock()}
     );
     s.messages.add(_liveMsg!);
     _liveSession = s;
+    // A new row changes the transcript structure: one full refresh here, then
+    // per-token ticks only repaint this row (see [liveBubbleTicks]).
+    AppState.I.refresh();
   }
 
   /// Coalesces stream-driven UI refreshes.
@@ -12833,6 +12843,12 @@ ${await _agentsMdBlock()}
   /// always painted.
   Timer? _streamRefreshTimer;
   bool _streamRefreshPending = false;
+
+  /// Ticks once per throttled stream publication. Only the live tail bubble
+  /// (and transcript views) listen to it, so a streaming token no longer
+  /// rebuilds every widget listening to [AppState]. The end-of-turn flush
+  /// still calls `AppState.I.refresh()` so everything else settles once.
+  final ValueNotifier<int> liveBubbleTicks = ValueNotifier<int>(0);
   int _streamPublicationCount = 0;
   static const _streamRefreshInterval = Duration(milliseconds: 16);
 
@@ -12858,19 +12874,34 @@ ${await _agentsMdBlock()}
     _streamPublicationCount++;
   }
 
+  /// The transcript only rebuilds its tail row on [liveBubbleTicks]. When the
+  /// live bubble is not the last message, fall back to a full refresh.
+  void _notifyLiveBubble() {
+    final session = _liveSession;
+    final message = _liveMsg;
+    if (session != null &&
+        message != null &&
+        session.messages.isNotEmpty &&
+        identical(session.messages.last, message)) {
+      liveBubbleTicks.value++;
+    } else {
+      AppState.I.refresh();
+    }
+  }
+
   void _refreshStreamThrottled() {
     if (_streamRefreshTimer != null) {
       _streamRefreshPending = true;
       return;
     }
     _publishLiveBubble();
-    AppState.I.refresh();
+    _notifyLiveBubble();
     _streamRefreshTimer = Timer(_streamRefreshInterval, () {
       _streamRefreshTimer = null;
       if (!_streamRefreshPending) return;
       _streamRefreshPending = false;
       _publishLiveBubble();
-      AppState.I.refresh();
+      _notifyLiveBubble();
     });
   }
 

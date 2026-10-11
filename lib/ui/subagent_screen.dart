@@ -109,9 +109,9 @@ class _SubagentScreenState extends State<SubagentScreen> {
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not send follow-up: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not send follow-up: $e')));
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -120,7 +120,11 @@ class _SubagentScreenState extends State<SubagentScreen> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([AppState.I, AgentService.I]),
+      animation: Listenable.merge([
+        AppState.I,
+        AgentService.I,
+        AgentService.I.liveBubbleTicks,
+      ]),
       builder: (_, _) {
         final app = AppState.I;
         final s = app.sessionById(widget.sessionId);
@@ -182,69 +186,71 @@ class _SubagentScreenState extends State<SubagentScreen> {
               children: [
                 _Lineage(sessionId: s.id),
                 _StatusStrip(session: s, state: state, sub: sub),
-                 Expanded(
-                   child: Stack(
-                     children: [
-                       Positioned.fill(
-                         child: s.messages.isEmpty
-                             ? Center(
-                                 child: Text(
-                                   running
-                                       ? 'Starting…'
-                                       : 'No activity recorded.',
-                                   style: TextStyle(
-                                     fontSize: 12.5,
-                                     color: Aether.textFaint,
-                                   ),
-                                 ),
-                               )
-                             : ChatTranscript(
-                                 session: s,
-                                 scrollController: _scroll,
-                                 typing: running,
-                               ),
-                       ),
-                       if (_showJumpFab)
-                         Positioned(
-                           right: 12,
-                           bottom: 12,
-                           child: Tooltip(
-                             message: 'Jump to latest',
-                             child: Material(
-                               color: Aether.surface,
-                               elevation: 2,
-                               borderRadius: BorderRadius.circular(20),
-                               child: InkWell(
-                                 onTap: _jumpToLatest,
-                                 borderRadius: BorderRadius.circular(20),
-                                 child: const Padding(
-                                   padding: EdgeInsets.symmetric(
-                                     horizontal: 10,
-                                     vertical: 6,
-                                   ),
-                                   child: Icon(
-                                     Icons.arrow_downward,
-                                     size: 16,
-                                     color: Aether.accent,
-                                   ),
-                                 ),
-                               ),
-                             ),
-                           ),
-                         ),
-                     ],
-                   ),
-                 ),
+                Expanded(
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: s.messages.isEmpty
+                            ? Center(
+                                child: Text(
+                                  running
+                                      ? 'Starting…'
+                                      : 'No activity recorded.',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    color: Aether.textFaint,
+                                  ),
+                                ),
+                              )
+                            : ChatTranscript(
+                                session: s,
+                                scrollController: _scroll,
+                                typing: running,
+                              ),
+                      ),
+                      if (_showJumpFab)
+                        Positioned(
+                          right: 12,
+                          bottom: 12,
+                          child: Tooltip(
+                            message: 'Jump to latest',
+                            child: Material(
+                              color: Aether.surface,
+                              elevation: 2,
+                              borderRadius: BorderRadius.circular(20),
+                              child: InkWell(
+                                onTap: _jumpToLatest,
+                                borderRadius: BorderRadius.circular(20),
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
+                                  child: Icon(
+                                    Icons.arrow_downward,
+                                    size: 16,
+                                    color: Aether.accent,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
                 _Composer(
-                  maxLines: MediaQuery.sizeOf(context).height -
-                              MediaQuery.viewInsetsOf(context).bottom < 480
+                  maxLines:
+                      MediaQuery.sizeOf(context).height -
+                              MediaQuery.viewInsetsOf(context).bottom <
+                          480
                       ? 2
                       : 4,
-                   controller: _input,
-                   continuable: continuable,
-                   running: running,
-                   state: state,
-                   sending: _sending,
+                  controller: _input,
+                  continuable: continuable,
+                  running: running,
+                  state: state,
+                  sending: _sending,
                   onSend: _send,
                   onStop: () => agent.stopSubagentRun(s.id),
                 ),
@@ -270,37 +276,38 @@ class _Lineage extends StatelessWidget {
     if (chain.length < 2) return const SizedBox.shrink();
     final ancestors = chain.sublist(0, chain.length - 1);
     return SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [for (final a in ancestors)
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (final a in ancestors)
             Row(
-            children: [
-              TextButton(
-                onPressed: () {
-                  if (a.isSubagent) {
-                    SubagentScreen.open(context, a.id);
-                  } else {
-                    AppState.I.selectSession(a.id);
-                    Navigator.of(context).popUntil((r) => r.isFirst);
-                  }
-                },
-                child: Text(
-                  a.agentLabel ?? a.title,
-                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+              children: [
+                TextButton(
+                  onPressed: () {
+                    if (a.isSubagent) {
+                      SubagentScreen.open(context, a.id);
+                    } else {
+                      AppState.I.selectSession(a.id);
+                      Navigator.of(context).popUntil((r) => r.isFirst);
+                    }
+                  },
+                  child: Text(
+                    a.agentLabel ?? a.title,
+                    style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
+                  ),
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 3),
-                child: Icon(
-                  Icons.chevron_right,
-                  size: 11,
-                  color: Aether.textFaint,
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 3),
+                  child: Icon(
+                    Icons.chevron_right,
+                    size: 11,
+                    color: Aether.textFaint,
+                  ),
                 ),
-              ),
-            ],
+              ],
             ),
-          ],
-        ),
+        ],
+      ),
     );
   }
 }
@@ -390,8 +397,8 @@ class _StatusStrip extends StatelessWidget {
           ),
           AetherPill(label: state, color: color, filled: true),
           Text(
-              bits.join(' · '),
-              style: TextStyle(fontSize: 11, color: Aether.textMuted),
+            bits.join(' · '),
+            style: TextStyle(fontSize: 11, color: Aether.textMuted),
           ),
           if (session.agentAllowedTools.isNotEmpty)
             Tooltip(
@@ -445,7 +452,7 @@ class _Composer extends StatelessWidget {
             Icon(Icons.history_toggle_off, size: 15, color: Aether.textFaint),
             const SizedBox(width: 8),
             Expanded(
-             child: Text(
+              child: Text(
                 running
                     ? 'This agent runs to completion — it takes no follow-ups.'
                     : switch (state) {
@@ -564,42 +571,46 @@ Future<void> showSubagentCatalog(BuildContext context, String sessionId) async {
         final children = app.childrenOf(sessionId);
         return SafeArea(
           child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(sheetCtx).height * .85),
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetCtx).height * .85,
+            ),
             child: children.isEmpty
-              ? const SingleChildScrollView(child: Padding(
-                  padding: EdgeInsets.symmetric(vertical: 12),
-                  child: AetherEmptyState(
-                    key: ValueKey('subagent-catalog-empty'),
-                    icon: Icons.account_tree_outlined,
-                    title: 'No subagents yet',
-                    message:
-                        'Ask the agent to dispatch one for a focused subtask — '
-                        'it gets its own transcript and workspace.',
-                  ),
-                ))
-              : ListView(
-                  shrinkWrap: true,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
-                      child: AetherSectionTitle(
-                        eyebrow: 'Subagents (${children.length})',
+                ? const SingleChildScrollView(
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: AetherEmptyState(
+                        key: ValueKey('subagent-catalog-empty'),
+                        icon: Icons.account_tree_outlined,
+                        title: 'No subagents yet',
+                        message:
+                            'Ask the agent to dispatch one for a focused subtask — '
+                            'it gets its own transcript and workspace.',
                       ),
                     ),
-                    for (final child in children)
+                  )
+                : ListView(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    children: [
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                        child: _CatalogCard(
-                          session: child,
-                          onOpen: () {
-                            Navigator.pop(sheetCtx);
-                            SubagentScreen.open(context, child.id);
-                          },
+                        padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
+                        child: AetherSectionTitle(
+                          eyebrow: 'Subagents (${children.length})',
                         ),
                       ),
-                  ],
-                ),
+                      for (final child in children)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                          child: _CatalogCard(
+                            session: child,
+                            onOpen: () {
+                              Navigator.pop(sheetCtx);
+                              SubagentScreen.open(context, child.id);
+                            },
+                          ),
+                        ),
+                    ],
+                  ),
           ),
         );
       },
@@ -629,9 +640,7 @@ class _CatalogCard extends StatelessWidget {
       _ => Aether.successLight,
     };
     final grandchildren = AppState.I.childrenOf(session.id).length;
-    final runtime = sub != null
-        ? formatCompactDuration(sub.elapsed)
-        : '—';
+    final runtime = sub != null ? formatCompactDuration(sub.elapsed) : '—';
     final subtitleBits = <String>[
       '${session.messages.length} rows',
       session.mode,
@@ -644,11 +653,7 @@ class _CatalogCard extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
         child: Row(
           children: [
-            AetherStatusDot(
-              color: color,
-              pulsing: running,
-              size: 9,
-            ),
+            AetherStatusDot(color: color, pulsing: running, size: 9),
             const SizedBox(width: 10),
             Expanded(
               child: Column(
@@ -656,36 +661,32 @@ class _CatalogCard extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                          session.agentLabel ?? session.title,
-                          style: AetherType.title.copyWith(fontSize: 13.5),
-                        ),
+                    session.agentLabel ?? session.title,
+                    style: AetherType.title.copyWith(fontSize: 13.5),
+                  ),
                   const SizedBox(height: 6),
                   Wrap(
                     spacing: 8,
                     runSpacing: 6,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      AetherPill(
-                        label: state,
-                        color: color,
-                        filled: true,
-                      ),
+                      AetherPill(label: state, color: color, filled: true),
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                      Icon(
-                        Icons.schedule,
-                        size: 11,
-                        color: Aether.textFaint,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        runtime,
-                        style: AetherType.caption.copyWith(
-                          fontFamily: 'JetBrainsMono',
-                        ),
-                      ),
-                      ],
+                          Icon(
+                            Icons.schedule,
+                            size: 11,
+                            color: Aether.textFaint,
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            runtime,
+                            style: AetherType.caption.copyWith(
+                              fontFamily: 'JetBrainsMono',
+                            ),
+                          ),
+                        ],
                       ),
                       if (running)
                         AetherGhostButton(
@@ -702,11 +703,7 @@ class _CatalogCard extends StatelessWidget {
               ),
             ),
             if (!running)
-              Icon(
-                Icons.chevron_right,
-                size: 18,
-                color: Aether.textFaint,
-              ),
+              Icon(Icons.chevron_right, size: 18, color: Aether.textFaint),
           ],
         ),
       ),
