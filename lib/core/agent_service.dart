@@ -52,6 +52,7 @@ import 'commands.dart';
 import 'device_control_service.dart';
 import 'model_limits.dart';
 import 'diag.dart';
+import 'ssrf_guard.dart';
 import 'image_studio.dart';
 import 'ovid_cloud_service.dart';
 
@@ -3260,41 +3261,41 @@ class AgentService extends ChangeNotifier {
     if (uri == null) return true; // scheme-less → relative, resolved later
     final host = uri.host.toLowerCase();
     if (host.isEmpty) return true; // relative path
-    if (host == 'localhost' || host == '[::1]') return false;
-    // IPv6 loopback without brackets (Uri.host strips them).
-    if (host == '::1') return false;
-    final ip = InternetAddress.tryParse(host);
-    if (ip != null) {
-      // IPv6 loopback.
-      if (ip.type == InternetAddressType.IPv6 && ip.address == '::1') {
-        return false;
-      }
-      if (ip.type == InternetAddressType.IPv4) {
-        final bytes = ip.rawAddress;
-        // 127.0.0.0/8
-        if (bytes[0] == 127) return false;
-        // 10.0.0.0/8
-        if (bytes[0] == 10) return false;
-        // 172.16.0.0/12
-        if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) return false;
-        // 192.168.0.0/16
-        if (bytes[0] == 192 && bytes[1] == 168) return false;
-        // 169.254.0.0/16 (link-local)
-        if (bytes[0] == 169 && bytes[1] == 254) return false;
-      }
+    if (host == 'localhost' || host.endsWith('.localhost')) return false;
+    var bare = host;
+    if (bare.startsWith('[') && bare.endsWith(']')) {
+      bare = bare.substring(1, bare.length - 1);
     }
+    final ip = InternetAddress.tryParse(bare);
+    // Private, loopback, link-local, CGNAT, IPv6 ULA/link-local and every
+    // IPv4-embedding IPv6 form (M3) — one shared classifier.
+    if (ip != null && SsrfGuard.isNonPublicAddress(ip)) return false;
     return true;
   }
 
   /// Refusal text when [url] targets a private/internal host, or null when the
   /// URL is allowed. Layered on top of [unloadableUrlReason] (scheme gate).
-  static String? _ssrfUrlReason(String url, {required String tool}) {
-    if (isAllowedBrowserUrl(url)) return null;
+  /// Literal addresses are classified directly; a host NAME is resolved and
+  /// refused when ANY address it maps to is non-public (M3), so a public DNS
+  /// record pointing at 127.0.0.1 or 169.254.169.254 does not slip through.
+  static Future<String?> _ssrfUrlReason(
+    String url, {
+    required String tool,
+  }) async {
     // If the scheme itself is bad, unloadableUrlReason already covers it.
     if (!isLoadableTabUrl(url)) return null;
-    return '$tool refused a URL targeting a private or internal host. '
-        'Navigating to localhost, 127.x, 10.x, 172.16-31.x, 192.168.x, '
-        '169.254.x, or [::1] is not allowed — these could probe internal '
+    String? resolved;
+    if (isAllowedBrowserUrl(url)) {
+      final host = Uri.tryParse(url.trim())?.host ?? '';
+      if (host.isEmpty) return null;
+      resolved = await SsrfGuard.nonPublicHostReason(host);
+      if (resolved == null) return null;
+    }
+    final detail = resolved == null ? '' : ' ($resolved)';
+    return '$tool refused a URL targeting a private or internal host$detail. '
+        'Navigating to localhost, 127.x, 10.x, 100.64-127.x, 172.16-31.x, '
+        '192.168.x, 169.254.x, [::1], fc00::/7 or fe80::/10 (directly or via '
+        'a DNS name) is not allowed — these could probe internal '
         'infrastructure. Explain what you were trying to do and ask the user '
         'how to proceed.';
   }
@@ -14181,7 +14182,10 @@ ${await _agentsMdBlock()}
         );
         if (schemeRefusal2 != null) return schemeRefusal2;
         // SECURITY (SSRF): refuse private/internal hosts.
-        final ssrfRefusal2 = _ssrfUrlReason(url, tool: 'browser_navigate');
+        final ssrfRefusal2 = await _ssrfUrlReason(
+          url,
+          tool: 'browser_navigate',
+        );
         if (ssrfRefusal2 != null) return ssrfRefusal2;
         // Strict permission model: same host-grant gate as browser_open.
         final navUri2 = Uri.tryParse(url);
@@ -14223,7 +14227,10 @@ ${await _agentsMdBlock()}
         );
         if (newTabSchemeRefusal != null) return newTabSchemeRefusal;
         // SECURITY (SSRF): refuse private/internal hosts.
-        final newTabSsrfRefusal = _ssrfUrlReason(url, tool: 'browser_new_tab');
+        final newTabSsrfRefusal = await _ssrfUrlReason(
+          url,
+          tool: 'browser_new_tab',
+        );
         if (newTabSsrfRefusal != null) return newTabSsrfRefusal;
         final ok = await _maybeApprove(
           'browser_new_tab',
@@ -17354,6 +17361,11 @@ ${await _agentsMdBlock()}
     // credentials. "Full Access" means the agent is not asked about its own
     // workspace; it does not mean it may reach the metadata service.
     if (isMetadataOrLinkLocalHost(host)) {
+      return false;
+    }
+    // …and not via a DNS name that RESOLVES there either (M3): any resolved
+    // link-local/metadata address refuses, in every mode.
+    if (await SsrfGuard.resolvesToMetadataOrLinkLocal(host)) {
       return false;
     }
     final m = mode;
