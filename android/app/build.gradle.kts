@@ -4,8 +4,31 @@ import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.Signature
 import java.security.cert.X509Certificate
+import java.util.Base64
 
 val ovidMinSdk = 23
+
+// Google Play distribution switch. The single source of truth is the Dart
+// define `--dart-define=OVID_PLAY_BUILD=true` (Flutter forwards dart-defines
+// to Gradle as the base64, comma-separated `dart-defines` property), so the
+// Dart feature gates (lib/core/distribution.dart) and the native packaging
+// below can never disagree. `-Povid.play=true` exists for Gradle-only tasks.
+// A Play build:
+//  * targets API 36 (Play's floor for new apps/updates since 2026-08-31);
+//  * ships no libovid_bootstrap.so (Termux userland that execs from app data,
+//    impossible at targetSdk >= 29 and "downloaded executable code" on Play);
+//  * merges src/play/AndroidManifest.xml, which removes the
+//    AccessibilityService (Play bans autonomous agents on that API) and every
+//    permission without a Play-approvable core use.
+val ovidPlayBuild: Boolean = run {
+    val defines = (project.findProperty("dart-defines") as String?).orEmpty()
+        .split(",").filter { it.isNotBlank() }
+        .map { runCatching { String(Base64.getDecoder().decode(it)) }.getOrDefault("") }
+    defines.any { it.trim() == "OVID_PLAY_BUILD=true" } ||
+        project.findProperty("ovid.play")?.toString() == "true"
+}
+val ovidPlayTargetSdk = 36
+val ovidSideloadTargetSdk = 28
 
 plugins {
     id("com.android.application")
@@ -101,6 +124,8 @@ android {
             // ballooned the build dir until the runner hit "No space left on
             // device". Keep its debug symbols so AGP skips the strip step.
             keepDebugSymbols += "**/libovid_bootstrap.so"
+            // Play builds carry no on-device Linux userland at all.
+            if (ovidPlayBuild) excludes += "**/libovid_bootstrap.so"
         }
     }
 
@@ -116,7 +141,9 @@ android {
         // Keep the legacy target until the immutable packaged-code architecture
         // is implemented and measured from the app process. A target-only bump
         // cannot qualify runtime behavior, downloaded code, or distribution.
-        targetSdk = 28
+        // Play builds (OVID_PLAY_BUILD=true) target API 36 and ship without
+        // the sandbox payload; see ovidPlayBuild above.
+        targetSdk = if (ovidPlayBuild) ovidPlayTargetSdk else ovidSideloadTargetSdk
 
         lint {
             // targetSdk 28 is deliberate (see the comment above — Play's
@@ -186,6 +213,14 @@ tasks.matching { it.name == "processDebugGoogleServices" }.configureEach {
 // Resource-backed host tests consume Flutter's merged assets under AGP 9.
 tasks.matching { it.name == "packageDebugUnitTestForUnitTest" }.configureEach {
     dependsOn("copyFlutterAssetsDebug")
+}
+
+// Play overlay manifest: removes the AccessibilityService, the idle
+// specialUse foreground-service type and permissions Play would reject.
+androidComponents {
+    onVariants { variant ->
+        if (ovidPlayBuild) variant.sources.manifests.addStaticManifestFile("src/play/AndroidManifest.xml")
+    }
 }
 
 kotlin {

@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_service.dart';
 import 'state.dart';
 import 'diag.dart';
+import 'distribution.dart';
 
 /// Foreground-service notification manager (the agent keep-alive "always-on assistant"
 /// parity): while an agent run is active, an ongoing low-importance
@@ -173,11 +174,13 @@ class AgentNotificationService {
   static bool? keepAliveOverrideForTest;
 
   bool get _isKeepAlive =>
-      keepAliveOverrideForTest ?? AppState.I.keepAliveEnabled;
+      keepAliveOverrideForTest ??
+      (Distribution.idleKeepAliveAvailable && AppState.I.keepAliveEnabled);
 
   /// True while any session sits in control mode — the user's explicit
   /// "stay present" intent, independent of the keep-alive toggle.
   bool _isControlModeActive() {
+    if (!Distribution.controlModeAvailable) return false;
     try {
       return AppState.I.sessions.any((s) => s.mode == AgentMode.control.name);
     } catch (_) {

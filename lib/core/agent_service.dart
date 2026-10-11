@@ -27,6 +27,7 @@ import 'usage_attempt.dart';
 import 'usage_attempt_recorder.dart';
 import 'grant_store.dart';
 import 'global_repo_registry.dart';
+import 'distribution.dart';
 import 'sandbox_service.dart';
 import 'webview_pool.dart';
 import 'github_service.dart';
@@ -297,8 +298,11 @@ extension AgentModeX on AgentMode {
 /// legacy sessions persisted as `safe` keep working and
 /// `/permission read-only` stays functional — but it is never a direct
 /// pick: the read-only policy is selected through the `plan` preset.
-List<AgentMode> modeOptionsForPicker() =>
-    AgentMode.values.where((m) => m != AgentMode.safe).toList(growable: false);
+List<AgentMode> modeOptionsForPicker() => AgentMode.values
+    .where((m) => m != AgentMode.safe)
+    // Play builds ship without the AccessibilityService (Distribution).
+    .where((m) => m != AgentMode.control || Distribution.controlModeAvailable)
+    .toList(growable: false);
 
 /// Live event jisse screens subscribe hote hain.
 /// kind: think | shell | shellOut | nav | page | file | err | done
@@ -1169,10 +1173,16 @@ class AgentService extends ChangeNotifier {
   /// resolves through the same path — no detached special case.
   AgentMode get mode {
     final s = _runCtx?.session ?? AppState.I.activeSession;
-    return AgentMode.values.firstWhere(
+    final resolved = AgentMode.values.firstWhere(
       (m) => m.name == s?.mode,
       orElse: () => AgentMode.auto,
     );
+    // A persisted Control session (backup restore) degrades to General in
+    // builds without Control mode.
+    if (resolved == AgentMode.control && !Distribution.controlModeAvailable) {
+      return AgentMode.auto;
+    }
+    return resolved;
   }
 
   set mode(AgentMode m) {
@@ -7232,7 +7242,9 @@ user which one instead of assuming this one.''';
     // omitted from the roster entirely when the running session is not in
     // Control — a smaller, more honest per-request payload.
     final runningMode = _runSession?.mode ?? AppState.I.activeSession?.mode;
-    final controlMode = runningMode == AgentMode.control.name;
+    final controlMode =
+        runningMode == AgentMode.control.name &&
+        Distribution.controlModeAvailable;
     // Zero nesting, layer 2 of 3: a subagent never even SEES the spawn tools,
     // so it cannot plan around the dispatch-gate refusal. Layer 1 is
     // `_childDeniedTools` at dispatch, layer 3 is the `isSubagent` refusal at
@@ -24558,6 +24570,10 @@ ${await _agentsMdBlock()}
   }
 
   Future<String> _requestSystemPermission(String name) async {
+    // Play builds declare only the permissions a shipped feature uses.
+    if (!Distribution.agentPermissions.contains(name)) {
+      return 'unavailable in this version of Ovid';
+    }
     final Permission? p;
     switch (name) {
       case 'notifications':

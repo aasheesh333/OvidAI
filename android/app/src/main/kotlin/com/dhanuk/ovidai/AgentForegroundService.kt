@@ -155,6 +155,19 @@ class AgentForegroundService : Service() {
         wakeLockAcquiredAt = 0L
     }
 
+    /// Android 15+ (targetSdk 35+): a dataSync foreground service may run at
+    /// most 6 hours per 24 hours. The system calls this when the budget is
+    /// spent; the service must stop within seconds or the app crashes with
+    /// ForegroundServiceDidNotStopInTimeException. Same path as Stop.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        BackgroundScheduleState.constraint(this, "Android's background time limit was reached; reopen Ovid to continue.")
+        wantWakeLock = false
+        releaseWakeLock()
+        removeForegroundNotification()
+        stopSelf()
+        AgentNotificationBridge.stopHandler?.invoke()
+    }
+
     override fun onDestroy() {
         releaseWakeLock()
         try {

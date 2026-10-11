@@ -8726,7 +8726,9 @@ block</pre>
       // targetSdkVersion >= 29 — the sandbox would die with EACCES on
       // every Android 10–16 device regardless of ABI or file mode.
       final gradle = File('android/app/build.gradle.kts').readAsStringSync();
-      expect(gradle, contains('targetSdk = 28'));
+      // Sideload builds keep 28; only the Play build (OVID_PLAY_BUILD, no
+      // sandbox payload) targets 36 — see test/play_distribution_test.dart.
+      expect(gradle, contains('val ovidSideloadTargetSdk = 28'));
       expect(
         gradle,
         isNot(contains('targetSdk = flutter.targetSdkVersion')),

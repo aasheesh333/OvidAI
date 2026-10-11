@@ -173,6 +173,12 @@ def create_app():
     from server.shares.runtime import mount_shares
     mount_shares(app, service.data.stores.shares, service, admin,
                  os.environ['SHARE_BASE_URL'])
+    if os.environ.get('CONTENT_REPORTS_DB', '').strip():
+        # In-app AI output / UGC reports (Play AI-Generated Content + UGC).
+        from server.reports.repository import ReportRepository
+        from server.reports.runtime import mount_reports
+        mount_reports(app, ReportRepository(os.environ['CONTENT_REPORTS_DB'].strip()),
+                      service, admin, os.environ['SHARE_BASE_URL'])
     if _activated('PRIVATE_SYNC_ACTIVATED'):
         from server.sync.runtime import mount_sync
         mount_sync(app, service.data.private_sync, service, admin)
