@@ -184,4 +184,46 @@ void main() {
     await tester.pumpAndSettle();
     expect(cache.pendingPaths, ['missing.txt']);
   });
+
+  testWidgets('open review ignores RepoCache notifies without disk reads', (tester) async {
+    cache.write('a.sh', 'changed\n');
+    cache.didSaveWorkspaceFile('a.sh', 'changed\n');
+    await open(tester, StudioCommitDialog(client: git.client));
+    await tester.tap(find.text('Review changes'));
+    await tester.pumpAndSettle();
+    expect(find.text('Approve and commit'), findsOneWidget);
+    final io = _CountingIO();
+    IOOverrides.runWithIOOverrides(() {
+      for (var i = 0; i < 50; i++) {
+        // ignore: invalid_use_of_protected_member, invalid_use_of_visible_for_testing_member
+        cache.notifyListeners();
+      }
+    }, io);
+    await tester.pumpAndSettle();
+    expect(io.fileOpens, 0, reason: 'no per-notify readAsBytesSync of approved files');
+    expect(io.typeChecks, 0);
+    // The review survives unrelated notifications…
+    expect(find.text('Approve and commit'), findsOneWidget);
+    // …and an in-memory edit still invalidates it.
+    cache.write('a.sh', 'later\n');
+    await tester.pumpAndSettle();
+    expect(find.text('Approve and commit'), findsNothing);
+    expect(git.mutations, isEmpty);
+  });
+}
+
+final class _CountingIO extends IOOverrides {
+  int fileOpens = 0;
+  int typeChecks = 0;
+  @override
+  File createFile(String path) {
+    fileOpens++;
+    return super.createFile(path);
+  }
+
+  @override
+  FileSystemEntityType fseGetTypeSync(String path, bool followLinks) {
+    typeChecks++;
+    return super.fseGetTypeSync(path, followLinks);
+  }
 }

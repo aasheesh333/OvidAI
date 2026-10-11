@@ -1394,13 +1394,25 @@ class RepoCache extends ChangeNotifier {
   }
 
   // ── commit pending ───────────────────────────────────────────────────
+  static const _staleApproval = CommitFailure(CommitFailureKind.staleApproval,
+      'Commit preview is stale; repository binding, selected bytes, operation or mode changed. Review again.');
+
   void validateApproval(CommitApproval approval) {
+    validateApprovalRevision(approval);
+    if (approval.contents.entries.any((e) => _commitContent(e.key) != e.value)) {
+      throw _staleApproval;
+    }
+  }
+
+  /// In-memory staleness check (binding, edit revisions, staged modes): no
+  /// disk reads, so it is cheap enough to run on every notification while a
+  /// review is open. Byte-level [validateApproval] still runs at publish.
+  void validateApprovalRevision(CommitApproval approval) {
     if (approval.generation != _bindingGeneration || approval.binding != _copyKey ||
-        approval.contents.entries.any((e) => !_dirty.contains(e.key) ||
-            _commitContent(e.key) != e.value || _revisions[e.key] != approval._revisions[e.key] ||
-            _stagedModes[e.key] != approval._stagedModes[e.key])) {
-      throw const CommitFailure(CommitFailureKind.staleApproval,
-          'Commit preview is stale; repository binding, selected bytes, operation or mode changed. Review again.');
+        approval.contents.keys.any((path) => !_dirty.contains(path) ||
+            _revisions[path] != approval._revisions[path] ||
+            _stagedModes[path] != approval._stagedModes[path])) {
+      throw _staleApproval;
     }
   }
 
