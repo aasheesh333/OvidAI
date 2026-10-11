@@ -5960,12 +5960,59 @@ user which one instead of assuming this one.''';
     ).allMatches(text).toList();
     if (mentions.isEmpty) return text;
     final blocks = <String>[];
+    // File reference: workspace file (or dir listing). Returns true when
+    // the token resolved to a workspace entry.
+    Future<bool> addFileBlock(String rel) async {
+      try {
+        final root = workspaceRootFor(s);
+        // PR23/M5: traversal guard — refuse anything with a `..` path
+        // SEGMENT that would escape the workspace root
+        // (@../../secrets class). A file literally named `a..b` is fine.
+        final segs = rel.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty);
+        if (rel.isEmpty || segs.contains('..') || segs.contains('.')) {
+          return false; // silently skip, like an unresolvable mention
+        }
+        final f = File('${root.path}/$rel');
+        if (f.existsSync()) {
+          blocks.add(
+            '── referenced file "$rel" ──\n'
+            '${cleanTruncate(await f.readAsString(), 4000)}',
+          );
+          return true;
+        }
+        final d = Directory('${root.path}/$rel');
+        if (d.existsSync()) {
+          final listing = d
+              .listSync()
+              .map((e) => e.path.split('/').last)
+              .join(', ');
+          blocks.add('── referenced directory "$rel" ──\n$listing');
+          return true;
+        }
+      } catch (e) {
+        Diag.swallow('agent_service', e);
+      }
+      return false;
+    }
+
     for (final m in mentions) {
       final token = m.group(1) ?? m.group(2)!;
-      // Session reference: @session:<id> or @session:<title>
+      // Explicit file reference (what the @-menu inserts): @file:<rel>.
+      if (token.startsWith('file:')) {
+        await addFileBlock(token.substring('file:'.length));
+        continue;
+      }
+      // Session reference: @session:<id> or @session:<title>. Unprefixed
+      // tokens resolve workspace files FIRST and then only an exact session
+      // id/title, so `@index.html` never expands to a chat whose title
+      // merely contains it.
       final explicitSession = token.startsWith('session:');
+      if (!explicitSession && await addFileBlock(token)) continue;
       final ref = explicitSession ? token.substring('session:'.length) : token;
-      final matches = _resolveSessionReference(ref);
+      final matches = _resolveSessionReference(
+        ref,
+        allowSubstring: explicitSession,
+      );
       if (explicitSession || matches.isNotEmpty) {
         final app = AppState.I;
         if (matches.length > 1) {
@@ -6008,42 +6055,15 @@ user which one instead of assuming this one.''';
         );
         continue;
       }
-      // File reference: workspace file (or dir listing).
-      try {
-        final root = workspaceRootFor(s);
-        final rel = token;
-        // PR23/M5: traversal guard — refuse anything with a `..` path
-        // SEGMENT that would escape the workspace root
-        // (@../../secrets class). A file literally named `a..b` is fine.
-        final segs = rel.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty);
-        if (segs.contains('..') || segs.contains('.')) {
-          continue; // silently skip, like an unresolvable mention
-        }
-        final f = File('${root.path}/$rel');
-        if (f.existsSync()) {
-          blocks.add(
-            '── referenced file "$rel" ──\n'
-            '${cleanTruncate(await f.readAsString(), 4000)}',
-          );
-          continue;
-        }
-        final d = Directory('${root.path}/$rel');
-        if (d.existsSync()) {
-          final listing = d
-              .listSync()
-              .map((e) => e.path.split('/').last)
-              .join(', ');
-          blocks.add('── referenced directory "$rel" ──\n$listing');
-        }
-      } catch (e) {
-        Diag.swallow('agent_service', e);
-      }
     }
     if (blocks.isEmpty) return text;
     return '$text\n\n[expanded references]\n${blocks.join('\n\n')}';
   }
 
-  List<ChatSession> _resolveSessionReference(String ref) {
+  List<ChatSession> _resolveSessionReference(
+    String ref, {
+    bool allowSubstring = true,
+  }) {
     if (ref.isEmpty) return [];
     final app = AppState.I;
     final byId = app.sessionById(ref);
@@ -6052,11 +6072,10 @@ user which one instead of assuming this one.''';
     final exact = app.rootSessions
         .where((s) => s.title.toLowerCase() == name)
         .toList();
-    return exact.isNotEmpty
-        ? exact
-        : app.rootSessions
-              .where((s) => s.title.toLowerCase().contains(name))
-              .toList();
+    if (exact.isNotEmpty || !allowSubstring) return exact;
+    return app.rootSessions
+        .where((s) => s.title.toLowerCase().contains(name))
+        .toList();
   }
 
   bool _canReadSession(ChatSession current, String targetId) =>
@@ -22614,6 +22633,22 @@ ${await _agentsMdBlock()}
       '${PluginContributionRegistry.I.activationFor(pluginId)?.name ?? 'unregistered'}). '
       'Its canonical contributions live under "plugin:$pluginId/…" and are '
       'scope-enforced. Nothing was executed.';
+
+  /// Short user-facing reason why [isSkillAvailableForSession] is false for
+  /// [skill], or `null` when it is available.
+  String? skillUnavailableReason(Skill skill, String sessionId) {
+    if (isSkillAvailableForSession(skill, sessionId)) return null;
+    final pluginId = skill.pluginId;
+    final canonicalId = skill.canonicalId;
+    if (pluginId == null || canonicalId == null) return null;
+    if (!PluginContributionRegistry.I.isPluginActiveForSession(
+      pluginId,
+      sessionId,
+    )) {
+      return 'plugin $pluginId is not enabled for this chat';
+    }
+    return 'not in the current manifest of plugin $pluginId';
+  }
 
   bool isSkillAvailableForSession(Skill skill, String sessionId) {
     final pluginId = skill.pluginId;

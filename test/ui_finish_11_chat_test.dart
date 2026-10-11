@@ -73,7 +73,7 @@ void main() {
       description: 'Review fixture',
       baseUrl: 'https://example.test/v1',
       apiKey: 'fixture-key',
-      models: [_model, 'gpt-research-long-effort-model', 'other-model'],
+      models: [_model, 'openai/gpt-5-codex-mini-2025-09-15', 'other-model'],
       isFree: true,
     ));
     app.sessions.clear();
@@ -251,6 +251,22 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('non-reasoning models render a plain tile without effort chips', (tester) async {
+    await pumpAt(tester, const ChatScreen(), size: const Size(360, 640), scale: 2, keyboard: 280);
+    await tester.tap(find.byIcon(Icons.unfold_more).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    final search = find.byKey(const ValueKey('model-picker-search'));
+    await tester.enterText(search, 'other-model');
+    await tester.pump();
+    // The search field also shows the query; the picker row is the other.
+    final row = find.text('other-model');
+    expect(find.ancestor(of: row, matching: find.byType(ListTile)), findsOneWidget);
+    expect(find.ancestor(of: row, matching: find.byType(ExpansionTile)), findsNothing);
+    expect(find.text('High'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('empty picker results scroll above keyboard and effort selection applies', (tester) async {
     await pumpAt(tester, const ChatScreen(), size: const Size(360, 640), scale: 2, keyboard: 280);
     await tester.tap(find.byIcon(Icons.unfold_more).first);
@@ -264,9 +280,9 @@ void main() {
     expect(find.text('No matches').hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
     await reveal(tester, search, scroll, reverse: true);
-    await tester.enterText(search, 'gpt-research');
+    await tester.enterText(search, 'gpt-5-codex');
     await tester.pump();
-    final model = find.text('gpt-research-long-effort-model');
+    final model = find.text('openai/gpt-5-codex-mini-2025-09-15');
     await reveal(tester, model, scroll);
     await tester.tap(model);
     await tester.pump();
@@ -276,7 +292,7 @@ void main() {
     await tester.tap(find.text('High'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
-    expect(app.activeSession!.model, 'gpt-research-long-effort-model · High');
+    expect(app.activeSession!.model, 'openai/gpt-5-codex-mini-2025-09-15 · High');
     expect(app.activeSession!.providerId, 'review-provider');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());

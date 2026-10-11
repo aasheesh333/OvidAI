@@ -1357,6 +1357,30 @@ class MainActivity : FlutterActivity() {
                             }.start()
                         }
                     }
+                    "openFile" -> {
+                        val filePath = call.argument<String>("filePath")
+                        if (filePath.isNullOrBlank()) {
+                            result.error("BAD_ARGS", "openFile requires filePath.", null)
+                        } else {
+                            Thread {
+                                try {
+                                    val intent = NativeShare.viewIntent(this, filePath, call.argument<String>("mime"))
+                                    runOnUiThread {
+                                        try {
+                                            startActivity(intent)
+                                            result.success(true)
+                                        } catch (e: android.content.ActivityNotFoundException) {
+                                            result.success(false)
+                                        } catch (e: Exception) {
+                                            result.error("OPEN_FAILED", "Could not open file: ${e.message}", null)
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    runOnUiThread { result.error("OPEN_FAILED", "Could not prepare file: ${e.message}", null) }
+                                }
+                            }.start()
+                        }
+                    }
                     "shareFile" -> {
                         val filePath = call.argument<String>("filePath")
                         val title = call.argument<String>("title") ?: "Share"

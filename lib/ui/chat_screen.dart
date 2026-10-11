@@ -88,7 +88,7 @@ class _ChatTextScaler extends TextScaler {
   int get hashCode => Object.hash(inherited, zoom);
 }
 
-class ChatTranscript extends StatelessWidget {
+class ChatTranscript extends StatefulWidget {
   final ChatSession session;
   final ScrollController? scrollController;
 
@@ -106,7 +106,31 @@ class ChatTranscript extends StatelessWidget {
   static int debugBuildCount = 0;
 
   @override
+  State<ChatTranscript> createState() => _ChatTranscriptState();
+}
+
+class _ChatTranscriptState extends State<ChatTranscript> {
+  /// Cumulative number of folded items requested; grows by one page per
+  /// "Load earlier" tap so the start of a long child run stays reachable.
+  int _visibleCount = _subagentTranscriptPage;
+
+  @override
+  void didUpdateWidget(covariant ChatTranscript oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.session.id != widget.session.id) {
+      _visibleCount = _subagentTranscriptPage;
+    }
+  }
+
+  void _loadEarlier() {
+    setState(() => _visibleCount += _subagentTranscriptPage);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final session = widget.session;
+    final scrollController = widget.scrollController;
+    final typing = widget.typing;
     // Structural changes and tool output arrive through AppState; streamed
     // text through this session's own live ticks. Agent-wide notifications
     // and other sessions' streams no longer rebuild the transcript (busy and
@@ -118,7 +142,7 @@ class ChatTranscript extends StatelessWidget {
       ]),
       builder: (_, _) {
         assert(() {
-          debugBuildCount++;
+          ChatTranscript.debugBuildCount++;
           return true;
         }());
         final layout = ChatLayout(
@@ -127,12 +151,12 @@ class ChatTranscript extends StatelessWidget {
         final window = windowForBounded(
           session.messages,
           pageSize: _subagentTranscriptPage,
-          visibleCount: 0,
+          visibleCount: _visibleCount,
           showReasoning: AppState.I.showReasoning,
         );
         final items = window.visible;
-        // The subagent transcript is bounded; when older rows are omitted,
-        // say so instead of silently truncating the child's history.
+        // The subagent transcript is paged; when older rows are omitted,
+        // offer "Load earlier" instead of silently truncating the history.
         final showOlder = window.hasEarlier;
         final count = items.length + (showOlder ? 1 : 0) + (typing ? 1 : 0);
         final list = ListView.builder(
@@ -140,7 +164,12 @@ class ChatTranscript extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           itemCount: count,
           itemBuilder: (_, i) {
-            if (showOlder && i == 0) return const _OlderMessagesIndicator();
+            if (showOlder && i == 0) {
+              return _OlderMessagesIndicator(
+                hiddenMessages: window.hiddenMessages,
+                onLoadEarlier: _loadEarlier,
+              );
+            }
             final li = showOlder ? i - 1 : i;
             if (li == items.length) return const _TypingBubble();
             return _buildItem(
@@ -864,6 +893,11 @@ class _ChatScreenState extends State<ChatScreen>
   bool _restoringDraft = false;
   String _observedDraftText = '';
   final Map<String, ({int id, String original})> _queueEdits = {};
+
+  /// True while a composer slash command is executing. Guards against a
+  /// double Send running `/compact`, `/clear` or `/new` twice and drives the
+  /// Send button's busy state.
+  bool _executingCommand = false;
   String? _draftBindScheduledFor;
 
   void _recordDraftEdit() {
@@ -966,6 +1000,28 @@ class _ChatScreenState extends State<ChatScreen>
     _showJumpFab = false;
     _visibleCount = _pageSize; // lazy paging resets per session
     _followScheduled = false; // tip-follow re-arms for the new transcript
+  }
+
+  void _showSkillUnavailable(
+    BuildContext context,
+    Skill skill,
+    String sessionId,
+  ) {
+    final reason = AgentService.I.skillUnavailableReason(skill, sessionId);
+    final canonicalId = skill.canonicalId;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          "Skill ${skill.name} isn't available in this session"
+          '${reason == null ? '' : ' ($reason)'}.',
+        ),
+        behavior: SnackBarBehavior.floating,
+        action: SnackBarAction(
+          label: 'Plugins',
+          onPressed: () => _openPlugins(context, focusCanonicalId: canonicalId),
+        ),
+      ),
+    );
   }
 
   void _openPlugins(BuildContext context, {String? focusCanonicalId}) {
@@ -1858,6 +1914,7 @@ class _ChatScreenState extends State<ChatScreen>
                               // the composer — the user answers the card, not the box.
                               locked: AgentService.I.pendingApproval != null,
                               editingQueue: _queueEdits.containsKey(s?.id),
+                              commandBusy: _executingCommand,
                               onCancelQueueEdit: () => setState(() {
                                 _queueEdits.remove(s?.id);
                               }),
@@ -1865,7 +1922,8 @@ class _ChatScreenState extends State<ChatScreen>
                                 if (s == null ||
                                     _boundSessionId != s.id ||
                                     AppState.I.activeSessionId != s.id ||
-                                    AgentService.I.pendingApproval != null) {
+                                    AgentService.I.pendingApproval != null ||
+                                    _executingCommand) {
                                   return;
                                 }
                                 final submitted = _input.text;
@@ -1915,9 +1973,15 @@ class _ChatScreenState extends State<ChatScreen>
 
                                 // ── Composer command system ───────────────────────
                                 if (t.startsWith('/')) {
-                                  final result = await CommandService.I.execute(
-                                    t,
-                                  );
+                                  setState(() => _executingCommand = true);
+                                  final CommandResult? result;
+                                  try {
+                                    result = await CommandService.I.execute(t);
+                                  } finally {
+                                    if (mounted) {
+                                      setState(() => _executingCommand = false);
+                                    }
+                                  }
                                   if (!mounted || !context.mounted) return;
                                   if (result != null) {
                                     if (result.clearInput &&
@@ -2002,6 +2066,14 @@ class _ChatScreenState extends State<ChatScreen>
                                             skill,
                                             s.id,
                                           )) {
+                                        // Never fail silently: say why and
+                                        // offer the plugin settings. The
+                                        // draft is kept.
+                                        _showSkillUnavailable(
+                                          context,
+                                          skill,
+                                          s.id,
+                                        );
                                         return;
                                       }
                                       final content =
@@ -2941,23 +3013,9 @@ class _ModelTile extends StatelessWidget {
     this.enabled = true,
   });
 
-  static const _effortModels = [
-    'deepseek',
-    'gpt',
-    'kimi',
-    'glm',
-    'opus',
-    'sonnet',
-    'gemini-2.5',
-    'qwen3',
-    'o4',
-    'grok',
-    'r1',
-  ];
   static const variants = ['Low', 'Medium', 'High'];
 
-  bool get supportsEffort =>
-      _effortModels.any((e) => model.toLowerCase().contains(e));
+  bool get supportsEffort => modelSupportsReasoningEffort(model);
 
   @override
   Widget build(BuildContext context) {
@@ -4520,20 +4578,22 @@ class _ProducedFilesCard extends StatelessWidget {
                   _fmtSize(f.size),
                   style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                 ),
+                // "Show in folder" handed Android a file:// URI (throws on
+                // API 24+, result ignored). Share the file through the
+                // FileProvider instead; tapping the row opens it in Studio.
                 trailing: IconButton(
-                  tooltip: 'Show in folder',
+                  tooltip: 'Share file',
                   visualDensity: VisualDensity.compact,
                   icon: Icon(
-                    Icons.folder_open_outlined,
+                    Icons.share_outlined,
                     size: 17,
                     color: Aether.textMuted,
                   ),
                   onPressed: () async {
                     final dir = await AgentService.I.hostDirOf(f.path);
                     if (!sheetCtx.mounted) return;
-                    final messenger = ScaffoldMessenger.of(sheetCtx);
                     if (dir == null) {
-                      messenger.showSnackBar(
+                      ScaffoldMessenger.of(sheetCtx).showSnackBar(
                         SnackBar(
                           content: Text(
                             '${_base(f.path)} is repo-only — not on local disk.',
@@ -4543,16 +4603,11 @@ class _ProducedFilesCard extends StatelessWidget {
                       );
                       return;
                     }
-                    try {
-                      await launchUrl(Uri.file(dir));
-                    } catch (_) {
-                      messenger.showSnackBar(
-                        SnackBar(
-                          content: Text('No file manager app to open folders.'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    }
+                    final hostPath = '$dir/${_base(f.path)}';
+                    await showNativeShare(
+                      sheetCtx,
+                      () => NativeShare.file(hostPath),
+                    );
                   },
                 ),
                 onTap: () {
@@ -5364,43 +5419,68 @@ class _MessageView extends StatelessWidget {
   }
 
   /// Attachment chips under a user message (paperclip + name + size).
+  /// Long names ellipsize inside a width cap so they never overflow the
+  /// bubble.
   Widget _attachmentChips() => Padding(
     padding: const EdgeInsets.only(top: 4),
-    child: Wrap(
-      spacing: 6,
-      runSpacing: 4,
-      alignment: WrapAlignment.end,
-      children: [
-        for (final a in m.attachments)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-            decoration: BoxDecoration(
-              color: Aether.surfaceRaised,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Aether.hairline),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(_attachIcon(a.name), size: 13, color: Aether.accent),
-                const SizedBox(width: 5),
-                Text(
-                  a.name,
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w600,
-                    color: Aether.text,
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final cap = constraints.maxWidth.isFinite
+            ? math.min(constraints.maxWidth, 280.0)
+            : 280.0;
+        return Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          alignment: WrapAlignment.end,
+          children: [
+            for (final a in m.attachments)
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: cap),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Aether.surfaceRaised,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Aether.hairline),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(_attachIcon(a.name), size: 13, color: Aether.accent),
+                      const SizedBox(width: 5),
+                      Flexible(
+                        child: Tooltip(
+                          message: a.name,
+                          child: Text(
+                            a.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: Aether.text,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        _fmtSize(a.size),
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 5),
-                Text(
-                  _fmtSize(a.size),
-                  style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-                ),
-              ],
-            ),
-          ),
-      ],
+              ),
+          ],
+        );
+      },
     ),
   );
 
@@ -5616,18 +5696,33 @@ class _MessageView extends StatelessWidget {
     await showNativeShare(context, () => NativeShare.file(path));
   }
 
-  /// Open a local workspace file with the best-matching app.
-  void _openLocalFile(BuildContext context, String path) {
+  /// Open a local workspace file with the best-matching app via the
+  /// FileProvider (a `file://` URI throws on Android 7+). Awaited, with a
+  /// snackbar when nothing can open it.
+  Future<void> _openLocalFile(BuildContext context, String path) async {
+    final messenger = ScaffoldMessenger.of(context);
     try {
-      launchUrl(Uri.file(path));
+      await NativeShare.open(path, mime: _imageMime(path));
     } catch (_) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(
           content: Text('No app can open ${path.split('/').last}'),
           behavior: SnackBarBehavior.floating,
         ),
       );
     }
+  }
+
+  static String? _imageMime(String path) {
+    final ext = path.split('.').last.toLowerCase();
+    return switch (ext) {
+      'png' => 'image/png',
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'gif' => 'image/gif',
+      'webp' => 'image/webp',
+      'bmp' => 'image/bmp',
+      _ => null,
+    };
   }
 }
 
@@ -5894,6 +5989,9 @@ class _InputBar extends StatefulWidget {
   /// composer is disabled until the user answers it (the approval takeover parity).
   final bool locked;
   final bool editingQueue;
+
+  /// A slash command is executing: Send is disabled and shows a spinner.
+  final bool commandBusy;
   final VoidCallback onCancelQueueEdit;
 
   /// Shared width axis: the composer card is capped to [ChatLayout.composerWidth]
@@ -5911,6 +6009,7 @@ class _InputBar extends StatefulWidget {
     this.coordinator,
     this.locked = false,
     this.editingQueue = false,
+    this.commandBusy = false,
     required this.onCancelQueueEdit,
     required this.onSend,
   });
@@ -6203,7 +6302,10 @@ class _InputBarState extends State<_InputBar> {
     final parent = app.sessionById(widget.sessionId);
     if (parent == null) return const [];
     final agent = AgentService.I;
-    final query = _mentionQuery.toLowerCase();
+    var query = _mentionQuery.toLowerCase();
+    // File rows insert `@file:<rel>`; strip the prefix so descending into
+    // an inserted `@file:src/` keeps matching inside that folder.
+    if (query.startsWith('file:')) query = query.substring('file:'.length);
     final scored = <({int score, int order, _SlashSuggestion s})>[];
     var order = 0;
     for (final sub in agent.subagentsOf(parent.id)) {
@@ -6268,7 +6370,12 @@ class _InputBarState extends State<_InputBar> {
                 ? 'directory — @$rel/ to descend'
                 : 'workspace file',
             hint: '',
-            insert: '@$rel${isDir ? '/' : ' '}',
+            // Explicit `@file:` so the reference always resolves to this
+            // workspace entry, never to a chat whose title contains it.
+            // Paths with whitespace are quoted to stay one token.
+            insert: rel.contains(RegExp(r'\s'))
+                ? '@"file:$rel" '
+                : '@file:$rel${isDir ? '/' : ' '}',
             group: 'Files',
           ),
         ));
@@ -6940,6 +7047,7 @@ class _InputBarState extends State<_InputBar> {
                           AppState.I.activeSessionId == sessionId &&
                           hasDraft &&
                           !locked &&
+                          !widget.commandBusy &&
                           AgentService.I.pendingApproval == null &&
                           (!widget.editingQueue ||
                               AgentService.I.pendingAttachments.isEmpty);
@@ -6979,6 +7087,7 @@ class _InputBarState extends State<_InputBar> {
                                   ? Icons.check
                                   : Icons.arrow_upward,
                               iconOnly: true,
+                              loading: widget.commandBusy,
                               onPressed: canSubmit ? onSend : null,
                             ),
                           ],
@@ -6996,25 +7105,34 @@ class _InputBarState extends State<_InputBar> {
   }
 }
 
-/// Minimal "older messages not shown" marker for the bounded subagent
-/// transcript (`ChatTranscript`), so a truncated child run is never silent.
+/// "Load earlier" control for the paged subagent transcript
+/// (`ChatTranscript`), so a truncated child run is never silent and its
+/// start stays reachable.
 class _OlderMessagesIndicator extends StatelessWidget {
-  const _OlderMessagesIndicator();
+  final int hiddenMessages;
+  final VoidCallback onLoadEarlier;
+
+  const _OlderMessagesIndicator({
+    required this.hiddenMessages,
+    required this.onLoadEarlier,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final label = hiddenMessages == 1
+        ? '1 earlier message'
+        : '$hiddenMessages earlier messages';
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.more_horiz, size: 14, color: Aether.textFaint),
-          const SizedBox(width: 6),
-          Text(
-            'Older messages not shown',
-            style: TextStyle(fontSize: 11, color: Aether.textFaint),
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Center(
+        child: TextButton.icon(
+          onPressed: onLoadEarlier,
+          icon: Icon(Icons.expand_less, size: 16, color: Aether.textMuted),
+          label: Text(
+            'Load earlier · $label',
+            style: TextStyle(fontSize: 12, color: Aether.textMuted),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -8372,53 +8490,63 @@ class _StudioFolderChip extends StatelessWidget {
 
         return Padding(
           padding: const EdgeInsets.only(right: 6),
-          child: GestureDetector(
-            onTap: () {
-              // Open Studio screen directly so user can connect a repo, pick/manage folders, or edit files
-              openStudio(context);
-            },
-            onLongPress: () => _manageWorkspaceFolder(context),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(16),
-                color: isConfigured
-                    ? Aether.accent.withValues(alpha: 0.12)
-                    : Aether.surfaceAlt,
-                border: Border.all(
+          // Tap (or long-press) opens the working-folder sheet; its first
+          // row opens Studio. The trailing ▾ signals the menu.
+          child: Tooltip(
+            message: 'Working folder',
+            child: InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: () => _manageWorkspaceFolder(context),
+              onLongPress: () => _manageWorkspaceFolder(context),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
                   color: isConfigured
-                      ? Aether.accent.withValues(alpha: 0.5)
-                      : Aether.hairline,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    hasRepo
-                        ? Icons.bookmark_border
-                        : (hasFolder
-                              ? Icons.folder_special_outlined
-                              : Icons.folder_outlined),
-                    size: 14,
-                    color: isConfigured ? Aether.accent : Aether.textMuted,
+                      ? Aether.accent.withValues(alpha: 0.12)
+                      : Aether.surfaceAlt,
+                  border: Border.all(
+                    color: isConfigured
+                        ? Aether.accent.withValues(alpha: 0.5)
+                        : Aether.hairline,
                   ),
-                  const SizedBox(width: 5),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 100),
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        height: 20 / 13,
-                        color: isConfigured ? Aether.accent : Aether.textMuted,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      hasRepo
+                          ? Icons.bookmark_border
+                          : (hasFolder
+                                ? Icons.folder_special_outlined
+                                : Icons.folder_outlined),
+                      size: 14,
+                      color: isConfigured ? Aether.accent : Aether.textMuted,
+                    ),
+                    const SizedBox(width: 5),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 100),
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          height: 20 / 13,
+                          color: isConfigured
+                              ? Aether.accent
+                              : Aether.textMuted,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                    Icon(
+                      Icons.arrow_drop_down,
+                      size: 16,
+                      color: isConfigured ? Aether.accent : Aether.textMuted,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -8464,6 +8592,19 @@ class _StudioFolderChip extends StatelessWidget {
             ),
             ListTile(
               dense: true,
+              leading: Icon(Icons.open_in_new, size: 19, color: Aether.accent),
+              title: const Text(
+                'Open Studio',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              subtitle: Text(
+                'Connect a repo, browse and edit files',
+                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              ),
+              onTap: () => Navigator.pop(sheetCtx, 'studio'),
+            ),
+            ListTile(
+              dense: true,
               leading: Icon(
                 Icons.drive_file_move_outline,
                 size: 19,
@@ -8496,6 +8637,10 @@ class _StudioFolderChip extends StatelessWidget {
     );
 
     if (choice == null || !context.mounted) return;
+    if (choice == 'studio') {
+      openStudio(context);
+      return;
+    }
     if (choice == 'sandbox') {
       if (!identical(AppState.I.sessionById(s.id), s)) return;
       AppState.I.setSessionWorkspaceFolder(null, sessionId: s.id);
