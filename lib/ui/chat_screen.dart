@@ -7877,53 +7877,63 @@ class _StudioFolderChip extends StatelessWidget {
 
         return Padding(
           padding: const EdgeInsets.only(right: 6),
-          child: GestureDetector(
-            onTap: () {
-              // Open Studio screen directly so user can connect a repo, pick/manage folders, or edit files
-              openStudio(context);
-            },
-            onLongPress: () => _manageWorkspaceFolder(context),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(16),
-                color: isConfigured
-                    ? Aether.accent.withValues(alpha: 0.12)
-                    : Aether.surfaceAlt,
-                border: Border.all(
+          // Tap (or long-press) opens the working-folder sheet; its first
+          // row opens Studio. The trailing ▾ signals the menu.
+          child: Tooltip(
+            message: 'Working folder',
+            child: InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: () => _manageWorkspaceFolder(context),
+              onLongPress: () => _manageWorkspaceFolder(context),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
                   color: isConfigured
-                      ? Aether.accent.withValues(alpha: 0.5)
-                      : Aether.hairline,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    hasRepo
-                        ? Icons.bookmark_border
-                        : (hasFolder
-                              ? Icons.folder_special_outlined
-                              : Icons.folder_outlined),
-                    size: 14,
-                    color: isConfigured ? Aether.accent : Aether.textMuted,
+                      ? Aether.accent.withValues(alpha: 0.12)
+                      : Aether.surfaceAlt,
+                  border: Border.all(
+                    color: isConfigured
+                        ? Aether.accent.withValues(alpha: 0.5)
+                        : Aether.hairline,
                   ),
-                  const SizedBox(width: 5),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 100),
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        height: 20 / 13,
-                        color: isConfigured ? Aether.accent : Aether.textMuted,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      hasRepo
+                          ? Icons.bookmark_border
+                          : (hasFolder
+                                ? Icons.folder_special_outlined
+                                : Icons.folder_outlined),
+                      size: 14,
+                      color: isConfigured ? Aether.accent : Aether.textMuted,
+                    ),
+                    const SizedBox(width: 5),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 100),
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          height: 20 / 13,
+                          color: isConfigured
+                              ? Aether.accent
+                              : Aether.textMuted,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                    Icon(
+                      Icons.arrow_drop_down,
+                      size: 16,
+                      color: isConfigured ? Aether.accent : Aether.textMuted,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -7969,6 +7979,19 @@ class _StudioFolderChip extends StatelessWidget {
             ),
             ListTile(
               dense: true,
+              leading: Icon(Icons.open_in_new, size: 19, color: Aether.accent),
+              title: const Text(
+                'Open Studio',
+                style: TextStyle(fontSize: 13.5),
+              ),
+              subtitle: Text(
+                'Connect a repo, browse and edit files',
+                style: TextStyle(fontSize: 11, color: Aether.textFaint),
+              ),
+              onTap: () => Navigator.pop(sheetCtx, 'studio'),
+            ),
+            ListTile(
+              dense: true,
               leading: Icon(
                 Icons.drive_file_move_outline,
                 size: 19,
@@ -8001,6 +8024,10 @@ class _StudioFolderChip extends StatelessWidget {
     );
 
     if (choice == null || !context.mounted) return;
+    if (choice == 'studio') {
+      openStudio(context);
+      return;
+    }
     if (choice == 'sandbox') {
       if (!identical(AppState.I.sessionById(s.id), s)) return;
       AppState.I.setSessionWorkspaceFolder(null, sessionId: s.id);

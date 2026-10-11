@@ -732,4 +732,21 @@ void main() {
       expect(dir.listSync().map((e) => e.path), [existing.path]);
     },
   );
+
+  testWidgets('working-folder sheet opens on tap with Open Studio first', (
+    tester,
+  ) async {
+    a.mode = 'studio';
+    a.workspaceFolder = '/nonexistent/tap-workspace';
+    await pumpChat(tester);
+    expect(find.byTooltip('Working folder'), findsOneWidget);
+    await tester.tap(find.text('tap-workspace'));
+    await tester.pumpAndSettle();
+    expect(find.text('Open Studio'), findsOneWidget);
+    expect(find.text('Select working folder'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Open Studio')).dy,
+      lessThan(tester.getTopLeft(find.text('Select working folder')).dy),
+    );
+  });
 }
