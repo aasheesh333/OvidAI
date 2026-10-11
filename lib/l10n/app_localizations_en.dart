@@ -186,4 +186,86 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get backupRestoreRollbackUnverified =>
       'Restore failed, and Ovid couldn\'t confirm the partial restore was undone. Some restored chats or settings may remain. Check your chat list before trying again.';
+
+  @override
+  String cloudModelCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count models',
+      one: '1 model',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get cloudStatusNotConnected => 'Not connected';
+
+  @override
+  String get cloudStatusSignInToActivate => 'Sign in to activate';
+
+  @override
+  String get cloudStatusConnecting => 'Connecting your account…';
+
+  @override
+  String get cloudStatusLoadingCatalog => 'Loading models…';
+
+  @override
+  String cloudStatusReady(String models) {
+    return 'Signed in · $models';
+  }
+
+  @override
+  String get cloudStatusFailed => 'Ovid Cloud connection failed.';
+
+  @override
+  String cloudCatalogStale(String models) {
+    return '$models available · catalog may be out of date';
+  }
+
+  @override
+  String get cloudRefreshModels => 'Refresh models';
+
+  @override
+  String get cloudConnectingButton => 'Connecting…';
+
+  @override
+  String get cloudRetryConnection => 'Retry connection';
+
+  @override
+  String get cloudSignOut => 'Sign out';
+
+  @override
+  String get scheduleStopBackgroundTitle => 'Pause background execution?';
+
+  @override
+  String scheduleStopBackgroundMessage(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count scheduled tasks',
+      one: '1 scheduled task',
+    );
+    return 'This pauses $_temp0 across all chats, and any scheduled run in progress is stopped. Replies you started yourself keep running. Resume brings the paused tasks back.';
+  }
+
+  @override
+  String get scheduleStopBackgroundConfirm => 'Pause schedules';
+
+  @override
+  String get scheduleCancelTask => 'Cancel task';
+
+  @override
+  String get scheduleCancelTaskTitle => 'Cancel this task?';
+
+  @override
+  String get scheduleCancelTaskRunningMessage =>
+      'The task is running now and will be stopped. A cancelled task never runs again; this cannot be undone.';
+
+  @override
+  String get scheduleCancelTaskMessage =>
+      'A cancelled task never runs again; this cannot be undone. Use Pause to stop it temporarily.';
+
+  @override
+  String get scheduleKeepTask => 'Keep task';
 }

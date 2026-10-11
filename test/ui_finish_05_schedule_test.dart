@@ -354,13 +354,19 @@ void main() {
     for (final action in [
       (label: 'Pause', status: 'paused'),
       (label: 'Resume', status: 'pending'),
-      (label: 'Cancel', status: 'cancelled'),
+      (label: 'Cancel task', status: 'cancelled'),
     ]) {
       await _reveal(tester, find.byTooltip('Task actions'));
       await tester.tap(find.byTooltip('Task actions'));
       await _frames(tester);
-      await tester.runAsync(() async {
+      if (action.status == 'cancelled') {
+        // Cancel is irreversible, so it confirms first (F-062).
         await tester.tap(find.text(action.label));
+        await _frames(tester);
+        expect(find.text('Cancel this task?'), findsOneWidget);
+      }
+      await tester.runAsync(() async {
+        await tester.tap(find.text(action.label).last);
         await app.flushSessionPersistence();
       });
       await _frames(tester);

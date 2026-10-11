@@ -173,16 +173,19 @@ class _OvidCloudTile extends StatelessWidget {
     final statusLabel = paid ? tier.toUpperCase() : 'FREE';
     final statusColor = paid ? Aether.accent : Aether.successLight;
     final modelCount = <String>{'auto', ...provider.models}.length;
-    final modelsLabel = '$modelCount ${modelCount == 1 ? 'model' : 'models'}';
+    final l = context.l10n;
+    final modelsLabel = l.cloudModelCount(modelCount);
     final String connectionLabel = switch (connection.status) {
       CloudConnectionStatus.idle =>
-        provider.hasKey ? 'Not connected' : 'Sign in to activate',
-      CloudConnectionStatus.connecting => 'Connecting your account…',
-      CloudConnectionStatus.loadingCatalog => 'Loading models…',
-      CloudConnectionStatus.ready => 'Signed in · $modelsLabel',
+        provider.hasKey
+            ? l.cloudStatusNotConnected
+            : l.cloudStatusSignInToActivate,
+      CloudConnectionStatus.connecting => l.cloudStatusConnecting,
+      CloudConnectionStatus.loadingCatalog => l.cloudStatusLoadingCatalog,
+      CloudConnectionStatus.ready => l.cloudStatusReady(modelsLabel),
       CloudConnectionStatus.failed =>
         (connection.error == null || connection.error!.trim().isEmpty)
-            ? 'Ovid Cloud connection failed.'
+            ? l.cloudStatusFailed
             : connection.error!,
     };
     final failed = connection.status == CloudConnectionStatus.failed;
@@ -234,7 +237,7 @@ class _OvidCloudTile extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                '$modelsLabel available · catalog may be out of date',
+                l.cloudCatalogStale(modelsLabel),
                 style: AetherType.caption,
               ),
             ),
@@ -246,7 +249,7 @@ class _OvidCloudTile extends StatelessWidget {
               if (ready)
                 TextButton.icon(
                   key: const ValueKey('ovid-cloud-refresh-models'),
-                  label: const Text('Refresh models'),
+                  label: Text(l.cloudRefreshModels),
                   icon: const Icon(Icons.refresh, size: 16),
                   onPressed: () =>
                       unawaited(cloud.ensureConnected(app: app, force: true)),
@@ -255,7 +258,9 @@ class _OvidCloudTile extends StatelessWidget {
                 TextButton.icon(
                   key: const ValueKey('ovid-cloud-retry-connection'),
                   label: Text(
-                    connection.loading ? 'Connecting…' : 'Retry connection',
+                    connection.loading
+                        ? l.cloudConnectingButton
+                        : l.cloudRetryConnection,
                   ),
                   icon: const Icon(Icons.refresh, size: 16),
                   onPressed: connection.loading
@@ -265,7 +270,7 @@ class _OvidCloudTile extends StatelessWidget {
               if (connection.mintStatus == MintStatus.sessionExpired)
                 TextButton.icon(
                   key: const ValueKey('ovid-cloud-sign-out'),
-                  label: const Text('Sign out'),
+                  label: Text(l.cloudSignOut),
                   icon: const Icon(Icons.logout, size: 16),
                   onPressed: () => unawaited(FirebaseService.I.signOut()),
                 ),

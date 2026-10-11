@@ -211,15 +211,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         .entries()
         .where((e) => ['pending', 'running'].contains(e.task['status']))
         .length;
+    final l = context.l10n;
     final ok = await showAetherConfirmDialog(
       context,
-      title: 'Pause background execution?',
-      message:
-          'This pauses $active scheduled task${active == 1 ? '' : 's'} '
-          'across all chats, and any scheduled run in progress is stopped. '
-          'Replies you started yourself keep running. Resume brings the '
-          'paused tasks back.',
-      confirmLabel: 'Pause schedules',
+      title: l.scheduleStopBackgroundTitle,
+      message: l.scheduleStopBackgroundMessage(active),
+      confirmLabel: l.scheduleStopBackgroundConfirm,
     );
     if (!ok || !context.mounted) return;
     await _action(
@@ -623,7 +620,7 @@ class _TaskCardState extends State<_TaskCard> {
         PopupMenuItem<String>(
           value: 'cancel',
           child: Text(
-            'Cancel task',
+            context.l10n.scheduleCancelTask,
             style: AetherType.body.copyWith(color: Aether.danger),
           ),
         ),
@@ -653,16 +650,15 @@ class _TaskCardState extends State<_TaskCard> {
     String status,
     AgentService agent,
   ) async {
+    final l = context.l10n;
     final ok = await showAetherConfirmDialog(
       context,
-      title: 'Cancel this task?',
+      title: l.scheduleCancelTaskTitle,
       message: status == 'running'
-          ? 'The task is running now and will be stopped. A cancelled task '
-                'never runs again; this cannot be undone.'
-          : 'A cancelled task never runs again; this cannot be undone. '
-                'Use Pause to stop it temporarily.',
-      confirmLabel: 'Cancel task',
-      cancelLabel: 'Keep task',
+          ? l.scheduleCancelTaskRunningMessage
+          : l.scheduleCancelTaskMessage,
+      confirmLabel: l.scheduleCancelTask,
+      cancelLabel: l.scheduleKeepTask,
     );
     if (!ok || !mounted) return;
     await _runAction(() => agent.schedules.cancelTask(widget.entry));

@@ -127,5 +127,65 @@
     "placeholders": {"reason": {"type": "String", "example": "Please try again."}}
   },
   "backupRestoreRollbackUnverified": "Restore failed, and Ovid couldn't confirm the partial restore was undone. Some restored chats or settings may remain. Check your chat list before trying again.",
-  "@backupRestoreRollbackUnverified": {"description": "Restore failed and its rollback could not be verified."}
+  "@backupRestoreRollbackUnverified": {"description": "Restore failed and its rollback could not be verified."},
+
+  "cloudModelCount": "{count, plural, =1{1 model} other{{count} models}}",
+  "@cloudModelCount": {"description": "Number of Ovid Cloud models available.", "placeholders": {"count": {"type": "int", "example": "12"}}},
+
+  "cloudStatusNotConnected": "Not connected",
+  "@cloudStatusNotConnected": {"description": "Ovid Cloud tile: idle with a stored key."},
+
+  "cloudStatusSignInToActivate": "Sign in to activate",
+  "@cloudStatusSignInToActivate": {"description": "Ovid Cloud tile: idle without an account."},
+
+  "cloudStatusConnecting": "Connecting your account…",
+  "@cloudStatusConnecting": {"description": "Ovid Cloud tile: minting the gateway key."},
+
+  "cloudStatusLoadingCatalog": "Loading models…",
+  "@cloudStatusLoadingCatalog": {"description": "Ovid Cloud tile: fetching the model catalog."},
+
+  "cloudStatusReady": "Signed in · {models}",
+  "@cloudStatusReady": {"description": "Ovid Cloud tile: connected.", "placeholders": {"models": {"type": "String", "example": "12 models"}}},
+
+  "cloudStatusFailed": "Ovid Cloud connection failed.",
+  "@cloudStatusFailed": {"description": "Ovid Cloud tile: failed with no specific reason."},
+
+  "cloudCatalogStale": "{models} available · catalog may be out of date",
+  "@cloudCatalogStale": {"description": "Ovid Cloud tile: shown under a failure, with the last known model count.", "placeholders": {"models": {"type": "String", "example": "12 models"}}},
+
+  "cloudRefreshModels": "Refresh models",
+  "@cloudRefreshModels": {"description": "Button: re-fetch the Ovid Cloud model catalog."},
+
+  "cloudConnectingButton": "Connecting…",
+  "@cloudConnectingButton": {"description": "Disabled retry button while connecting."},
+
+  "cloudRetryConnection": "Retry connection",
+  "@cloudRetryConnection": {"description": "Button: retry the Ovid Cloud connection."},
+
+  "cloudSignOut": "Sign out",
+  "@cloudSignOut": {"description": "Button: sign out after the Ovid Cloud session expired."},
+
+  "scheduleStopBackgroundTitle": "Pause background execution?",
+  "@scheduleStopBackgroundTitle": {"description": "Confirm dialog title for pausing all schedules."},
+
+  "scheduleStopBackgroundMessage": "This pauses {count, plural, =1{1 scheduled task} other{{count} scheduled tasks}} across all chats, and any scheduled run in progress is stopped. Replies you started yourself keep running. Resume brings the paused tasks back.",
+  "@scheduleStopBackgroundMessage": {"description": "Confirm dialog body for pausing all schedules.", "placeholders": {"count": {"type": "int", "example": "3"}}},
+
+  "scheduleStopBackgroundConfirm": "Pause schedules",
+  "@scheduleStopBackgroundConfirm": {"description": "Confirm button for pausing all schedules."},
+
+  "scheduleCancelTask": "Cancel task",
+  "@scheduleCancelTask": {"description": "Menu item and confirm button that permanently cancels a scheduled task."},
+
+  "scheduleCancelTaskTitle": "Cancel this task?",
+  "@scheduleCancelTaskTitle": {"description": "Confirm dialog title for cancelling a scheduled task."},
+
+  "scheduleCancelTaskRunningMessage": "The task is running now and will be stopped. A cancelled task never runs again; this cannot be undone.",
+  "@scheduleCancelTaskRunningMessage": {"description": "Cancel-task confirmation when the task is running."},
+
+  "scheduleCancelTaskMessage": "A cancelled task never runs again; this cannot be undone. Use Pause to stop it temporarily.",
+  "@scheduleCancelTaskMessage": {"description": "Cancel-task confirmation when the task is idle."},
+
+  "scheduleKeepTask": "Keep task",
+  "@scheduleKeepTask": {"description": "Dismiss button of the cancel-task confirmation."}
 }

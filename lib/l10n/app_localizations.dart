@@ -369,6 +369,126 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Restore failed, and Ovid couldn\'t confirm the partial restore was undone. Some restored chats or settings may remain. Check your chat list before trying again.'**
   String get backupRestoreRollbackUnverified;
+
+  /// Number of Ovid Cloud models available.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 model} other{{count} models}}'**
+  String cloudModelCount(int count);
+
+  /// Ovid Cloud tile: idle with a stored key.
+  ///
+  /// In en, this message translates to:
+  /// **'Not connected'**
+  String get cloudStatusNotConnected;
+
+  /// Ovid Cloud tile: idle without an account.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in to activate'**
+  String get cloudStatusSignInToActivate;
+
+  /// Ovid Cloud tile: minting the gateway key.
+  ///
+  /// In en, this message translates to:
+  /// **'Connecting your account…'**
+  String get cloudStatusConnecting;
+
+  /// Ovid Cloud tile: fetching the model catalog.
+  ///
+  /// In en, this message translates to:
+  /// **'Loading models…'**
+  String get cloudStatusLoadingCatalog;
+
+  /// Ovid Cloud tile: connected.
+  ///
+  /// In en, this message translates to:
+  /// **'Signed in · {models}'**
+  String cloudStatusReady(String models);
+
+  /// Ovid Cloud tile: failed with no specific reason.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid Cloud connection failed.'**
+  String get cloudStatusFailed;
+
+  /// Ovid Cloud tile: shown under a failure, with the last known model count.
+  ///
+  /// In en, this message translates to:
+  /// **'{models} available · catalog may be out of date'**
+  String cloudCatalogStale(String models);
+
+  /// Button: re-fetch the Ovid Cloud model catalog.
+  ///
+  /// In en, this message translates to:
+  /// **'Refresh models'**
+  String get cloudRefreshModels;
+
+  /// Disabled retry button while connecting.
+  ///
+  /// In en, this message translates to:
+  /// **'Connecting…'**
+  String get cloudConnectingButton;
+
+  /// Button: retry the Ovid Cloud connection.
+  ///
+  /// In en, this message translates to:
+  /// **'Retry connection'**
+  String get cloudRetryConnection;
+
+  /// Button: sign out after the Ovid Cloud session expired.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign out'**
+  String get cloudSignOut;
+
+  /// Confirm dialog title for pausing all schedules.
+  ///
+  /// In en, this message translates to:
+  /// **'Pause background execution?'**
+  String get scheduleStopBackgroundTitle;
+
+  /// Confirm dialog body for pausing all schedules.
+  ///
+  /// In en, this message translates to:
+  /// **'This pauses {count, plural, =1{1 scheduled task} other{{count} scheduled tasks}} across all chats, and any scheduled run in progress is stopped. Replies you started yourself keep running. Resume brings the paused tasks back.'**
+  String scheduleStopBackgroundMessage(int count);
+
+  /// Confirm button for pausing all schedules.
+  ///
+  /// In en, this message translates to:
+  /// **'Pause schedules'**
+  String get scheduleStopBackgroundConfirm;
+
+  /// Menu item and confirm button that permanently cancels a scheduled task.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel task'**
+  String get scheduleCancelTask;
+
+  /// Confirm dialog title for cancelling a scheduled task.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel this task?'**
+  String get scheduleCancelTaskTitle;
+
+  /// Cancel-task confirmation when the task is running.
+  ///
+  /// In en, this message translates to:
+  /// **'The task is running now and will be stopped. A cancelled task never runs again; this cannot be undone.'**
+  String get scheduleCancelTaskRunningMessage;
+
+  /// Cancel-task confirmation when the task is idle.
+  ///
+  /// In en, this message translates to:
+  /// **'A cancelled task never runs again; this cannot be undone. Use Pause to stop it temporarily.'**
+  String get scheduleCancelTaskMessage;
+
+  /// Dismiss button of the cancel-task confirmation.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep task'**
+  String get scheduleKeepTask;
 }
 
 class _AppLocalizationsDelegate
