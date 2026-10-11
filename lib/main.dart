@@ -6,10 +6,12 @@ import 'package:flutter/material.dart';
 import 'core/state.dart';
 import 'core/agent_notification_service.dart';
 import 'core/agent_service.dart';
+import 'core/mcp_client_requests.dart';
 import 'core/mcp_service.dart';
 import 'core/theme.dart';
 import 'ui/app_router.dart';
 import 'ui/login_gate.dart';
+import 'ui/mcp_elicitation_sheet.dart';
 import 'ui/mcp_oauth_sheet.dart';
 import 'ui/shell.dart';
 import 'core/share_link_resolver.dart';
@@ -80,6 +82,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // MCP `elicitation/create` → a sheet on the root navigator.
+    McpClientRequests.I.elicitor ??= appMcpElicitor;
     AppState.I.setAccountFeaturesForeground(
       WidgetsBinding.instance.lifecycleState == null ||
           WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
