@@ -214,7 +214,7 @@ void main() {
         _expectUntruncated(tester, find.text('Legacy password sign-in'));
         expect(find.text(legacyAuthMigrationHelp), findsOneWidget);
         await _reveal(tester, find.text('Sign out'));
-        await _reveal(tester, find.text('Delete your account'));
+        await _reveal(tester, find.text('Request deletion'));
         expect(service.deletionCalls, 0);
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());

@@ -35,6 +35,12 @@ jobs:
     # Bounded batches reuse Flutter startup across files; two isolates per batch
     # keep memory bounded. Retain enough time for tests and Android compilation.
     timeout-minutes: 90
+    env:
+      # In-app account deletion (server/account/README.md activation). Set the
+      # repository variable OVID_ACCOUNT_ENABLED=true only after the account
+      # service is live on the VPS; until then release builds ship the web /
+      # email deletion request instead. Both release commands must pass it.
+      OVID_ACCOUNT_ENABLED: ${{ vars.OVID_ACCOUNT_ENABLED || 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -215,11 +221,23 @@ jobs:
         working-directory: android
         run: ./gradlew :app:validateProductionReleaseSigning --no-daemon
 
+      - name: Guard release feature flags
+        if: env.release_signing == 'true'
+        run: |
+          case "$OVID_ACCOUNT_ENABLED" in
+            true) ;;
+            false) echo "::warning::OVID_ACCOUNT_ENABLED=false: release ships the web/email account-deletion request, not in-app deletion." ;;
+            *) echo "OVID_ACCOUNT_ENABLED must be true or false (got '$OVID_ACCOUNT_ENABLED')" >&2; exit 1 ;;
+          esac
+          flutter test test/release_flags_test.dart \
+            --dart-define=OVID_RELEASE_FLAGS_CHECK=true \
+            --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED"
+
       - name: Build signed release APK + AAB
         if: env.release_signing == 'true'
         run: |
-          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
-          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }}
+          flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED"
+          flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED"
 
       # Manual production_release enforces the API 36 Play floor.
       - name: Gate release artifacts
