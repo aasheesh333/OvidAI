@@ -366,7 +366,7 @@ void main() {
     await reveal(tester, find.text('Fetch from GitHub'));
     await tester.tap(find.text('Fetch from GitHub'));
     await _frames(tester);
-    expect(find.text('Add plugin or marketplace'), findsOneWidget);
+    expect(find.text('Add plugin, MCP server or marketplace'), findsOneWidget);
     expect(tester.widget<TextField>(field).decoration!.errorText, isNotNull);
     expect(app.plugins, isEmpty);
     expect(tester.takeException(), isNull);

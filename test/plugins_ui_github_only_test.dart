@@ -1,8 +1,9 @@
 // Task 2 (Plugins/MCP UI Contraction, spec §5.2): single "+" sheet.
 // Source-level contract (one AppBar Icons.add → showPluginAddSheet with
-// GitHub fetch + marketplace add; no standalone marketplace/extension
-// buttons, no _AddMcpTile/_addMcpDialog/_importMcpConfig; empty MCP list
-// hints at "+") + widget-level behavior (sheet routes both actions).
+// GitHub fetch + marketplace add, plus — PR-4b F-092 — an "MCP server" tab
+// for manual MCP entry; no standalone marketplace/extension buttons, no
+// _AddMcpTile/_addMcpDialog/_importMcpConfig; the empty MCP list offers the
+// sheet's MCP tab) + widget-level behavior (sheet routes every action).
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -15,12 +16,12 @@ String _pluginsScreenSource() =>
     File('lib/ui/plugins_screen.dart').readAsStringSync();
 
 /// The `showPluginAddSheet` function body: from its declaration to the
-/// `_githubSourceFromInput` helper that follows it.
+/// `parseGithubSourceInput` helper that follows it.
 String _addSheetBody(String src) {
   final start = src.indexOf('Future<void> showPluginAddSheet');
   assert(start >= 0, 'showPluginAddSheet not found');
   final end = src.indexOf(
-    'GithubPluginSource? _githubSourceFromInput',
+    'parseGithubSourceInput(\n  String input',
     start,
   );
   assert(end > start, 'add-sheet body end marker not found');
@@ -32,11 +33,14 @@ void main() {
     test('sheet keeps the GitHub route', () {
       final src = _pluginsScreenSource();
       final sheet = _addSheetBody(src);
-      expect(sheet, contains('_githubSourceFromInput'));
+      expect(sheet, contains('parseGithubSourceInput'));
       expect(sheet, contains('_runSourceInstall'));
       expect(sheet, contains('Fetch from GitHub'));
       expect(sheet, contains('owner/repo'));
-      expect(sheet, contains('Add plugin or marketplace'));
+      expect(sheet, contains('Add plugin, MCP server or marketplace'));
+      // F-092: manual MCP entry lives in the same sheet.
+      expect(sheet, contains('McpServerAddForm'));
+      expect(sheet, contains('MCP server'));
       // File-picker seams stay gone.
       expect(src, isNot(contains('pluginPickDirectoryForTest')));
       expect(src, isNot(contains('pluginPickZipFileForTest')));
@@ -49,9 +53,6 @@ void main() {
       expect(sheet, isNot(contains('ZIP archive')));
       expect(sheet, isNot(contains('Install from npm')));
       expect(sheet, isNot(contains('Inspect pasted config')));
-      expect(sheet, isNot(contains('Add MCP server')));
-      expect(sheet, isNot(contains('PASTE MCP CONFIG')));
-      expect(sheet, isNot(contains('DIRECT MCP SERVER')));
       expect(sheet, isNot(contains('LocalFolderPluginSource')));
       expect(sheet, isNot(contains('ZipPluginSource')));
       expect(sheet, isNot(contains('NpmPluginSource')));
@@ -70,7 +71,7 @@ void main() {
     test('exactly one + entry, no standalone entries', () {
       final src = _pluginsScreenSource();
       // One AppBar "+" with the combined tooltip.
-      expect(src, contains("tooltip: 'Add plugin or marketplace'"));
+      expect(src, contains("tooltip: 'Add plugin, MCP server or marketplace'"));
       expect(src, contains('showPluginAddSheet'));
       // Standalone marketplace dialog route is gone (folded into sheet).
       expect(src, isNot(contains('_addMarketplaceDialog')));
@@ -78,7 +79,8 @@ void main() {
       // Standalone GitHub-chooser extension button is gone (folded).
       expect(src, isNot(contains('showPluginSourceChooser')));
       expect(src, isNot(contains("tooltip: 'Install plugin from GitHub'")));
-      // MCP manual/import entries are gone from the UI.
+      // The old standalone MCP tile/dialogs stay gone (the sheet's MCP tab
+      // replaced them).
       expect(src, isNot(contains('_AddMcpTile')));
       expect(src, isNot(contains('_addMcpDialog')));
       expect(src, isNot(contains('_importMcpConfig')));
@@ -86,10 +88,10 @@ void main() {
       expect(src, isNot(contains('Import MCP config')));
     });
 
-    test('empty MCP list hints at +', () {
+    test('empty MCP list offers the MCP tab of the + sheet', () {
       expect(
         _pluginsScreenSource(),
-        contains('Use + to add from GitHub'),
+        contains('initialTab: PluginAddTab.mcp'),
       );
     });
 
@@ -144,7 +146,7 @@ void main() {
         await tester.pump(const Duration(milliseconds: 100));
       }
       expect(
-        find.byTooltip('Add plugin or marketplace'),
+        find.byTooltip('Add plugin, MCP server or marketplace'),
         findsOneWidget,
       );
       expect(find.byTooltip('Add marketplace'), findsNothing);
@@ -160,8 +162,8 @@ void main() {
         ),
         findsOneWidget,
       );
-      // Empty MCP list shows the "+" hint.
-      expect(find.text('Use + to add from GitHub'), findsOneWidget);
+      // Empty MCP list offers manual MCP entry.
+      expect(find.byKey(const ValueKey('mcp-section-add')), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   });

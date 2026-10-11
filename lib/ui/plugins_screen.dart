@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -18,9 +19,11 @@ import '../core/plugin_source_resolver.dart';
 import '../core/sandbox_service.dart';
 import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
+import '../core/tool_usage_store.dart';
 import '../core/state.dart';
 import 'github_login_sheet.dart';
 import 'mcp_oauth_sheet.dart';
+import 'mcp_server_add_form.dart';
 import 'plugin_install_progress.dart';
 import 'plugin_permission_sheet.dart';
 import 'plugin_settings_panel.dart';
@@ -366,6 +369,38 @@ Future<void> resetPluginToDefaults(
   }
 }
 
+/// After a plugin's settings are saved: reconnect its connected MCP servers
+/// so their env/headers/url pick up the new `CLAUDE_PLUGIN_OPTION_*` /
+/// `${user_config.*}` values (hooks read them on every run).
+Future<void> applyPluginSettings(
+  BuildContext context,
+  PluginItem plugin,
+) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final running = _pluginOwnedServers(
+    plugin,
+  ).where((s) => s.connected).toList();
+  var failed = 0;
+  for (final s in running) {
+    await AppState.I.toggleMcpServer(s); // disconnect
+    final outcome = await AppState.I.toggleMcpServer(s); // reconnect
+    if (!outcome.ok) failed++;
+  }
+  if (running.isEmpty || messenger == null || !messenger.mounted) return;
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(
+        failed == 0
+            ? 'Settings applied · restarted ${running.length} MCP '
+                  'server${running.length == 1 ? '' : 's'}'
+            : 'Settings saved, but $failed MCP '
+                  'server${failed == 1 ? '' : 's'} failed to restart',
+      ),
+      behavior: SnackBarBehavior.floating,
+    ),
+  );
+}
+
 /// True when [plugin] is an inbuilt (source-less) row that ships with the
 /// app and should install directly rather than opening the add sheet.
 bool _isInbuiltPlugin(PluginItem plugin) {
@@ -562,6 +597,7 @@ Future<PluginInstallResult?> startPluginInstallForTest(
   BuildContext? approvalContext,
   void Function(String line)? onProgress,
   PluginSourceProgress? sourceProgress,
+  VoidCallback? onApproved,
 }) async {
   PluginInspection inspection;
   try {
@@ -614,6 +650,8 @@ Future<PluginInstallResult?> startPluginInstallForTest(
     );
   }
 
+  // Approved (fresh or reused grant): only now may the UI say "Installing".
+  onApproved?.call();
   PluginItem row = plugin ?? _catalogRowFor(inspection.manifest);
   // Single-inspection flow (review C1): the approved inspection passes
   // straight through — no re-resolve, no second staging. The manager
@@ -678,17 +716,21 @@ Widget? pluginActivationBadge(PluginItem plugin) {
   return Tag(label, color: badgeSpec.$2 ?? Aether.textFaint, filled: true);
 }
 
-/// Task 2 (contraction spec §5.2): the single "+" sheet — the one add
-/// entry point for sources the catalog doesn't already cover AND for
-/// marketplaces (themselves GitHub repos). One repo field
-/// (`owner/repo` or URL via [_githubSourceFromInput]) funnels into the
-/// single inspection/approval flow ([_runSourceInstall]), and the same
-/// field adds a marketplace (repo recorded + catalog fetched) with the
-/// existing marketplace list + remove below.
-Future<void> showPluginAddSheet(BuildContext context) {
-  final app = AppState.I;
-  final repoC = TextEditingController();
-  String? repoError;
+/// Which half of the add sheet opens first.
+enum PluginAddTab { plugin, mcp }
+
+/// The single "+" sheet — the one add entry point. Two tabs:
+///   • Plugin / marketplace: one repo field (`owner/repo` or URL via
+///     [parseGithubSourceInput]) funnels into the single inspection/approval
+///     flow ([_runSourceInstall]); the same field adds a marketplace (repo
+///     recorded + catalog fetched) with the marketplace list + remove below.
+///   • MCP server (Claude Code `claude mcp add` / `add-json` parity): a
+///     stdio command, a remote http/sse URL, or a pasted `mcpServers` JSON
+///     ([McpServerAddForm]); the server is stored and then connected.
+Future<void> showPluginAddSheet(
+  BuildContext context, {
+  PluginAddTab initialTab = PluginAddTab.plugin,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -697,10 +739,98 @@ Future<void> showPluginAddSheet(BuildContext context) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (ctx) => AnimatedBuilder(
+    builder: (ctx) =>
+        _PluginAddSheet(hostContext: context, initialTab: initialTab),
+  );
+}
+
+/// Test seam: replaces the connect that follows adding an MCP server from
+/// the add sheet. Null in production ([connectMcpServer]).
+@visibleForTesting
+Future<void> Function(BuildContext context, McpServer server)?
+mcpAddConnectOverrideForTest;
+
+class _PluginAddSheet extends StatefulWidget {
+  /// The screen's context — survives the sheet being popped, so the install
+  /// and connect flows can keep reporting after it closes.
+  final BuildContext hostContext;
+  final PluginAddTab initialTab;
+  const _PluginAddSheet({required this.hostContext, required this.initialTab});
+
+  @override
+  State<_PluginAddSheet> createState() => _PluginAddSheetState();
+}
+
+class _PluginAddSheetState extends State<_PluginAddSheet> {
+  final TextEditingController repoC = TextEditingController();
+  String? repoError;
+  late PluginAddTab _tab = widget.initialTab;
+
+  @override
+  void dispose() {
+    repoC.dispose();
+    super.dispose();
+  }
+
+  void _fetchFromGithub() {
+    final parsed = parseGithubSourceInput(repoC.text);
+    final src = parsed.source;
+    if (src == null) {
+      setState(() => repoError = parsed.error);
+      return;
+    }
+    final context = widget.hostContext;
+    Navigator.pop(this.context);
+    _runSourceInstall(context, src, null);
+  }
+
+  Future<void> _addMarketplace() async {
+    final app = AppState.I;
+    final context = widget.hostContext;
+    final messenger = ScaffoldMessenger.of(context);
+    final added = app.addMarketplaceChecked(repoC.text);
+    final repo = added.repo;
+    if (repo == null) {
+      setState(
+        () => repoError = switch (added.error) {
+          MarketplaceAddError.duplicate => 'That marketplace is already added.',
+          _ => 'Enter a marketplace as owner/repo or a GitHub repository URL.',
+        },
+      );
+      return;
+    }
+    Navigator.pop(this.context);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('Importing $repo…'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    // Registering only records the repo — the catalog has to
+    // be fetched for its plugins/MCP servers to show up.
+    final msg = await app.fetchMarketplaceCatalog(repo);
+    if (!context.mounted) return;
+    messenger.showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Future<void> _onMcpAdded(List<McpServer> servers) async {
+    final context = widget.hostContext;
+    Navigator.pop(this.context);
+    final connect = mcpAddConnectOverrideForTest ?? connectMcpServer;
+    for (final server in servers) {
+      if (!context.mounted) return;
+      await connect(context, server);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AnimatedBuilder(
       animation: app,
-      builder: (ctx, _) => StatefulBuilder(
-        builder: (ctx, update) => Padding(
+      builder: (ctx, _) => Padding(
         padding: EdgeInsets.fromLTRB(
           16,
           16,
@@ -730,7 +860,7 @@ Future<void> showPluginAddSheet(BuildContext context) {
                   const SizedBox(width: 12),
                   const Expanded(
                     child: Text(
-                      'Add plugin or marketplace',
+                      'Add plugin, MCP server or marketplace',
                       style: TextStyle(
                         fontSize: 15.5,
                         fontWeight: FontWeight.w700,
@@ -745,182 +875,356 @@ Future<void> showPluginAddSheet(BuildContext context) {
                   ),
                 ],
               ),
-              const SizedBox(height: 6),
-              Text(
-                'Fetch a plugin from GitHub, or add a marketplace (itself '
-                'a GitHub repo with a marketplace.json). Every repo is '
-                'inspected and asks for one capability approval before '
-                'anything installs.',
-                style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-              ),
-              const SizedBox(height: 14),
-              Text(
-                'GITHUB REPO',
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.4,
-                  color: Aether.textFaint,
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: repoC,
-                autofocus: true,
-                style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
-                decoration: InputDecoration(
-                  hintText: 'owner/repo or https://github.com/owner/repo',
-                  errorText: repoError,
-                  errorMaxLines: 4,
-                ),
-              ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Aether.accent,
-                    side: BorderSide(
-                      color: Aether.accent.withValues(alpha: .4),
+                child: SegmentedButton<PluginAddTab>(
+                  key: const ValueKey('plugin-add-tabs'),
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(
+                      value: PluginAddTab.plugin,
+                      icon: Icon(Icons.extension_outlined, size: 16),
+                      label: Text('Plugin / marketplace'),
                     ),
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                  ),
-                  icon: const Icon(Icons.code, size: 16),
-                  label: const Text('Fetch from GitHub'),
-                  onPressed: () {
-                    final txt = repoC.text.trim();
-                    final src = _githubSourceFromInput(txt);
-                    if (src == null) {
-                      update(() => repoError = 'Enter owner/repo or a GitHub repository URL.');
-                      return;
-                    }
-                    Navigator.pop(ctx);
-                    _runSourceInstall(context, src, null);
-                  },
+                    ButtonSegment(
+                      value: PluginAddTab.mcp,
+                      icon: Icon(Icons.usb_outlined, size: 16),
+                      label: Text('MCP server'),
+                    ),
+                  ],
+                  selected: {_tab},
+                  onSelectionChanged: (v) => setState(() => _tab = v.first),
                 ),
               ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Aether.accent,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(11),
-                    ),
-                  ),
-                  icon: const Icon(Icons.link, size: 16),
-                  label: const Text(
-                    'Add marketplace',
-                    style: TextStyle(fontSize: 13.5),
-                  ),
-                  onPressed: () async {
-                    final messenger = ScaffoldMessenger.of(context);
-                    final added = app.addMarketplace(repoC.text);
-                    if (added == null) {
-                      update(() => repoError = 'Enter owner/repo (or a GitHub URL) that is not already added.');
-                      return;
-                    }
-                    Navigator.pop(ctx);
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text('Importing $added…'),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                    // Registering only records the repo — the catalog has to
-                    // be fetched for its plugins/MCP servers to show up.
-                    final msg = await app.fetchMarketplaceCatalog(added);
-                    if (!context.mounted) return;
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text(msg),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                  },
-                ),
-              ),
-              if (app.marketplaces.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                Text(
-                  'YOUR MARKETPLACES',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.4,
-                    color: Aether.textFaint,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                for (final m in app.marketplaces)
-                  Container(
-                    margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 9,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Aether.surfaceAlt,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Aether.hairline),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.inventory_2_outlined,
-                          size: 14,
-                          color: Aether.textMuted,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            m,
-                            style: const TextStyle(
-                              fontSize: 12.5,
-                              fontFamily: Aether.mono,
-                            ),
-                          ),
-                        ),
-                        // Every entry — including the legacy default, which
-                        // 404s and is no longer seeded — is removable.
-                        IconButton(
-                          key: ValueKey('sheet-marketplace-remove-$m'),
-                          tooltip: 'Remove marketplace',
-                          // Removal uninstalls its plugins — never one tap.
-                          onPressed: () =>
-                              confirmAndRemoveMarketplace(ctx, m),
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            size: 16,
-                            color: Aether.danger,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
+              const SizedBox(height: 12),
+              if (_tab == PluginAddTab.mcp)
+                McpServerAddForm(onAdded: _onMcpAdded)
+              else
+                ..._pluginTab(ctx, app),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  List<Widget> _pluginTab(BuildContext ctx, AppState app) => [
+    Text(
+      'Fetch a plugin from GitHub, or add a marketplace (itself '
+      'a GitHub repo with a marketplace.json). Every repo is '
+      'inspected and asks for one capability approval before '
+      'anything installs.',
+      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+    ),
+    const SizedBox(height: 14),
+    Text(
+      'GITHUB REPO',
+      style: TextStyle(
+        fontSize: 10,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 1.4,
+        color: Aether.textFaint,
       ),
     ),
+    const SizedBox(height: 8),
+    TextField(
+      controller: repoC,
+      autofocus: true,
+      textInputAction: TextInputAction.go,
+      onSubmitted: (_) => _fetchFromGithub(),
+      onChanged: (_) {
+        if (repoError != null) setState(() => repoError = null);
+      },
+      style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
+      decoration: InputDecoration(
+        hintText: 'owner/repo or https://github.com/owner/repo',
+        errorText: repoError,
+        errorMaxLines: 4,
+      ),
+    ),
+    const SizedBox(height: 8),
+    SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: Aether.accent,
+          side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
+          padding: const EdgeInsets.symmetric(vertical: 11),
+        ),
+        icon: const Icon(Icons.code, size: 16),
+        label: const Text('Fetch from GitHub'),
+        onPressed: _fetchFromGithub,
+      ),
+    ),
+    const SizedBox(height: 8),
+    SizedBox(
+      width: double.infinity,
+      child: FilledButton.icon(
+        style: FilledButton.styleFrom(
+          backgroundColor: Aether.accent,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(11),
+          ),
+        ),
+        icon: const Icon(Icons.link, size: 16),
+        label: const Text('Add marketplace', style: TextStyle(fontSize: 13.5)),
+        onPressed: _addMarketplace,
+      ),
+    ),
+    if (app.marketplaces.isNotEmpty) ...[
+      const SizedBox(height: 14),
+      Text(
+        'YOUR MARKETPLACES',
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.4,
+          color: Aether.textFaint,
+        ),
+      ),
+      const SizedBox(height: 6),
+      for (final m in app.marketplaces)
+        Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            color: Aether.surfaceAlt,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.inventory_2_outlined,
+                size: 14,
+                color: Aether.textMuted,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  m,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontFamily: Aether.mono,
+                  ),
+                ),
+              ),
+              // Every entry — including the legacy default, which
+              // 404s and is no longer seeded — is removable.
+              IconButton(
+                key: ValueKey('sheet-marketplace-remove-$m'),
+                tooltip: 'Remove marketplace',
+                // Removal uninstalls its plugins — never one tap.
+                onPressed: () => confirmAndRemoveMarketplace(ctx, m),
+                icon: const Icon(
+                  Icons.delete_outline,
+                  size: 16,
+                  color: Aether.danger,
+                ),
+              ),
+            ],
+          ),
+        ),
+    ],
+  ];
+}
+
+final _ghSegment = RegExp(r'^[A-Za-z0-9_.-]+$');
+
+/// Parses what a user types into the add sheet's repo field:
+///   • `owner/repo`, `owner/repo@ref`, `owner/repo#ref`
+///   • `github.com/owner/repo` (with or without `https://`, `www.`, `.git`)
+///   • `https://github.com/owner/repo/tree/<ref>/<path>` → ref + subPath
+///     (installs that subdirectory, not the repo root)
+///   • `git@github.com:owner/repo.git`
+/// Anything else after `owner/repo` is rejected with a specific error.
+({GithubPluginSource? source, String? error}) parseGithubSourceInput(
+  String input,
+) {
+  const hint =
+      'Use owner/repo, owner/repo@ref, or a GitHub URL '
+      '(…/tree/<ref>/<folder> installs that folder).';
+  var txt = input.trim();
+  if (txt.isEmpty) {
+    return (source: null, error: 'Enter owner/repo or a GitHub URL.');
+  }
+  txt = txt.replaceFirst(RegExp(r'^git@github\.com:'), '');
+  final hadScheme = RegExp(r'^[a-z]+://').hasMatch(txt);
+  txt = txt
+      .replaceFirst(RegExp(r'^[a-z]+://'), '')
+      .replaceFirst(RegExp(r'^www\.'), '');
+  if (txt.startsWith('github.com/')) {
+    txt = txt.substring('github.com/'.length);
+  } else if (hadScheme || RegExp(r'^[^/]+\.[a-z]{2,}/').hasMatch(txt)) {
+    return (
+      source: null,
+      error: 'Only GitHub repositories are supported here. $hint',
+    );
+  }
+  txt = txt.split('?').first.replaceFirst(RegExp(r'/+$'), '');
+  String? ref;
+  // `owner/repo@ref` / `owner/repo#ref` (short form).
+  final short = RegExp(r'^([^/@#]+)/([^/@#]+)[@#]([^/@#\s]+)$').firstMatch(txt);
+  if (short != null) {
+    txt = '${short.group(1)}/${short.group(2)}';
+    ref = short.group(3);
+  } else if (txt.contains('#')) {
+    final i = txt.indexOf('#');
+    final frag = txt.substring(i + 1);
+    txt = txt.substring(0, i);
+    if (frag.isNotEmpty) ref = frag;
+  }
+  final parts = txt.split('/');
+  if (parts.length < 2 || parts[0].isEmpty || parts[1].isEmpty) {
+    return (source: null, error: 'Enter owner/repo or a GitHub URL. $hint');
+  }
+  final owner = parts[0];
+  final repo = parts[1].replaceFirst(RegExp(r'\.git$'), '');
+  if (!_ghSegment.hasMatch(owner) || !_ghSegment.hasMatch(repo)) {
+    return (source: null, error: '"$owner/$repo" is not a valid repository.');
+  }
+  String? subPath;
+  if (parts.length > 2) {
+    final rest = parts.sublist(2);
+    if ((rest[0] == 'tree' || rest[0] == 'blob') &&
+        rest.length >= 2 &&
+        rest[1].isNotEmpty) {
+      ref = rest[1];
+      final sub = rest.sublist(2).where((p) => p.isNotEmpty).join('/');
+      if (sub.isNotEmpty) {
+        if (sub.split('/').any((p) => p == '..' || p == '.')) {
+          return (source: null, error: 'The folder path is not valid. $hint');
+        }
+        subPath = sub;
+      }
+    } else {
+      return (
+        source: null,
+        error: 'Unexpected "/${rest.join('/')}" after $owner/$repo. $hint',
+      );
+    }
+  }
+  return (
+    source: GithubPluginSource(
+      owner: owner,
+      repo: repo,
+      ref: ref,
+      subPath: subPath,
+    ),
+    error: null,
   );
 }
 
-/// `owner/repo` / full GitHub URL → [GithubPluginSource]. Null when the
-/// input names no usable repo.
-GithubPluginSource? _githubSourceFromInput(String input) {
-  var txt = input.trim();
-  final m = RegExp(r'^https?://github\.com/([^/]+)/([^/#?]+)').firstMatch(txt);
-  if (m != null) {
-    return GithubPluginSource(owner: m.group(1)!, repo: m.group(2)!);
+/// User-facing copy for an install failure — never a raw Dart exception
+/// string. The raw text stays available under "Details".
+String describeInstallFailure(Object? error) {
+  final raw = '${error ?? ''}';
+  final lower = raw.toLowerCase();
+  if (error is SocketException ||
+      error is TimeoutException ||
+      lower.contains('socketexception') ||
+      lower.contains('failed host lookup') ||
+      lower.contains('network is unreachable') ||
+      lower.contains('connection refused') ||
+      lower.contains('connection timed out') ||
+      lower.contains('timed out')) {
+    return "You're offline or GitHub can't be reached. Check your "
+        'connection and try again.';
   }
-  final parts = txt.split('/');
-  if (parts.length < 2 || parts[0].isEmpty || parts[1].isEmpty) return null;
-  return GithubPluginSource(owner: parts[0], repo: parts[1]);
+  if (lower.contains('rate limit') ||
+      lower.contains('http 403') ||
+      lower.contains('http 429')) {
+    return 'GitHub rate limit reached. Sign in to GitHub (Settings → '
+        'GitHub) to raise the limit, then retry.';
+  }
+  if (lower.contains('http 404') ||
+      lower.contains('not found') ||
+      lower.contains('tree unreachable')) {
+    return "Couldn't find that repository. Check owner/repo — private "
+        'repositories need GitHub sign-in.';
+  }
+  if (lower.contains('no plugin content') ||
+      lower.contains('canonical publisher/name') ||
+      lower.contains('manifest')) {
+    return 'No usable plugin manifest found in this repository '
+        '(.claude-plugin/plugin.json, .codex-plugin/plugin.json or .mcp.json).';
+  }
+  if (lower.contains('required compatibility')) {
+    return "This plugin needs features Ovid can't provide on this device.";
+  }
+  if (lower.contains('dependenc')) {
+    return 'A required dependency failed to install. See Details.';
+  }
+  if (lower.contains('approval required')) {
+    return 'This install needs your approval first.';
+  }
+  if (error is FormatException || lower.contains('formatexception')) {
+    return "The plugin's files couldn't be read (invalid format).";
+  }
+  return 'The install failed. See Details for the technical error.';
+}
+
+/// Honest summary of a finished install (outcome + copy + raw details),
+/// built from the result's activation record and probe failures.
+@visibleForTesting
+({InstallOutcome outcome, String summary, String? details})
+describeInstallOutcome(PluginInstallResult? result, {Object? crash}) {
+  if (crash != null) {
+    return (
+      outcome: InstallOutcome.failed,
+      summary: describeInstallFailure(crash),
+      details: '$crash',
+    );
+  }
+  if (result == null) {
+    return (
+      outcome: InstallOutcome.cancelled,
+      summary: 'Install cancelled — nothing was changed.',
+      details: null,
+    );
+  }
+  final record = result.record;
+  final activation = switch (record?.state) {
+    PluginActivation.sessionActive => 'Active in this chat now.',
+    PluginActivation.globalActive => 'Enabled everywhere.',
+    PluginActivation.pendingGlobal => 'Restart Ovid to enable it everywhere.',
+    _ when record?.promoteOnNextBoot ?? false =>
+      'Restart Ovid to enable it everywhere.',
+    _ => null,
+  };
+  switch (result.status) {
+    case PluginInstallStatus.ok:
+      return (
+        outcome: InstallOutcome.success,
+        summary: activation == null
+            ? 'Installed ✓'
+            : 'Installed ✓ — $activation',
+        details: null,
+      );
+    case PluginInstallStatus.degraded:
+      final warnings = [
+        if (result.degradedNames.isNotEmpty)
+          'optional dependencies failed (${result.degradedNames.join(', ')})',
+        if (result.probeFailures.isNotEmpty)
+          'missing files: ${result.probeFailures.join(', ')}',
+      ];
+      return (
+        outcome: InstallOutcome.degraded,
+        summary:
+            'Installed with warnings'
+            '${warnings.isEmpty ? '' : ': ${warnings.join('; ')}'}.'
+            '${activation == null ? '' : ' $activation'}',
+        details: null,
+      );
+    case PluginInstallStatus.failed:
+      return (
+        outcome: InstallOutcome.failed,
+        summary: describeInstallFailure(result.error),
+        details: result.error,
+      );
+  }
 }
 
 /// Runs one source install to completion with live progress + honest
@@ -937,31 +1241,48 @@ Future<void> _runSourceInstall(
   PluginItem? row,
 ) async {
   final messenger = ScaffoldMessenger.of(context);
+  final navigator = Navigator.of(context);
 
   // WS2 live progress: created before the install starts so no line is
-  // lost; the sheet reads the controller's current state on build.
+  // lost; the sheet reads the controller's current state when it opens.
   final progress = PluginInstallProgress();
   progress.setPhase('Fetching plugin source…');
   progress.line('Fetching ${source.sourceId}…');
-  unawaited(
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (_) => PluginInstallProgressSheet(
-        progress: progress,
-        title: 'Installing ${row?.name ?? source.sourceId}',
-        subtitle: 'Plugin install — live log',
-      ),
+
+  // Order (F-103): inspect inline → capability approval → only THEN the
+  // "Installing" sheet. Declining never leaves a red result behind.
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text('Fetching ${source.sourceId}…'),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(minutes: 5),
     ),
   );
+  var sheetOpen = false;
+  void openSheet() {
+    if (sheetOpen || !context.mounted) return;
+    sheetOpen = true;
+    messenger.hideCurrentSnackBar();
+    unawaited(
+      showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Aether.surface,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => PluginInstallProgressSheet(
+          progress: progress,
+          title: 'Installing ${row?.name ?? source.sourceId}',
+          subtitle: 'Plugin install — live log',
+        ),
+      ),
+    );
+  }
 
   PluginInstallResult? result;
-  String? crash;
+  Object? crash;
   var depsStarted = false;
   try {
     result = await startPluginInstallForTest(
@@ -969,6 +1290,10 @@ Future<void> _runSourceInstall(
       row,
       source: source,
       approvalContext: context,
+      onApproved: () {
+        progress.setPhase('Installing…');
+        openSheet();
+      },
       sourceProgress: (received, total) {
         final value = total == null || total <= 0
             ? null
@@ -990,29 +1315,50 @@ Future<void> _runSourceInstall(
       },
     );
   } catch (e) {
-    crash = '$e';
+    crash = e;
   }
-  final msg = crash != null
-      ? 'Install crashed: $crash'
-      : result == null
-      ? 'Install cancelled — nothing was changed.'
-      : switch (result.status) {
-          PluginInstallStatus.ok =>
-            'Installed ✓ — restart Ovid to enable it everywhere '
-                '(this session: contributions pending restart).',
-          PluginInstallStatus.degraded =>
-            'Installed with degraded dependencies: '
-                '${result.degradedNames.join(', ')} — restart to enable.',
-          PluginInstallStatus.failed =>
-            'Install failed: ${result.error ?? 'unknown error'}',
-        };
+  final described = describeInstallOutcome(result, crash: crash);
+  final installedId = result?.manifest?.id;
+  final installedRow = installedId == null
+      ? null
+      : AppState.I.plugins.where((p) => p.runtimeId == installedId).firstOrNull;
+  void openPlugin() {
+    final target = installedRow ?? row;
+    if (target == null) return;
+    navigator.push(
+      MaterialPageRoute(builder: (_) => PluginDetailScreen(plugin: target)),
+    );
+  }
+
+  final details = described.details;
+  if (details != null) progress.line(details);
   progress.finish(
-    ok: crash == null && result?.status == PluginInstallStatus.ok,
-    summary: msg,
+    outcome: described.outcome,
+    summary: described.summary,
+    details: details,
+    onOpenPlugin: (installedRow ?? row) == null ? null : openPlugin,
   );
-  messenger.showSnackBar(
-    SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
-  );
+  if (!sheetOpen) messenger.hideCurrentSnackBar();
+  if (messenger.mounted) {
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(described.summary),
+        behavior: SnackBarBehavior.floating,
+        action:
+            sheetOpen ||
+                described.outcome == InstallOutcome.cancelled ||
+                details == null
+            ? null
+            : SnackBarAction(
+                label: 'Details',
+                onPressed: () {
+                  if (!context.mounted) return;
+                  openSheet();
+                },
+              ),
+      ),
+    );
+  }
   AppState.I.refresh();
 }
 
@@ -1126,15 +1472,107 @@ class _PluginsScreenState extends State<PluginsScreen> {
     }
   }
 
+  /// The last refresh's per-repo outcome (null before the first one).
+  MarketplaceSyncReport? _syncReport;
+
+  /// Error of a refresh that threw outright (not a per-repo failure).
+  String? _syncCrash;
+
   Future<void> _syncCatalogs({bool force = false}) async {
     if (!mounted || _syncing) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     setState(() => _syncing = true);
+    MarketplaceSyncReport? report;
+    String? crash;
     try {
-      await AppState.I.syncMarketplaceCatalogs(force: force);
-    } catch (_) {
-      // Offline / bad repo — the built-in catalog still renders.
+      report = await AppState.I.syncMarketplaceCatalogsReport(force: force);
+    } catch (e) {
+      // The built-in catalog still renders; say the refresh failed.
+      Diag.swallow('plugins-sync', e);
+      crash = "Couldn't refresh marketplaces. Try again.";
     }
-    if (mounted) setState(() => _syncing = false);
+    if (!mounted) return;
+    setState(() {
+      _syncing = false;
+      _syncReport = report;
+      _syncCrash = crash;
+    });
+    // An explicit Refresh always answers, even when everything worked.
+    if (force &&
+        crash == null &&
+        report != null &&
+        report.failures.isEmpty &&
+        messenger != null &&
+        messenger.mounted) {
+      final n = report.fetched;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            n == 0
+                ? 'No marketplaces to refresh'
+                : 'Refreshed $n marketplace${n == 1 ? '' : 's'}',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// "Couldn't refresh 2 marketplaces · Retry" / offline banner.
+  Widget? _syncBanner() {
+    final report = _syncReport;
+    final failures = report?.failures ?? const <String, String>{};
+    if (_syncCrash == null && failures.isEmpty) return null;
+    final offline = report?.offline ?? false;
+    final text = _syncCrash != null
+        ? _syncCrash!
+        : offline
+        ? "You're offline — showing saved catalogs. Marketplaces will "
+              'refresh when you reconnect.'
+        : "Couldn't refresh ${failures.length} "
+              'marketplace${failures.length == 1 ? '' : 's'}: '
+              '${failures.keys.join(', ')}';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+      child: Container(
+        key: const ValueKey('marketplace-sync-banner'),
+        padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+        decoration: BoxDecoration(
+          color: Aether.surfaceAlt,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              offline ? Icons.cloud_off_outlined : Icons.warning_amber,
+              size: 16,
+              color: Aether.warnLight,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(fontSize: 12, color: Aether.textMuted),
+              ),
+            ),
+            TextButton(
+              onPressed: _syncing ? null : () => _syncCatalogs(force: true),
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// MCP servers matching the search query (name, description, id).
+  bool _mcpMatches(McpServer s) {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    return s.name.toLowerCase().contains(q) ||
+        s.description.toLowerCase().contains(q) ||
+        s.canonicalId.toLowerCase().contains(q);
   }
 
   @override
@@ -1170,7 +1608,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
           // Task 2 (contraction spec §5.2): exactly one "+" — the single
           // add sheet (GitHub fetch + marketplace add).
           IconButton(
-            tooltip: 'Add plugin or marketplace',
+            tooltip: 'Add plugin, MCP server or marketplace',
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.add, size: 22),
             onPressed: () => showPluginAddSheet(context),
@@ -1224,9 +1662,13 @@ class _PluginsScreenState extends State<PluginsScreen> {
               s.custom ||
               (s.ownerPluginId?.isNotEmpty ?? false) ||
               installedMcpIds.contains(s.canonicalId);
+          // Search and the category chips filter the MCP section too: it
+          // renders only for All/MCP, and only matching servers.
+          final showMcp = _cat == 'All' || _cat == 'MCP';
+          final visibleServers = app.mcpServers.where(_mcpMatches);
           final servers = [
-            ...app.mcpServers.where(configured),
-            ...app.mcpServers.where((s) => !configured(s)),
+            ...visibleServers.where(configured),
+            ...visibleServers.where((s) => !configured(s)),
           ];
           _scheduleFocusReveal(items, focusIds);
           return CustomScrollView(
@@ -1240,7 +1682,9 @@ class _PluginsScreenState extends State<PluginsScreen> {
                     onChanged: (v) => setState(() => _query = v),
                     style: const TextStyle(fontSize: 13),
                     decoration: InputDecoration(
-                      hintText: 'Search ${items.length} plugins…',
+                      hintText:
+                          'Search ${app.plugins.length} plugins & '
+                          '${app.mcpServers.length} MCP servers…',
                       prefixIcon: Icon(
                         Icons.search,
                         size: 16,
@@ -1284,11 +1728,14 @@ class _PluginsScreenState extends State<PluginsScreen> {
                   ),
                 ),
               ),
+              if (_syncBanner() case final banner?)
+                SliverToBoxAdapter(child: banner),
               // ── MCP section ──
-              if (!migrationOnly)
+              if (!migrationOnly && showMcp)
                 SliverToBoxAdapter(
                   child: _McpSection(
                     servers: servers,
+                    totalServers: app.mcpServers.length,
                     focusCanonicalId: widget.focusCanonicalId,
                     cardKeys: _mcpCardKeys,
                   ),
@@ -1483,8 +1930,22 @@ class _MarketplaceCardState extends State<_MarketplaceCard> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  'GitHub marketplace',
-                  style: AetherType.caption,
+                  switch ((
+                    app.marketplaceSyncErrors[widget.repo],
+                    app.marketplaceLastSynced[widget.repo],
+                  )) {
+                    (final String _, _) =>
+                      'GitHub marketplace · last refresh failed',
+                    (null, final DateTime at) =>
+                      'GitHub marketplace · synced ${usageRelativeTime(at, now: DateTime.now())}',
+                    _ => 'GitHub marketplace',
+                  },
+                  key: ValueKey('marketplace-sync-${widget.repo}'),
+                  style: AetherType.caption.copyWith(
+                    color: app.marketplaceSyncErrors.containsKey(widget.repo)
+                        ? Aether.warnLight
+                        : null,
+                  ),
                 ),
               ],
             ),
@@ -1513,8 +1974,16 @@ class _MarketplaceCardState extends State<_MarketplaceCard> {
                         ),
                       );
                     } catch (e) {
+                      Diag.swallow('marketplace-browse', e);
                       if (mounted) {
-                        messenger.showSnackBar(SnackBar(content: Text('Could not load marketplace: $e')));
+                        messenger.showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              "Couldn't load this marketplace. Check your "
+                              'connection and try again.',
+                            ),
+                          ),
+                        );
                       }
                     } finally {
                       if (mounted) setState(() => _busy = false);
@@ -1872,7 +2341,7 @@ class PluginDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: AppState.I,
+      animation: Listenable.merge([AppState.I, ToolUsageStore.I]),
       builder: (context, _) => _buildDetail(context),
     );
   }
@@ -2294,8 +2763,9 @@ class PluginDetailScreen extends StatelessWidget {
             const SectionHeader(
               'Settings',
               subtitle:
-                  'Declared by the plugin manifest — secrets stay in '
-                  'secure storage on this device',
+                  'Passed to the plugin as CLAUDE_PLUGIN_OPTION_<KEY> and '
+                  r'${user_config.<key>} — secrets stay in secure storage '
+                  'on this device',
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
@@ -2308,6 +2778,9 @@ class PluginDetailScreen extends StatelessWidget {
                 ),
                 pluginName: plugin.runtimeId!,
                 fields: configFieldsForSettings(settingsFields),
+                // New values reach hooks on their next run; running MCP
+                // servers restart so their env/headers pick them up.
+                onSaved: () => applyPluginSettings(context, plugin),
               ),
             ),
           ],
@@ -2441,13 +2914,9 @@ class _PluginDiagnostics extends StatelessWidget {
         if (owned.isEmpty && (manifest == null || manifest.mcpServers.isEmpty))
           const _DiagRow('No MCP servers declared.'),
         for (final s in owned) ...[
-          // Durable-only status (spec §5.3, Task 3): canonical label ·
-          // reason, or neutral "Not started" — never a binary
-          // Connected/Not connected inference.
-          _DiagRow(
-            '${s.canonicalId} · ${s.transport} · '
-            '${mcpDurableStatusText(s)}',
-          ),
+          // Actionable row: open the server (tools, credentials, usage) or
+          // set it up / connect inline. Durable-only status text (spec §5.3).
+          _OwnedMcpTile(server: s),
           // Driven by the real credential probe, not the declaration:
           // stored credentials read "configured", missing ones are named.
           if (s.envHint != null ||
@@ -2523,15 +2992,77 @@ class _PluginDiagnostics extends StatelessWidget {
               '${h.matcher != null ? 'matcher ${h.matcher} · ' : ''}'
               '${h.payload.isEmpty ? '' : h.payload}',
             ),
-        _DiagRow(
-          'Last result: '
-          '${HookService.I.failed > 0 ? 'failures seen this boot' : 'no failures this boot'} '
-          '(fired ${HookService.I.fired}, failed ${HookService.I.failed} this boot)',
+        // Per-plugin counters (this plugin's hooks only), not the
+        // process-global totals.
+        Builder(
+          builder: (_) {
+            final stats = HookService.I.statsFor(runtimeId);
+            if (stats == null) {
+              return const _DiagRow(
+                'Last result: none of this plugin\'s hooks ran this boot',
+              );
+            }
+            final fired = stats.lastFiredAt;
+            return Column(
+              key: ValueKey('plugin-hook-stats-$runtimeId'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _DiagRow(
+                  'Last result: '
+                  '${stats.failed > 0 ? 'failures seen this boot' : 'no failures this boot'} '
+                  '(fired ${stats.fired}, failed ${stats.failed}'
+                  '${stats.blocked > 0 ? ', blocked ${stats.blocked}' : ''}'
+                  ' this boot'
+                  '${fired == null ? '' : ' · last fired ${usageRelativeTime(fired, now: DateTime.now())}'})',
+                  warn: stats.failed > 0,
+                ),
+                if (stats.lastError case final err?)
+                  _DiagRow('Last error: $err', warn: true),
+              ],
+            );
+          },
         ),
         _DiagRow(
-          'Circuit breaker: ${HookService.breakerThreshold} consecutive '
-          'failures in a session disable this plugin\'s hooks '
-          '(fail-open — the run continues)',
+          HookService.I.isPluginTrippedAnySession(runtimeId)
+              ? 'Circuit breaker: TRIPPED — this plugin\'s hooks are off '
+                    'for the affected session; re-enable the plugin to retry'
+              : 'Circuit breaker: closed — ${HookService.breakerThreshold} '
+                    'consecutive failures in a session turn this plugin\'s '
+                    'hooks off (fail-open — the run continues)',
+          warn: HookService.I.isPluginTrippedAnySession(runtimeId),
+        ),
+        const SectionHeader('Usage', subtitle: 'Last 30 days on this device'),
+        Builder(
+          builder: (_) {
+            final u = ToolUsageStore.I.summary(pluginId: runtimeId);
+            if (u.isEmpty) {
+              return const _DiagRow(
+                'No calls to this plugin\'s commands, skills, agents or MCP '
+                'tools yet.',
+              );
+            }
+            final top = ToolUsageStore.I
+                .toolSummaries(pluginId: runtimeId)
+                .entries
+                .take(5);
+            return Column(
+              key: ValueKey('plugin-usage-$runtimeId'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _DiagRow(
+                  '${u.calls} call${u.calls == 1 ? '' : 's'} · '
+                  '${u.errors} failed · p50 ${u.p50Ms} ms · p95 ${u.p95Ms} ms'
+                  '${u.lastUsed == null ? '' : ' · last used ${usageRelativeTime(u.lastUsed!)}'}',
+                ),
+                for (final e in top)
+                  _DiagRow(
+                    '${e.key}: ${e.value.calls} call'
+                    '${e.value.calls == 1 ? '' : 's'}'
+                    '${e.value.errors > 0 ? ' (${e.value.errors} failed)' : ''}',
+                  ),
+              ],
+            );
+          },
         ),
         const SectionHeader('Dependencies'),
         if (manifest == null || manifest.dependencies.packages.isEmpty)
@@ -2563,6 +3094,52 @@ class _PluginDiagnostics extends StatelessWidget {
         const SectionHeader('Install log'),
         _InstallLogRow(plugin: plugin),
       ],
+    );
+  }
+}
+
+/// A plugin-owned MCP server in the plugin's diagnostics: tap to open its
+/// detail screen (tools, credentials, usage); inline Set up / Connect runs
+/// [connectMcpServer] with its credential and runtime gates.
+class _OwnedMcpTile extends StatelessWidget {
+  final McpServer server;
+  const _OwnedMcpTile({required this.server});
+
+  @override
+  Widget build(BuildContext context) {
+    final s = server;
+    final durable = durableMcpStatus(s);
+    final needsSetup = durable?.state == StartupItemState.needsSetup;
+    final connecting = mcpConnecting(s);
+    return ListTile(
+      key: ValueKey('plugin-owned-mcp-${s.canonicalId}'),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+      dense: true,
+      leading: Icon(Icons.usb_outlined, size: 18, color: Aether.textMuted),
+      title: Text(
+        s.name,
+        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(
+        '${s.transport} · ${mcpDurableStatusText(s)}',
+        style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+      ),
+      onTap: () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => McpDetailScreen(server: s))),
+      trailing: s.connected
+          ? const Icon(Icons.chevron_right, size: 18)
+          : TextButton(
+              key: ValueKey('plugin-owned-mcp-connect-${s.canonicalId}'),
+              onPressed: connecting ? null : () => connectMcpServer(context, s),
+              child: Text(
+                connecting
+                    ? 'Connecting…'
+                    : needsSetup
+                    ? 'Set up'
+                    : 'Connect',
+              ),
+            ),
     );
   }
 }
@@ -2769,10 +3346,14 @@ class _Perm extends StatelessWidget {
 /// (running process + JSON-RPC, not a downloaded package).
 class _McpSection extends StatelessWidget {
   final List<McpServer> servers;
+
+  /// All configured servers, before search filtering.
+  final int totalServers;
   final String? focusCanonicalId;
   final Map<String, GlobalKey>? cardKeys;
   const _McpSection({
     required this.servers,
+    required this.totalServers,
     this.focusCanonicalId,
     this.cardKeys,
   });
@@ -2804,14 +3385,36 @@ class _McpSection extends StatelessWidget {
             ],
           ),
         ),
-        // Task 2 (contraction spec §5.2): no add-tile — the single "+"
-        // opens the add sheet. An empty list hints at it instead.
-        if (servers.isEmpty)
+        // The single "+" opens the add sheet; an empty list offers its MCP
+        // tab directly, a filtered-out list says nothing matched.
+        if (servers.isEmpty && totalServers > 0)
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
             child: Text(
-              'Use + to add from GitHub',
+              'No MCP servers match your search.',
+              key: const ValueKey('mcp-section-no-match'),
               style: TextStyle(fontSize: 12, color: Aether.textMuted),
+            ),
+          )
+        else if (servers.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+            child: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              children: [
+                Text(
+                  'No MCP servers yet — add one by command, URL or JSON.',
+                  style: TextStyle(fontSize: 12, color: Aether.textMuted),
+                ),
+                TextButton.icon(
+                  key: const ValueKey('mcp-section-add'),
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Add MCP server'),
+                  onPressed: () =>
+                      showPluginAddSheet(context, initialTab: PluginAddTab.mcp),
+                ),
+              ],
             ),
           )
         else
@@ -3599,8 +4202,9 @@ class _LiveMcpOAuthService implements McpOAuthService {
 
   @override
   Future<String> beginAuthorization(String serverKey) async =>
-      (await McpService.I.beginMcpOAuthAuthorization(serverKey))
-          .authorizationUrl;
+      (await McpService.I.beginMcpOAuthAuthorization(
+        serverKey,
+      )).authorizationUrl;
 
   @override
   Future<void> completeAuthorization(String serverKey, String callbackUri) =>
@@ -3649,6 +4253,16 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
   void initState() {
     super.initState();
     _credFuture = _loadCreds();
+  }
+
+  @override
+  void didUpdateWidget(McpDetailScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.server, widget.server)) {
+      _credFuture = _loadCreds();
+      _catalog = null;
+      _catalogConnected = false;
+    }
   }
 
   Future<_McpCredState> _loadCreds() async {
@@ -3929,9 +4543,377 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
   Widget build(BuildContext context) {
     // Listen to AppState: the connect outcome lands asynchronously, so the
     // real ready/failed state must repaint without leaving the screen.
+    // ToolUsageStore: the usage block updates as calls finish.
     return AnimatedBuilder(
-      animation: AppState.I,
+      animation: Listenable.merge([AppState.I, ToolUsageStore.I]),
       builder: (context, _) => _buildDetail(context),
+    );
+  }
+
+  Future<_McpCatalog>? _catalog;
+  bool _catalogConnected = false;
+
+  /// Resources/prompts, loaded once per connection (cached, not per build).
+  Future<_McpCatalog>? _catalogFor(McpServer s) {
+    final connected = McpService.I.isConnected(s.canonicalId);
+    if (connected != _catalogConnected) {
+      _catalogConnected = connected;
+      _catalog = connected ? _loadCatalog(s) : null;
+    }
+    return _catalog;
+  }
+
+  void _reloadCatalog(McpServer s) {
+    setState(() {
+      _catalog = McpService.I.isConnected(s.canonicalId)
+          ? _loadCatalog(s, refresh: true)
+          : null;
+    });
+  }
+
+  static Future<_McpCatalog> _loadCatalog(
+    McpServer s, {
+    bool refresh = false,
+  }) async {
+    final caps = McpService.I.capabilitiesFor(s.canonicalId);
+    Future<({List<Map<String, dynamic>>? items, String? error})> load(
+      String capability,
+      Future<List<Map<String, dynamic>>> Function() fetch,
+    ) async {
+      if (caps[capability] is! Map) return (items: null, error: null);
+      try {
+        return (items: await fetch(), error: null);
+      } catch (e) {
+        Diag.swallow('mcp-catalog', e);
+        return (items: null, error: "Couldn't load $capability.");
+      }
+    }
+
+    final resources = await load(
+      'resources',
+      () => McpService.I.listResources(s.canonicalId, refresh: refresh),
+    );
+    final prompts = await load(
+      'prompts',
+      () => McpService.I.listPrompts(s.canonicalId, refresh: refresh),
+    );
+    return _McpCatalog(
+      resources: resources.items,
+      resourcesError: resources.error,
+      prompts: prompts.items,
+      promptsError: prompts.error,
+    );
+  }
+
+  /// "Tools (N)": each advertised tool with its description, usage and an
+  /// input-schema preview (Claude Code `/mcp` per-server tool listing).
+  Widget _toolsSection(McpServer s) {
+    final tools = McpService.I.connectedTools[s.canonicalId];
+    final usage = ToolUsageStore.I.toolSummaries(mcpServerId: s.canonicalId);
+    if (tools == null) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+        child: Text(
+          'Connect the server to list its tools.',
+          key: ValueKey('mcp-tools-disconnected-${s.canonicalId}'),
+          style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+        ),
+      );
+    }
+    return Padding(
+      key: ValueKey('mcp-tools-${s.canonicalId}'),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Material(
+        color: Aether.surface,
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: Aether.hairline),
+        ),
+        child: Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            initiallyExpanded: tools.length <= 8,
+            title: Text(
+              'Tools (${tools.length})',
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            subtitle: Text(
+              'What the model can call on this server',
+              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            ),
+            children: [
+              if (tools.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: Text(
+                    'This server advertises no tools.',
+                    style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                  ),
+                ),
+              for (final t in tools)
+                ExpansionTile(
+                  key: ValueKey('mcp-tool-${t.name}'),
+                  dense: true,
+                  title: Text(
+                    t.name,
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontFamily: Aether.mono,
+                    ),
+                  ),
+                  subtitle: Text(
+                    [
+                      if ((t.description ?? '').trim().isNotEmpty)
+                        t.description!.trim(),
+                      if (usage[t.name] case final u? when !u.isEmpty)
+                        '${u.calls} call${u.calls == 1 ? '' : 's'}'
+                            '${u.errors > 0 ? ' · ${u.errors} failed' : ''}',
+                    ].join(' · '),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+                  ),
+                  childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  expandedCrossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if ((t.description ?? '').trim().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: SelectableText(
+                          t.description!.trim(),
+                          style: TextStyle(fontSize: 12.5, color: Aether.text),
+                        ),
+                      ),
+                    Text(
+                      'Input schema',
+                      style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                    ),
+                    const SizedBox(height: 4),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Aether.codeBg,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: SelectableText(
+                        mcpSchemaPreview(t.inputSchema),
+                        style: TextStyle(
+                          fontFamily: Aether.mono,
+                          fontSize: 11,
+                          height: 1.45,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _catalogSection(McpServer s) {
+    final future = _catalogFor(s);
+    if (future == null) return const SizedBox.shrink();
+    return FutureBuilder<_McpCatalog>(
+      future: future,
+      builder: (context, snap) {
+        final c = snap.data;
+        if (c == null) return const SizedBox.shrink();
+        Widget list(
+          String title,
+          List<Map<String, dynamic>>? items,
+          String? error,
+          String Function(Map<String, dynamic>) label,
+        ) {
+          if (items == null && error == null) return const SizedBox.shrink();
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SectionHeader(items == null ? title : '$title (${items.length})'),
+              if (error != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          error,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: Aether.warnLight,
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () => _reloadCatalog(s),
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                )
+              else if (items!.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    'None advertised.',
+                    style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                  ),
+                )
+              else
+                for (final item in items.take(50))
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                    child: Text(
+                      label(item),
+                      style: TextStyle(fontSize: 12.5, color: Aether.text),
+                    ),
+                  ),
+            ],
+          );
+        }
+
+        String describe(Map<String, dynamic> m, String id) {
+          final name = '${m[id] ?? m['name'] ?? ''}';
+          final d = '${m['description'] ?? ''}'.trim();
+          return d.isEmpty ? name : '$name — $d';
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            list(
+              'Resources',
+              c.resources,
+              c.resourcesError,
+              (m) => describe(m, 'uri'),
+            ),
+            list(
+              'Prompts',
+              c.prompts,
+              c.promptsError,
+              (m) => describe(m, 'name'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Last error: the durable failure reason, else the live status detail,
+  /// plus the server's recent stderr for stdio servers.
+  Widget _lastErrorSection(McpServer s) {
+    final durable = durableMcpStatus(s);
+    final failing =
+        durable != null &&
+        (durable.state == StartupItemState.failed ||
+            durable.state == StartupItemState.degraded ||
+            durable.state == StartupItemState.unsupported ||
+            durable.state == StartupItemState.needsSetup);
+    final live = AppState.I.serviceStatus['mcp:${s.canonicalId}'];
+    final reason = failing && (durable.reason ?? '').isNotEmpty
+        ? durable.reason!
+        : live?.health == ServiceHealth.failed
+        ? (live?.detail ?? '')
+        : '';
+    final usageErr = ToolUsageStore.I.summary(mcpServerId: s.canonicalId);
+    final stderr = McpService.I.stderrTail(s.canonicalId, lines: 8);
+    if (reason.isEmpty && usageErr.lastError == null && stderr.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Column(
+      key: ValueKey('mcp-last-error-${s.canonicalId}'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SectionHeader('Last error'),
+        if (reason.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: SelectableText(
+              'Connection: $reason',
+              style: TextStyle(fontSize: 12.5, color: Aether.dangerC),
+            ),
+          ),
+        if (usageErr.lastError case final err?)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: SelectableText(
+              'Last failed call'
+              '${usageErr.lastErrorAt == null ? '' : ' (${usageRelativeTime(usageErr.lastErrorAt!)})'}'
+              ': $err',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+          ),
+        if (stderr.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Aether.codeBg,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: SelectableText(
+              stderr.join('\n'),
+              style: TextStyle(
+                fontFamily: Aether.mono,
+                fontSize: 11,
+                color: Aether.textMuted,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Usage: calls, failures, latency and last use over 30 days, from the
+  /// per-server aggregation McpService.callTool feeds.
+  Widget _usageSection(McpServer s) {
+    final u = ToolUsageStore.I.summary(mcpServerId: s.canonicalId);
+    return Column(
+      key: ValueKey('mcp-usage-${s.canonicalId}'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SectionHeader('Usage', subtitle: 'Last 30 days on this device'),
+        if (u.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              'No tool calls yet.',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _runRow('Calls', '${u.calls}'),
+                const SizedBox(height: 6),
+                _runRow(
+                  'Failures',
+                  '${u.errors} (${(u.errors * 100 / u.calls).round()}%)',
+                ),
+                const SizedBox(height: 6),
+                _runRow(
+                  'Latency',
+                  'p50 ${u.p50Ms} ms · p95 ${u.p95Ms} ms · avg ${u.avgMs} ms',
+                ),
+                if (u.lastUsed != null) ...[
+                  const SizedBox(height: 6),
+                  _runRow('Last used', usageRelativeTime(u.lastUsed!)),
+                ],
+              ],
+            ),
+          ),
+      ],
     );
   }
 
@@ -4242,6 +5224,13 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               return _credentialsSection(context, s, creds);
             },
           ),
+          // Claude Code `/mcp` parity: what the server offers, how it has
+          // been used, and what went wrong last.
+          const SectionHeader('Capabilities'),
+          _toolsSection(s),
+          _catalogSection(s),
+          _usageSection(s),
+          _lastErrorSection(s),
           const SectionHeader('Config (standard mcp.json)'),
           if (!mcpConfigEditable(s))
             Padding(
@@ -4486,6 +5475,54 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
       },
     });
   }
+}
+
+/// Resources/prompts a connected server advertised (null = not advertised).
+class _McpCatalog {
+  final List<Map<String, dynamic>>? resources;
+  final String? resourcesError;
+  final List<Map<String, dynamic>>? prompts;
+  final String? promptsError;
+  const _McpCatalog({
+    this.resources,
+    this.resourcesError,
+    this.prompts,
+    this.promptsError,
+  });
+}
+
+/// Compact, readable preview of a tool's JSON input schema: one line per
+/// property (`name: type — description`, `*` = required), or the raw JSON
+/// when the schema has no `properties`.
+String mcpSchemaPreview(Map<String, dynamic>? schema) {
+  if (schema == null || schema.isEmpty) return 'No parameters';
+  final props = schema['properties'];
+  if (props is! Map || props.isEmpty) {
+    if (schema['type'] == 'object') return 'No parameters';
+    final raw = const JsonEncoder.withIndent('  ').convert(schema);
+    return raw.length > 2000 ? '${raw.substring(0, 2000)}…' : raw;
+  }
+  final required = {
+    for (final r in (schema['required'] as List?) ?? const []) '$r',
+  };
+  final lines = <String>[];
+  for (final e in props.entries) {
+    final p = e.value is Map ? e.value as Map : const {};
+    var type = p['type'];
+    if (type is List) type = type.join('|');
+    if (type == 'array' && p['items'] is Map) {
+      type = '${(p['items'] as Map)['type'] ?? 'any'}[]';
+    }
+    final enumValues = p['enum'];
+    final desc = '${p['description'] ?? ''}'.trim();
+    lines.add(
+      '${e.key}${required.contains('${e.key}') ? '*' : ''}: ${type ?? 'any'}'
+      '${enumValues is List ? ' (${enumValues.join(' | ')})' : ''}'
+      '${desc.isEmpty ? '' : ' — $desc'}',
+    );
+  }
+  if (required.isNotEmpty) lines.add('* required');
+  return lines.join('\n');
 }
 
 /// A config edit rejected by validation — its message is shown verbatim in

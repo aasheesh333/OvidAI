@@ -244,10 +244,20 @@ void main() {
       );
       await _pump(tester, McpDetailScreen(server: owned));
       expect(find.byTooltip('Edit config'), findsNothing);
+      await tester.scrollUntilVisible(
+        find.textContaining('Managed by plugin acme/kit'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(find.textContaining('Managed by plugin acme/kit'), findsOneWidget);
       final seed = _server(name: 'seed', custom: false);
       await _pump(tester, McpDetailScreen(server: seed));
       expect(find.byTooltip('Edit config'), findsNothing);
+      await tester.scrollUntilVisible(
+        find.textContaining('Built-in server'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(find.textContaining('Built-in server'), findsOneWidget);
     });
   });
