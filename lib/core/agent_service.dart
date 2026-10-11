@@ -52,6 +52,7 @@ import 'commands.dart';
 import 'device_control_service.dart';
 import 'model_limits.dart';
 import 'diag.dart';
+import 'secret_scrub.dart';
 import 'ssrf_guard.dart';
 import 'image_studio.dart';
 import 'ovid_cloud_service.dart';
@@ -6592,7 +6593,8 @@ user which one instead of assuming this one.''';
           'name': canonicalStub,
           'description':
               'The "${s.name}" MCP server (transport: ${s.transport}'
-              '${s.url != null ? ', url: ${s.url}' : ''}) is configured but '
+              '${s.url != null ? ', url: ${scrubUrl(s.url!)}' : ''}) is '
+              'configured but '
               'not connected. Calling this connects it and runs an action.',
           'parameters': {
             'type': 'object',
@@ -15181,8 +15183,9 @@ ${await _agentsMdBlock()}
           (s) =>
               '${s.name} — ${s.connected ? 'connected' : 'disconnected'}'
               ' · transport: ${s.transport}'
-              '${s.url != null ? ' · url: ${s.url}' : ''}'
-              '${s.transport != 'http' ? ' · ${s.command} ${s.args.join(' ')}' : ''}',
+              // M4: never echo inline credentials back to the model.
+              '${s.url != null ? ' · url: ${scrubUrl(s.url!)}' : ''}'
+              '${s.transport != 'http' ? ' · ${scrubCommandLine(s.command, s.args)}' : ''}',
         )).join('\n');
 
       case 'catalog_add_mcp':
@@ -15206,10 +15209,12 @@ ${await _agentsMdBlock()}
         // the user approves it, in every mode (security M5).
         final isStdio = url == null || url.isEmpty;
         if (isStdio) {
-          final program = [
+          // Shown to the user; inline credentials stay out of the dialog
+          // (and of any screenshot of it) — M4.
+          final program = scrubCommandLine(
             command.isEmpty ? 'npx' : command,
-            ...mArgs,
-          ].join(' ');
+            mArgs,
+          );
           final approved = await _askUser(
             'catalog_add_mcp',
             'Add local MCP server "$name"',

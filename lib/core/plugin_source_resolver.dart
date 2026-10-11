@@ -9,6 +9,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import 'diag.dart';
+import 'secret_scrub.dart';
 
 /// ── Secure plugin source resolver (spec §4.2) ─────────────────────────
 ///
@@ -1242,7 +1243,10 @@ class PluginSourceProvenance {
       ),
       PastedConfigPluginSource s => (s.label, 'Pasted configuration'),
       DirectMcpPluginSource s => (
-        s.url ?? [s.command ?? '', ...s.args].join(' ').trim(),
+        // M4: the consent sheet shows the endpoint, never inline secrets.
+        s.url != null
+            ? scrubUrl(s.url!)
+            : scrubCommandLine(s.command ?? '', s.args).trim(),
         'MCP server you entered',
       ),
     };
