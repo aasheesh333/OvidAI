@@ -24,6 +24,46 @@ class OwnedProcessTree {
     }
   }
 
+  /// Send [signal] to every live descendant of [root] (not [root] itself).
+  ///
+  /// Returns how many processes were signalled, or -1 when `/proc` is not
+  /// readable on this platform (callers then fall back to discarding the
+  /// whole shell). Used by the Studio terminal's Ctrl-C: the shell survives
+  /// with its `cd`/exports while the command it is running is interrupted.
+  static int signalDescendants(int root, ProcessSignal signal) {
+    final List<FileSystemEntity> entries;
+    try {
+      entries = Directory('/proc').listSync();
+    } catch (_) {
+      return -1;
+    }
+    final parents = <int, int>{};
+    for (final entry in entries) {
+      final id = int.tryParse(entry.path.split('/').last);
+      if (id == null) continue;
+      final stat = _stat(id);
+      if (stat != null) parents[id] = stat.parent;
+    }
+    if (parents.isEmpty) return -1;
+    final tree = <int>{root};
+    var grew = true;
+    while (grew) {
+      grew = false;
+      parents.forEach((id, parent) {
+        if (!tree.contains(id) && tree.contains(parent)) {
+          tree.add(id);
+          grew = true;
+        }
+      });
+    }
+    tree.remove(root);
+    var sent = 0;
+    for (final id in tree) {
+      if (Process.killPid(id, signal)) sent++;
+    }
+    return sent;
+  }
+
   void kill() {
     if (_killed) return;
     _killed = true;

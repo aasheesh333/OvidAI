@@ -20,6 +20,9 @@ import 'widgets/aether_primitives.dart';
 @visibleForTesting
 Future<Process> Function()? studioPtySpawnerOverrideForTest;
 
+/// The terminal's Stop button (shown while a command runs).
+const Key studioTerminalStopKey = ValueKey('studio-terminal-stop');
+
 // ── Multi-terminal (P8) — N independent persistent shells ─────────────
 // Each terminal keeps its own scrollback + busy state and its own
 // persistent pipe shell (StudioShellSession), so `cd`/exports survive
@@ -285,8 +288,24 @@ class _TerminalPaneState extends State<_TerminalPane> {
   Future<void> _run(String cmd) async {
     final t = widget.term;
     final shell = t.shell;
+    if (shell.busy) {
+      // While a command runs, the field feeds its stdin (y/N prompts,
+      // `read`, a REPL). The one-shot fallback has no stdin: keep the text.
+      if (shell.sendStdin(cmd)) {
+        t.input.clear();
+        _scrollToBottom(t);
+      }
+      return;
+    }
     final c = cmd.trim();
-    if (c.isEmpty || shell.busy) return;
+    if (c.isEmpty) return;
+    final incomplete = StudioShellSession.incompleteReason(c);
+    if (incomplete != null) {
+      shell.addOutput('\$ $c');
+      shell.addOutput('⚠ $incomplete');
+      _scrollToBottom(t);
+      return;
+    }
     t.input.clear();
     shell.begin(c);
     _scrollToBottom(t);
@@ -297,13 +316,18 @@ class _TerminalPaneState extends State<_TerminalPane> {
     // the sandbox is unavailable.
     final override = studioPtySpawnerOverrideForTest;
     try {
-      final spawner = override ??
+      final spawner =
+          override ??
           () async {
             final workDir = await SandboxService.I.workDirFor(sessionId);
             return SandboxService.I.spawn(['bash'], hostWorkDir: workDir);
           };
-      if (await shell.runPersistent(c, sid: sessionId, spawner: spawner,
-          workspace: SandboxService.I.workDirForSync(sessionId).path)) {
+      if (await shell.runPersistent(
+        c,
+        sid: sessionId,
+        spawner: spawner,
+        workspace: SandboxService.I.workDirForSync(sessionId).path,
+      )) {
         return;
       }
     } catch (_) {
@@ -369,10 +393,10 @@ class _TerminalPaneState extends State<_TerminalPane> {
                         color: l.startsWith('\$')
                             ? Aether.accent
                             : l.startsWith('⚠')
-                                ? Aether.danger
-                                : l.endsWith('✓') || l.startsWith('✓')
-                                    ? Aether.successLight
-                                    : Aether.textMuted,
+                            ? Aether.danger
+                            : l.endsWith('✓') || l.startsWith('✓')
+                            ? Aether.successLight
+                            : Aether.textMuted,
                       ),
                     );
                   },
@@ -403,7 +427,11 @@ class _TerminalPaneState extends State<_TerminalPane> {
                       ),
                       decoration: InputDecoration(
                         isDense: true,
-                        hintText: 'bash \$ …',
+                        hintText: s.busy
+                            ? (s.acceptsStdin
+                                  ? 'stdin for running command…'
+                                  : 'command running…')
+                            : 'bash \$ …',
                         hintStyle: TextStyle(
                           fontFamily: Aether.mono,
                           fontFamilyFallback: kStudioMonoFallback,
@@ -418,23 +446,28 @@ class _TerminalPaneState extends State<_TerminalPane> {
                           size: 16,
                           color: Aether.accent,
                         ),
-                        // While a command runs the suffix is a Stop button —
-                        // a hung command must never wedge the terminal.
-                        suffixIcon: s.busy
-                            ? StudioIconButton(
-                                icon: Icons.stop_circle_outlined,
-                                tooltip: 'Stop command',
-                                iconSize: 18,
-                                color: Aether.danger,
-                                onPressed: () => setState(s.cancel),
-                              )
-                            : null,
                       ),
                       textInputAction: TextInputAction.send,
                       onSubmitted: _run,
-                      enabled: !s.busy,
+                      // Never `enabled: false` while busy: a disabled field
+                      // ignores pointers and swallows the input, so the
+                      // running command could not be answered. Busy input
+                      // goes to the command's stdin; the one-shot fallback
+                      // (no stdin) makes the field read-only instead.
+                      readOnly: s.busy && !s.acceptsStdin,
                     ),
                   ),
+                  // Stop sits outside the field's decoration so it is always
+                  // hittable while a command runs (Ctrl-C, then escalation).
+                  if (s.busy)
+                    StudioIconButton(
+                      key: studioTerminalStopKey,
+                      icon: Icons.stop_circle_outlined,
+                      tooltip: 'Stop command (Ctrl-C)',
+                      iconSize: 18,
+                      color: Aether.danger,
+                      onPressed: s.acceptsStdin ? s.interrupt : s.cancel,
+                    ),
                   // Clear scrollback for THIS terminal.
                   if (s.history.isNotEmpty)
                     StudioIconButton(

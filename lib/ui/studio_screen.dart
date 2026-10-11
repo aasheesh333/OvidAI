@@ -32,7 +32,10 @@ import 'widgets/aether_primitives.dart';
 export 'studio_editor.dart' show StudioEditor, StudioEditorTabs;
 export 'studio_file_tree.dart' show StudioFileTree;
 export 'studio_terminal_tabs.dart'
-    show StudioTerminalTabs, studioPtySpawnerOverrideForTest;
+    show
+        StudioTerminalTabs,
+        studioPtySpawnerOverrideForTest,
+        studioTerminalStopKey;
 
 /// Test seam: overrides the device directory picker for the Studio
 /// working-folder affordance so host widget tests can drive "change folder"
