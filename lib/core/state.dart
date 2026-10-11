@@ -182,7 +182,7 @@ class ProviderConfig {
     final persistedBaseUrl = entry['baseUrl'] as String?;
     if (persistedBaseUrl != null) {
       baseUrl = id == AppState.ovidCloudProviderId
-          ? _normalizeOvidCloudBaseUrl(persistedBaseUrl)
+          ? normalizeOvidCloudBaseUrl(persistedBaseUrl)
           : persistedBaseUrl;
     }
     final fmt = entry['apiFormat'];
@@ -205,7 +205,7 @@ class ProviderConfig {
     }
   }
 
-  static String _normalizeOvidCloudBaseUrl(String value) {
+  static String normalizeOvidCloudBaseUrl(String value) {
     final uri = Uri.tryParse(value);
     if (uri == null || uri.host != 'cloud.dhanuksoftwares.com') return value;
     return uri.replace(host: 'api.ovidsi.com').toString();

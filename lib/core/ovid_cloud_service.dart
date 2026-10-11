@@ -143,6 +143,9 @@ class OvidCloudService extends ChangeNotifier {
             try {
               await _refreshModels(scope, c);
               scope.check();
+              // The catalog rejected the bound key (revoked, expired or
+              // deleted upstream). Re-mint once instead of retrying a dead key.
+              if (_keyIdentity == null) return await _mint(state, client);
               return const MintOutcome(MintStatus.ok);
             } on CloudUsageException catch (e) {
               return MintOutcome(MintStatus.rejected, message: e.message);
@@ -481,7 +484,9 @@ class OvidCloudService extends ChangeNotifier {
         recovery != null &&
         identical(recovery.state, state) &&
         recovery.isCurrent;
-    if (r.baseUrl.isNotEmpty) provider.baseUrl = r.baseUrl;
+    if (r.baseUrl.isNotEmpty) {
+      provider.baseUrl = ProviderConfig.normalizeOvidCloudBaseUrl(r.baseUrl);
+    }
     scope.baseUrl = provider.baseUrl;
     scope.key = r.key;
     if (ownsRecovery) {
@@ -513,6 +518,17 @@ class OvidCloudService extends ChangeNotifier {
           ? 'auto'
           : (models.isNotEmpty ? models.first : 'auto');
       state.setModel(AppState.ovidCloudProviderId, auto);
+    }
+  }
+
+  static String? _errorCode(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      final error = decoded is Map ? decoded['error'] : null;
+      final code = error is Map ? error['code'] : null;
+      return code is String ? code : null;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -562,11 +578,23 @@ class OvidCloudService extends ChangeNotifier {
           .timeout(const Duration(seconds: 15));
       scope.check();
       if (res.statusCode != 200) {
-        // An expired/revoked scoped key requires re-verification on Retry.
-        if (res.statusCode == 401 || res.statusCode == 403) _keyIdentity = null;
-        failed(
-          'Ovid Cloud model catalog unavailable (${res.statusCode}). Retry.',
-        );
+        final code = _errorCode(res.body);
+        // An expired/revoked scoped key requires a fresh mint. Gateways that
+        // predate key_invalid report a rejected key as catalog_unavailable.
+        if (res.statusCode == 401 ||
+            res.statusCode == 403 ||
+            (res.statusCode == 503 && code == 'catalog_unavailable')) {
+          _keyIdentity = null;
+        }
+        failed(switch (res.statusCode) {
+          401 || 403 =>
+            'Your Ovid Cloud session expired (${res.statusCode}). Retry to reconnect.',
+          402 =>
+            'Ovid Cloud usage limit reached (402). Upgrade or wait for reset.',
+          429 => 'Ovid Cloud is busy (429). Retry in a moment.',
+          _ =>
+            'Ovid Cloud model catalog unavailable (${res.statusCode}). Retry.',
+        });
         return;
       }
       final body = jsonDecode(res.body);

@@ -83,10 +83,12 @@ void main() {
       await tester.pump();
       expect(
         tester
-             .widget<TextButton>(find.descendant(
-               of: find.byKey(const ValueKey('cloud-connection-retry')),
-               matching: find.byType(TextButton),
-             ))
+            .widget<TextButton>(
+              find.descendant(
+                of: find.byKey(const ValueKey('cloud-connection-retry')),
+                matching: find.byType(TextButton),
+              ),
+            )
             .onPressed,
         isNull,
       );
@@ -409,6 +411,43 @@ void main() {
       );
       await OvidCloudService.I.ensureConnected(client: client);
       expect(mints, 2);
+      expect(
+        OvidCloudService.I.connectionFor(AppState.I).status,
+        CloudConnectionStatus.ready,
+      );
+      client.close();
+    },
+  );
+
+  test(
+    'retry re-mints once when the bound key is rejected as catalog_unavailable',
+    () async {
+      var mints = 0;
+      var models = 0;
+      final client = MockClient((request) async {
+        if (request.url.path == '/mint') {
+          mints++;
+          return mint();
+        }
+        return switch (++models) {
+          1 => http.Response('down', 500),
+          2 => http.Response('{"error":{"code":"catalog_unavailable"}}', 503),
+          _ => catalog(),
+        };
+      });
+      await OvidCloudService.I.ensureConnected(client: client);
+      expect(
+        OvidCloudService.I.connectionFor(AppState.I).status,
+        CloudConnectionStatus.failed,
+      );
+      // A generic outage keeps the bound key: Retry re-fetches the catalog,
+      // which now rejects the key, so the same Retry mints a fresh key.
+      expect(
+        (await OvidCloudService.I.ensureConnected(client: client)).ok,
+        isTrue,
+      );
+      expect(mints, 2);
+      expect(models, 3);
       expect(
         OvidCloudService.I.connectionFor(AppState.I).status,
         CloudConnectionStatus.ready,

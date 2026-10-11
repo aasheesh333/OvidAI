@@ -117,3 +117,49 @@ class VerifierTest(unittest.TestCase):
             bad = client.post('/v1/images/edits', content='invalid', headers={**headers, 'Content-Type': 'application/json'})
             self.assertEqual(bad.status_code, 400)
         transport.client.close()
+
+
+class ModelCatalogRouteTest(unittest.TestCase):
+    def catalog(self, handler, headers=None):
+        app = FastAPI()
+        mint = SimpleNamespace(app=app, LITELLM_BASE='http://litellm:4000')
+        mount_images(mint, models_transport=httpx.MockTransport(handler))
+        with TestClient(app) as client:
+            return client.get('/v1/models', headers={'Authorization': 'Bearer sk-user'} if headers is None else headers)
+
+    def test_lists_text_models_and_hides_image_alias(self):
+        seen = {}
+
+        def handler(request):
+            seen['auth'] = request.headers['authorization']
+            return httpx.Response(200, json={'data': [{'id': 'auto'}, {'id': 'manual-a'}, {'id': 'ovid-image'}]})
+
+        response = self.catalog(handler)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen['auth'], 'Bearer sk-user')
+        self.assertEqual([row['id'] for row in response.json()['data']], ['auto', 'manual-a'])
+
+    def test_missing_bearer_is_401_not_503(self):
+        response = self.catalog(lambda request: self.fail('upstream must not be called'), headers={})
+        self.assertEqual((response.status_code, response.json()['error']['code']), (401, 'sign_in_required'))
+
+    def test_upstream_status_mapping(self):
+        cases = [
+            (httpx.Response(401, json={'error': 'invalid key'}), 401, 'key_invalid'),
+            (httpx.Response(403, json={'error': 'blocked'}), 401, 'key_invalid'),
+            (httpx.Response(400, json={'error': {'message': 'ExceededBudget: Crossed budget'}}), 402, 'budget_exceeded'),
+            (httpx.Response(429, json={}), 429, 'rate_limited'),
+            (httpx.Response(500, json={}), 503, 'catalog_unavailable'),
+        ]
+        for upstream, status, code in cases:
+            with self.subTest(upstream=upstream.status_code, code=code):
+                response = self.catalog(lambda request, upstream=upstream: upstream)
+                self.assertEqual((response.status_code, response.json()['error']['code']), (status, code))
+                self.assertNotIn('sk-user', response.text)
+
+    def test_network_failure_is_503(self):
+        def handler(request):
+            raise httpx.ConnectTimeout('timed out', request=request)
+
+        response = self.catalog(handler)
+        self.assertEqual((response.status_code, response.json()['error']['code']), (503, 'catalog_unavailable'))
