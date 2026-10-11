@@ -53,8 +53,11 @@ void main() {
     expect(find.byType(AetherCard), findsWidgets);
     expect(find.text('BACKUP'), findsOneWidget);
     expect(find.text('Export'), findsOneWidget);
-    expect(find.text('Import'), findsOneWidget);
-    expect(find.text('View backup files'), findsOneWidget);
+    expect(find.text('Import backup…'), findsOneWidget);
+    expect(find.text('Share archive'), findsOneWidget);
+    expect(find.text('JSON (for other tools)'), findsOneWidget);
+    // F-149: the dead "View backup files" pseudo-link is gone.
+    expect(find.text('View backup files'), findsNothing);
   });
 
   testWidgets('cloud usage status renders pill/progress/caption when stale', (

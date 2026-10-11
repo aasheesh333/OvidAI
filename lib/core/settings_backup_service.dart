@@ -15,6 +15,40 @@ typedef SettingsRestorePublisher =
       Map<String, String> newSessionIds,
     );
 
+/// A backup limit was hit. The message names the limit in words a user can
+/// act on; it is still a [FormatException] so callers that treat any invalid
+/// archive uniformly keep working.
+class BackupLimitException extends FormatException {
+  const BackupLimitException(super.message);
+  @override
+  String toString() => message;
+}
+
+/// What [SettingsBackupService.planExport] decided fits in one archive.
+class BackupExportPlan {
+  /// Sessions that fit, most recently active first.
+  final List<ChatSession> included;
+
+  /// Sessions left out because a limit was reached.
+  final List<ChatSession> skipped;
+
+  /// Human description of the first limit that was hit, or null when every
+  /// session fits.
+  final String? limitHit;
+  const BackupExportPlan(this.included, this.skipped, this.limitHit);
+  bool get isComplete => skipped.isEmpty;
+}
+
+String _thousands(int value) {
+  final digits = value.toString();
+  final out = StringBuffer();
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
+    out.write(digits[i]);
+  }
+  return out.toString();
+}
+
 class StagedSettingsBackup {
   final Directory directory;
   final List<Map<String, dynamic>> sessions;
@@ -187,12 +221,129 @@ class SettingsBackupService {
     return result;
   }
 
+  static bool _exported(Message m) =>
+      !m.thinking &&
+      (m.kind == MsgKind.text ||
+          m.kind == MsgKind.reasoning ||
+          m.kind == MsgKind.compact);
+
+  static DateTime _lastActivity(ChatSession s) {
+    var latest = s.createdAt;
+    for (final m in s.messages) {
+      if (m.time.isAfter(latest)) latest = m.time;
+    }
+    return latest;
+  }
+
+  static String get sessionLimitText =>
+      'the backup limit of ${_thousands(maxSessions)} chats';
+  static String get messageLimitText =>
+      'the backup limit of ${_thousands(maxMessages)} messages';
+  static String get messageSizeLimitText =>
+      'the 1 MiB limit for a single message';
+  static String get textLimitText =>
+      'the ${maxManifestBytes ~/ (1024 * 1024)} MiB transcript text limit';
+  static String get attachmentLimitText =>
+      'the backup limit of $maxAttachments attachments';
+
+  /// Pre-checks [sessions] against every archive limit before any work.
+  /// Most recently active chats are kept first; a chat containing a single
+  /// message over 1 MiB is skipped on its own, any other limit stops the
+  /// plan so the archive holds the newest chats that fit. Never throws.
+  static BackupExportPlan planExport(List<ChatSession> sessions) {
+    final ordered = List.of(sessions)
+      ..sort((a, b) => _lastActivity(b).compareTo(_lastActivity(a)));
+    final included = <ChatSession>[];
+    final skipped = <ChatSession>[];
+    String? limit;
+    var messages = 0;
+    var textBytes = 0;
+    var attachments = 0;
+    // JSON escaping and per-message fields add overhead; keep headroom so a
+    // planned archive never trips the manifest limit at encode time.
+    const textBudget = maxManifestBytes * 3 ~/ 4;
+    var stopped = false;
+    for (final session in ordered) {
+      if (stopped) {
+        skipped.add(session);
+        continue;
+      }
+      var sMessages = 0;
+      var sBytes = 0;
+      var sAttachments = 0;
+      var oversized = false;
+      for (final m in session.messages) {
+        if (!_exported(m)) continue;
+        if (m.content.length > 1024 * 1024) {
+          oversized = true;
+          break;
+        }
+        sMessages++;
+        sBytes += utf8.encode(m.content).length;
+        sAttachments += m.attachments.length;
+      }
+      if (oversized) {
+        limit ??= messageSizeLimitText;
+        skipped.add(session);
+        continue;
+      }
+      String? hit;
+      if (included.length + 1 > maxSessions) {
+        hit = sessionLimitText;
+      } else if (messages + sMessages > maxMessages) {
+        hit = messageLimitText;
+      } else if (textBytes + sBytes > textBudget) {
+        hit = textLimitText;
+      } else if (attachments + sAttachments > maxAttachments) {
+        hit = attachmentLimitText;
+      }
+      if (hit != null) {
+        limit ??= hit;
+        stopped = true;
+        skipped.add(session);
+        continue;
+      }
+      included.add(session);
+      messages += sMessages;
+      textBytes += sBytes;
+      attachments += sAttachments;
+    }
+    return BackupExportPlan(
+      List.unmodifiable(included),
+      List.unmodifiable(skipped),
+      limit,
+    );
+  }
+
+  /// Writes the legacy, export-only JSON dump of [sessions] (full session
+  /// JSON for other tools; it cannot be restored) into [directory].
+  static Future<File> writeJsonExport(
+    List<ChatSession> sessions,
+    Directory directory,
+  ) async {
+    final file = File(
+      '${directory.path}/ovid-sessions-${DateTime.now().millisecondsSinceEpoch}.json',
+    );
+    final payload = {
+      'exportedAt': DateTime.now().toIso8601String(),
+      'sessions': sessions.map((s) => s.toJson()).toList(),
+    };
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(payload),
+      flush: true,
+    );
+    return file;
+  }
+
   Future<Uint8List> export(
     List<ChatSession> sessions, {
     Map<String, Object?> settings = const {},
   }) async {
     if (sessions.length > maxSessions) {
-      throw const FormatException('Too many sessions.');
+      throw BackupLimitException(
+        'You have ${_thousands(sessions.length)} chats, more than '
+        '$sessionLimitText.',
+      );
     }
     final validatedSettings = _validatedSettings(settings);
     var messageCount = 0;
@@ -208,14 +359,20 @@ class SettingsBackupService {
           continue;
         }
         if (++messageCount > maxMessages) {
-          throw const FormatException('Too many messages.');
+          throw BackupLimitException(
+            'Your chats have more than ${_thousands(maxMessages)} messages, '
+            'over $messageLimitText.',
+          );
         }
         if (message.content.length > 1024 * 1024) {
-          throw const FormatException('Message exceeds 1 MiB character limit.');
+          throw BackupLimitException(
+            'A message in "${session.title}" is larger than '
+            '$messageSizeLimitText.',
+          );
         }
         textBytes += utf8.encode(message.content).length;
         if (textBytes > maxManifestBytes) {
-          throw const FormatException('Transcript text exceeds 8 MiB.');
+          throw BackupLimitException('Your chats exceed $textLimitText.');
         }
       }
     }
@@ -258,7 +415,10 @@ class SettingsBackupService {
       for (final message in session['messages'] as List) {
         for (final a in message['attachments'] as List) {
           if (++attachmentCount > maxAttachments) {
-            throw const FormatException('Too many attachments.');
+            throw BackupLimitException(
+              'Your chats have more than $maxAttachments attachments, over '
+              '$attachmentLimitText.',
+            );
           }
           final source = a.remove('source') as String?;
           a['status'] = 'unavailable';
@@ -285,9 +445,9 @@ class SettingsBackupService {
             }
             if (total + size >
                 maxArchiveBytes - maxManifestBytes - 1024 * 1024) {
-              throw const FormatException(
-                'Attachment total exceeds archive limit.',
-              );
+              // Archive budget spent: keep the transcript, mark the file
+              // as not included rather than failing the whole backup.
+              continue;
             }
             // Bounded stream handles a file growing after length() as well.
             final builder = BytesBuilder(copy: false);
@@ -333,12 +493,15 @@ class SettingsBackupService {
     _validate(manifest, {for (final f in archive) f.name: f.content});
     final json = utf8.encode(jsonEncode(manifest));
     if (json.length > maxManifestBytes) {
-      throw const FormatException('Transcript manifest exceeds 8 MiB.');
+      throw BackupLimitException('Your chats exceed $textLimitText.');
     }
     archive.add(ArchiveFile.noCompress('manifest.json', json.length, json));
     final result = ZipEncoder().encode(archive);
     if (result.length > maxArchiveBytes) {
-      throw const FormatException('Archive exceeds 64 MiB.');
+      throw BackupLimitException(
+        'The backup would exceed the '
+        '${maxArchiveBytes ~/ (1024 * 1024)} MiB archive limit.',
+      );
     }
     return Uint8List.fromList(result);
   }
