@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'diag.dart';
+import 'subagent_tools.dart';
 
 /// What produced one recorded call.
 enum ToolUsageKind { mcp, pluginTool }
@@ -51,9 +52,23 @@ class _Bucket {
   String? lastError;
   int lastErrorMs = 0;
 
-  static const maxSamples = 200;
+  /// Calls made from inside a subagent, by Claude Code `agent_type`.
+  final Map<String, int> agents = {};
 
-  void add({required bool ok, required int ms, required int at, String? error}) {
+  static const maxSamples = 200;
+  static const maxAgents = 32;
+
+  void add({
+    required bool ok,
+    required int ms,
+    required int at,
+    String? error,
+    String? agentType,
+  }) {
+    if (agentType != null &&
+        (agents.containsKey(agentType) || agents.length < maxAgents)) {
+      agents[agentType] = (agents[agentType] ?? 0) + 1;
+    }
     calls++;
     totalMs += ms;
     if (samples.length >= maxSamples) samples.removeAt(0);
@@ -76,6 +91,7 @@ class _Bucket {
     'l': lastUsedMs,
     if (lastError != null) 'le': lastError,
     if (lastErrorMs > 0) 'lt': lastErrorMs,
+    if (agents.isNotEmpty) 'a': agents,
   };
 
   static _Bucket fromJson(Map<String, dynamic> j) {
@@ -86,6 +102,12 @@ class _Bucket {
       ..lastUsedMs = (j['l'] as num?)?.toInt() ?? 0
       ..lastError = j['le'] as String?
       ..lastErrorMs = (j['lt'] as num?)?.toInt() ?? 0;
+    final a = j['a'];
+    if (a is Map) {
+      for (final e in a.entries) {
+        if (e.value is num) b.agents['${e.key}'] = (e.value as num).toInt();
+      }
+    }
     final s = j['s'];
     if (s is List) {
       for (final v in s) {
@@ -171,7 +193,11 @@ class ToolUsageStore extends ChangeNotifier {
     required bool ok,
     required Duration elapsed,
     String? error,
+    String? agentType,
   }) {
+    // Work done inside a subagent is attributed to it (Claude Code parity:
+    // a subagent's MCP / plugin tool use is its own, visible per agent).
+    agentType ??= SubagentScope.current?.agentType;
     final now = clockForTest();
     final bucket = (_days[_day(now)] ??= {}).putIfAbsent(
       _key(kind, pluginId, mcpServerId, tool),
@@ -187,6 +213,7 @@ class ToolUsageStore extends ChangeNotifier {
       ms: elapsed.inMilliseconds,
       at: now.millisecondsSinceEpoch,
       error: err,
+      agentType: agentType,
     );
     _prune(now);
     _scheduleSave();
@@ -270,6 +297,31 @@ class ToolUsageStore extends ChangeNotifier {
       days: days,
     ),
   );
+
+  /// Calls made from inside subagents over the last [days] days, by
+  /// `agent_type`, filtered by any given dimension. Main-conversation calls
+  /// are not included.
+  Map<String, int> agentCalls({
+    String? pluginId,
+    String? mcpServerId,
+    String? tool,
+    ToolUsageKind? kind,
+    int days = retentionDays,
+  }) {
+    final out = <String, int>{};
+    for (final b in _matching(
+      pluginId: pluginId,
+      mcpServerId: mcpServerId,
+      tool: tool,
+      kind: kind,
+      days: days,
+    )) {
+      for (final e in b.agents.entries) {
+        out[e.key] = (out[e.key] ?? 0) + e.value;
+      }
+    }
+    return out;
+  }
 
   /// Per-tool rollups for one MCP server (or one plugin), most-used first.
   Map<String, ToolUsageSummary> toolSummaries({
