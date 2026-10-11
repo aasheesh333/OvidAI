@@ -78,14 +78,18 @@ Future<void> _reveal(WidgetTester tester, Finder finder) async {
   // The share list is nested inside the sheet's own scrolling viewport.
   // Lay out the closest viewport's new position before revealing the target
   // through its outer ancestors; a single top-aligned pass can clip it again.
+  // Pinned sheet actions (e.g. "Create link") are outside any scrollable.
   final target = tester.element(finder);
-  await Scrollable.of(target).position.ensureVisible(
-    target.findRenderObject()!,
-    alignment: .5,
-  );
-  await tester.pump();
-  await Scrollable.ensureVisible(target, alignment: .5);
-  await _frames(tester);
+  final scrollable = Scrollable.maybeOf(target);
+  if (scrollable != null) {
+    await scrollable.position.ensureVisible(
+      target.findRenderObject()!,
+      alignment: .5,
+    );
+    await tester.pump();
+    await Scrollable.ensureVisible(target, alignment: .5);
+    await _frames(tester);
+  }
   expect(finder.hitTestable(), findsOneWidget);
   expect(tester.takeException(), isNull);
 }
@@ -171,6 +175,9 @@ void main() {
         expect(reads, 2, reason: 'Copy revalidates the owner receipt');
         await _reveal(tester, find.text('Revoke'));
         await tester.tap(find.text('Revoke'));
+        await _frames(tester);
+        // Revoking confirms first (F-069).
+        await tester.tap(find.text('Revoke link'));
         await _frames(tester);
         expect(active, isFalse);
         expect(find.text('Copy link'), findsNothing);
