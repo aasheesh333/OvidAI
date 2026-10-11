@@ -970,14 +970,78 @@ class DeviceControlService {
 
   static bool isSensitiveTarget({String? packageName, String? url}) {
     final package = packageName?.trim().toLowerCase() ?? '';
+    final bare = package.split(':').first;
     if (kDeniedControlPackages.any(
-      (denied) => package == denied || package.startsWith('$denied:'),
+      (denied) => bare == denied || bare.startsWith('$denied.'),
     )) {
       return true;
     }
+    if (bare.isNotEmpty && _looksLikeFinancePackage(bare)) return true;
     final host = Uri.tryParse(url?.trim() ?? '')?.host.toLowerCase() ?? '';
-    return kDeniedControlDomains.any(
+    if (host.isEmpty) return false;
+    if (kDeniedControlDomains.any(
       (denied) => host == denied || host.endsWith('.$denied'),
-    );
+    )) {
+      return true;
+    }
+    // A `bank` / `netbanking` label (netbanking.hdfcbank.com, ibank.foo.com)
+    // marks a banking site even when the brand is not listed.
+    return host
+        .split('.')
+        .any((label) => label.contains('bank') || label == 'upi');
+  }
+
+  /// Signal-based (not brand-based) finance detection by package name, so
+  /// unlisted banks, UPI apps and wallets are covered too: a segment that
+  /// names a bank, wallet, UPI or `paisa`, or that ends in `pay`
+  /// (`com.foo.spay`, `com.bar.gpay`). Ovid itself is never matched.
+  static bool _looksLikeFinancePackage(String package) {
+    if (package == 'com.dhanuk.ovidai') return false;
+    final segments = package.split('.');
+    // The first segment is the TLD (com, in, uk, …): never a signal.
+    for (final seg in segments.skip(1)) {
+      if (seg.contains('bank') ||
+          seg.contains('wallet') ||
+          seg.contains('paisa') ||
+          seg == 'upi' ||
+          seg.startsWith('upi') ||
+          seg.endsWith('upi') ||
+          seg == 'pay' ||
+          seg.endsWith('pay') ||
+          seg == 'paytm' ||
+          seg == 'payments') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Text that only appears on a payment or card-entry screen (UPI PIN pad,
+  /// card form, Play/Google Pay purchase sheet). Matched case-insensitively
+  /// against a formatted `device_read` result.
+  static const _paymentScreenMarkers = <String>[
+    'upi pin',
+    'enter upi pin',
+    'enter mpin',
+    'enter your mpin',
+    'cvv',
+    'cvc',
+    'card verification',
+    'card number',
+    'expiry date',
+    'confirm payment',
+    'complete payment',
+    'proceed to pay',
+    'pay securely',
+    '1-tap buy',
+    'one-tap buy',
+  ];
+
+  /// True when a `device_read` result shows a payment step, even inside an
+  /// app that is not on the finance list (a checkout, an in-app purchase
+  /// sheet, a UPI PIN pad raised over another app).
+  static bool looksLikePaymentScreen(String formattedRead) {
+    final text = formattedRead.toLowerCase();
+    return _paymentScreenMarkers.any(text.contains);
   }
 }

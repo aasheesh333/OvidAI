@@ -19323,6 +19323,22 @@ ${await _agentsMdBlock()}
           return _sensitiveDeviceDenial(packageName);
         }
         final result = DeviceControlService.formatReadResultForTest(raw);
+        // Payment-step guard: a checkout, card form, UPI PIN pad or purchase
+        // sheet inside an app that is NOT on the finance list. The screen is
+        // withheld and every action in that app is refused until a clean
+        // full read (or a different foreground app) shows the step is over.
+        final pkg = packageName.trim().toLowerCase();
+        final ownApp =
+            pkg == 'com.dhanuk.ovidai' || pkg.startsWith('com.dhanuk.ovidai:');
+        if (!ownApp && DeviceControlService.looksLikePaymentScreen(result)) {
+          _paymentScreenPackage = pkg;
+          return _sensitiveDeviceDenial(packageName);
+        }
+        if (_paymentScreenPackage != null &&
+            (_paymentScreenPackage != pkg ||
+                (raw['status'] == 'ok' && raw['full'] == true))) {
+          _paymentScreenPackage = null;
+        }
         if (raw['status'] == 'ok' || raw['status'] == 'unchanged') {
           _emit(
             'shell',
@@ -19350,6 +19366,15 @@ ${await _agentsMdBlock()}
       }
       if (_isSensitiveDeviceTarget(packageName)) {
         return _sensitiveDeviceDenial(packageName);
+      }
+      final flagged = _paymentScreenPackage;
+      if (flagged != null) {
+        if (flagged == packageName.trim().toLowerCase()) {
+          return 'DENIED: the last screen read in $packageName was a payment '
+              'step (PIN, card or purchase confirmation). Please complete it '
+              'yourself, then call device_read with mode "full" before acting.';
+        }
+        _paymentScreenPackage = null;
       }
 
       switch (name) {
@@ -19660,6 +19685,16 @@ ${await _agentsMdBlock()}
       return '$name failed: $error';
     }
   }
+
+  /// Foreground package whose last `device_read` showed a payment step;
+  /// actions there are refused until a clean full read clears it.
+  String? _paymentScreenPackage;
+
+  @visibleForTesting
+  String? get paymentScreenPackageForTest => _paymentScreenPackage;
+
+  @visibleForTesting
+  set paymentScreenPackageForTest(String? v) => _paymentScreenPackage = v;
 
   bool _isSensitiveDeviceTarget(String? packageName) {
     String? url;

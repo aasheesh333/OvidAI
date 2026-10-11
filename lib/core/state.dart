@@ -78,23 +78,139 @@ String ovidModelLabel(String model) {
   return model.trim() == 'auto' ? 'Auto' : model;
 }
 
+/// Sites Control mode never reads or acts on (matched as the host or any
+/// subdomain of it). Hosts with a `bank`/`netbanking` label are blocked as
+/// well by [DeviceControlService.isSensitiveTarget], so this list only needs
+/// brands whose domain does not say "bank".
 const kDeniedControlDomains = <String>[
+  // Global payments / wallets
   'paypal.com',
   'wise.com',
+  'venmo.com',
+  'cash.app',
+  'stripe.com',
+  'pay.google.com',
+  'wallet.google.com',
+  'revolut.com',
+  'klarna.com',
+  'coinbase.com',
+  'binance.com',
+  'kraken.com',
+  'metamask.io',
+  // US banks
   'chase.com',
   'bankofamerica.com',
   'wellsfargo.com',
+  'citi.com',
   'citigroup.com',
   'capitalone.com',
+  'americanexpress.com',
+  'discover.com',
+  'usbank.com',
+  // UK / EU banks
+  'hsbc.co.uk',
+  'hsbc.com',
+  'barclays.co.uk',
+  'lloydsbank.com',
+  'natwest.com',
+  'santander.co.uk',
+  'monzo.com',
+  'starlingbank.com',
+  'n26.com',
+  'ing.com',
+  // India: UPI, wallets, banks, brokers
+  'phonepe.com',
+  'paytm.com',
+  'bhimupi.org.in',
+  'npci.org.in',
+  'mobikwik.com',
+  'freecharge.in',
+  'cred.club',
+  'onlinesbi.sbi',
+  'sbi.co.in',
+  'hdfcbank.com',
+  'icicibank.com',
+  'axisbank.com',
+  'kotak.com',
+  'pnbindia.in',
+  'bankofbaroda.in',
+  'canarabank.com',
+  'unionbankofindia.co.in',
+  'idfcfirstbank.com',
+  'yesbank.in',
+  'indusind.com',
+  'zerodha.com',
+  'groww.in',
+  'upstox.com',
 ];
+
+/// Apps Control mode never reads or acts on. Packages whose name has a
+/// `bank`, `wallet`, `upi`, `paisa` or `*pay` segment are blocked as well by
+/// [DeviceControlService.isSensitiveTarget]; this list covers the finance
+/// apps whose package does not say so.
 const kDeniedControlPackages = <String>[
+  // Global payments / wallets / crypto
   'com.paypal.android.p2pmobile',
   'com.transferwise.android',
+  'com.venmo',
+  'com.squareup.cash',
+  'com.zellepay.zelle',
+  'com.google.android.apps.walletnfcrel',
+  'com.samsung.android.spay',
+  'com.revolut.revolut',
+  'com.myklarnamobile',
+  'com.coinbase.android',
+  'com.binance.dev',
+  'io.metamask',
+  'com.wallet.crypto.trustapp',
+  'com.eg.android.alipaygphone',
+  // US banks
   'com.chase.sig.android',
   'com.infonow.bofa',
   'com.wf.wellsfargomobile',
   'com.citi.citimobile',
   'com.konylabs.capitalone',
+  'com.americanexpress.android.acctsvcs.us',
+  'com.discoverfinancial.mobile',
+  'com.usbank.mobilebanking',
+  // UK / EU banks
+  'uk.co.hsbc.hsbcukmobilebanking',
+  'com.barclays.android.barclaysmobilebanking',
+  'com.grppl.android.shell.cmblloydstsb73',
+  'com.rbs.mobile.android.natwest',
+  'uk.co.santander.santanderuk',
+  'co.uk.getmondo',
+  'com.starlingbank.android',
+  'de.number26.android',
+  // India: UPI apps and wallets
+  'com.phonepe.app',
+  'net.one97.paytm',
+  'com.google.android.apps.nbu.paisa.user', // Google Pay (India)
+  'in.org.npci.upiapp', // BHIM
+  'com.dreamplug.androidapp', // CRED
+  'com.mobikwik_new',
+  'com.freecharge.android',
+  'in.amazon.mshop.android.shopping', // Amazon India (Amazon Pay)
+  'com.whatsapp.payments',
+  // India: banks
+  'com.sbi.lotusintouch', // SBI YONO
+  'com.sbi.sbifreedomplus', // SBI YONO Lite
+  'com.snapwork.hdfc', // HDFC Bank
+  'com.enstage.wibmo.hdfc', // HDFC PayZapp
+  'com.csam.icici.bank.imobile', // ICICI iMobile Pay
+  'com.axis.mobile', // Axis Mobile
+  'com.msf.kbank.mobile', // Kotak
+  'com.pnb.pnbone', // PNB ONE
+  'com.bankofbaroda.mconnect', // bob World
+  'com.canarabank.mobility', // Canara ai1
+  'com.infrasofttech.uboi', // Union Bank Vyom
+  'com.idfcfirstbank.optimus', // IDFC FIRST
+  'com.yesbank', // YES Bank
+  'com.indusind.mobile', // IndusInd
+  // India: brokers
+  'com.zerodha.kite3',
+  'com.nextbillion.groww',
+  'in.upstox.app',
 ];
 const kControlModeDisclosure =
     'Control mode lets Ovid use your device the way you would. With your permission '
@@ -102,11 +218,14 @@ const kControlModeDisclosure =
     'in this app and in others, so it can finish tasks for you end to end.\n\n'
     'Ovid reads the screen only while Control mode is on, and only to do what you asked. '
     'Screen structure and screenshots may be stored in this chat or its workspace and '
-    'sent to the selected AI provider; provider retention follows their policy. '
-    'Ovid will not act on banking or payment screens in these listed apps and sites — '
-    'PayPal, Wise, Chase, Bank of America, Wells Fargo, Citi, and Capital One '
-    '(in Ovid\'s own browser the page URL is checked only when Ovid is the foreground app) — '
-    'and password fields are blocked. '
+    'sent to the selected AI provider; provider retention follows their policy.\n\n'
+    'Ovid will not read or act on banking or payment screens it can recognise: '
+    'apps and sites on its built-in finance list (major banks, UPI apps such as '
+    'PhonePe, Paytm, Google Pay and BHIM, wallets, brokers and crypto apps), apps whose '
+    'name marks them as a bank, wallet or UPI app, and screens asking for a UPI PIN, '
+    'card number or CVV. The list cannot cover every app, so complete payments '
+    'yourself. In Ovid\'s own browser the page address is checked only while Ovid is '
+    'the foreground app. Password fields are always blocked. '
     'Every action appears in this chat.\n\n'
     'You turn this on yourself in Settings > Accessibility, and you can turn it off there at any time.';
 
