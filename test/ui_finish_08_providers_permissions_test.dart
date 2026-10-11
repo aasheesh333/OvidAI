@@ -126,7 +126,7 @@ void main() {
         await tester.tap(find.byTooltip('Save base URL'));
         await tester.pumpAndSettle();
         expect(provider.baseUrl, 'https://updated.example.test/v1');
-        await reveal(tester, find.text('[OI]-compatible'));
+        await reveal(tester, find.text('OpenAI-compatible'));
         await reveal(tester, find.text('Anthropic'));
         await tester.tap(find.text('Anthropic'));
         await tester.pumpAndSettle();
