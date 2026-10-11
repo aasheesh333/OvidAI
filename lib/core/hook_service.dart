@@ -1493,23 +1493,24 @@ class HookService extends ChangeNotifier {
     });
   }
 
-  static bool _safeEnvName(String name) =>
-      RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(name) &&
-      !name.startsWith('PLUGIN_') &&
-      !name.startsWith('OVID_') &&
-      !name.startsWith('CLAUDE_') &&
-      !name.startsWith('CODEX_') &&
-      !name.startsWith('LD_') &&
-      !name.startsWith('DYLD_') &&
-      !const {
-        'BASH_ENV',
-        'ENV',
-        'SHELLOPTS',
-        'BASHOPTS',
-        'IFS',
-        'NODE_OPTIONS',
-        'PYTHONSTARTUP',
-      }.contains(name);
+  /// Whether a hook-persisted (`CLAUDE_ENV_FILE` / `envFileAppend`)
+  /// variable may enter later hook environments: never the host contract
+  /// prefixes, shell-startup knobs, or anything in
+  /// [isProtectedRuntimeEnvName] (M1 — `PATH`, `HOME`, `NODE_PATH`,
+  /// `PYTHONPATH`, `GIT_*`, `npm_config_*`, …). Prefixes are matched
+  /// case-insensitively.
+  @visibleForTesting
+  static bool safeHookEnvName(String name) => _safeEnvName(name);
+
+  static bool _safeEnvName(String name) {
+    if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(name)) return false;
+    if (isProtectedRuntimeEnvName(name)) return false;
+    final upper = name.toUpperCase();
+    for (final prefix in const ['PLUGIN_', 'OVID_', 'CLAUDE_', 'CODEX_']) {
+      if (upper.startsWith(prefix)) return false;
+    }
+    return !const {'SHELLOPTS', 'BASHOPTS', 'IFS'}.contains(upper);
+  }
 
   // A data-only subset of shell exports: no expansion, substitution or source.
   static MapEntry<String, String>? _envAssignment(String raw) {
@@ -1613,14 +1614,14 @@ class HookService extends ChangeNotifier {
   }) async {
     final pluginName = _displayName(pluginId);
     final root = _rootPathFor(pluginId, hook);
-    // Per-session env vars a SessionStart hook persisted via
-    // `hookSpecificOutput.envFileAppend` (item 8). Spread FIRST so the
-    // built-in contract below always wins on collision.
+    // Per-session env vars a SessionStart hook of THIS plugin persisted via
+    // `hookSpecificOutput.envFileAppend` (item 8). Scoped per plugin (M1):
+    // one plugin's env file never reaches another plugin's hooks. Spread
+    // FIRST so the built-in contract below always wins on collision.
     final envFilePath = await _sessionEnvFilePath(sessionId, pluginId);
-    final sessionEnv = <String, String>{};
-    for (final entry in _envFiles[sessionId]?.values ?? <(String, int)>[]) {
-      sessionEnv.addAll(_loadSessionEnv(entry.$1));
-    }
+    final sessionEnv = envFilePath.isEmpty
+        ? const <String, String>{}
+        : _loadSessionEnv(envFilePath);
     final runtime = HookExecutionScope.dependencyRoot(
       PluginContributionRegistry.I.manifestFor(pluginId),
     );
