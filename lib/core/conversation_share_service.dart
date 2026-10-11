@@ -120,7 +120,10 @@ class ConversationShare {
 
 class ConversationShareService {
   ConversationShareService({
-    this.baseUrl = const String.fromEnvironment('OVID_SHARE_BASE_URL'),
+    this.baseUrl = const String.fromEnvironment(
+      'OVID_SHARE_BASE_URL',
+      defaultValue: 'https://api.ovidsi.com',
+    ),
     this.publicOrigin,
     required this.idToken,
     this.appCheck,
@@ -168,6 +171,9 @@ class ConversationShareService {
   }
 
   bool get available => _base != null;
+
+  /// Whether a signed-in, ready account is bound to this service instance.
+  bool get signedIn => currentUid == null || _ownerUid != null;
   bool get ownerIsCurrent =>
       currentUid == null || (_ownerUid != null && currentUid!() == _ownerUid);
 
@@ -202,6 +208,33 @@ class ConversationShareService {
       body: {...snapshot.toJson(), 'request_id': requestId},
     );
     return _parse(data, snapshot.sessionId);
+  }
+
+  /// Republishes [snapshot] to the SAME live link (owner only). Viewers see
+  /// the new text on refresh; the URL and expiry do not change.
+  Future<ConversationShare> update(
+    String id,
+    ConversationSnapshot snapshot, {
+    required String requestId,
+  }) async {
+    if (!_tokenPattern.hasMatch(id)) {
+      throw const ConversationShareException('Invalid share ID.');
+    }
+    if (!snapshot.withinLimits) {
+      throw const ConversationShareException(
+        'Share 1–500 completed text messages, up to 200 KB in total and 20,000 characters each.',
+      );
+    }
+    final data = await _call(
+      'PUT',
+      '/shares/$id',
+      body: {...snapshot.toJson(), 'request_id': requestId},
+    );
+    final share = _parse(data, snapshot.sessionId);
+    if (share.id != id) {
+      throw const ConversationShareException('The share server returned a different link.');
+    }
+    return share;
   }
 
   Future<List<ConversationShare>> list(String sessionId) async {
@@ -391,6 +424,8 @@ class ConversationShareService {
       if (response.statusCode != expectedStatus) {
         throw ConversationShareException(switch (response.statusCode) {
           401 => 'Sign in again to verify your identity.',
+          404 when method == 'PUT' =>
+            'This link was revoked or expired. Create a new link.',
           403 => 'This account or app is not allowed to share.',
           409 =>
             'This request was already used, revoked, or expired. Refresh existing links.',

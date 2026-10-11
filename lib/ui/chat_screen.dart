@@ -18,6 +18,7 @@ import '../core/voice_input_service.dart';
 import '../core/state.dart';
 import '../core/studio_setup_coordinator.dart';
 import '../core/native_share.dart';
+import 'conversation_share_sheet.dart';
 import 'share_actions.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
@@ -1344,6 +1345,14 @@ class _ChatScreenState extends State<ChatScreen>
                   );
                 },
               ),
+              // Share: Read-only link or live Collab session (F-185).
+              if (s != null && !s.isSubagent && s.messages.isNotEmpty)
+                IconButton(
+                  tooltip: 'Share chat',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.ios_share_outlined, size: 18),
+                  onPressed: () => showConversationShareSheet(context, s),
+                ),
               IconButton(
                 tooltip: 'New session',
                 visualDensity: VisualDensity.compact,

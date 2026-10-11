@@ -9,6 +9,7 @@ import 'core/theme.dart';
 import 'ui/login_gate.dart';
 import 'ui/shell.dart';
 import 'core/share_link_resolver.dart';
+import 'ui/collab_session_screen.dart';
 import 'ui/shared_conversation_screen.dart';
 
 final appNavigatorKey = GlobalKey<NavigatorState>();
@@ -16,10 +17,14 @@ final appNavigatorKey = GlobalKey<NavigatorState>();
 bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
   final route = ShareLinkResolver.route(uri);
   final navigator = navigatorKey.currentState;
-  if (route is! ShareViewerRoute || navigator == null) return false;
+  if (route == null || navigator == null) return false;
   navigator.push(
     MaterialPageRoute(
-      builder: (_) => SharedConversationScreen(token: route.token),
+      builder: (_) => switch (route) {
+        ShareViewerRoute(:final token) => SharedConversationScreen(token: token),
+        CollabJoinRoute(:final token, :final invite) =>
+          CollabJoinScreen(token: token, invite: invite),
+      },
     ),
   );
   return true;
@@ -106,9 +111,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     try {
       final deferred = await _resolver.restoreDeferred();
       if (deferred != null) {
-        _openShare(
-          Uri.parse('${ShareLinkResolver.canonicalOrigin}/s/${deferred.token}'),
-        );
+        _openShare(ShareLinkResolver.uriFor(deferred));
       }
     } on Object {
       // Deferred links are optional and may fail when the provider is absent.
@@ -116,23 +119,23 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   }
 
   void _openShare(Uri uri) {
-    final route = ShareLinkResolver.route(uri);
-    if (route is! ShareViewerRoute ||
+    final key = ShareLinkResolver.parse(uri)?.key;
+    if (key == null ||
         !mounted ||
-        _openedTokens.contains(route.token) ||
-        !_pendingTokens.add(route.token)) {
+        _openedTokens.contains(key) ||
+        !_pendingTokens.add(key)) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _openedTokens.contains(route.token)) {
-        _pendingTokens.remove(route.token);
+      if (!mounted || _openedTokens.contains(key)) {
+        _pendingTokens.remove(key);
         return;
       }
       if (openShareWithNavigator(appNavigatorKey, uri)) {
-        _pendingTokens.remove(route.token);
-        _openedTokens.add(route.token);
+        _pendingTokens.remove(key);
+        _openedTokens.add(key);
       } else {
-        _pendingTokens.remove(route.token);
+        _pendingTokens.remove(key);
         _openShare(uri);
       }
     });

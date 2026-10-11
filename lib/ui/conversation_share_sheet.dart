@@ -2,16 +2,26 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr/qr.dart' as qr;
 
+import '../core/collaboration/models.dart' show MessageRole, maxActiveMembers;
+import '../core/collaboration/production.dart';
 import '../core/conversation_share_service.dart';
+import '../core/firebase_service.dart';
+import '../core/native_share.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import 'auth_screen.dart';
+import 'collab_session_screen.dart';
+import 'share_actions.dart';
 import 'widgets/aether_primitives.dart';
+
+/// The two ways to share a chat session.
+enum ShareMode { readOnly, collab }
 
 Future<void> showConversationShareSheet(
   BuildContext context,
-  ChatSession session,
-) {
-  final service = ConversationShareService.production();
+  ChatSession session, {
+  ShareMode? initialMode,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -19,25 +29,458 @@ Future<void> showConversationShareSheet(
     backgroundColor: Colors.transparent,
     builder: (_) => FractionallySizedBox(
       heightFactor: .92,
-      child: ConversationShareSheet(session: session, service: service),
+      child: ConversationShareSheet(
+        session: session,
+        service: ConversationShareService.production(),
+        serviceFactory: ConversationShareService.production,
+        initialMode: initialMode,
+      ),
     ),
   );
 }
 
+/// Share sheet: first choose Read only or Collab, then manage that link.
 class ConversationShareSheet extends StatefulWidget {
   const ConversationShareSheet({
     super.key,
     required this.session,
     required this.service,
+    this.serviceFactory,
+    this.collaboration,
+    this.initialMode,
   });
   final ChatSession session;
   final ConversationShareService service;
+
+  /// Rebuilds the account-bound service after an in-sheet sign in (F-186).
+  final ConversationShareService Function()? serviceFactory;
+
+  /// Live-session owner; production uses [AppState.collaboration].
+  final CollaborationProduction? collaboration;
+  final ShareMode? initialMode;
 
   @override
   State<ConversationShareSheet> createState() => _ConversationShareSheetState();
 }
 
 class _ConversationShareSheetState extends State<ConversationShareSheet> {
+  late ShareMode? _mode = widget.initialMode;
+  late ConversationShareService _service = widget.service;
+  int _serviceGeneration = 0;
+
+  CollaborationProduction? get _collaboration =>
+      widget.collaboration ?? AppState.I.collaboration;
+
+  Future<void> _signIn() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const AuthScreen()),
+    );
+    if (!mounted) return;
+    final factory = widget.serviceFactory;
+    setState(() {
+      if (factory != null) _service = factory();
+      _serviceGeneration++;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final mode = _mode;
+    return AetherSheet(
+      title: switch (mode) {
+        null => 'Share this chat',
+        ShareMode.readOnly => 'Read-only link',
+        ShareMode.collab => 'Collab link',
+      },
+      actions: [
+        if (mode != null && widget.initialMode == null)
+          AetherGhostButton(
+            label: 'Back',
+            icon: Icons.arrow_back,
+            onPressed: () => setState(() => _mode = null),
+          ),
+        AetherGhostButton(
+          label: 'Close',
+          onPressed: () => Navigator.pop(context),
+        ),
+      ],
+      child: switch (mode) {
+        null => _ModeChooser(onPick: (value) => setState(() => _mode = value)),
+        ShareMode.readOnly => _ReadOnlyPanel(
+          key: ValueKey(_serviceGeneration),
+          session: widget.session,
+          service: _service,
+          onSignIn: _signIn,
+        ),
+        ShareMode.collab => _CollabPanel(
+          session: widget.session,
+          controller: _collaboration,
+          onSignIn: _signIn,
+        ),
+      },
+    );
+  }
+}
+
+class _ModeChooser extends StatelessWidget {
+  const _ModeChooser({required this.onPick});
+  final ValueChanged<ShareMode> onPick;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text(
+        'Pick how people can use the link.',
+        style: AetherType.bodyMuted,
+      ),
+      const SizedBox(height: 12),
+      _ModeCard(
+        icon: Icons.visibility_outlined,
+        title: 'Read only',
+        body:
+            'Anyone with the link can read this chat. Update the link to share newer messages.',
+        onTap: () => onPick(ShareMode.readOnly),
+      ),
+      const SizedBox(height: 10),
+      _ModeCard(
+        icon: Icons.groups_outlined,
+        title: 'Collab',
+        body:
+            'Up to $maxActiveMembers people (you included) chat live in this session. Messages show each author\'s name, and every person\'s turns use their own model and account.',
+        onTap: () => onPick(ShareMode.collab),
+      ),
+    ],
+  );
+}
+
+class _ModeCard extends StatelessWidget {
+  const _ModeCard({
+    required this.icon,
+    required this.title,
+    required this.body,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String title;
+  final String body;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: title,
+    child: InkWell(
+      borderRadius: BorderRadius.circular(AetherRadius.rMd),
+      onTap: onTap,
+      child: AetherCard(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: Aether.accent),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: AetherType.title),
+                  const SizedBox(height: 4),
+                  Text(body, style: AetherType.bodyMuted),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right, color: Aether.textMuted),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Collab: start a live session from this chat, then manage its link.
+class _CollabPanel extends StatefulWidget {
+  const _CollabPanel({
+    required this.session,
+    required this.controller,
+    required this.onSignIn,
+  });
+  final ChatSession session;
+  final CollaborationProduction? controller;
+  final VoidCallback onSignIn;
+
+  @override
+  State<_CollabPanel> createState() => _CollabPanelState();
+}
+
+class _CollabPanelState extends State<_CollabPanel> {
+  bool _busy = false;
+  String? _error;
+
+  Future<void> _run(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await action();
+    } catch (error) {
+      if (mounted) setState(() => _error = collaborationErrorMessage(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _start(CollaborationProduction controller) => _run(() async {
+    final snapshot = ConversationSnapshot.fromSession(widget.session);
+    await controller.startFromConversation(
+      sourceSessionId: widget.session.id,
+      seed: [
+        for (final message in snapshot.messages)
+          CollaborationSeedMessage(
+            message.role == 'user' ? MessageRole.user : MessageRole.assistant,
+            message.content,
+          ),
+      ],
+    );
+  });
+
+  void _open(CollaborationProduction controller) {
+    final navigator = Navigator.of(context, rootNavigator: true);
+    Navigator.pop(context);
+    navigator.push(
+      MaterialPageRoute(
+        builder: (_) => CollabSessionScreen(controller: widget.controller),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = widget.controller;
+    if (controller == null || !controller.configured) {
+      return Text(
+        'Live sessions are unavailable in this build.',
+        style: AetherType.body.copyWith(color: Aether.warnLight),
+      );
+    }
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) => _body(context, controller),
+    );
+  }
+
+  Widget _body(BuildContext context, CollaborationProduction controller) {
+    final children = <Widget>[];
+    if (_busy) {
+      children.add(const LinearProgressIndicator(minHeight: 2));
+    }
+    if (_error != null) {
+      children.add(
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Text(_error!, style: TextStyle(color: Aether.dangerC)),
+        ),
+      );
+    }
+    final current = controller.sessionToken;
+    final mine = current != null &&
+        controller.isOwner &&
+        controller.sourceSessionId == widget.session.id;
+    if (!FirebaseService.I.isSignedIn && widget.controller == null) {
+      children.add(_SignInCard(onSignIn: widget.onSignIn, what: 'start a live session'));
+    } else if (!controller.available) {
+      children.add(Text('Getting your account ready…', style: AetherType.bodyMuted));
+    } else if (mine) {
+      final link = controller.shareLink;
+      final members = controller.state?.activeMembers.length ?? 1;
+      children.addAll([
+        if (link != null)
+          _LinkCard(
+            url: link,
+            label: 'Collab link',
+            pill: '$members/$maxActiveMembers',
+            busy: _busy,
+            onRevoke: () => _run(controller.revokeLink),
+            shareTitle: 'Join my live Ovid session',
+          )
+        else
+          AetherCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('The link was revoked. Members who joined stay in the session.',
+                    style: AetherType.bodyMuted),
+                const SizedBox(height: 8),
+                AetherGhostButton(
+                  label: 'Create new link',
+                  icon: Icons.link,
+                  onPressed: _busy ? null : () => _run(controller.newLink),
+                ),
+              ],
+            ),
+          ),
+        const SizedBox(height: 12),
+        AetherPrimaryButton(
+          label: 'Open live session',
+          icon: Icons.forum_outlined,
+          onPressed: () => _open(controller),
+        ),
+      ]);
+    } else if (current != null) {
+      children.addAll([
+        Text(
+          'You are already in a live session. Leave it before starting a new one.',
+          style: AetherType.body,
+        ),
+        const SizedBox(height: 12),
+        AetherPrimaryButton(
+          label: 'Open current live session',
+          icon: Icons.forum_outlined,
+          onPressed: () => _open(controller),
+        ),
+      ]);
+    } else {
+      children.addAll([
+        AetherCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Chat live together', style: AetherType.title),
+              const SizedBox(height: 6),
+              Text(
+                'Up to $maxActiveMembers people, you included, can join with the link. Everyone sees every message and AI reply, each labelled with the author\'s name.',
+                style: AetherType.bodyMuted,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Each person\'s messages are answered by their own model and billed to their own account. Your key is never used for anyone else. The last ${CollaborationProduction.maxSeedMessages} visible messages of this chat are shared as context.',
+                style: AetherType.caption.copyWith(height: 1.5),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        AetherPrimaryButton(
+          label: 'Start Collab and create link',
+          icon: Icons.group_add_outlined,
+          loading: _busy,
+          onPressed: _busy ? null : () => _start(controller),
+        ),
+      ]);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: children,
+    );
+  }
+}
+
+class _SignInCard extends StatelessWidget {
+  const _SignInCard({required this.onSignIn, required this.what});
+  final VoidCallback onSignIn;
+  final String what;
+
+  @override
+  Widget build(BuildContext context) => AetherCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Sign in to $what', style: AetherType.title),
+        const SizedBox(height: 6),
+        Text(
+          'Links belong to your Ovid account so you can revoke them later.',
+          style: AetherType.bodyMuted,
+        ),
+        const SizedBox(height: 10),
+        AetherPrimaryButton(label: 'Sign in', icon: Icons.login, onPressed: onSignIn),
+      ],
+    ),
+  );
+}
+
+/// QR + URL + Copy / Share / Revoke for a link.
+class _LinkCard extends StatelessWidget {
+  const _LinkCard({
+    required this.url,
+    required this.label,
+    required this.pill,
+    required this.busy,
+    required this.onRevoke,
+    required this.shareTitle,
+  });
+  final String url;
+  final String label;
+  final String pill;
+  final bool busy;
+  final VoidCallback onRevoke;
+  final String shareTitle;
+
+  @override
+  Widget build(BuildContext context) => AetherCard(
+    title: Text(label, style: AetherType.title),
+    trailing: AetherPill(label: pill, color: Aether.successLight, icon: Icons.group_outlined),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Center(
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(AetherRadius.rMd),
+              border: Border.all(color: Aether.hairline),
+            ),
+            child: Semantics(
+              image: true,
+              label: 'QR code for $label',
+              child: _QrCode(data: url, size: 180),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        SelectableText(url, style: AetherType.mono.copyWith(color: Aether.text)),
+        const SizedBox(height: 12),
+        _ShareActions(
+          busy: busy,
+          onCopy: () async {
+            await Clipboard.setData(ClipboardData(text: url));
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Link copied')),
+              );
+            }
+          },
+          onShare: () => showNativeShare(
+            context,
+            () => NativeShare.link(url, title: shareTitle),
+          ),
+          onRevoke: onRevoke,
+          revokeLabel: 'Revoke link',
+        ),
+      ],
+    ),
+  );
+}
+
+class _ReadOnlyPanel extends StatefulWidget {
+  const _ReadOnlyPanel({
+    super.key,
+    required this.session,
+    required this.service,
+    required this.onSignIn,
+  });
+  final ChatSession session;
+  final ConversationShareService service;
+  final VoidCallback onSignIn;
+
+  @override
+  State<_ReadOnlyPanel> createState() => _ReadOnlyPanelState();
+}
+
+class _ReadOnlyPanelState extends State<_ReadOnlyPanel> {
   // The identity binding and frozen preview share the same lifetime.
   late final _service = widget.service;
   late final _snapshot = ConversationSnapshot.fromSession(widget.session);
@@ -52,7 +495,7 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
     super.initState();
     // Freeze the exact preview before any asynchronous server work.
     _snapshot;
-    if (_service.available) _refresh();
+    if (_service.available && _service.signedIn) _refresh();
   }
 
   Future<void> _run(Future<void> Function() action) async {
@@ -102,6 +545,52 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
     }
   });
 
+  /// Republish the current chat to the same link (F-183), confirmed first.
+  Future<void> _update(ConversationShare share) async {
+    final ok = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => AetherSheet(
+        title: 'Update link?',
+        actions: [
+          AetherGhostButton(
+            label: 'Cancel',
+            onPressed: () => Navigator.pop(context, false),
+          ),
+          AetherPrimaryButton(
+            label: 'Update',
+            icon: Icons.sync,
+            onPressed: () => Navigator.pop(context, true),
+          ),
+        ],
+        child: Text(
+          'People with this link will see the chat as it is now. The link itself does not change.',
+          style: AetherType.body,
+        ),
+      ),
+    );
+    if (ok != true) return;
+    await _run(() async {
+      final updated = await _service.update(
+        share.id,
+        _snapshot,
+        requestId: ConversationShareService.newRequestId(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _shares = [updated, ..._shares.where((s) => s.id != updated.id)];
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Link updated')),
+      );
+    });
+  }
+
+  Future<void> _share(ConversationShare share) => showNativeShare(
+    context,
+    () => NativeShare.link(share.url.toString(), title: 'Share chat link'),
+  );
+
   Future<void> _revoke(ConversationShare share) => _run(() async {
     await _service.revoke(share.id);
     if (mounted) setState(() => _shares.removeWhere((s) => s.id == share.id));
@@ -129,16 +618,11 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
   Widget build(BuildContext context) {
     final available = _service.available;
     final activeShare = _shares.isEmpty ? null : _shares.first;
+    if (available && !_service.signedIn) {
+      return _SignInCard(onSignIn: widget.onSignIn, what: 'create links');
+    }
 
-    return AetherSheet(
-      title: 'Share conversation',
-      actions: [
-        AetherGhostButton(
-          label: 'Close',
-          onPressed: () => Navigator.pop(context),
-        ),
-      ],
-      child: Column(
+    return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -156,6 +640,10 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                     share: activeShare,
                     busy: _busy,
                     onCopy: () => _copy(activeShare),
+                    onShare: () => _share(activeShare),
+                    onUpdate: _snapshot.withinLimits
+                        ? () => _update(activeShare)
+                        : null,
                     onRevoke: () => _revoke(activeShare),
                   )
                 else
@@ -169,7 +657,7 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          'Anyone with the link can read this frozen text snapshot. Later chat edits are not included.',
+                          'Anyone with the link can read this chat as it is now. Use Update link later to share newer messages.',
                           style: AetherType.bodyMuted,
                         ),
                         const SizedBox(height: 10),
@@ -236,7 +724,9 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                 const SizedBox(height: 14),
                 AetherCard(
                   title: Text(
-                    'Preview · ${_snapshot.messages.length} messages',
+                    activeShare == null
+                        ? 'Preview · ${_snapshot.messages.length} messages'
+                        : 'Current chat (not yet shared) · ${_snapshot.messages.length} messages',
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -313,7 +803,6 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                 : null,
           ),
         ],
-      ),
     );
   }
 }
@@ -324,11 +813,15 @@ class _ActiveShareCard extends StatelessWidget {
     required this.busy,
     required this.onCopy,
     required this.onRevoke,
+    this.onShare,
+    this.onUpdate,
   });
   final ConversationShare share;
   final bool busy;
   final VoidCallback onCopy;
   final VoidCallback onRevoke;
+  final VoidCallback? onShare;
+  final VoidCallback? onUpdate;
 
   @override
   Widget build(BuildContext context) {
@@ -378,8 +871,17 @@ class _ActiveShareCard extends StatelessWidget {
           _ShareActions(
             busy: busy,
             onCopy: onCopy,
+            onShare: onShare,
             onRevoke: onRevoke,
           ),
+          if (onUpdate != null) ...[
+            const SizedBox(height: 8),
+            AetherGhostButton(
+              label: 'Update link',
+              icon: Icons.sync,
+              onPressed: busy ? null : onUpdate,
+            ),
+          ],
         ],
       ),
     );
@@ -429,37 +931,56 @@ class _ShareActions extends StatelessWidget {
     required this.busy,
     required this.onCopy,
     required this.onRevoke,
+    this.onShare,
+    this.revokeLabel = 'Revoke',
   });
   final bool busy;
   final VoidCallback onCopy;
   final VoidCallback onRevoke;
+  final VoidCallback? onShare;
+  final String revokeLabel;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final copy = AetherGhostButton(
-        label: 'Copy link',
-        icon: Icons.copy,
-        onPressed: busy ? null : onCopy,
-      );
-      final revoke = AetherDangerButton(
-        label: 'Revoke',
-        icon: Icons.link_off,
-        onPressed: busy ? null : onRevoke,
-      );
+      final buttons = <Widget>[
+        AetherGhostButton(
+          label: 'Copy link',
+          icon: Icons.copy,
+          onPressed: busy ? null : onCopy,
+        ),
+        if (onShare != null)
+          AetherGhostButton(
+            label: 'Share',
+            icon: Icons.share_outlined,
+            onPressed: busy ? null : onShare,
+          ),
+        AetherDangerButton(
+          label: revokeLabel,
+          icon: Icons.link_off,
+          onPressed: busy ? null : onRevoke,
+        ),
+      ];
       // Each label needs its scaled text, icon, gap and button padding.
-      final actionWidth = 360 * MediaQuery.textScalerOf(context).scale(14) / 14;
+      final actionWidth =
+          180 * buttons.length * MediaQuery.textScalerOf(context).scale(14) / 14;
       if (constraints.maxWidth < actionWidth) {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [copy, const SizedBox(height: 8), revoke],
+          children: [
+            for (var i = 0; i < buttons.length; i++) ...[
+              if (i > 0) const SizedBox(height: 8),
+              buttons[i],
+            ],
+          ],
         );
       }
       return Row(
         children: [
-          Expanded(child: copy),
-          const SizedBox(width: 10),
-          Expanded(child: revoke),
+          for (var i = 0; i < buttons.length; i++) ...[
+            if (i > 0) const SizedBox(width: 10),
+            Expanded(child: buttons[i]),
+          ],
         ],
       );
     },

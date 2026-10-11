@@ -136,7 +136,7 @@ void main() {
           }),
         );
         await tester.pumpWidget(_host(
-          ConversationShareSheet(session: shareSession(), service: service),
+          ConversationShareSheet(initialMode: ShareMode.readOnly, session: shareSession(), service: service),
           layout.$2,
         ));
         await _frames(tester);
@@ -205,7 +205,7 @@ void main() {
       }),
     );
     await tester.pumpWidget(_host(
-      ConversationShareSheet(session: session, service: service), 2,
+      ConversationShareSheet(initialMode: ShareMode.readOnly, session: session, service: service), 2,
     ));
     await _frames(tester);
     expect(tester.widget<FilledButton>(

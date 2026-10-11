@@ -168,3 +168,33 @@ fall back to the 15-second poll and then stop.
   but has no UI entry point. It was never enabled in release builds because
   `OVID_PRIVATE_SYNC_BASE_URL` was never defined. Removing it completely
   touches account deletion and reset, so it belongs in its own PR.
+
+## Deployment checklist (owner)
+
+1. **Account service env** (`/etc/ovid-account/api.env` or the compose env):
+   * `SHARE_BASE_URL=https://ovidsi.com`. Receipts and landing pages use
+     this origin, and the app checks that receipt URLs match
+     `OVID_PUBLIC_SHARE_ORIGIN`.
+   * `LIVE_COLLABORATION_CONFIGURED=true`, `LIVE_COLLABORATION_ACTIVATED=true`,
+     plus the existing backend, path, and authority ID values.
+   * `OVID_ANDROID_RELEASE_CERT_SHA256=AA:BB:…` (comma-separated). Use the
+     **Play App Signing** certificate SHA-256 from Play Console > Test and
+     release > App integrity > App signing. You can also add the upload key
+     for sideloaded release builds.
+   * `OVID_ANDROID_PACKAGE_NAME=com.dhanuk.ovidai` (the default; it must match
+     `applicationId`).
+2. **Gateway** (Cloudflare to Caddy): on `ovidsi.com`, proxy `/s/*` (one or
+   two path segments), `/shares`, `/shares/*`, and
+   `/.well-known/assetlinks.json` to the account service. On `api.ovidsi.com`,
+   add `/chat/{t}/invites/{id}`, which the existing `/chat/*` route already
+   covers. Long polls hold requests for up to 25 s, so keep proxy read timeouts
+   at 60 s or more. Cloudflare's default is 100 s. Do not cache `/s/*` or
+   `/chat/*`. Every response is `no-store` already.
+3. **Verify:** `curl https://ovidsi.com/.well-known/assetlinks.json` should
+   return 200 JSON. Then, on a device:
+   `adb shell pm get-app-links com.dhanuk.ovidai` should show `ovidsi.com: verified`.
+4. **App build:** the defaults need no `--dart-define`
+   (`OVID_SHARE_BASE_URL` and `OVID_COLLABORATION_BASE_URL` default to
+   `https://api.ovidsi.com`, and `OVID_PUBLIC_SHARE_ORIGIN` to
+   `https://ovidsi.com`). To change the App Links host, pass
+   `-PovidShareHost=<host>` to Gradle.
