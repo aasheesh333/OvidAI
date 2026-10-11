@@ -658,6 +658,15 @@ class OvidCloudService extends ChangeNotifier {
     }
   }
 
+  bool _upgradeDisabledByServer = false;
+
+  /// True once `/upgrade` answered 403 "disabled": the server has no purchase
+  /// path, so plan CTAs are hidden for the rest of the process.
+  bool get upgradeDisabledByServer => _upgradeDisabledByServer;
+
+  @visibleForTesting
+  void resetUpgradeAvailabilityForTest() => _upgradeDisabledByServer = false;
+
   /// TEST "Pay now": upgrade the signed-in user's plan tier. Server-gated by
   /// ALLOW_TEST_UPGRADE. Returns the new tier on success, null on failure.
   Future<String?> upgrade(String tier, {http.Client? client}) {
@@ -691,6 +700,14 @@ class OvidCloudService extends ChangeNotifier {
           )
           .timeout(const Duration(seconds: 20));
       scope.check();
+      if (res.statusCode == 403 &&
+          res.body.toLowerCase().contains('disabled')) {
+        // The server turned the test purchase path off ("test upgrade is
+        // disabled"). Hide purchase CTAs instead of offering a dead button.
+        _upgradeDisabledByServer = true;
+        notifyListeners();
+        return null;
+      }
       if (res.statusCode != 200) return null;
       final j = jsonDecode(res.body) as Map<String, dynamic>;
       final newTier = j['tier'];
@@ -799,10 +816,15 @@ class OvidUsage {
     required this.remainingPct,
     required this.models,
     this.hasRemainingPct = true,
+    this.billingEnabled = false,
   });
 
   final String tier;
   final bool isPaid;
+
+  /// Server flag `billing_enabled`: a real purchase path exists. Absent or
+  /// false means paid plans are not for sale yet.
+  final bool billingEnabled;
 
   /// Internal (server field `daily_spent_usd`) — never render.
   final double dailySpentUsd;
@@ -855,6 +877,7 @@ class OvidUsage {
     budgetWindow: (j['budget_window'] as String?) ?? '',
     remainingPct: (j['remaining_pct'] as num?)?.toDouble() ?? 0,
     hasRemainingPct: j['remaining_pct'] is num,
+    billingEnabled: j['billing_enabled'] == true,
     models: [
       for (final m in (j['models'] as List? ?? const []))
         if (m is Map<String, dynamic>) OvidModelUsage.fromJson(m),
