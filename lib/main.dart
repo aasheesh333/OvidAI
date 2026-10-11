@@ -11,6 +11,7 @@ import 'ui/shell.dart';
 import 'core/share_link_resolver.dart';
 import 'l10n/l10n.dart';
 import 'ui/shared_conversation_screen.dart';
+import 'ui/widgets/error_views.dart';
 
 final appNavigatorKey = GlobalKey<NavigatorState>();
 
@@ -28,6 +29,7 @@ bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  installReleaseErrorWidget();
   AppState.I.registerProductionAccountFeatures();
   // Coalesce session writes in production; tests keep the zero-window default.
   AppState.enableSessionPersistDebounce();
