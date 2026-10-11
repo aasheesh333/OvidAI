@@ -37,6 +37,7 @@ import 'permissions_screen.dart';
 import 'providers_screen.dart';
 import 'plugins_screen.dart';
 import 'usage_screen.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/external_link.dart';
 import '../core/diag.dart';
@@ -293,7 +294,13 @@ class SettingsScreen extends StatelessWidget {
                   SettingsActions.resetAll == null
                       ? 'Unavailable · verified full reset is not connected'
                       : 'Chats, keys and settings · irreversible',
-                  const SettingsResetScreen(),
+                  SettingsResetScreen(
+                    onExport: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const _ExportChatsScreen(),
+                      ),
+                    ),
+                  ),
                 ),
                 _hairline(),
                 const _StorageTile(),
@@ -894,6 +901,20 @@ class _StorageScreenState extends State<_StorageScreen> {
     }
   }
 
+  /// Clearing cookies signs the user out of every site in every chat's
+  /// browser profile, so it confirms first.
+  Future<void> _confirmClearCookies() async {
+    final ok = await showAetherConfirmDialog(
+      context,
+      title: 'Clear browser cookies?',
+      message:
+          'You will be signed out of every website in the in-app browser, in '
+          'every chat, and site data such as preferences is removed.',
+      confirmLabel: 'Clear cookies',
+    );
+    if (ok && mounted) await _clearCookies();
+  }
+
   Future<void> _clearCookies() async {
     setState(() => _clearing = true);
     try {
@@ -1033,7 +1054,7 @@ class _StorageScreenState extends State<_StorageScreen> {
                 style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
               ),
               trailing: TextButton(
-                onPressed: _clearing ? null : _clearCookies,
+                onPressed: _clearing ? null : _confirmClearCookies,
                 child: const Text('Clear'),
               ),
             ),

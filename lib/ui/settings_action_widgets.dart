@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/settings_actions.dart';
 import '../core/theme.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
 /// Settings actions allow long labels to wrap at large accessibility text sizes.
@@ -39,9 +40,11 @@ class SettingsActionButton extends StatelessWidget {
       return FilledButton(
         onPressed: onPressed,
         style: style.copyWith(
-          backgroundColor: WidgetStateProperty.resolveWith((states) =>
-              (danger ? Aether.danger : Aether.accent)
-                  .withValues(alpha: states.contains(WidgetState.disabled) ? .4 : 1)),
+          backgroundColor: WidgetStateProperty.resolveWith(
+            (states) => (danger ? Aether.danger : Aether.accent).withValues(
+              alpha: states.contains(WidgetState.disabled) ? .4 : 1,
+            ),
+          ),
         ),
         child: child,
       );
@@ -125,7 +128,10 @@ class _SettingsSwitchTileState extends State<SettingsSwitchTile> {
 
 class SettingsResetScreen extends StatefulWidget {
   final Future<SettingsResetResult> Function()? reset;
-  const SettingsResetScreen({super.key, this.reset});
+
+  /// Opens chat export; offered as "Export my chats first" in the confirm.
+  final VoidCallback? onExport;
+  const SettingsResetScreen({super.key, this.reset, this.onExport});
   @override
   State<SettingsResetScreen> createState() => _SettingsResetScreenState();
 }
@@ -137,12 +143,11 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
     if (_busy) return;
     final reset = widget.reset ?? SettingsActions.resetAll;
     if (reset == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        scrollable: true,
-        title: const Text('Delete ALL data?'),
-        content: const Text(
+    final onExport = widget.onExport;
+    final confirmed = await showAetherConfirmDialog(
+      context,
+      title: 'Delete ALL data?',
+      message:
           'This permanently deletes from this device: chats and their '
           'workspaces, search index, memory, usage history, API keys and '
           'tokens, providers, plugins, MCP servers, presets, permission '
@@ -152,20 +157,22 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
           'already shared or saved elsewhere, the installed sandbox '
           'runtime, and your Ovid account and cloud data (delete those '
           'from Account). This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete everything'),
-          ),
-        ],
-      ),
+      confirmLabel: 'Delete everything',
+      typeToConfirm: 'DELETE',
+      extra: onExport == null
+          ? null
+          : Builder(
+              builder: (dialogContext) => OutlinedButton.icon(
+                icon: const Icon(Icons.download_outlined, size: 18),
+                label: const Text('Export my chats first'),
+                onPressed: () {
+                  Navigator.pop(dialogContext, false);
+                  onExport();
+                },
+              ),
+            ),
     );
-    if (confirmed != true || !mounted) return;
+    if (!confirmed || !mounted) return;
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.maybeOf(context);
     setState(() {
@@ -186,9 +193,10 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
         return;
       }
       setState(
-        () => _result = 'Incomplete reset. ${report.completed.length} store(s) completed.\n'
-                  '${report.failures.entries.map((e) => '${e.key}: ${e.value}').join('\n')}'
-                  '${report.failures.isEmpty ? '\nCompletion could not be verified.' : ''}\nRetry to finish.',
+        () => _result =
+            'Incomplete reset. ${report.completed.length} store(s) completed.\n'
+            '${report.failures.entries.map((e) => '${e.key}: ${e.value}').join('\n')}'
+            '${report.failures.isEmpty ? '\nCompletion could not be verified.' : ''}\nRetry to finish.',
       );
     } catch (_) {
       if (mounted) {
@@ -221,15 +229,19 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  _busy ? 'Deletion in progress' : available ? 'Ready' : 'Unavailable',
+                  _busy
+                      ? 'Deletion in progress'
+                      : available
+                      ? 'Ready'
+                      : 'Unavailable',
                   style: AetherType.label,
                 ),
                 const SizedBox(height: 8),
                 Text(
-              available
-                  ? 'Deletes chats, keys, settings and other app data on this device after stopping active writers. Folders outside the app and your Ovid account are not affected. Any incomplete removal is reported for retry.'
-                  : 'Full reset unavailable in this build: the verified all-store reset worker is not connected. No data has been deleted.',
-              style: AetherType.body,
+                  available
+                      ? 'Deletes chats, keys, settings and other app data on this device after stopping active writers. Folders outside the app and your Ovid account are not affected. Any incomplete removal is reported for retry.'
+                      : 'Full reset unavailable in this build: the verified all-store reset worker is not connected. No data has been deleted.',
+                  style: AetherType.body,
                 ),
               ],
             ),

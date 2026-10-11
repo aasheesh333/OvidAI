@@ -528,7 +528,8 @@ void main() {
       matching: find.byType(TextField),
     );
     await tester.enterText(dialogField, 'Revised');
-    await tester.tap(find.widgetWithText(TextButton, 'Edit in composer'));
+    expect(find.textContaining('This removes the 1 message'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, 'Edit & remove 1'));
     await tester.pumpAndSettle();
     expect(draft(tester), 'Revised');
     expect(
@@ -536,6 +537,9 @@ void main() {
       '/workspace/source.txt',
     );
     expect(a.messages, isEmpty);
+    // Let the Undo window expire.
+    await tester.pump(const Duration(seconds: 12));
+    await tester.pumpAndSettle();
   });
 
   testWidgets(
@@ -629,6 +633,9 @@ void main() {
       AgentService.I.pendingAttachments.single.path,
       '/workspace/example.txt',
     );
+    // Let the Undo window expire.
+    await tester.pump(const Duration(seconds: 12));
+    await tester.pumpAndSettle();
   });
 
   testWidgets(

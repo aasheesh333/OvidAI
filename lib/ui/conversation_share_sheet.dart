@@ -5,6 +5,7 @@ import 'package:qr/qr.dart' as qr;
 import '../core/conversation_share_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
 Future<void> showConversationShareSheet(
@@ -102,7 +103,21 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
     }
   });
 
-  Future<void> _revoke(ConversationShare share) => _run(() async {
+  /// Revoking deletes the public link for everyone, so it confirms first.
+  Future<void> _revoke(ConversationShare share) async {
+    final ok = await showAetherConfirmDialog(
+      context,
+      title: 'Revoke this link?',
+      message:
+          'People with this link will no longer be able to open it. You can '
+          'create a new link later, but it will have a different address.',
+      confirmLabel: 'Revoke link',
+    );
+    if (!ok || !mounted) return;
+    await _revokeNow(share);
+  }
+
+  Future<void> _revokeNow(ConversationShare share) => _run(() async {
     await _service.revoke(share.id);
     if (mounted) setState(() => _shares.removeWhere((s) => s.id == share.id));
   });

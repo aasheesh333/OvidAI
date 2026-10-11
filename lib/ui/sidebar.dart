@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/connection_service.dart';
+import '../core/diag.dart';
 import '../core/firebase_service.dart';
 import '../core/session_history_store.dart';
 import '../core/theme.dart';
@@ -14,6 +15,7 @@ import 'settings_screen.dart';
 import 'trajectory_screen.dart';
 import 'schedule_screen.dart';
 import 'conversation_share_sheet.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/ovid_mark.dart';
 
@@ -93,7 +95,10 @@ class SidebarSessionsNotifier extends ValueNotifier<SidebarSessions> {
     // Subagent sessions are apparatus, not chats — they are reached from the
     // parent's subagent card / catalog, never from the sidebar.
     return SidebarSessions([
-      for (final s in app.rootSessionsByRecency) SessionSummary.of(s),
+      // Chats in their Undo window are already gone from the list
+      // (optimistic delete).
+      for (final s in app.rootSessionsByRecency)
+        if (!app.isSessionDeletionPending(s.id)) SessionSummary.of(s),
     ], app.activeSessionId);
   }
 
@@ -956,7 +961,7 @@ class _SessionTileState extends State<_SessionTile> {
       // Swipe delete must confirm like the delete button does — an
       // accidental swipe used to delete the chat with no way back.
       confirmDismiss: (_) => _askDeleteConfirmed(context),
-      onDismissed: (_) => app.deleteSession(session.id),
+      onDismissed: (_) => _deleteWithUndo(context),
       background: Container(
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 20),
@@ -1094,9 +1099,11 @@ class _SessionTileState extends State<_SessionTile> {
         '$runningDescendantCount running descendant${runningDescendantCount == 1 ? '' : 's'} will be stopped',
     ];
     final impact = details.isEmpty
-        ? 'This chat cannot be recovered.'
+        ? 'You can undo for a few seconds; after that this chat cannot be '
+              'recovered.'
         : 'This will permanently delete ${details.join(', ')}. '
-              'This chat cannot be recovered.';
+              'You can undo for a few seconds; after that this chat cannot '
+              'be recovered.';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -1118,9 +1125,41 @@ class _SessionTileState extends State<_SessionTile> {
   }
 
   Future<void> _confirmDelete(BuildContext context) async {
-    if (await _askDeleteConfirmed(context)) {
-      AppState.I.deleteSession(widget.session.id);
+    if (await _askDeleteConfirmed(context) && context.mounted) {
+      _deleteWithUndo(context);
     }
+  }
+
+  /// Optimistic delete: the row disappears at once, a "Chat deleted · Undo"
+  /// snack bar runs for 5 s, and only then is the durable (possibly slow,
+  /// private-sync-backed) deletion awaited. A failure restores the row and
+  /// says so instead of leaving an invisible-but-undeleted chat.
+  void _deleteWithUndo(BuildContext context) {
+    final app = AppState.I;
+    final id = widget.session.id;
+    final messenger = ScaffoldMessenger.of(context);
+    app.hideSessionPending(id);
+    showUndoSnackBar(
+      messenger,
+      message: 'Chat deleted',
+      onUndo: () => app.unhideSession(id),
+      onCommit: () async {
+        try {
+          await app.commitPendingSessionDeletion(id);
+        } catch (e) {
+          Diag.swallow('sidebar.deleteSession', e);
+          if (messenger.mounted) {
+            messenger.showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'The chat could not be deleted and has been restored. Try again.',
+                ),
+              ),
+            );
+          }
+        }
+      },
+    );
   }
 
   void _showActions(BuildContext context) {

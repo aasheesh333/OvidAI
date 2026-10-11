@@ -7,6 +7,7 @@
 // AgentService.debugPauseScheduleTimerForTest) and the real singletons —
 // these are the same seams the legacy schedule_ui_test.dart uses.
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
@@ -14,6 +15,8 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+const _native = MethodChannel('ovid/native');
 
 Future<void> _pumpScreen(WidgetTester tester) async {
   await tester.pumpWidget(
@@ -33,6 +36,11 @@ void main() {
   late AppState app;
 
   setUp(() async {
+    // Native background Stop/Resume calls answer immediately so a Stop's
+    // serialized write never blocks a later Resume.
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_native, (call) async => true);
+    AgentNotificationService.I.resetForTest();
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
     app = AppState.createForTest();
@@ -45,6 +53,8 @@ void main() {
   });
 
   tearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_native, null);
     AgentNotificationService.I.backgroundStopped = false;
     AgentNotificationService.I.backgroundConstraint = null;
     AgentService.I.schedules.stopped = false;
@@ -176,7 +186,11 @@ void main() {
     await _pumpScreen(tester);
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
-    await tester.tap(find.text('Cancel'));
+    await tester.tap(find.text('Cancel task'));
+    await _settle(tester);
+    // Cancelling is irreversible, so it confirms first.
+    expect(find.text('Cancel this task?'), findsOneWidget);
+    await tester.tap(find.text('Cancel task'));
     await _settle(tester);
     expect(s.schedules.single['status'], 'cancelled');
     expect(find.text('cancelled'), findsOneWidget);
@@ -259,9 +273,101 @@ void main() {
     expect(AgentNotificationService.I.backgroundStopped, isFalse);
     await tester.tap(find.text('Stop background execution'));
     await _settle(tester);
+    expect(find.text('Pause background execution?'), findsOneWidget);
+    await tester.tap(find.text('Pause schedules'));
+    await _settle(tester);
     expect(AgentNotificationService.I.backgroundStopped, isTrue);
     // The strip now shows the paused state and the Resume affordance.
     expect(find.text('Background execution paused'), findsOneWidget);
     expect(find.text('Resume background execution'), findsOneWidget);
+  });
+
+  testWidgets('Stop background confirms first; Cancel keeps the active run',
+      (tester) async {
+    final run = AgentService.I.runBucketForTest('s');
+    run.activeRunId = 'fake-run';
+    addTearDown(() {
+      run.activeRunId = null;
+      run.cancelRequested = false;
+    });
+    await _pumpScreen(tester);
+    await tester.tap(find.text('Stop background execution'));
+    await _settle(tester);
+    expect(find.text('Pause background execution?'), findsOneWidget);
+    expect(find.textContaining('across all chats'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await _settle(tester);
+    expect(AgentNotificationService.I.backgroundStopped, isFalse);
+    expect(AgentService.I.busyFor('s'), isTrue);
+    expect(run.cancelRequested, isFalse);
+
+    // Confirming pauses schedules only: the user's reply keeps running.
+    await tester.tap(find.text('Stop background execution'));
+    await _settle(tester);
+    await tester.tap(find.text('Pause schedules'));
+    await _settle(tester);
+    expect(AgentNotificationService.I.backgroundStopped, isTrue);
+    expect(run.cancelRequested, isFalse);
+  });
+
+  testWidgets('Stop then Resume re-pends the tasks Stop paused',
+      (tester) async {
+    final s = app.sessionById('s')!;
+    final future = DateTime.now().toUtc().add(const Duration(hours: 2));
+    s.schedules.add({
+      'id': 'a',
+      'prompt': 'Daily digest',
+      'status': 'pending',
+      'fireAt': future.toIso8601String(),
+    });
+    s.schedules.add({
+      'id': 'b',
+      'prompt': 'Paused by me',
+      'status': 'paused',
+      'error': 'Paused by user',
+      'fireAt': future.toIso8601String(),
+    });
+    await _pumpScreen(tester);
+    await tester.tap(find.text('Stop background execution'));
+    await _settle(tester);
+    await tester.tap(find.text('Pause schedules'));
+    await _settle(tester);
+    expect(s.schedules.first['status'], 'paused');
+
+    await tester.tap(find.text('Resume background execution'));
+    // Resume awaits platform-channel and preferences I/O.
+    for (var i = 0; i < 5; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+    }
+    await _settle(tester);
+    expect(AgentNotificationService.I.backgroundStopped, isFalse);
+    expect(s.schedules.first['status'], 'pending');
+    expect(s.schedules.first.containsKey('error'), isFalse);
+    // A task the user paused individually stays paused.
+    expect(s.schedules.last['status'], 'paused');
+    expect(find.text('Resumed 1 paused task.'), findsOneWidget);
+  });
+
+  testWidgets('Cancel task asks first; Keep task leaves it pending',
+      (tester) async {
+    final s = app.sessionById('s')!;
+    s.schedules.add({
+      'id': 'a',
+      'prompt': 'Keep me',
+      'status': 'pending',
+      'fireAt': '2026-12-01T12:00:00Z',
+    });
+    await _pumpScreen(tester);
+    await tester.tap(find.byIcon(Icons.more_horiz));
+    await _settle(tester);
+    await tester.tap(find.text('Cancel task'));
+    await _settle(tester);
+    expect(find.text('Cancel this task?'), findsOneWidget);
+    await tester.tap(find.text('Keep task'));
+    await _settle(tester);
+    expect(s.schedules.single['status'], 'pending');
   });
 }

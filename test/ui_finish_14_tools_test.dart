@@ -113,8 +113,11 @@ void main() {
       await tester.enterText(editor, 'Unsaved conflicting draft');
       await tester.tap(find.text('Save'));
       await _brief(tester);
-      expect(find.textContaining('Reload before saving'), findsOneWidget);
+      expect(find.text('Memory changed while you were editing'), findsOneWidget);
       expect(memory.read(null, _longName).content, endsWith('Newer external content'));
+      // Dismissing the conflict dialog keeps the draft open.
+      await tester.tapAt(const Offset(4, 4));
+      await _brief(tester);
       await tester.tap(find.text('Reload'));
       await _brief(tester);
       await tester.tap(find.text('Keep editing'));

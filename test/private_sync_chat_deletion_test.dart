@@ -168,7 +168,7 @@ void main() {
 
   for (final action in [
     'Regenerate',
-    'Revert',
+    'Delete message',
     'Edit & resend',
     'Earlier edit',
   ]) {
@@ -176,7 +176,7 @@ void main() {
       '$action waits for disk and displays failure without losing draft',
       (tester) async {
         await tester.runAsync(setup);
-        if (action == 'Revert' || action == 'Edit & resend') {
+        if (action == 'Delete message' || action == 'Edit & resend') {
           session.messages.removeLast();
         }
         tester.view.physicalSize = const Size(700, 1200);
@@ -189,7 +189,7 @@ void main() {
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 350));
         final runEpoch = AgentService.I.runBucketForTest(session.id).runEpoch;
-        if (action == 'Regenerate' || action == 'Revert') {
+        if (action == 'Regenerate' || action == 'Delete message') {
           await tester.enterText(composer, 'Unsubmitted draft');
         }
         await tester.tap(
@@ -204,7 +204,12 @@ void main() {
             ),
             'Edited draft',
           );
-          await tester.tap(find.widgetWithText(TextButton, 'Edit in composer'));
+          // One later message is removed; the dialog says so.
+          expect(
+            find.textContaining('This removes the 1 message'),
+            findsOneWidget,
+          );
+          await tester.tap(find.widgetWithText(TextButton, 'Edit & remove 1'));
         }
         await tester.pump();
         expect(owner.entered.isCompleted, true);
@@ -212,7 +217,7 @@ void main() {
         expect(AgentService.I.runBucketForTest(session.id).runEpoch, runEpoch);
         expect(
           session.messages.last.content,
-          action == 'Revert' || action == 'Edit & resend'
+          action == 'Delete message' || action == 'Edit & resend'
               ? 'Original question'
               : 'Original answer',
         );

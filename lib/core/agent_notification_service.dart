@@ -97,7 +97,10 @@ class AgentNotificationService {
     return next;
   }
 
-  Future<void> stopBackground() async {
+  /// Pauses scheduled background work. [cancelRuns] (the notification's
+  /// panic stop) also cancels every in-flight reply in every chat; the
+  /// Schedule screen passes false so only schedules are affected.
+  Future<void> stopBackground({bool cancelRuns = true}) async {
     final generation = ++_backgroundGeneration;
     backgroundStopped = true;
     _localStopPending = true;
@@ -106,7 +109,7 @@ class AgentNotificationService {
     _active = false;
     // Pause synchronously before awaiting native or session storage.
     final paused = AgentService.I.stopScheduledBackground();
-    AgentService.I.cancelAllRuns();
+    if (cancelRuns) AgentService.I.cancelAllRuns();
     final persisted = _persistBackgroundStop();
     try {
       await Future.wait([paused, persisted]);

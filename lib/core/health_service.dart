@@ -242,6 +242,11 @@ class HealthService extends ChangeNotifier {
   HealthReport? lastReport;
   bool checking = false;
   bool repairing = false;
+
+  /// Progress of the current (or last) repair, kept here rather than in the
+  /// screen so a repair keeps running — and its log can be re-attached —
+  /// after the user leaves Device health.
+  final List<String> repairLog = [];
   Future<HealthReport>? _checks;
   HealthRepairCancellation? _repairCancellation;
   bool get cancellationRequested => _repairCancellation?.isCancelled ?? false;
@@ -413,6 +418,7 @@ class HealthService extends ChangeNotifier {
     final cancellation = HealthRepairCancellation();
     _repairCancellation = cancellation;
     repairing = true;
+    repairLog.clear();
     notifyListeners();
     try {
       final report = await runChecks();
@@ -426,7 +432,11 @@ class HealthService extends ChangeNotifier {
         throw StateError('Select a failed, repairable runtime.');
       }
       await worker(Set.unmodifiable(selected), cancellation, (line) {
-        if (!cancellation.isCancelled) onLine(line);
+        if (cancellation.isCancelled) return;
+        repairLog.add(line);
+        if (repairLog.length > 100) repairLog.removeAt(0);
+        onLine(line);
+        notifyListeners();
       });
       cancellation.throwIfCancelled();
       // A UI refresh begun during installation can still contain pre-install

@@ -45,6 +45,12 @@ void main() {
     // The confirmation states what is and is not removed.
     expect(find.textContaining('API keys and tokens'), findsOneWidget);
     expect(find.textContaining('Not deleted:'), findsOneWidget);
+    // Delete everything stays disabled until DELETE is typed (F-066).
+    await tester.enterText(
+      find.byKey(const ValueKey('aether-confirm-type')),
+      'DELETE',
+    );
+    await tester.pump();
     await tester.tap(find.text('Delete everything'));
     await tester.pumpAndSettle();
     expect(find.text('Root gate'), findsOneWidget);

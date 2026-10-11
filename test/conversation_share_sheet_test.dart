@@ -123,6 +123,9 @@ void main() {
       await scrollAndTap(tester, 'Create link');
       await scrollAndTap(tester, 'Refresh');
       await scrollAndTap(tester, 'Revoke');
+      expect(find.text('Revoke this link?'), findsOneWidget);
+      await tester.tap(find.text('Revoke link'));
+      await tester.pumpAndSettle();
       await scrollAndTap(tester, 'Create link');
       expect(find.text('Copy link'), findsOneWidget);
       expect(find.textContaining('already used'), findsNothing);
@@ -188,6 +191,9 @@ void main() {
     await scrollAndTap(tester, 'Copy link');
     expect(copied, shareUrl);
     await scrollAndTap(tester, 'Revoke');
+    expect(find.text('Revoke this link?'), findsOneWidget);
+    await tester.tap(find.text('Revoke link'));
+    await tester.pumpAndSettle();
     expect(revoked, true);
     expect(find.text('Copy link'), findsNothing);
   });
@@ -310,6 +316,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Copy link'), findsOneWidget);
       await scrollAndTap(tester, 'Revoke');
+      expect(find.text('Revoke this link?'), findsOneWidget);
+      await tester.tap(find.text('Revoke link'));
+      await tester.pumpAndSettle();
       expect(find.text('Revoke'), findsOneWidget);
       expect(find.textContaining('unconfirmed'), findsOneWidget);
     },

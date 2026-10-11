@@ -3,6 +3,7 @@ import '../core/collaboration/production.dart';
 import '../core/collaboration/models.dart';
 import '../core/collaboration/reducer.dart';
 import '../core/state.dart';
+import 'widgets/aether_confirm.dart';
 
 class CollaborationScreen extends StatefulWidget {
   const CollaborationScreen({super.key, this.controller});
@@ -44,6 +45,49 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Runs [action] only after the user confirms its stated consequence.
+  Future<void> _confirmThenRun({
+    required String title,
+    required String message,
+    required String confirmLabel,
+    required Future<void> Function() action,
+  }) async {
+    final ok = await showAetherConfirmDialog(
+      context,
+      title: title,
+      message: message,
+      confirmLabel: confirmLabel,
+    );
+    if (ok && mounted) await _run(action);
+  }
+
+  Future<void> _closeOrLeave(CollaborationProduction controller) {
+    if (!controller.isOwner) {
+      return _confirmThenRun(
+        title: 'Leave collaboration?',
+        message:
+            'You will stop receiving this session\'s messages and need a new '
+            'invitation to rejoin.',
+        confirmLabel: 'Leave',
+        action: controller.leaveOrClose,
+      );
+    }
+    final others = (controller.state?.members.values ?? const <Member>[])
+        .where((m) => m.role != MemberRole.owner && m.isActive)
+        .length;
+    return _confirmThenRun(
+      title: 'Close collaboration for everyone?',
+      message: others == 0
+          ? 'The session ends for everyone and its token stops working. This '
+                'cannot be undone.'
+          : 'All $others member${others == 1 ? '' : 's'} will lose access. '
+                'The session ends for everyone and its token stops working. '
+                'This cannot be undone.',
+      confirmLabel: 'Close collaboration',
+      action: controller.leaveOrClose,
+    );
   }
 
   @override
@@ -122,7 +166,7 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
             const Text('Session token — share only with intended members'),
             SelectableText(controller!.sessionToken!),
             TextButton(
-              onPressed: available ? () => _run(controller.leaveOrClose) : null,
+              onPressed: available ? () => _closeOrLeave(controller) : null,
               child: Text(
                 controller.isOwner
                     ? 'Close collaboration'
@@ -130,7 +174,17 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
               ),
             ),
             TextButton(
-              onPressed: available ? () => _run(controller.disconnect) : null,
+              onPressed: available
+                  ? () => _confirmThenRun(
+                      title: 'Disconnect this device?',
+                      message:
+                          'This device forgets the session and its token. The '
+                          'collaboration continues for other members; you need '
+                          'the session token and a new invitation to reconnect.',
+                      confirmLabel: 'Disconnect',
+                      action: controller.disconnect,
+                    )
+                  : null,
               child: const Text('Disconnect on this device'),
             ),
             if (controller.stale)
@@ -157,8 +211,14 @@ class _CollaborationScreenState extends State<CollaborationScreen> {
                         member.isActive
                     ? TextButton(
                         onPressed: available
-                            ? () => _run(
-                                () => controller.revokeMember(
+                            ? () => _confirmThenRun(
+                                title: 'Revoke ${member.participantId}?',
+                                message:
+                                    'They lose access to this collaboration '
+                                    'immediately and need a new invitation to '
+                                    'rejoin.',
+                                confirmLabel: 'Revoke access',
+                                action: () => controller.revokeMember(
                                   member.participantId,
                                 ),
                               )

@@ -102,7 +102,7 @@ void main() {
     expect(voice.isListening, isFalse);
   });
 
-  testWidgets('composer mic final transcript auto-sends', (tester) async {
+  testWidgets('composer mic final transcript fills the composer without sending', (tester) async {
     final provider = app.providerById('ollama-local')!;
     provider
       ..baseUrl = 'http://127.0.0.1:1/v1'
@@ -141,12 +141,21 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     await tester.pump();
 
+    // PR-3b F-054: dictation fills the composer for review; it never sends
+    // on its own (recognition errors must not reach the model unseen).
     expect(
       s.messages.any(
         (m) => m.role == 'user' && m.content.contains('hello world'),
       ),
-      isTrue,
-      reason: 'final mic transcript must send, not just fill the composer',
+      isFalse,
+      reason: 'final mic transcript fills the composer, it does not send',
+    );
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('chat-composer')))
+          .controller!
+          .text,
+      'hello world',
     );
   });
 

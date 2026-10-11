@@ -156,6 +156,9 @@ void main() {
       );
       await tester.tap(find.text('Delete all data'));
       await tester.pumpAndSettle();
+      // Type-to-confirm keeps the destructive button disabled until DELETE.
+      await tester.enterText(find.byKey(const ValueKey('aether-confirm-type')), 'DELETE');
+      await tester.pump();
       await tester.tap(find.text('Delete everything'));
       await tester.pumpAndSettle();
       expect(find.textContaining('Incomplete reset'), findsOneWidget);

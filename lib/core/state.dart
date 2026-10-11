@@ -26,6 +26,7 @@ import 'image_studio.dart';
 import 'mcp_config_parse.dart';
 import 'mcp_service.dart';
 import 'model_limits.dart';
+import 'composer_drafts.dart';
 import 'memory_store.dart';
 import 'usage_attempt.dart';
 import 'usage_attempt_store.dart';
@@ -2108,6 +2109,8 @@ class AppState extends ChangeNotifier {
     StartupCoordinator.I.statusSink = null;
     PluginRuntimeStatusStore.I.resetForTest();
     // ignore: invalid_use_of_visible_for_testing_member
+    ComposerDraftStore.I.resetForTest();
+    // ignore: invalid_use_of_visible_for_testing_member
     SessionLifecycleService.I.resetForTest();
     // ignore: invalid_use_of_visible_for_testing_member
     AgentService.resetTitleStateForTest();
@@ -2960,6 +2963,10 @@ class AppState extends ChangeNotifier {
   Object? _usagePreparationToken;
   Object? _usageStorageError;
   bool _settingsBusy = false;
+
+  /// Test seam: simulates a settings operation holding the session stores.
+  @visibleForTesting
+  set settingsBusyForTest(bool value) => _settingsBusy = value;
   Future<void>? _settingsOperation;
   final List<_SessionCleanup> _pendingAccountCleanup = [];
   final Map<String, _AccountHandoff> _retainedHandoffs = {};
@@ -5425,6 +5432,7 @@ class AppState extends ChangeNotifier {
       } catch (e) {
         Diag.swallow('history.deleteAll', e);
       }
+      await ComposerDraftStore.I.clearAll();
       await runtimeStatusStore.clear();
       _clearDeferredSessions();
       for (final s in List.of(sessions)) {
@@ -6820,10 +6828,14 @@ class AppState extends ChangeNotifier {
     }
     sessions.removeWhere((x) => doomed.any((d) => d.id == x.id));
     if (activeSessionId == null || doomed.any((d) => d.id == activeSessionId)) {
-      activeSessionId = rootSessions.isEmpty ? null : rootSessions.first.id;
+      activeSessionId = rootSessions
+          .where((x) => !_pendingDeletionIds.contains(x.id))
+          .firstOrNull
+          ?.id;
     }
     for (final dead in doomed) {
       _scheduleSessionDeletion(dead.id, dead.sandboxId);
+      ComposerDraftStore.I.remove(dead.id);
     }
     notifyListeners();
     persistSessions();
@@ -6840,7 +6852,10 @@ class AppState extends ChangeNotifier {
   /// Remove all messages from [index] onward in the named session
   /// (the session revert action "Revert"/"Edit & resend" semantics). Clearing from index 0 also
   /// resets the compacted summary so the agent truly starts fresh.
-  Future<void> deleteMessagesFrom(String sessionId, int index) async {
+  ///
+  /// Returns the removed messages so callers can offer Undo through
+  /// [restoreMessagesAt].
+  Future<List<Message>> deleteMessagesFrom(String sessionId, int index) async {
     if (_settingsBusy) throw StateError('Settings operation in progress.');
     final s = sessions.where((x) => x.id == sessionId).firstOrNull;
     if (s == null) throw StateError('The conversation is no longer available.');
@@ -6867,6 +6882,112 @@ class AppState extends ChangeNotifier {
     _markSessionDirty(s.id);
     notifyListeners();
     persistSessions();
+    return removed;
+  }
+
+  /// Undo for [deleteMessagesFrom]: re-appends [removed] at [index] when the
+  /// conversation has not changed since (nothing was appended after the
+  /// truncation). Restored rows get fresh private-sync identities because
+  /// the originals were already tombstoned. Returns false when the undo is
+  /// no longer safe.
+  bool restoreMessagesAt(
+    String sessionId,
+    int index,
+    List<Message> removed, {
+    String? compactedSummary,
+    int compactedAtCount = 0,
+  }) {
+    if (_settingsBusy || removed.isEmpty) return false;
+    final s = sessionById(sessionId);
+    if (s == null || s.messages.length != index) return false;
+    s.messages.addAll([
+      for (final m in removed)
+        Message.fromJson({...m.toJson(), 'privateSyncId': productionId()}),
+    ]);
+    if (index == 0 && compactedSummary != null) {
+      s.compactedSummary = compactedSummary;
+      s.compactedAtCount = compactedAtCount;
+    }
+    _markSessionDirty(s.id);
+    notifyListeners();
+    persistSessions();
+    return true;
+  }
+
+  /// Removes [sessionId]'s goal (UI "Clear goal"). Returns the cleared goal
+  /// so the caller can offer Undo via [restoreGoal].
+  Map<String, dynamic>? clearGoal(String sessionId) {
+    final s = sessionById(sessionId);
+    final goal = s?.goal;
+    if (s == null || goal == null) return null;
+    s.goal = null;
+    _markSessionDirty(s.id);
+    notifyListeners();
+    persistSessions();
+    return goal;
+  }
+
+  /// Undo for [clearGoal]; never overwrites a goal created meanwhile.
+  bool restoreGoal(String sessionId, Map<String, dynamic> goal) {
+    final s = sessionById(sessionId);
+    if (s == null || s.goal != null) return false;
+    s.goal = goal;
+    _markSessionDirty(s.id);
+    notifyListeners();
+    persistSessions();
+    return true;
+  }
+
+  // ── Soft delete (sidebar Undo window) ──
+  final Set<String> _pendingDeletionIds = {};
+  final Map<String, bool> _pendingDeletionWasActive = {};
+
+  /// True while [sessionId] is hidden awaiting its durable deletion.
+  bool isSessionDeletionPending(String sessionId) =>
+      _pendingDeletionIds.contains(sessionId);
+
+  /// Hides [sessionId] from the chat list immediately (optimistic delete);
+  /// the durable [deleteSession] runs after the Undo window. When it was the
+  /// active chat another visible chat becomes active.
+  void hideSessionPending(String sessionId) {
+    if (!_pendingDeletionIds.add(sessionId)) return;
+    final wasActive = activeSessionId == sessionId;
+    _pendingDeletionWasActive[sessionId] = wasActive;
+    if (wasActive) {
+      activeSessionId = rootSessions
+          .where((s) => !_pendingDeletionIds.contains(s.id))
+          .firstOrNull
+          ?.id;
+      final next = activeSessionId;
+      if (next != null) onSessionSwitched?.call(next);
+    }
+    notifyListeners();
+  }
+
+  /// Reverses [hideSessionPending] (Undo, or a failed durable delete).
+  void unhideSession(String sessionId) {
+    if (!_pendingDeletionIds.remove(sessionId)) return;
+    final wasActive = _pendingDeletionWasActive.remove(sessionId) ?? false;
+    if (wasActive && sessionById(sessionId) != null) {
+      activeSessionId = sessionId;
+      onSessionSwitched?.call(sessionId);
+    }
+    notifyListeners();
+  }
+
+  /// Durably deletes a session hidden by [hideSessionPending]. On failure the
+  /// row is restored and the error rethrown for the caller to report.
+  Future<void> commitPendingSessionDeletion(String sessionId) async {
+    if (!_pendingDeletionIds.contains(sessionId)) return;
+    try {
+      await deleteSession(sessionId);
+    } catch (_) {
+      unhideSession(sessionId);
+      rethrow;
+    }
+    _pendingDeletionIds.remove(sessionId);
+    _pendingDeletionWasActive.remove(sessionId);
+    notifyListeners();
   }
 
   /// Replace the content of an existing message (the message editor "Edit" of a user turn).

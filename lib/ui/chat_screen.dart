@@ -39,9 +39,11 @@ import '../core/skills.dart';
 import '../core/startup_coordinator.dart';
 import 'plugins_screen.dart';
 import 'startup_progress_panel.dart';
+import '../core/composer_drafts.dart';
 import '../core/diag.dart';
 import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
@@ -870,6 +872,9 @@ class _ChatScreenState extends State<ChatScreen>
     final sid = _boundSessionId;
     if (sid != null && !_restoringDraft) {
       _draftVersions[sid] = (_draftVersions[sid] ?? 0) + 1;
+      // Mirror to durable storage (debounced) so a long prompt survives
+      // process death, a phone call or the OS reclaiming the app.
+      ComposerDraftStore.I.put(sid, _input.text);
     }
   }
 
@@ -882,6 +887,7 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
     _drafts.remove(sid);
+    ComposerDraftStore.I.remove(sid);
   }
 
   // ── Lazy message paging (ChatGPT/Claude style) ──
@@ -941,8 +947,10 @@ class _ChatScreenState extends State<ChatScreen>
     } else if (_boundSessionId != null) {
       _drafts.remove(_boundSessionId);
     }
-    // Restore incoming session's draft.
-    final draft = _drafts[sessionId] ?? '';
+    // Restore incoming session's draft (memory first, then the durable copy
+    // written before the process was last killed).
+    final draft =
+        _drafts[sessionId] ?? ComposerDraftStore.I.draftFor(sessionId) ?? '';
     _restoringDraft = true;
     if (_input.text != draft) {
       _input.value = TextEditingValue(
@@ -984,6 +992,9 @@ class _ChatScreenState extends State<ChatScreen>
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => _showModelFallbackNotice(),
     );
+    unawaited(
+      ComposerDraftStore.I.load().then((_) => _restorePersistedDraft()),
+    );
   }
 
   ValueNotifier<String?>? _fallbackNotice;
@@ -999,11 +1010,28 @@ class _ChatScreenState extends State<ChatScreen>
     messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Applies the durable draft once it has loaded, unless the user already
+  /// started typing or the session's draft is held in memory.
+  void _restorePersistedDraft() {
+    final sid = _boundSessionId;
+    if (!mounted || sid == null || _drafts.containsKey(sid)) return;
+    if (_input.text.isNotEmpty) return;
+    final draft = ComposerDraftStore.I.draftFor(sid);
+    if (draft == null || draft.isEmpty) return;
+    _restoringDraft = true;
+    _input.value = TextEditingValue(
+      text: draft,
+      selection: TextSelection.collapsed(offset: draft.length),
+    );
+    _restoringDraft = false;
+  }
+
   @override
   void dispose() {
     _fallbackNotice?.removeListener(_showModelFallbackNotice);
     // One fewer approval UI able to answer.
     AgentService.markApprovalUiDisposed();
+    unawaited(ComposerDraftStore.I.flush());
     _scroll.dispose();
     _input.dispose();
     _inputFocus.dispose();
@@ -4803,14 +4831,19 @@ class _MessageView extends StatelessWidget {
         !AgentService.I.busyFor(session.id);
     if (canEdit && isUser && isLast) {
       add(Icons.edit_outlined, 'Edit & resend', () async {
-        if (!_stageEdit(context, m.content)) return;
-        if (!await _deleteHistory(context)) return;
-        onAction();
+        await _editAndTruncate(context, m.content);
       });
-      add(Icons.replay_outlined, 'Revert', () async {
+      // Deletes this message only (it is the last row). It does not revert
+      // any file changes, so it is not called "Revert"; Undo restores it.
+      add(Icons.delete_outline, 'Delete message', () async {
         if (!_canChangeHistory) return;
-        if (!await _deleteHistory(context)) return;
+        final undo = _undoSnapshot(msgIndex);
+        final removed = await _deleteHistoryFrom(context, msgIndex);
+        if (removed == null) return;
         onAction();
+        if (context.mounted) {
+          _offerUndo(context, undo, removed, message: 'Message deleted');
+        }
       });
     }
     // Earlier user messages: edit & resend (truncates conversation).
@@ -4896,29 +4929,51 @@ class _MessageView extends StatelessWidget {
     if (canEdit && !isUser && isLast && m.kind == MsgKind.text && !m.thinking) {
       add(Icons.refresh, 'Regenerate', () async {
         if (!_canChangeHistory) return;
+        void explain(String text) {
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(text)));
+        }
+
         // Find the last user message content.
         final msgs = session.messages as List<Message>;
-        Message? lastUser;
+        var lastUserIdx = -1;
         for (var i = msgs.length - 1; i >= 0; i--) {
           if (msgs[i].role == 'user') {
-            lastUser = msgs[i];
+            lastUserIdx = i;
             break;
           }
         }
-        if (lastUser == null || lastUser.content.isEmpty) return;
+        final lastUser = lastUserIdx < 0 ? null : msgs[lastUserIdx];
+        if (lastUser == null || lastUser.content.isEmpty) {
+          explain('There is no message to regenerate a reply for.');
+          return;
+        }
         final provider = AppState.I.providerForSession(session);
-        if (provider == null ||
-            !provider.isConfigured ||
-            !provider.models.contains(session.model.split('·').first.trim())) {
+        if (provider == null || !provider.isConfigured) {
+          explain('Set up a provider for this chat before regenerating.');
+          return;
+        }
+        if (!provider.models.contains(session.model.split('·').first.trim())) {
+          explain(
+            'The selected model is no longer available. Pick another model to regenerate.',
+          );
           return;
         }
         if (lastUser.attachments.any(
           (a) => a.path == null || a.path!.isEmpty,
         )) {
+          explain(
+            'An attachment of the original message is no longer available, so the reply cannot be regenerated.',
+          );
           return;
         }
-        // Delete from the current assistant message onward and resend.
-        if (!await _deleteHistory(context)) return;
+        // Delete EVERY row after the last user message (tool calls, reasoning
+        // and the answer) so the first attempt is never re-sent to the model.
+        if (await _deleteHistoryFrom(context, lastUserIdx + 1) == null) {
+          return;
+        }
         onAction();
         AgentService.I.runTask(
           lastUser.content,
@@ -4969,10 +5024,18 @@ class _MessageView extends StatelessWidget {
       msgIndex < session.messages.length &&
       identical(session.messages[msgIndex], m);
 
-  Future<bool> _deleteHistory(BuildContext context) async {
+  /// Truncates the conversation from [index] (inclusive). Returns the removed
+  /// rows, or null when the deletion failed or the conversation changed
+  /// while it was written (no continuation may run then).
+  Future<List<Message>?> _deleteHistoryFrom(
+    BuildContext context,
+    int index,
+  ) async {
     final app = AppState.I;
+    if (index < 0 || index > session.messages.length) return null;
+    final List<Message> removed;
     try {
-      await app.deleteMessagesFrom(session.id, msgIndex);
+      removed = await app.deleteMessagesFrom(session.id, index);
     } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -4983,15 +5046,104 @@ class _MessageView extends StatelessWidget {
           ),
         );
       }
-      return false;
+      return null;
     }
     // A session switch or a newly started run during the disk write must not
     // launch a continuation against another owner or a stale conversation.
-    return context.mounted &&
+    final current =
+        context.mounted &&
         identical(AppState.I, app) &&
         app.activeSessionId == session.id &&
         identical(app.sessionById(session.id), session) &&
         !AgentService.I.busyFor(session.id);
+    return current ? removed : null;
+  }
+
+  ({int index, String? summary, int summaryAt}) _undoSnapshot(int index) => (
+    index: index,
+    summary: session.compactedSummary,
+    summaryAt: session.compactedAtCount,
+  );
+
+  /// "[message] · Undo" for ~8 s after a history truncation. Undo restores
+  /// the removed rows only while nothing was added after the cut; it also
+  /// takes back an edit staged in the composer by [stagedText].
+  void _offerUndo(
+    BuildContext context,
+    ({int index, String? summary, int summaryAt}) snapshot,
+    List<Message> removed, {
+    required String message,
+    String? stagedText,
+    List<({String name, String path, int size})> stagedFiles = const [],
+  }) {
+    final messenger = ScaffoldMessenger.of(context);
+    final composer = input;
+    final sessionId = session.id;
+    showUndoSnackBar(
+      messenger,
+      message: message,
+      duration: const Duration(seconds: 8),
+      onUndo: () {
+        final restored =
+            !AgentService.I.busyFor(sessionId) &&
+            AppState.I.restoreMessagesAt(
+              sessionId,
+              snapshot.index,
+              removed,
+              compactedSummary: snapshot.summary,
+              compactedAtCount: snapshot.summaryAt,
+            );
+        if (!restored) {
+          if (messenger.mounted) {
+            messenger.showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'The conversation changed, so the deleted messages could not be restored.',
+                ),
+              ),
+            );
+          }
+          return;
+        }
+        if (stagedText != null &&
+            composer != null &&
+            AppState.I.activeSessionId == sessionId &&
+            composer.text == stagedText) {
+          composer.clear();
+          final pending = AgentService.I.pendingAttachments;
+          for (final file in stagedFiles) {
+            pending.remove(file);
+          }
+        }
+      },
+    );
+  }
+
+  /// Stages [text] (and this message's files) in the composer, truncates the
+  /// conversation from this message and offers Undo.
+  Future<void> _editAndTruncate(BuildContext context, String text) async {
+    final staged = [
+      for (final a in m.attachments)
+        if (a.path != null && a.path!.isNotEmpty)
+          (name: a.name, path: a.path!, size: a.size),
+    ];
+    if (!_stageEdit(context, text)) return;
+    final undo = _undoSnapshot(msgIndex);
+    final removed = await _deleteHistoryFrom(context, msgIndex);
+    if (removed == null) return;
+    onAction();
+    if (!context.mounted) return;
+    final later = removed.length - 1;
+    _offerUndo(
+      context,
+      undo,
+      removed,
+      message: later > 0
+          ? 'Moved to composer · $later later message${later == 1 ? '' : 's'} removed'
+          : 'Moved to composer',
+      stagedText: text,
+      stagedFiles: staged,
+    );
   }
 
   bool _stageEdit(BuildContext context, String text) {
@@ -5093,6 +5245,7 @@ class _MessageView extends StatelessWidget {
   void _showEditResendDialog(BuildContext context) {
     final c = TextEditingController(text: m.content);
     final navigator = Navigator.of(context, rootNavigator: true);
+    final later = session.messages.length - msgIndex - 1;
     Future<void> send(String value) async {
       final text = value.trim();
       if (text.isEmpty) {
@@ -5100,9 +5253,7 @@ class _MessageView extends StatelessWidget {
         return;
       }
       navigator.pop();
-      if (!_stageEdit(context, text)) return;
-      if (!await _deleteHistory(context)) return;
-      onAction();
+      await _editAndTruncate(context, text);
     }
 
     final route = DialogRoute<void>(
@@ -5112,22 +5263,39 @@ class _MessageView extends StatelessWidget {
           'Edit & resend',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
         ),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          maxLines: 6,
-          minLines: 1,
-          style: const TextStyle(fontSize: 14),
-          textInputAction: TextInputAction.done,
-          onSubmitted: send,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              maxLines: 6,
+              minLines: 1,
+              style: const TextStyle(fontSize: 14),
+              textInputAction: TextInputAction.done,
+              onSubmitted: send,
+            ),
+            if (later > 0) ...[
+              const SizedBox(height: 12),
+              Text(
+                'This removes the $later message${later == 1 ? '' : 's'} '
+                'after it. You can undo for a few seconds.',
+                key: const ValueKey('edit-resend-removal-count'),
+                style: const TextStyle(fontSize: 12.5, color: Aether.danger),
+              ),
+            ],
+          ],
         ),
         actions: [
           TextButton(onPressed: navigator.pop, child: const Text('Cancel')),
           TextButton(
             onPressed: () => send(c.text),
-            child: const Text(
-              'Edit in composer',
-              style: TextStyle(color: Aether.accent),
+            child: Text(
+              later > 0 ? 'Edit & remove $later' : 'Edit in composer',
+              style: TextStyle(
+                color: later > 0 ? Aether.danger : Aether.accent,
+              ),
             ),
           ),
         ],
@@ -5602,22 +5770,32 @@ class _AttachmentChip extends StatelessWidget {
 }
 
 /// Voice-input mic (press-to-talk): toggles on-device speech recognition,
-/// shows a stop button while listening, and AUTO-SENDS the final
-/// transcript (silence auto-stops, or tap stop). Honest no-op with a hint
-/// when STT is unavailable.
+/// shows a stop button while listening, and INSERTS the final transcript
+/// into the composer (silence auto-stops, or tap stop) for the user to review
+/// and send; dictation never sends on its own. Honest no-op with a hint when
+/// STT is unavailable.
 class _MicButton extends StatefulWidget {
   final TextEditingController controller;
 
-  /// Fired with the full transcribed text when dictation ends, so the
-  /// message sends exactly like a typed send.
-  final void Function(String text) onSend;
-  const _MicButton({required this.controller, required this.onSend});
+  /// False while an approval locks the composer or no chat is selected; an
+  /// in-progress dictation is cancelled so it cannot overwrite the field.
+  final bool enabled;
+  const _MicButton({required this.controller, this.enabled = true});
   @override
   State<_MicButton> createState() => _MicButtonState();
 }
 
 class _MicButtonState extends State<_MicButton> {
   bool _listening = false;
+
+  @override
+  void didUpdateWidget(covariant _MicButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.enabled && _listening) {
+      VoiceInputService.I.cancel();
+      _listening = false;
+    }
+  }
 
   @override
   void dispose() {
@@ -5643,9 +5821,10 @@ class _MicButtonState extends State<_MicButton> {
       );
       return;
     }
+    if (!widget.enabled) return;
     final base = widget.controller.text;
     final started = await voice.start((text, isFinal) {
-      if (!mounted) return;
+      if (!mounted || !widget.enabled) return;
       final t = text.trim();
       if (t.isEmpty) return;
       widget.controller.text = base.isEmpty ? t : '$base $t';
@@ -5654,11 +5833,10 @@ class _MicButtonState extends State<_MicButton> {
       );
       if (isFinal) {
         // Dictation ended (silence or stop button): release the service
-        // flag so the next tap starts fresh, then send like typed text.
+        // flag so the next tap starts fresh. The transcript stays in the
+        // composer for review — recognition errors are never auto-sent.
         unawaited(voice.stop());
-        final full = widget.controller.text.trim();
         if (mounted) setState(() => _listening = false);
-        if (full.isNotEmpty) widget.onSend(full);
       }
     });
     if (mounted) setState(() => _listening = started);
@@ -5673,7 +5851,7 @@ class _MicButtonState extends State<_MicButton> {
         size: 20,
         color: _listening ? Aether.accent : Aether.textMuted,
       ),
-      onPressed: _toggle,
+      onPressed: widget.enabled ? _toggle : null,
     );
   }
 }
@@ -6360,9 +6538,10 @@ class _InputBarState extends State<_InputBar> {
 
   void _imagePromptDialog(BuildContext context) {
     final c = TextEditingController();
-    // Disposed with the dialog: a leaked controller keeps its listeners and the
-    // platform text-input channel alive after the sheet is gone.
-    showDialog<void>(
+    // Disposed once the dialog route is fully gone (after its exit
+    // animation, which still builds the field): a leaked controller keeps its
+    // listeners and the platform text-input channel alive.
+    final route = DialogRoute<void>(
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('Generate an image', style: TextStyle(fontSize: 16)),
@@ -6385,14 +6564,45 @@ class _InputBarState extends State<_InputBar> {
               final prompt = c.text.trim();
               Navigator.pop(d);
               if (prompt.isEmpty) return;
-              controller.text = 'Generate an image: $prompt';
-              onSend();
+              _sendImagePrompt(context, prompt);
             },
             child: const Text('Generate'),
           ),
         ],
       ),
-    ).whenComplete(c.dispose);
+    );
+    Navigator.of(context).push(route);
+    route.completed.whenComplete(c.dispose);
+  }
+
+  /// Sends `Generate an image: …` through the normal send path without
+  /// losing the user's draft: the composer value is saved first and put
+  /// back whether the send was accepted (the image prompt was consumed) or
+  /// refused (the image prompt is still in the field).
+  void _sendImagePrompt(BuildContext context, String prompt) {
+    if (widget.locked || widget.sessionId == null) return;
+    if (widget.editingQueue) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Finish editing the queued message before generating an image.',
+          ),
+        ),
+      );
+      return;
+    }
+    final saved = controller.value;
+    final imageText = 'Generate an image: $prompt';
+    controller.value = TextEditingValue(
+      text: imageText,
+      selection: TextSelection.collapsed(offset: imageText.length),
+    );
+    // Plain text never awaits inside the send path, so the outcome is known
+    // when onSend returns.
+    onSend();
+    if (controller.text.isEmpty || controller.text == imageText) {
+      controller.value = saved;
+    }
   }
 
   Widget _attachOption(
@@ -6649,7 +6859,11 @@ class _InputBarState extends State<_InputBar> {
                     icon: Icons.add_circle_outline,
                     iconOnly: true,
                     iconSize: 40,
-                    onPressed: () => _attachSheet(context),
+                    // Nothing can be attached while an approval locks the
+                    // composer or before a chat exists.
+                    onPressed: widget.locked || widget.sessionId == null
+                        ? null
+                        : () => _attachSheet(context),
                   ),
                   // The middle chips (workspace / plan / mode) scroll
                   // horizontally on narrow phones instead of overflowing the
@@ -6672,7 +6886,7 @@ class _InputBarState extends State<_InputBar> {
                   // Model selector lives in the header AppBar — not duplicated here.
                   _MicButton(
                     controller: controller,
-                    onSend: (_) => widget.onSend(),
+                    enabled: !widget.locked && widget.sessionId != null,
                   ),
                   const SizedBox(width: 4),
                   // ── Stateful primary / stop button (web-IDE InputBar pattern) ──
@@ -6832,8 +7046,9 @@ class _TypingBubble extends StatelessWidget {
 /// is non-empty.
 /// web-IDE GoalBar — the session goal as a strip above the composer dock:
 /// objective, round chip, status; edit / pause / resume / clear actions.
-/// Renders only while a goal exists. Pause/resume flips the goal status
-/// directly; clear marks it complete (the strip then disappears).
+/// Renders only while an unfinished goal exists (a `complete` goal is
+/// hidden). Pause/resume flips the goal status directly; Clear removes the
+/// goal via [AppState.clearGoal] with an Undo snack bar.
 class _GoalBar extends StatelessWidget {
   const _GoalBar();
 
@@ -6852,6 +7067,8 @@ class _GoalBar extends StatelessWidget {
         final g = s?.goal;
         if (s == null || g == null) return const SizedBox.shrink();
         final status = g['status'] as String? ?? 'active';
+        // A finished goal is history, not a live strip.
+        if (status == 'complete') return const SizedBox.shrink();
         final objective = g['objective'] as String? ?? '';
         final round = (g['round'] as num?)?.toInt() ?? 0;
         final color = switch (status) {
@@ -6922,7 +7139,7 @@ class _GoalBar extends StatelessWidget {
                 ),
                 onPressed: () => _editObjective(context, s, objective),
               ),
-              // Clear (marks complete — the bar then hides).
+              // Clear removes the goal; Undo puts it back.
               IconButton(
                 visualDensity: VisualDensity.compact,
                 tooltip: 'Clear goal',
@@ -6931,7 +7148,16 @@ class _GoalBar extends StatelessWidget {
                   size: 16,
                   color: Aether.textFaint,
                 ),
-                onPressed: () => _update(s, 'complete'),
+                onPressed: () {
+                  final sessionId = s.id;
+                  final cleared = AppState.I.clearGoal(sessionId);
+                  if (cleared == null) return;
+                  showUndoSnackBar(
+                    ScaffoldMessenger.of(context),
+                    message: 'Goal cleared',
+                    onUndo: () => AppState.I.restoreGoal(sessionId, cleared),
+                  );
+                },
               ),
             ],
           ),
@@ -7216,29 +7442,36 @@ class _QueueDock extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    GestureDetector(
-                      onTap: () {
-                        for (var i = queue.length - 1; i >= 0; i--) {
-                          if (ids.length == queue.length) {
-                            agent.removeQueuedMessageById(ids[i]);
-                          } else {
+                    // Full 48dp target; clearing is undoable (queued text
+                    // and files come back with their original ids).
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(48, 48),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        foregroundColor: Aether.textMuted,
+                      ),
+                      onPressed: () {
+                        if (sid == null) {
+                          for (var i = queue.length - 1; i >= 0; i--) {
                             agent.removeQueuedMessage(i);
                           }
+                          onEdited();
+                          return;
                         }
+                        final taken = agent.takeQueuedMessages(sid);
                         onEdited();
+                        if (taken.isEmpty) return;
+                        showUndoSnackBar(
+                          ScaffoldMessenger.of(context),
+                          message:
+                              'Cleared ${taken.length} queued message${taken.length == 1 ? '' : 's'}',
+                          duration: const Duration(seconds: 6),
+                          onUndo: () => agent.restoreQueuedMessages(sid, taken),
+                        );
                       },
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 4,
-                          vertical: 6,
-                        ),
-                        child: Text(
-                          'Clear all',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Aether.textFaint,
-                          ),
-                        ),
+                      child: const Text(
+                        'Clear all',
+                        style: TextStyle(fontSize: 12),
                       ),
                     ),
                   ],
@@ -7758,7 +7991,8 @@ class _ApprovalDockState extends State<_ApprovalDock> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          for (final line in lines) Text(line, style: monoStyle),
+                          for (final line in lines)
+                            Text(line, style: monoStyle),
                         ],
                       ),
                     ),
@@ -8492,10 +8726,7 @@ Widget _accessModeSubtitle(AgentMode m, TextStyle base) {
       children: [
         TextSpan(
           text: 'Tools run without asking. ',
-          style: TextStyle(
-            color: Aether.dangerC,
-            fontWeight: FontWeight.w600,
-          ),
+          style: TextStyle(color: Aether.dangerC, fontWeight: FontWeight.w600),
         ),
         TextSpan(text: m.hint),
       ],

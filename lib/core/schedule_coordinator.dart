@@ -103,7 +103,7 @@ class ScheduleCoordinator {
       'zoneOffset': now.toLocal().timeZoneOffset.inMinutes,
       if (daily != null) 'localDate': _calendarDate(due),
       'status': stopped ? 'paused' : 'pending',
-      if (stopped) 'error': 'Background execution stopped by user',
+      if (stopped) 'error': stoppedByUser,
       'maxRetries': retries,
       'attempt': 0,
     };
@@ -343,6 +343,11 @@ class ScheduleCoordinator {
     }
   }
 
+  /// Marker left on tasks paused by [stop] (and on tasks created while
+  /// stopped) so [resumeStopped] re-pends exactly those, never tasks the
+  /// user paused one by one.
+  static const stoppedByUser = 'Background execution stopped by user';
+
   Future<void> stop() async {
     stopped = true;
     for (final e in entries()) {
@@ -350,7 +355,7 @@ class ScheduleCoordinator {
           _activeTasks.contains(e.task)) {
         final running = _activeTasks.contains(e.task);
         e.task['status'] = 'paused';
-        e.task['error'] = 'Background execution stopped by user';
+        e.task['error'] = stoppedByUser;
         if (running) cancel(e.sessionId);
       }
     }
@@ -363,6 +368,46 @@ class ScheduleCoordinator {
     e.task['error'] = pause ? 'Paused by user' : 'Cancelled by user';
     if (running) cancel(e.sessionId);
     await _save();
+  }
+
+  /// Clears [stopped] and re-pends every task that [stop] paused, moving
+  /// missed recurring occurrences to their next slot. One-off tasks keep
+  /// their due time (a missed one runs on the next tick). Returns how many
+  /// tasks were resumed.
+  Future<int> resumeStopped() async {
+    stopped = false;
+    final now = clock();
+    var resumed = 0;
+    for (final e in entries()) {
+      final t = e.task;
+      if (t['status'] != 'paused' || t['error'] != stoppedByUser) continue;
+      if (_activeTasks.contains(t) || _activeSessions.contains(e.sessionId)) {
+        continue;
+      }
+      t['status'] = 'pending';
+      t['attempt'] = 0;
+      t.remove('error');
+      t.remove('occurrenceAt');
+      t.remove('runId');
+      final due = DateTime.tryParse('${t['fireAt'] ?? ''}');
+      if (due != null && !due.isAfter(now)) {
+        if (t['dailyAt'] is String) {
+          final next = nextDaily(t['dailyAt'] as String, now);
+          t['fireAt'] = next.toUtc().toIso8601String();
+          t['localDate'] = _calendarDate(next);
+        } else if (t['every'] is num && (t['every'] as num) > 0) {
+          final interval = (t['every'] as num).toInt();
+          final steps = now.difference(due).inSeconds ~/ interval + 1;
+          t['fireAt'] = due
+              .add(Duration(seconds: interval * steps))
+              .toUtc()
+              .toIso8601String();
+        }
+      }
+      resumed++;
+    }
+    if (resumed > 0) await _save();
+    return resumed;
   }
 
   Future<void> resumeTask(ScheduleEntry e) async {

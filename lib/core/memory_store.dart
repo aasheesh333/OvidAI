@@ -222,6 +222,28 @@ class MemoryStore {
     return hits;
   }
 
+  /// Removes one memory file from a scope. `MEMORY.md` is the fixed
+  /// entrypoint, so "deleting" it truncates it to empty instead.
+  void delete(String? owner, String name) {
+    final dir = _scope(owner);
+    final file = _file(dir, name);
+    if (name == 'MEMORY.md') {
+      if (!file.existsSync()) return;
+      save(owner, name, '', mode: 'replace', revision: read(owner, name).revision);
+      return;
+    }
+    if (!file.existsSync()) {
+      throw StateError('Memory file not found: $name');
+    }
+    file.deleteSync();
+  }
+
+  /// Deletes every memory file of one scope (global or one chat).
+  void clearScope(String? owner) {
+    final dir = _scope(owner);
+    dir.deleteSync(recursive: true);
+  }
+
   void deleteSession(String owner) {
     final dir = _scope(owner);
     dir.deleteSync(recursive: true);

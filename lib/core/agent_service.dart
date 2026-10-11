@@ -946,6 +946,15 @@ class _SessionStudio {
   final Map<String, int> syncedMtime = {};
 }
 
+/// A queued message removed by [AgentService.takeQueuedMessages].
+typedef QueuedMessageSnapshot = ({
+  int id,
+  String text,
+  bool userReferences,
+  bool nextDispatch,
+  List<({String name, String path, int size})> attachments,
+});
+
 /// ═════════════════════════════ OpenAI-compatible LLM bridge ═══════════
 /// SSE streaming + tool-calling agent loop — web-IDE harness style.
 ///
@@ -2691,6 +2700,65 @@ class AgentService extends ChangeNotifier {
     if (sid != null && sid.isNotEmpty) {
       stopRequested(sessionId: sid);
     }
+  }
+
+  /// Removes every queued message of [sessionId] and returns them (stable
+  /// ids, flags and staged files) so the queue dock can offer Undo through
+  /// [restoreQueuedMessages].
+  List<QueuedMessageSnapshot> takeQueuedMessages(String sessionId) {
+    final run = _runs[sessionId];
+    if (run == null || run.queue.isEmpty) return const [];
+    _syncQueueIds(run);
+    final key = run.runKey ?? sessionId;
+    final taken = [
+      for (var i = 0; i < run.queue.length; i++)
+        (
+          id: run.queueIds[i],
+          text: run.queue[i],
+          userReferences: run.userReferenceQueueIds.contains(run.queueIds[i]),
+          nextDispatch: run.nextDispatchQueueIds.contains(run.queueIds[i]),
+          attachments: List.of(
+            _queuedAttachments[(key, run.queueIds[i])] ??
+                const <({String name, String path, int size})>[],
+          ),
+        ),
+    ];
+    for (var i = run.queue.length - 1; i >= 0; i--) {
+      _queueRemoveAt(run, i);
+    }
+    notifyListeners();
+    return taken;
+  }
+
+  /// Undo for [takeQueuedMessages]: puts [items] back at the FRONT of
+  /// [sessionId]'s queue (ahead of anything queued since) with their
+  /// original ids and files. Returns how many were restored.
+  int restoreQueuedMessages(
+    String sessionId,
+    List<QueuedMessageSnapshot> items,
+  ) {
+    if (items.isEmpty || !AppState.I.sessionAccountReady) return 0;
+    if (AppState.I.sessionById(sessionId) == null) return 0;
+    final run = _runFor(sessionId);
+    _syncQueueIds(run);
+    final key = run.runKey ?? sessionId;
+    var restored = 0;
+    for (final item in items.reversed) {
+      if (run.queueIds.contains(item.id)) continue;
+      run.queue.insert(0, item.text);
+      run.queueIds.insert(0, item.id);
+      if (item.userReferences) run.userReferenceQueueIds.add(item.id);
+      if (item.nextDispatch) run.nextDispatchQueueIds.add(item.id);
+      _queuedAttachments[(key, item.id)] = List.of(item.attachments);
+      if (run.nextQueueId <= item.id) run.nextQueueId = item.id + 1;
+      restored++;
+    }
+    if (restored > 0) {
+      notifyListeners();
+      // The run may have finished during the Undo window; start the head.
+      _scheduleQueuedContinuation(sessionId);
+    }
+    return restored;
   }
 
   /// Test seam: enqueue without a live run.
@@ -21255,10 +21323,18 @@ ${await _agentsMdBlock()}
     await _syncScheduleAlarm(null);
   }
 
-  Future<void> resumeScheduledBackground() async {
+  /// Resumes background execution and re-pends the tasks Stop paused.
+  /// Returns how many tasks were resumed.
+  Future<int> resumeScheduledBackground() async {
     await AgentNotificationService.I.resumeBackground();
-    schedules.stopped = AgentNotificationService.I.backgroundStopped;
+    var resumed = 0;
+    if (AgentNotificationService.I.backgroundStopped) {
+      schedules.stopped = true;
+    } else {
+      resumed = await schedules.resumeStopped();
+    }
     _schedulesChanged();
+    return resumed;
   }
 
   Future<void> editSchedule(

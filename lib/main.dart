@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'core/state.dart';
 import 'core/agent_service.dart';
+import 'core/composer_drafts.dart';
 import 'core/session_history_store.dart';
 import 'core/theme.dart';
 import 'ui/login_gate.dart';
@@ -151,6 +152,12 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     AppState.I.setAccountFeaturesForeground(state == AppLifecycleState.resumed);
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      // Backgrounding may be followed by process death: write composer
+      // drafts now instead of waiting for the debounce.
+      unawaited(ComposerDraftStore.I.flush());
+    }
     if (state == AppLifecycleState.resumed) {
       unawaited(AgentService.I.wakeSchedules());
     }
@@ -186,6 +193,9 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     return MaterialApp(
       title: 'Ovid',
       navigatorKey: appNavigatorKey,
+      // Enables state restoration (navigator + restorable widgets) after the
+      // OS kills the process in the background.
+      restorationScopeId: 'ovid',
       debugShowCheckedModeBanner: false,
       theme: Aether.theme(),
       home: const LoginGate(child: OvidShell()),

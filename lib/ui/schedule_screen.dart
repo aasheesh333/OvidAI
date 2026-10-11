@@ -5,6 +5,7 @@ import '../core/agent_service.dart';
 import '../core/schedule_coordinator.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
 /// Schedule screen — Aether redesign.
@@ -150,15 +151,52 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               label: Text(backgroundStopped
                   ? 'Resume background execution'
                   : 'Stop background execution'),
-              onPressed: () => _action(
-                context,
-                backgroundStopped
-                    ? AgentService.I.resumeScheduledBackground
-                    : AgentNotificationService.I.stopBackground,
-              ),
+              onPressed: () => backgroundStopped
+                  ? _resumeBackground(context)
+                  : _stopBackground(context),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Schedules-only stop: pauses every scheduled task (in every chat) after
+  /// a confirmation stating that scope. In-flight replies keep running; the
+  /// notification's Stop remains the global panic stop.
+  Future<void> _stopBackground(BuildContext context) async {
+    final active = AgentService.I.schedules
+        .entries()
+        .where((e) => ['pending', 'running'].contains(e.task['status']))
+        .length;
+    final ok = await showAetherConfirmDialog(
+      context,
+      title: 'Pause background execution?',
+      message:
+          'This pauses $active scheduled task${active == 1 ? '' : 's'} '
+          'across all chats, and any scheduled run in progress is stopped. '
+          'Replies you started yourself keep running. Resume brings the '
+          'paused tasks back.',
+      confirmLabel: 'Pause schedules',
+    );
+    if (!ok || !context.mounted) return;
+    await _action(
+      context,
+      () => AgentNotificationService.I.stopBackground(cancelRuns: false),
+    );
+  }
+
+  Future<void> _resumeBackground(BuildContext context) async {
+    var resumed = 0;
+    await _action(context, () async {
+      resumed = await AgentService.I.resumeScheduledBackground();
+    });
+    if (!context.mounted || resumed == 0) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Resumed $resumed paused task${resumed == 1 ? '' : 's'}.',
+        ),
       ),
     );
   }
@@ -524,7 +562,10 @@ class _TaskCardState extends State<_TaskCard> {
       if (status != 'cancelled' && status != 'completed')
         PopupMenuItem<String>(
           value: 'cancel',
-          child: Text('Cancel', style: AetherType.body),
+          child: Text(
+            'Cancel task',
+            style: AetherType.body.copyWith(color: Aether.danger),
+          ),
         ),
     ];
     return PopupMenuButton<String>(
@@ -540,10 +581,31 @@ class _TaskCardState extends State<_TaskCard> {
           case 'resume':
             _runAction(() => agent.schedules.resumeTask(widget.entry));
           case 'cancel':
-            _runAction(() => agent.schedules.cancelTask(widget.entry));
+            _confirmCancel(context, status, agent);
         }
       },
     );
+  }
+
+  /// Cancelling is irreversible (and stops a running task), so it confirms.
+  Future<void> _confirmCancel(
+    BuildContext context,
+    String status,
+    AgentService agent,
+  ) async {
+    final ok = await showAetherConfirmDialog(
+      context,
+      title: 'Cancel this task?',
+      message: status == 'running'
+          ? 'The task is running now and will be stopped. A cancelled task '
+                'never runs again; this cannot be undone.'
+          : 'A cancelled task never runs again; this cannot be undone. '
+                'Use Pause to stop it temporarily.',
+      confirmLabel: 'Cancel task',
+      cancelLabel: 'Keep task',
+    );
+    if (!ok || !mounted) return;
+    await _runAction(() => agent.schedules.cancelTask(widget.entry));
   }
 
   Future<void> _runAction(Future<void> Function() action) async {
