@@ -121,7 +121,7 @@
       "reason": {"type": "String", "example": "This file isn't a valid Ovid transcript archive."}
     }
   },
-  "backupRestoreRolledBack": "Restore failed. {reason} Ovid undid the partial restore.",
+  "backupRestoreRolledBack": "Restore failed. {reason} Any partial changes were undone.",
   "@backupRestoreRolledBack": {
     "description": "Restore failed while saving and the partial write was rolled back.",
     "placeholders": {"reason": {"type": "String", "example": "Please try again."}}

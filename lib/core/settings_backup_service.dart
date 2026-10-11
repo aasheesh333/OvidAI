@@ -15,6 +15,13 @@ typedef SettingsRestorePublisher =
       Map<String, String> newSessionIds,
     );
 
+/// A restore failed after writing began and its rollback could not be
+/// verified, so some restored data may remain. Callers must not tell the user
+/// that nothing changed.
+class RestoreRollbackError extends StateError {
+  RestoreRollbackError(super.message);
+}
+
 class StagedSettingsBackup {
   final Directory directory;
   final List<Map<String, dynamic>> sessions;
@@ -139,7 +146,7 @@ class SettingsBackupService {
         }
       }
       if (rollbackError != null) {
-        throw StateError(
+        throw RestoreRollbackError(
           'Settings restore failed: $error. Rollback failed: $rollbackError',
         );
       }

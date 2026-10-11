@@ -180,7 +180,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String backupRestoreRolledBack(String reason) {
-    return 'Restore failed. $reason Ovid undid the partial restore.';
+    return 'Restore failed. $reason Any partial changes were undone.';
   }
 
   @override

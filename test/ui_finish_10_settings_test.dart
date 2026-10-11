@@ -189,9 +189,52 @@ void main() {
     await tester.runAsync(() async => tester.tap(find.text('Restore as new sessions')));
     await _finishBackup(tester);
     expect(app.sessions.any((s) => s.title == 'Imported transcript'), isFalse);
-    await reveal(tester, find.textContaining('Operation failed'));
-    expect(find.textContaining('Operation failed'), findsOneWidget);
+    await reveal(tester, find.textContaining('Restore failed'));
+    expect(find.textContaining('Restore failed'), findsOneWidget);
+    expect(find.textContaining('Bad state'), findsNothing);
     expect(find.textContaining('Transcripts restored'), findsNothing);
+  });
+
+  testWidgets('failed backup restore never says No data was changed', (tester) async {
+    for (final failure in <Object>[
+      StateError('Session storage write/readback failed.'),
+      RestoreRollbackError('Restore failed. Rollback could not be verified.'),
+    ]) {
+      SettingsActions.restorePublisher = (_, _) async => throw failure;
+      await tester.pumpWidget(host(SettingsBackupScreen(key: UniqueKey())));
+      await reveal(tester, find.text('Restore as new sessions'));
+      await tester.runAsync(() async => tester.tap(find.text('Restore as new sessions')));
+      await _finishBackup(tester);
+      await reveal(tester, find.textContaining('Restore failed'));
+      expect(find.textContaining('No data was changed'), findsNothing);
+      expect(find.textContaining('Bad state'), findsNothing);
+      if (failure is RestoreRollbackError) {
+        expect(find.textContaining('may remain'), findsOneWidget);
+      } else {
+        expect(find.textContaining('Any partial changes were undone'), findsOneWidget);
+      }
+      // Raw text is available only behind the Details disclosure.
+      expect(find.textContaining('readback failed'), findsNothing);
+    }
+  });
+
+  testWidgets('invalid archive is reported before publish as unchanged', (tester) async {
+    // Real file IO must run outside fake async.
+    await tester.runAsync(() => archive.writeAsString('not a zip archive at all'));
+    var published = false;
+    SettingsActions.restorePublisher = (_, _) async => published = true;
+    await tester.pumpWidget(host(const SettingsBackupScreen()));
+    await reveal(tester, find.text('Restore as new sessions'));
+    await tester.runAsync(() async => tester.tap(find.text('Restore as new sessions')));
+    await _finishBackup(tester);
+    expect(published, isFalse);
+    await reveal(tester, find.textContaining('No data was changed'));
+    expect(find.textContaining("isn't a valid Ovid transcript archive"), findsOneWidget);
+    expect(find.textContaining('FormatException'), findsNothing);
+    await reveal(tester, find.text('Details'));
+    await tester.tap(find.text('Details'));
+    await tester.pump();
+    expect(find.text('Invalid ZIP directory.'), findsOneWidget);
   });
 
   testWidgets('Import validates the archive without publishing sessions', (tester) async {

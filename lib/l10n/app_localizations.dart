@@ -361,7 +361,7 @@ abstract class AppLocalizations {
   /// Restore failed while saving and the partial write was rolled back.
   ///
   /// In en, this message translates to:
-  /// **'Restore failed. {reason} Ovid undid the partial restore.'**
+  /// **'Restore failed. {reason} Any partial changes were undone.'**
   String backupRestoreRolledBack(String reason);
 
   /// Restore failed and its rollback could not be verified.

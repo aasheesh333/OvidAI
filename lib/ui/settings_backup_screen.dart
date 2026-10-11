@@ -3,13 +3,17 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import '../core/diag.dart';
 import '../core/native_share.dart';
 import '../core/settings_actions.dart';
 import '../core/settings_backup_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import '../l10n/l10n.dart';
 import 'settings_action_widgets.dart';
+import 'user_error.dart';
 import 'widgets/aether_primitives.dart';
+import 'widgets/error_views.dart';
 
 class SettingsBackupScreen extends StatefulWidget {
   const SettingsBackupScreen({super.key});
@@ -20,8 +24,13 @@ class SettingsBackupScreen extends StatefulWidget {
 class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
   bool _busy = false;
   String? _status;
+  String? _statusDetail;
   String _operation = 'Backup';
   File? _exported;
+
+  /// Set once the restore publisher starts writing. Only failures before this
+  /// point can honestly say "No data was changed".
+  bool _publishStarted = false;
 
   Future<void> _run(String operation, Future<void> Function() action) async {
     if (_busy) return;
@@ -29,17 +38,34 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       _busy = true;
       _operation = operation;
       _status = null;
+      _statusDetail = null;
+      _publishStarted = false;
     });
     try {
       await action();
-    } catch (e) {
+    } catch (e, st) {
+      Diag.swallow('settings_backup_screen.$operation', e, st);
       if (mounted) {
-        setState(() => _status =
-            'Operation failed during $operation. No data was changed. $e');
+        final message = _failureMessage(context.l10n, operation, e);
+        setState(() {
+          _status = message;
+          _statusDetail = UserError.detailOf(e);
+        });
       }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  String _failureMessage(AppLocalizations l, String operation, Object error) {
+    if (error is RestoreRollbackError) return l.backupRestoreRollbackUnverified;
+    final reason = error is FormatException
+        ? l.backupInvalidArchive
+        : friendlyError(error, l10n: l);
+    // The publisher contract rolls back its own writes on failure; an
+    // unverified rollback is reported above as RestoreRollbackError.
+    if (_publishStarted) return l.backupRestoreRolledBack(reason);
+    return l.backupFailedUnchanged(operation, reason);
   }
 
   Future<void> _export() => _run('Export', () async {
@@ -72,8 +98,8 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       _run(restore ? 'Restore' : 'Validate import', () async {
     // Capture ownership before the picker and all IO: an account handoff while
     // choosing a file must not redirect the import into the next account.
-    final publisher = restore ? SettingsActions.restorePublisher : null;
-    if (restore && publisher == null) {
+    final owner = restore ? SettingsActions.restorePublisher : null;
+    if (restore && owner == null) {
       throw StateError('Restore unavailable: no state publisher is connected.');
     }
     final picked = await FilePicker.platform.pickFiles(
@@ -100,6 +126,12 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       buffer.add(chunk);
     }
     final bytes = buffer.takeBytes();
+    final SettingsRestorePublisher? publisher = owner == null
+        ? null
+        : (staged, ids) {
+            _publishStarted = true;
+            return owner(staged, ids);
+          };
     final service = SettingsBackupService(
       publisher: publisher,
     );
@@ -275,6 +307,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
               label: 'Backup status: $_status',
               child: SelectableText(_status!, style: AetherType.body),
             ),
+            if (_statusDetail != null) ErrorDetails(detail: _statusDetail!),
           ],
         ],
       ),

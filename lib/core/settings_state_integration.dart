@@ -501,7 +501,7 @@ extension _SettingsStateIntegration on AppState {
           // A persisted candidate may still reference these files. Preserve
           // them rather than turning recoverable data into dangling paths.
           keepCopies = true;
-          throw StateError(
+          throw RestoreRollbackError(
             'Restore failed: $error. Rollback could not be '
             'verified: $rollbackError. Attachment copies retained at '
             '${copiedDirectories.map((d) => d.path).join(", ")}.',
