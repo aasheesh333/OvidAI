@@ -4,12 +4,15 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/diag.dart';
 import '../core/firebase_service.dart';
 import '../core/model_limits.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import '../l10n/l10n.dart';
 import 'billing_screen.dart';
+import 'user_error.dart';
 import 'widgets/aether_primitives.dart';
 
 /// Test seam: when non-null, overrides [ProviderConfig] delete routing used by
@@ -24,6 +27,37 @@ Future<String?> Function(String providerId)? removeCustomProviderForTest;
 /// `/models` endpoint. Returning a non-null string surfaces as inline feedback.
 @visibleForTesting
 Future<String?> Function(ProviderConfig provider)? fetchProviderModelsForTest;
+
+/// Test seam: HTTP client for the live `/models` request. Lets tests exercise
+/// response parsing and error copy without the network.
+@visibleForTesting
+http.Client? providerModelsHttpClientForTest;
+
+/// Provider-specific copy for a non-200 `/models` response.
+String providerFetchStatusMessage(AppLocalizations l, int status) =>
+    switch (UserError.kindForStatus(status)) {
+      UserErrorKind.unauthorized ||
+      UserErrorKind.forbidden => l.providerFetchKeyRejected,
+      UserErrorKind.notFound => l.providerFetchNoModelsEndpoint,
+      UserErrorKind.rateLimited => l.providerFetchRateLimited,
+      UserErrorKind.server => l.providerFetchServerError,
+      UserErrorKind.timeout => l.providerFetchUnreachable,
+      _ => l.providerFetchFailed,
+    };
+
+/// Provider-specific copy for a `/models` request that threw.
+String providerFetchErrorMessage(AppLocalizations l, Object error) {
+  if (error is FormatException &&
+      error.message.contains('Invalid HTTP header field value')) {
+    return l.providerFetchInvalidKey;
+  }
+  return switch (UserError.kindOf(error)) {
+    UserErrorKind.offline ||
+    UserErrorKind.timeout => l.providerFetchUnreachable,
+    UserErrorKind.badResponse => l.providerFetchUnexpectedResponse,
+    _ => friendlyError(error, l10n: l),
+  };
+}
 
 enum _FetchState { idle, busy, success, error, empty }
 
@@ -318,6 +352,7 @@ class _ProviderTileState extends State<_ProviderTile> {
 
   Future<void> _fetchModels(BuildContext context) async {
     if (_fetching) return;
+    final l = context.l10n;
     setState(() {
       _fetching = true;
       _fetchState = _FetchState.busy;
@@ -347,8 +382,9 @@ class _ProviderTileState extends State<_ProviderTile> {
       final uri = Uri.parse('${url}models');
       final cleanKey = provider.cleanApiKey;
       final isAnthropic = provider.effectiveApiFormat == ApiFormat.anthropic;
-      final res = await http
-          .get(
+      final client = providerModelsHttpClientForTest;
+      final res = await (client?.get ?? http.get)
+          .call(
             uri,
             headers: {
               if (isAnthropic && cleanKey.isNotEmpty) 'x-api-key': cleanKey,
@@ -361,7 +397,16 @@ class _ProviderTileState extends State<_ProviderTile> {
       if (!mounted) return;
       if (res.statusCode == 200) {
         final j = jsonDecode(res.body);
-        final List fetched = j['data'] ?? j['models'] ?? [];
+        // A non-object body (array, string, HTML error page) is not a
+        // models listing; report it instead of a Dart cast error.
+        if (j is! Map) {
+          throw const FormatException('models response is not a JSON object');
+        }
+        final list = j['data'] ?? j['models'] ?? const [];
+        if (list is! List) {
+          throw const FormatException('models response has no list');
+        }
+        final List fetched = list;
         final ids = [
           for (final m in fetched)
             (m is Map ? (m['id'] ?? m['name'] ?? '') : '$m').toString(),
@@ -385,21 +430,17 @@ class _ProviderTileState extends State<_ProviderTile> {
           _fetchResult = '${ids.length} models fetched and merged ✓';
         }
       } else {
+        Diag.swallow(
+          'providers_screen.fetch_models',
+          HttpStatusException(res.statusCode),
+        );
         _fetchState = _FetchState.error;
-        _fetchResult = 'Failed: HTTP ${res.statusCode} — check key/URL';
+        _fetchResult = providerFetchStatusMessage(l, res.statusCode);
       }
-    } catch (e) {
-      String msg;
-      if (e is FormatException &&
-          e.message.contains('Invalid HTTP header field value')) {
-        msg =
-            'API key looks invalid (contains whitespace or extra text). '
-            'Please re-enter your key.';
-      } else {
-        msg = 'Fetch failed: $e';
-      }
+    } catch (e, st) {
+      Diag.swallow('providers_screen.fetch_models', e, st);
       _fetchState = _FetchState.error;
-      _fetchResult = msg;
+      _fetchResult = providerFetchErrorMessage(l, e);
     } finally {
       if (mounted) setState(() => _fetching = false);
     }

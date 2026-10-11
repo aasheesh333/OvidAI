@@ -288,7 +288,8 @@ void main() {
     await _reveal(tester, find.text('Save'));
     await tester.tap(find.text('Save'));
     await _frames(tester);
-    await _reveal(tester, find.textContaining('Pause the task before editing'));
+    await _reveal(tester, find.text('Pause this task before editing it.'));
+    expect(find.textContaining('Bad state'), findsNothing);
     expect(find.text('Edit schedule'), findsOneWidget);
     expect(task['status'], 'running');
     expect(task['fireAt'], '2025-04-07T09:30:00Z');
@@ -304,7 +305,9 @@ void main() {
     app.failNextSessionWriteForTest = true;
     await tester.tap(find.text('Save'));
     await _frames(tester);
-    await _reveal(tester, find.textContaining('Session storage unavailable'));
+    // Raw StateError text is logged, not shown.
+    await _reveal(tester, find.text("That can't be done right now."));
+    expect(find.textContaining('Session storage unavailable'), findsNothing);
     expect(find.text('Edit schedule'), findsOneWidget);
     expect(task['prompt'], _description);
     expect(task['fireAt'], '2025-04-07T09:30:00Z');
@@ -372,5 +375,22 @@ void main() {
     expect(find.text('Resume'), findsNothing);
     expect(find.text('Cancel'), findsNothing);
     expect(find.text('Edit'), findsOneWidget);
+  });
+
+  testWidgets('resume while background is stopped shows copy and inline action',
+      (tester) async {
+    task['status'] = 'paused';
+    AgentService.I.schedules.stopped = true;
+    await _mount(tester);
+    await _menu(tester, 'Resume');
+    await _frames(tester);
+    expect(task['status'], 'paused');
+    await _reveal(
+      tester,
+      find.textContaining('Background execution is paused. Resume it'),
+    );
+    expect(find.textContaining('Bad state'), findsNothing);
+    expect(find.textContaining('StateError'), findsNothing);
+    expect(find.widgetWithText(TextButton, 'Resume background'), findsOneWidget);
   });
 }

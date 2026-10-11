@@ -2,11 +2,47 @@ import 'package:flutter/material.dart';
 
 import '../core/agent_notification_service.dart';
 import '../core/agent_service.dart';
+import '../core/diag.dart';
 import '../core/schedule_coordinator.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import '../l10n/l10n.dart';
+import 'user_error.dart';
 import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
+
+/// Friendly copy for a failed schedule mutation. Known coordinator refusals
+/// get specific copy (and [resumeBackground] when resuming background
+/// execution fixes them); everything else goes through [friendlyError]. The
+/// raw error is logged to [Diag], never shown.
+({String message, bool resumeBackground}) scheduleFailure(
+  AppLocalizations l,
+  Object error, [
+  StackTrace? stack,
+  String log = 'schedule_screen',
+]) {
+  Diag.swallow(log, error, stack);
+  if (error is StateError) {
+    switch (error.message) {
+      case 'Resume background execution first':
+        return (
+          message: l.scheduleErrorResumeBackgroundFirst,
+          resumeBackground: true,
+        );
+      case 'Previous run is still stopping':
+        return (
+          message: l.scheduleErrorPreviousRunStopping,
+          resumeBackground: false,
+        );
+      case 'Pause the task before editing':
+        return (message: l.scheduleErrorPauseBeforeEdit, resumeBackground: false);
+    }
+  }
+  if (error is FormatException) {
+    return (message: l.scheduleErrorInvalid, resumeBackground: false);
+  }
+  return (message: friendlyError(error, l10n: l), resumeBackground: false);
+}
 
 /// Schedule screen — Aether redesign.
 ///
@@ -36,10 +72,16 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   ) async {
     try {
       await action();
-    } catch (e) {
+    } catch (e, st) {
       if (context.mounted) {
+        final failure = scheduleFailure(
+          context.l10n,
+          e,
+          st,
+          'schedule_screen.background',
+        );
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$e')),
+          SnackBar(content: Text(failure.message)),
         );
       }
     }
@@ -300,8 +342,14 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
         'max_retries': _retries,
       });
       if (mounted) Navigator.pop(context);
-    } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+    } catch (e, st) {
+      if (mounted) {
+        setState(
+          () => _error =
+              scheduleFailure(context.l10n, e, st, 'schedule_screen.edit')
+                  .message,
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -466,6 +514,7 @@ class _TaskCardState extends State<_TaskCard> {
   bool _expanded = false;
   bool _busy = false;
   String? _feedback;
+  bool _offerResumeBackground = false;
 
   @override
   Widget build(BuildContext context) {
@@ -523,6 +572,17 @@ class _TaskCardState extends State<_TaskCard> {
               liveRegion: true,
               child: Text(_feedback!, style: AetherType.caption),
             ),
+            if (_offerResumeBackground && !_busy)
+              TextButton.icon(
+                icon: const Icon(Icons.play_arrow, size: 18),
+                label: Text(context.l10n.scheduleActionResumeBackground),
+                // Resume background execution, then retry the task resume
+                // the user originally asked for.
+                onPressed: () => _runAction(() async {
+                  await agent.resumeScheduledBackground();
+                  await agent.schedules.resumeTask(widget.entry);
+                }),
+              ),
           ],
           const SizedBox(height: 8),
           Align(
@@ -613,12 +673,20 @@ class _TaskCardState extends State<_TaskCard> {
     setState(() {
       _busy = true;
       _feedback = null;
+      _offerResumeBackground = false;
     });
     try {
       await action();
-      if (mounted) setState(() => _feedback = 'Schedule updated.');
-    } catch (e) {
-      if (mounted) setState(() => _feedback = 'Could not update schedule: $e');
+      if (mounted) setState(() => _feedback = context.l10n.scheduleUpdated);
+    } catch (e, st) {
+      if (mounted) {
+        final l = context.l10n;
+        final failure = scheduleFailure(l, e, st, 'schedule_screen.task');
+        setState(() {
+          _feedback = l.scheduleUpdateFailed(failure.message);
+          _offerResumeBackground = failure.resumeBackground;
+        });
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
