@@ -247,7 +247,11 @@ void main() {
       await _brief(tester);
       expect(coordinator.status, StudioSetupStatus.failed);
       expect(app.studioFirstOpenDone, isFalse);
-      expect(find.textContaining(_failure), findsOneWidget);
+      // F-171: a human headline, never the raw exception; the raw first
+      // line is kept for Details / Copy log.
+      expect(find.textContaining('Sandbox setup did not finish'), findsOneWidget);
+      expect(find.textContaining(_failure), findsNothing);
+      expect(coordinator.errorDetail, contains(_failure.split('\n').first));
       expect(tester.takeException(), isNull);
       await tester.scrollUntilVisible(find.text('Retry install'), 240,
           scrollable: find.byType(Scrollable).first);
