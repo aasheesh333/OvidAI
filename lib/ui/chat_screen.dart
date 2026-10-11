@@ -117,7 +117,7 @@ class ChatTranscript extends StatelessWidget {
           return true;
         }());
         final layout = ChatLayout(
-          viewportWidth: MediaQuery.of(context).size.width,
+          viewportWidth: MediaQuery.sizeOf(context).width,
         );
         final window = windowForBounded(
           session.messages,
@@ -1230,7 +1230,7 @@ class _ChatScreenState extends State<ChatScreen>
             _bindDraft(s.id);
           });
         }
-        final wide = MediaQuery.of(context).size.width >= 840;
+        final wide = MediaQuery.sizeOf(context).width >= 840;
         return Scaffold(
           backgroundColor: Aether.bg,
           drawer: wide

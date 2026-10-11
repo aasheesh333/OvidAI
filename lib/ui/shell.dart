@@ -211,7 +211,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final wide = MediaQuery.of(context).size.width >= 840;
+    final wide = MediaQuery.sizeOf(context).width >= 840;
     final chat = ChatScreen(startupCoordinator: widget.startupCoordinator);
 
     return Scaffold(
