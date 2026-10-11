@@ -12,6 +12,7 @@ import '../core/mcp_config_parse.dart';
 import '../core/mcp_service.dart';
 import '../core/native_plugin.dart';
 import '../core/plugin_manifest.dart';
+import '../core/plugin_permissions.dart';
 import '../core/plugin_registry.dart';
 import '../core/plugin_runtime.dart';
 import '../core/plugin_source_resolver.dart';
@@ -587,6 +588,11 @@ Future<PluginInstallResult?> startPluginInstallForTest(
     manifest: inspection.manifest,
   );
   final scaffoldContext = approvalContext;
+  // Set when THIS flow saved a fresh approval: a failed install must not
+  // leave consent behind for content that never installed (it would be
+  // reused silently by the next install of the same digest).
+  var approvedHere = false;
+  PluginPermissionGrant? priorGrant;
   if (grant == null) {
     if (scaffoldContext == null) {
       // No UI context (agent/test path): fail closed, never auto-approve.
@@ -599,15 +605,24 @@ Future<PluginInstallResult?> startPluginInstallForTest(
       inspection.discard();
       return null;
     }
+    priorGrant = await AppState.pluginPermissions.loadAny(
+      inspection.manifest.id,
+    );
+    if (!scaffoldContext.mounted) {
+      inspection.discard();
+      return null;
+    }
     // ignore: use_build_context_synchronously
     final accepted = await showPluginPermissionSheet(
       scaffoldContext,
       manifest: inspection.manifest,
+      provenance: PluginSourceProvenance.fromResolved(inspection.source),
     );
     if (accepted != true) {
       inspection.discard();
       return null; // cancelled — no state
     }
+    approvedHere = true;
     grant = await AppState.pluginPermissions.effectiveGrant(
       pluginId: inspection.manifest.id,
       manifest: inspection.manifest,
@@ -620,12 +635,33 @@ Future<PluginInstallResult?> startPluginInstallForTest(
   // consumes staging on success and discards it on failure, so there is
   // nothing left here to discard either way; a null result (no derivable
   // source) cannot happen for an already-inspected flow.
-  final result = await app.installPlugin(
-    row,
-    inspection: inspection,
-    origin: PluginInstallOrigin.pluginsScreen,
-    onProgress: onProgress,
-  );
+  Future<void> discardFreshApproval() async {
+    if (!approvedHere) return;
+    try {
+      await AppState.pluginPermissions.discardApproval(
+        inspection.manifest.id,
+        restore: priorGrant,
+      );
+    } catch (e) {
+      Diag.swallow('plugin-install.discard-approval', e);
+    }
+  }
+
+  final PluginInstallResult? result;
+  try {
+    result = await app.installPlugin(
+      row,
+      inspection: inspection,
+      origin: PluginInstallOrigin.pluginsScreen,
+      onProgress: onProgress,
+    );
+  } catch (_) {
+    await discardFreshApproval();
+    rethrow;
+  }
+  if (result == null || result.status == PluginInstallStatus.failed) {
+    await discardFreshApproval();
+  }
   if (result == null) {
     // No row to sync — remember the runtime install anyway.
     inspection.discard();
@@ -2638,6 +2674,8 @@ class _EffectiveGrantRow extends StatelessWidget {
                           'request approval on the next install or update.'
                     : 'Granted capabilities:\n'
                           '${grant.capabilities.map((c) => c.name).join(', ')}\n\n'
+                          '${grant.declinedCapabilities.isEmpty ? '' : 'Declined (disabled by you):\n${grant.declinedCapabilities.map(pluginCapabilityTitle).join(', ')}\n\n'}'
+                          '${grant.allowDependencyScripts ? 'Dependency install scripts: allowed\n\n' : ''}'
                           'Approved ${grant.approvedAt.toIso8601String().substring(0, 10)} '
                           'for digest ${_EffectiveGrantRow.digestSnippetForTest(grant.manifestDigest)}…'),
             style: const TextStyle(fontSize: 12.5, height: 1.5),
@@ -2692,7 +2730,8 @@ class _EffectiveGrantRow extends StatelessWidget {
                   g == null
                       ? 'No effective grant (approval required on next '
                             'install)'
-                      : 'Granted: ${g.capabilities.map((c) => c.name).join(', ')}',
+                      : 'Granted: ${g.capabilities.map((c) => c.name).join(', ')}'
+                            '${g.declinedCapabilities.isEmpty ? '' : '\nDisabled by you: ${g.declinedCapabilities.map(pluginCapabilityTitle).join(', ')}'}',
                   style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
                 );
               },

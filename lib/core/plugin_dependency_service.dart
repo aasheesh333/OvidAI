@@ -9,9 +9,10 @@
 /// a device-ABI compatibility check.
 ///
 /// Lifecycle scripts run only when the install carries a
-/// [PluginPermissionGrant] with `shell.execute`; without it npm gets
-/// `--ignore-scripts` and pip skips bytecode compilation/hooks (fail
-/// closed).
+/// [PluginPermissionGrant] with the separate
+/// [PluginPermissionGrant.allowDependencyScripts] opt-in (never implied by
+/// `shell.execute`); without it npm gets `--ignore-scripts` and pip installs
+/// wheels only with no bytecode compilation (fail closed).
 ///
 /// Every command's shape is captured for diagnostics: command line,
 /// exit code, resolved versions, sha256 checksums of the captured
@@ -257,9 +258,10 @@ class PluginDependencyService {
     var anyFailed = false;
     var requiredFailed = false;
 
-    // Lifecycle scripts gate — fail closed without the grant.
-    final scriptsAllowed =
-        grant?.capabilities.contains(PluginCapability.shellExecute) == true;
+    // Lifecycle scripts gate — fail closed without the SEPARATE opt-in.
+    // A hook's shellExecute grant never implies it (F-104): accepting a
+    // plugin must not silently let its dependencies run install-time code.
+    final scriptsAllowed = grant?.allowDependencyScripts == true;
 
     Future<PluginDependencyResultEntry> runOne(
       String kind,
@@ -396,8 +398,11 @@ class PluginDependencyService {
             '--target',
             '${rt.path}/python',
             '--no-deps',
-            // Post-install hooks denied without shellExecute.
+            // Post-install hooks denied without the install-scripts opt-in.
             '--no-compile',
+            // A source distribution runs its setup script at install time;
+            // wheels only, unless the user opted into install scripts.
+            if (!scriptsAllowed) '--only-binary=:all:',
             d.versionSpec.isEmpty ? d.name : '${d.name}${d.versionSpec}',
           ];
           entries.add(await runOne('python', d, args));

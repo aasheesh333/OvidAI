@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import 'diag.dart';
 
@@ -225,7 +226,39 @@ class ResolvedPluginSource {
     required this.transactionId,
     required this.stagingDir,
     required this.fileCount,
+    this.githubRepo,
+    this.resolvedRef,
+    this.revision,
   });
+
+  /// Test seam: a resolved source with provenance but no real staging.
+  @visibleForTesting
+  factory ResolvedPluginSource.forTest({
+    required PluginSource source,
+    required Directory stagingDir,
+    int fileCount = 0,
+    String? githubRepo,
+    String? resolvedRef,
+    String? revision,
+  }) => ResolvedPluginSource._(
+    source: source,
+    sourceId: source.sourceId,
+    transactionId: 'test',
+    stagingDir: stagingDir,
+    fileCount: fileCount,
+    githubRepo: githubRepo,
+    resolvedRef: resolvedRef,
+    revision: revision,
+  );
+
+  /// `owner/repo` actually fetched, for GitHub and marketplace sources.
+  final String? githubRepo;
+
+  /// Branch or ref the content was fetched from.
+  final String? resolvedRef;
+
+  /// Git tree SHA GitHub reported for [resolvedRef] at fetch time.
+  final String? revision;
 
   final PluginSource source;
   final String sourceId;
@@ -337,6 +370,9 @@ class PluginSourceResolver {
         transactionId: transactionId,
         stagingDir: staging,
         fileCount: count,
+        githubRepo: progress.githubRepo,
+        resolvedRef: progress.resolvedRef,
+        revision: progress.revision,
       );
     } catch (_) {
       try {
@@ -458,7 +494,13 @@ class PluginSourceResolver {
                     'trees/$branch?recursive=1';
       List<Map<String, String>> entries;
       try {
-        entries = await _githubTreeEntries(s, treeUrl, branch, subPrefix);
+        entries = await _githubTreeEntries(
+          s,
+          treeUrl,
+          branch,
+          subPrefix,
+          progress: p,
+        );
         treeReached = true;
       } catch (_) {
         continue; // unreachable/malformed branch — try the next candidate
@@ -527,13 +569,22 @@ class PluginSourceResolver {
     GithubPluginSource s,
     String treeUrl,
     String branch,
-    String subPrefix,
-  ) async {
+    String subPrefix, {
+    _Progress? progress,
+  }) async {
     final j = await _getJson(
       Uri.parse(treeUrl),
       _kMaxTreeBytes,
       accept: 'application/vnd.github+json',
     );
+    // Provenance for the consent sheet (F-105): which repo, which ref, and
+    // the exact tree revision that was fetched.
+    if (progress != null) {
+      progress
+        ..githubRepo = '${s.owner}/${s.repo}'
+        ..resolvedRef = branch
+        ..revision = j['sha'] is String ? j['sha'] as String : null;
+    }
     final tree = (j['tree'] as List?)?.cast<Map<String, dynamic>>();
     if (tree == null) {
       throw PluginSourceException(
@@ -1095,6 +1146,11 @@ class _Progress {
   final PluginSourceProgress? on;
   int received = 0;
 
+  /// GitHub provenance captured while resolving (see [ResolvedPluginSource]).
+  String? githubRepo;
+  String? resolvedRef;
+  String? revision;
+
   void add(int bytes, int? total) {
     received += bytes;
     on?.call(received, total);
@@ -1105,4 +1161,100 @@ String _basename(String path) {
   final p = path.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
   final i = p.lastIndexOf('/');
   return i >= 0 && i < p.length - 1 ? p.substring(i + 1) : p;
+}
+
+/// Where an inspected plugin comes from, in the terms the consent sheet
+/// shows (F-105): the repository and ref actually fetched, the marketplace
+/// it was listed in, and whether the source is one the user vouched for.
+class PluginSourceProvenance {
+  const PluginSourceProvenance({
+    required this.label,
+    required this.origin,
+    this.repo,
+    this.ref,
+    this.revision,
+    this.marketplace,
+    this.fileCount,
+    this.unverified = false,
+  });
+
+  /// One-line source, e.g. `acme/tools@main (tree 1a2b3c4)` or a path.
+  final String label;
+
+  /// Where it came from, e.g. "Marketplace: acme/market" or
+  /// "Direct from GitHub — not from a marketplace you added".
+  final String origin;
+
+  /// GitHub `owner/repo` when the content came from GitHub.
+  final String? repo;
+  final String? ref;
+
+  /// Full tree SHA of the fetched revision.
+  final String? revision;
+
+  /// Marketplace name when installed from a catalog entry.
+  final String? marketplace;
+  final int? fileCount;
+
+  /// True for REMOTE content not listed by a marketplace the user added
+  /// (a GitHub repo or npm package typed or linked directly) — a
+  /// typosquatted repo looks exactly like the real one, so these get a
+  /// warning before consent. Local files and configs the user entered are
+  /// their own.
+  final bool unverified;
+
+  /// Browser URL for [repo], or null for non-GitHub sources.
+  Uri? get repoUrl => repo == null ? null : Uri.https('github.com', '/$repo');
+
+  factory PluginSourceProvenance.fromResolved(ResolvedPluginSource resolved) {
+    final src = resolved.source;
+    final repo = resolved.githubRepo ?? switch (src) {
+      GithubPluginSource s => '${s.owner}/${s.repo}',
+      _ => null,
+    };
+    final ref = resolved.resolvedRef ?? switch (src) {
+      GithubPluginSource s => s.ref,
+      _ => null,
+    };
+    final revision = resolved.revision;
+    String githubLabel() => [
+      repo!,
+      if (ref != null && ref.isNotEmpty) '@$ref',
+      if (revision != null && revision.length >= 7)
+        ' (tree ${revision.substring(0, 7)})',
+    ].join();
+    final (label, origin) = switch (src) {
+      MarketplacePluginSource s => (
+        repo != null ? githubLabel() : s.declaredSource,
+        'Marketplace: ${s.catalogName}',
+      ),
+      GithubPluginSource _ => (
+        githubLabel(),
+        'Direct from GitHub — not from a marketplace you added',
+      ),
+      LocalFolderPluginSource s => (s.path, 'Local folder on this device'),
+      ZipPluginSource s => (s.path, 'ZIP file on this device'),
+      NpmPluginSource s => (
+        s.version == null || s.version!.isEmpty
+            ? s.package
+            : '${s.package}@${s.version}',
+        'npm package — not from a marketplace you added',
+      ),
+      PastedConfigPluginSource s => (s.label, 'Pasted configuration'),
+      DirectMcpPluginSource s => (
+        s.url ?? [s.command ?? '', ...s.args].join(' ').trim(),
+        'MCP server you entered',
+      ),
+    };
+    return PluginSourceProvenance(
+      label: label,
+      origin: origin,
+      repo: repo,
+      ref: ref,
+      revision: revision,
+      marketplace: src is MarketplacePluginSource ? src.catalogName : null,
+      fileCount: resolved.fileCount,
+      unverified: src is GithubPluginSource || src is NpmPluginSource,
+    );
+  }
 }

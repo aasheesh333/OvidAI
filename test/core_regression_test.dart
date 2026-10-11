@@ -16618,7 +16618,10 @@ cwd = 'tools'
         expect(find.text('Accept'), findsOneWidget);
         expect(find.text('Cancel'), findsOneWidget);
 
-        // Cancel → no state change.
+        // Cancel → no state change. (The sheet now also carries the
+        // install-scripts row, so the actions may sit below the fold.)
+        await tester.ensureVisible(find.text('Cancel'));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('Cancel'));
         await tester.pumpAndSettle();
         expect(accepted, isFalse);
@@ -16635,6 +16638,8 @@ cwd = 'tools'
         // Accept → grant persisted under the manifest digest. The sheet is
         // non-dismissable, so only the Accept/Cancel buttons end it.
         await tester.tap(find.byType(FilledButton));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('Accept'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Accept'));
         await tester.pumpAndSettle();
@@ -16667,11 +16672,13 @@ cwd = 'tools'
     PluginPermissionGrant p6Grant({
       String pluginId = 'acme/dep-kit',
       Set<PluginCapability> caps = const {},
+      bool scripts = false,
     }) => PluginPermissionGrant(
       pluginId: pluginId,
       manifestDigest: 'sha256:${'a' * 64}',
       capabilities: caps,
       approvedAt: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+      allowDependencyScripts: scripts,
     );
 
     test(
@@ -16774,7 +16781,7 @@ cwd = 'tools'
     );
 
     test(
-      'PLUGIN6: npm lifecycle scripts allowed only with a shellExecute grant',
+      'PLUGIN6: npm lifecycle scripts allowed only with the install-scripts opt-in (F-104)',
       () async {
         final dir = await Directory.systemTemp.createTemp('p6-npm2-');
         addTearDown(() => dir.deleteSync(recursive: true));
@@ -16796,24 +16803,35 @@ cwd = 'tools'
           0,
           '{"dependencies":{"node-gyp-ish":{"version":"1.0.0"}}}',
         ));
-        final result = await svc.install(
+        // A hook's shellExecute grant alone no longer implies scripts.
+        final shellOnly = await svc.install(
           manifest,
           p6Grant(caps: {PluginCapability.shellExecute}),
         );
-        expect(result.status, PluginDependencyStatus.ok);
-        final npmCmds = runner.cmds
-            .where(
-              (c) =>
-                  c.args.isNotEmpty &&
-                  c.args[0] == 'npm' &&
-                  c.args[1] == 'install',
-            )
-            .toList();
-        expect(npmCmds, isNotEmpty);
+        expect(shellOnly.status, PluginDependencyStatus.ok);
+        bool isNpmInstall(RecordedCmd c) =>
+            c.args.isNotEmpty && c.args[0] == 'npm' && c.args[1] == 'install';
         expect(
-          npmCmds.first.args,
+          runner.cmds.where(isNpmInstall).last.args,
+          contains('--ignore-scripts'),
+          reason: 'shellExecute without the opt-in keeps scripts off',
+        );
+
+        runner.queue((0, 'OK node'));
+        runner.queue((0, 'added 1 package'));
+        runner.queue((
+          0,
+          '{"dependencies":{"node-gyp-ish":{"version":"1.0.0"}}}',
+        ));
+        final result = await svc.install(
+          manifest,
+          p6Grant(caps: {PluginCapability.shellExecute}, scripts: true),
+        );
+        expect(result.status, PluginDependencyStatus.ok);
+        expect(
+          runner.cmds.where(isNpmInstall).last.args,
           isNot(contains('--ignore-scripts')),
-          reason: 'grant carries shellExecute → scripts may run',
+          reason: 'explicit install-scripts opt-in → scripts may run',
         );
       },
     );
@@ -16859,8 +16877,9 @@ cwd = 'tools'
         expect(args[tIdx + 1], '$rt/python');
         // No dependency pollution / no system site-packages.
         expect(args, contains('--no-deps'));
-        // Post-install hooks denied without shellExecute.
+        // Post-install hooks denied without the install-scripts opt-in.
         expect(args, contains('--no-compile'));
+        expect(args, contains('--only-binary=:all:'));
 
         // Resolved version parsed out of pip's output.
         final entry = result.entries.firstWhere((e) => e.name == 'requests');
