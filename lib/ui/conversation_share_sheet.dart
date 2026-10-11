@@ -124,8 +124,11 @@ class _ModeChooser extends StatelessWidget {
   const _ModeChooser({required this.onPick});
   final ValueChanged<ShareMode> onPick;
 
+  // Scrolls: AetherSheet clamps its body (PR-6b), and the two mode cards
+  // overflow a 360x640 phone at large text otherwise.
   @override
-  Widget build(BuildContext context) => Column(
+  Widget build(BuildContext context) => SingleChildScrollView(
+    child: Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     mainAxisSize: MainAxisSize.min,
     children: [
@@ -150,6 +153,7 @@ class _ModeChooser extends StatelessWidget {
         onTap: () => onPick(ShareMode.collab),
       ),
     ],
+    ),
   );
 }
 

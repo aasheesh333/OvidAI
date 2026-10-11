@@ -1490,7 +1490,7 @@ class _ChatScreenState extends State<ChatScreen>
               if (s != null && !s.isSubagent && s.messages.isNotEmpty)
                 IconButton(
                   tooltip: 'Share chat',
-                  visualDensity: VisualDensity.compact,
+                  // Full 48dp target like the other header icons (PR-6b).
                   icon: const Icon(Icons.ios_share_outlined, size: 18),
                   onPressed: () => showConversationShareSheet(context, s),
                 ),

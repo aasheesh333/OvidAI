@@ -84,6 +84,9 @@ void main() {
       sheet: (_) => FractionallySizedBox(
         heightFactor: .92,
         child: ConversationShareSheet(
+          // The collab sheet opens on a mode chooser; Read only is the
+          // panel with "Create link".
+          initialMode: ShareMode.readOnly,
           session: shareSession(),
           service: ConversationShareService(
             baseUrl: '',
@@ -98,6 +101,28 @@ void main() {
     expect(tester.getRect(create).bottom, lessThanOrEqualTo(640));
     // Pinned: not inside any scroll view.
     expect(Scrollable.maybeOf(tester.element(create)), isNull);
+  });
+
+  testWidgets('share mode chooser fits 360x640 / 1.3x without overflow', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      size: const Size(360, 640),
+      scale: 1.3,
+      sheet: (_) => FractionallySizedBox(
+        heightFactor: .92,
+        child: ConversationShareSheet(
+          session: shareSession(),
+          service: ConversationShareService(
+            baseUrl: '',
+            idToken: () async => null,
+          ),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    expect(find.text('Close').hitTestable(), findsOneWidget);
   });
 
   testWidgets('showAetherSheet caps the sheet at 640dp on wide screens', (

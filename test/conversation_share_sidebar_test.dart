@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/ui/conversation_share_sheet.dart';
 import 'package:ovid_ai/ui/sidebar.dart';
 
 void main() {
@@ -46,8 +47,13 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Share conversation'));
       await tester.pumpAndSettle();
-      expect(find.text('Second preview'), findsOneWidget);
-      expect(find.text('First preview'), findsNothing);
+      // The collab share sheet opens on its Read only / Collab chooser and
+      // asks signed-out users to sign in before showing a preview, so check
+      // the session it was opened for.
+      final sheet = tester.widget<ConversationShareSheet>(
+        find.byType(ConversationShareSheet),
+      );
+      expect(sheet.session.id, 'b');
       expect(app.activeSessionId, 'a');
       expect(tester.takeException(), isNull);
     },
