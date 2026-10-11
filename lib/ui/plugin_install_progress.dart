@@ -13,6 +13,11 @@ import 'widgets/aether_primitives.dart';
 /// from the studio terminal: scrolled-up reading is never yanked back
 /// down by new output.
 
+/// How a finished install ended. A degraded install IS installed (some
+/// optional parts failed) and must not look like a failure; a cancelled one
+/// changed nothing and is neutral.
+enum InstallOutcome { success, degraded, failed, cancelled }
+
 /// Controller driving [PluginInstallProgressSheet]: the install flow
 /// pushes phase/progress/log lines; the sheet renders them.
 class PluginInstallProgress extends ChangeNotifier {
@@ -27,15 +32,27 @@ class PluginInstallProgress extends ChangeNotifier {
   double? _progress; // null = indeterminate
   final List<String> _lines = [];
   bool _done = false;
-  bool _ok = false;
+  InstallOutcome _outcome = InstallOutcome.failed;
   String _summary = '';
+  String? _details;
+  VoidCallback? _onOpenPlugin;
 
   String get phase => _phase;
   double? get progress => _progress;
   List<String> get lines => List.unmodifiable(_lines);
   bool get done => _done;
-  bool get ok => _ok;
+
+  /// True when the plugin ended up installed (cleanly or degraded).
+  bool get ok =>
+      _outcome == InstallOutcome.success || _outcome == InstallOutcome.degraded;
+  InstallOutcome get outcome => _outcome;
   String get summary => _summary;
+
+  /// Raw technical error text, shown under "Details" (never as the summary).
+  String? get details => _details;
+
+  /// "Open plugin" action offered after a success/degraded install.
+  VoidCallback? get onOpenPlugin => _onOpenPlugin;
 
   /// Sets the phase label and optional determinate progress (0.0–1.0,
   /// null for indeterminate). Rapid byte-progress updates are coalesced:
@@ -63,15 +80,50 @@ class PluginInstallProgress extends ChangeNotifier {
   }
 
   /// Marks the install finished; the sheet shows [summary] with a Done /
-  /// Close button.
-  void finish({required bool ok, required String summary}) {
+  /// Close button and sets the phase to the matching final label. Pass an
+  /// [outcome] (preferred) or the legacy [ok] flag (success / failed).
+  void finish({
+    bool? ok,
+    InstallOutcome? outcome,
+    required String summary,
+    String? details,
+    VoidCallback? onOpenPlugin,
+  }) {
     _done = true;
-    _ok = ok;
+    _outcome =
+        outcome ??
+        (ok == true ? InstallOutcome.success : InstallOutcome.failed);
     _summary = summary;
-    if (ok) _progress = 1.0;
+    _details = details == null || details.trim().isEmpty ? null : details;
+    _onOpenPlugin = onOpenPlugin;
+    _phase = installOutcomePhase(_outcome);
+    if (this.ok) _progress = 1.0;
     notifyListeners();
   }
 }
+
+/// Final phase label for an [InstallOutcome].
+String installOutcomePhase(InstallOutcome outcome) => switch (outcome) {
+  InstallOutcome.success => 'Installed',
+  InstallOutcome.degraded => 'Installed with warnings',
+  InstallOutcome.failed => 'Failed',
+  InstallOutcome.cancelled => 'Cancelled',
+};
+
+/// Accent for an [InstallOutcome]: green, amber, red, neutral.
+Color installOutcomeColor(InstallOutcome outcome) => switch (outcome) {
+  InstallOutcome.success => Aether.successLight,
+  InstallOutcome.degraded => Aether.warnLight,
+  InstallOutcome.failed => Aether.dangerC,
+  InstallOutcome.cancelled => Aether.textMuted,
+};
+
+IconData installOutcomeIcon(InstallOutcome outcome) => switch (outcome) {
+  InstallOutcome.success => Icons.check_circle,
+  InstallOutcome.degraded => Icons.warning_amber_rounded,
+  InstallOutcome.failed => Icons.error_outline,
+  InstallOutcome.cancelled => Icons.info_outline,
+};
 
 /// Wraps the source resolver's raw byte progress into a readable label:
 /// `Fetching <sourceId>: 42%` when the total is known, otherwise
@@ -226,7 +278,23 @@ class _PluginInstallProgressSheetState
         child: AetherSheet(
       title: widget.title,
       actions: [
-        if (p.done)
+        if (p.done && p.ok && p.onOpenPlugin != null) ...[
+          AetherPrimaryButton(
+            label: 'Open plugin',
+            onPressed: () {
+              final open = p.onOpenPlugin!;
+              Navigator.of(context).pop();
+              open();
+            },
+          ),
+          SizedBox(
+            width: double.infinity,
+            child: TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Done'),
+            ),
+          ),
+        ] else if (p.done)
           AetherPrimaryButton(
             label: p.ok ? 'Done' : 'Close',
             onPressed: () => Navigator.of(context).pop(),
@@ -266,9 +334,9 @@ class _PluginInstallProgressSheetState
                   )
                 else
                   Icon(
-                    p.ok ? Icons.check_circle : Icons.error,
+                    installOutcomeIcon(p.outcome),
                     size: 18,
-                    color: p.ok ? Aether.successLight : Aether.danger,
+                    color: installOutcomeColor(p.outcome),
                   ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -289,7 +357,9 @@ class _PluginInstallProgressSheetState
                 minHeight: 6,
                 backgroundColor: Aether.surfaceAlt,
                 valueColor: AlwaysStoppedAnimation<Color>(
-                  p.done && !p.ok ? Aether.danger : Aether.accent,
+                  p.done && p.outcome != InstallOutcome.success
+                      ? installOutcomeColor(p.outcome)
+                      : Aether.accent,
                 ),
               ),
             ),
@@ -298,30 +368,48 @@ class _PluginInstallProgressSheetState
             if (p.done) ...[
               const SizedBox(height: 12),
               AetherCard(
-                color: (p.ok ? Aether.success : Aether.danger).withValues(
-                  alpha: 0.06,
-                ),
+                key: ValueKey('install-result-${p.outcome.name}'),
+                color: installOutcomeColor(p.outcome).withValues(alpha: 0.06),
                 padding: const EdgeInsets.all(12),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Icon(
-                      p.ok ? Icons.check_circle : Icons.error_outline,
+                      installOutcomeIcon(p.outcome),
                       size: 16,
-                      color: p.ok ? Aether.successLight : Aether.dangerC,
+                      color: installOutcomeColor(p.outcome),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
                         p.summary,
                         style: AetherType.body.copyWith(
-                          color: p.ok ? Aether.successLight : Aether.dangerC,
+                          color: installOutcomeColor(p.outcome),
                         ),
                       ),
                     ),
                   ],
                 ),
               ),
+              if (p.details != null)
+                Theme(
+                  data: Theme.of(
+                    context,
+                  ).copyWith(dividerColor: Colors.transparent),
+                  child: ExpansionTile(
+                    key: const ValueKey('install-result-details'),
+                    tilePadding: EdgeInsets.zero,
+                    title: Text('Details', style: AetherType.bodyMuted),
+                    children: [
+                      SelectableText(
+                        p.details!,
+                        style: AetherType.mono.copyWith(
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
             ],
           ],
       ),
