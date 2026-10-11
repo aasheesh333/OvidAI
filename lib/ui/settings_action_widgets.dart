@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/settings_actions.dart';
 import '../core/theme.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
 /// Settings actions allow long labels to wrap at large accessibility text sizes.
@@ -125,7 +126,10 @@ class _SettingsSwitchTileState extends State<SettingsSwitchTile> {
 
 class SettingsResetScreen extends StatefulWidget {
   final Future<SettingsResetResult> Function()? reset;
-  const SettingsResetScreen({super.key, this.reset});
+
+  /// Opens chat export; offered as "Export my chats first" in the confirm.
+  final VoidCallback? onExport;
+  const SettingsResetScreen({super.key, this.reset, this.onExport});
   @override
   State<SettingsResetScreen> createState() => _SettingsResetScreenState();
 }
@@ -137,27 +141,29 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
     if (_busy) return;
     final reset = widget.reset ?? SettingsActions.resetAll;
     if (reset == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        scrollable: true,
-        title: const Text('Delete ALL data?'),
-        content: const Text(
-          'Remove app-owned chats, credentials, settings and local data. This cannot be undone. External user folders are excluded.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete everything'),
-          ),
-        ],
-      ),
+    final onExport = widget.onExport;
+    final confirmed = await showAetherConfirmDialog(
+      context,
+      title: 'Delete ALL data?',
+      message:
+          'Remove app-owned chats, credentials, settings and local data. This '
+          'cannot be undone. External user folders are excluded.',
+      confirmLabel: 'Delete everything',
+      typeToConfirm: 'DELETE',
+      extra: onExport == null
+          ? null
+          : Builder(
+              builder: (dialogContext) => OutlinedButton.icon(
+                icon: const Icon(Icons.download_outlined, size: 18),
+                label: const Text('Export my chats first'),
+                onPressed: () {
+                  Navigator.pop(dialogContext, false);
+                  onExport();
+                },
+              ),
+            ),
     );
-    if (confirmed != true || !mounted) return;
+    if (!confirmed || !mounted) return;
     setState(() {
       _busy = true;
       _result = null;

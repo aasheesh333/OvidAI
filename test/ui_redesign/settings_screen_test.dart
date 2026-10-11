@@ -153,4 +153,42 @@ void main() {
     Navigator.of(ctx).pop();
     await tester.pump();
   });
+
+  testWidgets('Storage cookie Clear confirms; Cancel clears nothing', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(540, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(host());
+    await tester.pump();
+    await tester.scrollUntilVisible(
+      find.text('Storage'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Storage'));
+    // Storage sizing awaits path_provider (missing in tests) before the rows
+    // render.
+    for (var i = 0; i < 3; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+    // The cookie row's Clear is the last one (the cache row has its own).
+    await tester.tap(find.widgetWithText(TextButton, 'Clear').last);
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Clear browser cookies?'), findsOneWidget);
+    expect(find.textContaining('signed out of every website'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Clear browser cookies?'), findsNothing);
+    // Nothing ran: neither the success nor the failure report appears.
+    expect(find.textContaining('Default jar'), findsNothing);
+    expect(find.text('Could not clear cookies on this device.'), findsNothing);
+  });
 }
