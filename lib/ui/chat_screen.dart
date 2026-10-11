@@ -37,6 +37,7 @@ import '../core/skills.dart';
 import '../core/startup_coordinator.dart';
 import 'plugins_screen.dart';
 import 'startup_progress_panel.dart';
+import '../core/composer_drafts.dart';
 import '../core/diag.dart';
 import '../core/ovid_cloud_service.dart';
 import 'widgets/aether_primitives.dart';
@@ -841,6 +842,9 @@ class _ChatScreenState extends State<ChatScreen>
     final sid = _boundSessionId;
     if (sid != null && !_restoringDraft) {
       _draftVersions[sid] = (_draftVersions[sid] ?? 0) + 1;
+      // Mirror to durable storage (debounced) so a long prompt survives
+      // process death, a phone call or the OS reclaiming the app.
+      ComposerDraftStore.I.put(sid, _input.text);
     }
   }
 
@@ -853,6 +857,7 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
     _drafts.remove(sid);
+    ComposerDraftStore.I.remove(sid);
   }
 
   // ── Lazy message paging (ChatGPT/Claude style) ──
@@ -912,8 +917,10 @@ class _ChatScreenState extends State<ChatScreen>
     } else if (_boundSessionId != null) {
       _drafts.remove(_boundSessionId);
     }
-    // Restore incoming session's draft.
-    final draft = _drafts[sessionId] ?? '';
+    // Restore incoming session's draft (memory first, then the durable copy
+    // written before the process was last killed).
+    final draft =
+        _drafts[sessionId] ?? ComposerDraftStore.I.draftFor(sessionId) ?? '';
     _restoringDraft = true;
     if (_input.text != draft) {
       _input.value = TextEditingValue(
@@ -950,12 +957,30 @@ class _ChatScreenState extends State<ChatScreen>
     AgentService.markApprovalUiMounted();
     _input.addListener(_recordDraftEdit);
     _scroll.addListener(_onScroll);
+    unawaited(ComposerDraftStore.I.load().then((_) => _restorePersistedDraft()));
+  }
+
+  /// Applies the durable draft once it has loaded, unless the user already
+  /// started typing or the session's draft is held in memory.
+  void _restorePersistedDraft() {
+    final sid = _boundSessionId;
+    if (!mounted || sid == null || _drafts.containsKey(sid)) return;
+    if (_input.text.isNotEmpty) return;
+    final draft = ComposerDraftStore.I.draftFor(sid);
+    if (draft == null || draft.isEmpty) return;
+    _restoringDraft = true;
+    _input.value = TextEditingValue(
+      text: draft,
+      selection: TextSelection.collapsed(offset: draft.length),
+    );
+    _restoringDraft = false;
   }
 
   @override
   void dispose() {
     // One fewer approval UI able to answer.
     AgentService.markApprovalUiDisposed();
+    unawaited(ComposerDraftStore.I.flush());
     _scroll.dispose();
     _input.dispose();
     _inputFocus.dispose();
