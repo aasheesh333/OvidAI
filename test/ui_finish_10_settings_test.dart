@@ -16,7 +16,6 @@ import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/settings_backup_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
-import 'package:ovid_ai/ui/health_screen.dart';
 import 'package:ovid_ai/ui/settings_action_widgets.dart';
 import 'package:ovid_ai/ui/settings_backup_screen.dart';
 import 'package:ovid_ai/ui/settings_health_screen.dart';
@@ -147,7 +146,7 @@ void main() {
       await tester.tap(find.text('Backup'));
       await tester.pumpAndSettle();
       expect(find.byType(SettingsBackupScreen), findsOneWidget);
-      await reveal(tester, find.text('Restore as new sessions'));
+      await reveal(tester, find.text('Import backup…'));
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });
@@ -157,11 +156,16 @@ void main() {
     final active = app.activeSessionId;
     final count = app.sessions.length;
     await tester.pumpWidget(host(const SettingsBackupScreen()));
-    await reveal(tester, find.text('Restore as new sessions'));
+    await reveal(tester, find.text('Import backup…'));
     // Real archive reads, staging and owner publication run outside fake async.
     await tester.runAsync(() async {
-      await tester.tap(find.text('Restore as new sessions'));
+      await tester.tap(find.text('Import backup…'));
     });
+    // Validation runs first and asks before anything is restored.
+    await _finishBackup(tester, until: find.text('Restore backup?'));
+    expect(app.sessions.length, count);
+    expect(find.textContaining('1 transcript(s), 1 message(s)'), findsOneWidget);
+    await tester.tap(find.text('Restore'));
     // Drain the actual IO operation rather than assuming a fixed wall-clock wait.
     await _finishBackup(tester);
     expect(app.sessions.length, count + 1);
@@ -185,8 +189,10 @@ void main() {
       ]);
     });
     await tester.pumpWidget(host(const SettingsBackupScreen()));
-    await reveal(tester, find.text('Restore as new sessions'));
-    await tester.runAsync(() async => tester.tap(find.text('Restore as new sessions')));
+    await reveal(tester, find.text('Import backup…'));
+    await tester.runAsync(() async => tester.tap(find.text('Import backup…')));
+    await _finishBackup(tester, until: find.text('Restore backup?'));
+    await tester.tap(find.text('Restore'));
     await _finishBackup(tester);
     expect(app.sessions.any((s) => s.title == 'Imported transcript'), isFalse);
     await reveal(tester, find.textContaining('Restore failed'));
@@ -201,9 +207,14 @@ void main() {
       RestoreRollbackError('Restore failed. Rollback could not be verified.'),
     ]) {
       SettingsActions.restorePublisher = (_, _) async => throw failure;
+      // Let the previous iteration's confirmation finish its exit transition.
+      await tester.pumpAndSettle();
       await tester.pumpWidget(host(SettingsBackupScreen(key: UniqueKey())));
-      await reveal(tester, find.text('Restore as new sessions'));
-      await tester.runAsync(() async => tester.tap(find.text('Restore as new sessions')));
+      // One Import flow (PR-6d): validate, confirm, then restore.
+      await reveal(tester, find.text('Import backup…'));
+      await tester.runAsync(() async => tester.tap(find.text('Import backup…')));
+      await _finishBackup(tester, until: find.text('Restore backup?'));
+      await tester.tap(find.text('Restore'));
       await _finishBackup(tester);
       await reveal(tester, find.textContaining('Restore failed'));
       expect(find.textContaining('No data was changed'), findsNothing);
@@ -224,8 +235,8 @@ void main() {
     var published = false;
     SettingsActions.restorePublisher = (_, _) async => published = true;
     await tester.pumpWidget(host(const SettingsBackupScreen()));
-    await reveal(tester, find.text('Restore as new sessions'));
-    await tester.runAsync(() async => tester.tap(find.text('Restore as new sessions')));
+    await reveal(tester, find.text('Import backup…'));
+    await tester.runAsync(() async => tester.tap(find.text('Import backup…')));
     await _finishBackup(tester);
     expect(published, isFalse);
     await reveal(tester, find.textContaining('No data was changed'));
@@ -240,9 +251,13 @@ void main() {
   testWidgets('Import validates the archive without publishing sessions', (tester) async {
     final ids = app.sessions.map((s) => s.id).toList();
     await tester.pumpWidget(host(const SettingsBackupScreen()));
-    await reveal(tester, find.text('Import'));
-    await tester.runAsync(() async => tester.tap(find.text('Import')));
+    await reveal(tester, find.text('Import backup…'));
+    await tester.runAsync(() async => tester.tap(find.text('Import backup…')));
+    await _finishBackup(tester, until: find.text('Restore backup?'));
+    await tester.tap(find.text('Cancel'));
     await _finishBackup(tester);
+    // Let the dialog's exit transition finish before reading the status.
+    await tester.pumpAndSettle();
     expect(app.sessions.map((s) => s.id), ids);
     await reveal(tester, find.textContaining('Archive valid: 1 transcript(s)'));
     expect(find.textContaining('No data restored'), findsOneWidget);
@@ -377,7 +392,7 @@ void main() {
     final health = HealthService(installed: () async => true,
       exec: (_) async => (0, 'version'), workspace: () async {},
       providerConfigured: () => throw StateError('configuration unavailable'));
-    await tester.pumpWidget(host(HealthScreen(service: health), scale: 2));
+    await tester.pumpWidget(host(SettingsHealthScreen(service: health), scale: 2));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.textContaining('Health checks failed'), findsOneWidget);
@@ -394,7 +409,7 @@ void main() {
       final health = HealthService(installed: () async => true,
         exec: (_) async => (127, 'missing'), workspace: () async {},
         providerConfigured: () => false);
-      await tester.pumpWidget(host(HealthScreen(service: health), scale: size.width == 360 ? 2 : 1));
+      await tester.pumpWidget(host(SettingsHealthScreen(service: health), scale: size.width == 360 ? 2 : 1));
       await tester.pumpAndSettle();
       expect(find.text('Overall health'), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -419,8 +434,8 @@ void main() {
     tester.view.viewInsets = const FakeViewPadding(bottom: 260);
     addTearDown(tester.view.resetViewInsets);
     await tester.pump();
-    await tester.ensureVisible(find.widgetWithText(TextField, 'Preset ID'));
-    await tester.enterText(find.widgetWithText(TextField, 'Preset ID'), 'keyboard_test');
+    await tester.ensureVisible(find.widgetWithText(TextField, 'Preset name'));
+    await tester.enterText(find.widgetWithText(TextField, 'Preset name'), 'keyboard_test');
     expect(tester.takeException(), isNull);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
@@ -445,16 +460,24 @@ void main() {
   });
 }
 
-Future<void> _finishBackup(WidgetTester tester) async {
-  // Pump in bounded real-IO turns, stopping on the UI operation's settled state.
+Future<void> _finishBackup(WidgetTester tester, {Finder? until}) async {
+  // Pump in bounded real-IO turns, stopping on the UI operation's settled
+  // state (or once [until] appears, e.g. the restore confirmation).
   final deadline = DateTime.now().add(const Duration(seconds: 10));
   while (DateTime.now().isBefore(deadline)) {
     await tester.runAsync(() async {
       await Future<void>.delayed(Duration.zero);
     });
     await tester.pump();
+    if (until != null) {
+      if (until.evaluate().isNotEmpty) {
+        await tester.pump(const Duration(milliseconds: 300));
+        return;
+      }
+      continue;
+    }
     final restore = find.byWidgetPredicate((w) =>
-      w is SettingsActionButton && w.label == 'Restore as new sessions');
+      w is SettingsActionButton && w.label == 'Import backup…');
     if (tester.widget<SettingsActionButton>(restore).onPressed != null) return;
   }
   fail('Backup did not settle within the bounded IO pump budget');

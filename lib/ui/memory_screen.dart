@@ -11,7 +11,9 @@ import '../core/theme.dart';
 import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Plain-text Markdown memory editor, rebuilt on the Aether primitives.
+/// Memory screen: a readable list of what Ovid remembers (MEMORY.md split
+/// into bullet/paragraph entries, each deletable), with the raw Markdown
+/// editor behind "Edit as Markdown". Rebuilt on the Aether primitives.
 ///
 /// Memory content is treated as untrusted plain text: nothing here renders
 /// Markdown as HTML or executes any uploaded script. Imports create a new file
@@ -51,6 +53,17 @@ class _MemoryScreenState extends State<MemoryScreen> {
   /// The open file changed on disk (usually the agent) since it was loaded.
   bool _stale = false;
   DateTime _lastStaleCheck = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Raw Markdown editor vs the readable entry list. Empty files open in
+  /// the editor (there is nothing to list yet); others open as entries.
+  bool _rawMode = true;
+  String? _modeFile;
+  DateTime? _modified;
+
+  /// When this app last saved each file from this screen, so a newer write
+  /// can be attributed to Ovid ("Last updated by Ovid").
+  static final Map<String, DateTime> _uiSaves = {};
+  String get _saveKey => '${_owner ?? 'global'}/$_file';
 
   bool get _dirty => _content.text != _loaded;
   bool get _enabled => _store != null && !_busy;
@@ -113,10 +126,102 @@ class _MemoryScreenState extends State<MemoryScreen> {
       _revision = doc.revision;
       _loaded = doc.content;
       _content.text = doc.content;
+      _modified = _lastModified();
+      final key = _saveKey;
+      if (_modeFile != key) {
+        _modeFile = key;
+        _rawMode = doc.content.trim().isEmpty;
+      }
       setState(() {
         _error = null;
         _stale = false;
       });
+    } catch (e) {
+      setState(() => _error = '$e');
+    }
+  }
+
+  DateTime? _lastModified() {
+    try {
+      return _store!.lastModified(_owner, _file);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _recordUiSave() {
+    _modified = _lastModified();
+    if (_modified != null) _uiSaves[_saveKey] = _modified!;
+  }
+
+  /// Remove one readable entry and save through the normal revision-checked
+  /// path, after a confirmation.
+  Future<void> _deleteEntry(MemoryEntry entry) async {
+    if (_dirty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Save or reload your Markdown edits first.'),
+        ),
+      );
+      return;
+    }
+    final excerpt = entry.text.length > 160
+        ? '${entry.text.substring(0, 160)}…'
+        : entry.text;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: const Text('Delete this memory?'),
+        content: Text(
+          '"$excerpt"\n\nOvid will no longer see it in future chats.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Delete', style: TextStyle(color: Aether.danger)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      _checkOwner();
+      final doc = _store!.save(
+        _owner,
+        _file,
+        removeMemoryEntry(_loaded, entry),
+        mode: 'replace',
+        revision: _revision,
+      );
+      _revision = doc.revision;
+      _loaded = doc.content;
+      _content.text = doc.content;
+      _recordUiSave();
+      AppState.I.refresh();
+      setState(() {
+        _error = null;
+        _stale = false;
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Memory deleted')));
+    } on StateError catch (e) {
+      // The agent rewrote the file since it was shown: show the latest.
+      if (e.message.contains('Memory changed')) {
+        _load();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Memory changed meanwhile. Showing the latest.'),
+          ),
+        );
+      } else {
+        setState(() => _error = '$e');
+      }
     } catch (e) {
       setState(() => _error = '$e');
     }
@@ -154,6 +259,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
       );
       _revision = doc.revision;
       _loaded = doc.content;
+      _recordUiSave();
       setState(() {
         _error = null;
         _stale = false;
@@ -623,6 +729,91 @@ class _MemoryScreenState extends State<MemoryScreen> {
     );
   }
 
+  String? get _modifiedCaption {
+    final modified = _modified;
+    if (modified == null) return null;
+    final uiSave = _uiSaves[_saveKey];
+    final byOvid = uiSave == null || modified.isAfter(uiSave);
+    // Without a record of saving it here, the newest write may still be
+    // the user's from an earlier launch; only claim Ovid after a UI save.
+    final who = byOvid && uiSave != null ? ' by Ovid' : '';
+    return 'Last updated$who · ${_formatWhen(modified)}';
+  }
+
+  static String _formatWhen(DateTime t) {
+    final diff = DateTime.now().difference(t);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inHours < 1) return '${diff.inMinutes} min ago';
+    if (diff.inDays < 1) return '${diff.inHours} h ago';
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)} '
+        '${two(t.hour)}:${two(t.minute)}';
+  }
+
+  Widget _buildEntries() {
+    final entries = splitMemoryEntries(_loaded);
+    if (entries.isEmpty) {
+      return Text(
+        'No memories in this file yet. Use Edit as Markdown to write one.',
+        style: AetherType.bodyMuted,
+      );
+    }
+    final children = <Widget>[];
+    String? heading;
+    for (var i = 0; i < entries.length; i++) {
+      final entry = entries[i];
+      if (entry.heading != heading || (i == 0 && entry.heading != null)) {
+        heading = entry.heading;
+        if (heading != null) {
+          children.add(
+            Padding(
+              padding: EdgeInsets.only(
+                top: i == 0 ? 0 : AetherSpacing.space3,
+                bottom: AetherSpacing.space1,
+              ),
+              child: Text(heading, style: AetherType.label),
+            ),
+          );
+        }
+      }
+      children.add(
+        Padding(
+          key: ValueKey('memory-entry-$i'),
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 9, right: 8),
+                child: Icon(Icons.circle, size: 5, color: Aether.textMuted),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(entry.text, style: AetherType.body),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Delete memory',
+                icon: Icon(
+                  Icons.delete_outline,
+                  size: 18,
+                  color: Aether.textMuted,
+                ),
+                onPressed: _enabled ? () => _deleteEntry(entry) : null,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: children,
+    );
+  }
+
   Widget _buildEditorCard() {
     // Let the filename and editor grow with text scale inside the page scroll.
     return Container(
@@ -652,12 +843,25 @@ class _MemoryScreenState extends State<MemoryScreen> {
                 color: Aether.textMuted,
                 filled: false,
               ),
+              AetherGhostButton(
+                label: _rawMode ? 'Show entries' : 'Edit as Markdown',
+                onPressed: _store == null
+                    ? null
+                    : () => setState(() => _rawMode = !_rawMode),
+              ),
             ],
           ),
+          if (_modifiedCaption != null) ...[
+            const SizedBox(height: 4),
+            Text(_modifiedCaption!, style: AetherType.caption),
+          ],
           const SizedBox(height: AetherSpacing.space3),
           Divider(height: 1, thickness: 1, color: Aether.hairline),
           const SizedBox(height: AetherSpacing.space3),
-          TextField(
+          if (!_rawMode)
+            _buildEntries()
+          else
+            TextField(
               key: const Key('memory-content'),
               controller: _content,
               enabled: _enabled,

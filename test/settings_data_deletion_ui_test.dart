@@ -125,7 +125,8 @@ void main() {
         MaterialApp(theme: Aether.theme(), home: const SettingsScreen()),
       );
       await tester.pump();
-      final row = find.widgetWithText(ListTile, 'Export chats');
+      // Export chats moved into Export data (PR-6d, F-144).
+      final row = find.text('Export data');
       await tester.scrollUntilVisible(
         row,
         300,
@@ -134,7 +135,8 @@ void main() {
       await tester.tap(row);
       await tester.pumpAndSettle();
       await tester.runAsync(() async {
-        await tester.tap(find.text('Export and share JSON'));
+        await tester.ensureVisible(find.text('JSON (for other tools)'));
+        await tester.tap(find.text('JSON (for other tools)'));
         for (var i = 0; i < 20 && shared.isEmpty; i++) {
           await Future<void>.delayed(const Duration(milliseconds: 20));
         }
@@ -142,7 +144,7 @@ void main() {
       });
       await tester.pumpAndSettle();
       expect(shared, hasLength(1));
-      expect(shared.single, contains('/ovid-chat-export-'));
+      expect(shared.single, contains('/ovid-json-'));
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 100)),
       );

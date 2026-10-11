@@ -34,9 +34,11 @@ void main() {
     final health = service();
     await pumpScreen(tester, health);
 
-    expect(find.textContaining('Available'), findsOneWidget);
-    expect(find.textContaining('Needs attention'), findsOneWidget);
-    expect(find.textContaining('Unavailable'), findsOneWidget);
+    // Summary counts; per-check status words ("Available", "Missing") are
+    // separate labels on each card.
+    expect(find.textContaining('Available: '), findsOneWidget);
+    expect(find.textContaining('Needs attention: '), findsOneWidget);
+    expect(find.textContaining('Unavailable: '), findsOneWidget);
     expect(find.textContaining('18 of 18 checks completed'), findsOneWidget);
     expect(find.textContaining('2 repairable'), findsOneWidget);
   });

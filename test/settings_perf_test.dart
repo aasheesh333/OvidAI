@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/settings_backup_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/settings_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -38,13 +39,26 @@ void main() {
     final backend = _CountingPreferences();
     SharedPreferencesStorePlatform.instance = backend;
     await tester.pumpWidget(const MaterialApp(home: SettingsScreen()));
-    final tile = find.text('AI response timeout');
-    await tester.scrollUntilVisible(tile, 300);
+    // PR-6d renamed the row (Models section).
+    final tile = find.text('Response wait limit');
+    await tester.scrollUntilVisible(
+      tile,
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(tile);
+    await tester.pumpAndSettle();
     await tester.tap(tile);
     await tester.pumpAndSettle();
 
     final slider = find.byType(Slider);
-    await tester.ensureVisible(slider);
+    // The screen's ListView builds lazily; PR-6d's preset list pushes the
+    // slider below the fold.
+    await tester.scrollUntilVisible(
+      slider,
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
     await tester.pumpAndSettle();
     final start = AppState.I.responseTimeoutSec;
     var notifies = 0;

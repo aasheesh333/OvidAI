@@ -464,4 +464,78 @@ void main() {
       expect(root.listSync(), isEmpty);
     }
   });
+
+  group('F-151 export limits are named and planned', () {
+    List<ChatSession> sessionsWith(int messages, {int perSession = 1000}) {
+      final out = <ChatSession>[];
+      var left = messages;
+      var i = 0;
+      while (left > 0) {
+        final n = left < perSession ? left : perSession;
+        out.add(
+          ChatSession(
+            id: 's$i',
+            title: 'Chat $i',
+            model: 'm',
+            createdAt: DateTime(2026, 1, 1).add(Duration(days: i)),
+            messages: [
+              for (var j = 0; j < n; j++) Message(role: 'user', content: 'm'),
+            ],
+          ),
+        );
+        left -= n;
+        i++;
+      }
+      return out;
+    }
+
+    test('20,001 messages names the limit instead of a raw FormatException',
+        () async {
+      final sessions = sessionsWith(20001);
+      Object? error;
+      try {
+        await SettingsBackupService().export(sessions);
+      } catch (e) {
+        error = e;
+      }
+      expect(error, isA<BackupLimitException>());
+      expect('$error', contains('20,000 messages'));
+      expect('$error', isNot(contains('FormatException')));
+    });
+
+    test('plan keeps the most recent chats that fit and names the limit',
+        () async {
+      final sessions = sessionsWith(20001);
+      final plan = SettingsBackupService.planExport(sessions);
+      expect(plan.isComplete, isFalse);
+      expect(plan.limitHit, contains('20,000 messages'));
+      expect(plan.skipped.single.id, 's0'); // oldest left out
+      expect(plan.included.length, 20);
+      final bytes = await SettingsBackupService().export(plan.included);
+      final staged = await SettingsBackupService().stage(bytes, root);
+      expect(staged.sessions.length, 20);
+      await staged.dispose();
+    });
+
+    test('a single oversized message skips only its chat', () {
+      final plan = SettingsBackupService.planExport([
+        ChatSession(
+          id: 'big',
+          title: 'Big',
+          model: 'm',
+          messages: [Message(role: 'user', content: 'x' * (1024 * 1024 + 1))],
+        ),
+        ChatSession(id: 'ok', title: 'Ok', model: 'm'),
+      ]);
+      expect(plan.included.map((s) => s.id), ['ok']);
+      expect(plan.skipped.map((s) => s.id), ['big']);
+      expect(plan.limitHit, contains('1 MiB'));
+    });
+
+    test('everything fits -> complete plan', () {
+      final plan = SettingsBackupService.planExport(sessionsWith(10));
+      expect(plan.isComplete, isTrue);
+      expect(plan.limitHit, isNull);
+    });
+  });
 }

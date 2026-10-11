@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
+import 'core/diag.dart';
 import 'core/state.dart';
 import 'core/studio_drafts.dart';
 import 'core/agent_notification_service.dart';
@@ -26,12 +28,75 @@ bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
   final route = ShareLinkResolver.route(uri);
   final navigator = navigatorKey.currentState;
   if (route is! ShareViewerRoute || navigator == null) return false;
-  navigator.push(
-    MaterialPageRoute(
-      builder: (_) => SharedConversationScreen(token: route.token),
-    ),
-  );
+  navigator.push(_shareViewerRoute(route.token));
   return true;
+}
+
+Route<void> _shareViewerRoute(String token) => MaterialPageRoute<void>(
+  builder: (_) => SharedConversationScreen(token: token),
+);
+
+/// Opens `/s/<token>` share links on the app navigator.
+///
+/// Only *in-flight* opens are de-duplicated: a token is held from the moment
+/// a link arrives (covering the initial link racing the first stream event)
+/// until the viewer it pushed is popped. Tapping the same link again after
+/// going back therefore opens it again.
+///
+/// When the navigator is not attached yet (cold start), the open is retried
+/// on the next frame, and a frame is explicitly scheduled so the retry does
+/// not wait for an unrelated pointer event. Retries are capped at
+/// [maxAttempts]; the cap is logged through [Diag].
+class ShareLinkOpener {
+  ShareLinkOpener({
+    required this.navigatorKey,
+    this.maxAttempts = 10,
+    Route<void> Function(String token)? routeBuilder,
+    bool Function()? isActive,
+  }) : _routeBuilder = routeBuilder ?? _shareViewerRoute,
+       _isActive = isActive ?? (() => true);
+
+  final GlobalKey<NavigatorState> navigatorKey;
+  final int maxAttempts;
+  final Route<void> Function(String token) _routeBuilder;
+  final bool Function() _isActive;
+  final _inFlight = <String>{};
+
+  @visibleForTesting
+  Set<String> get inFlightTokens => Set.unmodifiable(_inFlight);
+
+  void open(Uri uri) {
+    final route = ShareLinkResolver.route(uri);
+    if (route is! ShareViewerRoute || !_isActive()) return;
+    if (!_inFlight.add(route.token)) return;
+    _attempt(route.token, 0);
+  }
+
+  void _attempt(String token, int attempt) {
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!_isActive()) {
+        _inFlight.remove(token);
+        return;
+      }
+      final navigator = navigatorKey.currentState;
+      if (navigator == null) {
+        if (attempt + 1 >= maxAttempts) {
+          _inFlight.remove(token);
+          Diag.swallow(
+            'deeplink.open',
+            StateError('navigator not ready after $maxAttempts frames'),
+          );
+          return;
+        }
+        _attempt(token, attempt + 1);
+        return;
+      }
+      navigator
+          .push(_routeBuilder(token))
+          .whenComplete(() => _inFlight.remove(token));
+    });
+    SchedulerBinding.instance.scheduleFrame();
+  }
 }
 
 Future<void> main() async {
@@ -84,8 +149,10 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   final _links = AppLinks();
   final _resolver = ShareLinkResolver();
   StreamSubscription<Uri>? _linkSubscription;
-  final _openedTokens = <String>{};
-  final _pendingTokens = <String>{};
+  late final _shareOpener = ShareLinkOpener(
+    navigatorKey: appNavigatorKey,
+    isActive: () => mounted,
+  );
 
   @override
   void initState() {
@@ -143,7 +210,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     // platforms without an App Links implementation.
     _linkSubscription = _links.uriLinkStream.listen(
       _onLink,
-      onError: (Object error, StackTrace stack) {},
+      onError: (Object error, StackTrace stack) =>
+          Diag.swallow('deeplink.stream', error, stack),
     );
     try {
       await _resolver.readInstallReferrer();
@@ -168,28 +236,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     }
   }
 
-  void _openShare(Uri uri) {
-    final route = ShareLinkResolver.route(uri);
-    if (route is! ShareViewerRoute ||
-        !mounted ||
-        _openedTokens.contains(route.token) ||
-        !_pendingTokens.add(route.token)) {
-      return;
-    }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _openedTokens.contains(route.token)) {
-        _pendingTokens.remove(route.token);
-        return;
-      }
-      if (openShareWithNavigator(appNavigatorKey, uri)) {
-        _pendingTokens.remove(route.token);
-        _openedTokens.add(route.token);
-      } else {
-        _pendingTokens.remove(route.token);
-        _openShare(uri);
-      }
-    });
-  }
+  void _openShare(Uri uri) => _shareOpener.open(uri);
 
   void _onThemeChanged() {
     if (!mounted || Aether.dark == _builtDark) return;

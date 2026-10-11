@@ -12,7 +12,6 @@ import 'package:ovid_ai/core/health_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/collaboration_screen.dart';
-import 'package:ovid_ai/ui/health_screen.dart';
 import 'package:ovid_ai/ui/settings_health_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -175,11 +174,16 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
       expect(health.repairing, isTrue);
 
+      // The elapsed-time readout ticks every second while repairing, so the
+      // tree never settles: pump frames explicitly.
       await navigator.currentState!.maybePop();
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       expect(find.text('Leave while repairing?'), findsOneWidget);
       await tester.tap(find.text('Keep running'));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
       expect(find.text('Settings home'), findsOneWidget);
       expect(find.byType(SettingsHealthScreen), findsNothing);
       // Leaving neither cancelled nor stopped the install.
@@ -205,7 +209,7 @@ void main() {
       addTearDown(() => AgentService.I.dropSessionRun('busy'));
       final health = service(worker: null, pythonOk: true);
       await tester.pumpWidget(
-        MaterialApp(theme: Aether.theme(), home: HealthScreen(service: health)),
+        MaterialApp(theme: Aether.theme(), home: SettingsHealthScreen(service: health)),
       );
       await tester.pumpAndSettle();
       await tester.scrollUntilVisible(find.text('Hard reset the sandbox'), 400);

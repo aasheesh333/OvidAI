@@ -154,6 +154,20 @@ class _BrowserScreenState extends State<BrowserScreen> {
     });
   }
 
+  /// System back while the page has history: go back one page.
+  Future<void> _goBackInPage() async {
+    final tab = _activeTab;
+    if (tab == null) return;
+    final controller = browserWebViewBuilderForTest != null
+        ? tab.controller
+        : _agent.controllerForTab(tab);
+    if (controller == null) return;
+    if (await controller.canGoBack()) {
+      await controller.goBack();
+    }
+    unawaited(_refreshHistoryAvailability());
+  }
+
   /// Launch [url] in the device's real browser (e.g. Chrome).
   Future<void> _openInExternalBrowser(String url) async {
     final messenger = ScaffoldMessenger.maybeOf(context);
@@ -296,10 +310,23 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final controller = tab == null || browserWebViewBuilderForTest != null
         ? tab?.controller
         : agent.controllerForTab(tab);
-    return Scaffold(
+    // System back walks the page history like a real browser; only when
+    // there is no history left does it leave the screen. The AppBar ✕
+    // always closes the screen.
+    return PopScope(
+      canPop: !_canGoBack,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_goBackInPage());
+      },
+      child: Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
-        leading: const BackButton(),
+        leading: IconButton(
+          key: const ValueKey('browser-close'),
+          tooltip: 'Close browser',
+          icon: const Icon(Icons.close),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         title: const Text('Browser'),
         toolbarHeight: math.max(56, textScaler.scale(22) * 1.4 + 16),
         bottom: stackedActions
@@ -632,6 +659,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

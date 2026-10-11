@@ -219,6 +219,9 @@ void main() {
     await _reveal(tester, find.text('Daily'));
     await tester.tap(find.text('Daily'));
     await _frames(tester);
+    await _reveal(tester, find.text('Advanced'));
+    await tester.tap(find.text('Advanced'));
+    await _frames(tester);
     await _reveal(tester, time);
     await tester.enterText(time, '25:90');
     await _reveal(tester, find.text('Save'));
@@ -226,7 +229,7 @@ void main() {
     expect(tester.view.viewInsets.bottom, 240);
     await tester.tap(find.text('Save'));
     await _frames(tester);
-    await _reveal(tester, find.text('Use HH:mm, from 00:00 to 23:59.'));
+    await _reveal(tester, find.text('Pick a time of day (HH:mm, 00:00 to 23:59).'));
     expect(task['every'], 3600);
     await _reveal(tester, time);
     await tester.enterText(time, '09:45');
@@ -258,6 +261,8 @@ void main() {
     await _mount(tester);
     await _menu(tester, 'Edit');
     await tester.tap(find.text('One-off'));
+    await _frames(tester);
+    await tester.tap(find.text('Advanced'));
     await _frames(tester);
     final time = find.byKey(const ValueKey('schedule-time'));
     await tester.enterText(time, '2032-02-30 09:00');
@@ -321,6 +326,9 @@ void main() {
     final prompt = find.byKey(const ValueKey('schedule-prompt'));
     final time = find.byKey(const ValueKey('schedule-time'));
     await tester.enterText(prompt, '   ');
+    await _reveal(tester, find.text('Advanced'));
+    await tester.tap(find.text('Advanced'));
+    await _frames(tester);
     await _reveal(tester, time);
     expect(tester.widget<TextField>(time).keyboardType, TextInputType.number);
     await tester.enterText(time, '299');
@@ -328,7 +336,7 @@ void main() {
     await tester.tap(find.text('Save'));
     await _frames(tester);
     await _reveal(tester, find.text('Enter a task description.'));
-    await _reveal(tester, find.text('Enter a whole number of seconds, at least 300.'));
+    await _reveal(tester, find.text('The shortest interval is 5 minutes.'));
     expect(task['every'], 3600);
     await _reveal(tester, prompt);
     await tester.enterText(prompt, 'Check release queue');

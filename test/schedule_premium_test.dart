@@ -56,9 +56,13 @@ void main() {
     await _settle(tester);
 
     await tester.tap(find.text('Interval'));
+    await tester.tap(find.text('Advanced'));
+    await _settle(tester);
     await tester.enterText(find.byKey(const ValueKey('schedule-time')), '900');
     await tester.tap(find.text('One-off'));
-    expect(find.text('2026-12-01T09:30:00Z'), findsOneWidget);
+    await tester.pump();
+    // One-offs are edited in device-local time, never as the stored UTC "Z".
+    expect(find.text(scheduleLocalText('2026-12-01T09:30:00Z')), findsOneWidget);
     await tester.tap(find.text('Daily'));
     expect(find.text('09:30'), findsOneWidget);
     await tester.tap(find.text('Interval'));

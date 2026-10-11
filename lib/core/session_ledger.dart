@@ -416,6 +416,14 @@ class SessionLedger {
   }
 
   /// Wall-clock/turn/step projection over the ledger (stats parity).
+  ///
+  /// LLM time comes from `turn_end.llmMs` (nothing emits standalone `llm`
+  /// events today; any that do appear are still summed, and a turn that
+  /// had them does not add its `turn_end` figure on top). The agent writes
+  /// the run bucket's running totals into `turn_end`, so consecutive ends of
+  /// the same in-memory bucket (its cumulative `turns` count rises) add only
+  /// the delta; a falling/missing count means a fresh bucket (app restart,
+  /// dropped run) and the whole value is added.
   Future<SessionProjection> projection(String sessionId) async =>
       SessionProjection.fromEvents(await read(sessionId));
 
@@ -552,6 +560,10 @@ class SessionProjectionBuilder {
   var _turns = 0, _steps = 0, _toolMs = 0, _llmMs = 0;
   DateTime? _firstStart, _lastEnd;
   final _toolCounts = <String, int>{};
+  // turn_end.llmMs bookkeeping (see [SessionLedger.projection]).
+  int? _prevEndTurns;
+  var _prevEndLlm = 0;
+  var _llmEventsThisTurn = false;
 
   void add(Map<String, dynamic> e) {
     switch (e['kind'] as String?) {
@@ -560,6 +572,19 @@ class SessionProjectionBuilder {
         _firstStart ??= DateTime.tryParse(e['t'] as String? ?? '');
       case 'turn_end':
         _lastEnd = DateTime.tryParse(e['t'] as String? ?? '');
+        final reported = (e['llmMs'] as num?)?.toInt() ?? 0;
+        final endTurns = (e['turns'] as num?)?.toInt();
+        final prevEndTurns = _prevEndTurns;
+        final sameBucket =
+            endTurns != null &&
+            prevEndTurns != null &&
+            endTurns > prevEndTurns &&
+            reported >= _prevEndLlm;
+        final delta = sameBucket ? reported - _prevEndLlm : reported;
+        if (!_llmEventsThisTurn && delta > 0) _llmMs += delta;
+        _prevEndTurns = endTurns;
+        _prevEndLlm = reported;
+        _llmEventsThisTurn = false;
       case 'tool_start':
         _steps++;
         final n = e['tool'] as String?;
@@ -568,6 +593,7 @@ class SessionProjectionBuilder {
         _toolMs += (e['ms'] as num?)?.toInt() ?? 0;
       case 'llm':
         _llmMs += (e['ms'] as num?)?.toInt() ?? 0;
+        _llmEventsThisTurn = true;
     }
   }
 

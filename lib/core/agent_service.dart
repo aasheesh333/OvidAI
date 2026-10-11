@@ -6080,7 +6080,7 @@ user which one instead of assuming this one.''';
 
   bool _canReadSession(ChatSession current, String targetId) =>
       current.id == targetId ||
-      AppState.I.shareSessionMemory ||
+      AppState.I.effectiveShareSessionMemory ||
       current.referencedSessionIds.contains(targetId);
 
   String _handleSessionRead(Map<String, dynamic> args) {
@@ -10279,10 +10279,24 @@ user which one instead of assuming this one.''';
   /// model id, then the keyword table (1M default for unknown models).
   /// FIX 3 (g): measured against the run's EFFECTIVE model, so a preset pin
   /// budgets against the window the request will really be sent to.
+  ///
+  /// The override can only shrink the window: a 1M override on a 128K model
+  /// would put compaction past the point where the provider already rejects
+  /// the request, so the effective window is `min(override, model window)`.
   static int contextWindowForSession(ChatSession s) {
+    final auto = contextWindowFor(effectiveModelForSession(s), s.providerId);
+    return effectiveContextWindow(AppState.I.contextWindowOverride, auto);
+  }
+
+  /// `min(override, modelWindow)`; a non-positive override means auto.
+  static int effectiveContextWindow(int override, int modelWindow) =>
+      override > 0 && override < modelWindow ? override : modelWindow;
+
+  /// Whether the Settings override is what [contextWindowForSession] uses.
+  static bool contextOverrideAppliesTo(ChatSession s) {
     final o = AppState.I.contextWindowOverride;
-    if (o > 0) return o;
-    return contextWindowFor(effectiveModelForSession(s), s.providerId);
+    if (o <= 0) return false;
+    return o < contextWindowFor(effectiveModelForSession(s), s.providerId);
   }
 
   /// default policy: compact when the measured request envelope reaches
@@ -11482,7 +11496,7 @@ Session isolation: this chat has its OWN sandbox workspace (id: ${s.sandboxId ??
 Other chats' files are NOT visible to you — don't ask about them, they're
 inaccessible here. Explicit user @session references authorize read-only access
 to those transcripts via session_read in THIS chat, even when sharing is off.
-${AppState.I.shareSessionMemory ? 'The user enabled "Share session memory" — you may search across all chats via memory_search or session_search.' : ''}
+${AppState.I.effectiveShareSessionMemory ? 'The user enabled "Share session memory" — you may search across all chats via memory_search or session_search.' : ''}
 Browser isolation: the Browser panel is per session too — this chat has its own
 tabs AND its own cookie jar / logins (WebView profile), so a site the user
 signed into in ANOTHER chat is NOT logged in here, and vice versa. Never claim
@@ -15286,7 +15300,7 @@ ${await _agentsMdBlock()}
         _emit('think', 'searching memory: $q2');
         final app = AppState.I;
         if (!app.memoryEnabled) return 'Memory is disabled in Settings.';
-        final share = app.shareSessionMemory;
+        final share = app.effectiveShareSessionMemory;
         final current = _runSession;
         if (current == null) return 'no active session';
         final store = await app.prepareMemory();
@@ -24037,11 +24051,12 @@ ${await _agentsMdBlock()}
         !_runChainStale;
     if (!currentOwner()) return restart;
     final scope =
-        args['scope'] as String? ?? (app.shareSessionMemory ? 'all' : 'this');
+        args['scope'] as String? ??
+        (app.effectiveShareSessionMemory ? 'all' : 'this');
     final targetId = args['session_id'] as String?;
     if (scope != 'this' && scope != 'all') return 'Error: invalid scope.';
     if ((targetId != null && !_canReadSession(current, targetId)) ||
-        (targetId == null && scope == 'all' && !app.shareSessionMemory)) {
+        (targetId == null && scope == 'all' && !app.effectiveShareSessionMemory)) {
       return 'DENIED: broad session search requires Share session memory. '
           'An explicit user reference permits session_id-scoped reads only.';
     }
@@ -24080,7 +24095,7 @@ ${await _agentsMdBlock()}
     );
     if (!currentOwner() || indexed != index.generation) return restart;
     if ((targetId != null && !_canReadSession(current, targetId)) ||
-        (targetId == null && scope == 'all' && !app.shareSessionMemory)) {
+        (targetId == null && scope == 'all' && !app.effectiveShareSessionMemory)) {
       return 'DENIED: session access changed.';
     }
     if (hits.isEmpty) {

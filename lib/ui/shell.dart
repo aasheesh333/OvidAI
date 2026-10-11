@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/agent_notification_service.dart';
 import '../core/agent_service.dart';
+import '../core/connection_service.dart';
 import '../core/device_control_service.dart';
 import '../core/github_service.dart';
 import '../core/firebase_service.dart';
@@ -45,6 +46,172 @@ class _PersistWarningBanner extends StatelessWidget {
   }
 }
 
+/// Thin app-wide "You're offline" strip. Phones only saw connectivity
+/// inside the drawer (and not at all in compact large-text mode); this sits
+/// above every screen while the last probe failed, with a Retry that
+/// re-probes immediately.
+class OfflineBanner extends StatelessWidget {
+  const OfflineBanner({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = ConnectionService.I;
+    return AnimatedBuilder(
+      animation: c,
+      builder: (context, _) {
+        if (!c.offline) return const SizedBox.shrink();
+        final checking = c.status == ConnectionStatus.checking;
+        return SafeArea(
+          bottom: false,
+          child: Semantics(
+            liveRegion: true,
+            child: Material(
+              key: const ValueKey('offline-banner'),
+              color: Aether.warnLight.withValues(alpha: 0.16),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.cloud_off_outlined,
+                      size: 16,
+                      color: Aether.warnLight,
+                    ),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        "You're offline — messages can't be sent until the "
+                        'connection is back.',
+                        style: TextStyle(fontSize: 12, height: 1.3),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: checking ? null : c.probe,
+                      child: Text(checking ? 'Checking…' : 'Retry'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Shows the one-time telemetry consent dialog (Play policy).
+///
+/// Every `FirebaseService` notification during startup used to call the
+/// prompt again, and nothing guarded an already-open dialog, so two or three
+/// copies could stack. The dialog was also barrier/back-dismissible while a
+/// dismissal recorded nothing, so it came back on every launch. This shows
+/// at most one dialog, stops listening once it has been shown, and only an
+/// explicit choice closes it.
+class TelemetryConsentPrompter {
+  TelemetryConsentPrompter({
+    required this.source,
+    required this.isAvailable,
+    required this.consentAsked,
+    required this.setConsent,
+  });
+
+  /// Production wiring against [FirebaseService.I].
+  factory TelemetryConsentPrompter.firebase() {
+    final fb = FirebaseService.I;
+    return TelemetryConsentPrompter(
+      source: fb,
+      isAvailable: () => fb.isAvailable,
+      consentAsked: () => fb.consentAsked,
+      setConsent: fb.setConsent,
+    );
+  }
+
+  final Listenable source;
+  final bool Function() isAvailable;
+  final bool Function() consentAsked;
+  final Future<void> Function(bool allow) setConsent;
+
+  BuildContext Function()? _context;
+  bool _listening = false;
+  bool _showing = false;
+  bool _shown = false;
+
+  /// Starts watching [source]; asks after the first frame and whenever the
+  /// source becomes available, until the dialog has been shown once.
+  void attach(BuildContext Function() context) {
+    _context = context;
+    if (!_listening) {
+      source.addListener(_onSourceChanged);
+      _listening = true;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => maybeAsk());
+  }
+
+  void detach() {
+    _stopListening();
+    _context = null;
+  }
+
+  void _stopListening() {
+    if (!_listening) return;
+    source.removeListener(_onSourceChanged);
+    _listening = false;
+  }
+
+  void _onSourceChanged() {
+    if (!isAvailable()) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => maybeAsk());
+  }
+
+  void maybeAsk() {
+    final context = _context?.call();
+    if (_showing || _shown || context == null || !context.mounted) return;
+    if (!isAvailable()) return;
+    if (consentAsked()) {
+      _stopListening();
+      return;
+    }
+    _showing = true;
+    _shown = true;
+    _stopListening();
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (d) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text(
+            'Help improve Ovid AI?',
+            style: TextStyle(fontSize: 16),
+          ),
+          content: const Text(
+            'Share anonymous crash reports and usage stats (Firebase Crashlytics & Analytics) to help fix bugs faster. '
+            'This is optional and off unless you allow it. See our privacy policy for details.',
+            style: TextStyle(fontSize: 13, height: 1.5),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                setConsent(false);
+                Navigator.pop(d);
+              },
+              child: const Text('No thanks'),
+            ),
+            FilledButton(
+              onPressed: () {
+                setConsent(true);
+                Navigator.pop(d);
+              },
+              child: const Text('Allow'),
+            ),
+          ],
+        ),
+      ),
+    ).whenComplete(() => _showing = false);
+  }
+}
+
 /// Chat-first shell, DeepSeek-web style. The chat IS the app; everything
 /// else (Studio, Browser, Plugins, Settings) lives behind icons/drawer.
 ///
@@ -69,6 +236,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   /// 3 s for the app's whole lifetime.
   late final AppState _persistApp = AppState.I;
   bool _persistWarned = false;
+  final _consent = TelemetryConsentPrompter.firebase();
 
   void _onPersistStateChanged() {
     final failed = _persistApp.lastSessionPersistFailed;
@@ -85,9 +253,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     // Foreground-notification wiring (agent keep-alive): registers the
     // notification Stop-button handler.
     unawaited(AgentNotificationService.I.init());
-    FirebaseService.I.addListener(_onFirebaseReady);
     // Ask for telemetry consent once (Play policy) after first frame.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
+    _consent.attach(() => context);
     // First-run welcome notice moved to LoginGate (post-login overlay).
     // Studio first-open owns the sandbox install now (mandatory full
     // install incl. Node.js/Python via openStudio). The shell still kicks
@@ -102,12 +269,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     _persistWarned = _persistApp.lastSessionPersistFailed;
   }
 
-  void _onFirebaseReady() {
-    if (FirebaseService.I.isAvailable) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAskConsent());
-    }
-  }
-
   void _revealControlChat(String sessionId) {
     if (!mounted) return;
     Navigator.of(context).popUntil((route) => route.isFirst);
@@ -120,7 +281,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     }
     _persistApp.removeListener(_onPersistStateChanged);
     WidgetsBinding.instance.removeObserver(this);
-    FirebaseService.I.removeListener(_onFirebaseReady);
+    _consent.detach();
     super.dispose();
   }
 
@@ -134,6 +295,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(AppState.I.reconnectServicesAfterResume());
+        // Connectivity may have changed while backgrounded.
+        unawaited(ConnectionService.I.probe());
         // If Ovid's accessibility service is enabled in Settings but the
         // OS has not rebound it (app restart), absorb the rebind window
         // now (pure wait — no programmatic toggle, which could disable the
@@ -174,41 +337,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     }
   }
 
-  void _maybeAskConsent() {
-    final fb = FirebaseService.I;
-    if (!fb.isAvailable || fb.consentAsked || !mounted) return;
-    showDialog<void>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text(
-          'Help improve Ovid AI?',
-          style: TextStyle(fontSize: 16),
-        ),
-        content: const Text(
-          'Share anonymous crash reports and usage stats (Firebase Crashlytics & Analytics) to help fix bugs faster. '
-          'This is optional and off unless you allow it. See our privacy policy for details.',
-          style: TextStyle(fontSize: 13, height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              fb.setConsent(false);
-              Navigator.pop(d);
-            },
-            child: const Text('No thanks'),
-          ),
-          FilledButton(
-            onPressed: () {
-              fb.setConsent(true);
-              Navigator.pop(d);
-            },
-            child: const Text('Allow'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 840;
@@ -219,6 +347,11 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
       // The inner chat Scaffold owns keyboard avoidance. Resizing both shells
       // subtracts the same inset twice and crowds out the composer.
       resizeToAvoidBottomInset: false,
+      // Re-check connectivity whenever the drawer (with its status chip)
+      // opens, as the chip has always promised.
+      onDrawerChanged: (open) {
+        if (open) unawaited(ConnectionService.I.probe());
+      },
       drawer: wide
           ? null
           : Drawer(
@@ -228,6 +361,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
             ),
       body: Column(
         children: [
+          const OfflineBanner(),
           if (_persistWarned)
             SafeArea(
               bottom: false,

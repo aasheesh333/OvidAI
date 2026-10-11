@@ -30,6 +30,7 @@ import 'html_artifact_view.dart';
 import 'link_safety.dart';
 import '../core/url_safety.dart';
 import '../core/agent_service.dart';
+import '../core/connection_service.dart';
 import '../core/commands.dart';
 import '../core/device_control_service.dart';
 import '../core/mcp_service.dart';
@@ -7017,7 +7018,11 @@ class _InputBarState extends State<_InputBar> {
                   const SizedBox(width: 4),
                   // ── Stateful primary / stop button (web-IDE InputBar pattern) ──
                   AnimatedBuilder(
-                    animation: Listenable.merge([AgentService.I, controller]),
+                    animation: Listenable.merge([
+                      AgentService.I,
+                      controller,
+                      ConnectionService.I,
+                    ]),
                     builder: (_, _) {
                       // Per-session run state (never leaked from other
                       // sessions — the multi-session blink fix).
@@ -7042,12 +7047,18 @@ class _InputBarState extends State<_InputBar> {
                       // Match the existing submission handler: files alone
                       // are not a submission, and queue edits retain their
                       // original attachments rather than newly staged files.
+                      // Offline: the request cannot leave the device, so
+                      // Send is disabled (the shell banner explains why and
+                      // offers Retry). Saving a queue edit stays local.
+                      final offline =
+                          ConnectionService.I.offline && !widget.editingQueue;
                       final canSubmit =
                           hasSession &&
                           AppState.I.activeSessionId == sessionId &&
                           hasDraft &&
                           !locked &&
                           !widget.commandBusy &&
+                          !offline &&
                           AgentService.I.pendingApproval == null &&
                           (!widget.editingQueue ||
                               AgentService.I.pendingAttachments.isEmpty);
@@ -7057,7 +7068,9 @@ class _InputBarState extends State<_InputBar> {
                           : runningNow
                           ? (interrupt ? 'Interrupt and send' : 'Queue')
                           : 'Send';
-                      final actionTooltip = widget.editingQueue
+                      final actionTooltip = offline
+                          ? "You're offline"
+                          : widget.editingQueue
                           ? 'Save queued message'
                           : runningNow && !interrupt
                           ? 'Add to queue'

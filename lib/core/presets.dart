@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 
 import 'plan_mode.dart';
@@ -29,6 +31,11 @@ class AgentPreset {
   /// session's model (the previous behaviour).
   final String? model;
 
+  /// Provider that owns [model]. The same model id can be a different route
+  /// on two gateways, so a pin records which provider it was picked from.
+  /// Null on pins saved before this field existed (model id only).
+  final String? modelProviderId;
+
   /// G3: optional sampling temperature for this preset's runs. Null = let the
   /// provider default decide (never a synthetic default injected). Skipped on
   /// Anthropic runs that enable a thinking budget, which rejects it.
@@ -48,6 +55,7 @@ class AgentPreset {
     this.deniedTools = const [],
     this.persona = '',
     this.model,
+    this.modelProviderId,
     this.temperature,
     this.planAllowedTools = const [],
   });
@@ -63,6 +71,9 @@ class AgentPreset {
       model: (json['model'] as String? ?? '').trim().isEmpty
           ? null
           : (json['model'] as String).trim(),
+      modelProviderId: (json['modelProviderId'] as String? ?? '').trim().isEmpty
+          ? null
+          : (json['modelProviderId'] as String).trim(),
       temperature: (json['temperature'] as num?)?.toDouble(),
       planAllowedTools:
           (json['planAllowedTools'] as List?)
@@ -80,6 +91,8 @@ class AgentPreset {
     'deniedTools': deniedTools,
     'persona': persona,
     if (model != null) 'model': model,
+    if (model != null && modelProviderId != null)
+      'modelProviderId': modelProviderId,
     if (temperature != null) 'temperature': temperature,
     if (planAllowedTools.isNotEmpty) 'planAllowedTools': planAllowedTools,
   };
@@ -92,6 +105,7 @@ class AgentPreset {
     List<String>? deniedTools,
     String? persona,
     String? model,
+    String? modelProviderId,
     double? temperature,
     List<String>? planAllowedTools,
     bool clearModel = false,
@@ -105,6 +119,9 @@ class AgentPreset {
       deniedTools: deniedTools ?? this.deniedTools,
       persona: persona ?? this.persona,
       model: clearModel ? null : (model ?? this.model),
+      modelProviderId: clearModel
+          ? null
+          : (model != null ? modelProviderId : this.modelProviderId),
       temperature: clearTemperature
           ? null
           : (temperature ?? this.temperature),
@@ -220,7 +237,47 @@ class PresetRegistry {
 
   static void clearCustom() => _custom.clear();
 
+  /// Custom preset ids: lowercase letters, digits, `_` and `-`, 1–40 chars.
+  static final RegExp customIdPattern = RegExp(r'^[a-z0-9_-]{1,40}$');
+
+  static bool isBuiltInId(String id) => _builtIn.any((p) => p.id == id);
+
+  /// Why [id] cannot be used for a new custom preset, or null when it can.
+  /// A custom preset must never reuse a built-in id (it would shadow the
+  /// built-in for every session) or an existing custom id (it would
+  /// overwrite it).
+  static String? validateNewCustomId(String id) {
+    if (!customIdPattern.hasMatch(id)) {
+      return 'Use 1–40 lowercase letters, digits, "_" or "-".';
+    }
+    if (isBuiltInId(id)) return '"$id" is a built-in preset.';
+    if (_custom.any((p) => p.id == id)) {
+      return 'A custom preset with id "$id" already exists.';
+    }
+    return null;
+  }
+
+  /// A fresh, collision-free id for a new custom preset (`custom_<hex>`).
+  static String newCustomId([Random? random]) {
+    final rng = random ?? Random.secure();
+    while (true) {
+      final hex = List.generate(
+        12,
+        (_) => rng.nextInt(16).toRadixString(16),
+      ).join();
+      final id = 'custom_$hex';
+      if (validateNewCustomId(id) == null) return id;
+    }
+  }
+
   static void saveCustom(AgentPreset p) {
+    if (isBuiltInId(p.id)) {
+      throw ArgumentError.value(
+        p.id,
+        'id',
+        'Custom presets cannot reuse a built-in preset id',
+      );
+    }
     _custom.removeWhere((e) => e.id == p.id);
     _custom.add(p);
   }

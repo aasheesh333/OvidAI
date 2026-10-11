@@ -266,4 +266,47 @@ void main() {
     expect(disabled.flow.succeeded, isFalse);
     disabled.flow.dispose();
   });
+
+  group('country code (F-158)', () {
+    test('national number with region IN gets +91', () {
+      final dial = phoneDialCodeForRegion('IN').dialCode;
+      expect(
+        normalizePhoneNumber('9876543210', dialCode: dial),
+        '+919876543210',
+      );
+      expect(
+        normalizePhoneNumber('098765 43210', dialCode: dial),
+        '+919876543210',
+      );
+    });
+
+    test('explicit international numbers keep their own code', () {
+      expect(
+        normalizePhoneNumber('+1 415 555 0100', dialCode: '+91'),
+        '+14155550100',
+      );
+      expect(
+        normalizePhoneNumber('0044 7700 900123', dialCode: '+91'),
+        '+447700900123',
+      );
+    });
+
+    test('unknown or missing region falls back to India', () {
+      expect(phoneDialCodeForRegion(null).dialCode, '+91');
+      expect(phoneDialCodeForRegion('ZZ').dialCode, '+91');
+      expect(phoneDialCodeForRegion('gb').dialCode, '+44');
+    });
+
+    test('send completes a national number with the picked code', () async {
+      String? sent;
+      final flow = PhoneAuthFlow(
+        currentUid: () => null,
+        verify: (number, token, callbacks) async => sent = number,
+        apply: (_) async {},
+      );
+      await flow.send('98765 43210', dialCode: '+91');
+      expect(sent, '+919876543210');
+      flow.dispose();
+    });
+  });
 }

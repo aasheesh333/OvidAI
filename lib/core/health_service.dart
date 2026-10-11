@@ -182,11 +182,15 @@ class HealthService extends ChangeNotifier {
             // One command retains the installer's own lock for the whole operation.
             // Await the producer even after cancellation/timeout; no abandoned work
             // may race a retry. execChecked settles after exit and stream draining.
-            final (code, _) = await sandbox.execChecked([
-              'ovid-pkg',
-              'install',
-              ...packages,
-            ]);
+            // Stream the installer's own output so a multi-minute install
+            // shows live progress instead of one static line.
+            final (code, _) = await sandbox.execChecked(
+              ['ovid-pkg', 'install', ...packages],
+              onLine: (line) {
+                final text = line.trimRight();
+                if (text.isNotEmpty) onLine(text);
+              },
+            );
             cancellation.throwIfCancelled();
             if (timedOut) {
               throw TimeoutException('Signed package repair timed out.');

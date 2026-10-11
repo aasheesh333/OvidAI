@@ -1,10 +1,9 @@
-import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/agent_service.dart';
@@ -48,11 +47,11 @@ import 'widgets/ovid_mark.dart';
 
 /// Settings hub — Aether premium reskin.
 ///
-/// Rows are grouped into premium cards (Account / Appearance / Models /
-/// Autonomy / Studio / Backup / Health / Diagnostics / About). All existing
-/// preference tiles and their persisted bindings are preserved verbatim —
-/// nothing was added to [AppState] or [SettingsActions]; the AetherCard
-/// wrappers only change presentation.
+/// Rows are grouped by what people come to change: Account (plan, usage),
+/// Personalization (theme, memory, reasoning), Data controls (export,
+/// permissions, telemetry, storage, delete), Models, Studio, Notifications,
+/// Advanced (device health, browser viewport, integrity, sync internals) and
+/// About. Preference tiles keep their persisted bindings.
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({
     super.key,
@@ -86,105 +85,35 @@ class SettingsScreen extends StatelessWidget {
                 _hairline(),
                 _navTile(
                   context,
-                  Icons.sync_lock_outlined,
-                  'Private sync',
-                  'Private transcript storage over HTTPS, with your consent',
-                  PrivateSyncSettingsScreen(controller: privateSyncController),
+                  Icons.workspace_premium_outlined,
+                  'Plan & Billing',
+                  'Your Ovid Cloud plan · usage · upgrade',
+                  const BillingScreen(),
                 ),
                 _hairline(),
                 _navTile(
                   context,
-                  Icons.group_outlined,
-                  'Collaboration',
-                  'Shared messages and read-only activity',
-                  CollaborationScreen(controller: collaborationController),
+                  Icons.bar_chart_rounded,
+                  'Usage',
+                  'Per-client spend · OvidAI, OpenCode, [CC], Z Code',
+                  const UsageScreen(),
                 ),
               ],
             ),
           ),
 
-          // ── Appearance ────────────────────────────────────────────────
-          const _SectionGap(),
-          const AetherSectionTitle(eyebrow: 'Appearance'),
-          const SizedBox(height: 10),
-          const AetherCard(padding: EdgeInsets.zero, child: _ThemeToggle()),
-
-          // ── Models ────────────────────────────────────────────────────
+          // ── Personalization ───────────────────────────────────────────
           const _SectionGap(),
           const AetherSectionTitle(
-            eyebrow: 'Models',
-            subtitle:
-                'Providers, context window, output cap, response timeout and preset routing.',
+            eyebrow: 'Personalization',
+            subtitle: 'Theme, memory and how answers are shown.',
           ),
           const SizedBox(height: 10),
           AetherCard(
             padding: EdgeInsets.zero,
             child: Column(
               children: [
-                _navTile(
-                  context,
-                  Icons.key_outlined,
-                  'Providers',
-                  'BYOK · free & custom providers',
-                  const ProvidersScreen(),
-                ),
-                _hairline(),
-                _navTile(
-                  context,
-                  Icons.memory_outlined,
-                  'Context & output',
-                  'Context window override (per-model auto by default) and max output tokens. Drives auto-compaction + the % context ring.',
-                  const _ContextModelScreen(),
-                ),
-                _hairline(),
-                _navTile(
-                  context,
-                  Icons.timer_outlined,
-                  'AI response timeout',
-                  'How long the agent may stream. Lower = snappier, higher = no cutoff of long answers.',
-                  const _TimeoutScreen(),
-                ),
-                _hairline(),
-                _navTile(
-                  context,
-                  Icons.tune_outlined,
-                  'Agent presets',
-                  'Tool rosters & permissions · built-in & custom presets',
-                  const _PresetsScreen(),
-                ),
-              ],
-            ),
-          ),
-
-          // ── Autonomy ──────────────────────────────────────────────────
-          const _SectionGap(),
-          const AetherSectionTitle(
-            eyebrow: 'Autonomy',
-            subtitle:
-                'What the agent may reach into on its own — paths, hosts, memory and chain-of-thought visibility.',
-          ),
-          const SizedBox(height: 10),
-          AetherCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                ListTile(
-                  leading: const Icon(Icons.key_outlined),
-                  title: const Text(
-                    'Permissions',
-                    style: TextStyle(fontSize: 14),
-                  ),
-                  subtitle: const Text(
-                    'Paths and hosts the agent may always access',
-                    style: TextStyle(fontSize: 11.5),
-                  ),
-                  trailing: const Icon(Icons.chevron_right, size: 18),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const PermissionsScreen(),
-                    ),
-                  ),
-                ),
+                const _ThemeToggle(),
                 _hairline(),
                 const _SettingsSwitchTile(
                   icon: Icons.psychology_outlined,
@@ -214,19 +143,116 @@ class SettingsScreen extends StatelessWidget {
                   getter: _getShowReasoning,
                   setter: _setShowReasoning,
                 ),
-                _hairline(),
-                const _SettingsSwitchTile(
-                  icon: Icons.desktop_windows_outlined,
-                  title: 'Browser: desktop mode',
-                  subtitleOn:
-                      'ON — Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)',
-                  subtitleOff:
-                      'OFF — new tabs use the device\'s mobile viewport (default)',
-                  getter: _getBrowserDesktop,
-                  setter: _setBrowserDesktop,
+              ],
+            ),
+          ),
+
+          // ── Data controls ─────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Data controls',
+            subtitle:
+                'Export, permissions, telemetry, storage and deleting your data.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _navTileWithAction(
+                  context,
+                  Icons.inventory_2_outlined,
+                  'Export data',
+                  'Portable chat backup (ZIP) to save or restore · JSON for other tools',
+                  const SettingsBackupScreen(),
+                  actionLabel: 'Backup',
                 ),
                 _hairline(),
-                const _DeviceIntegrityTile(),
+                ListTile(
+                  leading: const Icon(Icons.key_outlined),
+                  title: const Text(
+                    'Permissions',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  subtitle: const Text(
+                    'Paths and hosts the agent may always access',
+                    style: TextStyle(fontSize: 11.5),
+                  ),
+                  trailing: const Icon(Icons.chevron_right, size: 18),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const PermissionsScreen(),
+                    ),
+                  ),
+                ),
+                _hairline(),
+                _TelemetryTile(),
+                _hairline(),
+                const _StorageTile(),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.delete_outline,
+                  'Delete all data',
+                  SettingsActions.resetAll == null
+                      ? 'Unavailable · verified full reset is not connected'
+                      : 'Chats, keys and settings · irreversible',
+                  SettingsResetScreen(
+                    // "Export my chats first" (PR-3b) opens Export data.
+                    onExport: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const SettingsBackupScreen(),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Models ────────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Models',
+            subtitle:
+                'Providers, presets, context window and response wait limit.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                _navTile(
+                  context,
+                  Icons.key_outlined,
+                  'Providers',
+                  'BYOK · free & custom providers',
+                  const ProvidersScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.tune_outlined,
+                  'Agent presets',
+                  'Tool rosters & permissions · built-in & custom presets',
+                  const _PresetsScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.memory_outlined,
+                  'Context & output',
+                  'Context window override (per-model auto by default) and max output tokens. Drives auto-compaction + the % context ring.',
+                  const _ContextModelScreen(),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.timer_outlined,
+                  'Response wait limit',
+                  'How long to wait for the model to respond (or resume) before giving up.',
+                  const _TimeoutScreen(),
+                ),
               ],
             ),
           ),
@@ -262,11 +288,30 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
 
-          // ── Backup ────────────────────────────────────────────────────
+          // ── Notifications ─────────────────────────────────────────────
           const _SectionGap(),
           const AetherSectionTitle(
-            eyebrow: 'Backup',
-            subtitle: 'Export, import, inspect and clear app-owned data.',
+            eyebrow: 'Notifications',
+            subtitle: 'Status notifications and background work.',
+          ),
+          const SizedBox(height: 10),
+          AetherCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                const _NotificationsTile(),
+                _hairline(),
+                const _KeepAliveToggle(),
+              ],
+            ),
+          ),
+
+          // ── Advanced ──────────────────────────────────────────────────
+          const _SectionGap(),
+          const AetherSectionTitle(
+            eyebrow: 'Advanced',
+            subtitle:
+                'Device health, browser viewport, device integrity and sync internals.',
           ),
           const SizedBox(height: 10),
           AetherCard(
@@ -275,86 +320,40 @@ class SettingsScreen extends StatelessWidget {
               children: [
                 _navTileWithAction(
                   context,
-                  Icons.inventory_2_outlined,
-                  'Portable transcript backup',
-                  'Versioned archive · attachment limits · validate restore',
-                  const SettingsBackupScreen(),
-                  actionLabel: 'Backup',
+                  Icons.monitor_heart_outlined,
+                  'Device health',
+                  'Per-runtime probes · configuration and repair availability',
+                  const SettingsHealthScreen(),
+                  actionLabel: 'Health',
                 ),
-                _hairline(),
-                _navTile(
-                  context,
-                  Icons.download_outlined,
-                  'Export chats',
-                  'Download all sessions as JSON',
-                  const _ExportChatsScreen(),
-                ),
-                _hairline(),
-                _navTile(
-                  context,
-                  Icons.delete_outline,
-                  'Delete all data',
-                  SettingsActions.resetAll == null
-                      ? 'Unavailable · verified full reset is not connected'
-                      : 'Chats, keys and settings · irreversible',
-                  SettingsResetScreen(
-                    onExport: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const _ExportChatsScreen(),
-                      ),
-                    ),
-                  ),
-                ),
-                _hairline(),
-                const _StorageTile(),
-              ],
-            ),
-          ),
-
-          // ── Health ────────────────────────────────────────────────────
-          const _SectionGap(),
-          const AetherSectionTitle(
-            eyebrow: 'Health',
-            subtitle: 'Per-runtime probes and configuration repair.',
-          ),
-          const SizedBox(height: 10),
-          AetherCard(
-            padding: EdgeInsets.zero,
-            child: _navTileWithAction(
-              context,
-              Icons.monitor_heart_outlined,
-              'Device health',
-              'Per-runtime probes · configuration and repair availability',
-              const SettingsHealthScreen(),
-              actionLabel: 'Health',
-            ),
-          ),
-
-          // ── Diagnostics ───────────────────────────────────────────────
-          const _SectionGap(),
-          const AetherSectionTitle(
-            eyebrow: 'Diagnostics',
-            subtitle:
-                'Telemetry, background keep-alive and notification channel.',
-          ),
-          const SizedBox(height: 10),
-          AetherCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _TelemetryTile(),
-                _hairline(),
-                const _KeepAliveToggle(),
                 _hairline(),
                 const _SettingsSwitchTile(
-                  icon: Icons.notifications_outlined,
-                  title: 'Notifications',
+                  icon: Icons.desktop_windows_outlined,
+                  title: 'Browser: desktop mode',
                   subtitleOn:
-                      'Requested — status notifications also require OS permission and an available background service',
+                      'ON — Desktop layout viewport (media queries use 1280px; fallback scale-only if channel unavailable)',
                   subtitleOff:
-                      'OFF — no status notification; background runs may stop',
-                  getter: _getNotificationsEnabled,
-                  setter: _setNotificationsEnabled,
+                      'OFF — new tabs use the device\'s mobile viewport (default)',
+                  getter: _getBrowserDesktop,
+                  setter: _setBrowserDesktop,
+                ),
+                _hairline(),
+                const _DeviceIntegrityTile(),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.sync_lock_outlined,
+                  'Private sync',
+                  'Private transcript storage over HTTPS, with your consent',
+                  PrivateSyncSettingsScreen(controller: privateSyncController),
+                ),
+                _hairline(),
+                _navTile(
+                  context,
+                  Icons.group_outlined,
+                  'Collaboration',
+                  'Shared messages and read-only activity',
+                  CollaborationScreen(controller: collaborationController),
                 ),
               ],
             ),
@@ -368,22 +367,6 @@ class SettingsScreen extends StatelessWidget {
             padding: EdgeInsets.zero,
             child: Column(
               children: [
-                _navTile(
-                  context,
-                  Icons.workspace_premium_outlined,
-                  'Plan & Billing',
-                  'Your Ovid Cloud plan · usage · upgrade',
-                  const BillingScreen(),
-                ),
-                _hairline(),
-                _navTile(
-                  context,
-                  Icons.bar_chart_rounded,
-                  'Usage',
-                  'Per-client spend · OvidAI, OpenCode, [CC], Z Code',
-                  const UsageScreen(),
-                ),
-                _hairline(),
                 ListTile(
                   leading: const Icon(Icons.share_outlined),
                   title: const Text('Share Ovid'),
@@ -1055,7 +1038,7 @@ class _StorageScreenState extends State<_StorageScreen> {
                 style: TextStyle(fontSize: 14),
               ),
               subtitle: Text(
-                'Sessions, workspaces, previews · managed by Export chats / Delete all data',
+                'Sessions, workspaces, previews · managed by Export data / Delete all data',
                 style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
               ),
               trailing: Text(
@@ -1156,24 +1139,172 @@ class _StorageScreenState extends State<_StorageScreen> {
 /// Share-session-memory toggle — real, persisted in AppState. OFF by default
 /// so each chat session stays isolated (its own sandbox workspace + memory).
 /// ON lets the AI search across every chat via the memory_search tool.
+///
+/// Requires Memory: while Memory is off the switch is disabled and every
+/// cross-chat path treats sharing as off ([AppState.effectiveShareSessionMemory]).
 class _ShareMemoryTile extends StatelessWidget {
   const _ShareMemoryTile();
 
   @override
   Widget build(BuildContext context) {
     final app = AppState.I;
-    return SettingsSwitchTile(
-      icon: Icons.psychology_outlined,
-      title: 'Share session memory',
-      listenable: app,
-      subtitleOn: 'ON — the AI can search across all chats (memory_search).',
-      subtitleOff: 'OFF — cross-chat memory search is disabled.',
-      getter: () => app.shareSessionMemory,
-      setter: (v) => SettingsActions.persist(
-        'ovid_share_session_memory',
-        v,
-        () => app.setShareSessionMemory(v),
-      ),
+    return AnimatedBuilder(
+      animation: app,
+      builder: (_, _) {
+        final memoryOn = app.memoryEnabled;
+        return SettingsSwitchTile(
+          key: ValueKey('share-memory-$memoryOn'),
+          icon: Icons.psychology_outlined,
+          title: 'Share session memory',
+          listenable: app,
+          subtitleOn:
+              'ON — the AI can search across all chats (memory_search).',
+          subtitleOff: memoryOn
+              ? 'OFF — cross-chat memory search is disabled.'
+              : 'Requires Memory — turn Memory on to share it across chats.',
+          getter: () => app.effectiveShareSessionMemory,
+          setter: memoryOn
+              ? (v) => SettingsActions.persist(
+                  'ovid_share_session_memory',
+                  v,
+                  () => app.setShareSessionMemory(v),
+                )
+              : null,
+        );
+      },
+    );
+  }
+}
+
+/// Seam over the OS notification permission so the Settings row can be
+/// exercised in tests without the platform channel.
+class NotificationPermissionAccess {
+  NotificationPermissionAccess._();
+
+  static Future<PermissionStatus> Function() status = () =>
+      Permission.notification.status;
+  static Future<PermissionStatus> Function() request = () =>
+      Permission.notification.request();
+  static Future<bool> Function() openSettings = openAppSettings;
+
+  @visibleForTesting
+  static void reset() {
+    status = () => Permission.notification.status;
+    request = () => Permission.notification.request();
+    openSettings = openAppSettings;
+  }
+}
+
+/// Notifications switch that reflects the OS permission, not just the
+/// preference: turning it ON asks Android for POST_NOTIFICATIONS, and a
+/// switch that is ON while Android blocks notifications says so and offers
+/// the system settings page as the fix.
+class _NotificationsTile extends StatefulWidget {
+  const _NotificationsTile();
+
+  @override
+  State<_NotificationsTile> createState() => _NotificationsTileState();
+}
+
+class _NotificationsTileState extends State<_NotificationsTile>
+    with WidgetsBindingObserver {
+  PermissionStatus? _status;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning from the system settings page: pick up the new grant.
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  Future<void> _refresh() async {
+    PermissionStatus? st;
+    try {
+      st = await NotificationPermissionAccess.status();
+    } catch (e) {
+      Diag.swallow('settings_screen.notifications', e);
+    }
+    if (mounted) setState(() => _status = st);
+  }
+
+  bool get _blocked =>
+      _status != null && (_status!.isDenied || _status!.isPermanentlyDenied);
+
+  Future<void> _set(bool v) async {
+    if (v) {
+      try {
+        final st = await NotificationPermissionAccess.request();
+        if (mounted) setState(() => _status = st);
+      } catch (e) {
+        Diag.swallow('settings_screen.notifications', e);
+      }
+    }
+    await _setNotificationsEnabled(v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (_, _) {
+        final on = AppState.I.notificationsEnabled;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _SettingsSwitchTile(
+              icon: Icons.notifications_outlined,
+              title: 'Notifications',
+              subtitleOn: _blocked
+                  ? 'ON — but blocked by Android; no notifications will show'
+                  : 'ON — status notifications while Ovid works in the background',
+              subtitleOff:
+                  'OFF — no status notification; background runs may stop',
+              getter: _getNotificationsEnabled,
+              setter: _set,
+            ),
+            if (on && _blocked)
+              ListTile(
+                key: const ValueKey('notifications-blocked'),
+                dense: true,
+                leading: Icon(
+                  Icons.block_outlined,
+                  size: 19,
+                  color: Aether.warnLight,
+                ),
+                title: const Text(
+                  'Blocked by Android',
+                  style: TextStyle(fontSize: 14),
+                ),
+                subtitle: Text(
+                  'Allow notifications for Ovid in system settings.',
+                  style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                ),
+                trailing: TextButton(
+                  onPressed: () async {
+                    try {
+                      await NotificationPermissionAccess.openSettings();
+                    } catch (e) {
+                      Diag.swallow('settings_screen.notifications', e);
+                    }
+                  },
+                  child: const Text('Open settings'),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }
@@ -1348,7 +1479,7 @@ class _TimeoutScreenState extends State<_TimeoutScreen> {
         leading: const BackButton(),
         toolbarHeight:
             kToolbarHeight * (MediaQuery.textScalerOf(context).scale(20) / 20),
-        title: const Text('AI response timeout'),
+        title: const Text('Response wait limit'),
       ),
       body: AnimatedBuilder(
         animation: AppState.I,
@@ -1358,9 +1489,11 @@ class _TimeoutScreenState extends State<_TimeoutScreen> {
             padding: const EdgeInsets.all(16),
             children: [
               Text(
-                'How long the agent may stream before being cut off. '
-                'Long reasoning chains need a generous budget; casual chat '
-                'feels snappier with a short one.',
+                'How long to wait for the model to respond (or resume) '
+                'before giving up. This is the longest silence allowed — '
+                'the first token, or a pause mid-answer — not a cap on the '
+                'total length of a reply. Reasoning models can think quietly '
+                'for a minute or more before they start.',
                 style: TextStyle(
                   fontSize: 12.5,
                   height: 1.55,
@@ -1413,15 +1546,29 @@ class _TimeoutScreenState extends State<_TimeoutScreen> {
               Padding(
                 padding: const EdgeInsets.all(12),
                 child: Text(
-                  'Custom values: pick any number of seconds between 5 s and 60 min.',
+                  'Custom values: pick any number of seconds between '
+                  '${AppState.minResponseTimeoutSec} s and 60 min.',
                   style: TextStyle(fontSize: 11, color: Aether.textFaint),
                 ),
               ),
+              if (cur < AppState.responseTimeoutWarnBelowSec)
+                Padding(
+                  key: const ValueKey('timeout-low-warning'),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Text(
+                    'Under a minute: reasoning models that think before '
+                    'answering may time out on every turn.',
+                    style: TextStyle(fontSize: 11.5, color: Aether.warnLight),
+                  ),
+                ),
               Slider(
-                value: (_draft ?? cur.toDouble()).clamp(5.0, 3600.0),
-                min: 5,
-                max: 3600,
-                divisions: 71,
+                value: (_draft ?? cur.toDouble()).clamp(
+                  AppState.minResponseTimeoutSec.toDouble(),
+                  AppState.maxResponseTimeoutSec.toDouble(),
+                ),
+                min: AppState.minResponseTimeoutSec.toDouble(),
+                max: AppState.maxResponseTimeoutSec.toDouble(),
+                divisions: 119,
                 activeColor: Aether.accent,
                 inactiveColor: Aether.surfaceAlt,
                 label: '${(_draft ?? cur.toDouble()).round()}s',
@@ -1439,6 +1586,15 @@ class _TimeoutScreenState extends State<_TimeoutScreen> {
 /// Context & output — user control over context window + output caps.
 class _ContextModelScreen extends StatelessWidget {
   const _ContextModelScreen();
+
+  /// Same labels as the presets: binary sizes (32768) read as "32K",
+  /// decimal ones (128000) as "128K".
+  static String _kTokens(int tokens) {
+    if (tokens % 1000000 == 0) return '${tokens ~/ 1000000}M';
+    if (tokens % 1000 == 0) return '${tokens ~/ 1000}K';
+    if (tokens % 1024 == 0) return '${tokens ~/ 1024}K';
+    return '${(tokens / 1000).toStringAsFixed(0)}K';
+  }
 
   static const _windowPresets = <(int, String)>[
     (0, 'Auto (per-model)'),
@@ -1476,10 +1632,23 @@ class _ContextModelScreen extends StatelessWidget {
           // a different window) on two gateways, so ask the provider that owns
           // this session first.
           final model = s?.model ?? '';
+          // Model window (what "Auto" means) vs the window compaction really
+          // uses: the override only ever shrinks it (min(override, model)).
           final autoWindow = AgentService.contextWindowFor(
             model,
             s?.providerId,
           );
+          final effectiveWindow = s == null
+              ? AgentService.effectiveContextWindow(
+                  app.contextWindowOverride,
+                  autoWindow,
+                )
+              : AgentService.contextWindowForSession(s);
+          final overrideApplies = s == null
+              ? app.contextWindowOverride > 0 &&
+                    app.contextWindowOverride < autoWindow
+              : AgentService.contextOverrideAppliesTo(s);
+          final overrideTooBig = app.contextWindowOverride > autoWindow;
           final measuredLimits = ModelLimits.label(model, s?.providerId);
           final limitSource = measuredLimits == null
               ? 'family table / default \u2014 this model published no limits'
@@ -1504,9 +1673,12 @@ class _ContextModelScreen extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 18),
                 child: Text(
                   'Current model: ${s?.model ?? '\u2014'}\n'
+                  'Model window: ${_kTokens(autoWindow)} tokens\n'
                   'Window used for compaction: '
-                  '${(autoWindow / 1000).toStringAsFixed(0)}K tokens\n'
-                  'Source: $limitSource',
+                  '${_kTokens(effectiveWindow)} tokens '
+                  '${overrideApplies ? '(override)' : '(auto)'}\n'
+                  'Source: $limitSource'
+                  '${overrideTooBig ? '\nYour override is larger than this model\'s window, so the model window is used.' : ''}',
                   style: TextStyle(
                     fontSize: 11.5,
                     height: 1.55,
@@ -1528,10 +1700,26 @@ class _ContextModelScreen extends StatelessWidget {
                       RadioListTile<int>(
                         dense: true,
                         activeColor: Aether.accent,
+                        // Larger than the current model's window: it could
+                        // never apply, so don't offer it as a choice (the
+                        // stored value stays selectable to switch away).
+                        enabled:
+                            v == 0 ||
+                            v <= autoWindow ||
+                            v == app.contextWindowOverride,
                         title: Text(
                           label,
                           style: const TextStyle(fontSize: 14),
                         ),
+                        subtitle: v > 0 && v > autoWindow
+                            ? Text(
+                                'Larger than this model\'s window',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Aether.textFaint,
+                                ),
+                              )
+                            : null,
                         value: v,
                       ),
                   ],
@@ -1578,140 +1766,6 @@ class _ContextModelScreen extends StatelessWidget {
             ],
           );
         },
-      ),
-    );
-  }
-}
-
-/// Writes the chat export off the UI isolate. Encoding every session (tool
-/// output, compacted summaries) used to freeze the UI for seconds and build
-/// one giant indented string; here each session is encoded separately inside
-/// [Isolate.run] and streamed to disk, so peak memory is one session.
-@visibleForTesting
-Future<void> writeSessionsExport(
-  String path, {
-  required String exportedAt,
-  required List<Map<String, dynamic>> sessions,
-}) => Isolate.run(() async {
-  final sink = File(path).openWrite();
-  try {
-    sink.write('{"exportedAt":${jsonEncode(exportedAt)},"sessions":[');
-    for (var i = 0; i < sessions.length; i++) {
-      if (i > 0) sink.write(',');
-      sink.write(jsonEncode(sessions[i]));
-    }
-    sink.write(']}');
-    await sink.flush();
-  } finally {
-    await sink.close();
-  }
-});
-
-class _ExportChatsScreen extends StatefulWidget {
-  const _ExportChatsScreen();
-  @override
-  State<_ExportChatsScreen> createState() => _ExportChatsScreenState();
-}
-
-class _ExportChatsScreenState extends State<_ExportChatsScreen> {
-  bool _busy = false;
-  Directory? _staging;
-
-  @override
-  void dispose() {
-    _discardStaging();
-    super.dispose();
-  }
-
-  /// The plaintext export lives only in a temporary staging directory until
-  /// the share sheet has copied it; nothing is left in app documents.
-  void _discardStaging() {
-    final staging = _staging;
-    _staging = null;
-    if (staging == null) return;
-    staging.delete(recursive: true).catchError((Object e) {
-      Diag.swallow('settings.export_cleanup', e);
-      return staging;
-    });
-  }
-
-  Future<void> _export() async {
-    setState(() => _busy = true);
-    try {
-      final temp = await getTemporaryDirectory();
-      // Remove any export left behind by an interrupted earlier attempt.
-      await for (final entity in temp.list(followLinks: false)) {
-        if (entity is Directory &&
-            entity.uri.pathSegments
-                .where((segment) => segment.isNotEmpty)
-                .last
-                .startsWith('ovid-chat-export-')) {
-          await entity.delete(recursive: true);
-        }
-      }
-      final stamp = DateTime.now().millisecondsSinceEpoch;
-      final staging = _staging = await Directory(
-        '${temp.path}/ovid-chat-export-$stamp',
-      ).create(recursive: true);
-      final file = File('${staging.path}/ovid-sessions-$stamp.json');
-      await writeSessionsExport(
-        file.path,
-        exportedAt: DateTime.now().toIso8601String(),
-        sessions: AppState.I.sessions.map((s) => s.toJson()).toList(),
-      );
-      if (!mounted) return;
-      // The native share path copies the file into its own short-lived share
-      // cache before the chooser opens, so the staging copy can go now.
-      await showNativeShare(context, () => NativeShare.file(file.path));
-      _discardStaging();
-    } catch (e, st) {
-      _discardStaging();
-      if (!mounted) return;
-      final l = context.l10n;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            l.settingsExportFailed(
-              friendlyError(e, l10n: l, stack: st, log: 'settings.export'),
-            ),
-          ),
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Export chats')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Text(
-            'Exports every session (messages, todos, goals, schedules, '
-            'attachments metadata) as a single JSON file and opens the share '
-            'sheet so you can save or send it. No copy is kept in the app.',
-            style: TextStyle(
-              fontSize: 13.5,
-              height: 1.6,
-              color: Aether.textMuted,
-            ),
-          ),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: _busy ? null : _export,
-            icon: _busy
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.ios_share_outlined, size: 18),
-            label: Text(_busy ? 'Exporting…' : 'Export and share JSON'),
-          ),
-        ],
       ),
     );
   }
@@ -2207,16 +2261,26 @@ class _SkillsScreenState extends State<SkillsScreen> {
   }
 }
 
-class _PresetsScreen extends StatelessWidget {
+class _PresetsScreen extends StatefulWidget {
   const _PresetsScreen();
 
-  void _duplicate(BuildContext context, AgentPreset preset) async {
+  @override
+  State<_PresetsScreen> createState() => _PresetsScreenState();
+}
+
+class _PresetsScreenState extends State<_PresetsScreen> {
+  /// One key per preset id so a freshly created preset can be scrolled to.
+  final Map<String, GlobalKey> _tileKeys = {};
+
+  /// Preset that was just created: rendered expanded and scrolled into view.
+  String? _createdId;
+
+  GlobalKey _keyFor(String id) =>
+      _tileKeys.putIfAbsent(id, () => GlobalKey(debugLabel: 'preset-$id'));
+
+  Future<void> _duplicate(AgentPreset preset) async {
     final nameController = TextEditingController(
       text: '${preset.label} (Custom)',
-    );
-    final idController = TextEditingController(
-      text:
-          '${preset.id}_custom_${DateTime.now().millisecondsSinceEpoch % 1000}',
     );
     final route = DialogRoute<bool>(
       context: context,
@@ -2226,19 +2290,10 @@ class _PresetsScreen extends StatelessWidget {
           'Duplicate as custom preset',
           style: TextStyle(fontSize: 16),
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: 'Preset Label'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: idController,
-              decoration: const InputDecoration(labelText: 'Preset ID'),
-            ),
-          ],
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Preset name'),
         ),
         actions: [
           TextButton(
@@ -2256,27 +2311,43 @@ class _PresetsScreen extends StatelessWidget {
     // A popped route still builds its fields during its exit transition (and
     // keyboard inset changes). Release controllers only after overlay removal.
     await route.completed;
-    final confirmed = ok == true;
-    final idText = idController.text.trim();
     final nameText = nameController.text.trim();
     nameController.dispose();
-    idController.dispose();
-    if (confirmed && idText.isNotEmpty) {
-      final newPreset = AgentPreset(
-        id: idText,
-        label: nameText.isEmpty ? idText : nameText,
-        description: preset.description,
-        allowedTools: List.of(preset.allowedTools),
-        deniedTools: List.of(preset.deniedTools),
-        persona: preset.persona,
-        // G3/G5: a duplicate must carry the run pins and the plan policy,
-        // otherwise "Duplicate as custom" silently drops half the preset.
-        model: preset.model,
-        temperature: preset.temperature,
-        planAllowedTools: List.of(preset.planAllowedTools),
-      );
-      await AppState.I.saveCustomPreset(newPreset);
-    }
+    if (ok != true) return;
+    // The id is generated, never typed: a typed id could shadow a built-in
+    // preset (e.g. `standard`) for every session or overwrite another custom.
+    final id = PresetRegistry.newCustomId();
+    final label = nameText.isEmpty ? '${preset.label} (Custom)' : nameText;
+    final newPreset = AgentPreset(
+      id: id,
+      label: label,
+      description: preset.description,
+      allowedTools: List.of(preset.allowedTools),
+      deniedTools: List.of(preset.deniedTools),
+      persona: preset.persona,
+      // G3/G5: a duplicate must carry the run pins and the plan policy,
+      // otherwise "Duplicate as custom" silently drops half the preset.
+      model: preset.model,
+      modelProviderId: preset.modelProviderId,
+      temperature: preset.temperature,
+      planAllowedTools: List.of(preset.planAllowedTools),
+    );
+    await AppState.I.saveCustomPreset(newPreset);
+    if (!mounted) return;
+    setState(() => _createdId = id);
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text("Created '$label'")));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final target = _tileKeys[id]?.currentContext;
+      if (target != null && target.mounted) {
+        Scrollable.ensureVisible(
+          target,
+          duration: const Duration(milliseconds: 300),
+          alignment: 0.1,
+        );
+      }
+    });
   }
 
   @override
@@ -2307,10 +2378,11 @@ class _PresetsScreen extends StatelessWidget {
               ),
               for (final preset in allPresets)
                 _PresetTile(
-                  key: ValueKey(preset.id),
+                  key: _keyFor(preset.id),
                   preset: preset,
                   isCustom: customIds.contains(preset.id),
-                  onDuplicate: () => _duplicate(context, preset),
+                  initiallyExpanded: preset.id == _createdId,
+                  onDuplicate: () => _duplicate(preset),
                   onDelete: customIds.contains(preset.id)
                       ? () => _confirmDelete(context, preset)
                       : null,
@@ -2356,6 +2428,7 @@ class _PresetTile extends StatefulWidget {
   final VoidCallback onDuplicate;
   final VoidCallback? onDelete;
   final ValueChanged<AgentPreset>? onUpdate;
+  final bool initiallyExpanded;
 
   const _PresetTile({
     super.key,
@@ -2364,6 +2437,7 @@ class _PresetTile extends StatefulWidget {
     required this.onDuplicate,
     this.onDelete,
     this.onUpdate,
+    this.initiallyExpanded = false,
   });
 
   @override
@@ -2371,7 +2445,32 @@ class _PresetTile extends StatefulWidget {
 }
 
 class _PresetTileState extends State<_PresetTile> {
-  bool _expanded = false;
+  late bool _expanded = widget.initiallyExpanded;
+
+  @override
+  void didUpdateWidget(_PresetTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initiallyExpanded && !oldWidget.initiallyExpanded) {
+      _expanded = true;
+    }
+  }
+
+  Future<void> _pickModel(AgentPreset p) async {
+    final picked =
+        await showModalBottomSheet<({String providerId, String model})>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          builder: (_) => _PresetModelPickerSheet(
+            selectedProviderId: p.modelProviderId,
+            selectedModel: p.model,
+          ),
+        );
+    if (picked == null) return;
+    widget.onUpdate?.call(
+      p.copyWith(model: picked.model, modelProviderId: picked.providerId),
+    );
+  }
 
   static const _gatedTools = [
     'browser_open',
@@ -2393,6 +2492,13 @@ class _PresetTileState extends State<_PresetTile> {
     'workflow',
     'ralph',
   ];
+
+  static String _pinLabel(AgentPreset p) {
+    final providerId = p.modelProviderId;
+    if (providerId == null) return p.model!;
+    final name = AppState.I.providerById(providerId)?.name ?? providerId;
+    return '$name · ${p.model}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2632,6 +2738,7 @@ class _PresetTileState extends State<_PresetTile> {
               child: Wrap(
                 spacing: 8,
                 runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   ChoiceChip(
                     label: const Text(
@@ -2642,15 +2749,24 @@ class _PresetTileState extends State<_PresetTile> {
                     onSelected: (_) =>
                         widget.onUpdate?.call(p.copyWith(clearModel: true)),
                   ),
-                  for (final m in {
-                    for (final prov in AppState.I.providers) ...prov.models,
-                  })
-                    ChoiceChip(
-                      label: Text(m, style: const TextStyle(fontSize: 11)),
-                      selected: p.model == m,
-                      onSelected: (_) =>
-                          widget.onUpdate?.call(p.copyWith(model: m)),
+                  if (p.model != null)
+                    InputChip(
+                      label: Text(
+                        _pinLabel(p),
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      selected: true,
+                      onPressed: () => _pickModel(p),
                     ),
+                  TextButton.icon(
+                    key: const ValueKey('preset-model-pick'),
+                    onPressed: () => _pickModel(p),
+                    icon: const Icon(Icons.search, size: 16),
+                    label: Text(
+                      p.model == null ? 'Choose model…' : 'Change…',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -2697,6 +2813,110 @@ class _PresetTileState extends State<_PresetTile> {
             const SizedBox(height: 10),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Searchable model picker for a preset's model pin. Lists every provider's
+/// models lazily, grouped by provider, and returns `(providerId, model)` so
+/// the same model id on two gateways stays unambiguous.
+class _PresetModelPickerSheet extends StatefulWidget {
+  const _PresetModelPickerSheet({this.selectedProviderId, this.selectedModel});
+
+  final String? selectedProviderId;
+  final String? selectedModel;
+
+  @override
+  State<_PresetModelPickerSheet> createState() =>
+      _PresetModelPickerSheetState();
+}
+
+class _PresetModelPickerSheetState extends State<_PresetModelPickerSheet> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final q = _query.trim().toLowerCase();
+    final rows = <Object>[]; // ProviderConfig header or (provider, model)
+    for (final provider in AppState.I.providers) {
+      final nameHit = provider.name.toLowerCase().contains(q);
+      final models = [
+        for (final m in provider.models)
+          if (q.isEmpty || nameHit || m.toLowerCase().contains(q)) m,
+      ];
+      if (models.isEmpty) continue;
+      rows.add(provider);
+      for (final m in models) {
+        rows.add((provider: provider, model: m));
+      }
+    }
+    return SizedBox(
+      height: MediaQuery.sizeOf(context).height * 0.8,
+      child: Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: TextField(
+                key: const ValueKey('preset-model-search'),
+                autofocus: true,
+                decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.search),
+                  hintText: 'Search models or providers',
+                ),
+                onChanged: (v) => setState(() => _query = v),
+              ),
+            ),
+            Expanded(
+              child: rows.isEmpty
+                  ? Center(
+                      child: Text(
+                        q.isEmpty
+                            ? 'No models yet. Add a provider and fetch its models first.'
+                            : 'No models match "$_query".',
+                        style: TextStyle(color: Aether.textFaint),
+                        textAlign: TextAlign.center,
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: rows.length,
+                      itemBuilder: (context, i) {
+                        final row = rows[i];
+                        if (row is ProviderConfig) {
+                          return Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                            child: Text(
+                              row.name.toUpperCase(),
+                              style: AetherType.label,
+                            ),
+                          );
+                        }
+                        final item =
+                            row as ({ProviderConfig provider, String model});
+                        final selected =
+                            item.model == widget.selectedModel &&
+                            (widget.selectedProviderId == null ||
+                                widget.selectedProviderId == item.provider.id);
+                        return ListTile(
+                          dense: true,
+                          title: Text(item.model),
+                          trailing: selected
+                              ? Icon(Icons.check, color: Aether.accent)
+                              : null,
+                          onTap: () => Navigator.pop(context, (
+                            providerId: item.provider.id,
+                            model: item.model,
+                          )),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -75,8 +75,10 @@ void main() {
     }
   }
 
-  testWidgets('JSON-array body shows Unexpected response', (tester) async {
-    await fetchWith(tester, (_) async => http.Response('[{"id":"a"}]', 200));
+  // A bare JSON array is a valid listing (Together AI style, PR-6d); a
+  // body with no model list at all is not.
+  testWidgets('non-list body shows Unexpected response', (tester) async {
+    await fetchWith(tester, (_) async => http.Response('"maintenance"', 200));
     expect(find.text(l.providerFetchUnexpectedResponse), findsOneWidget);
     expectNoRawText();
   });
