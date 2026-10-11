@@ -38,6 +38,7 @@ import '../core/startup_coordinator.dart';
 import 'plugins_screen.dart';
 import 'startup_progress_panel.dart';
 import '../core/diag.dart';
+import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
 import 'widgets/aether_primitives.dart';
 
@@ -950,10 +951,29 @@ class _ChatScreenState extends State<ChatScreen>
     AgentService.markApprovalUiMounted();
     _input.addListener(_recordDraftEdit);
     _scroll.addListener(_onScroll);
+    _fallbackNotice = AppState.I.ovidCloudModelFallbackNotice
+      ..addListener(_showModelFallbackNotice);
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _showModelFallbackNotice(),
+    );
+  }
+
+  ValueNotifier<String?>? _fallbackNotice;
+
+  /// One-time "`model` is no longer available — switched to Auto".
+  void _showModelFallbackNotice() {
+    final notice = _fallbackNotice;
+    final message = notice?.value;
+    if (!mounted || notice == null || message == null) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    notice.value = null;
+    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   void dispose() {
+    _fallbackNotice?.removeListener(_showModelFallbackNotice);
     // One fewer approval UI able to answer.
     AgentService.markApprovalUiDisposed();
     _scroll.dispose();
@@ -2405,12 +2425,16 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
         final cloud = OvidCloudService.I;
         final connection = cloud.connectionFor(app);
         final managed = app.providerById(AppState.ovidCloudProviderId);
+        // `auto` is a server-side alias and the last-good catalog is
+        // persisted, so both stay visible whatever the connection state.
+        final cloudModels = managed == null
+            ? const <String>[]
+            : <String>{'auto', ...managed.models}.toList();
         final showCloud =
             managed != null &&
             (q.isEmpty ||
                 _matchesQuery(q, managed.name) ||
-                (connection.status == CloudConnectionStatus.ready &&
-                    managed.models.any((m) => _matchesQuery(q, m))));
+                cloudModels.any((m) => _matchesQuery(q, m)));
         final configured = app.providers
             .where((p) => p.id != AppState.ovidCloudProviderId)
             .where((p) => p.hasKey && p.models.isNotEmpty)
@@ -2431,7 +2455,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
         );
 
         // Recents (current selection + prior selections), filtered by query &
-        // Ovid Cloud readiness.
+        // the Ovid Cloud catalog.
         final allRecents = <({String providerId, String model})>[];
         final session = app.activeSession;
         if (session != null &&
@@ -2453,8 +2477,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
           final p = app.providerById(r.providerId);
           if (p == null) return false;
           if (p.id == AppState.ovidCloudProviderId &&
-              (connection.status != CloudConnectionStatus.ready ||
-                  !p.models.contains(r.model.split('·').first.trim()))) {
+              !cloudModels.contains(r.model.split('·').first.trim())) {
             return false;
           }
           if (q.isEmpty) return true;
@@ -2584,6 +2607,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                             cloud: cloud,
                             connection: connection,
                             managed: managed,
+                            models: cloudModels,
                             q: q,
                           ),
                         if (recents.isNotEmpty) ...[
@@ -2629,10 +2653,14 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
     required OvidCloudService cloud,
     required CloudConnectionState connection,
     required ProviderConfig managed,
+    required List<String> models,
     required String q,
   }) {
     final ready = connection.status == CloudConnectionStatus.ready;
-    final filtered = managed.models
+    final failed = connection.status == CloudConnectionStatus.failed;
+    // Only a mint in flight makes the key (and so every row) unusable.
+    final selectable = connection.status != CloudConnectionStatus.connecting;
+    final filtered = models
         .where((m) => _matchesQuery(q, m) || _matchesQuery(q, managed.name))
         .toList();
     final body = Column(
@@ -2660,25 +2688,49 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
             ),
           ],
         ),
-        if (!ready)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: AetherGhostButton(
-              key: const ValueKey('cloud-connection-retry'),
-              label: connection.loading ? 'Retrying…' : 'Retry',
-              icon: Icons.refresh,
-              loading: connection.loading,
-              onPressed: connection.loading
-                  ? null
-                  : () => unawaited(cloud.ensureConnected(app: app)),
-            ),
+        if (failed) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Catalog may be out of date · Retry',
+            key: const ValueKey('cloud-catalog-stale'),
+            style: AetherType.caption,
           ),
-        if (ready && filtered.isNotEmpty) ...[
+        ],
+        if (!ready)
+          Wrap(
+            spacing: 8,
+            children: [
+              AetherGhostButton(
+                key: const ValueKey('cloud-connection-retry'),
+                label: connection.loading ? 'Retrying…' : 'Retry',
+                icon: Icons.refresh,
+                loading: connection.loading,
+                onPressed: connection.loading
+                    ? null
+                    : () => unawaited(cloud.ensureConnected(app: app)),
+              ),
+              if (connection.mintStatus == MintStatus.sessionExpired)
+                AetherGhostButton(
+                  key: const ValueKey('cloud-connection-sign-out'),
+                  label: 'Sign out',
+                  icon: Icons.logout,
+                  onPressed: () {
+                    Navigator.pop(context);
+                    unawaited(FirebaseService.I.signOut());
+                  },
+                ),
+            ],
+          ),
+        if (filtered.isNotEmpty) ...[
           const SizedBox(height: 12),
           Divider(height: 1, thickness: 1, color: Aether.hairline),
           const SizedBox(height: 4),
           for (final model in filtered)
-            _ModelTile(providerId: managed.id, model: model),
+            _ModelTile(
+              providerId: managed.id,
+              model: model,
+              enabled: selectable,
+            ),
         ],
       ],
     );
@@ -2806,10 +2858,12 @@ class _ModelTile extends StatelessWidget {
   final String providerId;
   final String model;
   final bool isRecent;
+  final bool enabled;
   const _ModelTile({
     required this.providerId,
     required this.model,
     this.isRecent = false,
+    this.enabled = true,
   });
 
   static const _effortModels = [
@@ -2899,6 +2953,7 @@ class _ModelTile extends StatelessWidget {
         color: Colors.transparent,
         child: ListTile(
           dense: true,
+          enabled: enabled,
           leading: Icon(
             Icons.smart_toy_outlined,
             size: 18,
@@ -2935,6 +2990,7 @@ class _ModelTile extends StatelessWidget {
         data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
         child: ExpansionTile(
           dense: true,
+          enabled: enabled,
           tilePadding: const EdgeInsets.symmetric(horizontal: 16),
           childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
           leading: Icon(

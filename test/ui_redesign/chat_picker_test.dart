@@ -91,7 +91,10 @@ void main() {
     );
   }
 
-  Future<void> openPicker(WidgetTester tester, {String openerText = 'Auto'}) async {
+  Future<void> openPicker(
+    WidgetTester tester, {
+    String openerText = 'Auto',
+  }) async {
     await tester.pumpWidget(
       MaterialApp(theme: Aether.theme(), home: const ChatScreen()),
     );
@@ -149,13 +152,11 @@ void main() {
     await openPicker(tester, openerText: 'Select model');
 
     expect(find.text('Ovid Cloud'), findsOneWidget);
-    // No model rows render while idle — no Auto pill.
+    // The server-side `auto` alias stays selectable while idle, next to the
+    // Retry affordance.
     expect(
-      find.descendant(
-        of: find.byType(AetherPill),
-        matching: find.text('Auto'),
-      ),
-      findsNothing,
+      find.descendant(of: find.byType(AetherPill), matching: find.text('Auto')),
+      findsWidgets,
     );
     expect(find.widgetWithText(AetherGhostButton, 'Retry'), findsOneWidget);
   });
@@ -199,7 +200,11 @@ void main() {
     final searchField = find.byKey(const ValueKey('model-picker-search'));
     // Search shares the lazy viewport with the catalogue. Return through the
     // real sheet controller's gesture path before editing the off-screen field.
-    for (var i = 0; i < 12 && searchField.hitTestable().evaluate().isEmpty; i++) {
+    for (
+      var i = 0;
+      i < 12 && searchField.hitTestable().evaluate().isEmpty;
+      i++
+    ) {
       await tester.drag(listFinder, const Offset(0, 200));
       await tester.pumpAndSettle();
     }
@@ -219,7 +224,10 @@ void main() {
     expect(find.text('Ovid Cloud'), findsNothing);
     expect(find.text('Acme AI'), findsOneWidget);
     // Match the result label, not the EditableText containing the same query.
-    expect(find.byWidgetPredicate((w) => w is Text && w.data == 'acme-mini'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate((w) => w is Text && w.data == 'acme-mini'),
+      findsOneWidget,
+    );
     expect(find.text('acme-pro'), findsNothing);
     expect(tester.takeException(), isNull);
   });
