@@ -6112,6 +6112,100 @@ class AppState extends ChangeNotifier {
   List<ChatSession> get rootSessions =>
       sessions.where((s) => !s.isSubagent).toList();
 
+  /// Message-content search for the sidebar (F-047): the SQLite FTS5 index
+  /// when available (off the UI isolate), else a bounded in-memory scan.
+  /// One hit per root chat, best first; deleted/hidden chats are dropped.
+  Future<List<SessionContentHit>> searchSessionContent(
+    String query, {
+    int limit = 20,
+  }) async {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return const [];
+    List<SessionContentHit>? hits;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      hits = await SessionHistoryRepository.I.searchContent(
+        prefs,
+        _accountKey(_kSessions),
+        trimmed,
+        limit: limit,
+      );
+    } catch (e) {
+      Diag.swallow('history.search', e);
+    }
+    if (hits != null) {
+      return [
+        for (final hit in hits)
+          if (sessionById(hit.sessionId) case final s? when !s.isSubagent) hit,
+      ];
+    }
+    return _scanSessionContent(trimmed, limit);
+  }
+
+  List<SessionContentHit> _scanSessionContent(String query, int limit) {
+    final needle = query.toLowerCase();
+    final out = <SessionContentHit>[];
+    for (final session in rootSessionsByRecency) {
+      for (var i = session.messages.length - 1; i >= 0; i--) {
+        final m = session.messages[i];
+        if (m.kind != MsgKind.text ||
+            (m.role != 'user' && m.role != 'assistant')) {
+          continue;
+        }
+        final lower = m.content.toLowerCase();
+        final at = lower.indexOf(needle);
+        if (at < 0) continue;
+        if (lower.length != m.content.length) {
+          // Case folding changed offsets; show the head without highlight.
+          out.add(
+            SessionContentHit(
+              sessionId: session.id,
+              messageIndex: i,
+              role: m.role,
+              snippet: m.content.length > 100
+                  ? '${m.content.substring(0, 100)}…'
+                  : m.content,
+            ),
+          );
+          break;
+        }
+        final start = (at - 40).clamp(0, m.content.length);
+        final end = (at + needle.length + 60).clamp(0, m.content.length);
+        out.add(
+          SessionContentHit(
+            sessionId: session.id,
+            messageIndex: i,
+            role: m.role,
+            snippet:
+                '${start > 0 ? '…' : ''}${m.content.substring(start, at)}'
+                '${SessionHistoryRepository.highlightStart}'
+                '${m.content.substring(at, at + needle.length)}'
+                '${SessionHistoryRepository.highlightEnd}'
+                '${m.content.substring(at + needle.length, end)}'
+                '${end < m.content.length ? '…' : ''}',
+          ),
+        );
+        break;
+      }
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  /// Root sessions, most recent activity first (sidebar order, F-046).
+  /// Compared at one-second resolution and stable for ties, so chats touched
+  /// in the same second keep their stored (newest-created-first) order.
+  List<ChatSession> get rootSessionsByRecency {
+    final roots = rootSessions;
+    final order = {for (var i = 0; i < roots.length; i++) roots[i]: i};
+    int second(ChatSession s) =>
+        s.lastActivityAt.millisecondsSinceEpoch ~/ 1000;
+    return roots..sort((a, b) {
+      final byTime = second(b).compareTo(second(a));
+      return byTime != 0 ? byTime : order[a]!.compareTo(order[b]!);
+    });
+  }
+
   /// Direct children of [sessionId], oldest first.
   List<ChatSession> childrenOf(String sessionId) =>
       sessions.where((s) => s.parentId == sessionId).toList().reversed.toList();

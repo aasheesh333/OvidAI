@@ -205,7 +205,7 @@ void main() {
     await pumpSidebar(tester, size: const Size(1000, 800));
     final settings = find.byIcon(Icons.settings_outlined);
     final footerRect = tester.getRect(settings);
-    await tester.enterText(find.byType(TextField), 'model-49');
+    await tester.enterText(find.byType(TextField), 'on 49');
     await tester.pumpAndSettle();
     expect(find.text('Session 49').hitTestable(), findsOneWidget);
     expect(find.text('Session 0'), findsNothing);
@@ -270,7 +270,7 @@ void main() {
       expect(footerRect.bottom, lessThanOrEqualTo(360));
       expect(tester.getRect(sessionScroll).height, greaterThanOrEqualTo(48));
 
-      await tester.enterText(find.byType(TextField), 'model-49');
+      await tester.enterText(find.byType(TextField), 'on 49');
       await tester.pumpAndSettle();
       expect(find.text('Session 49').hitTestable(), findsOneWidget);
       expect(find.text('Session 0'), findsNothing);

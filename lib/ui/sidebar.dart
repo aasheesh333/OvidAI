@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/connection_service.dart';
 import '../core/firebase_service.dart';
+import '../core/session_history_store.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/agent_service.dart';
@@ -39,6 +42,41 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
   String _query = '';
   final TextEditingController _searchController = TextEditingController();
 
+  /// Message-content search (F-047) runs 200 ms after the last keystroke;
+  /// title matches render immediately.
+  static const contentSearchDebounce = Duration(milliseconds: 200);
+  Timer? _contentDebounce;
+  int _contentSearchSeq = 0;
+  String _contentQuery = '';
+  List<SessionContentHit> _contentHits = const [];
+
+  void _onQueryChanged(String value) {
+    final q = value.trim();
+    setState(() => _query = q);
+    _contentDebounce?.cancel();
+    final seq = ++_contentSearchSeq;
+    if (q.isEmpty) {
+      setState(() {
+        _contentQuery = '';
+        _contentHits = const [];
+      });
+      return;
+    }
+    _contentDebounce = Timer(contentSearchDebounce, () async {
+      List<SessionContentHit> hits;
+      try {
+        hits = await AppState.I.searchSessionContent(q);
+      } catch (_) {
+        hits = const [];
+      }
+      if (!mounted || seq != _contentSearchSeq) return;
+      setState(() {
+        _contentQuery = q;
+        _contentHits = hits;
+      });
+    });
+  }
+
   Future<void> _navigateFromSidebar(
     BuildContext context,
     WidgetBuilder builder,
@@ -50,6 +88,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
 
   @override
   void dispose() {
+    _contentDebounce?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -107,7 +146,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: TextField(
                         controller: _searchController,
-                        onChanged: (v) => setState(() => _query = v.trim()),
+                        onChanged: _onQueryChanged,
                         style: const TextStyle(fontSize: 13),
                         decoration: InputDecoration(
                           hintText: 'Search sessions',
@@ -148,7 +187,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                                   icon: const Icon(Icons.close, size: 14),
                                   onPressed: () {
                                     _searchController.clear();
-                                    setState(() => _query = '');
+                                    _onQueryChanged('');
                                   },
                                 ),
                         ),
@@ -184,18 +223,27 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                         final q = _query.toLowerCase();
                         // Subagent sessions are apparatus, not chats — they are
                         // reached from the parent's subagent card / catalog, never
-                        // from the sidebar.
-                        final roots = app.rootSessions;
+                        // from the sidebar. Most recent activity first (F-046).
+                        final roots = app.rootSessionsByRecency;
+                        // Titles match instantly; message bodies follow from
+                        // the debounced content search. Model names are not
+                        // matched (searching "gpt" listed every chat).
                         final visible = q.isEmpty
                             ? roots
                             : roots
                                   .where(
-                                    (s) =>
-                                        s.title.toLowerCase().contains(q) ||
-                                        s.model.toLowerCase().contains(q),
+                                    (s) => s.title.toLowerCase().contains(q),
                                   )
                                   .toList();
-                        if (visible.isEmpty) {
+                        final shown = {for (final s in visible) s.id};
+                        final contentRows = <(ChatSession, SessionContentHit)>[
+                          if (q.isNotEmpty && _contentQuery == _query)
+                            for (final hit in _contentHits)
+                              if (app.sessionById(hit.sessionId) case final s?
+                                  when !s.isSubagent && shown.add(s.id))
+                                (s, hit),
+                        ];
+                        if (visible.isEmpty && contentRows.isEmpty) {
                           return Padding(
                             padding: const EdgeInsets.all(16),
                             child: Text(
@@ -209,23 +257,48 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             ),
                           );
                         }
-                        // Sessions list — flat, in stored order. No grouping
-                        // headers: the sidebar deliberately shows no repo or
-                        // workspace labels (user decision 2026-09-24); the repo
-                        // name still appears in the studio chatbox folder chip.
+                        Widget tile(ChatSession s) => Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: _SessionTile(
+                            session: s,
+                            active: s.id == app.activeSessionId,
+                            isDrawer: widget.isDrawer,
+                          ),
+                        );
+                        // No repo or workspace labels (user decision
+                        // 2026-09-24); only recency headers when not searching.
+                        final now = DateTime.now();
+                        String? lastGroup;
+                        final groups = q.isEmpty
+                            ? [
+                                for (final s in visible)
+                                  sessionRecencyGroup(s.lastActivityAt, now),
+                              ]
+                            : const <String>[];
+                        // A lone group header ("Today" above every chat)
+                        // adds no information; show headers once chats span
+                        // two or more groups.
+                        final grouped = groups.toSet().length > 1;
+                        final rows = <Widget>[];
+                        for (var i = 0; i < visible.length; i++) {
+                          if (grouped && groups[i] != lastGroup) {
+                            rows.add(_RecencyHeader(label: groups[i]));
+                            lastGroup = groups[i];
+                          }
+                          rows.add(tile(visible[i]));
+                        }
                         return Column(
                           children: [
-                            for (final s in visible)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                ),
-                                child: _SessionTile(
+                            ...rows,
+                            if (contentRows.isNotEmpty) ...[
+                              const _RecencyHeader(label: 'In messages'),
+                              for (final (s, hit) in contentRows)
+                                _ContentHitTile(
                                   session: s,
-                                  active: s.id == app.activeSessionId,
+                                  hit: hit,
                                   isDrawer: widget.isDrawer,
                                 ),
-                              ),
+                            ],
                           ],
                         );
                       },
@@ -313,6 +386,120 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+/// Sidebar date group for [at] relative to [now] (F-046).
+@visibleForTesting
+String sessionRecencyGroup(DateTime at, DateTime now) {
+  final today = DateTime(now.year, now.month, now.day);
+  final local = at.toLocal();
+  final day = DateTime(local.year, local.month, local.day);
+  final age = today.difference(day).inDays;
+  if (age <= 0) return 'Today';
+  if (age == 1) return 'Yesterday';
+  if (age < 7) return 'Previous 7 days';
+  return 'Older';
+}
+
+class _RecencyHeader extends StatelessWidget {
+  const _RecencyHeader({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    header: true,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 4),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 10.5,
+            fontWeight: FontWeight.w600,
+            color: Aether.textFaint,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// A message-body search result: chat title plus the matching excerpt with
+/// the FTS match highlighted.
+class _ContentHitTile extends StatelessWidget {
+  const _ContentHitTile({
+    required this.session,
+    required this.hit,
+    required this.isDrawer,
+  });
+
+  final ChatSession session;
+  final SessionContentHit hit;
+  final bool isDrawer;
+
+  @override
+  Widget build(BuildContext context) {
+    final base = TextStyle(fontSize: 11.5, color: Aether.textMuted);
+    final spans = <TextSpan>[];
+    final parts = hit.snippet
+        .replaceAll('\n', ' ')
+        .split(SessionHistoryRepository.highlightStart);
+    for (var i = 0; i < parts.length; i++) {
+      if (i == 0) {
+        spans.add(TextSpan(text: parts[i]));
+        continue;
+      }
+      final end = parts[i].indexOf(SessionHistoryRepository.highlightEnd);
+      if (end < 0) {
+        spans.add(TextSpan(text: parts[i]));
+        continue;
+      }
+      spans.add(
+        TextSpan(
+          text: parts[i].substring(0, end),
+          style: TextStyle(
+            color: Aether.text,
+            fontWeight: FontWeight.w700,
+            backgroundColor: Aether.accent.withValues(alpha: 0.18),
+          ),
+        ),
+      );
+      spans.add(TextSpan(text: parts[i].substring(end + 1)));
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1.5),
+      child: InkWell(
+        key: ValueKey('content-hit-${session.id}'),
+        borderRadius: BorderRadius.circular(10),
+        onTap: () {
+          AppState.I.selectSession(session.id);
+          if (isDrawer) Navigator.maybePop(context);
+        },
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                session.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, color: Aether.text),
+              ),
+              const SizedBox(height: 2),
+              Text.rich(
+                TextSpan(style: base, children: spans),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
         ),
       ),
     );
