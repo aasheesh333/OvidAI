@@ -85,11 +85,16 @@ class ComposerDraftStore {
   Future<void> flush() {
     _timer?.cancel();
     _timer = null;
-    final snapshot = jsonEncode(_drafts);
+    final snapshot = _drafts.isEmpty ? null : jsonEncode(_drafts);
     Future<void> write() async {
       try {
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(prefsKey, snapshot);
+        // No drafts: drop the key, so Delete all data leaves nothing behind.
+        if (snapshot == null) {
+          await prefs.remove(prefsKey);
+        } else {
+          await prefs.setString(prefsKey, snapshot);
+        }
       } catch (e) {
         Diag.swallow('composer_drafts.write', e);
       }
@@ -103,6 +108,16 @@ class ComposerDraftStore {
   Future<void> clearAll() {
     _drafts.clear();
     return flush();
+  }
+
+  /// Readback for the verified reset: nothing in memory and nothing persisted.
+  Future<bool> isEmpty() async {
+    await _write;
+    if (_drafts.isNotEmpty) return false;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final raw = prefs.getString(prefsKey);
+    return raw == null || raw.isEmpty || raw == '{}';
   }
 
   @visibleForTesting

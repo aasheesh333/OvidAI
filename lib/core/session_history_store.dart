@@ -321,6 +321,24 @@ class SessionHistoryRepository {
     }
   });
 
+  /// Readback for the verified reset: true when no table of any namespace
+  /// (rows, message index, FTS, migration markers, quarantined raw rows)
+  /// holds data. Trivially true while SQLite is not in use.
+  Future<bool> isEmpty() => _serial(() async {
+    if (!_sqliteEnabled && !_rollbackRequested) return true;
+    final db = await _open();
+    for (final table in const [
+      'history_rows',
+      'history_messages',
+      'history_fts',
+      'history_migrations',
+      'history_quarantine',
+    ]) {
+      if (db.select('SELECT 1 FROM $table LIMIT 1').isNotEmpty) return false;
+    }
+    return true;
+  });
+
   /// Copy every migrated namespace back to prefs (kill switch, eager form).
   Future<void> rollbackAll(SharedPreferences prefs) async {
     final keys = prefs.getStringList(migratedMarkerKey) ?? const [];

@@ -29,7 +29,11 @@ enum ResetStoreKind {
   // App-made temporary artifacts: backup/export archives and staging dirs.
   cache('cache'),
   // The default WebView cookie jar.
-  cookies('cookies');
+  cookies('cookies'),
+  // Unsent composer drafts and unsaved Studio editor / repo drafts.
+  drafts('drafts'),
+  // Per-tool / MCP / plugin usage rollups.
+  toolUsage('tool-usage');
 
   const ResetStoreKind(this.id);
   final String id;

@@ -427,6 +427,14 @@ class ToolUsageStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Readback for the verified reset: no rollup in memory or on disk.
+  Future<bool> isEmpty() async {
+    if (_days.isNotEmpty) return false;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    return !prefs.containsKey(prefsKey);
+  }
+
   @visibleForTesting
   void resetForTest() {
     _days.clear();

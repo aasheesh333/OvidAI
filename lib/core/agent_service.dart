@@ -5508,6 +5508,18 @@ if (!window.__ovidBlankHooked) {
   @visibleForTesting
   void debugForgetStudioStateForTest() => _studios.clear();
 
+  /// Delete all data: forget every in-memory Studio bucket (open tabs,
+  /// buffers, unsaved drafts), so nothing re-persists a draft after the
+  /// draft store was wiped.
+  void clearStudioStateForReset() {
+    _studios.clear();
+    notifyListeners();
+  }
+
+  /// True when no Studio bucket holds an unsaved draft.
+  bool get studioDraftsEmpty =>
+      _studios.values.every((st) => !st.dirty.any(st.fileBuffer.containsKey));
+
   /// Bring [path]'s existing buffer (e.g. an unsaved draft of a closed tab)
   /// back as the active tab without touching its content.
   void focusStudioFile(String path) {

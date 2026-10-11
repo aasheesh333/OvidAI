@@ -153,6 +153,20 @@ class StudioDraftStore {
     });
   }
 
+  /// Readback for the verified reset: no queued and no persisted record.
+  Future<bool> isEmpty() async {
+    if (_pending.isNotEmpty) return false;
+    if (!enabled) return true;
+    await _chain;
+    try {
+      final dir = await _directory();
+      return await dir.list().every((entry) => entry is! File);
+    } catch (error, stack) {
+      Diag.swallow('studio_drafts.isEmpty', error, stack);
+      return false;
+    }
+  }
+
   Future<Map<String, Object?>?> read(String name) async {
     if (!enabled) return null;
     await _chain;

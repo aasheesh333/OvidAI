@@ -7,15 +7,20 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:ovid_ai/core/agent_service.dart';
+import 'package:ovid_ai/core/composer_drafts.dart';
+import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/memory_store.dart';
 import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/secure_store.dart';
 import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/settings_backup_service.dart';
+import 'package:ovid_ai/core/session_history_store.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/core/studio_drafts.dart';
+import 'package:ovid_ai/core/tool_usage_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 // ignore: depend_on_referenced_packages
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
@@ -409,6 +414,73 @@ void main() {
     expect(app.sessions.any((s) => s.id == 'existing'), isFalse);
     // A user file outside app-owned stores is never touched.
     expect(file.readAsStringSync(), 'keep');
+  });
+
+  // Integration: stores added by other branches are part of the verified
+  // reset — composer drafts (PR-3b), Studio / repo drafts (PR-3c), tool
+  // usage rollups (PR-4b), every chat-history.db namespace (PR-3) and
+  // in-memory MCP OAuth attempts (PR-7).
+  test('reset clears drafts, tool usage, every history namespace and OAuth memory', () async {
+    ComposerDraftStore.I.resetForTest();
+    ToolUsageStore.I.resetForTest();
+    ToolUsageStore.saveDelayForTest = Duration.zero;
+    StudioDraftStore.I.enable(root: () async => root);
+    SessionHistoryRepository.I.enableSqlite(
+      path: '${root.path}/chat-history.db',
+      backgroundSearch: false,
+    );
+    // Migrate this account's prefs rows into SQLite, as production startup
+    // does, so the reset owns a loaded namespace.
+    await app.loadSessions();
+    SessionLedger.rootOverrideForTest =
+        Directory('${root.path}/session-ledgers')..createSync(recursive: true);
+    addTearDown(() async {
+      SessionLedger.rootOverrideForTest = null;
+      StudioDraftStore.I.disableForTest();
+      ComposerDraftStore.I.resetForTest();
+      ToolUsageStore.I.resetForTest();
+      await SessionHistoryRepository.I.resetForTest();
+    });
+
+    ComposerDraftStore.I.put('existing', 'half-typed message');
+    await ComposerDraftStore.I.flush();
+    StudioDraftStore.I.schedule(
+      StudioDraftStore.recordName('editor', 'bucket'),
+      () => (data: {'v': 1, 'files': {}}),
+    );
+    StudioDraftStore.I.schedule(
+      StudioDraftStore.recordName('repo', 'owner/repo'),
+      () => (data: {'v': 1}),
+    );
+    await StudioDraftStore.I.flush();
+    ToolUsageStore.I.record(
+      kind: ToolUsageKind.pluginTool,
+      tool: 'search',
+      mcpServerId: 'srv',
+      ok: true,
+      elapsed: const Duration(milliseconds: 5),
+    );
+    await ToolUsageStore.I.flush();
+    // Another account's namespace in chat-history.db.
+    await SessionHistoryRepository.I.writeRows(prefs, 'ovid_sessions__other', [
+      jsonEncode(original.toJson()),
+    ]);
+    expect(await ComposerDraftStore.I.isEmpty(), isFalse);
+    expect(await StudioDraftStore.I.isEmpty(), isFalse);
+    expect(await ToolUsageStore.I.isEmpty(), isFalse);
+    expect(await SessionHistoryRepository.I.isEmpty(), isFalse);
+
+    final report = await SettingsActions.resetAll!();
+
+    expect(report.failures, isEmpty);
+    expect(report.success, isTrue);
+    expect(report.completed, containsAll(['drafts', 'tool-usage', 'sessions']));
+    expect(await ComposerDraftStore.I.isEmpty(), isTrue);
+    expect(await StudioDraftStore.I.isEmpty(), isTrue);
+    expect(await ToolUsageStore.I.isEmpty(), isTrue);
+    expect(await SessionHistoryRepository.I.isEmpty(), isTrue);
+    expect(AgentService.I.studioDraftsEmpty, isTrue);
+    expect(McpService.I.oauthMemoryEmpty, isTrue);
   });
 
   test('reset removes keys, configuration, settings, skills, exports, cache and cookies', () async {

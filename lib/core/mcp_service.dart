@@ -1336,6 +1336,16 @@ class McpService {
     }
   }
 
+  /// Delete all data: drop every in-memory OAuth config, token, refresh and
+  /// pending authorization attempt. Generations are dropped too, so an
+  /// in-flight sign-in or refresh can no longer write its result back
+  /// ([_ownsOAuth] fails). Secure storage is wiped by the secrets store.
+  void clearAllOAuthState() => forgetOAuthMemoryForTest();
+
+  /// True when no OAuth attempt, token or config is held in memory.
+  bool get oauthMemoryEmpty =>
+      _oauthAttempts.isEmpty && _oauthTokens.isEmpty && _oauthConfigs.isEmpty;
+
   /// Test seam: simulate Android process death — every in-memory OAuth
   /// structure is dropped; only secure storage survives.
   @visibleForTesting

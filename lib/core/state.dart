@@ -28,6 +28,7 @@ import 'mcp_config_parse.dart';
 import 'mcp_service.dart';
 import 'model_limits.dart';
 import 'composer_drafts.dart';
+import 'studio_drafts.dart';
 import 'memory_store.dart';
 import 'usage_attempt.dart';
 import 'usage_attempt_store.dart';
@@ -5589,6 +5590,10 @@ class AppState extends ChangeNotifier {
         Diag.swallow('history.deleteAll', e);
       }
       await ComposerDraftStore.I.clearAll();
+      AgentService.I.clearStudioStateForReset();
+      await StudioDraftStore.I.deleteAll('');
+      await ToolUsageStore.I.clear();
+      McpService.I.clearAllOAuthState();
       await runtimeStatusStore.clear();
       _clearDeferredSessions();
       for (final s in List.of(sessions)) {

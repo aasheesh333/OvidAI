@@ -66,6 +66,9 @@ extension _SettingsStateIntegration on AppState {
               prefs,
               _accountKey(AppState._kSessions),
             );
+            // chat-history.db: every namespace, the FTS index, migration
+            // markers and quarantined raw rows — not just this account's.
+            await SessionHistoryRepository.I.deleteAll();
             await prefs.remove(_accountKey(AppState._kActive));
             await prefs.remove(_accountKey(AppState._kSessionBootstrap));
             await prefs.reload();
@@ -85,6 +88,7 @@ extension _SettingsStateIntegration on AppState {
               _accountKey(AppState._kSessions),
             );
             return (rows == null || rows.isEmpty) &&
+                await SessionHistoryRepository.I.isEmpty() &&
                 sessions.isEmpty &&
                 _deferredSessionJson == null &&
                 activeSessionId == null;
@@ -233,13 +237,21 @@ extension _SettingsStateIntegration on AppState {
           onStage: () async {},
           onDelete: () async {
             await GitHubService.I.signOut();
+            // Pending MCP OAuth attempts / tokens live in secure storage
+            // (wiped below) and in memory; drop the memory side first so an
+            // in-flight sign-in cannot write a token back.
+            McpService.I.clearAllOAuthState();
             await AppState._secureStorage.deleteAll();
+            // Plugin grants moved to secure storage (PR-5b); drop the
+            // in-process cache too or they keep applying until restart.
+            PluginPermissionStore.forgetCachedGrants();
             for (final provider in providers) {
               provider.apiKey = '';
             }
           },
           onVerifyDeleted: () async =>
               (await AppState._secureStorage.readAll()).isEmpty &&
+              McpService.I.oauthMemoryEmpty &&
               providers.every((provider) => provider.apiKey.isEmpty),
         ),
         ResetStoreKind.preferences: FunctionalResetStore(
@@ -291,6 +303,29 @@ extension _SettingsStateIntegration on AppState {
           // The cookie jar cannot be enumerated; a second clear reports
           // whether any cookie was still present.
           onVerifyDeleted: () async => !await AppState.clearWebCookies(),
+        ),
+        ResetStoreKind.drafts: FunctionalResetStore(
+          name: ResetStoreKind.drafts.id,
+          onStage: () async {},
+          onDelete: () async {
+            // In-memory owners first, so a debounced flush cannot write a
+            // draft back after its file is gone.
+            AgentService.I.clearStudioStateForReset();
+            await ComposerDraftStore.I.clearAll();
+            // Studio editor drafts and RepoCache uncommitted drafts share
+            // the same app-private record directory.
+            await StudioDraftStore.I.deleteAll('');
+          },
+          onVerifyDeleted: () async =>
+              AgentService.I.studioDraftsEmpty &&
+              await ComposerDraftStore.I.isEmpty() &&
+              await StudioDraftStore.I.isEmpty(),
+        ),
+        ResetStoreKind.toolUsage: FunctionalResetStore(
+          name: ResetStoreKind.toolUsage.id,
+          onStage: () async {},
+          onDelete: () => ToolUsageStore.I.clear(),
+          onVerifyDeleted: () => ToolUsageStore.I.isEmpty(),
         ),
       });
       await coordinator.prepare();

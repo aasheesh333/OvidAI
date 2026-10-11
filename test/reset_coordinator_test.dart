@@ -236,6 +236,8 @@ void main() {
         'exports',
         'cache',
         'cookies',
+        'drafts',
+        'tool-usage',
       ]);
       expect(report.success, isTrue);
     },
