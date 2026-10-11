@@ -250,6 +250,13 @@ void main() {
       await tester.tap(find.widgetWithText(TextButton, 'Delete'));
       await tester.pumpAndSettle();
 
+      // The row disappears at once; the durable delete waits for the Undo
+      // window to pass.
+      expect(find.text(targetChat.title), findsNothing);
+      expect(find.text('Chat deleted'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pumpAndSettle();
+
       expect(app.sessionById(targetChat.id), isNull);
       expect(app.sessionById(activeChat.id), same(activeChat));
       expect(app.activeSessionId, activeChat.id);
@@ -275,11 +282,63 @@ void main() {
       await tester.tap(find.widgetWithText(TextButton, 'Delete'));
       await tester.pumpAndSettle();
 
+      // The row disappears at once; the durable delete waits for the Undo
+      // window to pass.
+      expect(find.text(targetChat.title), findsNothing);
+      expect(find.text('Chat deleted'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pumpAndSettle();
+
       expect(app.sessionById(targetChat.id), isNull);
       expect(app.sessionById(activeChat.id), same(activeChat));
       expect(app.activeSessionId, activeChat.id);
       expect(find.text(targetChat.title), findsNothing);
       expect(find.text(activeChat.title), findsOneWidget);
+    });
+
+    testWidgets('Undo restores the deleted chat', (tester) async {
+      await pumpChats(tester);
+      await tester.tap(deleteChatFor(activeChat.title));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(find.text(activeChat.title), findsNothing);
+      // The deleted chat was active: another chat takes over meanwhile.
+      expect(app.activeSessionId, targetChat.id);
+
+      await tester.tap(find.text('Undo'));
+      await tester.pumpAndSettle();
+      expect(find.text(activeChat.title), findsOneWidget);
+      expect(app.activeSessionId, activeChat.id);
+      await tester.pump(const Duration(seconds: 8));
+      await tester.pumpAndSettle();
+      expect(app.sessionById(activeChat.id), same(activeChat));
+    });
+
+    testWidgets('swipe-delete while settings are busy restores the row', (
+      tester,
+    ) async {
+      await pumpChats(tester);
+      app.settingsBusyForTest = true;
+      addTearDown(() => app.settingsBusyForTest = false);
+      await tester.drag(
+        find.byKey(ValueKey(targetChat.id)),
+        const Offset(-400, 0),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(find.text(targetChat.title), findsNothing);
+
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pumpAndSettle();
+      // The durable delete failed: the row is back and the user is told.
+      expect(tester.takeException(), isNull);
+      expect(app.sessionById(targetChat.id), same(targetChat));
+      expect(find.text(targetChat.title), findsOneWidget);
+      expect(find.textContaining('could not be deleted'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
     });
   });
 }

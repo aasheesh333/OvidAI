@@ -6332,9 +6332,10 @@ class _InputBarState extends State<_InputBar> {
 
   void _imagePromptDialog(BuildContext context) {
     final c = TextEditingController();
-    // Disposed with the dialog: a leaked controller keeps its listeners and the
-    // platform text-input channel alive after the sheet is gone.
-    showDialog<void>(
+    // Disposed once the dialog route is fully gone (after its exit
+    // animation, which still builds the field): a leaked controller keeps its
+    // listeners and the platform text-input channel alive.
+    final route = DialogRoute<void>(
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('Generate an image', style: TextStyle(fontSize: 16)),
@@ -6363,7 +6364,9 @@ class _InputBarState extends State<_InputBar> {
           ),
         ],
       ),
-    ).whenComplete(c.dispose);
+    );
+    Navigator.of(context).push(route);
+    route.completed.whenComplete(c.dispose);
   }
 
   /// Sends `Generate an image: …` through the normal send path without

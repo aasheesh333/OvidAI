@@ -1911,6 +1911,8 @@ class AppState extends ChangeNotifier {
     StartupCoordinator.I.statusSink = null;
     PluginRuntimeStatusStore.I.resetForTest();
     // ignore: invalid_use_of_visible_for_testing_member
+    ComposerDraftStore.I.resetForTest();
+    // ignore: invalid_use_of_visible_for_testing_member
     SessionLifecycleService.I.resetForTest();
     // ignore: invalid_use_of_visible_for_testing_member
     AgentService.resetTitleStateForTest();
@@ -2757,6 +2759,10 @@ class AppState extends ChangeNotifier {
   Object? _usagePreparationToken;
   Object? _usageStorageError;
   bool _settingsBusy = false;
+
+  /// Test seam: simulates a settings operation holding the session stores.
+  @visibleForTesting
+  set settingsBusyForTest(bool value) => _settingsBusy = value;
   Future<void>? _settingsOperation;
   final List<_SessionCleanup> _pendingAccountCleanup = [];
   final Map<String, _AccountHandoff> _retainedHandoffs = {};

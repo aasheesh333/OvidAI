@@ -26,7 +26,8 @@ class ComposerDraftStore {
   final Map<String, String> _drafts = {};
   Future<Map<String, String>>? _loading;
   Timer? _timer;
-  Future<void> _write = Future<void>.value();
+  // Serializes writes; created lazily in the caller's zone.
+  Future<void>? _write;
 
   /// Loads persisted drafts once; later calls reuse the same future.
   Future<Map<String, String>> load() => _loading ??= _load();
@@ -85,14 +86,17 @@ class ComposerDraftStore {
     _timer?.cancel();
     _timer = null;
     final snapshot = jsonEncode(_drafts);
-    return _write = _write.then((_) async {
+    Future<void> write() async {
       try {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(prefsKey, snapshot);
       } catch (e) {
         Diag.swallow('composer_drafts.write', e);
       }
-    });
+    }
+
+    final previous = _write;
+    return _write = previous == null ? write() : previous.then((_) => write());
   }
 
   /// Forgets every draft (account switch / delete all data) and persists it.
@@ -107,6 +111,6 @@ class ComposerDraftStore {
     _timer = null;
     _drafts.clear();
     _loading = null;
-    _write = Future<void>.value();
+    _write = null;
   }
 }
