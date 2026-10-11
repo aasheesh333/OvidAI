@@ -14,7 +14,7 @@ See `README.md`. For this group additionally: color tokens and WCAG contrast
 targets, theming approach, consistency, and localization rollout prerequisites.
 
 ## Status
-in progress
+complete (sections 1–10 + group summary)
 
 ---
 
@@ -478,3 +478,448 @@ Projects / ChatGPT team-chat model); member roles beyond owner and member.
 model-state rows; a test that Close shows a confirm dialog; a test that Send
 is disabled for whitespace-only input.
 
+
+---
+
+## 8. Design tokens and app theme — `lib/core/theme.dart`
+
+**What it is / how reached.** This is not a screen. `Aether` holds the brand
+constants, the light/dark palette as static getters switched by a global
+`static bool dark` (`:26`, `:52-78`), the motion and mono tokens, a cached
+`ThemeData` (`:120-209`), and two legacy widgets, `Tag` (`:213`) and
+`SectionHeader` (`:248`). `main.dart:35-42` sets `Aether.dark` before the
+first frame, and `OvidApp` rebuilds `MaterialApp(theme: Aether.theme())` when
+the value changes (`main.dart:141-145`, `:156-168`, `:182-188`). Every screen
+in `lib/ui` reads `Aether.*` directly: 193 call sites use `textFaint`, 194 use
+`textMuted` and 211 use `Aether.accent`.
+
+**Computed WCAG 2.x contrast ratios** (relative luminance, sRGB). AA requires
+4.5:1 for body text, 3:1 for text ≥18.66px bold or ≥24px, and 3:1 for UI
+component boundaries and meaningful icons (1.4.11).
+
+| Token (light) | on bg F4F1EA | on surface FFF | on surfaceAlt EDE9DF | on surfaceRaised E4DFD3 |
+|---|---|---|---|---|
+| text 1B1B1B | 15.27 | 17.22 | 14.21 | 12.95 |
+| textMuted 6B675E | 5.00 | 5.63 | 4.65 | **4.24** |
+| textFaint 8A867D | **3.22** | **3.63** | **2.99** | **2.73** |
+| accent E5484D | **3.47** | **3.91** | **3.23** | **2.94** |
+| accentC C0292E | 5.17 | 5.84 | 4.81 | **4.39** |
+| successC 1FA05F | **2.98** | **3.36** | **2.77** | **2.53** |
+| successLight 15803D / warnLight B45309 | **4.45** | 5.02 | **4.14** | **3.77** |
+| success 22C55E (used raw in light) | ~2.0 | **2.28** | — | — |
+| warn F59E0B (used raw in light) | **1.90** | **2.15** | **1.77** | **1.62** |
+| hairline DCD7CB (field border) | **1.27** | **1.44** | **1.18** | — |
+| hairlineStrong C4BEB0 | **1.64** | **1.85** | **1.53** | — |
+
+| Token (dark) | on bg 141414 | on surface 1E1E1E | on surfaceAlt 262626 | on surfaceRaised 303030 |
+|---|---|---|---|---|
+| text F4F1EA | 16.33 | 14.78 | 13.42 | 11.70 |
+| textMuted A8A49B | 7.41 | 6.71 | 6.09 | 5.31 |
+| textFaint 8A867D | 5.08 | 4.59 | **4.17** | **3.64** |
+| accent E5484D | 4.71 | **4.26** | **3.87** | **3.37** |
+| hairline 333333 | **1.46** | **1.32** | **1.20** | — |
+| hairlineStrong 454545 | **1.92** | **1.74** | **1.58** | — |
+
+Buttons: white on `accent` (the primary button in **both** modes) is **3.91**,
+white on `accentC` is 5.84, and white on `success` is 2.28. Bold values fail
+the relevant AA threshold.
+
+**Findings**
+- **P1 · a11y/contrast · `theme.dart:49`, `:61`.** Light `textFaint` #8A867D
+  measures 3.63 on white, 3.22 on paper and 2.99 on surfaceAlt, all below
+  4.5:1. It is used as a text colour at 154 `color: Aether.textFaint` sites,
+  mostly at 11–12sp: `AetherType.caption` (`aether_primitives.dart:129-133`),
+  `SectionHeader` (`:266`), `AetherSectionTitle`, field hints (`:166`,
+  `aether_primitives.dart:732`), timestamps and helper text. **User impact:**
+  for low-vision users and anyone outdoors on a phone, captions, section
+  labels and placeholders are hard to read, and this fails WCAG AA (and EN 301
+  549 for EU distribution). **Fix:** set light `textFaint` to **#6F6B62**
+  (4.71 on bg, 5.31 on surface, 4.38 on surfaceAlt). Darken `textMuted` to
+  about #57534B so the three text levels stay distinct, and set dark
+  `textFaint` to **#9A968D** (6.25/5.65/5.13/4.48). Add a unit test that
+  asserts every text token is ≥4.5:1 against bg, surface and surfaceAlt in
+  both modes (see Test to add).
+- **P1 · a11y/contrast · `theme.dart:67`, `:74`, `aether_primitives.dart:317`,
+  `:424`, `:473`.** `Aether.accent` (brand red #E5484D) is a `const` that does
+  not change with light/dark, and `accentC` (#C0292E) exists to fix that.
+  However, the primitives and 90 `color: Aether.accent` text or icon sites use
+  the raw brand red. The theme's `colorScheme.primary` is `accentC` (`:142`),
+  so the M3 widgets and the Aether buttons do not agree. White label text on
+  the primary or danger button is **3.91:1** for 14sp w600 text, which counts
+  as normal text under AA. Red links on paper are 3.47:1. In dark mode, red
+  text on surface is 4.26:1 and on surfaceAlt 3.87:1. **User impact:** the
+  main call to action on every screen fails contrast, and red inline links or
+  labels are hard to read. **Fix:** make `accent` a theme-aware getter that
+  returns #C0292E in light mode (white on it is 5.84). Keep `signalRed` only
+  for the brand mark, focus rings and the agent dot. Add a dark text variant
+  around **#F2666A** (5.47 on surface, 4.96 on surfaceAlt) for red **text**.
+  Then delete `accentC`/`dangerC` once call sites are migrated.
+- **P1 · a11y/contrast · `theme.dart:69-70`, `:75`.** `successC` is commented
+  as a "readable variant" but measures only 3.36:1 on white and 2.98:1 on
+  paper. It colours tool "done" state text and icons in chat
+  (`chat_layout.dart:186`, `chat_screen.dart:4139`). The raw `success`
+  (#22C55E) and `warn` (#F59E0B) consts are used as status colours in
+  **light** mode too (`schedule_screen.dart:118`, `:691`,
+  `settings_health_screen.dart:474`, `:484`, `health_screen.dart:495`, `:505`,
+  `:587`, `usage_screen.dart:881`, `sandbox_setup.dart:266`,
+  `plugin_install_progress.dart:301`). They measure 2.28:1 and 2.15:1 on
+  white, below the 3:1 non-text minimum for a status dot that carries meaning.
+  `successLight`/`warnLight` also fail on paper (4.45). **User impact:**
+  green "OK" and amber "warning" states are hard to tell apart from each other
+  and from the background, especially for users with deuteranomaly, because
+  these states have no icon or text alternative (see §9 status dot).
+  **Fix:** expose one theme-aware getter each for `success`, `warn` and
+  `danger`: light `success` #166534 (6.32 on bg), light `warn` #A04606
+  (5.52), dark values unchanged. Make the raw consts private, and remove the
+  `successC`/`successLight`/`warnLight` aliases (65 call sites).
+- **P1 · a11y/non-text contrast · `theme.dart:45`, `:171-182`,
+  `aether_primitives.dart:738-756`, `:1269-1287`.** Text field boundaries use
+  `hairline`, which is 1.44:1 on white and 1.27:1 on paper in light mode and
+  1.32:1 in dark mode. The fill (surfaceAlt) differs from the white card by
+  only 1.21:1. WCAG 1.4.11 requires 3:1 for the visual boundary of an input.
+  **User impact:** empty fields (login phone/OTP, MCP JSON, collaboration
+  token) are nearly invisible on white cards, so users don't see where to
+  tap. **Fix:** add an `inputBorder` token: light **#8F897C** (3.08 on bg,
+  3.48 on surface), dark **#7F7A6E** (4.31 on bg, 3.90 on surface). Use it
+  for `enabledBorder`, and keep `hairline` for dividers only.
+- **P1 · theming architecture · `theme.dart:24-26`, `:52-64`,
+  `main.dart:182-188`.** The palette is a global mutable static read through
+  getters, so no widget registers a dependency on it. A theme switch only
+  takes effect in widgets that happen to rebuild. `OvidApp.setState` rebuilds
+  `MaterialApp`, but `home: const LoginGate(child: OvidShell())` is a const
+  subtree: only `Theme.of` dependents and `AppState` listeners rebuild, while
+  `const` children, cached `child:` arguments of `AnimatedBuilder`, and open
+  dialogs or sheets that don't listen to `AppState` keep painting the old
+  colours. There is also no `darkTheme`/`themeMode`, so `AnimatedTheme`
+  cross-fades the Material parts while the `Aether.*` parts snap (or don't
+  change at all). The static state also leaks between tests
+  (`resetThemeCacheForTest`, `:107`). **User impact:** after the user toggles
+  the theme in Settings, or the OS switches to dark at sunset (`system`
+  mode), screens can show mixed light and dark surfaces until the user
+  navigates away. Verify on device by opening a sheet, then switching the
+  system theme from quick settings. **Fix:** add a
+  `ThemeExtension<AetherColors>` with `light`/`dark` instances and `lerp`.
+  Build `theme` and `darkTheme` once, pass
+  `themeMode: ThemeMode.system|light|dark` to `MaterialApp`, and read colours
+  with `context.aether.text`. To migrate incrementally, keep the static
+  getters as `@Deprecated` shims for one release, migrate primitives first
+  (this one change covers 111 `AetherCard` and 294 `AetherType` uses), then
+  migrate screens file by file.
+- **P1 · l10n readiness · `pubspec.yaml`, `main.dart:182-188`, whole
+  `lib/ui`.** Localization has not started. There is no
+  `flutter_localizations`, no `intl`, no `l10n.yaml`/ARB files, and no
+  `localizationsDelegates`/`supportedLocales` on `MaterialApp`. Material's own
+  strings (Cut/Copy/Paste, date picker, "Back" semantics) are therefore
+  English only and RTL layout can never activate. `lib/ui` contains about 310
+  `Text('literal')` and about 339 `label:/tooltip:/title:/hintText:/message:`
+  literals. The primitives hardcode screen-reader strings: `'Loading'`
+  (`aether_primitives.dart:361`, `:410`), `'Digit ${i+1} of ${n}'` (`:1193`)
+  and `'Decrease'/'Increase' … 'value'` (`:1366`). There are 225
+  `EdgeInsets.only/fromLTRB` and 0 `EdgeInsetsDirectional` uses, 15
+  locale-insensitive `toUpperCase()` calls (`theme.dart:261`, the tagline on
+  `login_gate.dart:219`; Turkish dotted i becomes the wrong glyph), and **0**
+  `DateFormat`/`NumberFormat` uses, so dates, token counts and prices are
+  formatted by hand. **User impact:** Ovid cannot ship in any non-English
+  market (Hindi, Indonesian, Portuguese and Spanish make up most of the
+  Android top-10 markets at 10M DAU) without touching every file. **Fix
+  (prerequisite order):** (1) add `flutter_localizations` + `intl`,
+  `generate: true`, `l10n.yaml`, an `app_en.arb`, and delegates/locales on
+  `MaterialApp`; (2) change primitives to take strings from
+  `AppLocalizations` (start with the a11y strings above); (3) add a
+  `no-hardcoded-ui-strings` custom lint or CI grep that ratchets the literal
+  count down; (4) replace `EdgeInsets.only(left/right)` with directional
+  insets and `Alignment.centerLeft` with `AlignmentDirectional`; (5) route all
+  dates and numbers through `DateFormat`/`NumberFormat.compact` with the
+  current locale; (6) add a pseudo-locale (`en_XA`, +40% length) golden run
+  to catch truncation.
+- **P2 · typography · `theme.dart:154-160`, `:203-207`,
+  `aether_primitives.dart:75-139`.** The app bar title is 15sp (M3 default is
+  22) with 20dp icons. `AetherType` is not mapped into `ThemeData.textTheme`,
+  so the four `Theme.of(context).textTheme` users and every M3 widget
+  (dialogs, list tiles, chips) use the Material scale while Aether screens use
+  `AetherType` or literals. `lib/ui` has about 450 hard-coded `fontSize:`
+  literals, including 46 at 8.5–10.5sp (`Tag` at 10sp, `theme.dart:237`).
+  **User impact:** the type scale is inconsistent, and labels under 11sp are
+  unreadable for many users at the default text scale. **Fix:** map
+  `AetherType` into `TextTheme` (display → displaySmall, h1 → headlineSmall,
+  h2 → titleLarge, title → titleMedium, body → bodyMedium, label →
+  labelLarge, caption → bodySmall). Set an 11sp floor (tags only) and 12sp for
+  everything else, and add a lint or CI grep that rejects `fontSize:` < 11
+  outside `widgets/`.
+- **P2 · fonts · `pubspec.yaml` `fonts:` (`assets/fonts/Inter.ttf`,
+  876 KB).** Inter ships as a single variable-font file with no `weight:`
+  descriptors. Unless the engine maps `FontWeight` onto the `wght` axis, every
+  w600/w700 is synthetic ("fake") bold, which is smeared and wider. There is
+  no explicit fallback for Devanagari or CJK either (the system font is used).
+  **Fix:** verify on a device with a w400-vs-w700 screenshot. If weights are
+  synthesized, ship static Inter Regular/Medium/SemiBold/Bold with `weight:`
+  entries (subset to Latin plus Latin-Ext, about 4×90 KB), or set
+  `fontVariations: [FontVariation.weight(...)]` in the primitives.
+- **P2 · theming/consistency · `theme.dart:139-148`.** The `colorScheme`
+  overrides only `surface/primary/secondary/tertiary/onSurface/error`. M3 roles
+  such as `outline`, `outlineVariant`, `onSurfaceVariant`,
+  `surfaceContainer*`, `primaryContainer`, `secondaryContainer`, `onError`
+  and `inverseSurface` stay at baseline values. **User impact:** Switch,
+  Chip, SegmentedButton, NavigationBar, DropdownMenu, Slider, Card and the
+  M3 date picker render with lavender or grey baseline tints that are off
+  brand, next to Paper/Ink Aether widgets. **Fix:** fill every role from
+  Aether tokens (outline = inputBorder, outlineVariant = hairline,
+  onSurfaceVariant = textMuted, surfaceContainerLow…Highest =
+  surface/surfaceAlt/surfaceRaised, primaryContainer = accentSoft,
+  onError = white), and also set `switchTheme`, `chipTheme`,
+  `filledButtonTheme`, `outlinedButtonTheme` and `textButtonTheme` so raw
+  Material buttons (used heavily in §7) match the Aether buttons.
+- **P2 · contrast · `theme.dart:184-188`.** Snackbar text is 13sp on
+  surfaceRaised. The action button uses `primary` (accentC), which is 4.39:1
+  on #E4DFD3, so it fails. **Fix:** use an inverse snackbar (Ink background,
+  Paper text, `actionTextColor: #F2666A`) like the ChatGPT and Claude apps; it
+  is also more visible.
+- **P2 · motion/a11y · `theme.dart:134-136`, `:282-307`.** The custom
+  fade-and-slide page transition ignores `MediaQuery.disableAnimationsOf`, so
+  with "Remove animations" enabled the 2.5% slide still plays (Flutter does
+  not shorten route transitions on its own). **Fix:** in `buildTransitions`,
+  return `child` directly when animations are disabled.
+- **P2 · duplication · `theme.dart:212-280`.** `Tag` duplicates `AetherPill`
+  (8 call sites), and `SectionHeader` duplicates `AetherSectionTitle` (20
+  versus 34 call sites) with different paddings. Both also use
+  locale-insensitive `toUpperCase()`. **Fix:** make `Tag` and
+  `SectionHeader` thin deprecated wrappers over the Aether primitives, then
+  migrate the call sites.
+
+**Missing features:** a high-contrast theme variant (Android "High contrast
+text" or user setting); dynamic colour opt-out is fine, but there is no
+"follow system font" or "text size" in-app setting that ChatGPT and Claude
+expose; no `ThemeMode` cross-fade.
+
+**Test to add:** `test/theme_contrast_test.dart` iterates every text token ×
+{bg, surface, surfaceAlt} in both modes and asserts ≥4.5 (and ≥3.0 for
+`inputBorder`, `success`, `warn` and `danger` as non-text). Add a widget test
+that toggles `AppState.setLightTheme` with a bottom sheet open and asserts
+the sheet's `Material.color` changes. Add a test that `MaterialApp` has
+non-empty `supportedLocales` and `localizationsDelegates`.
+
+---
+
+## 9. Aether primitives — `lib/ui/widgets/aether_primitives.dart`
+
+**What it is / how reached.** This is the shared widget library used by every
+screen. It contains spacing, radius, shadow and type tokens (`:19-139`);
+`AetherCard` (111 uses); `AetherGradientHeader`; `AetherSectionTitle`; four
+button kinds built on `_AetherButton` (`:276-641`), including the chat
+composer's icon-only send/stop; `AetherField` (17 uses, against 30 raw
+`TextField`s in `lib/ui`); `AetherStatusDot`; `AetherPill`;
+`AetherEmptyState`; `AetherSegmentedControl`; `AetherOtpField`;
+`AetherStepper`; and `AetherSheet` (`:1381-1514`). Changes here affect every
+screen, so they are the cheapest place to fix accessibility and consistency.
+
+**Findings**
+- **P1 · layout (default mode) · `:1386-1397`, `:1454-1480`.** `pinActions`
+  defaults to `false`, and the default `_scrollingBody` puts the handle,
+  title, a body clamped to the **full** body height
+  (`ConstrainedBox(maxHeight: bodyConstraints.maxHeight)`) and the actions in
+  one `SingleChildScrollView`. Any body that fills its height (a
+  `ListView`/`Expanded`) therefore pushes the action row about 57 + 60dp
+  below the fold. This is the root cause of the hidden "Create link" button
+  in §3, and it affects every tall sheet (memory add, schedule editor, MCP
+  OAuth, plugin permission). **User impact:** primary actions such as
+  Allow, Save and Create are off-screen, and users don't know they can
+  scroll the outer sheet. **Fix:** make `pinActions: true` the default, and
+  in `_scrollingBody` clamp the body to
+  `bodyConstraints.maxHeight - chromeHeight` (measure the title with a
+  `LayoutBuilder` or use a `CustomMultiChildLayout`). Add a test that pumps
+  each sheet at 320×568 with text scale 2.0 and asserts the last action
+  `hitTestable()`.
+- **P2 · API footgun/tablet · `:1378-1433`.** `AetherSheet` paints its own
+  `surface` background, `rXl` (22) top radius and shadow, while
+  `bottomSheetTheme` (`theme.dart:196-202`) also paints `surface` with a 20dp
+  radius. Every caller therefore has to remember
+  `backgroundColor: Colors.transparent` by hand (the current callers in memory, plugin permission, MCP OAuth, schedule, GitHub login and share sheets all do). There is no
+  max width, so on tablets and foldables the sheet stretches edge to edge
+  (1280dp line lengths). The title is not `Semantics(header: true)`, and the
+  drag handle has no semantics or dismiss action. **Fix:** add a
+  `showAetherSheet<T>(context, {title, child, actions})` helper that sets
+  `isScrollControlled: true`, `useSafeArea: true`, a transparent background
+  and `constraints: BoxConstraints(maxWidth: 640)`, and route all callers
+  through it. Mark the title as a header.
+- **P2 · a11y/tap target · `:340-353`, `:1020`.** The icon-only button (the
+  chat composer's **send/stop**, the most-tapped control in the app) and
+  `_SegItem` are custom `InkWell`s with a 44dp minimum, so
+  `materialTapTargetSize.padded` does not apply. Android/Material guidance and
+  the Play pre-launch accessibility scanner require 48dp. Label buttons are
+  fine: `FilledButton`/`OutlinedButton`/`TextButton` pad their hit area to
+  48dp through the theme's `tapTargetSize`. **Fix:** set the min to 48 in
+  both places (keep a 44dp visual circle inside a 48dp hit box if the
+  composer layout is tight), and add a `meetsGuideline(androidTapTargetGuideline)`
+  test.
+- **P2 · a11y/contrast · `:317-321`, `:424-427`, `:473-476`.** The primary and
+  danger buttons use brand `Aether.accent` with a white label (3.91:1, see §8).
+  The disabled state is white70 on accent@40% over paper, about 1.56:1, so a
+  disabled "Send" or "Save" label is barely visible, and users can't tell
+  whether the button is disabled or just pale. **Fix:** use the theme-aware
+  accent from §8. For the disabled state use M3's onSurface@38% label on
+  onSurface@12% fill, which is clearly "disabled" and still legible.
+- **P2 · a11y/colour-only status · `:783-858`.** `AetherStatusDot` is an
+  unlabeled 8dp coloured circle that conveys running, ok, warn and error
+  states by colour alone (WCAG 1.4.1). It is used in schedule, health and
+  subagent rows (`schedule_screen.dart:126`, `health_screen.dart:518`,
+  `:624`, `subagent_screen.dart:647`). **User impact:** colour-blind users and
+  TalkBack users get no status. **Fix:** add a required `semanticLabel`
+  (wrapped in `Semantics(label:)`), and optionally a `shape` or `icon` per
+  state (check, triangle, cross) so the states differ by more than hue.
+- **P2 · a11y/semantics · `:712-772`.** `AetherField` puts `errorText` into
+  the field's semantics label **and** renders the same text as a separate
+  `liveRegion` node, so TalkBack announces the error twice when it appears and
+  reads "Label, newline, error" on every focus. Hint text is not part of the
+  label either. **Fix:** move the error into
+  `InputDecoration(errorText:)` with a custom `errorStyle` (Material then
+  exposes it once as the field's error semantics), or wrap the visible error
+  text in `ExcludeSemantics`.
+- **P2 · API coverage · `:648-698`.** `AetherField` has no
+  `textInputAction`, `textCapitalization`, `inputFormatters`, `maxLength`,
+  `readOnly`, `autocorrect`/`enableSuggestions` or `onTapOutside`
+  parameters. That is why 30 raw `TextField`s bypass it (§7 collaboration,
+  §3 sharing, settings) and lose its label, error and a11y handling.
+  **Fix:** forward these parameters (or accept an `InputDecoration`
+  override), then migrate the raw fields.
+- **P2 · a11y · `:1011-1014`.** `_SegItem` semantics lack
+  `inMutuallyExclusiveGroup: true`, so TalkBack says "button, selected"
+  instead of "1 of 3, selected". **Fix:** add the flag and an index hint, or
+  build on M3 `SegmentedButton` themed with Aether colours.
+- **P2 · a11y · `:1295-1376`.** `AetherStepper` has no
+  `Semantics(value:, increasedValue:, decreasedValue:, onIncrease:,
+  onDecrease:)`, so screen readers cannot adjust it with swipe up/down and
+  value changes are not announced. Its tooltips are English literals
+  (`:1366`). **Fix:** wrap the row in an adjustable `Semantics` node.
+- **P2 · dead/duplicate code · `:1052-1293`.** `AetherOtpField` has **zero**
+  call sites. `auth_methods.dart:524-603` implements its own OTP cells. The
+  unused one also has two latent bugs: its `Wrap` follows ambient
+  `Directionality`, so digits run right-to-left in RTL locales, and at text
+  scale 2.0 six cells of `scale(20)+24` dp plus 8dp gaps (about 424dp)
+  wrap onto two rows on a 360dp phone. **Fix:** either delete it, or fix
+  both bugs (`Directionality(textDirection: TextDirection.ltr)` and a
+  `FittedBox`/single `Row`) and migrate `auth_methods` to it, so only one OTP
+  implementation remains.
+- **P2 · interaction feedback · `:145-212` (+ `subagent_screen.dart:640-643`).**
+  `AetherCard` has no `onTap`. Callers wrap it in an outer `InkWell`, whose
+  ripple paints on the *ancestor* `Material`, underneath the card's own opaque
+  `Material(color: surface)`. The tap therefore shows no pressed state.
+  **Fix:** add `onTap`/`onLongPress` to `AetherCard` and put the `InkWell`
+  inside its `Material`, then migrate the wrapping call sites.
+- **P2 · brand consistency · `:214-239`.** `AetherGradientHeader` draws a
+  gradient, but the brand rules in `theme.dart:10` say "No gradients or
+  glow". It is used in `sidebar.dart:337`, `usage_screen.dart:730`,
+  `billing_screen.dart:280`, `browser_screen.dart` and `auth_screen.dart`.
+  **Fix:** render a flat `Aether.bg` band (or delete the widget and use
+  spacing).
+- **P2 · overflow/l10n · `:861-905`, `theme.dart:213-245`.** `AetherPill` and
+  `Tag` render `Text` with no `maxLines`/`overflow` inside a `Row(min)`. With
+  translated labels, which can be 30–40% longer, or at a large text scale, a
+  pill in a tight header row overflows (yellow-black stripes in debug,
+  clipped in release). **Fix:** add `maxLines: 1, overflow: ellipsis` and
+  `Flexible` around the label, plus a `semanticsLabel` parameter.
+
+**Missing features:** a shared `AetherListTile` (most screens hand-roll
+rows); a shared `AetherConfirmDialog` (§3, §7 and others need destructive
+confirmations); `AetherSkeleton`/shimmer loading placeholders (ChatGPT and
+Claude use skeletons instead of spinners); `AetherBanner` for inline
+error/offline states with Retry; a `showAetherSheet` helper.
+
+**Test to add:** `test/aether_primitives_a11y_test.dart`: pump each
+primitive in both modes and assert `androidTapTargetGuideline`,
+`textContrastGuideline` and `labeledTapTargetGuideline`. Add a test that
+`AetherSheet` with a `ListView` body at 320×568 / 2.0× keeps its actions
+hit-testable, and a test that `AetherField(errorText:)` produces exactly one
+semantics node containing the error.
+
+---
+
+## 10. Brand mark — `lib/ui/widgets/ovid_mark.dart`
+
+**What it is / how reached.** `OvidMark` (static `CustomPainter`),
+`OvidWordmark` ("Ovid" + red "Si", `semanticsLabel: 'Ovid Si'`),
+`OvidLockup`, and `OvidMarkAnimated` (drawOn/reveal/pulse/blink/chase loops,
+reduce-motion aware). It is used in the sidebar header (`sidebar.dart:352-359`)
+and on the login/startup splash (`login_gate.dart:200-212`, `:655`).
+
+**Findings**
+- **P2 · motion · `:212-223`, `:292-304`.** `drawOn`/`reveal` are one-shot
+  intros by design (the comment calls them "ring draws, agent square pops"),
+  but `_updateMotionPreference` always calls `_c.repeat()`. On the splash
+  (`login_gate.dart:200`) the ring therefore erases to **blank** and redraws
+  every 3 s for as long as startup or login waits, which looks like a reload
+  or glitch. **Fix:** for `drawOn`/`reveal`, use `_c.forward()` (hold the
+  final frame); keep `repeat()` only for pulse/blink/chase.
+- **P2 · perf · `:247-257`, `:296`, `:315`.** Every animated frame calls
+  `Path.addRRect(...).computeMetrics().first`, allocating and measuring a path
+  60 times per second. There is no `RepaintBoundary`, so the whole splash
+  column repaints each frame. **Fix:** cache the `PathMetric` per size in
+  state (or memoize in the painter by `s`), and wrap the `CustomPaint` in a
+  `RepaintBoundary`.
+- **P2 · theming footgun · `:16-21`, `:28-34`.** The default
+  `variant: primary` paints an **Ink** ring that is invisible on the dark bg
+  (#1B1B1B on #141414 is about 1.1:1). Each call site has to remember
+  `Aether.dark ? reversed : primary`; all three current sites do, but the
+  default is wrong in half the themes, and the variant is captured at build
+  time (the same static-palette issue as §8). **Fix:** add an
+  `OvidMarkVariant.auto` default that resolves from the theme brightness
+  (via `Theme.of(context).brightness`, which also registers a rebuild
+  dependency). Do the same for `OvidWordmark.onDark`.
+- **P2 · a11y · `:35-42`, `:244-258`.** `OvidMark` and `OvidMarkAnimated`
+  have no semantics. That is correct when they are decorative, but on the
+  splash the animated mark is the only "something is happening" signal next
+  to the spinner, and the `chase` variant is documented as a loader. **Fix:**
+  add an optional `semanticLabel`. When `animation == chase`, expose
+  `Semantics(label: 'Loading', liveRegion: true)` (localized), otherwise
+  `ExcludeSemantics`.
+- **P2 · l10n · `:95`, `:114`.** The wordmark is split as `'Ovid '` + `'Si'`
+  with a hardcoded trailing space and a negative letter-spacing of
+  0.03×size. In RTL locales the `Text.rich` reorders the runs to "Si Ovid".
+  **Fix:** wrap the wordmark (and the lockup `Row`) in
+  `Directionality(textDirection: TextDirection.ltr)`; brand marks should
+  never mirror.
+
+**Missing features:** none that users would notice. An adaptive launcher
+icon and splash using the same geometry (Android 12 `SplashScreen` API)
+would keep the brand consistent from cold start to first frame.
+
+**Test to add:** a widget test that pumps `OvidMarkAnimated(animation:
+reveal)` for 4 s and asserts the controller is completed rather than
+repeating. Add a test that `OvidMark()` under a dark theme with
+`variant: auto` paints the Paper ring, and a golden of `OvidLockup` under
+`TextDirection.rtl`.
+
+---
+
+## Group summary
+
+Overall, the sharing, sync and collaboration screens work but are rough. The
+common problems are raw debug output, one-tap destructive actions, primary
+CTAs hidden below the fold, and eager lists rebuilt on every sync tick. The
+design system has good bones: tokens, cached theme, reduce-motion support and
+44dp minimums. However, several core tokens fail WCAG AA, the palette is not
+reactive, and localization has not started. Primitive and token fixes are the
+highest-leverage work, because one change fixes every screen.
+
+**Top 10 fixes, in recommended order**
+
+| # | Fix | Sections | Effort |
+|---|---|---|---|
+| 1 | Contrast token pass: theme-aware `accent` (#C0292E light, #F2666A dark text), `textFaint` #6F6B62 / #9A968D, theme-aware `success`/`warn`, a new `inputBorder` token; plus `theme_contrast_test.dart` to lock it | §8, §9 | S |
+| 2 | `AetherSheet`: make `pinActions` the default, clamp the body to the height left after the chrome, add a `showAetherSheet` helper with max width 640. This fixes the hidden "Create link" button and every tall sheet | §3, §9 | S |
+| 3 | Confirmation dialogs for every destructive one-tap action (revoke share link, close/leave/revoke collaboration) plus an explicit consent confirm for enabling private sync, via a new shared `AetherConfirmDialog` | §3, §4, §7, §9 | S |
+| 4 | Remove debug output and raw errors from the UI: collaboration model-state map dump, the shared `owner.error` used for both success and error, generic error strings → typed, mapped copy | §4, §7 | S–M |
+| 5 | Sharing reachability: a Share button in the chat app bar, native "Share…" for links, "Update link" plus a stale-preview warning | §2, §3 | M |
+| 6 | Shared conversation viewer: Markdown/code rendering, role labels, `ListView.builder`, pinned CTA, retry on error | §1 | M |
+| 7 | Private sync and activity performance and status: index records once in the controller, separate the status listenable from the records, use `ListView.builder`, show "Last synced · N pending", structured consent with explicit confirm | §4, §5, §6 | M |
+| 8 | Collaboration UX: an invite deep link with Copy/Share/QR that prefills join, a chat layout with a pinned composer, disabled-until-valid inputs, display names | §7 | M |
+| 9 | Reactive theming: `ThemeExtension<AetherColors>` + `darkTheme`/`themeMode`, migrate primitives first, then screens; fill all M3 `ColorScheme` roles and button themes | §8 | L |
+| 10 | l10n foundation: `flutter_localizations` + `intl` + ARB, localized a11y strings in primitives, directional insets, `DateFormat`/`NumberFormat`, a CI ratchet on hardcoded strings, pseudo-locale goldens | §8, §9, §10 | L (foundation M, rollout L) |
+
+Next in line after the top 10 (all S): 48dp hit targets for the icon-only send
+button and segmented items; `AetherStatusDot` semantic labels and shape per
+state; `AetherCard.onTap` with an internal ripple; a one-shot splash
+`reveal`; deleting or unifying `AetherOtpField`; and remove-animations
+support in page transitions.
+
+**Effort key:** S ≤ 1 day, M 2–4 days, L ≥ 1 week (including migrating
+call sites and tests).
