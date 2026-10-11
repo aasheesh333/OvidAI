@@ -7,6 +7,8 @@ import 'package:ovid_ai/core/ovid_cloud_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/core/usage_attempt.dart';
+import 'package:ovid_ai/core/usage_attempt_store.dart';
+import 'package:ovid_ai/ui/billing_screen.dart';
 import 'package:ovid_ai/ui/cloud_usage_status.dart';
 import 'package:ovid_ai/ui/image_receipt_panel.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
@@ -458,6 +460,30 @@ class UsageScreen extends StatelessWidget {
                 ),
               ),
 
+              // ---- Retention / storage notices (F-203) ----
+              if (app.usageStorageError != null)
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 10, 16, 0),
+                  child: _UsageHistoryNotice(
+                    key: ValueKey('usage-storage-error'),
+                    icon: Icons.error_outline,
+                    danger: true,
+                    message:
+                        'Usage history on this device could not be read or '
+                        'saved, so these totals may be incomplete. Your '
+                        'Ovid Cloud allowance above is not affected.',
+                  ),
+                )
+              else if (app.usageHistoryTruncated)
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 10, 16, 0),
+                  child: _UsageHistoryNotice(
+                    key: ValueKey('usage-history-truncated'),
+                    icon: Icons.history_toggle_off,
+                    message: usageHistoryLimitNotice,
+                  ),
+                ),
+
               // ---- 'By provider' section ----
               Padding(
                 padding: const EdgeInsets.fromLTRB(18, 22, 18, 10),
@@ -467,7 +493,15 @@ class UsageScreen extends StatelessWidget {
                 ),
               ),
 
-              if (providers.isEmpty)
+              if (providers.isEmpty && app.usageStorageError != null)
+                const AetherEmptyState(
+                  icon: Icons.error_outline,
+                  title: 'Usage history unavailable',
+                  message:
+                      'This device could not read its usage history. New '
+                      'requests are still counted by Ovid Cloud.',
+                )
+              else if (providers.isEmpty)
                 const AetherEmptyState(
                   icon: Icons.query_stats,
                   title: 'No usage yet',
@@ -519,11 +553,74 @@ class ImageReceiptsScreen extends StatelessWidget {
           ImageReceiptPanel(
             studio: ImageStudio.I,
             headers: OvidCloudService.I.imageHeaders,
+            sessionTitle: (id) => AppState.I.sessionById(id)?.title,
+            onOpenSession: (id) {
+              if (AppState.I.sessionById(id) == null) return;
+              AppState.I.selectSession(id);
+              Navigator.of(context).popUntil((route) => route.isFirst);
+            },
           ),
         ],
       ),
     );
   }
+}
+
+/// Shown when the device journal dropped older attempts (F-203).
+const usageHistoryLimitNotice =
+    'History limited to the last '
+    '${UsageAttemptStore.defaultTerminalHistoryLimit} requests on this device. '
+    'Older activity is not included in "Today" or the 14-day chart.';
+
+class _UsageHistoryNotice extends StatelessWidget {
+  const _UsageHistoryNotice({
+    super.key,
+    required this.icon,
+    required this.message,
+    this.danger = false,
+  });
+  final IconData icon;
+  final String message;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = danger ? Aether.dangerC : Aether.textMuted;
+    return Semantics(
+      liveRegion: danger,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Aether.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: danger ? color : Aether.hairline),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 18, color: color),
+            const SizedBox(width: 10),
+            Expanded(child: Text(message, style: AetherType.body)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "Resets in 4h 12m" for a server reset time (F-204). Null when unknown.
+String? formatResetCountdown(DateTime? resetsAt, {DateTime? now}) {
+  if (resetsAt == null) return null;
+  final left = resetsAt.difference((now ?? DateTime.now()).toUtc());
+  if (left.inMinutes < 1) return 'Resets in under a minute';
+  if (left.inDays >= 1) {
+    final hours = left.inHours % 24;
+    return 'Resets in ${left.inDays}d${hours > 0 ? ' ${hours}h' : ''}';
+  }
+  if (left.inHours >= 1) {
+    return 'Resets in ${left.inHours}h ${left.inMinutes % 60}m';
+  }
+  return 'Resets in ${left.inMinutes}m';
 }
 
 /// A single compact stat column used by the local totals strip.
@@ -792,6 +889,49 @@ class _PlanHeroHeaderState extends State<_PlanHeroHeader> {
             )
           else
             _RemainingHero(pct: pct),
+          if (_usage != null) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 14,
+              runSpacing: 6,
+              children: [
+                // Only the server's own reset time is shown; the client never
+                // interprets `budget_window` itself.
+                if (formatResetCountdown(_usage!.resetsAt) case final reset?)
+                  _HeroFact(
+                    key: const ValueKey('usage-reset'),
+                    icon: Icons.schedule,
+                    label: reset,
+                  ),
+                _HeroFact(
+                  key: const ValueKey('usage-requests-today'),
+                  icon: Icons.bolt_outlined,
+                  label: _usage!.requestsToday == 1
+                      ? '1 request today'
+                      : '${_usage!.requestsToday} requests today',
+                ),
+              ],
+            ),
+          ],
+          if (pct != null && pct < 0.1 && tier != '15x') ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                key: const ValueKey('usage-upgrade'),
+                style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BillingScreen()),
+                ),
+                icon: const Icon(Icons.arrow_upward, size: 18),
+                label: Text(
+                  pct <= 0
+                      ? 'Allowance used up · See plans'
+                      : 'Running low · Upgrade',
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 10),
           Text('Server-authoritative', style: AetherType.caption),
           CloudUsageStatus(store: _store),
@@ -823,6 +963,22 @@ class _PlanHeroHeaderState extends State<_PlanHeroHeader> {
       ],
     );
   }
+}
+
+class _HeroFact extends StatelessWidget {
+  const _HeroFact({super.key, required this.icon, required this.label});
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 15, color: Aether.textMuted),
+      const SizedBox(width: 6),
+      Flexible(child: Text(label, style: AetherType.body)),
+    ],
+  );
 }
 
 class _RemainingHero extends StatelessWidget {
@@ -1281,6 +1437,14 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
           ),
 
           const _SectionLabel('LAST 14 DAYS · ACTIVITY SCOPE'),
+          if (AppState.I.usageHistoryTruncated)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: _UsageHistoryNotice(
+                icon: Icons.history_toggle_off,
+                message: usageHistoryLimitNotice,
+              ),
+            ),
           if (!hasTrend)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 18),

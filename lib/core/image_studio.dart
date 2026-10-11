@@ -11,7 +11,8 @@ import 'package:flutter/foundation.dart';
 import 'diag.dart';
 import 'image_receipt_store.dart';
 
-export 'image_receipt_store.dart' show ImageReceipt, ImageRequestRecord;
+export 'image_receipt_store.dart'
+    show ImageReceipt, ImageRequestRecord, imageChargeSummary;
 
 class ImageStudioError implements Exception {
   const ImageStudioError(this.message);
@@ -263,6 +264,7 @@ class ImageStudio extends ChangeNotifier {
     Uint8List? input,
     required Map<String, String> headers,
     String? requestId,
+    String? sessionId,
   }) async {
     final account = _accountId;
     final generation = _generation;
@@ -301,6 +303,8 @@ class ImageStudio extends ChangeNotifier {
       accountId: account,
       requestId: requestId,
       fingerprint: fingerprint,
+      createdAt: DateTime.now().toUtc(),
+      sessionId: sessionId,
     );
     late ({ImageRequestRecord record, bool created}) admission;
     try {
@@ -539,7 +543,7 @@ class ImageStudio extends ChangeNotifier {
       401 || 403 =>
         'Sign in to the original account with current image permission to check this receipt.',
       _ when record.state == 'failed' =>
-        'Image request failed; exact charge ${record.receipt?.charged ?? 'unavailable'}. '
+        'Image request failed (${imageChargeSummary(record.state, record.receipt?.charged).toLowerCase()}). '
             'This receipt is resolved. You may start a new image request when image service is available.',
       _ =>
         bytes != null

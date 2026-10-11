@@ -78,7 +78,30 @@ class ImageReceipt {
 bool validImageRequestId(String value) =>
     RegExp(r'^[A-Za-z0-9_.:-]{8,128}$').hasMatch(value);
 
-/// Minimal durable admission. No prompt, input/output bytes, path or credentials.
+/// Chat session IDs are app-generated; accept only a bounded, path-safe token.
+bool _validSessionId(Object? value) =>
+    value is String && RegExp(r'^[A-Za-z0-9_.:-]{1,128}$').hasMatch(value);
+
+/// User-facing accounting impact of an image receipt (F-207). The server's
+/// `charged` is an internal decimal; it is never rendered as a number.
+String imageChargeSummary(String state, String? charged) {
+  if (charged == null) {
+    return state == 'failed'
+        ? 'Charge not confirmed'
+        : 'Charge pending confirmation';
+  }
+  final mantissa = charged.split(RegExp('[Ee]')).first;
+  final zero = !RegExp('[1-9]').hasMatch(mantissa);
+  if (zero) return 'Not charged';
+  return state == 'failed'
+      ? 'Charged to your Ovid Cloud allowance despite the failure'
+      : 'Charged to your Ovid Cloud allowance';
+}
+
+/// Minimal durable admission. No prompt, input/output bytes, path or
+/// credentials. [createdAt] and the originating chat [sessionId] let the
+/// receipts screen title a card and reopen the chat (F-205); both are dropped
+/// on local reset like the receipt detail.
 /// A local pending row means submission MAY have happened, including after crash.
 class ImageRequestRecord {
   const ImageRequestRecord({
@@ -87,6 +110,8 @@ class ImageRequestRecord {
     required this.fingerprint,
     this.state = 'pending',
     this.receipt,
+    this.createdAt,
+    this.sessionId,
   });
 
   final String accountId;
@@ -94,7 +119,24 @@ class ImageRequestRecord {
   final String fingerprint;
   final String state;
   final ImageReceipt? receipt;
+
+  /// Local submission time (UTC), when known (rows written since F-205).
+  final DateTime? createdAt;
+
+  /// Chat session that requested the image, when known.
+  final String? sessionId;
   bool get unresolved => state == 'pending' || state == 'unknown';
+
+  ImageRequestRecord _copy({required String state, ImageReceipt? receipt}) =>
+      ImageRequestRecord(
+        accountId: accountId,
+        requestId: requestId,
+        fingerprint: fingerprint,
+        state: state,
+        receipt: receipt,
+        createdAt: createdAt,
+        sessionId: sessionId,
+      );
 
   ImageRequestRecord withReceipt(ImageReceipt value) {
     if (value.accountId != accountId ||
@@ -102,24 +144,11 @@ class ImageRequestRecord {
         value.fingerprint != fingerprint) {
       throw const FormatException('Mismatched image receipt');
     }
-    return ImageRequestRecord(
-      accountId: accountId,
-      requestId: requestId,
-      fingerprint: fingerprint,
-      state: value.state,
-      receipt: value,
-    );
+    return _copy(state: value.state, receipt: value);
   }
 
-  ImageRequestRecord get unknown => unresolved
-      ? ImageRequestRecord(
-          accountId: accountId,
-          requestId: requestId,
-          fingerprint: fingerprint,
-          state: 'unknown',
-          receipt: receipt,
-        )
-      : this;
+  ImageRequestRecord get unknown =>
+      unresolved ? _copy(state: 'unknown', receipt: receipt) : this;
 
   Map<String, Object?> toJson() => {
     'account_id': accountId,
@@ -127,6 +156,8 @@ class ImageRequestRecord {
     'fingerprint': fingerprint,
     'state': state,
     'receipt': receipt?.toJson(),
+    if (createdAt != null) 'created_at': createdAt!.millisecondsSinceEpoch,
+    if (sessionId != null) 'session_id': sessionId,
   };
 
   factory ImageRequestRecord.fromJson(Object? value) {
@@ -141,11 +172,19 @@ class ImageRequestRecord {
     if (!const ['pending', 'unknown', 'confirmed', 'failed'].contains(state)) {
       throw const FormatException('Invalid image journal state');
     }
+    // Optional metadata never fails the journal: an invalid value is dropped.
+    final created = value['created_at'];
+    final createdAt = created is int && created > 0 && created < 32503680000000
+        ? DateTime.fromMillisecondsSinceEpoch(created, isUtc: true)
+        : null;
+    final session = value['session_id'];
     final record = ImageRequestRecord(
       accountId: identity.accountId,
       requestId: identity.requestId,
       fingerprint: identity.fingerprint,
       state: state as String,
+      createdAt: createdAt,
+      sessionId: _validSessionId(session) ? session as String : null,
     );
     final receipt = value['receipt'];
     if (receipt == null) return record; // May be a redacted dedup tombstone.
@@ -153,13 +192,7 @@ class ImageRequestRecord {
     if (parsed.state != state && !(state == 'unknown' && parsed.unresolved)) {
       throw const FormatException('Inconsistent image journal');
     }
-    return ImageRequestRecord(
-      accountId: record.accountId,
-      requestId: record.requestId,
-      fingerprint: record.fingerprint,
-      state: state,
-      receipt: parsed.receipt,
-    );
+    return record._copy(state: state, receipt: parsed.receipt);
   }
 }
 

@@ -13,7 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
   testWidgets(
-    'receipt panel checks status read-only, shows exact money without claiming an image, clears on switch',
+    'receipt panel checks status read-only, never shows the raw charge or claims an image, clears on switch',
     (tester) async {
       final store = ImageReceiptStore(
         preferences: SharedPreferences.getInstance,
@@ -74,10 +74,12 @@ void main() {
       await tester.tap(find.text('Check status'));
       await tester.pumpAndSettle();
       expect(reads, 1);
+      // F-207: the internal decimal is never rendered; allowance impact is.
       expect(
         find.textContaining('0.0370370367037037036703703703670'),
-        findsOneWidget,
+        findsNothing,
       );
+      expect(find.text('Charged to your Ovid Cloud allowance'), findsOneWidget);
       expect(
         find.textContaining('Image bytes are unavailable'),
         findsOneWidget,
@@ -85,10 +87,13 @@ void main() {
       studio.bindAccount('bob');
       await tester.pump();
       expect(
-        find.textContaining('0.0370370367037037036703703703670'),
+        find.text('Charged to your Ovid Cloud allowance'),
         findsNothing,
       );
-      expect(find.textContaining('request-1234'), findsNothing);
+      expect(
+        find.textContaining('request-1234', skipOffstage: false),
+        findsNothing,
+      );
       final bob = ImageStudio(
         receiptStore: store,
         client: MockClient((_) async => http.Response('{}', 404)),
@@ -104,7 +109,10 @@ void main() {
           ),
         ),
       );
-      expect(find.textContaining('request-1234'), findsOneWidget);
+      expect(
+        find.textContaining('request-1234', skipOffstage: false),
+        findsOneWidget,
+      );
       expect(find.textContaining('server did not find'), findsNothing);
       final headers = Completer<Map<String, String>>();
       await tester.pumpWidget(
@@ -118,7 +126,10 @@ void main() {
       bob.bindAccount('alice');
       headers.complete({'Authorization': 'Bearer previous'});
       await tester.pumpAndSettle();
-      expect(find.textContaining('request-1234'), findsNothing);
+      expect(
+        find.textContaining('request-1234', skipOffstage: false),
+        findsNothing,
+      );
       // Keep journal scenarios in the same fake-async zone: the production
       // store serializes operations process-wide, across studio instances.
       await tester.pumpWidget(const SizedBox.shrink());
@@ -173,10 +184,9 @@ Future<void> _checkConflictingStatus(WidgetTester tester) async {
   );
   await tester.tap(find.text('Check status'));
   await tester.pumpAndSettle();
-  expect(
-    find.text('Exact charge: 0.0370370367037037036703703703670'),
-    findsOneWidget,
-  );
+  // Saved accounting is retained (charged), never rendered as a number.
+  expect(find.text('Charged to your Ovid Cloud allowance'), findsOneWidget);
+  expect(find.textContaining('0.0370370367'), findsNothing);
   expect(find.textContaining('0.99'), findsNothing);
   expect(find.textContaining('conflicts'), findsOneWidget);
   expect(methods, ['GET']);

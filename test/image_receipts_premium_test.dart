@@ -78,6 +78,10 @@ void main() {
     );
 
     expect(find.text('Summary'), findsOneWidget);
+    // The request ID lives under Details (F-205).
+    expect(find.text('Reference'), findsNothing);
+    await tester.tap(find.text('Details'));
+    await tester.pumpAndSettle();
     expect(find.text('Reference'), findsOneWidget);
     expect(find.text('Result'), findsOneWidget);
     expect(find.text('Check status'), findsOneWidget);
@@ -86,7 +90,7 @@ void main() {
 
     await tester.tap(find.text('Copy request ID'));
     await tester.pumpAndSettle();
-    expect(find.text('Request ID copied'), findsOneWidget);
+    expect(find.text('Request ID copied'), findsWidgets);
     expect(
       (await Clipboard.getData(Clipboard.kTextPlain))?.text,
       _id,

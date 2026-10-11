@@ -121,9 +121,9 @@ void main() {
         expect(tester.takeException(), isNull);
         for (final entry in [
           ('free', 'Free', '×1'),
-          ('3x', '₹499', '×3'),
-          ('7x', '₹899', '×7'),
-          ('15x', '₹1699', '×15'),
+          ('3x', 'Plus', '×3'),
+          ('7x', 'Pro', '×7'),
+          ('15x', 'Max', '×15'),
         ]) {
           final card = find.byKey(ValueKey('plan-${entry.$1}'));
           await _reveal(tester, card);
@@ -150,7 +150,7 @@ void main() {
           of: find.byType(BottomSheet),
           matching: find.textContaining('when enabled by the server'),
         ), findsOneWidget);
-        final pay = find.widgetWithText(FilledButton, 'Pay now · ₹1699');
+        final pay = find.widgetWithText(FilledButton, 'Activate test plan');
         await _reveal(tester, pay);
         expect(tester.getSize(pay).height, greaterThanOrEqualTo(48));
         await _reveal(tester, find.text('Cancel'));
@@ -213,10 +213,17 @@ void main() {
       ));
       await _frames(tester);
       expect(AppState.I.ovidCloudTier, tier);
-      expect(find.byKey(const ValueKey('billing-pay-now')), findsNothing);
-      expect(find.text(success
-          ? 'You are now on the Plus plan.'
-          : 'Could not complete the upgrade. Try again.'), findsOneWidget);
+      if (success) {
+        expect(find.byKey(const ValueKey('billing-pay-now')), findsNothing);
+        expect(find.text('You are now on the Plus plan.'), findsOneWidget);
+      } else {
+        // A rejection keeps the sheet open with specific copy and Retry.
+        expect(find.byKey(const ValueKey('billing-sheet-error')), findsOneWidget);
+        expect(find.textContaining('could not confirm this plan'), findsOneWidget);
+        final retry = find.byKey(const ValueKey('billing-pay-now'));
+        expect(find.descendant(of: retry, matching: find.text('Retry')), findsOneWidget);
+        expect(tester.widget<FilledButton>(retry).onPressed, isNotNull);
+      }
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     });

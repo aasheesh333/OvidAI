@@ -428,9 +428,11 @@ void main() {
         )..bindAccount('alice');
         await studio.loadReceipts();
         final recovered = Completer<void>();
-        var publications = 0;
+        // The panel also reloads receipts on open; wait for the result GET.
         studio.addListener(() {
-          if (++publications == 2) recovered.complete();
+          if (paths.length == 2 && !recovered.isCompleted) {
+            recovered.complete();
+          }
         });
         await tester.pumpWidget(
           MaterialApp(
@@ -450,7 +452,8 @@ void main() {
           '/v1/images/requests/$_id/result',
         ]);
         expect(find.byType(Image), findsOneWidget);
-        expect(find.text('Exact charge: $_charge'), findsOneWidget);
+        expect(find.text('Charged to your Ovid Cloud allowance'), findsOneWidget);
+        expect(find.textContaining(_charge), findsNothing);
         studio.bindAccount('alice');
         await tester.pump();
         expect(find.byType(Image), findsNothing);
@@ -478,13 +481,13 @@ void main() {
         );
         expect(find.textContaining('could not be loaded'), findsOneWidget);
         expect(
-          find.text('No loaded image receipts for this account.'),
+          find.textContaining('No image receipts yet'),
           findsNothing,
         );
         broken = false;
         await tester.tap(find.text('Retry loading receipts'));
         await tester.pumpAndSettle();
-        expect(find.text('Request $_id'), findsOneWidget);
+        expect(find.text('Request $_id', skipOffstage: false), findsOneWidget);
         expect(find.textContaining('could not be loaded'), findsNothing);
         await tester.pumpWidget(const SizedBox.shrink());
       });

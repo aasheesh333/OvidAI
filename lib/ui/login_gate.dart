@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/account_service.dart';
 import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
+import '../core/play_billing.dart';
 import '../core/theme.dart';
 import '../core/auth_identity.dart';
 import '../core/legal_links.dart';
@@ -115,6 +116,11 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
       unawaited(
         widget.bindCloud?.call() ?? OvidCloudService.I.ensureConnected(),
       );
+      if (widget.bindCloud == null) {
+        // Re-verify Play purchases that were paid but not yet confirmed
+        // (e.g. the app died mid-purchase) before Play refunds them.
+        unawaited(PlayBillingService.I.ensureLoaded());
+      }
     }
     setState(() {});
   }
