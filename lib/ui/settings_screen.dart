@@ -4,13 +4,13 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:url_launcher/url_launcher.dart' as import_url_launcher;
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/agent_service.dart';
 import '../core/app_info.dart';
 import '../core/native_share.dart';
 import '../core/firebase_service.dart';
+import '../core/legal_links.dart';
 import '../core/model_limits.dart';
 import '../core/plan_mode.dart';
 import '../core/presets.dart';
@@ -37,6 +37,7 @@ import 'providers_screen.dart';
 import 'plugins_screen.dart';
 import 'usage_screen.dart';
 import 'widgets/aether_primitives.dart';
+import 'widgets/external_link.dart';
 import '../core/diag.dart';
 import 'widgets/ovid_mark.dart';
 
@@ -523,16 +524,6 @@ class SettingsScreen extends StatelessWidget {
       Divider(height: 1, thickness: 1, color: Aether.hairline);
 
   Widget _privacyPolicyTile(BuildContext context) {
-    Future<void> openPrivacyPolicy() async {
-      final uri = Uri.tryParse('https://dhanuk.page.gd/ovid/');
-      if (uri != null) {
-        await import_url_launcher.launchUrl(
-          uri,
-          mode: import_url_launcher.LaunchMode.externalApplication,
-        );
-      }
-    }
-
     return ListTile(
       dense: true,
       leading: Icon(
@@ -542,38 +533,18 @@ class SettingsScreen extends StatelessWidget {
       ),
       title: const Text('Privacy policy', style: TextStyle(fontSize: 14)),
       subtitle: Text(
-        'dhanuk.page.gd/ovid',
+        _displayUrl(LegalLinks.privacyPolicy),
         style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
       ),
       trailing: Icon(Icons.open_in_new, size: 16, color: Aether.textFaint),
-      onTap: () => showDialog<void>(
-        context: context,
-        builder: (d) => AlertDialog(
-          scrollable: true,
-          title: const Text('Privacy policy', style: TextStyle(fontSize: 15)),
-          content: const Text(
-            'View the Ovid AI privacy policy at:\n\nhttps://dhanuk.page.gd/ovid/\n\n'
-            'It covers Firebase sign-in, optional crash reports & analytics, and how your API keys stay encrypted on-device.',
-            style: TextStyle(fontSize: 13, height: 1.5),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(d),
-              child: const Text('Close'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(d);
-                openPrivacyPolicy();
-              },
-              child: const Text('Open policy'),
-            ),
-          ],
-        ),
-      ),
+      onTap: () => openExternalLink(context, LegalLinks.privacyPolicy),
     );
   }
 }
+
+/// `https://host/path` → `host/path` for row subtitles.
+String _displayUrl(String url) =>
+    url.replaceFirst(RegExp(r'^https?://'), '').replaceFirst(RegExp(r'/$'), '');
 
 /// Fixed-height gap between sections. Keeps the premium rhythm consistent
 /// regardless of the content height of the preceding card.
@@ -1508,15 +1479,45 @@ class _ExportChatsScreen extends StatefulWidget {
 
 class _ExportChatsScreenState extends State<_ExportChatsScreen> {
   bool _busy = false;
-  File? _exported;
+  Directory? _staging;
+
+  @override
+  void dispose() {
+    _discardStaging();
+    super.dispose();
+  }
+
+  /// The plaintext export lives only in a temporary staging directory until
+  /// the share sheet has copied it; nothing is left in app documents.
+  void _discardStaging() {
+    final staging = _staging;
+    _staging = null;
+    if (staging == null) return;
+    staging.delete(recursive: true).catchError((Object e) {
+      Diag.swallow('settings.export_cleanup', e);
+      return staging;
+    });
+  }
 
   Future<void> _export() async {
     setState(() => _busy = true);
     try {
-      final dir = await getApplicationDocumentsDirectory();
-      final file = File(
-        '${dir.path}/ovid-sessions-${DateTime.now().millisecondsSinceEpoch}.json',
-      );
+      final temp = await getTemporaryDirectory();
+      // Remove any export left behind by an interrupted earlier attempt.
+      await for (final entity in temp.list(followLinks: false)) {
+        if (entity is Directory &&
+            entity.uri.pathSegments
+                .where((segment) => segment.isNotEmpty)
+                .last
+                .startsWith('ovid-chat-export-')) {
+          await entity.delete(recursive: true);
+        }
+      }
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final staging = _staging = await Directory(
+        '${temp.path}/ovid-chat-export-$stamp',
+      ).create(recursive: true);
+      final file = File('${staging.path}/ovid-sessions-$stamp.json');
       final payload = {
         'exportedAt': DateTime.now().toIso8601String(),
         'sessions': AppState.I.sessions.map((s) => s.toJson()).toList(),
@@ -1525,18 +1526,19 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
         const JsonEncoder.withIndent('  ').convert(payload),
       );
       if (!mounted) return;
-      setState(() => _exported = file);
+      // The native share path copies the file into its own short-lived share
+      // cache before the chooser opens, so the staging copy can go now.
+      await showNativeShare(context, () => NativeShare.file(file.path));
+      _discardStaging();
+    } catch (e) {
+      _discardStaging();
+      Diag.swallow('settings.export', e);
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Exported to:\n${file.path}'),
-          behavior: SnackBarBehavior.floating,
+        const SnackBar(
+          content: Text('Export failed. Free some space and try again.'),
         ),
       );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1551,8 +1553,8 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
         children: [
           Text(
             'Exports every session (messages, todos, goals, schedules, '
-            'attachments metadata) as a single JSON file saved to the app '
-            'documents directory.',
+            'attachments metadata) as a single JSON file and opens the share '
+            'sheet so you can save or send it. No copy is kept in the app.',
             style: TextStyle(
               fontSize: 13.5,
               height: 1.6,
@@ -1568,20 +1570,9 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
                     height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Icon(Icons.download_outlined, size: 18),
-            label: Text(_busy ? 'Exporting…' : 'Export all sessions'),
+                : const Icon(Icons.ios_share_outlined, size: 18),
+            label: Text(_busy ? 'Exporting…' : 'Export and share JSON'),
           ),
-          if (_exported != null)
-            OutlinedButton.icon(
-              onPressed: _busy
-                  ? null
-                  : () => showNativeShare(
-                      context,
-                      () => NativeShare.file(_exported!.path),
-                    ),
-              icon: const Icon(Icons.share_outlined),
-              label: const Text('Share / save JSON'),
-            ),
         ],
       ),
     );
@@ -1635,53 +1626,47 @@ class _AboutScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 32),
-          ListTile(
-            leading: Icon(Icons.public, size: 20, color: Aether.accent),
-            title: const Text('Website', style: TextStyle(fontSize: 14)),
-            subtitle: Text(
-              'dhanuk.page.gd/ovid',
-              style: TextStyle(fontSize: 12, color: Aether.textFaint),
-            ),
-            trailing: Icon(
-              Icons.open_in_new,
-              size: 16,
-              color: Aether.textFaint,
-            ),
-            onTap: () {
-              final uri = Uri.tryParse('https://dhanuk.page.gd/ovid');
-              if (uri != null) {
-                import_url_launcher.launchUrl(
-                  uri,
-                  mode: import_url_launcher.LaunchMode.externalApplication,
-                );
-              }
-            },
+          _AboutLinkTile(
+            icon: Icons.public,
+            iconColor: Aether.accent,
+            title: 'Website',
+            url: LegalLinks.website,
+          ),
+          _AboutLinkTile(
+            icon: Icons.privacy_tip_outlined,
+            title: 'Privacy policy',
+            url: LegalLinks.privacyPolicy,
+          ),
+          _AboutLinkTile(
+            icon: Icons.gavel_outlined,
+            title: 'Terms of Service',
+            url: LegalLinks.terms,
           ),
           ListTile(
             leading: Icon(
-              Icons.privacy_tip_outlined,
+              Icons.description_outlined,
               size: 20,
               color: Aether.textMuted,
             ),
-            title: const Text('Privacy policy', style: TextStyle(fontSize: 14)),
+            title: const Text(
+              'Open-source licenses',
+              style: TextStyle(fontSize: 14),
+            ),
             subtitle: Text(
-              'dhanuk.page.gd/ovid',
+              'Third-party software used by Ovid AI',
               style: TextStyle(fontSize: 12, color: Aether.textFaint),
             ),
             trailing: Icon(
-              Icons.open_in_new,
-              size: 16,
+              Icons.chevron_right,
+              size: 18,
               color: Aether.textFaint,
             ),
-            onTap: () {
-              final uri = Uri.tryParse('https://dhanuk.page.gd/ovid/');
-              if (uri != null) {
-                import_url_launcher.launchUrl(
-                  uri,
-                  mode: import_url_launcher.LaunchMode.externalApplication,
-                );
-              }
-            },
+            onTap: () => showLicensePage(
+              context: context,
+              applicationName: 'Ovid AI',
+              applicationVersion: kAppVersion,
+              applicationLegalese: '© ${DateTime.now().year} Dhanuk Softwares',
+            ),
           ),
           const SizedBox(height: 24),
           Center(
@@ -1692,6 +1677,36 @@ class _AboutScreen extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// About-screen row that opens an external page directly, with a copy-link
+/// fallback when no browser can handle it.
+class _AboutLinkTile extends StatelessWidget {
+  const _AboutLinkTile({
+    required this.icon,
+    required this.title,
+    required this.url,
+    this.iconColor,
+  });
+
+  final IconData icon;
+  final String title;
+  final String url;
+  final Color? iconColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(icon, size: 20, color: iconColor ?? Aether.textMuted),
+      title: Text(title, style: const TextStyle(fontSize: 14)),
+      subtitle: Text(
+        _displayUrl(url),
+        style: TextStyle(fontSize: 12, color: Aether.textFaint),
+      ),
+      trailing: Icon(Icons.open_in_new, size: 16, color: Aether.textFaint),
+      onTap: () => openExternalLink(context, url),
     );
   }
 }

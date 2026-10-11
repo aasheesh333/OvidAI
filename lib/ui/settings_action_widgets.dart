@@ -143,7 +143,15 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
         scrollable: true,
         title: const Text('Delete ALL data?'),
         content: const Text(
-          'Remove app-owned chats, credentials, settings and local data. This cannot be undone. External user folders are excluded.',
+          'This permanently deletes from this device: chats and their '
+          'workspaces, search index, memory, usage history, API keys and '
+          'tokens, providers, plugins, MCP servers, presets, permission '
+          'grants, settings, uploaded skills, chat exports and backups, '
+          'browser cookies and profiles, and signs you out.\n\n'
+          'Not deleted: folders you picked outside the app, files you '
+          'already shared or saved elsewhere, the installed sandbox '
+          'runtime, and your Ovid account and cloud data (delete those '
+          'from Account). This cannot be undone.',
         ),
         actions: [
           TextButton(
@@ -158,6 +166,8 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
       ),
     );
     if (confirmed != true || !mounted) return;
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
     setState(() {
       _busy = true;
       _result = null;
@@ -165,10 +175,18 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
     try {
       final report = await reset();
       if (!mounted) return;
+      if (report.success) {
+        const done = 'All data on this device was deleted.';
+        setState(() => _result = done);
+        // The reset signs out, so the gate under this stack now shows the
+        // login screen. Return there instead of leaving signed-out settings
+        // screens on top.
+        messenger?.showSnackBar(const SnackBar(content: Text(done)));
+        navigator.popUntil((route) => route.isFirst);
+        return;
+      }
       setState(
-        () => _result = report.success
-            ? 'All data deleted.'
-            : 'Incomplete reset. ${report.completed.length} store(s) completed.\n'
+        () => _result = 'Incomplete reset. ${report.completed.length} store(s) completed.\n'
                   '${report.failures.entries.map((e) => '${e.key}: ${e.value}').join('\n')}'
                   '${report.failures.isEmpty ? '\nCompletion could not be verified.' : ''}\nRetry to finish.',
       );
@@ -209,7 +227,7 @@ class _SettingsResetScreenState extends State<SettingsResetScreen> {
                 const SizedBox(height: 8),
                 Text(
               available
-                  ? 'Deletes app-owned data after stopping active writers. Any incomplete removal is reported for retry.'
+                  ? 'Deletes chats, keys, settings and other app data on this device after stopping active writers. Folders outside the app and your Ovid account are not affected. Any incomplete removal is reported for retry.'
                   : 'Full reset unavailable in this build: the verified all-store reset worker is not connected. No data has been deleted.',
               style: AetherType.body,
                 ),

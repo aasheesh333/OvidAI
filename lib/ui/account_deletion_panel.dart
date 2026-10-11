@@ -1,8 +1,10 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../core/account_service.dart';
+import '../core/legal_links.dart';
 import '../core/theme.dart';
 import 'widgets/aether_primitives.dart';
+import 'widgets/external_link.dart';
 
 class AccountDeletionPanel extends StatefulWidget {
   const AccountDeletionPanel({
@@ -11,6 +13,9 @@ class AccountDeletionPanel extends StatefulWidget {
     this.usesPassword = false,
     required this.reauthenticate,
     required this.requestDeletion,
+    this.restore,
+    this.canReauthenticate = true,
+    this.uid,
   });
   final AccountService service;
   // Kept as an ignored source-compatibility parameter for existing consumers.
@@ -18,6 +23,20 @@ class AccountDeletionPanel extends StatefulWidget {
   final bool usesPassword;
   final Future<String?> Function(String? unused) reauthenticate;
   final Future<AccountDeletion> Function(String requestId) requestDeletion;
+
+  /// Account-owner restore (`FirebaseService.restoreAccount`), so the
+  /// app-wide deletion receipt is cleared together with the server request.
+  /// Returns the latest receipt. Falls back to [AccountService.cancelDeletion]
+  /// only when no owner is supplied.
+  final Future<AccountDeletion?> Function()? restore;
+
+  /// False when no linked sign-in method can verify the account in this
+  /// build (legacy password only, or a provider disabled here). In-app
+  /// deletion is then impossible, so the web/email request is offered.
+  final bool canReauthenticate;
+
+  /// Prefilled into the email deletion request.
+  final String? uid;
 
   @override
   State<AccountDeletionPanel> createState() => _AccountDeletionPanelState();
@@ -154,8 +173,11 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
         if (error != 'cancelled') throw AccountException(error);
         return;
       }
-      final status = await widget.service.cancelDeletion();
-      if (mounted) setState(() => _status = status);
+      final restore = widget.restore;
+      final status = restore != null
+          ? await restore()
+          : await widget.service.cancelDeletion();
+      if (mounted && status != null) setState(() => _status = status);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {
@@ -176,6 +198,9 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
   @override
   Widget build(BuildContext context) {
     final enabled = widget.service.enabled;
+    // Play requires a working deletion path in every build: when the in-app
+    // flow cannot run, offer the web form and a prefilled email instead.
+    final offerRequest = !enabled || !widget.canReauthenticate;
     final pending = _status?.isPending == true;
     final cancelled = _status?.state == 'cancelled';
     final countdown = _countdown();
@@ -183,22 +208,6 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (!enabled)
-          AetherCard(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.info_outline, size: 18, color: Aether.textMuted),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'Account deletion is not yet activated on the server. No request has been submitted.',
-                    style: AetherType.body,
-                  ),
-                ),
-              ],
-            ),
-          ),
         if (pending) ...[
           Container(
             decoration: BoxDecoration(
@@ -306,11 +315,20 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
             icon: Icons.restore,
             onPressed: _busy ? null : _restore,
           )
+        else if (offerRequest)
+          _DeletionRequestFallback(
+            reason: enabled
+                ? 'None of the sign-in methods linked to this account can '
+                      'verify a deletion in this version of the app.'
+                : 'In-app account deletion is not available in this version '
+                      'of the app yet.',
+            uid: widget.uid,
+          )
         else
           AetherDangerButton(
             label: 'Delete your account',
             icon: Icons.delete_forever_outlined,
-            onPressed: enabled && !_busy ? _delete : null,
+            onPressed: _busy ? null : _delete,
           ),
         if (enabled) ...[
           const SizedBox(height: 6),
@@ -320,6 +338,56 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
             onPressed: _busy ? null : _refresh,
           ),
         ],
+      ],
+    );
+  }
+}
+
+/// Deletion request outside the in-app flow: the public web form (also the
+/// Play Console "Delete account URL") and a prefilled support email.
+class _DeletionRequestFallback extends StatelessWidget {
+  const _DeletionRequestFallback({required this.reason, this.uid});
+  final String reason;
+  final String? uid;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        AetherCard(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.info_outline, size: 18, color: Aether.textMuted),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  '$reason You can still request deletion on the web or by '
+                  'email. We remove your Ovid identity, profile, cloud data '
+                  'and cloud keys, and confirm by email.',
+                  style: AetherType.body,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        AetherDangerButton(
+          label: 'Request deletion',
+          icon: Icons.open_in_new,
+          onPressed: () =>
+              openExternalLink(context, LegalLinks.accountDeletionRequest),
+        ),
+        const SizedBox(height: 6),
+        AetherGhostButton(
+          label: 'Email a deletion request',
+          icon: Icons.mail_outline,
+          onPressed: () => openExternalLink(
+            context,
+            LegalLinks.accountDeletionMail(uid: uid).toString(),
+          ),
+        ),
       ],
     );
   }

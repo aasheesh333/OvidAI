@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/firebase_service.dart';
@@ -13,8 +14,16 @@ import 'widgets/aether_primitives.dart';
 /// Preserves the plan tiles (Free, Plus ₹499, Pro ₹899, Max ₹1699), hides
 /// USD everywhere, retains the selected-tier state, and routes "Pay now" through
 /// [OvidCloudService.upgrade] (which is server-gated by the test-upgrade env).
+///
+/// There is no Play Billing yet, so release builds offer purchases only when
+/// the server reports `billing_enabled`; otherwise plan CTAs read "Paid plans
+/// coming soon". A server 403 "disabled" from `/upgrade` hides them too.
 class BillingScreen extends StatefulWidget {
-  const BillingScreen({super.key});
+  const BillingScreen({super.key, this.allowTestUpgrade});
+
+  /// Whether the server test-upgrade path may be offered without the server
+  /// `billing_enabled` flag. Defaults to debug/profile builds only.
+  final bool? allowTestUpgrade;
 
   @override
   State<BillingScreen> createState() => _BillingScreenState();
@@ -117,8 +126,17 @@ class _BillingScreenState extends State<BillingScreen> {
         title: const Text('Plans & Billing'),
       ),
       body: AnimatedBuilder(
-        animation: Listenable.merge([app, FirebaseService.I, _store]),
+        animation: Listenable.merge([
+          app,
+          FirebaseService.I,
+          _store,
+          OvidCloudService.I,
+        ]),
         builder: (_, _) {
+          final canPurchase =
+              !OvidCloudService.I.upgradeDisabledByServer &&
+              (_usage?.billingEnabled == true ||
+                  (widget.allowTestUpgrade ?? !kReleaseMode));
           final tier = _usage?.tier ?? OvidCloudService.I.confirmedTier ?? '';
           final isPaid =
               _usage?.isPaid ?? (tier.isNotEmpty && tier != 'free');
@@ -147,6 +165,7 @@ class _BillingScreenState extends State<BillingScreen> {
                 usage: _usage,
                 store: _store,
                 nextPlan: nextPlan,
+                canPurchase: canPurchase,
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
@@ -166,13 +185,17 @@ class _BillingScreenState extends State<BillingScreen> {
                     currentTier: tier,
                     rank: _tierRank(p.tier),
                     currentRank: currentRank,
+                    canPurchase: canPurchase,
                   ),
                 ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
                 child: Text(
-                  'Prices are in INR. Test activation is available only when '
-                  'enabled by the server. Your plan changes after server confirmation.',
+                  canPurchase
+                      ? 'Prices are in INR. Test activation is available only when '
+                            'enabled by the server. Your plan changes after server confirmation.'
+                      : 'Paid plans are coming soon. Prices are in INR and shown '
+                            'for reference; nothing can be purchased yet.',
                   style: AetherType.caption,
                 ),
               ),
@@ -195,10 +218,12 @@ class _CurrentPlanHeader extends StatelessWidget {
     required this.loading,
     required this.usage,
     required this.store,
+    required this.canPurchase,
     this.nextPlan,
   });
 
   final _PlanOption plan;
+  final bool canPurchase;
   final bool hasTier;
   final bool isPaid;
   final bool loading;
@@ -255,7 +280,7 @@ class _CurrentPlanHeader extends StatelessWidget {
           else
             _UsageBar(pct: pct, percentText: percentText),
           CloudUsageStatus(store: store),
-          if (nextPlan != null && hasTier) ...[
+          if (nextPlan != null && hasTier && canPurchase) ...[
             const SizedBox(height: 16),
             SizedBox(
               width: double.infinity,
@@ -265,6 +290,13 @@ class _CurrentPlanHeader extends StatelessWidget {
                 label: 'Upgrade',
                 buttonKey: const ValueKey('upgrade-header'),
               ),
+            ),
+          ] else if (nextPlan != null && hasTier) ...[
+            const SizedBox(height: 16),
+            Text(
+              'Paid plans coming soon',
+              key: const ValueKey('paid-plans-coming-soon'),
+              style: AetherType.label,
             ),
           ],
         ],
@@ -327,12 +359,14 @@ class _PlanCard extends StatelessWidget {
     required this.currentTier,
     required this.rank,
     required this.currentRank,
+    required this.canPurchase,
   });
 
   final _PlanOption plan;
   final String currentTier;
   final int rank;
   final int currentRank;
+  final bool canPurchase;
 
   @override
   Widget build(BuildContext context) {
@@ -390,6 +424,16 @@ class _PlanCard extends StatelessWidget {
             )
           else if (isFree)
             Text('Included with your account', style: AetherType.bodyMuted)
+          else if (!canPurchase)
+            SizedBox(
+              key: ValueKey('coming-soon-${plan.tier}'),
+              width: double.infinity,
+              child: const _BillingButton(
+                ghost: true,
+                label: 'Coming soon',
+                onPressed: null,
+              ),
+            )
           else if (currentRank >= 0 && isBelow)
             _UpgradeButton(
               plan: plan,
@@ -464,6 +508,8 @@ class _UpgradeButtonState extends State<_UpgradeButton> {
         content: Text(
           newTier == plan.tier
               ? 'You are now on the ${plan.title} plan.'
+              : OvidCloudService.I.upgradeDisabledByServer
+              ? 'Paid plans are not available yet. Nothing was charged.'
               : 'Could not complete the upgrade. Try again.',
         ),
       ),

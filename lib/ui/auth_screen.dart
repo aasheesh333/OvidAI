@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../core/account_service.dart';
 import '../core/firebase_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
@@ -310,6 +311,16 @@ class _AuthScreenState extends State<AuthScreen> {
                   service: fb.accountService,
                   reauthenticate: (_) => _verifyIdentity(fb),
                   requestDeletion: fb.requestAccountDeletion,
+                  restore: () async {
+                    await fb.restoreAccount();
+                    // A successful restore re-admits the account, so the
+                    // latest receipt is the login acknowledgement ('active').
+                    final receipt = fb.lastDeletionReceipt;
+                    if (receipt == null || !receipt.allowsLogin) return receipt;
+                    return AccountDeletion('cancelled', null, receipt.requestId);
+                  },
+                  canReauthenticate: fb.reauthProviders.isNotEmpty,
+                  uid: fb.uid,
                 ),
                 signOut: AetherDangerButton(
                   label: _signingOut ? 'Signing out…' : 'Sign out',

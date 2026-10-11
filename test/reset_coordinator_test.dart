@@ -229,6 +229,13 @@ void main() {
         'shares',
         'private-sync',
         'collaboration',
+        'configuration',
+        'secrets',
+        'preferences',
+        'skills',
+        'exports',
+        'cache',
+        'cookies',
       ]);
       expect(report.success, isTrue);
     },

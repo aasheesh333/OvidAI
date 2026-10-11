@@ -22,6 +22,13 @@ class GateService extends ChangeNotifier implements FirebaseService {
   @override
   AccountDeletion? lastDeletionReceipt;
   @override
+  bool accountTransitionFailed = false;
+  int accountRechecks = 0;
+  @override
+  Future<void> recheckAccountState({bool force = false}) async {
+    accountRechecks++;
+  }
+  @override
   Future<void> initialize() => initialization.future;
   @override
   Future<void> retryAccountLogin() async {

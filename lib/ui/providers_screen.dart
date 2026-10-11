@@ -85,7 +85,7 @@ class ProvidersScreen extends StatelessWidget {
                   icon: Icons.cloud_queue_outlined,
                   title: 'No providers yet',
                   message:
-                      'Add an [OI]-compatible endpoint — Together, Groq, '
+                      'Add an OpenAI-compatible endpoint — Together, Groq, '
                       'OpenRouter, or your own gateway — to use its models in '
                       'chat.',
                   action: FilledButton.icon(
@@ -850,7 +850,7 @@ class _EditProviderSheetState extends State<_EditProviderSheet> {
                 runSpacing: 8,
                 children: [
                   for (final option in const [
-                    (value: ApiFormat.openai, label: '[OI]-compatible'),
+                    (value: ApiFormat.openai, label: 'OpenAI-compatible'),
                     (value: ApiFormat.anthropic, label: 'Anthropic'),
                   ])
                     ChoiceChip(
@@ -1164,7 +1164,7 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Connect an [OI]-compatible or Anthropic endpoint.',
+              'Connect an OpenAI-compatible or Anthropic endpoint.',
               style: AetherType.bodyMuted,
             ),
             const SizedBox(height: 16),
@@ -1194,7 +1194,7 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
               runSpacing: 8,
               children: [
                 for (final option in const [
-                  (value: ApiFormat.openai, label: '[OI]-compatible'),
+                  (value: ApiFormat.openai, label: 'OpenAI-compatible'),
                   (value: ApiFormat.anthropic, label: 'Anthropic'),
                 ])
                   ChoiceChip(

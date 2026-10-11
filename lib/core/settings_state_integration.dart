@@ -216,6 +216,76 @@ extension _SettingsStateIntegration on AppState {
         ResetStoreKind.collaboration: _accountLifecycle.asResetStore(
           ResetStoreKind.collaboration.id,
         ),
+        ResetStoreKind.configuration: FunctionalResetStore(
+          name: ResetStoreKind.configuration.id,
+          onStage: () async {},
+          onDelete: _resetConfiguration,
+          onVerifyDeleted: _verifyConfigurationReset,
+        ),
+        ResetStoreKind.secrets: FunctionalResetStore(
+          name: ResetStoreKind.secrets.id,
+          onStage: () async {},
+          onDelete: () async {
+            await GitHubService.I.signOut();
+            await AppState._secureStorage.deleteAll();
+            for (final provider in providers) {
+              provider.apiKey = '';
+            }
+          },
+          onVerifyDeleted: () async =>
+              (await AppState._secureStorage.readAll()).isEmpty &&
+              providers.every((provider) => provider.apiKey.isEmpty),
+        ),
+        ResetStoreKind.preferences: FunctionalResetStore(
+          name: ResetStoreKind.preferences.id,
+          onStage: () async {},
+          onDelete: _resetPreferences,
+          onVerifyDeleted: () async {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.reload();
+            return prefs.getKeys().every(_resetKeepPreferences.contains);
+          },
+        ),
+        ResetStoreKind.skills: FunctionalResetStore(
+          name: ResetStoreKind.skills.id,
+          onStage: () async {},
+          onDelete: () async {
+            final dir = await _userSkillsDir();
+            if (await dir.exists()) await dir.delete(recursive: true);
+            SkillService.I.invalidateAllSessions();
+          },
+          onVerifyDeleted: () async => !await (await _userSkillsDir()).exists(),
+        ),
+        ResetStoreKind.exports: FunctionalResetStore(
+          name: ResetStoreKind.exports.id,
+          onStage: () async {},
+          onDelete: () async {
+            for (final file in await _legacyChatExports()) {
+              await file.delete();
+            }
+          },
+          onVerifyDeleted: () async => (await _legacyChatExports()).isEmpty,
+        ),
+        ResetStoreKind.cache: FunctionalResetStore(
+          name: ResetStoreKind.cache.id,
+          onStage: () async {},
+          onDelete: () async {
+            for (final entity in await _appTempArtifacts()) {
+              await entity.delete(recursive: true);
+            }
+          },
+          onVerifyDeleted: () async => (await _appTempArtifacts()).isEmpty,
+        ),
+        ResetStoreKind.cookies: FunctionalResetStore(
+          name: ResetStoreKind.cookies.id,
+          onStage: () async {},
+          onDelete: () async {
+            await AppState.clearWebCookies();
+          },
+          // The cookie jar cannot be enumerated; a second clear reports
+          // whether any cookie was still present.
+          onVerifyDeleted: () async => !await AppState.clearWebCookies(),
+        ),
       });
       await coordinator.prepare();
       return (await coordinator.commit()).toSettingsResult();
@@ -233,6 +303,155 @@ extension _SettingsStateIntegration on AppState {
     }
     return result;
   }
+
+  /// Preferences that describe this device's runtime install, not the
+  /// user's data, and survive an all-data reset: the sandbox install/skip
+  /// markers (the sandbox itself is not removed) and the pending browser
+  /// profile deletions, whose retry must outlive the reset.
+  static const _resetKeepPreferences = <String>{
+    AppState._kSandboxSkipped,
+    AppState._kStudioFirstOpenDone,
+    'ovid_browser_profile_deletes',
+  };
+
+  /// Configuration keys owned by [_resetConfiguration]. Prefix keys carry a
+  /// per-server suffix.
+  static const _configurationKeys = <String>{
+    AppState._kProviders,
+    AppState._kLastModel,
+    AppState._kLastProvider,
+    AppState._kRecentModels,
+    AppState._kPluginState,
+    AppState._kCustomPlugins,
+    AppState._kCustomMcpServers,
+    AppState._kRemovedBuiltinSeeds,
+    AppState._kMcpConnectedIntent,
+    AppState._kMarketplaces,
+    AppState._kMarketplaceMerged,
+    AppState._kCustomPresets,
+    AppState._kPermissionGrants,
+  };
+  static const _configurationPrefixes = <String>[
+    AppState._kMcpEnvPrefix,
+    AppState._kMcpHeadersPrefix,
+  ];
+
+  bool _isConfigurationKey(String key) =>
+      _configurationKeys.contains(key) ||
+      _configurationPrefixes.any(key.startsWith);
+
+  /// Providers, plugins, MCP servers, custom presets and global grants go
+  /// back to the built-in catalog, in memory and on disk.
+  Future<void> _resetConfiguration() async {
+    final prefs = await SharedPreferences.getInstance();
+    for (final key in prefs.getKeys().where(_isConfigurationKey).toList()) {
+      await prefs.remove(key);
+    }
+    await prefs.reload();
+    providers.clear();
+    plugins.clear();
+    mcpServers.clear();
+    _seed();
+    PresetRegistry.clearCustom();
+    globalPermissionGrants.clear();
+    lastSelectedModel = '';
+    lastSelectedProviderId = null;
+    refresh();
+  }
+
+  Future<bool> _verifyConfigurationReset() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    return !prefs.getKeys().any(_isConfigurationKey) &&
+        PresetRegistry.customPresets.isEmpty &&
+        globalPermissionGrants.isEmpty &&
+        providers.every((provider) => provider.apiKey.isEmpty);
+  }
+
+  /// Clears every remaining preference except the device keep-list, and
+  /// returns the in-memory settings to their defaults so a later write
+  /// cannot persist the old values again.
+  Future<void> _resetPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final kept = <String, Object?>{
+      for (final key in _resetKeepPreferences) key: prefs.get(key),
+    };
+    await prefs.clear();
+    for (final entry in kept.entries) {
+      final value = entry.value;
+      switch (value) {
+        case final bool v:
+          await prefs.setBool(entry.key, v);
+        case final int v:
+          await prefs.setInt(entry.key, v);
+        case final double v:
+          await prefs.setDouble(entry.key, v);
+        case final String v:
+          await prefs.setString(entry.key, v);
+        case final List<String> v:
+          await prefs.setStringList(entry.key, v);
+        default:
+          break;
+      }
+    }
+    await prefs.reload();
+    memories.clear();
+    memoryEnabled = true;
+    showReasoning = true;
+    githubSync = true;
+    workflowEnabled = true;
+    browserDesktopMode = false;
+    autoRunSafeCommands = true;
+    shareSessionMemory = false;
+    shareStudioOnRestart = true;
+    shareBrowserOnRestart = true;
+    refresh();
+  }
+
+  Future<Directory> _userSkillsDir() async =>
+      Directory('${(await getApplicationDocumentsDirectory()).path}/skills');
+
+  /// `ovid-sessions-<ts>.json` files written by older "Export chats".
+  Future<List<File>> _legacyChatExports() async {
+    final docs = await getApplicationDocumentsDirectory();
+    if (!await docs.exists()) return const [];
+    return [
+      await for (final entity in docs.list(followLinks: false))
+        if (entity is File &&
+            RegExp(
+              r'^ovid-sessions-\d+\.json$',
+            ).hasMatch(entity.uri.pathSegments.last))
+          entity,
+    ];
+  }
+
+  /// Temporary archives and staging directories the app itself creates
+  /// (transcript backups, session exports, chat exports, restore staging,
+  /// native share snapshots).
+  /// Other temp content belongs to plugins/WebView and is left alone.
+  Future<List<FileSystemEntity>> _appTempArtifacts() async {
+    final temp = await getTemporaryDirectory();
+    if (!await temp.exists()) return const [];
+    const prefixes = [
+      'ovid-backup-',
+      'ovid-export-',
+      'ovid-chat-export-',
+      'ovid-restore-',
+      // Native share snapshots (Android cacheDir/outgoing-shares).
+      'outgoing-shares',
+    ];
+    return [
+      await for (final entity in temp.list(followLinks: false))
+        if (prefixes.any(
+          (prefix) => _baseName(entity.path).startsWith(prefix),
+        ))
+          entity,
+    ];
+  }
+
+  String _baseName(String path) =>
+      path.substring(path.lastIndexOf(Platform.pathSeparator) + 1);
 
   Set<String> _deferredLedgerSessionIds() {
     final ids = <String>{};

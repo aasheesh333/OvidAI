@@ -8,9 +8,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/memory_store.dart';
+import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
+import 'package:ovid_ai/core/secure_store.dart';
 import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/settings_backup_service.dart';
+import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -37,6 +40,7 @@ class _Preferences extends InMemorySharedPreferencesStore {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  final defaultClearWebCookies = AppState.clearWebCookies;
   late Directory root;
   late AppState app;
   late SharedPreferences prefs;
@@ -61,6 +65,8 @@ void main() {
         );
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
+    // No WebView platform in unit tests: model an emptied cookie jar.
+    AppState.clearWebCookies = () async => false;
     backend = _Preferences();
     SharedPreferencesStorePlatform.instance = backend;
     prefs = await SharedPreferences.getInstance();
@@ -88,6 +94,7 @@ void main() {
   });
 
   tearDown(() async {
+    AppState.clearWebCookies = defaultClearWebCookies;
     backend.beforeWrite = null;
     await SessionSearch.I.close();
     SessionSearch.dbPathOverrideForTest = null;
@@ -402,6 +409,74 @@ void main() {
     expect(app.sessions.any((s) => s.id == 'existing'), isFalse);
     // A user file outside app-owned stores is never touched.
     expect(file.readAsStringSync(), 'keep');
+  });
+
+  test('reset removes keys, configuration, settings, skills, exports, cache and cookies', () async {
+    final secure = ovidSecureStorage();
+    await secure.write(key: 'ovid_provider_key_openai', value: 'sk-secret');
+    await secure.write(key: 'github_token', value: 'ghp-secret');
+    app.providers.first.apiKey = 'sk-secret';
+    PresetRegistry.saveCustom(const AgentPreset(
+      id: 'custom-reset', label: 'Custom', description: 'd',
+    ));
+    await prefs.setString('ovid_custom_presets', '[{"id":"custom-reset"}]');
+    await prefs.setString('ovid_permission_grants_v1', '[{"kind":"host"}]');
+    await prefs.setString('ovid_provider_configs_v1', '[]');
+    await prefs.setString('ovid_mcp_env_server', '{}');
+    await prefs.setString('ovid_theme_mode', 'light');
+    await prefs.setBool('ovid_sandbox_skipped', true);
+    final skill = File('${root.path}/skills/mine.md')
+      ..createSync(recursive: true)
+      ..writeAsStringSync('# skill');
+    final export = File('${root.path}/ovid-sessions-123.json')
+      ..writeAsStringSync('{"sessions":[]}');
+    final backupDir = Directory('${root.path}/ovid-backup-x')..createSync();
+    File('${backupDir.path}/ovid-transcripts-v1.zip').writeAsStringSync('zip');
+    final exportZip = File('${root.path}/ovid-export-1.zip')
+      ..writeAsStringSync('zip');
+    final shareCache = Directory('${root.path}/outgoing-shares')..createSync();
+    final userFile = File('${root.path}/user-file')..writeAsStringSync('keep');
+    var cookieClears = 0;
+    AppState.clearWebCookies = () async => cookieClears++ == 0;
+    // SessionLedger.I caches the first test's (since deleted) root; point it
+    // at this test's root so the ledger tombstone can be written.
+    SessionLedger.rootOverrideForTest =
+        Directory('${root.path}/session-ledgers')..createSync(recursive: true);
+    addTearDown(() => SessionLedger.rootOverrideForTest = null);
+
+    final report = await SettingsActions.resetAll!();
+
+    expect(report.failures, isEmpty);
+    expect(report.success, isTrue);
+    expect(
+      report.completed,
+      containsAll([
+        'configuration', 'secrets', 'preferences', 'skills', 'exports',
+        'cache', 'cookies',
+      ]),
+    );
+    expect(await secure.readAll(), isEmpty);
+    expect(app.providers.every((p) => p.apiKey.isEmpty), isTrue);
+    expect(PresetRegistry.customPresets, isEmpty);
+    expect(app.globalPermissionGrants, isEmpty);
+    await prefs.reload();
+    expect(prefs.getKeys(), {'ovid_sandbox_skipped'});
+    expect(prefs.getBool('ovid_sandbox_skipped'), isTrue);
+    expect(skill.existsSync(), isFalse);
+    expect(export.existsSync(), isFalse);
+    expect(backupDir.existsSync(), isFalse);
+    expect(exportZip.existsSync(), isFalse);
+    expect(shareCache.existsSync(), isFalse);
+    expect(cookieClears, 2, reason: 'clear, then readback');
+    expect(userFile.readAsStringSync(), 'keep');
+  });
+
+  test('a store whose readback still finds data is never reported as success', () async {
+    // A cookie jar that keeps reporting cookies after clearing.
+    AppState.clearWebCookies = () async => true;
+    final report = await SettingsActions.resetAll!();
+    expect(report.success, isFalse);
+    expect(report.failures.keys, contains('cookies'));
   });
 
   test('legacy deleteAllData still clears memory preferences and sessions', () async {

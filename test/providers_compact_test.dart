@@ -110,7 +110,7 @@ void main() {
 
   for (final option in [
     (label: 'Anthropic', format: ApiFormat.anthropic),
-    (label: '[OI]-compatible', format: ApiFormat.openai),
+    (label: 'OpenAI-compatible', format: ApiFormat.openai),
   ]) {
     testWidgets('create provider passes selected ${option.label} protocol', (
       tester,
@@ -148,7 +148,7 @@ void main() {
       expect(app.providers.single.apiFormat, ApiFormat.anthropic);
       await tapVisible(
         tester,
-        find.widgetWithText(ChoiceChip, '[OI]-compatible'),
+        find.widgetWithText(ChoiceChip, 'OpenAI-compatible'),
       );
       expect(app.providers.single.apiFormat, ApiFormat.openai);
       expect(find.byTooltip('Remove model cached-model-9'), findsOneWidget);

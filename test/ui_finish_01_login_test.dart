@@ -165,7 +165,7 @@ void main() {
         await _readWholeParagraph(tester,
             find.textContaining('identity-verified account recovery'));
         await _reveal(tester,
-            find.textContaining('By continuing you agree to use Ovid responsibly.'));
+            find.textContaining('may lead to suspension'));
         expect(find.text('Protected app'), findsNothing);
       });
     }

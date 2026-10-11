@@ -10,6 +10,7 @@ import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter/widgets.dart' show Brightness, WidgetsBinding;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart' show WebViewCookieManager;
 
 import 'agent_notification_service.dart';
 import 'device_control_service.dart';
@@ -46,6 +47,7 @@ import 'session_search.dart';
 import 'session_ledger.dart';
 import 'settings_actions.dart';
 import 'settings_backup_service.dart';
+import 'skills.dart' show SkillService;
 import 'presets.dart';
 import 'reset_coordinator.dart';
 import 'private_sync/production.dart';
@@ -2708,6 +2710,12 @@ class AppState extends ChangeNotifier {
   }
 
   static final _secureStorage = ovidSecureStorage();
+
+  /// Clears the default WebView cookie jar; resolves to whether any cookie
+  /// was present. The all-data reset uses a second call as its readback.
+  /// Replaceable so hosts without a WebView platform (tests) can supply one.
+  static Future<bool> Function() clearWebCookies = () =>
+      WebViewCookieManager().clearCookies();
   static const _providerKeyPrefix = 'ovid_provider_key_';
   Future<void>? _initialization;
   Future<void>? _firstFrameInitialization;
