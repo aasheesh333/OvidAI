@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'sandbox_service.dart';
@@ -90,7 +92,59 @@ class StudioSetupCoordinator extends ChangeNotifier {
   double _phaseProgress = 0;
   double get phaseProgress => _phaseProgress;
   String? _error;
+
+  /// Human headline + action for the last failure. Never raw exception text.
   String? get error => _error;
+  String? _errorDetail;
+
+  /// The raw first line of the failure, for a collapsed "Details" row and
+  /// "Copy log". Null when the failure has no technical detail.
+  String? get errorDetail => _errorDetail;
+
+  /// Maps a setup failure to one human sentence with an action.
+  @visibleForTesting
+  static String friendlyError(Object e) {
+    if (e is SandboxUnsupportedException) return e.message;
+    if (e is _SetupPersistenceException) {
+      return 'Could not save Studio setup status. Retry setup.';
+    }
+    final raw = '$e'.toLowerCase();
+    final fsCode = e is FileSystemException ? e.osError?.errorCode : null;
+    if (fsCode == 28 ||
+        raw.contains('no space left') ||
+        raw.contains('errno = 28') ||
+        raw.contains('enospc')) {
+      return 'Not enough storage. Free about 600 MB on this device, then '
+          'retry.';
+    }
+    if (e is SocketException ||
+        e is http.ClientException ||
+        e is HandshakeException ||
+        e is TimeoutException ||
+        raw.contains('failed host lookup') ||
+        raw.contains('connection reset') ||
+        raw.contains('connection closed') ||
+        raw.contains('network is unreachable')) {
+      return 'The download was interrupted. Check your connection (Wi-Fi '
+          'recommended), then retry.';
+    }
+    if (e is StateError && e.message.startsWith('Sandbox core could not run')) {
+      return e.message;
+    }
+    if (fsCode == 13 || raw.contains('permission denied')) {
+      return 'Ovid could not write the sandbox files. Restart the app and '
+          'retry.';
+    }
+    return 'Sandbox setup did not finish. Retry, or continue to chat without '
+        'the sandbox.';
+  }
+
+  static String _firstLine(Object e) {
+    final raw = '$e'.trim();
+    final line = raw.split('\n').first.trim();
+    return line.isEmpty ? raw : line;
+  }
+
   DateTime? _startedAt;
   DateTime? get startedAt => _startedAt;
   DateTime? _finishedAt;
@@ -117,6 +171,7 @@ class StudioSetupCoordinator extends ChangeNotifier {
     _coreReady = false;
     _status = StudioSetupStatus.running;
     _error = null;
+    _errorDetail = null;
     _phase = 0;
     _phaseProgress = 0;
     _log.clear();
@@ -138,6 +193,7 @@ class StudioSetupCoordinator extends ChangeNotifier {
     _status = StudioSetupStatus.idle;
     _coreReady = false;
     _error = null;
+    _errorDetail = null;
     _log.clear();
     notifyListeners();
   }
@@ -224,7 +280,15 @@ class StudioSetupCoordinator extends ChangeNotifier {
         }
       }
     } catch (e) {
-      _error = '$e';
+      _errorDetail = _firstLine(e);
+      _error = friendlyError(e);
+      if (_coreReady && e is! _SetupPersistenceException) {
+        // Core works; only the runtime step failed. Keep the partial copy
+        // human and say what still works.
+        _error =
+            'Sandbox core is ready, but some runtime tools are unavailable. '
+            '$_error';
+      }
       _status = e is _SetupPersistenceException
           ? StudioSetupStatus.failed
           : e is SandboxUnsupportedException
