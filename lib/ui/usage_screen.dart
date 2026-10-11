@@ -10,6 +10,7 @@ import 'package:ovid_ai/core/usage_attempt.dart';
 import 'package:ovid_ai/ui/cloud_usage_status.dart';
 import 'package:ovid_ai/ui/image_receipt_panel.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
+import 'package:ovid_ai/ui/widgets/memo_listenable_builder.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
 /// PROVIDER-WISE usage tracking — "kisne kitna khaya" view.
@@ -421,7 +422,7 @@ class UsageScreen extends StatelessWidget {
           ),
         ],
       ),
-      body: _MemoListenableBuilder(
+      body: MemoListenableBuilder(
         listenable: app,
         memoKey: () => UsageSnapshot.keyFor(app),
         builder: (_) {
@@ -1134,7 +1135,7 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return _MemoListenableBuilder(
+    return MemoListenableBuilder(
       listenable: Listenable.merge([AppState.I, OvidCloudService.I]),
       memoKey: () => (
         UsageSnapshot.keyFor(AppState.I),
@@ -1467,59 +1468,4 @@ class _ChartPoint extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Listens to [listenable] but rebuilds only when [memoKey] changes, so a
-/// screen derived from one slice of [AppState] ignores the notifications
-/// (streamed tokens, unrelated settings) that do not touch that slice.
-class _MemoListenableBuilder extends StatefulWidget {
-  const _MemoListenableBuilder({
-    required this.listenable,
-    required this.memoKey,
-    required this.builder,
-  });
-
-  final Listenable listenable;
-  final Object? Function() memoKey;
-  final WidgetBuilder builder;
-
-  @override
-  State<_MemoListenableBuilder> createState() => _MemoListenableBuilderState();
-}
-
-class _MemoListenableBuilderState extends State<_MemoListenableBuilder> {
-  Object? _key;
-
-  @override
-  void initState() {
-    super.initState();
-    _key = widget.memoKey();
-    widget.listenable.addListener(_changed);
-  }
-
-  @override
-  void didUpdateWidget(covariant _MemoListenableBuilder oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.listenable, widget.listenable)) {
-      oldWidget.listenable.removeListener(_changed);
-      widget.listenable.addListener(_changed);
-    }
-    _key = widget.memoKey();
-  }
-
-  void _changed() {
-    final next = widget.memoKey();
-    if (next == _key) return;
-    _key = next;
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void dispose() {
-    widget.listenable.removeListener(_changed);
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => widget.builder(context);
 }

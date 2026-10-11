@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 
 import '../reset_coordinator.dart';
 import '../usage_attempt.dart' as local;
+import 'archive_index.dart';
 import 'client.dart';
 import 'coordinator.dart';
 import 'dto.dart';
@@ -212,6 +213,27 @@ class PrivateSyncProduction extends ChangeNotifier
   String? get deviceId => _deviceId;
   List<SyncReplayRecord> get records =>
       available ? (_store?.records ?? const []) : const [];
+
+  /// Cheap change key for archive-derived UI: moves only when the visible
+  /// record set can change (availability, store replacement or a committed
+  /// store revision) — not on delivery-status notifications during sync.
+  Object get recordsKey => (available, _store, _store?.revision);
+
+  Object? _archiveKey;
+  PrivateArchiveIndex? _archive;
+
+  /// Restored-archive index, rebuilt only when [recordsKey] changes.
+  PrivateArchiveIndex get archive {
+    final key = recordsKey;
+    final cached = _archive;
+    if (cached != null && key == _archiveKey) return cached;
+    final next = available
+        ? PrivateArchiveIndex.build(records)
+        : PrivateArchiveIndex.empty;
+    _archiveKey = key;
+    _archive = next;
+    return next;
+  }
   bool _owns(int epoch) => epoch == _epoch && available;
 
   AccountLifecycleDependencies get lifecycle => AccountLifecycleDependencies(
@@ -889,6 +911,8 @@ class PrivateSyncProduction extends ChangeNotifier
     await _identityFile?.drained;
     await _outboxFile?.drained;
     _store = null;
+    _archive = null;
+    _archiveKey = null;
     _outbox = null;
     _identity = {};
   }
