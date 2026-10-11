@@ -5,6 +5,7 @@ WORKDIR /app
 COPY server/account/requirements.txt server/account/requirements.txt
 COPY server/images/requirements.txt server/images/requirements.txt
 COPY server/shares/requirements.txt server/shares/requirements.txt
+COPY server/billing/requirements.txt server/billing/requirements.txt
 RUN pip install --no-cache-dir -r server/account/requirements.txt \
     && groupadd --gid 10001 ovid-account \
     && useradd --uid 10001 --gid 10001 --no-create-home ovid-account
