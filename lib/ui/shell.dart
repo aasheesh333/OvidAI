@@ -63,10 +63,19 @@ class OvidShell extends StatefulWidget {
 class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   /// DURABILITY WARNING (2026-09-27): [AppState.lastSessionPersistFailed]
   /// was written on a failed session write but never read by anything, so
-  /// chat history could silently stop being saved. This polls the flag and
-  /// surfaces a persistent banner instead of failing invisibly.
-  Timer? _persistWarnTimer;
+  /// chat history could silently stop being saved. This watches the flag
+  /// (every write outcome that flips it notifies [AppState]) and surfaces a
+  /// persistent banner instead of failing invisibly. It used to poll every
+  /// 3 s for the app's whole lifetime.
+  late final AppState _persistApp = AppState.I;
   bool _persistWarned = false;
+
+  void _onPersistStateChanged() {
+    final failed = _persistApp.lastSessionPersistFailed;
+    if (failed != _persistWarned && mounted) {
+      setState(() => _persistWarned = failed);
+    }
+  }
 
   @override
   void initState() {
@@ -88,14 +97,9 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => unawaited(AppState.I.maybeStartBackgroundRuntimeInstall()),
     );
-    // Durability watchdog: a few seconds is enough for the debounced
-    // session write to land, so a genuine failure shows up promptly.
-    _persistWarnTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      final failed = AppState.I.lastSessionPersistFailed;
-      if (failed != _persistWarned && mounted) {
-        setState(() => _persistWarned = failed);
-      }
-    });
+    // Durability watchdog.
+    _persistApp.addListener(_onPersistStateChanged);
+    _persistWarned = _persistApp.lastSessionPersistFailed;
   }
 
   void _onFirebaseReady() {
@@ -114,7 +118,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     if (AgentService.I.onControlTaskCompleted == _revealControlChat) {
       AgentService.I.onControlTaskCompleted = null;
     }
-    _persistWarnTimer?.cancel();
+    _persistApp.removeListener(_onPersistStateChanged);
     WidgetsBinding.instance.removeObserver(this);
     FirebaseService.I.removeListener(_onFirebaseReady);
     super.dispose();
