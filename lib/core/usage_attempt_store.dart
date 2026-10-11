@@ -37,6 +37,10 @@ class UsageAttemptStore {
 
   static const schemaVersion = 1;
   static const journalFileName = 'usage_attempts.json';
+  /// Terminal attempts kept per account (older ones are dropped and
+  /// [historyTruncated] is set). The Usage screen states this limit.
+  static const defaultTerminalHistoryLimit = 500;
+
   static int _nextInstanceId = 0;
   static final Map<String, UsageAttemptStore> _openStores = {};
 
@@ -57,7 +61,7 @@ class UsageAttemptStore {
 
   static Future<UsageAttemptStore> open({
     required Directory accountRoot,
-    int terminalHistoryLimit = 500,
+    int terminalHistoryLimit = defaultTerminalHistoryLimit,
     int maxJournalBytes = 1024 * 1024,
     UsageAttemptStagedWriter? writeStagedFile,
     UsageAttemptOwnerFence ownerFence = _alwaysOwner,
