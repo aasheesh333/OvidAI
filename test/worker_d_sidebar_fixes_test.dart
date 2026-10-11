@@ -145,6 +145,12 @@ void main() {
     await swipeAndPump();
     await tester.tap(find.widgetWithText(TextButton, 'Delete'));
     await tester.pumpAndSettle();
+    // Optimistic delete with Undo (PR-3b F-058): hidden at once, removed
+    // durably once the Undo window closes.
+    expect(AppState.I.isSessionDeletionPending('s1'), isTrue);
+    expect(find.text('Cancel me'), findsNothing);
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
     expect(AppState.I.sessions.any((s) => s.id == 's1'), isFalse);
   });
 }

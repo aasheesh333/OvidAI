@@ -385,7 +385,9 @@ class CompactionLedger {
     try {
       final d = jsonDecode(raw);
       if (d is Map) return d.cast<String, dynamic>();
-    } catch (_) {}
+    } on FormatException {
+      // Tool input that is not JSON carries no structured fields.
+    }
     return const {};
   }
 

@@ -44,9 +44,12 @@ void main() {
       expect(identical(darkTheme, lightTheme), isFalse);
       expect(Aether.theme(), same(lightTheme));
 
+      // PR-6b caches one ThemeData per brightness (AetherColors light/dark),
+      // so flipping back may return the cached dark theme; what matters is
+      // that it is never the stale light one.
       Aether.dark = true;
-      expect(identical(Aether.theme(), darkTheme), isFalse,
-          reason: 'a rebuilt dark theme is correct; a stale light one is not');
+      expect(identical(Aether.theme(), lightTheme), isFalse,
+          reason: 'a dark theme is correct; a stale light one is not');
       expect(Aether.theme().brightness, Brightness.dark);
     });
   });

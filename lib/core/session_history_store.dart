@@ -233,7 +233,10 @@ class SessionHistoryRepository {
   Future<void> close() => _serial(() async {
     try {
       await _opening;
-    } catch (_) {}
+    } catch (error) {
+      // A failed open leaves nothing to release beyond the handle below.
+      Diag.swallow('history.close', error);
+    }
     _db?.dispose();
     _db = null;
     _opening = null;
@@ -1009,7 +1012,9 @@ class SessionHistoryRepository {
       try {
         final id = jsonDecode(m.group(1)!);
         if (id is String && id.isNotEmpty) return id;
-      } catch (_) {}
+      } on FormatException {
+        // Not a JSON string literal: fall back to the full decode below.
+      }
     }
     try {
       final decoded = jsonDecode(raw);
@@ -1017,7 +1022,9 @@ class SessionHistoryRepository {
         final id = decoded['id'] as String;
         return id.isEmpty ? null : id;
       }
-    } catch (_) {}
+    } on FormatException {
+      // Opaque (non-JSON) row: it has no session id.
+    }
     return null;
   }
 

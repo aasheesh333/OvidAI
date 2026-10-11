@@ -394,6 +394,16 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
             label: 'Cancel',
             onPressed: _completing ? null : _cancel,
           ),
+          // Pinned with Cancel (PR-6b AetherSheet): the paste fallback can
+          // push a body button below the fold at large text sizes.
+          if (_showPaste && !_loading && _beginError == null)
+            AetherPrimaryButton(
+              key: const ValueKey('mcp-oauth-complete'),
+              label: _completing ? 'Finishing…' : 'Finish sign-in',
+              icon: Icons.check,
+              loading: _completing,
+              onPressed: _completing ? null : _complete,
+            ),
         ],
         child: SingleChildScrollView(
           child: Column(
@@ -558,14 +568,6 @@ class _McpOAuthSheetState extends State<McpOAuthSheet> {
       onChanged: (_) {
         if (_callbackError != null) setState(() => _callbackError = null);
       },
-    ),
-    const SizedBox(height: 14),
-    AetherPrimaryButton(
-      key: const ValueKey('mcp-oauth-complete'),
-      label: _completing ? 'Finishing…' : 'Finish sign-in',
-      icon: Icons.check,
-      loading: _completing,
-      onPressed: _completing ? null : _complete,
     ),
   ];
 }

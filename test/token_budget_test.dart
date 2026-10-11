@@ -220,7 +220,13 @@ void main() {
     // get_prompt/read_resource) exposes MCP prompts+resources to the model,
     // which was previously unreachable; the +~900 tokens are worth the
     // capability. Ceiling raised accordingly; still no capability removed.
-    expect(approxTokens, lessThan(12200));
+    // Integrated 2026-10-11 (integration/production-hardening): 12,225
+    // tokens. Each feature branch stayed under 12,200 alone; together PR-4c's
+    // Claude Code subagent / MultiEdit / NotebookEdit tools, PR-4d's
+    // compaction fields and PR-1c / PR-5 schema guards add ~+390 over
+    // 2026-10-06. Ceiling raised to 12,400; no capability removed. Trim
+    // descriptions here before raising it again.
+    expect(approxTokens, lessThan(12400));
   });
 
   test('no advertised tool description is truncated', () {
