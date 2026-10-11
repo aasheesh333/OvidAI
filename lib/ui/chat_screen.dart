@@ -5890,7 +5890,10 @@ class _InputBarState extends State<_InputBar> {
     final parent = app.sessionById(widget.sessionId);
     if (parent == null) return const [];
     final agent = AgentService.I;
-    final query = _mentionQuery.toLowerCase();
+    var query = _mentionQuery.toLowerCase();
+    // File rows insert `@file:<rel>`; strip the prefix so descending into
+    // an inserted `@file:src/` keeps matching inside that folder.
+    if (query.startsWith('file:')) query = query.substring('file:'.length);
     final scored = <({int score, int order, _SlashSuggestion s})>[];
     var order = 0;
     for (final sub in agent.subagentsOf(parent.id)) {
@@ -5960,7 +5963,12 @@ class _InputBarState extends State<_InputBar> {
                 ? 'directory — @$rel/ to descend'
                 : 'workspace file',
             hint: '',
-            insert: '@$rel${isDir ? '/' : ' '}',
+            // Explicit `@file:` so the reference always resolves to this
+            // workspace entry, never to a chat whose title contains it.
+            // Paths with whitespace are quoted to stay one token.
+            insert: rel.contains(RegExp(r'\s'))
+                ? '@"file:$rel" '
+                : '@file:$rel${isDir ? '/' : ' '}',
             group: 'Files',
           ),
         ));

@@ -151,7 +151,12 @@ void main() {
 
   test('ambiguous partial name never grants access', () async {
     app.sessions.add(ChatSession(id: 'another', title: 'NamedOther', model: 'm'));
-    expect(await agent.expandReferences('@Named', current), contains('ambiguous'));
+    // Unprefixed tokens only match an exact id/title (F-134).
+    expect(await agent.expandReferences('@Named', current), '@Named');
+    expect(
+      await agent.expandReferences('@session:Named', current),
+      contains('ambiguous'),
+    );
     expect(current.referencedSessionIds, isEmpty);
   });
 }

@@ -6453,6 +6453,33 @@ block</pre>
       );
     });
 
+    test('expandReferences: workspace files win over session titles', () async {
+      final titled = newSession('rf-titled');
+      titled.title = 'Fix index.html';
+      final s = newSession('rf-s4');
+      final dir = await AgentService.I.sessionWorkDirForTest();
+      File('${dir.path}/index.html').writeAsStringSync('<h1>hello file</h1>');
+
+      for (final mention in ['@index.html', '@file:index.html']) {
+        final out = await AgentService.I.expandReferences(
+          'update $mention please',
+          s,
+        );
+        expect(out, contains('referenced file "index.html"'), reason: mention);
+        expect(out, contains('hello file'), reason: mention);
+        expect(out, isNot(contains('referenced session')), reason: mention);
+      }
+      expect(s.referencedSessionIds, isEmpty);
+    });
+
+    test('expandReferences: unprefixed tokens never substring-match titles', () async {
+      final titled = newSession('rf-titled2');
+      titled.title = 'Fix missing.css layout';
+      final s = newSession('rf-s5');
+      final out = await AgentService.I.expandReferences('see @missing.css', s);
+      expect(out, 'see @missing.css');
+    });
+
     test('expandReferences: @session:id includes recent messages', () async {
       final other = newSession('rf-other');
       other.messages.add(
