@@ -95,7 +95,7 @@ void main() {
     agent.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
     PathProviderPlatform.instance = originalPaths;
-    await documents.delete(recursive: true);
+    await _deleteEventually(documents);
   });
 
   Future<String> dispatch(String prompt) => agent.dispatchForTest(
@@ -742,4 +742,17 @@ void main() {
       expect(lastRequest, isNot(contains('HIDDEN-TRANSCRIPT')));
     },
   );
+}
+
+Future<void> _deleteEventually(Directory directory) async {
+  for (var attempt = 0; attempt < 20; attempt++) {
+    try {
+      if (!await directory.exists()) return;
+      await directory.delete(recursive: true);
+      return;
+    } on FileSystemException {
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+    }
+  }
+  await directory.delete(recursive: true);
 }

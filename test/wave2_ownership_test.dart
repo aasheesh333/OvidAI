@@ -87,7 +87,7 @@ void main() {
     SessionSearch.dbPathOverrideForTest = null;
     SessionLedger.rootOverrideForTest = null;
     AppState.resetTestInstance();
-    await dir.delete(recursive: true);
+    await _deleteEventually(dir);
   });
 
   Future<String> search([Map<String, dynamic> extra = const {}]) =>
@@ -564,4 +564,17 @@ void main() {
       expect((await index.search('needle')).single.snippet, contains('B'));
     },
   );
+}
+
+Future<void> _deleteEventually(Directory directory) async {
+  for (var attempt = 0; attempt < 20; attempt++) {
+    try {
+      if (!await directory.exists()) return;
+      await directory.delete(recursive: true);
+      return;
+    } on FileSystemException {
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+    }
+  }
+  await directory.delete(recursive: true);
 }
