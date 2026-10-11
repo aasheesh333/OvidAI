@@ -76,7 +76,11 @@ void main() {
     await pumpScreen(tester);
     await tester.tap(find.byIcon(Icons.more_horiz));
     await _settle(tester);
-    await tester.tap(find.text('Cancel'));
+    await tester.tap(find.text('Cancel task'));
+    await _settle(tester);
+    // Cancelling is irreversible, so it confirms first.
+    expect(find.text('Cancel this task?'), findsOneWidget);
+    await tester.tap(find.text('Cancel task'));
     await _settle(tester);
     expect(task['status'], 'cancelled');
     expect(find.text('cancelled'), findsOneWidget);

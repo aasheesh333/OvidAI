@@ -20932,10 +20932,18 @@ ${await _agentsMdBlock()}
     await _syncScheduleAlarm(null);
   }
 
-  Future<void> resumeScheduledBackground() async {
+  /// Resumes background execution and re-pends the tasks Stop paused.
+  /// Returns how many tasks were resumed.
+  Future<int> resumeScheduledBackground() async {
     await AgentNotificationService.I.resumeBackground();
-    schedules.stopped = AgentNotificationService.I.backgroundStopped;
+    var resumed = 0;
+    if (AgentNotificationService.I.backgroundStopped) {
+      schedules.stopped = true;
+    } else {
+      resumed = await schedules.resumeStopped();
+    }
     _schedulesChanged();
+    return resumed;
   }
 
   Future<void> editSchedule(
