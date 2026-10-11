@@ -354,8 +354,11 @@ class _AetherButton extends StatelessWidget {
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: effectiveOnPressed,
+          // The 48dp GestureDetector owns the semantics tap action; the
+          // inner circle's InkWell is visual feedback only.
           child: Center(
-            child: Material(
+            child: ExcludeSemantics(
+              child: Material(
               color: bg,
               shape: const CircleBorder(),
               child: InkWell(
@@ -371,6 +374,7 @@ class _AetherButton extends StatelessWidget {
                   ),
                   child: ExcludeSemantics(child: content),
                 ),
+              ),
               ),
             ),
           ),
