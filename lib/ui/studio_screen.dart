@@ -65,6 +65,21 @@ Future<Object?> Function()? studioRepoSyncOverrideForTest;
 @visibleForTesting
 GlobalRepoRegistry? studioRegistryOverrideForTest;
 
+/// Test seams for the repo picker's paged list and name search.
+@visibleForTesting
+Future<List<Map<String, dynamic>>> Function({int page})?
+studioListReposOverrideForTest;
+@visibleForTesting
+Future<List<Map<String, dynamic>>> Function(
+  String query, {
+  Iterable<String> owners,
+})?
+studioSearchReposOverrideForTest;
+
+/// The picker search field (test seam).
+@visibleForTesting
+const Key studioPickerSearchKey = ValueKey('studio-picker-search');
+
 /// Test seam: same as [studioRepoSyncOverrideForTest] but receives the
 /// progress sink, so a test can assert that Studio surfaces [RepoCache.sync]'s
 /// `onLine` callback instead of dropping it. The plain override wins when both
@@ -771,15 +786,30 @@ class _StudioScreenState extends State<StudioScreen> {
       return;
     }
     try {
-      List<Map<String, dynamic>> repos = const [];
+      final repos = <Map<String, dynamic>>[];
       if (!mounted) return;
       final picked = await showStudioSheet<String>(
         context,
-        child: StudioRepoSheet(
-          loader: () async {
-            repos = await GitHubService.I.listRepos();
-            return repos;
-          },
+        scrollable: true,
+        child: FractionallySizedBox(
+          heightFactor: 0.85,
+          child: StudioRepoSheet(
+            pageLoader: (page) async {
+              final next = await (studioListReposOverrideForTest ??
+                  GitHubService.I.listRepos)(page: page);
+              repos.addAll(next);
+              return next;
+            },
+            search: (query) async {
+              final owners = {
+                for (final r in repos) ?repoFullNameOf(r)?.split('/').first,
+              };
+              final hits = await (studioSearchReposOverrideForTest ??
+                  GitHubService.I.searchRepos)(query, owners: owners);
+              repos.addAll(hits);
+              return hits;
+            },
+          ),
         ),
       );
       if (picked == null) return;
@@ -1980,20 +2010,38 @@ class _AuthBadge extends StatelessWidget {
 /// The repository picker sheet. Public so the null-tolerance of the payload
 /// can be tested without a network round-trip.
 class StudioRepoSheet extends StatelessWidget {
-  const StudioRepoSheet({this.repos, this.loader, super.key})
-      : assert(repos != null || loader != null);
+  const StudioRepoSheet({
+    this.repos,
+    this.loader,
+    this.pageLoader,
+    this.search,
+    this.pageSize = GitHubService.repoPageSize,
+    super.key,
+  }) : assert(repos != null || loader != null || pageLoader != null);
 
   final List<Map<String, dynamic>>? repos;
   final Future<List<Map<String, dynamic>>> Function()? loader;
+
+  /// Pages through the user's repos as they scroll (preferred over [loader]).
+  final Future<List<Map<String, dynamic>>> Function(int page)? pageLoader;
+
+  /// Server-side name search for repos not loaded yet.
+  final Future<List<Map<String, dynamic>>> Function(String query)? search;
+  final int pageSize;
 
   @override
   Widget build(BuildContext context) {
     if (repos != null) return _repoList(context, repos!);
     return _AsyncPickerSheet<Map<String, dynamic>>(
       title: 'Your repositories',
-      loader: loader!,
+      loader: loader,
+      pageLoader: pageLoader,
+      pageSize: pageSize,
       emptyMessage: 'No repositories are available for this account.',
       itemBuilder: (context, repo) => _RepoTile(repo: repo),
+      searchTextOf: (repo) => repoFullNameOf(repo) ?? '',
+      remoteSearch: search,
+      keyOf: repoFullNameOf,
     );
   }
 
@@ -2094,15 +2142,36 @@ class _BranchTile extends StatelessWidget {
 class _AsyncPickerSheet<T> extends StatefulWidget {
   const _AsyncPickerSheet({
     required this.title,
-    required this.loader,
     required this.emptyMessage,
     required this.itemBuilder,
-  });
+    this.loader,
+    this.pageLoader,
+    this.pageSize = 100,
+    this.searchTextOf,
+    this.remoteSearch,
+    this.keyOf,
+  }) : assert(loader != null || pageLoader != null);
 
   final String title;
-  final Future<List<T>> Function() loader;
+
+  /// Loads the whole list at once (branches).
+  final Future<List<T>> Function()? loader;
+
+  /// Loads one 1-based page; a page shorter than [pageSize] is the last one.
+  /// Further pages load as the user scrolls near the end.
+  final Future<List<T>> Function(int page)? pageLoader;
+  final int pageSize;
   final String emptyMessage;
   final Widget Function(BuildContext context, T value) itemBuilder;
+
+  /// Enables the search field: filters loaded values by this text.
+  final String Function(T value)? searchTextOf;
+
+  /// Optional server-side search for values pagination has not reached.
+  final Future<List<T>> Function(String query)? remoteSearch;
+
+  /// Identity used to merge remote search hits with loaded values.
+  final Object? Function(T value)? keyOf;
 
   @override
   State<_AsyncPickerSheet<T>> createState() => _AsyncPickerSheetState<T>();
@@ -2112,68 +2181,185 @@ class _AsyncPickerSheetState<T> extends State<_AsyncPickerSheet<T>> {
   List<T>? _values;
   Object? _error;
   bool _loading = false;
+  int _page = 0;
+  bool _hasMore = false;
+  final _scroll = ScrollController();
+  final _search = TextEditingController();
+  String _query = '';
+  Timer? _searchDebounce;
+  List<T> _remote = const [];
+  bool _searchingRemote = false;
+  int _searchSeq = 0;
 
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_maybeLoadMore);
     _load();
   }
 
-  Future<void> _load() async {
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _scroll.dispose();
+    _search.dispose();
+    super.dispose();
+  }
+
+  void _maybeLoadMore() {
+    if (!_hasMore || _loading || !_scroll.hasClients) return;
+    if (_scroll.position.extentAfter < 400) unawaited(_load(more: true));
+  }
+
+  Future<void> _load({bool more = false}) async {
     if (_loading) return;
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final values = await widget.loader();
-      if (mounted) setState(() => _values = values);
+      final pageLoader = widget.pageLoader;
+      if (pageLoader != null) {
+        final next = more ? _page + 1 : 1;
+        final page = await pageLoader(next);
+        if (!mounted) return;
+        setState(() {
+          _page = next;
+          _values = [if (more) ...?_values, ...page];
+          _hasMore = page.length >= widget.pageSize;
+        });
+      } else {
+        final values = await widget.loader!();
+        if (mounted) setState(() => _values = values);
+      }
     } catch (e) {
       if (mounted) setState(() => _error = e);
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+    // A short first page may not fill the viewport: keep paging.
+    if (mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _maybeLoadMore();
+      });
+    }
+  }
+
+  void _onQueryChanged(String q) {
+    setState(() {
+      _query = q.trim().toLowerCase();
+      _remote = const [];
+    });
+    _searchDebounce?.cancel();
+    final remote = widget.remoteSearch;
+    if (remote == null || _query.length < 2) return;
+    _searchDebounce = Timer(const Duration(milliseconds: 400), () async {
+      final seq = ++_searchSeq;
+      setState(() => _searchingRemote = true);
+      try {
+        final hits = await remote(q.trim());
+        if (!mounted || seq != _searchSeq) return;
+        setState(() => _remote = hits);
+      } catch (_) {
+        // Local filtering still works; the remote search is best-effort.
+      } finally {
+        if (mounted && seq == _searchSeq) {
+          setState(() => _searchingRemote = false);
+        }
+      }
+    });
+  }
+
+  List<T> _visible(List<T> values) {
+    final textOf = widget.searchTextOf;
+    if (textOf == null || _query.isEmpty) return values;
+    final local = [
+      for (final v in values)
+        if (textOf(v).toLowerCase().contains(_query)) v,
+    ];
+    if (_remote.isEmpty) return local;
+    final keyOf = widget.keyOf ?? (T v) => v;
+    final seen = {for (final v in local) keyOf(v)};
+    return [
+      ...local,
+      for (final v in _remote)
+        if (seen.add(keyOf(v))) v,
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
     final values = _values;
-    return ListView(
-      shrinkWrap: true,
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      children: [
-        StudioSheetHeader(title: widget.title),
-        if (_loading && values == null)
-          const Padding(
-            padding: EdgeInsets.all(28),
-            child: Center(child: CircularProgressIndicator()),
-          )
-        else if (_error != null && values == null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text('Could not load this list. Check your connection and try again.'),
-                const SizedBox(height: 10),
-                OutlinedButton.icon(
-                  onPressed: _loading ? null : _load,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Retry'),
-                ),
-              ],
+    final visible = values == null ? null : _visible(values);
+    final Widget body;
+    if (_loading && values == null) {
+      body = const Padding(
+        padding: EdgeInsets.all(28),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    } else if (_error != null && values == null) {
+      body = Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(StudioFailure.of(_error!).message),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _loading ? null : _load,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Retry'),
             ),
-          )
-        else if (values == null || values.isEmpty)
+          ],
+        ),
+      );
+    } else if (visible == null || visible.isEmpty) {
+      body = Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+        child: Text(
+          _query.isNotEmpty
+              ? (_searchingRemote
+                    ? 'Searching…'
+                    : 'Nothing matches "${_search.text.trim()}".')
+              : widget.emptyMessage,
+        ),
+      );
+    } else {
+      final footer = _loading || _searchingRemote;
+      // Lazy: only visible tiles are built (users with hundreds of repos).
+      body = ListView.builder(
+        controller: _scroll,
+        padding: const EdgeInsets.only(bottom: 10),
+        itemCount: visible.length + (footer ? 1 : 0),
+        itemBuilder: (context, i) => i == visible.length
+            ? const LinearProgressIndicator(minHeight: 2)
+            : widget.itemBuilder(context, visible[i]),
+      );
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 8),
+        StudioSheetHeader(title: widget.title),
+        if (widget.searchTextOf != null)
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
-            child: Text(widget.emptyMessage),
-          )
-        else ...[
-          for (final value in values) widget.itemBuilder(context, value),
-          if (_loading) const LinearProgressIndicator(minHeight: 2),
-        ],
-        const SizedBox(height: 10),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: TextField(
+              key: studioPickerSearchKey,
+              controller: _search,
+              onChanged: _onQueryChanged,
+              autocorrect: false,
+              textInputAction: TextInputAction.search,
+              decoration: const InputDecoration(
+                isDense: true,
+                prefixIcon: Icon(Icons.search, size: 18),
+                hintText: 'Search',
+              ),
+            ),
+          ),
+        Flexible(child: body),
       ],
     );
   }

@@ -760,9 +760,16 @@ class GitHubService extends ChangeNotifier {
     return token;
   }
 
-  /// List repos accessible to the user (owns first).
+  /// Repos per page for [listRepos] (GitHub's maximum).
+  static const int repoPageSize = 100;
+
+  /// One page of repos the user can access — owned, collaborator AND
+  /// organization-member repos — most recently updated first. The picker
+  /// pages through these (it used to fetch only the first 30, so anyone with
+  /// more repos, i.e. every org member, could not pick older/org repos).
   Future<List<Map<String, dynamic>>> listRepos({
-    int limit = 30,
+    int limit = repoPageSize,
+    int page = 1,
     http.Client? client,
   }) async {
     final token = _requireToken();
@@ -770,7 +777,10 @@ class GitHubService extends ChangeNotifier {
     try {
       final res = await c
           .get(
-            Uri.parse('$_apiBase/user/repos?per_page=$limit&sort=updated'),
+            Uri.parse(
+              '$_apiBase/user/repos?per_page=$limit&page=$page&sort=updated'
+              '&affiliation=owner,collaborator,organization_member',
+            ),
             headers: {
               'Authorization': 'Bearer $token',
               'Accept': 'application/vnd.github+json',
@@ -781,6 +791,52 @@ class GitHubService extends ChangeNotifier {
         throw GitHubHttpException.fromResponse('repos fetch', res);
       }
       return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+    } finally {
+      if (client == null) c.close();
+    }
+  }
+
+  /// Searches repositories by name among the user's own account and the
+  /// given [owners] (orgs/users seen in the user's repo list), for repos
+  /// that pagination has not reached yet.
+  Future<List<Map<String, dynamic>>> searchRepos(
+    String query, {
+    Iterable<String> owners = const [],
+    http.Client? client,
+  }) async {
+    final token = _requireToken();
+    final q = query.trim();
+    if (q.isEmpty) return const [];
+    final scopes = <String>{
+      if (login != null && login!.isNotEmpty) 'user:$login',
+      for (final o in owners)
+        if (o.isNotEmpty && o != login) 'user:$o',
+    };
+    final c = client ?? http.Client();
+    try {
+      final uri = Uri.parse('$_apiBase/search/repositories').replace(
+        queryParameters: {
+          'q': '$q in:name fork:true ${scopes.join(' ')}'.trim(),
+          'per_page': '50',
+        },
+      );
+      final res = await c
+          .get(
+            uri,
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Accept': 'application/vnd.github+json',
+            },
+          )
+          .timeout(_requestTimeout);
+      if (res.statusCode != 200) {
+        throw GitHubHttpException.fromResponse('repo search', res);
+      }
+      final body = jsonDecode(res.body);
+      final items = body is Map ? body['items'] : null;
+      return items is List
+          ? items.whereType<Map<String, dynamic>>().toList()
+          : const [];
     } finally {
       if (client == null) c.close();
     }
