@@ -421,7 +421,7 @@ void main() {
           headers: () async => {'Authorization': 'Bearer fixture'}),
       ), layout.$2));
       expect(find.textContaining('could not be loaded'), findsOneWidget);
-      expect(find.text('No loaded image receipts for this account.'), findsNothing);
+      expect(find.textContaining('No image receipts yet'), findsNothing);
       expect(tester.takeException(), isNull);
       final loaded = Completer<void>();
       void onLoaded() {
@@ -432,11 +432,12 @@ void main() {
       }
       studio.addListener(onLoaded);
       broken = false;
+      await _reveal(tester, find.text('Retry loading receipts'));
       await tester.tap(find.text('Retry loading receipts'));
       await loaded.future;
       studio.removeListener(onLoaded);
       await tester.pump();
-      expect(find.text('Charge: not confirmed'), findsOneWidget);
+      expect(find.text('Charge pending confirmation'), findsOneWidget);
       final recovered = Completer<void>();
       var publications = 0;
       studio.addListener(() {
@@ -451,7 +452,8 @@ void main() {
         '/v1/images/requests/$_request',
         '/v1/images/requests/$_request/result',
       ]);
-      expect(find.text('Exact charge: $_charge'), findsOneWidget);
+      expect(find.text('Charged to your Ovid Cloud allowance'), findsOneWidget);
+      expect(find.textContaining(_charge), findsNothing);
       expect(find.byType(Image), findsOneWidget);
       final imageFinder = find.byType(Image);
       final image = tester.widget<Image>(imageFinder);
@@ -478,7 +480,7 @@ void main() {
       studio.bindAccount('bob');
       await tester.pump();
       expect(find.byType(Image), findsNothing);
-      expect(find.text('Exact charge: $_charge'), findsNothing);
+      expect(find.text('Charged to your Ovid Cloud allowance'), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
       studio.dispose();
     });

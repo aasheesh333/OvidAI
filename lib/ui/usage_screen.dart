@@ -462,6 +462,12 @@ class ImageReceiptsScreen extends StatelessWidget {
           ImageReceiptPanel(
             studio: ImageStudio.I,
             headers: OvidCloudService.I.imageHeaders,
+            sessionTitle: (id) => AppState.I.sessionById(id)?.title,
+            onOpenSession: (id) {
+              if (AppState.I.sessionById(id) == null) return;
+              AppState.I.selectSession(id);
+              Navigator.of(context).popUntil((route) => route.isFirst);
+            },
           ),
         ],
       ),

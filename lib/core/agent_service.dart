@@ -23283,6 +23283,7 @@ ${await _agentsMdBlock()}
           requestId: args['request_id'] as String,
           input: input,
           headers: headers,
+          sessionId: session.id,
         );
         if (!current()) return 'Cancelled: image run or account changed.';
         accounting =

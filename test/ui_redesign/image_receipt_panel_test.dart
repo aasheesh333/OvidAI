@@ -43,7 +43,7 @@ void main() {
 
     expect(find.text('Image receipts'), findsOneWidget);
     expect(
-      find.text('No loaded image receipts for this account.'),
+      find.text('No image receipts yet — images you generate with Ovid Cloud appear here.'),
       findsOneWidget,
     );
     expect(find.text('Check status'), findsNothing);
@@ -82,7 +82,7 @@ void main() {
     // The pushed route embeds the panel bound to the singleton studio.
     expect(find.byType(ImageReceiptPanel), findsOneWidget);
     expect(
-      find.text('No loaded image receipts for this account.'),
+      find.text('No image receipts yet — images you generate with Ovid Cloud appear here.'),
       findsOneWidget,
     );
 
