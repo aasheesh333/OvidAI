@@ -3,10 +3,12 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/memory_store.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
 /// Plain-text Markdown memory editor, rebuilt on the Aether primitives.
@@ -21,11 +23,11 @@ import 'widgets/aether_primitives.dart';
 /// `Add file`, `Add`, `Import .md`, `memory-filename`, `Cancel`) are preserved
 /// so `test/memory_screen_test.dart` keeps asserting the same real behavior.
 ///
-/// Note on pinning/deletion/export: the [MemoryStore] has no pin, per-file
-/// delete, or export API. The pin glyph reflects the one fact the store does
-/// model — `MEMORY.md` is the fixed, always-present entrypoint of a scope — and
-/// the overflow Delete stays disabled for that entrypoint rather than pretending
-/// a removal happened. These gaps are called out in the wave report.
+/// Deletion: any file (including ones the agent wrote) can be deleted after a
+/// confirmation; `MEMORY.md` is the fixed entrypoint, so deleting it clears
+/// its contents. "Clear all memory" empties the whole scope. When the agent
+/// writes the open file while the user edits it, Save offers Keep mine / Use
+/// latest / Copy my text instead of failing, and a banner offers Reload.
 class MemoryScreen extends StatefulWidget {
   final MemoryStore? memoryStore;
 
@@ -46,6 +48,10 @@ class _MemoryScreenState extends State<MemoryScreen> {
   List<String> _files = ['MEMORY.md'];
   bool _busy = false;
 
+  /// The open file changed on disk (usually the agent) since it was loaded.
+  bool _stale = false;
+  DateTime _lastStaleCheck = DateTime.fromMillisecondsSinceEpoch(0);
+
   bool get _dirty => _content.text != _loaded;
   bool get _enabled => _store != null && !_busy;
   String get _scopeCaption => _owner == null ? 'Global memory' : 'Session memory';
@@ -54,7 +60,31 @@ class _MemoryScreenState extends State<MemoryScreen> {
   void initState() {
     super.initState();
     _sessionId = AppState.I.activeSessionId;
+    AppState.I.addListener(_onAppChanged);
     _initialize();
+  }
+
+  /// Agent memory writes refresh [AppState]; detect when the open file
+  /// changed underneath the editor. A clean editor reloads silently, a dirty
+  /// one shows the "Updated by Ovid" banner. Throttled: AppState notifies on
+  /// every streamed token.
+  void _onAppChanged() {
+    final store = _store;
+    if (!mounted || store == null || _busy) return;
+    final now = DateTime.now();
+    if (now.difference(_lastStaleCheck) < const Duration(seconds: 1)) return;
+    _lastStaleCheck = now;
+    try {
+      _checkOwner();
+      if (store.read(_owner, _file).revision == _revision) return;
+    } catch (_) {
+      return;
+    }
+    if (_dirty) {
+      if (!_stale) setState(() => _stale = true);
+    } else {
+      _load();
+    }
   }
 
   Future<void> _initialize() async {
@@ -83,7 +113,10 @@ class _MemoryScreenState extends State<MemoryScreen> {
       _revision = doc.revision;
       _loaded = doc.content;
       _content.text = doc.content;
-      setState(() => _error = null);
+      setState(() {
+        _error = null;
+        _stale = false;
+      });
     } catch (e) {
       setState(() => _error = '$e');
     }
@@ -121,13 +154,78 @@ class _MemoryScreenState extends State<MemoryScreen> {
       );
       _revision = doc.revision;
       _loaded = doc.content;
+      setState(() {
+        _error = null;
+        _stale = false;
+      });
       AppState.I.refresh();
-      setState(() => _error = null);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Memory saved')));
+    } on StateError catch (e) {
+      if (e.message.contains('Memory changed')) {
+        _resolveConflict();
+      } else {
+        setState(() => _error = '$e');
+      }
     } catch (e) {
       setState(() => _error = '$e');
+    }
+  }
+
+  /// The file changed since it was loaded (usually the agent wrote it).
+  /// Never leaves the user with only a "discard" exit.
+  Future<void> _resolveConflict() async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: const Text('Memory changed while you were editing'),
+        content: Text(
+          'Ovid (or another editor) updated $_file after you opened it. '
+          'Keep mine overwrites that update with your text; Use latest '
+          'discards your edit; Copy my text puts your edit on the clipboard '
+          'so you can merge by hand.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'copy'),
+            child: const Text('Copy my text'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'latest'),
+            child: const Text('Use latest'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, 'mine'),
+            child: const Text('Keep mine'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    switch (choice) {
+      case 'mine':
+        try {
+          _checkOwner();
+          _revision = _store!.read(_owner, _file).revision;
+        } catch (e) {
+          setState(() => _error = '$e');
+          return;
+        }
+        _save();
+      case 'latest':
+        _load();
+      case 'copy':
+        await Clipboard.setData(ClipboardData(text: _content.text));
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Your text was copied. Your edit is still open.'),
+          ),
+        );
+      default:
+        break;
     }
   }
 
@@ -243,29 +341,66 @@ class _MemoryScreenState extends State<MemoryScreen> {
     if (await _discard() && mounted) _load();
   }
 
-  void _notifyDeleteUnsupported(String name) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        scrollable: true,
-        title: const Text('Delete not supported'),
-        content: Text(
-          'Removing "$name" is not supported by the memory store. Clear its '
-          'contents and save to leave the file empty, or ask an operator to '
-          'remove the file off-device.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
+  Future<void> _delete(String name) async {
+    final entry = name == 'MEMORY.md';
+    final editing = name == _file && _dirty;
+    final ok = await showAetherConfirmDialog(
+      context,
+      title: entry ? 'Clear $name?' : 'Delete $name?',
+      message:
+          '${entry ? 'Its contents will be erased; the empty entry point stays.' : 'The file is removed from ${_scopeCaption.toLowerCase()}.'} '
+          'Ovid will no longer remember what it contained. This cannot be '
+          'undone.${editing ? ' Your unsaved edit to it is discarded too.' : ''}',
+      confirmLabel: entry ? 'Clear' : 'Delete',
     );
+    if (!ok || !mounted) return;
+    try {
+      _checkOwner();
+      _store!.delete(_owner, name);
+    } catch (e) {
+      setState(() => _error = '$e');
+      return;
+    }
+    AppState.I.refresh();
+    if (name == _file) {
+      _file = 'MEMORY.md';
+      _load();
+    } else {
+      // Keep any unsaved edit of the open file; only the list changes.
+      try {
+        setState(() => _files = _store!.list(_owner));
+      } catch (e) {
+        setState(() => _error = '$e');
+      }
+    }
+  }
+
+  Future<void> _clearAll() async {
+    final ok = await showAetherConfirmDialog(
+      context,
+      title: 'Clear all ${_scopeCaption.toLowerCase()}?',
+      message:
+          'Deletes all ${_files.length} file${_files.length == 1 ? '' : 's'} '
+          'in ${_scopeCaption.toLowerCase()}, including everything Ovid saved '
+          'there. This cannot be undone.',
+      confirmLabel: 'Clear all',
+    );
+    if (!ok || !mounted) return;
+    try {
+      _checkOwner();
+      _store!.clearScope(_owner);
+    } catch (e) {
+      setState(() => _error = '$e');
+      return;
+    }
+    AppState.I.refresh();
+    _file = 'MEMORY.md';
+    _load();
   }
 
   @override
   void dispose() {
+    AppState.I.removeListener(_onAppChanged);
     _content.dispose();
     super.dispose();
   }
@@ -362,9 +497,41 @@ class _MemoryScreenState extends State<MemoryScreen> {
                     icon: Icons.file_upload_outlined,
                     onPressed: _enabled ? _import : null,
                   ),
+                  AetherGhostButton(
+                    label: 'Clear all memory',
+                    icon: Icons.delete_sweep_outlined,
+                    onPressed: _enabled ? _clearAll : null,
+                  ),
                 ],
               ),
             ),
+            if (_stale)
+              Padding(
+                padding: const EdgeInsets.only(top: AetherSpacing.space3),
+                child: AetherCard(
+                  key: const Key('memory-stale-banner'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AetherSpacing.space4,
+                    vertical: AetherSpacing.space2,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.sync_problem, size: 16, color: Aether.warn),
+                      const SizedBox(width: AetherSpacing.space2),
+                      Expanded(
+                        child: Text(
+                          'Updated by Ovid while you were editing',
+                          style: AetherType.body,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _enabled ? _reload : null,
+                        child: const Text('Reload'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             const SizedBox(height: AetherSpacing.space3),
             _buildFileList(),
             if (_files.isNotEmpty) ...[
@@ -446,9 +613,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
           sourceCaption: _scopeCaption,
           onTap: _enabled ? () => _selectFile(name) : null,
           onEdit: _enabled ? () => _selectFile(name) : null,
-          onDelete: isEntry || !_enabled
-              ? null
-              : () => _notifyDeleteUnsupported(name),
+          deleteLabel: isEntry ? 'Clear' : 'Delete',
+          onDelete: _enabled ? () => _delete(name) : null,
         ),
       );
     }
@@ -519,8 +685,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
 /// One memory file rendered as an [AetherCard] list item.
 ///
 /// Anatomy: `[pin glyph]  filename  /  source caption` with an overflow menu
-/// offering Edit (selects the file into the editor) and Delete (disabled for
-/// the pinned entrypoint and for anything the store cannot delete).
+/// offering Edit (selects the file into the editor) and Delete (Clear for the
+/// pinned entrypoint, which always exists).
 class _MemoryFileRow extends StatelessWidget {
   final String name;
   final bool selected;
@@ -529,6 +695,7 @@ class _MemoryFileRow extends StatelessWidget {
   final VoidCallback? onTap;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
+  final String deleteLabel;
 
   const _MemoryFileRow({
     required this.name,
@@ -538,6 +705,7 @@ class _MemoryFileRow extends StatelessWidget {
     required this.onTap,
     required this.onEdit,
     required this.onDelete,
+    this.deleteLabel = 'Delete',
   });
 
   @override
@@ -602,7 +770,7 @@ class _MemoryFileRow extends StatelessWidget {
                   value: 'delete',
                   enabled: onDelete != null,
                   child: Text(
-                    'Delete',
+                    deleteLabel,
                     style: TextStyle(
                       color: onDelete == null
                           ? Aether.textFaint

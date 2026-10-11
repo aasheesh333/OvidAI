@@ -71,11 +71,12 @@ void main() {
     expect(find.text('Add file'), findsOneWidget);
     expect(find.text('Import .md'), findsOneWidget);
 
-    // Overflow exposes Edit / Delete for the entrypoint row.
+    // Overflow exposes Edit / Clear for the entrypoint row (MEMORY.md always
+    // exists, so deleting it empties it).
     await tester.tap(find.byIcon(Icons.more_vert).first);
     await tester.pumpAndSettle();
     expect(find.text('Edit'), findsOneWidget);
-    expect(find.text('Delete'), findsOneWidget);
+    expect(find.text('Clear'), findsOneWidget);
 
     // Edit stays wired: selecting the already-open file is a no-op close.
     await tester.tap(find.text('Edit'));
@@ -103,15 +104,15 @@ void main() {
     expect(MemoryStore(dir).list(null), contains('ideas.md'));
     expect(find.text('ideas.md'), findsWidgets);
 
-    // The new, non-pinned row offers Delete; the store cannot remove files,
-    // so the UI says so instead of pretending a removal happened.
+    // The new, non-pinned row offers Delete, which confirms and removes it.
     await tester.tap(find.byIcon(Icons.more_vert).at(1));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Delete'));
     await tester.pumpAndSettle();
-    expect(find.text('Delete not supported'), findsOneWidget);
-    await tester.tap(find.text('Close'));
+    expect(find.text('Delete ideas.md?'), findsOneWidget);
+    await tester.tap(find.text('Delete'));
     await tester.pumpAndSettle();
+    expect(MemoryStore(dir).list(null), isNot(contains('ideas.md')));
   });
 
   testWidgets('editor save still persists through MemoryStore', (tester) async {

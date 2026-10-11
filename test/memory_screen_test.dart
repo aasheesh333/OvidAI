@@ -165,10 +165,91 @@ void main() {
       );
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('Reload before saving'), findsOneWidget);
+      expect(
+        find.text('Memory changed while you were editing'),
+        findsOneWidget,
+      );
       expect(MemoryStore(dir).read(null, 'MEMORY.md').content, 'Newer edit');
+      // Use latest discards the stale edit and shows the agent's text.
+      await tester.tap(find.text('Use latest'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('memory-content')))
+            .controller!
+            .text,
+        'Newer edit',
+      );
     },
   );
+
+  testWidgets('agent write during edit: Keep mine saves the user text', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: MemoryScreen()));
+    await tester.runAsync(() => app.prepareMemory());
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('memory-content')),
+      'My careful notes',
+    );
+    // The agent writes the same file while the user is editing.
+    MemoryStore(dir).save(null, 'MEMORY.md', 'Agent fact', mode: 'append');
+    app.refresh();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('memory-stale-banner')), findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Keep mine'));
+    await tester.pumpAndSettle();
+    expect(
+      MemoryStore(dir).read(null, 'MEMORY.md').content,
+      'My careful notes',
+    );
+    expect(find.byKey(const Key('memory-stale-banner')), findsNothing);
+  });
+
+  testWidgets('Delete removes an agent-written file after confirmation', (
+    tester,
+  ) async {
+    MemoryStore(dir).save(null, 'facts.md', 'Agent wrote this', mode: 'create');
+    await tester.pumpWidget(const MaterialApp(home: MemoryScreen()));
+    await tester.runAsync(() => app.prepareMemory());
+    await tester.pumpAndSettle();
+    expect(MemoryStore(dir).list(null), contains('facts.md'));
+    await tester.tap(find.byTooltip('More actions').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Delete facts.md?'), findsOneWidget);
+    await tester.tap(find.text('Delete').last);
+    await tester.pumpAndSettle();
+    expect(MemoryStore(dir).list(null), isNot(contains('facts.md')));
+    expect(find.text('facts.md'), findsNothing);
+  });
+
+  testWidgets('Clear all memory empties the scope after confirmation', (
+    tester,
+  ) async {
+    MemoryStore(dir)
+      ..save(null, 'MEMORY.md', 'Entry', mode: 'replace', revision:
+          MemoryStore(dir).read(null, 'MEMORY.md').revision)
+      ..save(null, 'facts.md', 'Fact', mode: 'create');
+    await tester.pumpWidget(const MaterialApp(home: MemoryScreen()));
+    await tester.runAsync(() => app.prepareMemory());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Clear all memory'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(MemoryStore(dir).list(null), contains('facts.md'));
+    await tester.tap(find.text('Clear all memory'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Clear all'));
+    await tester.pumpAndSettle();
+    expect(MemoryStore(dir).list(null), ['MEMORY.md']);
+    expect(MemoryStore(dir).read(null, 'MEMORY.md').content, isEmpty);
+  });
 
   testWidgets(
     'import creates safe Markdown, reports conflicts and oversize input',
