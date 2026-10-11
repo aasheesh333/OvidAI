@@ -1643,9 +1643,8 @@ libncursesw.so.6.5←./lib/libncurses.so.6
         args: ['-y', '@example/echo'],
       );
       expect(app.mcpServers.any((s) => s.name == name), isTrue);
-      // Verify it was written to SharedPreferences.
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getStringList('ovid_custom_mcp_servers_v1');
+      // Verify it was persisted (secure storage, H1).
+      final saved = (await AppState.persistedCustomMcpRowsForTest());
       expect(saved, isNotNull);
       expect(
         saved!.any(
@@ -11334,7 +11333,7 @@ url = "https://api.example.com/mcp"
         expect(rawPlugins, isNot(contains('mkt-plugin-1')));
         final rawPluginState = prefs.getString('ovid_plugin_state_v1') ?? '{}';
         expect(rawPluginState, isNot(contains('mkt-plugin-1')));
-        final rawMcps = prefs.getStringList('ovid_custom_mcp_servers_v1') ?? [];
+        final rawMcps = (await AppState.persistedCustomMcpRowsForTest()) ?? [];
         expect(rawMcps.any((j) => j.contains('mkt-mcp-1')), isFalse);
       },
     );
@@ -12275,8 +12274,7 @@ You are an expert security auditor reviewing code for vulnerabilities.
           headers: {'Authorization': 'Bearer super-secret-token'},
         );
         await SharedPreferences.getInstance();
-        final prefs = await SharedPreferences.getInstance();
-        final saved = prefs.getStringList('ovid_custom_mcp_servers_v1') ?? [];
+        final saved = (await AppState.persistedCustomMcpRowsForTest()) ?? [];
         final entry = saved
             .map((j) => jsonDecode(j) as Map<String, dynamic>)
             .firstWhere((m) => m['name'] == 'secure-headers');

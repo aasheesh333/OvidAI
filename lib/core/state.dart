@@ -3841,6 +3841,10 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Test seam: re-run the shell-preferences load (simulates a restart).
+  @visibleForTesting
+  Future<void> reloadShellPreferencesForTest() => _loadShellPreferences();
+
   Future<void> _loadShellPreferences() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -3872,7 +3876,7 @@ class AppState extends ChangeNotifier {
       browserDesktopMode = prefs.getBool(_kBrowserDesktopMode) ?? false;
       autoRunSafeCommands = prefs.getBool(_kAutoRunSafe) ?? true;
       try {
-        final rawGrants = prefs.getString(_kPermissionGrants);
+        final rawGrants = await _readGlobalPermissionGrantsRaw();
         globalPermissionGrants = rawGrants == null
             ? []
             : PermissionGrant.listFromJson(jsonDecode(rawGrants) as List?);
@@ -5238,6 +5242,7 @@ class AppState extends ChangeNotifier {
       workflowEnabled = true;
       browserDesktopMode = false;
       autoRunSafeCommands = true;
+      globalPermissionGrants = [];
       shareSessionMemory = false;
       shareStudioOnRestart = true;
       shareBrowserOnRestart = true;
@@ -5253,6 +5258,8 @@ class AppState extends ChangeNotifier {
       } catch (e) {
         Diag.swallow('state', e);
       }
+      // Grants were wiped with secure storage; drop the in-process cache too.
+      PluginPermissionStore.forgetCachedGrants();
       _ensureActiveSession();
       notifyListeners();
       await persistSessions();
@@ -5323,7 +5330,15 @@ class AppState extends ChangeNotifier {
   /// ON  → the AI (via memory_search) can search across ALL sessions' chat
   /// history ("poori app history", user-opted).
   static const _kShareMemory = 'ovid_share_session_memory';
+  /// LEGACY preferences key for the custom/plugin-owned MCP server rows.
+  /// Read once by the H1 migration into [_kCustomMcpServersSecure].
   static const _kCustomMcpServers = 'ovid_custom_mcp_servers_v1';
+
+  /// Secure-storage key for the custom/plugin-owned MCP server rows (H1).
+  /// Each row names a command the app will spawn, so the list must not be
+  /// editable through a world-readable-on-root, backup-restorable
+  /// preferences file.
+  static const _kCustomMcpServersSecure = 'ovid_custom_mcp_servers_v2';
   static const _kRemovedBuiltinSeeds = 'ovid_removed_builtin_seeds_v1';
   @visibleForTesting
   static const kRemovedBuiltinSeeds = _kRemovedBuiltinSeeds;
@@ -5456,7 +5471,13 @@ class AppState extends ChangeNotifier {
   /// Global "always allow" permission grants (the strict permission model:
   /// General/Studio). Applies to every session; the user can revoke entries
   /// from Settings. Session-scoped grants live on the ChatSession instead.
+  /// LEGACY preferences key; migrated once into [_kPermissionGrantsSecure].
   static const _kPermissionGrants = 'ovid_permission_grants_v1';
+
+  /// Secure-storage key for global "always allow/deny" decisions (H1): an
+  /// "always allow shell" entry is execution authority, so it must not be
+  /// mintable by editing a preferences file.
+  static const _kPermissionGrantsSecure = 'ovid_permission_grants_v2';
   List<PermissionGrant> globalPermissionGrants = [];
 
   /// Send behavior while the agent is running: `queue` (default) appends the
@@ -5766,14 +5787,66 @@ class AppState extends ChangeNotifier {
 
   Future<void> _persistGlobalPermissionGrants() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        _kPermissionGrants,
-        jsonEncode(globalPermissionGrants.map((g) => g.toJson()).toList()),
+      await _secureStorage.write(
+        key: _kPermissionGrantsSecure,
+        value: jsonEncode(
+          globalPermissionGrants.map((g) => g.toJson()).toList(),
+        ),
       );
+      await _dropLegacyPermissionGrants();
     } catch (e) {
       Diag.swallow('state', e);
     }
+  }
+
+  Future<void> _dropLegacyPermissionGrants() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.containsKey(_kPermissionGrants)) {
+        await prefs.remove(_kPermissionGrants);
+      }
+    } catch (e) {
+      Diag.swallow('state.permission_grants_legacy', e);
+    }
+  }
+
+  /// The persisted global "always allow/deny" decisions as raw JSON, running
+  /// the one-time H1 migration out of SharedPreferences: copy, read back to
+  /// verify, then delete the preferences copy (never losing a decision). An
+  /// unverified copy is removed and retried next run; an unreadable keystore
+  /// keeps serving the legacy value.
+  Future<String?> _readGlobalPermissionGrantsRaw() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? raw;
+    try {
+      raw = await _secureStorage.read(key: _kPermissionGrantsSecure);
+    } catch (e) {
+      Diag.swallow('state.permission_grants_read', e);
+      return prefs.getString(_kPermissionGrants);
+    }
+    if (raw != null) {
+      await _dropLegacyPermissionGrants();
+      return raw;
+    }
+    final legacy = prefs.getString(_kPermissionGrants);
+    if (legacy == null) return null;
+    try {
+      await _secureStorage.write(key: _kPermissionGrantsSecure, value: legacy);
+      final readBack = await _secureStorage.read(key: _kPermissionGrantsSecure);
+      if (readBack != legacy) {
+        throw StateError('permission grant migration did not verify');
+      }
+    } catch (e) {
+      Diag.swallow('state.permission_grants_migrate', e);
+      try {
+        await _secureStorage.delete(key: _kPermissionGrantsSecure);
+      } catch (e) {
+        Diag.swallow('state.permission_grants_migrate_rollback', e);
+      }
+      return legacy;
+    }
+    await _dropLegacyPermissionGrants();
+    return legacy;
   }
 
   /// Adds a global "always allow" grant (applies to every session).
@@ -7991,7 +8064,7 @@ class AppState extends ChangeNotifier {
       }
     }
     final prefs = await SharedPreferences.getInstance();
-    final persistedBefore = prefs.getStringList(_kCustomMcpServers);
+    final persistedBefore = await _readCustomMcpRows();
     final intentBefore = prefs.getStringList(_kMcpConnectedIntent);
     final writer =
         mcpOAuthWriteOverrideForTest ?? McpService.I.setMcpOAuthConfig;
@@ -8200,17 +8273,15 @@ class AppState extends ChangeNotifier {
               : _secureStorage.write(key: entry.key, value: entry.value),
         );
       }
-      for (final entry in {
-        _kCustomMcpServers: persistedBefore,
-        _kMcpConnectedIntent: intentBefore,
-      }.entries) {
-        await restore(() async {
-          final written = entry.value == null
-              ? await prefs.remove(entry.key)
-              : await prefs.setStringList(entry.key, entry.value!);
-          if (!written) throw StateError('Failed to restore ${entry.key}');
-        });
-      }
+      await restore(() => _writeCustomMcpRows(persistedBefore));
+      await restore(() async {
+        final written = intentBefore == null
+            ? await prefs.remove(_kMcpConnectedIntent)
+            : await prefs.setStringList(_kMcpConnectedIntent, intentBefore);
+        if (!written) {
+          throw StateError('Failed to restore $_kMcpConnectedIntent');
+        }
+      });
       for (final snapshot in owned.where((s) => s.connected)) {
         await restore(() async {
           // Restore the snapshot's configuration first, but do not claim the
@@ -9525,7 +9596,6 @@ class AppState extends ChangeNotifier {
       if (strict && mcpCustomMcpPersistenceOverrideForTest != null) {
         await mcpCustomMcpPersistenceOverrideForTest!();
       }
-      final prefs = await SharedPreferences.getInstance();
       final customs = mcpServers
           .where((s) => s.custom)
           .map(
@@ -9556,14 +9626,99 @@ class AppState extends ChangeNotifier {
             }),
           )
           .toList();
-      final written = await prefs.setStringList(_kCustomMcpServers, customs);
-      if (strict && !written) {
-        throw StateError('Failed to persist custom MCP servers');
-      }
+      await _writeCustomMcpRows(customs);
     } catch (e) {
       if (strict) rethrow;
       Diag.swallow('state', e);
     }
+  }
+
+  /// Writes the MCP server rows to secure storage (null deletes them), then
+  /// drops any leftover legacy preferences copy — the secure copy now holds
+  /// the complete list. Throws when secure storage refuses the write.
+  Future<void> _writeCustomMcpRows(List<String>? rows) async {
+    if (rows == null) {
+      await _secureStorage.delete(key: _kCustomMcpServersSecure);
+    } else {
+      await _secureStorage.write(
+        key: _kCustomMcpServersSecure,
+        value: jsonEncode(rows),
+      );
+    }
+    await _dropLegacyCustomMcpRows();
+  }
+
+  Future<void> _dropLegacyCustomMcpRows() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.containsKey(_kCustomMcpServers)) {
+        await prefs.remove(_kCustomMcpServers);
+      }
+    } catch (e) {
+      Diag.swallow('state.custom_mcp_legacy', e);
+    }
+  }
+
+  static List<String>? _decodeCustomMcpRows(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return null;
+      return [for (final row in decoded) if (row is String) row];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The persisted MCP server rows, running the one-time H1 migration out
+  /// of SharedPreferences when needed: the legacy list is copied into secure
+  /// storage, read back to verify, and only then removed from preferences —
+  /// so a row is never lost. An unverified copy is deleted and retried on
+  /// the next run; an unreadable keystore keeps serving the legacy list.
+  /// Null when nothing was ever persisted.
+  Future<List<String>?> _readCustomMcpRows() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? raw;
+    try {
+      raw = await _secureStorage.read(key: _kCustomMcpServersSecure);
+    } catch (e) {
+      Diag.swallow('state.custom_mcp_read', e);
+      return prefs.getStringList(_kCustomMcpServers);
+    }
+    final secure = raw == null ? null : _decodeCustomMcpRows(raw);
+    if (secure != null) {
+      await _dropLegacyCustomMcpRows();
+      return secure;
+    }
+    final legacy = prefs.getStringList(_kCustomMcpServers);
+    if (legacy == null) return null;
+    final encoded = jsonEncode(legacy);
+    try {
+      await _secureStorage.write(key: _kCustomMcpServersSecure, value: encoded);
+      final readBack = await _secureStorage.read(
+        key: _kCustomMcpServersSecure,
+      );
+      if (readBack != encoded) {
+        throw StateError('custom MCP server migration did not verify');
+      }
+    } catch (e) {
+      Diag.swallow('state.custom_mcp_migrate', e);
+      try {
+        await _secureStorage.delete(key: _kCustomMcpServersSecure);
+      } catch (e) {
+        Diag.swallow('state.custom_mcp_migrate_rollback', e);
+      }
+      return legacy;
+    }
+    await _dropLegacyCustomMcpRows();
+    return legacy;
+  }
+
+  /// Test seam: the MCP server rows exactly as persisted in secure storage
+  /// (null when absent), without running the migration.
+  @visibleForTesting
+  static Future<List<String>?> persistedCustomMcpRowsForTest() async {
+    final raw = await _secureStorage.read(key: _kCustomMcpServersSecure);
+    return raw == null ? null : _decodeCustomMcpRows(raw);
   }
 
   @visibleForTesting
@@ -9606,8 +9761,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> _loadCustomMcpServers() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final list = prefs.getStringList(_kCustomMcpServers);
+      final list = await _readCustomMcpRows();
       if (list == null || list.isEmpty) return;
       for (final j in list) {
         final m = jsonDecode(j) as Map<String, dynamic>;

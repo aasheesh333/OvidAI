@@ -489,9 +489,18 @@ class PluginPermissionStore {
   // fresh preferences lifecycle hydrates (and migrates) once. The confirmed
   // snapshot only ever holds what was hydrated or a write actually
   // committed.
-  static final _hydration = Expando<Future<Map<String, String>>>();
-  static final _confirmed = Expando<Map<String, String>>();
-  static final _revoked = Expando<Map<String, Object>>();
+  static var _hydration = Expando<Future<Map<String, String>>>();
+  static var _confirmed = Expando<Map<String, String>>();
+  static var _revoked = Expando<Map<String, Object>>();
+
+  /// Drops every in-process grant cache (after "delete all data" wiped
+  /// secure storage) so the next read hydrates from storage again.
+  static void forgetCachedGrants() {
+    _hydration = Expando();
+    _confirmed = Expando();
+    _revoked = Expando();
+    _declinedByPlugin.clear();
+  }
 
   Map<String, Object> _tombstones(SharedPreferences prefs) =>
       _revoked[prefs] ??= {};
