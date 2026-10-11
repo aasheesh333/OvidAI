@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/html_artifact.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -20,9 +21,9 @@ void main() {
         MaterialApp(
           theme: Aether.theme(),
           builder: (context, child) => MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              textScaler: TextScaler.linear(scale),
-            ),
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: TextScaler.linear(scale)),
             child: child!,
           ),
           home: Scaffold(
@@ -88,4 +89,65 @@ void main() {
       expectHeader('View source', 'Expand preview');
     }, variant: linux);
   }
+
+  testWidgets('artifact controls at 360dp are IconButtons with no text '
+      'below 12sp', (tester) async {
+    final semantics = tester.ensureSemantics();
+    tester.view.physicalSize = const Size(360, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Aether.theme(),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: HtmlArtifactView(
+              artifact: HtmlArtifact.create('owner', {
+                'title': title,
+                'html': '<main>Hello</main>',
+              }),
+              sessionId: 'owner',
+            ),
+          ),
+        ),
+      ),
+    );
+    for (final (tip, icon) in [
+      ('View source', Icons.code),
+      ('Expand preview', Icons.fullscreen),
+    ]) {
+      expect(find.widgetWithIcon(IconButton, icon), findsOneWidget);
+      final data = tester
+          .getSemantics(find.widgetWithIcon(IconButton, icon))
+          .getSemanticsData();
+      expect('${data.label}${data.tooltip}', contains(tip));
+    }
+    expect(find.text('View source'), findsNothing);
+    // No header text is scaled below 12sp (the old FittedBox labels were
+    // ~6sp); the uppercase OFFLINE SANDBOX tag keeps the 11sp tag floor.
+    for (final e
+        in find
+            .descendant(
+              of: find
+                  .ancestor(of: find.text(title), matching: find.byType(Row))
+                  .first,
+              matching: find.byType(RichText),
+            )
+            .evaluate()) {
+      final paragraph = e.renderObject! as RenderParagraph;
+      final size = paragraph.text.style?.fontSize ?? 14;
+      final scale = paragraph.getTransformTo(null).getMaxScaleOnAxis();
+      // Icon glyphs are RichText too; only check real text.
+      if (paragraph.text.style?.fontFamily == 'MaterialIcons') continue;
+      if (paragraph.text.toPlainText().trim().isEmpty) continue;
+      final tag = paragraph.text.toPlainText() == 'OFFLINE SANDBOX';
+      expect(
+        size * scale,
+        greaterThanOrEqualTo(tag ? 11 : 12),
+        reason: paragraph.text.toPlainText(),
+      );
+    }
+    semantics.dispose();
+  });
 }

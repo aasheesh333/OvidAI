@@ -50,9 +50,9 @@ bool _isProblem(StartupItemState state) => !_isBenignTerminal(state) &&
     state != StartupItemState.running;
 
 Color _stateColor(StartupItemState state) => switch (state) {
-  StartupItemState.ready => Aether.successLight,
-  StartupItemState.failed => Aether.dangerC,
-  StartupItemState.unsupported => Aether.dangerC,
+  StartupItemState.ready => Aether.success,
+  StartupItemState.failed => Aether.danger,
+  StartupItemState.unsupported => Aether.danger,
   StartupItemState.disabled => Aether.textFaint,
   StartupItemState.skipped => Aether.textFaint,
   StartupItemState.queued || StartupItemState.running => Aether.accent,
@@ -215,7 +215,7 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
                           height: 7,
                           margin: const EdgeInsets.only(right: 8),
                           decoration: BoxDecoration(
-                            color: Aether.dangerC,
+                            color: Aether.danger,
                             shape: BoxShape.circle,
                           ),
                         ),
@@ -349,8 +349,8 @@ class _StartupStepHeader extends StatelessWidget {
             ? 'Review the rows below to retry, disable or install.'
             : 'You are good to go.');
     final color = anyProblem && !isRunning
-        ? Aether.dangerC
-        : (isRunning ? Aether.accent : Aether.successLight);
+        ? Aether.danger
+        : (isRunning ? Aether.accent : Aether.success);
     final icon = anyProblem && !isRunning
         ? Icons.warning_amber_rounded
         : (isRunning

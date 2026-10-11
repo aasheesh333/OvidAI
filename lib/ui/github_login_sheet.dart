@@ -17,11 +17,8 @@ void showGithubLoginSheet(
   BuildContext context, {
   void Function()? onConnected,
 }) {
-  showModalBottomSheet(
+  showAetherSheet<bool>(
     context: context,
-    backgroundColor: Colors.transparent,
-    isScrollControlled: true,
-    useSafeArea: true,
     isDismissible: false,
     builder: (_) => const GithubLoginSheet(),
   ).then((ok) {
@@ -270,7 +267,7 @@ class _GithubLoginSheetState extends State<GithubLoginSheet>
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const SizedBox(
+          SizedBox(
             width: 14,
             height: 14,
             child: CircularProgressIndicator(
@@ -312,16 +309,16 @@ class _GithubLoginSheetState extends State<GithubLoginSheet>
           width: 54,
           height: 54,
           decoration: BoxDecoration(
-            color: Aether.successLight.withValues(alpha: 0.12),
+            color: Aether.success.withValues(alpha: 0.12),
             shape: BoxShape.circle,
             border: Border.all(
-              color: Aether.successLight.withValues(alpha: 0.5),
+              color: Aether.success.withValues(alpha: 0.5),
             ),
           ),
           child: Icon(
             Icons.check_rounded,
             size: 30,
-            color: Aether.successLight,
+            color: Aether.success,
           ),
         ),
         const SizedBox(height: 14),
@@ -345,7 +342,7 @@ class _GithubLoginSheetState extends State<GithubLoginSheet>
   Widget _expiredView() => Column(
     mainAxisSize: MainAxisSize.min,
     children: [
-      Icon(Icons.timer_off_outlined, size: 36, color: Aether.warnLight),
+      Icon(Icons.timer_off_outlined, size: 36, color: Aether.warn),
       const SizedBox(height: 12),
       Text('Code expired', style: AetherType.title),
       const SizedBox(height: 4),
@@ -362,7 +359,7 @@ class _GithubLoginSheetState extends State<GithubLoginSheet>
   Widget _errorView() => Column(
     mainAxisSize: MainAxisSize.min,
     children: [
-      const Icon(Icons.error_outline, size: 36, color: Aether.danger),
+      Icon(Icons.error_outline, size: 36, color: Aether.danger),
       const SizedBox(height: 12),
       Text('Something went wrong', style: AetherType.title),
       const SizedBox(height: 4),
@@ -547,7 +544,7 @@ class _CopyChipState extends State<_CopyChip> {
               Icon(
                 copied ? Icons.check : Icons.copy_outlined,
                 size: 13,
-                color: copied ? Aether.successLight : Aether.textFaint,
+                color: copied ? Aether.success : Aether.textFaint,
               ),
               const SizedBox(width: 5),
               Semantics(
@@ -557,7 +554,7 @@ class _CopyChipState extends State<_CopyChip> {
                   copied ? 'Copied' : widget.label,
                   style: TextStyle(
                     fontSize: 12,
-                    color: copied ? Aether.successLight : Aether.textFaint,
+                    color: copied ? Aether.success : Aether.textFaint,
                   ),
                 ),
               ),

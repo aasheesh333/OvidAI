@@ -13,11 +13,8 @@ Future<void> showConversationShareSheet(
   ChatSession session,
 ) {
   final service = ConversationShareService.production();
-  return showModalBottomSheet<void>(
+  return showAetherSheet<void>(
     context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    backgroundColor: Colors.transparent,
     builder: (_) => FractionallySizedBox(
       heightFactor: .92,
       child: ConversationShareSheet(session: session, service: service),
@@ -147,10 +144,24 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
 
     return AetherSheet(
       title: 'Share conversation',
+      // Pinned by AetherSheet below the scrolling preview, so "Create link"
+      // is visible without scrolling at any viewport or text scale.
       actions: [
         AetherGhostButton(
           label: 'Close',
           onPressed: () => Navigator.pop(context),
+        ),
+        AetherPrimaryButton(
+          label: 'Create link',
+          icon: Icons.link,
+          onPressed:
+              available &&
+                  _loaded &&
+                  !_busy &&
+                  _snapshot.withinLimits &&
+                  _shares.isEmpty
+              ? _create
+              : null,
         ),
       ],
       child: Column(
@@ -197,7 +208,7 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                           Text(
                             'Sharing is unavailable: deployment is not configured.',
                             style: AetherType.body.copyWith(
-                              color: Aether.warnLight,
+                              color: Aether.warn,
                             ),
                           ),
                         ],
@@ -225,14 +236,14 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                             Icon(
                               Icons.error_outline,
                               size: 16,
-                              color: Aether.dangerC,
+                              color: Aether.danger,
                             ),
                             const SizedBox(width: 10),
                             Expanded(
                               child: Text(
                                 _error!,
                                 style: AetherType.body.copyWith(
-                                  color: Aether.dangerC,
+                                  color: Aether.danger,
                                 ),
                               ),
                             ),
@@ -275,7 +286,7 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
                         Text(
                           'No shareable text, or snapshot exceeds the 500-message / 200 KB / 20,000-character-per-message limit.',
                           style: AetherType.caption.copyWith(
-                            color: Aether.warnLight,
+                            color: Aether.warn,
                           ),
                         ),
                     ],
@@ -314,19 +325,6 @@ class _ConversationShareSheetState extends State<ConversationShareSheet> {
               ],
             ),
           ),
-          const SizedBox(height: 12),
-          AetherPrimaryButton(
-            label: 'Create link',
-            icon: Icons.link,
-            onPressed:
-                available &&
-                    _loaded &&
-                    !_busy &&
-                    _snapshot.withinLimits &&
-                    _shares.isEmpty
-                ? _create
-                : null,
-          ),
         ],
       ),
     );
@@ -353,7 +351,7 @@ class _ActiveShareCard extends StatelessWidget {
       title: Text('Shareable link', style: AetherType.title),
       trailing: AetherPill(
         label: 'LIVE',
-        color: Aether.successLight,
+        color: Aether.success,
         icon: Icons.check_circle_outline,
       ),
       child: Column(

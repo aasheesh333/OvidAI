@@ -33,11 +33,8 @@ Future<bool?> showPluginPermissionSheet(
   PluginSourceProvenance? provenance,
   Future<bool> Function(Uri uri)? openUrl,
 }) {
-  return showModalBottomSheet<bool>(
+  return showAetherSheet<bool>(
     context: context,
-    backgroundColor: Colors.transparent,
-    isScrollControlled: true,
-    useSafeArea: true,
     isDismissible: false,
     enableDrag: false,
     builder: (_) => _PluginPermissionSheet(
@@ -155,10 +152,9 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
       canPop: !_saving,
       child: Padding(
         padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-        // Scroll the chrome too: a keyboard and large text can leave less
-        // room than the title and actions alone need.
-        child: SingleChildScrollView(
-          child: MediaQuery.removeViewInsets(
+        // The sheet pins Cancel/Accept below the body; the body scrolls when
+        // a keyboard or large text leave too little room.
+        child: MediaQuery.removeViewInsets(
             context: context,
             removeBottom: true,
           child: AetherSheet(
@@ -174,7 +170,8 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
             onPressed: _saving ? null : _accept,
           ),
         ],
-        child: Column(
+        child: SingleChildScrollView(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -229,7 +226,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                       Icon(
                         Icons.verified_outlined,
                         size: 18,
-                        color: Aether.successLight,
+                        color: Aether.success,
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -341,12 +338,12 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(Icons.error_outline, color: Aether.danger),
+                        Icon(Icons.error_outline, color: Aether.danger),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
                             _error!,
-                            style: AetherType.body.copyWith(color: Aether.dangerC),
+                            style: AetherType.body.copyWith(color: Aether.danger),
                           ),
                         ),
                       ],
@@ -360,7 +357,7 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(Icons.info_outline, size: 18, color: Aether.accent),
+                    Icon(Icons.info_outline, size: 18, color: Aether.accent),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(

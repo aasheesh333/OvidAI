@@ -95,7 +95,7 @@ void main() {
   testWidgets('AetherPill renders filled and outlined variants', (tester) async {
     await tester.pumpWidget(
       _host(
-        const Row(
+        Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             AetherPill(label: 'FILLED', color: Aether.accent),
@@ -158,7 +158,7 @@ void main() {
   testWidgets('AetherStatusDot pulses only when pulsing=true', (tester) async {
     await tester.pumpWidget(
       _host(
-        const Row(
+        Row(
           children: [
             AetherStatusDot(color: Aether.success, pulsing: true),
             SizedBox(width: 8),

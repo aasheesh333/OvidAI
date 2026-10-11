@@ -151,7 +151,7 @@ Future<bool> showDeleteConfirmationDialog(
           onPressed: () => Navigator.pop(dialogContext, true),
           child: Text(
             confirmLabel,
-            style: const TextStyle(color: Aether.danger),
+            style: TextStyle(color: Aether.danger),
           ),
         ),
       ],
@@ -520,11 +520,11 @@ Widget durableStatusIcon(PluginRuntimeStatus status) {
       return Icon(
         Icons.check_circle_outline,
         size: 18,
-        color: Aether.successLight,
+        color: Aether.success,
       );
     case StartupItemState.queued:
     case StartupItemState.running:
-      return const SizedBox(
+      return SizedBox(
         width: 14,
         height: 14,
         child: CircularProgressIndicator(strokeWidth: 2, color: Aether.accent),
@@ -533,7 +533,7 @@ Widget durableStatusIcon(PluginRuntimeStatus status) {
     case StartupItemState.unsupported:
       return Tooltip(
         message: tooltip,
-        child: Icon(Icons.error_outline, size: 18, color: Aether.dangerC),
+        child: Icon(Icons.error_outline, size: 18, color: Aether.danger),
       );
     case StartupItemState.degraded:
     case StartupItemState.skipped:
@@ -541,7 +541,7 @@ Widget durableStatusIcon(PluginRuntimeStatus status) {
     case StartupItemState.migrationRequired:
       return Tooltip(
         message: tooltip,
-        child: const Icon(Icons.warning_amber, size: 18, color: Aether.accent),
+        child: Icon(Icons.warning_amber, size: 18, color: Aether.accent),
       );
     case StartupItemState.disabled:
       return Icon(Icons.power_settings_new, size: 18, color: Aether.textFaint);
@@ -740,10 +740,10 @@ Widget? pluginActivationBadge(PluginItem plugin) {
     PluginActivation.sessionActive => ('This session', Aether.accent),
     PluginActivation.pendingGlobal => (
       'Restart to enable everywhere',
-      Aether.warnLight,
+      Aether.warn,
     ),
-    PluginActivation.globalActive => ('Global', Aether.successLight),
-    PluginActivation.degraded => ('Degraded', Aether.warnLight),
+    PluginActivation.globalActive => ('Global', Aether.success),
+    PluginActivation.degraded => ('Degraded', Aether.warn),
     PluginActivation.failed => ('Failed', Aether.danger),
     PluginActivation.disabled => (null, null),
   };
@@ -887,7 +887,7 @@ class _PluginAddSheetState extends State<_PluginAddSheet> {
                       color: Aether.accentSoft,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(
+                    child: Icon(
                       Icons.add,
                       size: 19,
                       color: Aether.accent,
@@ -1054,7 +1054,7 @@ class _PluginAddSheetState extends State<_PluginAddSheet> {
                 tooltip: 'Remove marketplace',
                 // Removal uninstalls its plugins — never one tap.
                 onPressed: () => confirmAndRemoveMarketplace(ctx, m),
-                icon: const Icon(
+                icon: Icon(
                   Icons.delete_outline,
                   size: 16,
                   color: Aether.danger,
@@ -1300,14 +1300,8 @@ Future<void> _runSourceInstall(
     sheetOpen = true;
     messenger.hideCurrentSnackBar();
     unawaited(
-      showModalBottomSheet<void>(
+      showAetherSheet<void>(
         context: context,
-        isScrollControlled: true,
-        useSafeArea: true,
-        backgroundColor: Aether.surface,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
         builder: (_) => PluginInstallProgressSheet(
           progress: progress,
           title: 'Installing ${row?.name ?? source.sourceId}',
@@ -1623,7 +1617,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
         title: const Text('Plugins & marketplaces'),
         actions: [
           if (_syncing)
-            const Padding(
+            Padding(
               padding: EdgeInsets.symmetric(horizontal: 14),
               child: SizedBox(
                 width: 15,
@@ -2031,7 +2025,7 @@ class _MarketplaceCardState extends State<_MarketplaceCard> {
             key: ValueKey('marketplace-remove-${widget.repo}'),
             tooltip: 'Remove marketplace',
             visualDensity: VisualDensity.compact,
-            icon: const Icon(
+            icon: Icon(
               Icons.delete_outline,
               size: 18,
               color: Aether.danger,
@@ -2264,7 +2258,7 @@ class PluginCard extends StatelessWidget {
                     if (plugin.installed)
                       IconButton(
                         key: ValueKey('plugin-delete-${plugin.name}'),
-                        icon: const Icon(
+                        icon: Icon(
                           Icons.delete_outline,
                           size: 18,
                           color: Aether.danger,
@@ -2314,7 +2308,7 @@ class PluginCard extends StatelessWidget {
                     final status = app.serviceStatus['plugin:${plugin.name}'];
                     if (status != null) {
                       if (status.health == ServiceHealth.connecting) {
-                        return const SizedBox(
+                        return SizedBox(
                           width: 14,
                           height: 14,
                           child: CircularProgressIndicator(
@@ -2326,7 +2320,7 @@ class PluginCard extends StatelessWidget {
                         return Icon(
                           Icons.check_circle_outline,
                           size: 18,
-                          color: Aether.successLight,
+                          color: Aether.success,
                         );
                       } else if (status.health == ServiceHealth.failed) {
                         return Tooltip(
@@ -2334,7 +2328,7 @@ class PluginCard extends StatelessWidget {
                           child: Icon(
                             Icons.error_outline,
                             size: 18,
-                            color: Aether.dangerC,
+                            color: Aether.danger,
                           ),
                         );
                       }
@@ -2354,7 +2348,7 @@ class PluginCard extends StatelessWidget {
                           : Icons.check_circle_outline,
                       size: 18,
                       color: plugin.enabled
-                          ? Aether.successLight
+                          ? Aether.success
                           : Aether.textFaint,
                     );
                   },
@@ -3199,7 +3193,7 @@ class _DiagRow extends StatelessWidget {
           Icon(
             warn ? Icons.warning_amber_outlined : Icons.check_circle_outline,
             size: 14,
-            color: warn ? Aether.warnLight : Aether.textFaint,
+            color: warn ? Aether.warn : Aether.textFaint,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -3370,7 +3364,7 @@ class _Perm extends StatelessWidget {
           Icon(
             Icons.verified_user_outlined,
             size: 14,
-            color: Aether.successLight,
+            color: Aether.success,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -3424,7 +3418,7 @@ class _McpSection extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              const Tag('LIVE', color: Aether.accent, filled: true),
+              Tag('LIVE', color: Aether.accent, filled: true),
             ],
           ),
         ),
@@ -4117,12 +4111,12 @@ class McpCard extends StatelessWidget {
                   return Aether.accent.withValues(alpha: 0.45);
                 case StartupItemState.failed:
                 case StartupItemState.unsupported:
-                  return Aether.dangerC.withValues(alpha: 0.45);
+                  return Aether.danger.withValues(alpha: 0.45);
                 case StartupItemState.needsSetup:
                 case StartupItemState.degraded:
                 case StartupItemState.migrationRequired:
                 case StartupItemState.skipped:
-                  return Aether.warnLight.withValues(alpha: 0.45);
+                  return Aether.warn.withValues(alpha: 0.45);
                 case StartupItemState.disabled:
                 case StartupItemState.queued:
                 case StartupItemState.running:
@@ -4168,7 +4162,7 @@ class McpCard extends StatelessWidget {
                 const SizedBox(width: 4),
                 IconButton(
                   key: ValueKey('mcp-delete-${server.canonicalId}'),
-                  icon: const Icon(
+                  icon: Icon(
                     Icons.delete_outline,
                     size: 16,
                     color: Aether.danger,
@@ -4232,7 +4226,7 @@ class McpCard extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 10.5,
                       color: durable.state == StartupItemState.ready
-                          ? Aether.successLight
+                          ? Aether.success
                           : Aether.textMuted,
                     ),
                   );
@@ -4761,7 +4755,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               if (stored)
                 IconButton(
                   tooltip: 'Delete $name',
-                  icon: const Icon(
+                  icon: Icon(
                     Icons.delete_outline,
                     size: 17,
                     color: Aether.danger,
@@ -5237,7 +5231,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
           IconButton(
             key: ValueKey('mcp-detail-delete-${s.canonicalId}'),
             tooltip: 'Delete server',
-            icon: const Icon(
+            icon: Icon(
               Icons.delete_outline,
               size: 19,
               color: Aether.danger,
@@ -5316,7 +5310,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                           style: TextStyle(
                             fontSize: 11.5,
                             color: durable.state == StartupItemState.ready
-                                ? Aether.successLight
+                                ? Aether.success
                                 : Aether.textMuted,
                           ),
                         );
@@ -5380,12 +5374,12 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                 color: Aether.surfaceAlt,
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
-                  color: Aether.dangerC.withValues(alpha: 0.35),
+                  color: Aether.danger.withValues(alpha: 0.35),
                 ),
               ),
               child: Row(
                 children: [
-                  Icon(Icons.block_outlined, size: 15, color: Aether.dangerC),
+                  Icon(Icons.block_outlined, size: 15, color: Aether.danger),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
@@ -5935,7 +5929,7 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
               fillColor: Aether.surfaceAlt,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: Aether.hairline),
+                borderSide: BorderSide(color: Aether.inputBorder),
               ),
             ),
             onChanged: (_) => _validate(),

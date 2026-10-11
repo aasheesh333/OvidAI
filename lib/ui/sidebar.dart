@@ -269,13 +269,13 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             borderRadius: BorderRadius.circular(
                               AetherRadius.rMd,
                             ),
-                            borderSide: BorderSide(color: Aether.hairline),
+                            borderSide: BorderSide(color: Aether.inputBorder),
                           ),
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(
                               AetherRadius.rMd,
                             ),
-                            borderSide: BorderSide(color: Aether.hairline),
+                            borderSide: BorderSide(color: Aether.inputBorder),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(
@@ -969,7 +969,7 @@ class _SessionTileState extends State<_SessionTile> {
           color: Aether.danger.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(10),
         ),
-        child: const Icon(Icons.delete_outline, color: Aether.danger, size: 18),
+        child: Icon(Icons.delete_outline, color: Aether.danger, size: 18),
       ),
       child: MouseRegion(
         onEnter: (_) => setState(() => _hover = true),
@@ -1058,7 +1058,7 @@ class _SessionTileState extends State<_SessionTile> {
               IconButton(
                 tooltip: 'Delete chat',
                 visualDensity: VisualDensity.compact,
-                icon: const Icon(
+                icon: Icon(
                   Icons.delete_outline,
                   size: 17,
                   color: Aether.danger,
@@ -1116,7 +1116,7 @@ class _SessionTileState extends State<_SessionTile> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+            child: Text('Delete', style: TextStyle(color: Aether.danger)),
           ),
         ],
       ),
@@ -1201,7 +1201,7 @@ class _SessionTileState extends State<_SessionTile> {
             ),
             ListTile(
               dense: true,
-              leading: const Icon(
+              leading: Icon(
                 Icons.auto_awesome_outlined,
                 size: 19,
                 color: Aether.accent,
@@ -1283,7 +1283,7 @@ class _SessionTileState extends State<_SessionTile> {
               ),
               TextButton(
                 onPressed: () => save(c.text),
-                child: const Text(
+                child: Text(
                   'Save',
                   style: TextStyle(color: Aether.accent),
                 ),
@@ -1316,7 +1316,7 @@ class _RunningBadge extends StatelessWidget {
             Container(
               width: 6,
               height: 6,
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: Aether.accent,
               ),
@@ -1350,7 +1350,7 @@ class _ConnectionChip extends StatelessWidget {
       builder: (_, _) {
         final c = ConnectionService.I;
         final color = switch (c.status) {
-          ConnectionStatus.online => Aether.successLight,
+          ConnectionStatus.online => Aether.success,
           ConnectionStatus.offline => Aether.danger,
           ConnectionStatus.checking => Aether.textFaint,
         };

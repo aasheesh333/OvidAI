@@ -211,12 +211,12 @@ class _PluginSettingsPanelState extends State<PluginSettingsPanel> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.error_outline, size: 16, color: Aether.dangerC),
+                  Icon(Icons.error_outline, size: 16, color: Aether.danger),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       _error!,
-                      style: AetherType.body.copyWith(color: Aether.dangerC),
+                      style: AetherType.body.copyWith(color: Aether.danger),
                     ),
                   ),
                 ],
@@ -232,7 +232,7 @@ class _PluginSettingsPanelState extends State<PluginSettingsPanel> {
                 Icon(
                   Icons.check_circle_outline,
                   size: 16,
-                  color: Aether.successLight,
+                  color: Aether.success,
                 ),
                 const SizedBox(width: 8),
                 Expanded(child: Text('Settings saved', style: AetherType.bodyMuted)),
@@ -318,7 +318,7 @@ class _SettingsField extends StatelessWidget {
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
-              borderSide: BorderSide(color: Aether.hairline),
+              borderSide: BorderSide(color: Aether.inputBorder),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
@@ -326,7 +326,7 @@ class _SettingsField extends StatelessWidget {
             ),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
-              borderSide: BorderSide(color: Aether.hairline),
+              borderSide: BorderSide(color: Aether.inputBorder),
             ),
           ),
         ),

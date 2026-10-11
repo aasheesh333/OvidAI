@@ -230,7 +230,7 @@ Future<StudioUnsavedChoice> showStudioUnsavedDialog(
         ),
         TextButton(
           onPressed: () => Navigator.pop(d, StudioUnsavedChoice.discard),
-          child: const Text('Discard', style: TextStyle(color: Aether.danger)),
+          child: Text('Discard', style: TextStyle(color: Aether.danger)),
         ),
         FilledButton(
           onPressed: () => Navigator.pop(d, StudioUnsavedChoice.save),
@@ -875,19 +875,19 @@ class _StudioEditorState extends State<StudioEditor> {
       pill = AetherPill(
         label: 'CONFLICT',
         icon: Icons.sync_problem_outlined,
-        color: Aether.dangerC,
+        color: Aether.danger,
       );
     } else if (_dirty) {
       pill = AetherPill(
         label: 'UNSAVED',
         icon: Icons.circle,
-        color: Aether.warnLight,
+        color: Aether.warn,
       );
     } else {
       pill = AetherPill(
         label: 'SAVED',
         icon: Icons.check_circle,
-        color: Aether.successLight,
+        color: Aether.success,
       );
     }
     return Container(
@@ -909,7 +909,7 @@ class _StudioEditorState extends State<StudioEditor> {
               Icon(
                 Icons.description_outlined,
                 size: 15,
-                color: _dirty ? Aether.warnLight : Aether.accent,
+                color: _dirty ? Aether.warn : Aether.accent,
               ),
               const SizedBox(width: 8),
               Expanded(

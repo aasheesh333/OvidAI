@@ -121,7 +121,7 @@ class _SharedConversationScreenState extends State<SharedConversationScreen> {
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
               sliver: SliverList.list(
                 children: [
-                  if (_error != null) Text(_error!, style: TextStyle(color: Aether.dangerC)),
+                  if (_error != null) Text(_error!, style: TextStyle(color: Aether.danger)),
                   AetherPrimaryButton(
                     label: _busy ? 'Continuing…' : 'Continue in Ovid Si',
                     onPressed: _busy ? null : _continue,

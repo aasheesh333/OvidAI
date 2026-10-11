@@ -1292,8 +1292,15 @@ class _ChatScreenState extends State<ChatScreen>
                 ),
           appBar: AppBar(
             automaticallyImplyLeading: !wide,
-            title: GestureDetector(
+            // A11Y: a labelled button with a 48dp-tall hit area.
+            title: Semantics(
+              button: true,
+              label: 'Change model',
+              child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
               onTap: () => _modelPicker(context),
+              child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1309,6 +1316,8 @@ class _ChatScreenState extends State<ChatScreen>
                   const SizedBox(width: 4),
                   Icon(Icons.unfold_more, size: 16, color: Aether.textFaint),
                 ],
+              ),
+              ),
               ),
             ),
             actions: [
@@ -1342,7 +1351,6 @@ class _ChatScreenState extends State<ChatScreen>
                     children: [
                       IconButton(
                         tooltip: 'Background jobs',
-                        visualDensity: VisualDensity.compact,
                         icon: const Icon(Icons.terminal_outlined, size: 19),
                         onPressed: () => _showJobsPopover(context, s!.id),
                       ),
@@ -1356,7 +1364,7 @@ class _ChatScreenState extends State<ChatScreen>
                           ),
                           decoration: BoxDecoration(
                             color: running > 0
-                                ? Aether.accent
+                                ? Aether.accentFill
                                 : Aether.textFaint,
                             borderRadius: BorderRadius.circular(6),
                           ),
@@ -1376,7 +1384,6 @@ class _ChatScreenState extends State<ChatScreen>
               ),
               IconButton(
                 tooltip: 'Studio — code & terminal',
-                visualDensity: VisualDensity.compact,
                 icon: const Icon(Icons.code, size: 19),
                 onPressed: () => openStudio(context),
               ),
@@ -1395,7 +1402,6 @@ class _ChatScreenState extends State<ChatScreen>
                     children: [
                       IconButton(
                         tooltip: 'Browser — agent & login',
-                        visualDensity: VisualDensity.compact,
                         icon: const Icon(Icons.public, size: 19),
                         onPressed: () => Navigator.of(context).push(
                           MaterialPageRoute(
@@ -1422,7 +1428,6 @@ class _ChatScreenState extends State<ChatScreen>
               ),
               IconButton(
                 tooltip: 'New session',
-                visualDensity: VisualDensity.compact,
                 icon: const Icon(Icons.edit_square, size: 18),
                 onPressed: app.newSession,
               ),
@@ -1788,7 +1793,7 @@ class _ChatScreenState extends State<ChatScreen>
                                                           .maxScrollExtent,
                                                     );
                                                   },
-                                                  child: const Padding(
+                                                  child: Padding(
                                                     padding:
                                                         EdgeInsets.symmetric(
                                                           horizontal: 10,
@@ -2144,7 +2149,7 @@ class _ChatScreenState extends State<ChatScreen>
                     style: TextStyle(fontSize: 11, color: Aether.textMuted),
                   ),
                   trailing: AppState.I.activeSession?.presetId == p.id
-                      ? const Icon(Icons.check, size: 16, color: Aether.accent)
+                      ? Icon(Icons.check, size: 16, color: Aether.accent)
                       : null,
                   onTap: () async {
                     Navigator.pop(context);
@@ -2288,7 +2293,7 @@ class _ChatScreenState extends State<ChatScreen>
                 children: [
                   Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.terminal_outlined,
                         size: 16,
                         color: Aether.accent,
@@ -2812,7 +2817,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           Text(managed.name, style: AetherType.title),
-          const AetherPill(label: 'MANAGED', color: Aether.accent),
+          AetherPill(label: 'MANAGED', color: Aether.accent),
         ],
       ),
       child: body,
@@ -2862,7 +2867,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
           if (p.isFree) ...[
             AetherPill(label: 'FREE', color: Aether.successLight),
           ],
-          const AetherPill(label: 'KEY', color: Aether.accent),
+          AetherPill(label: 'KEY', color: Aether.accent),
         ],
       ),
       child: Column(
@@ -2975,7 +2980,7 @@ class _ModelTile extends StatelessWidget {
         providerId == AppState.ovidCloudProviderId &&
         baseModel.toLowerCase() == 'auto';
     final AetherPill modePill = isAutoRow
-        ? const AetherPill(label: 'Auto', color: Aether.accent)
+        ? AetherPill(label: 'Auto', color: Aether.accent)
         : AetherPill(label: 'Manual', color: Aether.textMuted);
 
     Widget buildCurrentBadge() {
@@ -2986,7 +2991,7 @@ class _ModelTile extends StatelessWidget {
           color: Aether.accentSoft,
           borderRadius: BorderRadius.circular(4),
         ),
-        child: const Text(
+        child: Text(
           'CURRENT',
           style: TextStyle(
             fontSize: 9.5,
@@ -3040,7 +3045,7 @@ class _ModelTile extends StatelessWidget {
                 )
               : null,
           trailing: selected
-              ? const Icon(Icons.check, size: 18, color: Aether.accent)
+              ? Icon(Icons.check, size: 18, color: Aether.accent)
               : null,
           onTap: () {
             app.setModel(providerId, model);
@@ -3082,7 +3087,7 @@ class _ModelTile extends StatelessWidget {
               : (effortVariant != null
                     ? Text(
                         effortVariant,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
                           color: Aether.accent,
                         ),
@@ -3161,7 +3166,7 @@ class _EmptyState extends StatelessWidget {
                     width: 52,
                     height: 52,
                     decoration: BoxDecoration(
-                      color: Aether.accent,
+                      color: Aether.signalRed,
                       borderRadius: BorderRadius.circular(15),
                     ),
                     child: const Center(
@@ -3259,7 +3264,7 @@ class _ReasoningCardState extends State<_ReasoningCard> {
                 child: Row(
                   children: [
                     if (isStreaming)
-                      const _ChaseDot(Aether.accent)
+                      _ChaseDot(Aether.accent)
                     else
                       Icon(
                         Icons.psychology_outlined,
@@ -3437,7 +3442,7 @@ class _ToolCardState extends State<_ToolCard>
                       else if (stopped)
                         _StateDot(Aether.warnLight)
                       else if (running)
-                        const _ChaseDot(Aether.accent)
+                        _ChaseDot(Aether.accent)
                       else
                         Icon(
                           _iconFor(iconKind),
@@ -4793,22 +4798,22 @@ class _MessageView extends StatelessWidget {
 
   Widget _actionRow(BuildContext context, bool isUser, bool isLast) {
     final items = <Widget>[];
+    // Secondary actions (Branch, Revert) live in a "More actions" menu so
+    // the row fits on a phone with full 48dp targets.
+    final overflow = <(IconData, String, VoidCallback)>[];
+    // A11Y: every action is a 48x48dp target (Play pre-launch scanner,
+    // Material guidance); the Tooltip supplies the semantics label.
+    Widget target(String tip, VoidCallback fn, Widget icon) => Tooltip(
+      message: tip,
+      waitDuration: const Duration(milliseconds: 500),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(24),
+        onTap: fn,
+        child: SizedBox(width: 48, height: 48, child: Center(child: icon)),
+      ),
+    );
     void add(IconData icon, String tip, VoidCallback fn) {
-      items.add(
-        Tooltip(
-          message: tip,
-          waitDuration: const Duration(milliseconds: 500),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(4),
-            onTap: fn,
-            child: Padding(
-              // A11Y: minimum 48dp tap target per Material guidelines.
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-              child: Icon(icon, size: 15, color: Aether.textFaint),
-            ),
-          ),
-        ),
-      );
+      items.add(target(tip, fn, Icon(icon, size: 16, color: Aether.textFaint)));
     }
 
     final copyText = _copyText();
@@ -4856,64 +4861,50 @@ class _MessageView extends StatelessWidget {
     // Re-clicking the same value retracts. A down-vote offers a note.
     if (!isUser && m.kind == MsgKind.text && !m.thinking) {
       items.add(
-        Tooltip(
-          message: m.feedback == 'up' ? 'Retract like' : 'Good answer',
-          waitDuration: const Duration(milliseconds: 500),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(4),
-            onTap: () {
-              m.feedback = m.feedback == 'up' ? null : 'up';
-              m.feedbackNote = null;
-              AppState.I.persistSessions();
-              onAction();
-            },
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-              child: Icon(
-                m.feedback == 'up'
-                    ? Icons.thumb_up_alt
-                    : Icons.thumb_up_alt_outlined,
-                size: 15,
-                color: m.feedback == 'up' ? Aether.accent : Aether.textFaint,
-              ),
-            ),
+        target(
+          m.feedback == 'up' ? 'Retract like' : 'Good answer',
+          () {
+            m.feedback = m.feedback == 'up' ? null : 'up';
+            m.feedbackNote = null;
+            AppState.I.persistSessions();
+            onAction();
+          },
+          Icon(
+            m.feedback == 'up'
+                ? Icons.thumb_up_alt
+                : Icons.thumb_up_alt_outlined,
+            size: 16,
+            color: m.feedback == 'up' ? Aether.accent : Aether.textFaint,
           ),
         ),
       );
       items.add(
-        Tooltip(
-          message: m.feedback == 'down' ? 'Retract dislike' : 'Bad answer',
-          waitDuration: const Duration(milliseconds: 500),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(4),
-            onTap: () {
-              if (m.feedback == 'down') {
-                m.feedback = null;
-                m.feedbackNote = null;
-                AppState.I.persistSessions();
-                onAction();
-                return;
-              }
-              m.feedback = 'down';
-              _askFeedbackNote(context);
-            },
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-              child: Icon(
-                m.feedback == 'down'
-                    ? Icons.thumb_down_alt
-                    : Icons.thumb_down_alt_outlined,
-                size: 15,
-                color: m.feedback == 'down' ? Aether.danger : Aether.textFaint,
-              ),
-            ),
+        target(
+          m.feedback == 'down' ? 'Retract dislike' : 'Bad answer',
+          () {
+            if (m.feedback == 'down') {
+              m.feedback = null;
+              m.feedbackNote = null;
+              AppState.I.persistSessions();
+              onAction();
+              return;
+            }
+            m.feedback = 'down';
+            _askFeedbackNote(context);
+          },
+          Icon(
+            m.feedback == 'down'
+                ? Icons.thumb_down_alt
+                : Icons.thumb_down_alt_outlined,
+            size: 16,
+            color: m.feedback == 'down' ? Aether.danger : Aether.textFaint,
           ),
         ),
       );
     }
     // Branch into a new conversation from this assistant message.
     if (!isUser && m.kind == MsgKind.text && !m.thinking) {
-      add(Icons.call_split, 'Branch into a new conversation', () {
+      overflow.add((Icons.call_split, 'Branch into a new conversation', () {
         final branch = AppState.I.branchSessionFrom(session.id, msgIndex);
         if (branch != null && context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -4923,7 +4914,7 @@ class _MessageView extends StatelessWidget {
             ),
           );
         }
-      });
+      }));
     }
     // Regenerate: re-send the last user message to get a new response.
     if (canEdit && !isUser && isLast && m.kind == MsgKind.text && !m.thinking) {
@@ -4986,10 +4977,38 @@ class _MessageView extends StatelessWidget {
         );
       });
     }
+    if (overflow.isNotEmpty) {
+      items.add(
+        PopupMenuButton<VoidCallback>(
+          tooltip: 'More actions',
+          child: SizedBox(
+            width: 48,
+            height: 48,
+            child: Icon(Icons.more_horiz, size: 18, color: Aether.textFaint),
+          ),
+          onSelected: (fn) => fn(),
+          itemBuilder: (_) => [
+            for (final (icon, label, fn) in overflow)
+              PopupMenuItem(
+                value: fn,
+                child: Row(
+                  children: [
+                    Icon(icon, size: 18, color: Aether.textMuted),
+                    const SizedBox(width: 12),
+                    Flexible(child: Text(label)),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, top: 2),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      // Wrap, not Row: 48dp targets plus the timestamp must not overflow a
+      // narrow bubble at large text scales.
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           ...items,
           if (!isUser && m.elapsedMs != null)
@@ -5282,7 +5301,7 @@ class _MessageView extends StatelessWidget {
                 'This removes the $later message${later == 1 ? '' : 's'} '
                 'after it. You can undo for a few seconds.',
                 key: const ValueKey('edit-resend-removal-count'),
-                style: const TextStyle(fontSize: 12.5, color: Aether.danger),
+                style: TextStyle(fontSize: 12.5, color: Aether.danger),
               ),
             ],
           ],
@@ -5523,7 +5542,7 @@ class _MessageView extends StatelessWidget {
 
   Widget _imageGenFallback() => Container(
     color: Aether.surfaceAlt,
-    child: const Center(
+    child: Center(
       child: Icon(Icons.auto_awesome, color: Aether.accent, size: 40),
     ),
   );
@@ -7021,7 +7040,7 @@ class _TypingBubble extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 10),
           child: Row(
             children: [
-              const _ChaseDot(Aether.accent),
+              _ChaseDot(Aether.accent),
               const SizedBox(width: 10),
               Expanded(
                 child: _ShimmerText(
@@ -7276,7 +7295,7 @@ class _TodoDockState extends State<_TodoDock> {
                         color: Aether.textFaint,
                       ),
                       const SizedBox(width: 6),
-                      const Icon(
+                      Icon(
                         Icons.checklist_outlined,
                         size: 13,
                         color: Aether.accent,
@@ -7295,7 +7314,7 @@ class _TodoDockState extends State<_TodoDock> {
                         Container(
                           width: 6,
                           height: 6,
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: Aether.accent,
                           ),
@@ -7303,7 +7322,7 @@ class _TodoDockState extends State<_TodoDock> {
                         const SizedBox(width: 4),
                         Text(
                           '$inProg active',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 10,
                             color: Aether.accent,
                           ),
@@ -8121,7 +8140,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Row(
+          Row(
             children: [
               Icon(Icons.help_outline, size: 14, color: Aether.accent),
               SizedBox(width: 6),
@@ -8207,7 +8226,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
               const SizedBox(width: 4),
               FilledButton(
                 style: FilledButton.styleFrom(
-                  backgroundColor: Aether.accent,
+                  backgroundColor: Aether.accentFill,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 14,
@@ -8258,7 +8277,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: Aether.hairline),
+          borderSide: BorderSide(color: Aether.inputBorder),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
@@ -8697,7 +8716,7 @@ class _ModeChip extends StatelessWidget {
                     ),
                   ),
                   trailing: AgentService.I.mode == m
-                      ? const Icon(Icons.check, size: 18, color: Aether.accent)
+                      ? Icon(Icons.check, size: 18, color: Aether.accent)
                       : null,
                   onTap: () async {
                     Navigator.pop(context);
@@ -9316,7 +9335,7 @@ class _OvidMarkdown extends StatelessWidget {
           color: body,
         ),
         tableBody: TextStyle(fontSize: fontSize - 1, height: 1.4, color: body),
-        a: const TextStyle(
+        a: TextStyle(
           color: Aether.accent,
           decoration: TextDecoration.underline,
         ),
@@ -9602,7 +9621,7 @@ class _RuntimeInstallBanner extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   else
-                    const Icon(
+                    Icon(
                       Icons.warning_amber_rounded,
                       size: 17,
                       color: Aether.danger,
@@ -9653,7 +9672,7 @@ class _RuntimeInstallBanner extends StatelessWidget {
                     value: progress.clamp(0.0, 1.0),
                     minHeight: 4,
                     backgroundColor: Aether.surfaceAlt,
-                    valueColor: const AlwaysStoppedAnimation(Aether.accent),
+                    valueColor: AlwaysStoppedAnimation(Aether.accent),
                   ),
                 ),
               ],

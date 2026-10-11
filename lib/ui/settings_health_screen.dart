@@ -147,12 +147,12 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
   }
 
   Color _scoreColor(int s) => s >= 90
-      ? Aether.successLight
+      ? Aether.success
       : s >= 70
       ? Aether.accent
       : s >= 45
-      ? Aether.warnLight
-      : Aether.dangerC;
+      ? Aether.warn
+      : Aether.danger;
 
   @override
   Widget build(BuildContext context) {

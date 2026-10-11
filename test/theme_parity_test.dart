@@ -16,11 +16,15 @@ void main() {
       expect(Aether.stone.toARGB32(), 0xFF8A867D);
     });
 
-    test('Signal Red is the single accent in both modes', () {
-      for (final isDark in [true, false]) {
-        Aether.dark = isDark;
-        expect(Aether.accent.toARGB32(), 0xFFE5484D);
-      }
+    test('the accent is one red family, tuned per mode for WCAG AA', () {
+      // Signal Red stays the brand mark colour; readable text/fill variants
+      // replace it where it failed 4.5:1 (see theme_contrast_test.dart).
+      Aether.dark = false;
+      expect(Aether.accent.toARGB32(), 0xFFC0292E);
+      expect(Aether.accentFill.toARGB32(), 0xFFC0292E);
+      Aether.dark = true;
+      expect(Aether.accent.toARGB32(), 0xFFF2666A);
+      expect(Aether.accentFill.toARGB32(), 0xFFC0292E);
     });
   });
 
@@ -37,8 +41,8 @@ void main() {
 
     test('label ramp is Ink / muted / Stone', () {
       expect(Aether.text.toARGB32(), 0xFF1B1B1B);
-      expect(Aether.textMuted.toARGB32(), 0xFF6B675E);
-      expect(Aether.textFaint.toARGB32(), 0xFF8A867D);
+      expect(Aether.textMuted.toARGB32(), 0xFF57534B);
+      expect(Aether.textFaint.toARGB32(), 0xFF6C685F);
     });
   });
 
@@ -55,14 +59,21 @@ void main() {
     test('label ramp is Paper / muted / Stone', () {
       expect(Aether.text.toARGB32(), 0xFFF4F1EA);
       expect(Aether.textMuted.toARGB32(), 0xFFA8A49B);
-      expect(Aether.textFaint.toARGB32(), 0xFF8A867D);
+      expect(Aether.textFaint.toARGB32(), 0xFF9A968D);
     });
   });
 
   group('state colours', () {
-    test('success / warn keep their semantic hue', () {
+    test('success / warn keep their semantic hue on Ink', () {
+      Aether.dark = true;
       expect(Aether.success.toARGB32(), 0xFF22C55E);
       expect(Aether.warn.toARGB32(), 0xFFF59E0B);
+    });
+
+    test('success / warn use AA-readable tones on Paper', () {
+      Aether.dark = false;
+      expect(Aether.success.toARGB32(), 0xFF166534);
+      expect(Aether.warn.toARGB32(), 0xFFA04606);
     });
   });
 }

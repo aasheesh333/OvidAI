@@ -198,7 +198,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
           const SizedBox(height: 12),
           AetherCard(
             title: const Text('Export-ready archive'),
-            trailing: const AetherPill(
+            trailing: AetherPill(
               label: 'V1',
               color: Aether.accent,
             ),

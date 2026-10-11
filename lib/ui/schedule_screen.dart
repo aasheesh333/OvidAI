@@ -241,12 +241,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   }
 
   Future<void> _edit(BuildContext context, ScheduleEntry entry) async {
-    await showModalBottomSheet<void>(
+    await showAetherSheet<void>(
       context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      constraints: const BoxConstraints(maxWidth: 640),
-      backgroundColor: Colors.transparent,
       builder: (sheetContext) => _EditScheduleSheet(entry: entry),
     );
   }
@@ -451,7 +447,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                   child: Text(
                     _error!,
                     style: TextStyle(
-                      color: Aether.dangerC,
+                      color: Aether.danger,
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
                     ),

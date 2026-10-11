@@ -640,7 +640,7 @@ class _BillingButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(AetherRadius.rMd),
       ),
       textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-      backgroundColor: ghost ? Colors.transparent : Aether.accentC,
+      backgroundColor: ghost ? Colors.transparent : Aether.accent,
       foregroundColor: ghost ? Aether.text : (Aether.dark ? Colors.black : Colors.white),
     );
     if (ghost) {

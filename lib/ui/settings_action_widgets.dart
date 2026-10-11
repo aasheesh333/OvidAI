@@ -98,7 +98,10 @@ class _SettingsSwitchTileState extends State<SettingsSwitchTile> {
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.listenable,
-    builder: (_, _) => ListTile(
+    // A11Y: one semantics node, so TalkBack reads "<title>, <subtitle>,
+    // switch, on/off" instead of an unlabeled "Switch, off".
+    builder: (_, _) => MergeSemantics(
+      child: ListTile(
       dense: true,
       leading: Icon(widget.icon, size: 19, color: Aether.textMuted),
       title: Text(widget.title, style: const TextStyle(fontSize: 14)),
@@ -111,7 +114,7 @@ class _SettingsSwitchTileState extends State<SettingsSwitchTile> {
                 : widget.subtitleOff),
         style: TextStyle(
           fontSize: 11.5,
-          color: _error == null ? Aether.textFaint : Aether.dangerC,
+          color: _error == null ? Aether.textFaint : Aether.danger,
         ),
       ),
       trailing: Switch(
@@ -122,6 +125,7 @@ class _SettingsSwitchTileState extends State<SettingsSwitchTile> {
       onTap: _busy || widget.setter == null
           ? null
           : () => _save(_retryValue ?? !widget.getter()),
+    ),
     ),
   );
 }

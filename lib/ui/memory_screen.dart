@@ -234,10 +234,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
     String suggested = 'notes.md',
   }) async {
     if (!await _discard() || !mounted) return;
-    final added = await showModalBottomSheet<String>(
+    final added = await showAetherSheet<String>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
       builder: (context) => _MemoryFileSheet(
         suggested: suggested,
         create: (name) {
@@ -470,7 +468,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: AetherSpacing.space3),
-                child: Text(_error!, style: TextStyle(color: Aether.dangerC)),
+                child: Text(_error!, style: TextStyle(color: Aether.danger)),
               ),
             if (_store == null && _error == null)
               const Padding(
@@ -728,7 +726,7 @@ class _MemoryFileRow extends StatelessWidget {
               child: Icon(
                 pinned ? Icons.push_pin : Icons.push_pin_outlined,
                 size: 16,
-                color: pinned ? Aether.accentC : Aether.textFaint,
+                color: pinned ? Aether.accent : Aether.textFaint,
               ),
             ),
             const SizedBox(width: AetherSpacing.space3),
@@ -774,7 +772,7 @@ class _MemoryFileRow extends StatelessWidget {
                     style: TextStyle(
                       color: onDelete == null
                           ? Aether.textFaint
-                          : Aether.dangerC,
+                          : Aether.danger,
                     ),
                   ),
                 ),
@@ -810,8 +808,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-      child: SingleChildScrollView(
-        child: AetherSheet(
+      child: AetherSheet(
       title: 'Add memory file',
       actions: [
         AetherGhostButton(
@@ -830,7 +827,10 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
           },
         ),
       ],
-      child: Column(
+      // The sheet pins Cancel/Add; the body scrolls when large text or the
+      // keyboard leave too little room.
+      child: SingleChildScrollView(
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -853,7 +853,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(AetherRadius.rMd),
                 borderSide: BorderSide(
-                  color: _error != null ? Aether.danger : Aether.hairline,
+                  color: _error != null ? Aether.danger : Aether.inputBorder,
                 ),
               ),
               focusedBorder: OutlineInputBorder(
@@ -866,7 +866,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(AetherRadius.rMd),
                 borderSide: BorderSide(
-                  color: _error != null ? Aether.danger : Aether.hairline,
+                  color: _error != null ? Aether.danger : Aether.inputBorder,
                 ),
               ),
             ),
@@ -875,7 +875,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
           if (_error != null)
             Text(
               _error!,
-              style: TextStyle(fontSize: 12, color: Aether.dangerC),
+              style: TextStyle(fontSize: 12, color: Aether.danger),
             )
           else
             Text(
@@ -884,7 +884,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
             ),
         ],
       ),
-        ),
+      ),
       ),
     );
   }

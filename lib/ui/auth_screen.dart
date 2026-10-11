@@ -171,7 +171,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     const SizedBox(height: AetherSpacing.space2),
                     AetherPill(
                       label: _planPill(tier, isPaid),
-                      color: isPaid ? Aether.accentC : Aether.textMuted,
+                      color: isPaid ? Aether.accent : Aether.textMuted,
                       filled: isPaid,
                     ),
                   ],
@@ -256,7 +256,7 @@ class _AuthScreenState extends State<AuthScreen> {
                                   Icon(
                                     _providerIcon(id),
                                     size: 24,
-                                    color: Aether.accentC,
+                                    color: Aether.accent,
                                   ),
                                   const SizedBox(width: 12),
                                   Expanded(
@@ -333,7 +333,7 @@ class _AuthScreenState extends State<AuthScreen> {
                 const SizedBox(height: AetherSpacing.space2),
                 Text(
                   _signOutError!,
-                  style: AetherType.body.copyWith(color: Aether.dangerC),
+                  style: AetherType.body.copyWith(color: Aether.danger),
                 ),
               ],
               const SizedBox(height: AetherSpacing.space6),
@@ -405,7 +405,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   Icon(
                     Icons.hourglass_bottom,
                     size: 16,
-                    color: Aether.warnLight,
+                    color: Aether.warn,
                   ),
                   const SizedBox(width: 8),
                   const Flexible(
@@ -609,7 +609,7 @@ class _ProfileHeader extends StatelessWidget {
                       Icon(
                         emailVerified ? Icons.verified : Icons.error_outline,
                         size: 14,
-                        color: emailVerified ? Aether.accentC : Aether.warnLight,
+                        color: emailVerified ? Aether.accent : Aether.warn,
                         semanticLabel: emailVerified
                             ? 'Email verified'
                             : 'Email not verified',
@@ -689,7 +689,7 @@ class _LegacyPasswordWarnCard extends StatelessWidget {
       color: Aether.surface,
       title: Row(
         children: [
-          Icon(Icons.warning_amber_rounded, size: 16, color: Aether.warnLight),
+          Icon(Icons.warning_amber_rounded, size: 16, color: Aether.warn),
           const SizedBox(width: 8),
           const Flexible(
             child: Text('Legacy password sign-in'),
@@ -722,7 +722,7 @@ class _DangerZoneCard extends StatelessWidget {
           // Full-height danger left rule. A decoration border is used rather
           // than a stretched Row child so the rule adapts to content height
           // without needing a bounded cross-axis (ListView is unbounded).
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(
               left: BorderSide(color: Aether.danger, width: 3),
             ),
@@ -740,7 +740,7 @@ class _DangerZoneCard extends StatelessWidget {
                   Flexible(
                     child: Text(
                       'Danger zone',
-                      style: AetherType.title.copyWith(color: Aether.dangerC),
+                      style: AetherType.title.copyWith(color: Aether.danger),
                     ),
                   ),
                 ],

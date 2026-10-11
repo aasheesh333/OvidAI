@@ -130,13 +130,13 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
 
   Color _stateColor(String state) {
     final s = state.toLowerCase();
-    if (s.contains('fail') || s.contains('error')) return Aether.dangerC;
-    if (s.contains('pending')) return Aether.warnLight;
+    if (s.contains('fail') || s.contains('error')) return Aether.danger;
+    if (s.contains('pending')) return Aether.warn;
     if (s.contains('ok') ||
         s.contains('success') ||
         s.contains('ready') ||
         s.contains('confirm')) {
-      return Aether.successLight;
+      return Aether.success;
     }
     return Aether.textMuted;
   }

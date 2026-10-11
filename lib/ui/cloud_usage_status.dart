@@ -28,13 +28,13 @@ class CloudUsageStatus extends StatelessWidget {
         final Color pillColor;
         final String pillLabel;
         if (hasError) {
-          pillColor = Aether.dangerC;
+          pillColor = Aether.danger;
           pillLabel = 'UNAVAILABLE';
         } else if (loading) {
-          pillColor = Aether.accentC;
+          pillColor = Aether.accent;
           pillLabel = 'REFRESHING';
         } else {
-          pillColor = Aether.warnLight;
+          pillColor = Aether.warn;
           pillLabel = 'STALE';
         }
 

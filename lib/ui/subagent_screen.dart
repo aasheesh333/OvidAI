@@ -211,7 +211,7 @@ class _SubagentScreenState extends State<SubagentScreen> {
                   icon: Icon(
                     Icons.stop_circle_outlined,
                     size: 20,
-                    color: Aether.warnLight,
+                    color: Aether.warn,
                   ),
                   onPressed: () => agent.stopSubagentRun(s.id),
                 ),
@@ -258,8 +258,8 @@ class _SubagentScreenState extends State<SubagentScreen> {
                               child: InkWell(
                                 onTap: _jumpToLatest,
                                 borderRadius: BorderRadius.circular(20),
-                                child: const Padding(
-                                  padding: EdgeInsets.symmetric(
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
                                     horizontal: 10,
                                     vertical: 6,
                                   ),
@@ -371,7 +371,7 @@ class _DescendantsButton extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
             decoration: BoxDecoration(
-              color: Aether.accent,
+              color: Aether.accentFill,
               borderRadius: BorderRadius.circular(6),
             ),
             child: Text(
@@ -445,9 +445,9 @@ class _StatusStripState extends State<_StatusStrip> {
     final sub = widget.sub;
     final color = switch (state) {
       'running' => Aether.accent,
-      'stopped' || 'stopping' => Aether.warnLight,
+      'stopped' || 'stopping' => Aether.warn,
       'failed' => Aether.danger,
-      _ => Aether.successLight,
+      _ => Aether.success,
     };
     final bits = <String>[
       if (sub != null) formatCompactDuration(sub.elapsed),
@@ -547,7 +547,7 @@ class _Composer extends StatelessWidget {
             if (running)
               TextButton(
                 style: TextButton.styleFrom(
-                  foregroundColor: Aether.warnLight,
+                  foregroundColor: Aether.warn,
                   minimumSize: Size.zero,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
@@ -602,7 +602,7 @@ class _Composer extends StatelessWidget {
                   icon: Icon(
                     Icons.stop_circle_outlined,
                     size: 20,
-                    color: Aether.warnLight,
+                    color: Aether.warn,
                   ),
                   onPressed: onStop,
                 ),
@@ -610,7 +610,7 @@ class _Composer extends StatelessWidget {
                 tooltip: running ? 'Queue' : 'Send',
                 visualDensity: VisualDensity.compact,
                 icon: sending
-                    ? const SizedBox(
+                    ? SizedBox(
                         width: 15,
                         height: 15,
                         child: CircularProgressIndicator(
@@ -735,9 +735,9 @@ class _CatalogCard extends StatelessWidget {
     final state = running ? 'running' : (session.agentState ?? 'finished');
     final color = switch (state) {
       'running' => Aether.accent,
-      'stopped' || 'stopping' => Aether.warnLight,
+      'stopped' || 'stopping' => Aether.warn,
       'failed' => Aether.danger,
-      _ => Aether.successLight,
+      _ => Aether.success,
     };
     final grandchildren = AppState.I.childrenOf(session.id).length;
     final runtime = sub != null ? formatCompactDuration(sub.elapsed) : '—';

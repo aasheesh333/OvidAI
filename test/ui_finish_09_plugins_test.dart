@@ -114,7 +114,11 @@ void main() {
     await _frames(tester);
     await tester.ensureVisible(target);
     await _frames(tester);
-    expect(target.hitTestable(), findsOneWidget);
+    // AetherSheet pins its actions below the body, so at 2.0x with the
+    // keyboard up a long wrapped text can be taller than the body viewport.
+    // ensureVisible brings its first lines into view; probe there rather
+    // than at the centre.
+    expect(target.hitTestable(at: const Alignment(0, -0.8)), findsOneWidget);
     expect(tester.takeException(), isNull);
   }
 

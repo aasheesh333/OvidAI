@@ -96,12 +96,12 @@ class _HealthScreenState extends State<HealthScreen> {
   }
 
   Color _scoreColor(int s) => s >= 90
-      ? Aether.successLight
+      ? Aether.success
       : s >= 70
       ? Aether.accent
       : s >= 45
-      ? Aether.warnLight
-      : Aether.dangerC;
+      ? Aether.warn
+      : Aether.danger;
 
   Future<void> _runRepair() async {
     if (_repairing || _resetting || _health.repairing || _health.checking) return;
@@ -316,7 +316,7 @@ class _ProbingState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(
+            SizedBox(
               width: 26,
               height: 26,
               child: CircularProgressIndicator(
@@ -562,7 +562,7 @@ class _HealthCheckCard extends StatelessWidget {
                         fontSize: 11,
                         fontFamily: Aether.mono,
                         color: check.ok
-                            ? Aether.successLight
+                            ? Aether.success
                             : Aether.textFaint,
                       ),
                     ),
@@ -637,7 +637,7 @@ class _ServiceCard extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: connecting
-                ? const SizedBox(
+                ? SizedBox(
                     width: 12,
                     height: 12,
                     child: CircularProgressIndicator(

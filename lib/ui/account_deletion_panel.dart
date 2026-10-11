@@ -94,7 +94,7 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
                 Icon(
                   Icons.warning_amber_rounded,
                   size: 20,
-                  color: Aether.warnLight,
+                  color: Aether.warn,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -226,7 +226,7 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
                   Icon(
                     Icons.hourglass_bottom,
                     size: 18,
-                    color: Aether.warnLight,
+                    color: Aether.warn,
                   ),
                   const SizedBox(width: 10),
                   Expanded(
@@ -244,7 +244,7 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
                         countdown,
                         style: AetherType.h2.copyWith(
                           fontFamily: Aether.mono,
-                          color: Aether.warnLight,
+                          color: Aether.warn,
                         ),
                       ),
                     ),
@@ -266,7 +266,7 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
                 Icon(
                   Icons.check_circle_outline,
                   size: 18,
-                  color: Aether.successLight,
+                  color: Aether.success,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -286,12 +286,12 @@ class _AccountDeletionPanelState extends State<AccountDeletionPanel> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.error_outline, size: 18, color: Aether.dangerC),
+                Icon(Icons.error_outline, size: 18, color: Aether.danger),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     _error!,
-                    style: AetherType.body.copyWith(color: Aether.dangerC),
+                    style: AetherType.body.copyWith(color: Aether.danger),
                   ),
                 ),
               ],

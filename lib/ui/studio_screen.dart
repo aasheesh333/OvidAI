@@ -1108,7 +1108,7 @@ class _StudioScreenState extends State<StudioScreen> {
                 ? 'Committing changes'
                 : 'Commit ${RepoCache.I.dirtyCount} pending file(s)',
             iconSize: 18,
-            color: Aether.warnLight,
+            color: Aether.warn,
             onPressed: _committing ? null : _commitPending,
           ),
         if (compactActions)
@@ -1712,11 +1712,11 @@ class _SandboxMissingBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      color: Aether.warnLight.withValues(alpha: 0.10),
+      color: Aether.warn.withValues(alpha: 0.10),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Row(
         children: [
-          Icon(Icons.terminal_outlined, size: 16, color: Aether.warnLight),
+          Icon(Icons.terminal_outlined, size: 16, color: Aether.warn),
           const SizedBox(width: 8),
           const Expanded(
             child: Text(
@@ -1819,7 +1819,7 @@ class _RepoBar extends StatelessWidget {
                   Semantics(
                     liveRegion: true,
                     label: 'Syncing',
-                    child: const SizedBox(
+                    child: SizedBox(
                       width: 13,
                       height: 13,
                       child: CircularProgressIndicator(
@@ -1863,7 +1863,7 @@ class _BarButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = accent ? Aether.accentC : Aether.textMuted;
+    final color = accent ? Aether.accent : Aether.textMuted;
     return Tooltip(
       message: tooltip,
       child: Semantics(
@@ -1921,12 +1921,12 @@ class _SyncErrorBanner extends StatelessWidget {
       container: true,
       child: Container(
         width: double.infinity,
-        color: Aether.warnLight.withValues(alpha: 0.12),
+        color: Aether.warn.withValues(alpha: 0.12),
         padding: const EdgeInsets.only(left: 12, right: 2, top: 2, bottom: 2),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Icon(Icons.cloud_off_outlined, size: 16, color: Aether.warnLight),
+            Icon(Icons.cloud_off_outlined, size: 16, color: Aether.warn),
             const SizedBox(width: 8),
             Expanded(
               child: Padding(
@@ -1939,7 +1939,7 @@ class _SyncErrorBanner extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
-                        color: Aether.warnLight,
+                        color: Aether.warn,
                       ),
                     ),
                     if (detail != null && detail!.isNotEmpty)
@@ -2082,7 +2082,7 @@ class _SyncProgressBanner extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
               child: Row(
                 children: [
-                  const SizedBox(
+                  SizedBox(
                     width: 13,
                     height: 13,
                     child: CircularProgressIndicator(
@@ -2191,15 +2191,15 @@ class _AuthBadge extends StatelessWidget {
         final String label;
         if (loggedIn) {
           icon = Icons.check_circle;
-          color = Aether.successLight;
+          color = Aether.success;
           label = 'Signed in to GitHub';
         } else if (unknown) {
           icon = Icons.hourglass_top;
-          color = Aether.warnLight;
+          color = Aether.warn;
           label = 'Checking your GitHub sign-in…';
         } else {
           icon = Icons.cancel;
-          color = Aether.dangerC;
+          color = Aether.danger;
           label = 'Not signed in to GitHub';
         }
 
@@ -2639,7 +2639,7 @@ class _AccountChip extends StatelessWidget {
               ),
             ),
             const PopupMenuDivider(height: 6),
-            const PopupMenuItem(
+            PopupMenuItem(
               value: 'signout',
               child: Row(
                 children: [
@@ -2749,7 +2749,7 @@ class _AccountChip extends StatelessWidget {
             },
             child: Text(
               uncommitted > 0 ? 'Discard and sign out' : 'Sign out',
-              style: const TextStyle(color: Aether.danger),
+              style: TextStyle(color: Aether.danger),
             ),
           ),
         ],
@@ -2836,7 +2836,7 @@ class _ApprovalBanner extends StatelessWidget {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
             child: AetherCard(
-              color: Aether.warnLight.withValues(alpha: 0.08),
+              color: Aether.warn.withValues(alpha: 0.08),
               padding: const EdgeInsets.all(14),
               title: Wrap(
                 spacing: 8,
@@ -2844,11 +2844,11 @@ class _ApprovalBanner extends StatelessWidget {
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   Icon(Icons.verified_user_outlined,
-                      size: 16, color: Aether.warnLight),
+                      size: 16, color: Aether.warn),
                   const Text('Approval required'),
                   Text(
                     a.tool.toUpperCase(),
-                    style: AetherType.label.copyWith(color: Aether.warnLight),
+                    style: AetherType.label.copyWith(color: Aether.warn),
                   ),
                 ],
               ),

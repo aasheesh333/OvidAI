@@ -395,7 +395,7 @@ class _FileTreeRowState extends State<_FileTreeRow> {
       iconColor = Aether.accent;
     } else if (failed) {
       icon = Icons.error_outline;
-      iconColor = Aether.dangerC;
+      iconColor = Aether.danger;
     } else if (node.isDirectory) {
       icon = widget.expanded
           ? Icons.folder_open_outlined
@@ -460,7 +460,7 @@ class _FileTreeRowState extends State<_FileTreeRow> {
                     color: selected
                         ? Aether.accent
                         : failed
-                            ? Aether.dangerC
+                            ? Aether.danger
                             : node.isDirectory
                                 ? Aether.text
                                 : Aether.textMuted,
@@ -624,9 +624,9 @@ class _TreeFooter extends StatelessWidget {
                   : Icons.cloud_off_outlined,
               size: 15,
               color: partial
-                  ? Aether.warnLight
+                  ? Aether.warn
                   : ready
-                  ? Aether.successLight
+                  ? Aether.success
                   : Aether.textFaint,
             ),
             const SizedBox(width: 7),

@@ -638,7 +638,7 @@ class _AuthAction extends StatelessWidget {
       minimumSize: const Size(0, 48),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       foregroundColor: primary ? Colors.white : (ghost ? Aether.textMuted : Aether.text),
-      backgroundColor: primary ? Aether.accent : null,
+      backgroundColor: primary ? Aether.accentFill : null,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AetherRadius.rMd)),
       side: !primary && !ghost ? BorderSide(color: Aether.hairlineStrong) : null,
     );
@@ -664,7 +664,7 @@ class _InlineDangerText extends StatelessWidget {
           color: Aether.danger.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(AetherRadius.rSm),
           border: Border(
-            left: BorderSide(color: Aether.dangerC, width: 3),
+            left: BorderSide(color: Aether.danger, width: 3),
           ),
         ),
         child: Text(
@@ -672,7 +672,7 @@ class _InlineDangerText extends StatelessWidget {
           style: TextStyle(
             fontSize: 13,
             fontWeight: FontWeight.w500,
-            color: Aether.dangerC,
+            color: Aether.danger,
           ),
         ),
       ),

@@ -191,7 +191,20 @@ void main() {
         if (configuration.scale == 2) {
           expect(tester.getSize(find.byTooltip('View source')).height, greaterThan(44));
         }
-        for (final label in ['OFFLINE SANDBOX', 'View source', 'Expand preview', artifact.title]) {
+        // Under 560dp or at large text the controls are labelled 48dp
+        // IconButtons (tooltip + semantics) instead of scaled-down text.
+        final compactControls =
+            configuration.size.width < 560 || configuration.scale > 1;
+        if (compactControls) {
+          expect(find.widgetWithIcon(IconButton, Icons.code), findsOneWidget);
+          expect(find.widgetWithIcon(IconButton, Icons.fullscreen), findsOneWidget);
+          expect(find.text('View source'), findsNothing);
+        }
+        for (final label in [
+          'OFFLINE SANDBOX',
+          if (!compactControls) ...['View source', 'Expand preview'],
+          artifact.title,
+        ]) {
           expect(
             tester.renderObject<RenderParagraph>(find.text(label)).didExceedMaxLines,
             isFalse,
