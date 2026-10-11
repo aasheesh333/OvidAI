@@ -93,6 +93,31 @@ void main() {
       expect(find.text('From the dashboard'), findsOneWidget);
     });
 
+    testWidgets('a changed field set rebuilds without a null-check crash', (
+      tester,
+    ) async {
+      // Retry activation / an update re-registers the manifest while the
+      // detail page is open: [a] then [a, b] must render b, not throw.
+      await pumpPanel(tester, fields: [fields.first]);
+      expect(
+        find.byKey(const ValueKey('plugin-settings-field-api_token')),
+        findsNothing,
+      );
+      await pumpPanel(tester, fields: fields);
+      expect(tester.takeException(), isNull);
+      expect(
+        find.byKey(const ValueKey('plugin-settings-field-api_token')),
+        findsOneWidget,
+      );
+      // And shrinking back disposes the removed controller cleanly.
+      await pumpPanel(tester, fields: [fields.first]);
+      expect(tester.takeException(), isNull);
+      expect(
+        find.byKey(const ValueKey('plugin-settings-field-api_token')),
+        findsNothing,
+      );
+    });
+
     testWidgets('secret fields are masked; plain fields are not', (
       tester,
     ) async {

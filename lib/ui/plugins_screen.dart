@@ -2176,6 +2176,12 @@ class PluginDetailScreen extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
               child: PluginSettingsPanel(
+                // A changed field set (Retry activation / update) gets a
+                // fresh panel state; didUpdateWidget covers the rest.
+                key: ValueKey(
+                  '${plugin.runtimeId}|'
+                  '${settingsFields.map((f) => f.key).join(',')}',
+                ),
                 pluginName: plugin.runtimeId!,
                 fields: configFieldsForSettings(settingsFields),
               ),
