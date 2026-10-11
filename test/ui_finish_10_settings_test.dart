@@ -383,8 +383,8 @@ void main() {
     tester.view.viewInsets = const FakeViewPadding(bottom: 260);
     addTearDown(tester.view.resetViewInsets);
     await tester.pump();
-    await tester.ensureVisible(find.widgetWithText(TextField, 'Preset ID'));
-    await tester.enterText(find.widgetWithText(TextField, 'Preset ID'), 'keyboard_test');
+    await tester.ensureVisible(find.widgetWithText(TextField, 'Preset name'));
+    await tester.enterText(find.widgetWithText(TextField, 'Preset name'), 'keyboard_test');
     expect(tester.takeException(), isNull);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
