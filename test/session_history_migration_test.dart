@@ -166,6 +166,38 @@ void main() {
     );
   });
 
+  // Integration: PR-4d's compaction ledger and tool inputs ride in the
+  // session JSON, so they must survive the PR-3 SQLite repository.
+  test('compaction state and tool inputs persist through SQLite', () async {
+    SharedPreferences.setMockInitialValues({});
+    final app = await boot();
+    app.sendMessage('before compaction');
+    final session = app.activeSession!;
+    session.compactionState = {
+      'v': 1,
+      'files': ['lib/a.dart'],
+    };
+    session.messages.add(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.tool,
+        content: '',
+        toolName: 'read_file',
+        toolInput: '{"path":"lib/a.dart"}',
+      ),
+    );
+    app.persistSessions();
+    await app.flushSessionPersistenceForTest();
+    final id = session.id;
+    final again = await boot();
+    final restored = again.sessionById(id)!;
+    expect(restored.compactionState, {
+      'v': 1,
+      'files': ['lib/a.dart'],
+    });
+    expect(restored.messages.last.toolInput, '{"path":"lib/a.dart"}');
+  });
+
   test('corrupt fixture rows are quarantined, the rest loads', () async {
     SharedPreferences.setMockInitialValues({
       'ovid_sessions': [
