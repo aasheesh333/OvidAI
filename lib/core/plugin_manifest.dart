@@ -890,6 +890,22 @@ class PluginPermissionGrant {
   /// older grants, which therefore install with scripts disabled.
   final bool allowDependencyScripts;
 
+  /// SHA-256 over the approved plugin's FULL content tree (every file under
+  /// the plugin root, not just the manifest) — `pluginContentTreeHash` in
+  /// `plugin_permissions.dart`. The manifest digest alone cannot see a hook
+  /// script or server binary that changed under an unchanged manifest; this
+  /// binds the approval to the exact bytes the user approved. Null only for
+  /// grants made before content hashing existed (see
+  /// [adoptContentTreeOnFirstUse]); a null hash on any other grant fails
+  /// closed.
+  final String? contentTreeHash;
+
+  /// One-time upgrade marker: this grant was approved by an app version that
+  /// did not hash plugin content, so the first runtime use records the
+  /// installed content tree (trust-on-first-use for that upgrade only) and
+  /// clears the flag. Every later activation enforces the recorded hash.
+  final bool adoptContentTreeOnFirstUse;
+
   const PluginPermissionGrant({
     required this.pluginId,
     required this.manifestDigest,
@@ -898,7 +914,29 @@ class PluginPermissionGrant {
     required this.approvedAt,
     this.declinedCapabilities = const {},
     this.allowDependencyScripts = false,
+    this.contentTreeHash,
+    this.adoptContentTreeOnFirstUse = false,
   });
+
+  /// This grant re-keyed onto [manifestDigest] and/or bound to
+  /// [contentTreeHash]; everything the user decided is carried unchanged
+  /// (including the original approval time — a re-key is not a re-approval).
+  PluginPermissionGrant rebound({
+    String? manifestDigest,
+    String? contentTreeHash,
+    bool? adoptContentTreeOnFirstUse,
+  }) => PluginPermissionGrant(
+    pluginId: pluginId,
+    manifestDigest: manifestDigest ?? this.manifestDigest,
+    capabilities: capabilities,
+    environmentReadNames: environmentReadNames,
+    approvedAt: approvedAt,
+    declinedCapabilities: declinedCapabilities,
+    allowDependencyScripts: allowDependencyScripts,
+    contentTreeHash: contentTreeHash ?? this.contentTreeHash,
+    adoptContentTreeOnFirstUse:
+        adoptContentTreeOnFirstUse ?? this.adoptContentTreeOnFirstUse,
+  );
 
   /// Every capability the user decided on, granted or declined.
   Set<PluginCapability> get decidedCapabilities => {
@@ -915,6 +953,8 @@ class PluginPermissionGrant {
     if (declinedCapabilities.isNotEmpty)
       'declinedCapabilities': declinedCapabilities.map((c) => c.name).toList(),
     if (allowDependencyScripts) 'allowDependencyScripts': true,
+    if (contentTreeHash != null) 'contentTreeHash': contentTreeHash,
+    if (adoptContentTreeOnFirstUse) 'adoptContentTreeOnFirstUse': true,
   };
 
   factory PluginPermissionGrant.fromJson(Map<String, dynamic> j) =>
@@ -936,6 +976,12 @@ class PluginPermissionGrant {
         ),
         // Fail closed: only an explicit `true` opts into install scripts.
         allowDependencyScripts: j['allowDependencyScripts'] == true,
+        contentTreeHash: j['contentTreeHash'] is String
+            ? j['contentTreeHash'] as String
+            : null,
+        // Only an explicit `true` (written by the one-time preferences →
+        // secure-storage migration) opens the trust-on-first-use window.
+        adoptContentTreeOnFirstUse: j['adoptContentTreeOnFirstUse'] == true,
       );
 }
 

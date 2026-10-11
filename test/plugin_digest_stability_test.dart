@@ -171,6 +171,7 @@ void main() {
           capabilities: m.requestedCapabilities,
           environmentReadNames: m.environmentReadNames,
           approvedAt: approvedAt,
+          contentTreeHash: pluginContentTreeHash(m.rootPath),
         ),
       );
       // Sanity: a plain digest-keyed load misses — this is the cascade.
@@ -201,6 +202,7 @@ void main() {
           manifestDigest: legacyPluginManifestDigest(m),
           capabilities: m.requestedCapabilities,
           approvedAt: approvedAt,
+          contentTreeHash: pluginContentTreeHash(m.rootPath),
         ),
       );
 
@@ -220,6 +222,7 @@ void main() {
           manifestDigest: legacyPluginManifestDigest(old),
           capabilities: old.requestedCapabilities,
           approvedAt: DateTime.utc(2026),
+          contentTreeHash: pluginContentTreeHash(old.rootPath),
         ),
       );
 
@@ -252,6 +255,7 @@ void main() {
           manifestDigest: legacyPluginManifestDigest(m),
           capabilities: const {},
           approvedAt: DateTime.utc(2026),
+          contentTreeHash: pluginContentTreeHash(m.rootPath),
         ),
       );
 
@@ -279,6 +283,7 @@ void main() {
           // Approved before the manifest started reading ACME_TOKEN.
           environmentReadNames: const {},
           approvedAt: DateTime.utc(2026),
+          contentTreeHash: pluginContentTreeHash(m.rootPath),
         ),
       );
 
@@ -296,6 +301,7 @@ void main() {
         manifestDigest: pluginManifestDigest(m),
         capabilities: m.requestedCapabilities,
         approvedAt: DateTime.utc(2026, 3, 3),
+        contentTreeHash: pluginContentTreeHash(m.rootPath),
       );
       await store.save(current);
 
@@ -319,6 +325,7 @@ void main() {
           manifestDigest: legacyPluginManifestDigest(m),
           capabilities: m.requestedCapabilities,
           approvedAt: DateTime.utc(2026),
+          contentTreeHash: pluginContentTreeHash(m.rootPath),
         ),
       );
 

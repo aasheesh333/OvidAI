@@ -17864,6 +17864,12 @@ ${await _agentsMdBlock()}
           for (final s in inspection.manifest.mcpServers) ...s.envNames,
         },
         approvedAt: DateTime.now(),
+        // H2: the approval covers the staged content tree, not just the
+        // manifest.
+        contentTreeHash: PluginPermissionStore.contentTreeHashFor(
+          inspection.manifest.rootPath,
+          reverify: true,
+        ),
       ),
     );
     final retry = await app.installPlugin(

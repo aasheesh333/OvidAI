@@ -116,6 +116,12 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
             for (final s in widget.manifest.mcpServers) ...s.envNames,
           },
           approvedAt: DateTime.now(),
+          // H2: bind consent to the exact files on screen, not just the
+          // manifest — changed code under the same manifest re-prompts.
+          contentTreeHash: PluginPermissionStore.contentTreeHashFor(
+            widget.manifest.rootPath,
+            reverify: true,
+          ),
         ),
       );
     } catch (e) {

@@ -31,6 +31,50 @@ class _Preferences extends InMemorySharedPreferencesStore {
   }
 }
 
+/// Plugin grants persist in secure storage (H1): fail their writes there.
+class _GrantStorage extends FlutterSecureStorage {
+  _GrantStorage() : super();
+  static const _inner = FlutterSecureStorage();
+  bool fail = false;
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (fail) throw StateError('secure storage unavailable');
+    await _inner.write(key: key, value: value);
+  }
+
+  @override
+  Future<String?> read({
+    required String key,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) => _inner.read(key: key);
+
+  @override
+  Future<void> delete({
+    required String key,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) => _inner.delete(key: key);
+}
+
 Future<void> _frames(WidgetTester tester, [int count = 8]) async {
   for (var i = 0; i < count; i++) {
     await tester.pump(const Duration(milliseconds: 50));
@@ -166,9 +210,13 @@ void main() {
         child: const Text('Open'),
       ),
     )), keyboard: 260);
+    final secure = _GrantStorage();
+    PluginPermissionStore.secureStorageForTest = secure;
+    addTearDown(() => PluginPermissionStore.secureStorageForTest = null);
     await tester.tap(find.text('Open'));
     await _frames(tester);
     preferences.fail = true;
+    secure.fail = true;
     await reveal(tester, find.text('Accept'));
     await tester.tap(find.text('Accept'));
     await _frames(tester);
@@ -176,6 +224,7 @@ void main() {
     expect(result, isNull);
     expect(await PluginPermissionStore().loadAny(_id), isNull);
     preferences.fail = false;
+    secure.fail = false;
     await reveal(tester, find.text('Accept'));
     await tester.tap(find.text('Accept'));
     await _frames(tester);

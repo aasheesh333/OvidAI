@@ -166,6 +166,7 @@ void main() {
       pluginId: m.id, manifestDigest: pluginManifestDigest(installed),
       capabilities: installed.requestedCapabilities,
       environmentReadNames: installed.environmentReadNames, approvedAt: DateTime.utc(2026),
+      contentTreeHash: pluginContentTreeHash(installed.rootPath),
     ));
     hooks.executorForTest = (_, _) async => '{"additionalContext":"old-boot-context"}';
     await hooks.fire('SessionStart', sid, payload: {'source': 'startup'});

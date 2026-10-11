@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
+import 'package:ovid_ai/core/plugin_permissions.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
 import 'package:ovid_ai/core/plugin_runtime.dart';
 import 'package:ovid_ai/core/plugin_source_resolver.dart';
@@ -1096,6 +1097,7 @@ void main() {
           manifestDigest: inspection.manifestDigest,
           capabilities: inspection.manifest.requestedCapabilities,
           approvedAt: DateTime.utc(2026, 9, 10),
+          contentTreeHash: pluginContentTreeHash(inspection.manifest.rootPath),
         ),
       );
       final result = await app.installPlugin(

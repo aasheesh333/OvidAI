@@ -16135,6 +16135,7 @@ cwd = 'tools'
               1735689600000,
               isUtc: true,
             ),
+            contentTreeHash: pluginContentTreeHash(manifest.rootPath),
           ),
         );
         final loaded = await store.load('acme/grant-kit', digest);
@@ -16189,6 +16190,7 @@ cwd = 'tools'
             capabilities: manifest.requestedCapabilities,
             environmentReadNames: manifest.environmentReadNames,
             approvedAt: DateTime.now(),
+            contentTreeHash: pluginContentTreeHash(manifest.rootPath),
           ),
         );
 
@@ -16224,6 +16226,7 @@ cwd = 'tools'
             manifestDigest: v1Digest,
             capabilities: v1.requestedCapabilities,
             approvedAt: DateTime.now(),
+            contentTreeHash: pluginContentTreeHash(v1.rootPath),
           ),
         );
 
@@ -16274,6 +16277,7 @@ cwd = 'tools'
             manifestDigest: v2Digest,
             capabilities: v2.requestedCapabilities,
             approvedAt: DateTime.now(),
+            contentTreeHash: pluginContentTreeHash(v2.rootPath),
           ),
         );
         final effective = await store.effectiveGrant(
@@ -16314,6 +16318,7 @@ cwd = 'tools'
             capabilities: manifest.requestedCapabilities,
             environmentReadNames: const {'API_TOKEN'},
             approvedAt: DateTime.now(),
+            contentTreeHash: pluginContentTreeHash(manifest.rootPath),
           ),
         );
         // Owner-scoped secret (values only ever in secure storage).
@@ -16374,6 +16379,7 @@ cwd = 'tools'
             manifestDigest: digest,
             capabilities: const {PluginCapability.mcpRegister},
             approvedAt: DateTime.now(),
+            contentTreeHash: pluginContentTreeHash(manifest.rootPath),
           ),
         );
         final loaded = await store.load('acme/grant-kit', digest);
@@ -16410,6 +16416,7 @@ cwd = 'tools'
             capabilities: manifest.requestedCapabilities,
             environmentReadNames: const {'API_TOKEN'},
             approvedAt: DateTime.now(),
+            contentTreeHash: pluginContentTreeHash(manifest.rootPath),
           ),
         );
         // The owning plugin's secret lives ONLY in secure storage.
@@ -16442,8 +16449,9 @@ cwd = 'tools'
         // Corrupted stored JSON tolerates load (returns null, never throws).
         // Corruption is observed on a fresh preferences lifecycle, not by
         // bypassing the live store's confirmed-commit snapshot.
-        SharedPreferences.setMockInitialValues({
-          'ovid_plugin_grants_v1': '{not json',
+        SharedPreferences.setMockInitialValues({});
+        FlutterSecureStorage.setMockInitialValues({
+          kPluginGrantsSecureKey: '{not json',
         });
         expect(
           await PluginPermissionStore().load('acme/grant-kit', digest),
@@ -17432,6 +17440,7 @@ cwd = 'tools'
           manifestDigest: pluginManifestDigest(manifest),
           capabilities: manifest.requestedCapabilities,
           approvedAt: DateTime.now(),
+          contentTreeHash: pluginContentTreeHash(manifest.rootPath),
         ),
       );
     }
@@ -17734,7 +17743,7 @@ cwd = 'tools'
         expect(row.installed, isFalse);
         expect(row.runtimeId, isNull);
         expect(
-          prefs.getString('ovid_plugin_grants_v1'),
+          await const FlutterSecureStorage().read(key: kPluginGrantsSecureKey),
           contains('p7org/runtime-kit'),
         );
       },
@@ -17867,8 +17876,10 @@ cwd = 'tools'
           PluginContributionRegistry.I.isRegistered('p7org/runtime-kit'),
           isFalse,
         );
-        final prefs = await SharedPreferences.getInstance();
-        expect(prefs.getString('ovid_plugin_grants_v1'), isNull);
+        expect(
+          await const FlutterSecureStorage().read(key: kPluginGrantsSecureKey),
+          isNull,
+        );
         expect(
           Directory('${p7Runtime.path}/plugin-runtime').existsSync(),
           isFalse,
@@ -17927,9 +17938,8 @@ cwd = 'tools'
           await PluginRuntimeManager.I.recordFor('p7org/runtime-kit'),
           isNull,
         );
-        final prefs = await SharedPreferences.getInstance();
         expect(
-          prefs.getString('ovid_plugin_grants_v1'),
+          await const FlutterSecureStorage().read(key: kPluginGrantsSecureKey),
           isNot(contains('p7org/runtime-kit')),
         );
         expect(rowB.runtimeId, isNull);
@@ -19671,6 +19681,7 @@ cwd = 'tools'
             manifestDigest: pluginManifestDigest(manifest),
             capabilities: inferRequestedCapabilities(manifest),
             approvedAt: DateTime.now(),
+            contentTreeHash: pluginContentTreeHash(manifest.rootPath),
           ),
         );
         var requests = 0;
@@ -20806,6 +20817,7 @@ cwd = 'tools'
             for (final server in manifest.mcpServers) ...server.envNames,
           },
           approvedAt: DateTime.now(),
+          contentTreeHash: pluginContentTreeHash(manifest.rootPath),
         ),
       );
     }
@@ -22091,6 +22103,7 @@ cwd = 'tools'
           manifestDigest: inspection.manifestDigest,
           capabilities: inspection.manifest.requestedCapabilities,
           approvedAt: DateTime.utc(2026, 9, 10),
+          contentTreeHash: pluginContentTreeHash(inspection.manifest.rootPath),
         ),
       );
       registeredIds.add(inspection.manifest.id);

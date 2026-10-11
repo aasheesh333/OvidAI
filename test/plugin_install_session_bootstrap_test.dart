@@ -105,6 +105,7 @@ void main() {
         manifestDigest: pluginManifestDigest(manifest),
         capabilities: manifest.requestedCapabilities,
         approvedAt: DateTime.now(),
+        contentTreeHash: pluginContentTreeHash(manifest.rootPath),
       ),
     );
     final row = PluginItem(

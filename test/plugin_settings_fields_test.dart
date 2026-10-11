@@ -354,6 +354,7 @@ void main() {
           manifestDigest: pluginManifestDigest(before),
           capabilities: inferRequestedCapabilities(before),
           approvedAt: DateTime.utc(2026),
+          contentTreeHash: pluginContentTreeHash(before.rootPath),
         ),
       );
 

@@ -2272,6 +2272,11 @@ audit=false
       'npm_config_userconfig': '$runtimeRoot/cache/npm/npmrc',
       'PIP_CACHE_DIR': '$runtimeRoot/cache/pip',
       'PIP_TARGET': '$runtimeRoot/python',
+      // Bytecode caches go under the runtime cache, never into the plugin's
+      // content tree: a `__pycache__` written next to an imported module
+      // would change the approved content hash (H2) and disable the plugin
+      // on the next boot.
+      'PYTHONPYCACHEPREFIX': '$runtimeRoot/cache/pycache',
       // Plugin bin/ first, then the sandbox's own PATH shape (a
       // literal $PATH would never expand in a process environment).
       'PATH':

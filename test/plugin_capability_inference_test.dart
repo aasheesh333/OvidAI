@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -141,6 +142,7 @@ void main() {
       'adapter manifests keep the four out of the required set so existing grants stay effective',
       () async {
         SharedPreferences.setMockInitialValues({});
+        FlutterSecureStorage.setMockInitialValues({});
         final manifest = await const PluginAdapterRegistry().inspect(
           adapterFixture(),
         );
@@ -154,6 +156,7 @@ void main() {
             manifestDigest: pluginManifestDigest(manifest),
             capabilities: inferRequestedCapabilities(manifest),
             approvedAt: DateTime.utc(2026, 9, 19),
+            contentTreeHash: pluginContentTreeHash(manifest.rootPath),
           ),
         );
 
