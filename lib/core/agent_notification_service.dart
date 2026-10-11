@@ -243,6 +243,22 @@ class AgentNotificationService {
       ? anyRunActiveOverrideForTest!()
       : AgentService.I.anyRunActive;
 
+  /// Routes a notification tap to its chat. main.dart installs the app
+  /// router (pop to the chat root, validate the id, then select); without
+  /// it only a session that still exists is selected — never a deleted id.
+  bool Function(String sessionId)? selectSessionHandler;
+
+  /// A notification for [sid] was tapped (`onSelectSession`).
+  void handleSelectSession(String? sid) {
+    if (sid == null || sid.isEmpty) return;
+    final handler = selectSessionHandler;
+    if (handler != null) {
+      handler(sid);
+    } else if (AppState.I.sessionById(sid) != null) {
+      AppState.I.selectSession(sid);
+    }
+  }
+
   /// Wire the notification Stop button → agent cancel. Called once at
   /// app startup (main.dart).
   Future<void> init() async {
@@ -263,10 +279,7 @@ class AgentNotificationService {
         backgroundConstraint = call.arguments as String?;
         AppState.I.refresh();
       } else if (call.method == 'onSelectSession') {
-        final sid = call.arguments as String?;
-        if (sid != null && sid.isNotEmpty) {
-          AppState.I.selectSession(sid);
-        }
+        handleSelectSession(call.arguments as String?);
       }
       return null;
     });

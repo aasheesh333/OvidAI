@@ -4,14 +4,18 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 
 import 'core/state.dart';
+import 'core/agent_notification_service.dart';
 import 'core/agent_service.dart';
+import 'core/mcp_service.dart';
 import 'core/theme.dart';
+import 'ui/app_router.dart';
 import 'ui/login_gate.dart';
+import 'ui/mcp_oauth_sheet.dart';
 import 'ui/shell.dart';
 import 'core/share_link_resolver.dart';
 import 'ui/shared_conversation_screen.dart';
 
-final appNavigatorKey = GlobalKey<NavigatorState>();
+export 'ui/app_router.dart' show appNavigatorKey;
 
 bool openShareWithNavigator(GlobalKey<NavigatorState> navigatorKey, Uri uri) {
   final route = ShareLinkResolver.route(uri);
@@ -82,14 +86,52 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     );
     // Rebuild the whole app when the user toggles the theme in Settings.
     AppState.I.addListener(_onThemeChanged);
+    // Notification taps route through the app router (07 §1): back to the
+    // chat root, validated id, then select.
+    AgentNotificationService.I.selectSessionHandler = _openChatFromNotification;
     _restoreAndListenForLinks();
+  }
+
+  bool _openChatFromNotification(String sessionId, [int attempt = 0]) {
+    if (AppRouter.openChat(sessionId)) return true;
+    // Cold start: the navigator may not be attached for a few frames.
+    if (appNavigatorKey.currentState == null && attempt < 10 && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _openChatFromNotification(sessionId, attempt + 1),
+      );
+      WidgetsBinding.instance.scheduleFrame();
+    }
+    return false;
+  }
+
+  /// Every incoming link: MCP OAuth redirects and chat links are routed
+  /// here; share links keep their dedicated handling in [_openShare].
+  void _onLink(Uri uri) {
+    if (McpService.isMcpOAuthCallback(uri)) {
+      unawaited(
+        handleMcpOAuthRedirect(
+          uri,
+          messenger: appScaffoldMessengerKey.currentState,
+        ),
+      );
+      return;
+    }
+    final route = AppRouter.parse(uri);
+    if (route is ChatRoute || route is ScheduleRoute) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) AppRouter.go(route!);
+      });
+      WidgetsBinding.instance.scheduleFrame();
+      return;
+    }
+    _openShare(uri);
   }
 
   Future<void> _restoreAndListenForLinks() async {
     // Subscribe first: platform startup calls can await indefinitely or fail on
     // platforms without an App Links implementation.
     _linkSubscription = _links.uriLinkStream.listen(
-      _openShare,
+      _onLink,
       onError: (Object error, StackTrace stack) {},
     );
     try {
@@ -99,7 +141,7 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     }
     try {
       final initial = await _links.getInitialLink();
-      if (initial != null) _openShare(initial);
+      if (initial != null) _onLink(initial);
     } on Object {
       // Initial app links may be unavailable during platform startup.
     }
@@ -173,6 +215,10 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     AppState.I.setAccountFeaturesForeground(false);
     WidgetsBinding.instance.removeObserver(this);
     AppState.I.removeListener(_onThemeChanged);
+    if (AgentNotificationService.I.selectSessionHandler ==
+        _openChatFromNotification) {
+      AgentNotificationService.I.selectSessionHandler = null;
+    }
     _linkSubscription?.cancel();
     super.dispose();
   }
@@ -182,6 +228,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     return MaterialApp(
       title: 'Ovid',
       navigatorKey: appNavigatorKey,
+      scaffoldMessengerKey: appScaffoldMessengerKey,
+      onGenerateRoute: AppRouter.onGenerateRoute,
       debugShowCheckedModeBanner: false,
       theme: Aether.theme(),
       home: const LoginGate(child: OvidShell()),
