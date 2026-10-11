@@ -78,6 +78,40 @@ String ovidModelLabel(String model) {
   return model.trim() == 'auto' ? 'Auto' : model;
 }
 
+/// Exact model families known to accept the OpenAI-compatible
+/// `reasoning_effort` parameter. Matched against the model id's last path
+/// segment (`openai/o3-mini` → `o3-mini`). Anything else gets a plain tile
+/// and never sends `reasoning_effort`, so non-reasoning models are not
+/// rejected and retried.
+final List<RegExp> _reasoningEffortFamilies = [
+  // OpenAI o-series (o1-mini / o1-preview predate reasoning_effort).
+  RegExp(r'^o1(-pro)?(-\d{4}-\d{2}-\d{2})?$'),
+  RegExp(
+    r'^o[34](-mini|-pro)?(-(high|low|deep-research))?(-\d{4}-\d{2}-\d{2})?$',
+  ),
+  // GPT-5 reasoning models (the -chat variants are non-reasoning).
+  RegExp(
+    r'^gpt-5(\.\d+)?(-(mini|nano|pro|codex(-mini)?))?(-\d{4}-\d{2}-\d{2})?$',
+  ),
+  RegExp(r'^gpt-oss-\d+b$'),
+  // Gemini thinking models via the OpenAI-compatible endpoint.
+  RegExp(r'^gemini-2\.5-(pro|flash)(-lite)?(-preview.*)?$'),
+  RegExp(r'^gemini-3(\.\d+)?-(pro|flash)(-preview.*)?$'),
+  // xAI: only grok-3-mini accepts reasoning_effort.
+  RegExp(r'^grok-3-mini(-fast)?(-beta)?$'),
+];
+
+/// Whether [model] (optionally carrying a `· Low/Medium/High` variant)
+/// belongs to a family that supports `reasoning_effort`.
+bool modelSupportsReasoningEffort(String model) {
+  var id = model.split('·').first.trim().toLowerCase();
+  final slash = id.lastIndexOf('/');
+  if (slash >= 0) id = id.substring(slash + 1);
+  final colon = id.indexOf(':');
+  if (colon >= 0) id = id.substring(0, colon);
+  return _reasoningEffortFamilies.any((re) => re.hasMatch(id));
+}
+
 const kDeniedControlDomains = <String>[
   'paypal.com',
   'wise.com',

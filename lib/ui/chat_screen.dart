@@ -2884,23 +2884,9 @@ class _ModelTile extends StatelessWidget {
     this.isRecent = false,
   });
 
-  static const _effortModels = [
-    'deepseek',
-    'gpt',
-    'kimi',
-    'glm',
-    'opus',
-    'sonnet',
-    'gemini-2.5',
-    'qwen3',
-    'o4',
-    'grok',
-    'r1',
-  ];
   static const variants = ['Low', 'Medium', 'High'];
 
-  bool get supportsEffort =>
-      _effortModels.any((e) => model.toLowerCase().contains(e));
+  bool get supportsEffort => modelSupportsReasoningEffort(model);
 
   @override
   Widget build(BuildContext context) {
