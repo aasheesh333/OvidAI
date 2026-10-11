@@ -18,17 +18,17 @@ library;
 class ClaudeCodeTools {
   ClaudeCodeTools._();
 
-  /// Native tools each Claude Code tool name grants. Ovid has no dedicated
-  /// MultiEdit / NotebookEdit / LS tools: their capability lives in `fs_edit`,
-  /// `file_write` and `fs_glob`, so a `tools: MultiEdit` grant maps there.
+  /// Native tools each Claude Code tool name grants. `multi_edit` and
+  /// `notebook_edit` take the Claude Code input shape natively; Ovid has no
+  /// LS tool, so `LS` maps to `fs_glob`.
   static const Map<String, Set<String>> _ccToNative = {
     'Bash': {'run_shell', 'job_start', 'job_output', 'job_list', 'job_kill'},
     'PowerShell': {'run_shell'},
     'Read': {'file_read', 'read_image', 'read_attachment'},
     'Write': {'file_write'},
     'Edit': {'fs_edit'},
-    'MultiEdit': {'fs_edit'},
-    'NotebookEdit': {'fs_edit', 'file_write'},
+    'MultiEdit': {'multi_edit'},
+    'NotebookEdit': {'notebook_edit'},
     'NotebookRead': {'file_read'},
     'Glob': {'fs_glob'},
     'LS': {'fs_glob'},
@@ -76,6 +76,10 @@ class ClaudeCodeTools {
           'create' => 'Write',
           _ => 'Edit',
         };
+      case 'multi_edit':
+        return 'MultiEdit';
+      case 'notebook_edit':
+        return 'NotebookEdit';
       case 'fs_glob':
         return 'Glob';
       case 'fs_grep':
@@ -149,6 +153,10 @@ class ClaudeCodeTools {
           case 'insert':
             alias('new_str', 'new_string');
         }
+      case 'multi_edit':
+        alias('path', 'file_path');
+      case 'notebook_edit':
+        alias('path', 'notebook_path');
       case 'fs_grep':
         alias('include', 'glob');
       case 'web_search':

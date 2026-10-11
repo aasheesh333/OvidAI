@@ -52,11 +52,13 @@ void main() {
     test(
       'Claude Code names grant native tools (MultiEdit, NotebookEdit, Task)',
       () {
-        expect(ClaudeCodeTools.nativeToolsFor('MultiEdit'), {'fs_edit'});
+        expect(ClaudeCodeTools.nativeToolsFor('MultiEdit'), {'multi_edit'});
         expect(
           ClaudeCodeTools.nativeToolsFor('NotebookEdit'),
-          containsAll(['fs_edit', 'file_write']),
+          {'notebook_edit'},
         );
+        expect(ClaudeCodeTools.ccToolName('multi_edit'), 'MultiEdit');
+        expect(ClaudeCodeTools.ccToolName('notebook_edit'), 'NotebookEdit');
         expect(ClaudeCodeTools.nativeToolsFor('Task'), {'dispatch_agent'});
         expect(ClaudeCodeTools.nativeToolsFor('Glob'), {'fs_glob'});
       },

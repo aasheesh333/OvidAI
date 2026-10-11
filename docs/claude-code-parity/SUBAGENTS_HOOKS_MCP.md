@@ -43,7 +43,7 @@ depth limit, but the owner's rule is no nesting at all.
 | PostToolUse `decision:block` / exit 2 / `additionalContext` / `updatedToolOutput` | Ignored | Honoured | **done** (appended to / replaces the tool result) |
 | Tool-name aliasing Bash/Read/Write/Edit | Matcher only | n/a | kept |
 | Aliasing Glob, Grep, WebFetch, WebSearch, Agent+Task, TodoWrite, Skill | No | n/a | **done** |
-| MultiEdit / NotebookEdit | No | n/a | partial: grant mapping only (`tools:`). Ovid has no such tools, so a matcher on them never fires |
+| MultiEdit / NotebookEdit | No | NotebookEdit edits one cell (`replace`/`insert`/`delete`). MultiEdit is the older multi-replace tool, no longer in the current tools table | **done**: native `multi_edit` (`{file_path, edits[]}`, sequential, all-or-nothing, unique unless `replace_all`) and `notebook_edit` (`{notebook_path, cell_id, new_source, cell_type, edit_mode}`, keeps notebook/cell metadata and outputs). Same gates as `fs_edit`: read-before-write, CAS, path grants, approval, diff card, RepoCache/Studio, Read-Only refusal. Plan mode refuses them (not allowlisted). CC aliases for matchers, stdin and `tools:` |
 | CC stdin: CC `tool_name` + CC `tool_input` keys | Native name and keys | CC shape | **done** for command hooks of `claudeCode`-format plugins (native name kept as `ovid_tool_name`, native keys kept alongside). Prompt/agent hooks keep native stdin |
 | `updatedInput` CC → native (`file_path`→`path`, ...) | Merged verbatim | n/a | **done** |
 | Write vs Edit on create | `fs_edit create` → Write | Same | kept |
@@ -53,8 +53,8 @@ depth limit, but the owner's rule is no nesting at all.
 | `sampling/createMessage` with user approval | Dropped | Supported | **done** (asked in every mode, Full Access included) |
 | `elicitation/create` via a sheet | Dropped | Supported | **done** (`McpElicitationSheet`) |
 | Server request with the same id as our pending request | Mistaken for our response | Distinct | **done** (stdio, HTTP SSE body, legacy SSE) |
-| `notifications/progress`, `notifications/message` | Ignored | Handled | **done** (recorded per server). Ovid does not yet send `progressToken`, so progress only arrives from servers that send it unprompted |
-| Server request mid-stream over Streamable HTTP | n/a | Answered while the POST stream is open | partial: Ovid buffers the HTTP response, so the request is answered after the stream ends. stdio and legacy SSE answer immediately |
+| `notifications/progress`, `notifications/message` | Ignored | Handled | **done**: every `tools/call` sends `_meta.progressToken`. Progress goes to the live tool card and restarts the HTTP response timeout. Log lines are kept per server |
+| Server request mid-stream over Streamable HTTP | n/a | Answered while the POST stream is open | **done**: the `text/event-stream` POST response is parsed incrementally (`McpSseParser`). Requests are answered at once on the same `Mcp-Session-Id`, and the event with our id resolves the call |
 
 ## Design notes
 
