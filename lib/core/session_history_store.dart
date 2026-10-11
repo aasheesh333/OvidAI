@@ -625,8 +625,13 @@ class SessionHistoryRepository {
     _fault('verified');
     await _addMarker(prefs, key);
     _fault('marked');
-    // Only now is the legacy copy redundant.
-    await prefs.remove(key);
+    // Only now is the legacy copy redundant. The DB is already authoritative;
+    // a failed removal leaves a blob the next launch merges (a no-op here).
+    try {
+      await prefs.remove(key);
+    } catch (error) {
+      Diag.swallow('history.migrate.removeLegacy', error);
+    }
     final report = SessionHistoryMigrationReport(
       key: key,
       sourceRows: source.length,
