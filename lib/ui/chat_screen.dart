@@ -27,6 +27,8 @@ import 'subagent_screen.dart';
 import 'transcript_model.dart';
 import 'chat_layout.dart';
 import 'html_artifact_view.dart';
+import 'link_safety.dart';
+import '../core/url_safety.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
 import '../core/device_control_service.dart';
@@ -3643,6 +3645,24 @@ class _RichToolResultState extends State<_RichToolResult> {
   bool _jsonExpanded = true;
   bool _mermaidExpanded = false;
 
+  /// Link recognizers created by the current build. Owned here so they are
+  /// disposed when the spans are rebuilt or the card goes away instead of
+  /// leaking one per URL per build.
+  final List<TapGestureRecognizer> _recognizers = [];
+
+  void _disposeRecognizers() {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+  }
+
+  @override
+  void dispose() {
+    _disposeRecognizers();
+    super.dispose();
+  }
+
   static final _urlRe = RegExp(r'https?://[^\s)\]}>,"]+', caseSensitive: false);
   static final _hexColorRe = RegExp(r'#([0-9a-fA-F]{6})\b');
   static final _mermaidFenceRe = RegExp(
@@ -3667,6 +3687,7 @@ class _RichToolResultState extends State<_RichToolResult> {
 
   @override
   Widget build(BuildContext context) {
+    _disposeRecognizers();
     final content = widget.content;
     final baseColor = widget.isError ? Aether.dangerC : Aether.text;
 
@@ -3931,7 +3952,13 @@ class _RichToolResultState extends State<_RichToolResult> {
           );
         }
       } else {
-        // Tappable URL.
+        // Tappable URL. Tool output is attacker-influenced (web fetch, MCP,
+        // shell): never launch on one tap. The confirm sheet shows the real,
+        // decoded host with any `user@` prefix stripped.
+        final url = m.value;
+        final recognizer = TapGestureRecognizer()
+          ..onTap = () => _openToolOutputLink(context, url);
+        _recognizers.add(recognizer);
         spans.add(
           TextSpan(
             text: m.value,
@@ -3940,13 +3967,7 @@ class _RichToolResultState extends State<_RichToolResult> {
               decoration: TextDecoration.underline,
               decorationColor: Aether.accent,
             ),
-            recognizer: (TapGestureRecognizer()
-              ..onTap = () {
-                final uri = Uri.tryParse(m.value);
-                if (uri != null) {
-                  launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              }),
+            recognizer: recognizer,
           ),
         );
       }
@@ -8826,6 +8847,9 @@ class _OvidMarkdown extends StatelessWidget {
       // in-app browser, matching a real chat surface.
       selectable: true,
       onTapLink: (text, href, title) => _openLink(context, text, href, title),
+      // Never the package default (Image.network on render / Image.file for
+      // any path): remote images wait for a tap, see [safeMarkdownImage].
+      imageBuilder: safeMarkdownImage,
       builders: {'code': _OvidInlineCodeBuilder()},
       styleSheet: MarkdownStyleSheet(
         // Line-heights follow the captured reference: base 24px at 14px,
@@ -8893,10 +8917,36 @@ class _OvidMarkdown extends StatelessWidget {
   }
 }
 
+/// Open a URL found in tool output — only after the user has seen its real
+/// host in the confirm sheet. http(s) only; userinfo is stripped.
+Future<void> _openToolOutputLink(BuildContext context, String raw) async {
+  final link = safeLinkFrom(raw, webOnly: true);
+  if (link == null) return;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final choice = await confirmLinkSheet(context, link);
+  if (choice != LinkChoice.open) return;
+  try {
+    final ok = await launchUrl(link.uri, mode: LaunchMode.externalApplication);
+    if (!ok) throw StateError('not launched');
+  } catch (_) {
+    messenger?.showSnackBar(
+      const SnackBar(
+        content: Text('Could not open this link.'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+}
+
 /// Open a markdown link: http(s) in the in-app browser (so the agent and the
-/// user share one browsing surface), everything else (mailto:, tel:, custom
-/// schemes) through the platform handler. External launches that nothing can
-/// handle fall back to the in-app browser so the tap never dies silently.
+/// user share one browsing surface, and its address bar shows the real
+/// domain), everything else (mailto:, tel:, custom schemes) through the
+/// platform handler.
+///
+/// Model-authored links are attacker-influenced, so a confirm sheet with the
+/// real host comes first whenever the link could deceive: a non-http(s)
+/// scheme (it triggers another app), a `user@` prefix, an internationalized
+/// host, or link text that names a different site than the href.
 Future<void> _openLink(
   BuildContext context,
   String text,
@@ -8912,7 +8962,7 @@ Future<void> _openLink(
       r'^(www\.)?[\w-]+(\.[\w-]+)+(/.*)?$',
     ).firstMatch(t);
     if (domainLike == null) return;
-    raw = t.startsWith('www.') ? 'https://$t' : 'https://$t';
+    raw = 'https://$t';
   }
   var uri = Uri.tryParse(raw);
   // Schemeless hrefs ("example.com/a") are relative in markdown terms, but
@@ -8921,35 +8971,41 @@ Future<void> _openLink(
     uri = Uri.tryParse('https://$raw');
   }
   if (uri == null) return;
+  final link = safeLinkFrom(uri.toString());
+  if (link == null) return;
   final messenger = ScaffoldMessenger.of(context);
-  void fallback() => launchUrl(uri!, mode: LaunchMode.externalApplication);
-  if (uri.scheme == 'http' || uri.scheme == 'https') {
-    await BrowserScreen.open(context, url: uri.toString());
+  final needsConfirm =
+      !link.isWeb ||
+      link.hadUserInfo ||
+      link.isIdn ||
+      linkTextMisleads(text, link);
+  if (needsConfirm) {
+    final choice = await confirmLinkSheet(context, link, linkText: text);
+    if (choice != LinkChoice.open || !context.mounted) return;
+  }
+  if (link.isWeb) {
+    await BrowserScreen.open(context, url: link.uri.toString());
     return;
   }
   try {
-    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    final ok = await launchUrl(link.uri, mode: LaunchMode.externalApplication);
     if (!ok) {
       // No handler (missing <queries> entry / app not installed) — tell the
       // user instead of swallowing the failure.
       messenger.showSnackBar(
         SnackBar(
-          content: Text('No app can open ${uri.scheme} links.'),
+          content: Text('No app can open ${link.uri.scheme} links.'),
           behavior: SnackBarBehavior.floating,
         ),
       );
     }
   } catch (_) {
-    try {
-      fallback();
-    } catch (_) {
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Could not open this link.'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('Could not open this link.'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 }
 
