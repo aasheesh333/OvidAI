@@ -20,11 +20,8 @@ Future<bool?> showPluginPermissionSheet(
   BuildContext context, {
   required NormalizedPluginManifest manifest,
 }) {
-  return showModalBottomSheet<bool>(
+  return showAetherSheet<bool>(
     context: context,
-    backgroundColor: Colors.transparent,
-    isScrollControlled: true,
-    useSafeArea: true,
     isDismissible: false,
     enableDrag: false,
     builder: (_) => _PluginPermissionSheet(manifest: manifest),
@@ -90,10 +87,9 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
       canPop: !_saving,
       child: Padding(
         padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-        // Scroll the chrome too: a keyboard and large text can leave less
-        // room than the title and actions alone need.
-        child: SingleChildScrollView(
-          child: MediaQuery.removeViewInsets(
+        // The sheet pins Cancel/Accept below the body; the body scrolls when
+        // a keyboard or large text leave too little room.
+        child: MediaQuery.removeViewInsets(
             context: context,
             removeBottom: true,
           child: AetherSheet(
@@ -109,7 +105,8 @@ class _PluginPermissionSheetState extends State<_PluginPermissionSheet> {
             onPressed: _saving ? null : _accept,
           ),
         ],
-        child: Column(
+        child: SingleChildScrollView(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [

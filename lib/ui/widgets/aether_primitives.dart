@@ -1380,18 +1380,48 @@ class AetherStepper extends StatelessWidget {
   }
 }
 
-/// Full-screen bottom sheet with drag handle, title, body, and action row.
+/// Shows [builder] (normally an [AetherSheet]) as a modal bottom sheet with
+/// the settings every Aether sheet needs: scroll-controlled (so tall sheets
+/// can use the full height), inside the safe area, a transparent route
+/// background (the sheet paints its own surface and radius), and a 640dp max
+/// width so tablets and foldables don't stretch it edge to edge.
+Future<T?> showAetherSheet<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  bool isDismissible = true,
+  bool enableDrag = true,
+  bool useRootNavigator = false,
+}) {
+  return showModalBottomSheet<T>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    backgroundColor: Colors.transparent,
+    constraints: const BoxConstraints(maxWidth: 640),
+    isDismissible: isDismissible,
+    enableDrag: enableDrag,
+    useRootNavigator: useRootNavigator,
+    builder: builder,
+  );
+}
+
+/// Bottom sheet with drag handle, title, body, and action row.
 ///
-/// Use via `showModalBottomSheet(context: context, builder: (_) => AetherSheet(...))`.
+/// Show it with [showAetherSheet].
 class AetherSheet extends StatelessWidget {
   final String title;
   final Widget child;
   final List<Widget>? actions;
 
-  /// Pins [actions] below the scrollable body instead of letting them scroll
-  /// away with the content. Callers with tall bodies at small viewports or
-  /// large text scales opt in so the primary action row stays reachable.
-  /// Defaults to the historical scrolling chrome for every existing caller.
+  /// Pins [actions] below the body so the primary action stays on screen when
+  /// the body fills the sheet (a list, large text, the keyboard). The body is
+  /// clamped to the height left after the handle, title and actions, so a
+  /// body taller than that must scroll itself: pass a [ListView], or wrap a
+  /// [Column] in a [SingleChildScrollView].
+  ///
+  /// Set to false for the legacy layout where title, body and actions scroll
+  /// together. Under unbounded height (a caller that wraps the sheet in its
+  /// own scroll view) both modes lay out at their natural size.
   final bool pinActions;
 
   const AetherSheet({
@@ -1399,36 +1429,54 @@ class AetherSheet extends StatelessWidget {
     required this.title,
     required this.child,
     this.actions,
-    this.pinActions = false,
+    this.pinActions = true,
   });
+
+  bool get _hasActions => actions != null && actions!.isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
+    final c = context.aether;
     return LayoutBuilder(
       builder: (context, constraints) {
         final media = MediaQuery.of(context);
         // Some existing callers already inset the sheet. Consume only the
         // remaining keyboard obstruction instead of applying it twice.
-        final consumed = media.size.height - constraints.maxHeight;
+        final consumed = constraints.hasBoundedHeight
+            ? media.size.height - constraints.maxHeight
+            : 0.0;
         final keyboardInset = (media.viewInsets.bottom - consumed)
             .clamp(0.0, media.viewInsets.bottom);
         return Padding(
           padding: EdgeInsets.only(bottom: keyboardInset),
           child: SafeArea(
             top: false,
-            child: Container(
+            child: DecoratedBox(
               decoration: BoxDecoration(
-                color: Aether.surface,
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(AetherRadius.rXl),
                 ),
                 boxShadow: AetherShadows.shadowM,
               ),
-              padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
-              child: LayoutBuilder(
-                builder: (context, bodyConstraints) => pinActions
-                    ? _pinnedBody(bodyConstraints)
-                    : _scrollingBody(bodyConstraints),
+              child: Material(
+                key: const ValueKey('aether-sheet-surface'),
+                color: c.surface,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(AetherRadius.rXl),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
+                  child: LayoutBuilder(
+                    builder: (context, bodyConstraints) {
+                      if (!bodyConstraints.hasBoundedHeight) {
+                        return _naturalBody();
+                      }
+                      return pinActions
+                          ? _pinnedBody(context)
+                          : _scrollingBody(bodyConstraints);
+                    },
+                  ),
+                ),
               ),
             ),
           ),
@@ -1448,12 +1496,30 @@ class AetherSheet extends StatelessWidget {
     ),
   );
 
-  Widget _actionsRow() => OverflowBar(
-    alignment: MainAxisAlignment.end,
-    overflowAlignment: OverflowBarAlignment.end,
-    spacing: 8,
-    overflowSpacing: 8,
-    children: actions!,
+  List<Widget> _header() => [
+    _dragHandle(),
+    const SizedBox(height: 14),
+    Semantics(header: true, child: Text(title, style: AetherType.h2)),
+    const SizedBox(height: 16),
+  ];
+
+  List<Widget> _footer() => [
+    if (_hasActions) ...[
+      const SizedBox(height: 16),
+      OverflowBar(
+        alignment: MainAxisAlignment.end,
+        overflowAlignment: OverflowBarAlignment.end,
+        spacing: 8,
+        overflowSpacing: 8,
+        children: actions!,
+      ),
+    ],
+  ];
+
+  Widget _naturalBody() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    mainAxisSize: MainAxisSize.min,
+    children: [..._header(), child, ..._footer()],
   );
 
   Widget _scrollingBody(BoxConstraints bodyConstraints) {
@@ -1462,57 +1528,82 @@ class AetherSheet extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
-          _dragHandle(),
-          const SizedBox(height: 14),
-          Text(title, style: AetherType.h2),
-          const SizedBox(height: 16),
-          // Keep list/Expanded-based bodies bounded, while
-          // allowing the title and actions to scroll when large
-          // text or the keyboard leaves too little room.
+          ..._header(),
+          // Keep list/Expanded-based bodies bounded, while allowing the title
+          // and actions to scroll when large text or the keyboard leaves too
+          // little room.
           ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: bodyConstraints.maxHeight,
-            ),
+            constraints: BoxConstraints(maxHeight: bodyConstraints.maxHeight),
             child: child,
           ),
-          if (actions != null && actions!.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            _actionsRow(),
-          ],
+          ..._footer(),
         ],
       ),
     );
   }
 
-  Widget _pinnedBody(BoxConstraints bodyConstraints) {
+  /// Smallest body height the full header may leave. Below it (large text
+  /// plus the keyboard) the header collapses to one title line.
+  static const double _minPinnedBody = 120;
+
+  /// Height of the full header ([_header]) at [width].
+  double _fullHeaderHeight(BuildContext context, double width) {
+    final painter = TextPainter(
+      text: TextSpan(text: title, style: AetherType.h2),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+    )..layout(maxWidth: width);
+    final height = 4 + 14 + painter.height + 16;
+    painter.dispose();
+    return height;
+  }
+
+  /// The actions are pinned below the body, so they are always on screen,
+  /// and nothing scrolls except the body itself (no nested outer scroll that
+  /// a filling list would make unreachable). The body gets what is left after
+  /// the header, i.e. maxHeight - chrome. When the full header (handle, the
+  /// wrapped title) would leave less than [_minPinnedBody], the header
+  /// collapses to a single ellipsized title line (its semantics keep the full
+  /// title) to give the body the room.
+  Widget _pinnedBody(BuildContext context) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Flexible(
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _dragHandle(),
-                const SizedBox(height: 14),
-                Text(title, style: AetherType.h2),
-                const SizedBox(height: 16),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: bodyConstraints.maxHeight,
-                  ),
-                  child: child,
-                ),
-              ],
-            ),
+          child: LayoutBuilder(
+            builder: (context, area) {
+              final compact =
+                  area.maxHeight -
+                      _fullHeaderHeight(context, area.maxWidth) <
+                  _minPinnedBody;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (compact) ...[
+                    Semantics(
+                      header: true,
+                      label: title,
+                      child: ExcludeSemantics(
+                        child: Text(
+                          title,
+                          style: AetherType.h2,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ] else
+                    ..._header(),
+                  Flexible(child: child),
+                ],
+              );
+            },
           ),
         ),
-        if (actions != null && actions!.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          _actionsRow(),
-        ],
+        ..._footer(),
       ],
     );
   }

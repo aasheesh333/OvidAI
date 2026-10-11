@@ -37,11 +37,8 @@ Future<bool?> showMcpOAuthSheet(
   required McpOAuthService service,
   McpOAuthLauncher launcher = defaultMcpOAuthLauncher,
 }) {
-  return showModalBottomSheet<bool>(
+  return showAetherSheet<bool>(
     context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    backgroundColor: Colors.transparent,
     isDismissible: false,
     enableDrag: false,
     builder: (_) => McpOAuthSheet(

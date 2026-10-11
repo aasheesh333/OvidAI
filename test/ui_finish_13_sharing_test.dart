@@ -78,14 +78,18 @@ Future<void> _reveal(WidgetTester tester, Finder finder) async {
   // The share list is nested inside the sheet's own scrolling viewport.
   // Lay out the closest viewport's new position before revealing the target
   // through its outer ancestors; a single top-aligned pass can clip it again.
+  // Pinned sheet actions (e.g. "Create link") are outside any scrollable.
   final target = tester.element(finder);
-  await Scrollable.of(target).position.ensureVisible(
-    target.findRenderObject()!,
-    alignment: .5,
-  );
-  await tester.pump();
-  await Scrollable.ensureVisible(target, alignment: .5);
-  await _frames(tester);
+  final scrollable = Scrollable.maybeOf(target);
+  if (scrollable != null) {
+    await scrollable.position.ensureVisible(
+      target.findRenderObject()!,
+      alignment: .5,
+    );
+    await tester.pump();
+    await Scrollable.ensureVisible(target, alignment: .5);
+    await _frames(tester);
+  }
   expect(finder.hitTestable(), findsOneWidget);
   expect(tester.takeException(), isNull);
 }

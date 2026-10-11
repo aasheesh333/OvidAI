@@ -726,14 +726,8 @@ Future<void> _runSourceInstall(
   progress.setPhase('Fetching plugin source…');
   progress.line('Fetching ${source.sourceId}…');
   unawaited(
-    showModalBottomSheet<void>(
+    showAetherSheet<void>(
       context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
       builder: (_) => PluginInstallProgressSheet(
         progress: progress,
         title: 'Installing ${row?.name ?? source.sourceId}',

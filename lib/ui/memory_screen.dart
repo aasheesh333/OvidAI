@@ -136,10 +136,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
     String suggested = 'notes.md',
   }) async {
     if (!await _discard() || !mounted) return;
-    final added = await showModalBottomSheet<String>(
+    final added = await showAetherSheet<String>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
       builder: (context) => _MemoryFileSheet(
         suggested: suggested,
         create: (name) {
@@ -642,8 +640,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-      child: SingleChildScrollView(
-        child: AetherSheet(
+      child: AetherSheet(
       title: 'Add memory file',
       actions: [
         AetherGhostButton(
@@ -662,7 +659,10 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
           },
         ),
       ],
-      child: Column(
+      // The sheet pins Cancel/Add; the body scrolls when large text or the
+      // keyboard leave too little room.
+      child: SingleChildScrollView(
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -716,7 +716,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
             ),
         ],
       ),
-        ),
+      ),
       ),
     );
   }

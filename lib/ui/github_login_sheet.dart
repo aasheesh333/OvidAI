@@ -15,11 +15,8 @@ void showGithubLoginSheet(
   BuildContext context, {
   void Function()? onConnected,
 }) {
-  showModalBottomSheet(
+  showAetherSheet<bool>(
     context: context,
-    backgroundColor: Colors.transparent,
-    isScrollControlled: true,
-    useSafeArea: true,
     isDismissible: false,
     builder: (_) => const GithubLoginSheet(),
   ).then((ok) {

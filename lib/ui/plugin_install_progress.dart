@@ -219,8 +219,7 @@ class _PluginInstallProgressSheetState
     final p = widget.progress;
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-      child: SingleChildScrollView(
-        child: MediaQuery.removeViewInsets(
+      child: MediaQuery.removeViewInsets(
           context: context,
           removeBottom: true,
         child: AetherSheet(
@@ -245,7 +244,9 @@ class _PluginInstallProgressSheetState
             ),
           ),
       ],
-      child: Column(
+      // The sheet pins the action below the body; the body scrolls.
+      child: SingleChildScrollView(
+        child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
