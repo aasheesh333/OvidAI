@@ -141,7 +141,9 @@ def test_session_budgets_are_atomic_across_different_accounts(pg, monkeypatch, b
     elif budget == 'requests':
         monkeypatch.setattr(policy, 'MAX_REQUEST_RECORDS', 4)  # invite + two joins + one append
     else:
-        for i in range(59):
+        # Pin the limit so the seeded history stays within one replay page.
+        monkeypatch.setattr(policy, 'APPEND_RATE_PER_MINUTE', 60)
+        for i in range(policy.APPEND_RATE_PER_MINUTE - 1):
             repo.append('owner', token, message(f'prior-{i}'))
         expected = 'rate_limited'
     def append(i):
