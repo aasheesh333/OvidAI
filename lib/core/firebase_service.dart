@@ -65,6 +65,19 @@ class FirebaseService extends ChangeNotifier {
   User? _user;
 
   bool get isAvailable => _available;
+
+  /// True once Firebase is up and the first auth state was observed, which
+  /// happens BEFORE that account's chat history has hydrated. LoginGate leaves
+  /// the splash here and covers hydration with the account-not-ready screen,
+  /// so cold start no longer grows with history size (F-045).
+  bool get firstUserKnown => _firstUserKnown;
+  bool _firstUserKnown = false;
+
+  void _publishFirstUser() {
+    if (_firstUserKnown) return;
+    _firstUserKnown = true;
+    notifyListeners();
+  }
   bool get consentGiven => _consentGiven;
   bool get consentAsked => _consentAsked;
   bool get isSignedIn => _user != null && !_user!.isAnonymous;
@@ -152,7 +165,9 @@ class FirebaseService extends ChangeNotifier {
         _authSub ??= _userChangesForTest?.listen((user) {
           unawaited(_onUser(user));
         });
-        await _onUser(_user);
+        final first = _onUser(_user);
+        _publishFirstUser();
+        await first;
         return;
       } catch (_) {
         _available = false;
@@ -170,7 +185,11 @@ class FirebaseService extends ChangeNotifier {
       _authSub ??= FirebaseAuth.instance.userChanges().listen((user) {
         unawaited(_onUser(user));
       });
-      await _onUser(_identity.currentUser);
+      // `_onUser` records the user synchronously, then awaits history
+      // hydration; publish the known user before that wait.
+      final first = _onUser(_identity.currentUser);
+      _publishFirstUser();
+      await first;
 
       // Route Flutter + platform errors to Crashlytics only when consented.
       if (_consentGiven) _attachCrashHandlers();
