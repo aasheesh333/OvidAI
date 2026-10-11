@@ -1018,6 +1018,10 @@ class AgentService extends ChangeNotifier {
   set mode(AgentMode m) {
     final s = _runCtx?.session ?? AppState.I.activeSession;
     if (s == null) return;
+    _writeMode(s, m);
+  }
+
+  void _writeMode(ChatSession s, AgentMode m) {
     final wasControl = s.mode == AgentMode.control.name;
     s.mode = m.name;
     if (wasControl && m != AgentMode.control) {
@@ -5762,11 +5766,20 @@ user which one instead of assuming this one.''';
   /// True while ANY session has a run — for global indicators.
   bool get anyBusy => _runs.values.any((r) => r.activeRunId != null);
 
-  void setMode(AgentMode m) {
+  ///
+  /// [sessionId] pins the change to the session whose composer made the pick.
+  /// Without it the target is `_runSession ?? activeSession`, which inside a
+  /// background run's zone is the BACKGROUND session — a foreground mode pick
+  /// must never change (or clear plan mode on) a different chat.
+  void setMode(AgentMode m, {String? sessionId}) {
     // Picking an access mode directly ends plan mode: the picker and the
     // enforcement gate must agree, and any plan-owned read-only is released
     // as part of that exit.
-    final s = _runSession ?? AppState.I.activeSession;
+    final pinned = sessionId == null
+        ? null
+        : AppState.I.sessionById(sessionId);
+    if (sessionId != null && pinned == null) return;
+    final s = pinned ?? _runSession ?? AppState.I.activeSession;
     // FIX 4 (e): a pending entry must be cancelled even when plan mode is not
     // live yet. The old guard was `s.planMode` alone, so a session with
     // `planMode == false && planModePending == true` (a `/plan` queued while a
@@ -5782,7 +5795,11 @@ user which one instead of assuming this one.''';
       s.planModePending = null;
       _releasePlanOwnedMode(s);
     }
-    mode = m; // writes to active session (or detached child)
+    if (pinned != null) {
+      _writeMode(pinned, m);
+    } else {
+      mode = m; // writes to active session (or detached child)
+    }
     events.add(AgentEvent('think', 'access mode → ${m.label}'));
     notifyListeners();
   }
@@ -5917,6 +5934,26 @@ user which one instead of assuming this one.''';
     }
     if (!req.completer.isCompleted) req.completer.complete(ok);
     notifyListeners();
+  }
+
+  /// Resolves [req] only if it is STILL the pending approval.
+  ///
+  /// The approval card captures the request it rendered and calls this, so a
+  /// double-tap on Allow, or a tap that lands while the card is being swapped
+  /// for the next tool's request, can never approve a request the user has
+  /// not seen. Returns whether [req] was resolved.
+  bool approveRequest(ApprovalRequest req, bool ok, {String? note}) {
+    if (!identical(pendingApproval, req)) return false;
+    approve(ok, note: note);
+    return true;
+  }
+
+  /// [approveAlways] bound to the request the card rendered; see
+  /// [approveRequest].
+  bool approveAlwaysRequest(ApprovalRequest req) {
+    if (!identical(pendingApproval, req)) return false;
+    approveAlways();
+    return true;
   }
 
   /// Approve AND remember the requesting tool for the rest of this session:
@@ -19302,6 +19339,22 @@ ${await _agentsMdBlock()}
           return _sensitiveDeviceDenial(packageName);
         }
         final result = DeviceControlService.formatReadResultForTest(raw);
+        // Payment-step guard: a checkout, card form, UPI PIN pad or purchase
+        // sheet inside an app that is NOT on the finance list. The screen is
+        // withheld and every action in that app is refused until a clean
+        // full read (or a different foreground app) shows the step is over.
+        final pkg = packageName.trim().toLowerCase();
+        final ownApp =
+            pkg == 'com.dhanuk.ovidai' || pkg.startsWith('com.dhanuk.ovidai:');
+        if (!ownApp && DeviceControlService.looksLikePaymentScreen(result)) {
+          _paymentScreenPackage = pkg;
+          return _sensitiveDeviceDenial(packageName);
+        }
+        if (_paymentScreenPackage != null &&
+            (_paymentScreenPackage != pkg ||
+                (raw['status'] == 'ok' && raw['full'] == true))) {
+          _paymentScreenPackage = null;
+        }
         if (raw['status'] == 'ok' || raw['status'] == 'unchanged') {
           _emit(
             'shell',
@@ -19329,6 +19382,15 @@ ${await _agentsMdBlock()}
       }
       if (_isSensitiveDeviceTarget(packageName)) {
         return _sensitiveDeviceDenial(packageName);
+      }
+      final flagged = _paymentScreenPackage;
+      if (flagged != null) {
+        if (flagged == packageName.trim().toLowerCase()) {
+          return 'DENIED: the last screen read in $packageName was a payment '
+              'step (PIN, card or purchase confirmation). Please complete it '
+              'yourself, then call device_read with mode "full" before acting.';
+        }
+        _paymentScreenPackage = null;
       }
 
       switch (name) {
@@ -19639,6 +19701,16 @@ ${await _agentsMdBlock()}
       return '$name failed: $error';
     }
   }
+
+  /// Foreground package whose last `device_read` showed a payment step;
+  /// actions there are refused until a clean full read clears it.
+  String? _paymentScreenPackage;
+
+  @visibleForTesting
+  String? get paymentScreenPackageForTest => _paymentScreenPackage;
+
+  @visibleForTesting
+  set paymentScreenPackageForTest(String? v) => _paymentScreenPackage = v;
 
   bool _isSensitiveDeviceTarget(String? packageName) {
     String? url;

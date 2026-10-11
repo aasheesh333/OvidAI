@@ -27,6 +27,8 @@ import 'subagent_screen.dart';
 import 'transcript_model.dart';
 import 'chat_layout.dart';
 import 'html_artifact_view.dart';
+import 'link_safety.dart';
+import '../core/url_safety.dart';
 import '../core/agent_service.dart';
 import '../core/commands.dart';
 import '../core/device_control_service.dart';
@@ -2001,6 +2003,7 @@ class _ChatScreenState extends State<ChatScreen>
   /// `/permission` popupSelect: the mode sheet (same rows as the composer
   /// mode chip), command-driven.
   void _showModeSheetFromCommand(BuildContext context) {
+    final sessionId = AppState.I.activeSessionId;
     showModalBottomSheet(
       context: context,
       backgroundColor: Aether.surface,
@@ -2020,21 +2023,23 @@ class _ChatScreenState extends State<ChatScreen>
             for (final m in modeOptionsForPicker())
               ListTile(
                 dense: true,
-                title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
-                subtitle: Text(
-                  m.hint,
-                  style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                title: Text(
+                  m.label,
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    color: _skipsApprovals(m) ? Aether.dangerC : null,
+                  ),
+                ),
+                subtitle: _accessModeSubtitle(
+                  m,
+                  TextStyle(fontSize: 11, color: Aether.textMuted),
                 ),
                 trailing: AgentService.I.mode == m
                     ? Icon(Icons.check, size: 16, color: Aether.accent)
                     : null,
                 onTap: () async {
                   Navigator.pop(context);
-                  if (m == AgentMode.control) {
-                    await _enableControlMode(context);
-                  } else {
-                    AgentService.I.setMode(m);
-                  }
+                  await _pickAccessMode(context, m, sessionId);
                 },
               ),
             const SizedBox(height: 10),
@@ -3696,6 +3701,24 @@ class _RichToolResultState extends State<_RichToolResult> {
   bool _jsonExpanded = true;
   bool _mermaidExpanded = false;
 
+  /// Link recognizers created by the current build. Owned here so they are
+  /// disposed when the spans are rebuilt or the card goes away instead of
+  /// leaking one per URL per build.
+  final List<TapGestureRecognizer> _recognizers = [];
+
+  void _disposeRecognizers() {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+  }
+
+  @override
+  void dispose() {
+    _disposeRecognizers();
+    super.dispose();
+  }
+
   static final _urlRe = RegExp(r'https?://[^\s)\]}>,"]+', caseSensitive: false);
   static final _hexColorRe = RegExp(r'#([0-9a-fA-F]{6})\b');
   static final _mermaidFenceRe = RegExp(
@@ -3720,6 +3743,7 @@ class _RichToolResultState extends State<_RichToolResult> {
 
   @override
   Widget build(BuildContext context) {
+    _disposeRecognizers();
     final content = widget.content;
     final baseColor = widget.isError ? Aether.dangerC : Aether.text;
 
@@ -3984,7 +4008,13 @@ class _RichToolResultState extends State<_RichToolResult> {
           );
         }
       } else {
-        // Tappable URL.
+        // Tappable URL. Tool output is attacker-influenced (web fetch, MCP,
+        // shell): never launch on one tap. The confirm sheet shows the real,
+        // decoded host with any `user@` prefix stripped.
+        final url = m.value;
+        final recognizer = TapGestureRecognizer()
+          ..onTap = () => _openToolOutputLink(context, url);
+        _recognizers.add(recognizer);
         spans.add(
           TextSpan(
             text: m.value,
@@ -3993,13 +4023,7 @@ class _RichToolResultState extends State<_RichToolResult> {
               decoration: TextDecoration.underline,
               decorationColor: Aether.accent,
             ),
-            recognizer: (TapGestureRecognizer()
-              ..onTap = () {
-                final uri = Uri.tryParse(m.value);
-                if (uri != null) {
-                  launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              }),
+            recognizer: recognizer,
           ),
         );
       }
@@ -7397,6 +7421,64 @@ class _ApprovalDockState extends State<_ApprovalDock> {
   // grants are per mode + per session by construction, so there is no scope to
   // pick. `AgentService.approve(false, note:)` still exists for programmatic
   // callers.
+
+  /// Taps that land this soon after a NEW request replaces the card are
+  /// ignored: a double-tap on Allow, or a tap aimed at the previous card,
+  /// must not approve a request the user has not had a chance to read.
+  static const _armDelay = Duration(milliseconds: 300);
+
+  /// Details longer than this are shown in a scrollable box with a
+  /// "Show all (N lines)" toggle instead of being clamped.
+  static const _detailPreviewLines = 8;
+
+  ApprovalRequest? _shown;
+  bool _armed = false;
+  bool _expanded = false;
+  Timer? _armTimer;
+
+  @override
+  void dispose() {
+    _armTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Called from build: (re)arms the tap guard whenever a different request
+  /// is rendered. Only mutates plain fields; the timer's setState runs later.
+  void _track(ApprovalRequest req) {
+    if (identical(req, _shown)) return;
+    _shown = req;
+    _armed = false;
+    _expanded = false;
+    _armTimer?.cancel();
+    _armTimer = Timer(_armDelay, () {
+      if (mounted) setState(() => _armed = true);
+    });
+  }
+
+  /// Resolves exactly the request [req] the card rendered — never whatever
+  /// happens to be pending by the time the tap is delivered.
+  void _decide(ApprovalRequest req, {required bool ok, bool always = false}) {
+    if (!_armed || !identical(req, _shown)) return;
+    if (always) {
+      AgentService.I.approveAlwaysRequest(req);
+    } else {
+      AgentService.I.approveRequest(req, ok);
+    }
+  }
+
+  static String _toolLabel(String tool) {
+    final words = tool
+        .replaceAll(RegExp(r'[_\-.]+'), ' ')
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty)
+        .toList();
+    if (words.isEmpty) return 'Approval needed';
+    final first = words.first;
+    words[0] = first[0].toUpperCase() + first.substring(1);
+    return words.join(' ');
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -7423,116 +7505,202 @@ class _ApprovalDockState extends State<_ApprovalDock> {
           return _QuestionsCard(req, key: ObjectKey(req));
         }
         // ── Standard approve/deny card: exactly three actions ──
-        return Container(
-          margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: Aether.warnLight.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Icon(
+        _track(req);
+        return _standardCard(context, req);
+      },
+    );
+  }
+
+  Widget _standardCard(BuildContext context, ApprovalRequest req) {
+    // Title says WHICH tool is asking; the monospace box below shows exactly
+    // what will run. When there is no separate detail, the summary itself is
+    // the thing being approved, so it goes in the (never clamped) box.
+    final hasDetail = req.detail.isNotEmpty && req.detail != req.summary;
+    final title = hasDetail && req.summary.trim().isNotEmpty
+        ? req.summary.trim()
+        : _toolLabel(req.tool);
+    final body = hasDetail ? req.detail : req.summary;
+    final lines = body.split('\n');
+    final long = lines.length > _detailPreviewLines;
+    final isCommit = req.tool == 'commit';
+    final screenH = MediaQuery.sizeOf(context).height;
+    final maxBoxH = _expanded ? math.max(180.0, screenH * 0.5) : 180.0;
+    final monoStyle = TextStyle(
+      fontSize: 12,
+      height: 1.4,
+      color: Aether.text,
+      fontFamily: Aether.mono,
+    );
+
+    final buttonText = const TextStyle(fontSize: 13);
+    final deny = OutlinedButton(
+      key: const ValueKey('approval-deny'),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: Aether.dangerC,
+        side: BorderSide(color: Aether.dangerC.withValues(alpha: 0.6)),
+        minimumSize: const Size(64, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+      ),
+      onPressed: () => _decide(req, ok: false),
+      child: Text('Deny', style: buttonText),
+    );
+    final allow = FilledButton(
+      key: const ValueKey('approval-allow'),
+      style: FilledButton.styleFrom(
+        backgroundColor: Aether.successLight,
+        foregroundColor: Colors.white,
+        minimumSize: const Size(64, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+      ),
+      onPressed: () => _decide(req, ok: true),
+      child: Text('Allow', style: buttonText),
+    );
+    // No scope choice: an Always Allow is recorded for THIS mode and THIS
+    // session, persists across restarts, and is purged when the session is
+    // deleted.
+    final always = req.allowAlways
+        ? TextButton(
+            key: const ValueKey('approval-always'),
+            style: TextButton.styleFrom(
+              foregroundColor: Aether.accentC,
+              minimumSize: const Size(64, 48),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+            ),
+            onPressed: () => _decide(req, ok: true, always: true),
+            child: Text(
+              'Always Allow',
+              textAlign: TextAlign.center,
+              style: buttonText,
+            ),
+          )
+        : null;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      decoration: BoxDecoration(
+        color: Aether.warnLight.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
+      ),
+      child: Semantics(
+        container: true,
+        liveRegion: true,
+        label: 'Approval required: $title',
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 1),
+                  child: Icon(
                     Icons.warning_amber_rounded,
                     size: 16,
                     color: Aether.warnLight,
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: req.tool == 'commit'
-                        ? SizedBox(
-                            key: const ValueKey('commit-approval-detail'),
-                            height: 180,
-                            child: Scrollbar(
-                              child: SingleChildScrollView(
-                                key: ObjectKey(req),
-                                child: SelectionArea(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      for (final line in req.detail.split('\n'))
-                                        Text(
-                                          line,
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            height: 1.4,
-                                            color: Aether.text,
-                                            fontFamily: Aether.mono,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          )
-                        : Text(
-                            req.detail.isNotEmpty && req.detail != req.summary
-                                ? req.detail
-                                : req.summary,
-                            maxLines: 8,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12,
-                              height: 1.4,
-                              color: Aether.text,
-                              fontFamily: Aether.mono,
-                            ),
-                          ),
-                  ),
-                  const SizedBox(width: 6),
-                  // EXACTLY THREE actions (owner requirement, 2026-09-24):
-                  // Deny, Allow, Always Allow. The card used to carry a fourth
-                  // "Deny with a note" icon button plus a This session /
-                  // All sessions scope row. The note dialog is gone, and the
-                  // scope choice is gone with it — grants are now per MODE and
-                  // per session by construction, so there is nothing to choose.
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Aether.danger,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: Size.zero,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Aether.text,
                     ),
-                    child: const Text('Deny', style: TextStyle(fontSize: 12)),
-                    onPressed: () => AgentService.I.approve(false),
                   ),
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Aether.successLight,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: Size.zero,
-                    ),
-                    child: const Text('Allow', style: TextStyle(fontSize: 12)),
-                    onPressed: () => AgentService.I.approve(true),
-                  ),
-                  if (req.allowAlways)
-                    TextButton(
-                      style: TextButton.styleFrom(
-                        foregroundColor: Aether.accent,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: Size.zero,
+                ),
+              ],
+            ),
+            if (body.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              // Detail on its own full-width row (never squeezed beside the
+              // buttons) and never clamped: anything past the box height
+              // scrolls, so every byte being approved is reachable.
+              ConstrainedBox(
+                key: ValueKey(
+                  isCommit ? 'commit-approval-detail' : 'approval-detail',
+                ),
+                constraints: BoxConstraints(maxHeight: maxBoxH),
+                child: Scrollbar(
+                  child: SingleChildScrollView(
+                    key: ObjectKey(req),
+                    child: SelectionArea(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (final line in lines) Text(line, style: monoStyle),
+                        ],
                       ),
-                      child: const Text(
-                        'Always Allow',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                      // No scope choice: an Always Allow is recorded for THIS
-                      // mode and THIS session, persists across restarts, and is
-                      // purged when the session is deleted.
-                      onPressed: () => AgentService.I.approveAlways(),
                     ),
-                ],
+                  ),
+                ),
               ),
+              if (long)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: Aether.textMuted,
+                      minimumSize: const Size(48, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                    ),
+                    onPressed: () => setState(() => _expanded = !_expanded),
+                    child: Text(
+                      _expanded
+                          ? 'Show less'
+                          : 'Show all (${lines.length} lines)',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
             ],
-          ),
-        );
-      },
+            const SizedBox(height: 8),
+            // Full-width action row. Narrow widths (or large text) move
+            // Always Allow onto its own row so Deny / Allow keep a wide,
+            // well-separated 48dp target.
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final scale = MediaQuery.textScalerOf(context).scale(1);
+                final oneRow =
+                    always == null || constraints.maxWidth / scale >= 300;
+                if (oneRow) {
+                  return Row(
+                    children: [
+                      Expanded(child: deny),
+                      if (always != null) ...[
+                        const SizedBox(width: 8),
+                        Expanded(child: always),
+                      ],
+                      const SizedBox(width: 8),
+                      Expanded(child: allow),
+                    ],
+                  );
+                }
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(child: deny),
+                        const SizedBox(width: 8),
+                        Expanded(child: allow),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    always,
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -8128,6 +8296,7 @@ class _ModeChip extends StatelessWidget {
   }
 
   void _showModeSheet(BuildContext context) {
+    final sessionId = AppState.I.activeSessionId;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -8149,11 +8318,21 @@ class _ModeChip extends StatelessWidget {
               for (final m in modeOptionsForPicker())
                 ListTile(
                   dense: true,
-                  leading: Icon(m.icon, size: 18, color: m.color),
-                  title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
-                  subtitle: Text(
-                    m.hint,
+                  leading: Icon(
+                    m.icon,
+                    size: 18,
+                    color: _skipsApprovals(m) ? Aether.dangerC : m.color,
+                  ),
+                  title: Text(
+                    m.label,
                     style: TextStyle(
+                      fontSize: 13.5,
+                      color: _skipsApprovals(m) ? Aether.dangerC : null,
+                    ),
+                  ),
+                  subtitle: _accessModeSubtitle(
+                    m,
+                    TextStyle(
                       fontSize: 11,
                       color: Aether.textFaint,
                       height: 1.4,
@@ -8164,11 +8343,7 @@ class _ModeChip extends StatelessWidget {
                       : null,
                   onTap: () async {
                     Navigator.pop(context);
-                    if (m == AgentMode.control) {
-                      await _enableControlMode(context);
-                    } else {
-                      AgentService.I.setMode(m);
-                    }
+                    await _pickAccessMode(context, m, sessionId);
                   },
                 ),
               const SizedBox(height: 8),
@@ -8177,6 +8352,104 @@ class _ModeChip extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Modes that skip every app-level approval prompt. They get a danger
+/// accent and an explicit "Tools run without asking" line in both access-mode
+/// sheets, and a confirmation before they are switched on.
+bool _skipsApprovals(AgentMode m) => m == AgentMode.drive;
+
+Widget _accessModeSubtitle(AgentMode m, TextStyle base) {
+  if (!_skipsApprovals(m)) return Text(m.hint, style: base);
+  return Text.rich(
+    TextSpan(
+      style: base,
+      children: [
+        TextSpan(
+          text: 'Tools run without asking. ',
+          style: TextStyle(
+            color: Aether.dangerC,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        TextSpan(text: m.hint),
+      ],
+    ),
+  );
+}
+
+/// Sessions (this process) where the user already confirmed Full Access.
+/// Re-confirmation is still required while a run is active in the session.
+final Set<String> _fullAccessConfirmedSessions = <String>{};
+
+@visibleForTesting
+void debugResetFullAccessConfirmations() =>
+    _fullAccessConfirmedSessions.clear();
+
+/// The single path both access-mode sheets use to apply a pick. Switching to
+/// Full Access is confirmed the first time per session and whenever a run is
+/// in progress there (it takes effect on that run's next tool call), and the
+/// change is pinned to the composer's [sessionId] so a background run's
+/// session is never the one modified.
+Future<void> _pickAccessMode(
+  BuildContext context,
+  AgentMode m,
+  String? sessionId,
+) async {
+  if (m == AgentMode.control) {
+    await _enableControlMode(context);
+    return;
+  }
+  final session = AppState.I.sessionById(sessionId);
+  final current = AgentMode.values.firstWhere(
+    (x) => x.name == session?.mode,
+    orElse: () => AgentService.I.mode,
+  );
+  if (_skipsApprovals(m) && current != m) {
+    final key = sessionId ?? '';
+    final running = sessionId != null && AgentService.I.busyFor(sessionId);
+    if (running || !_fullAccessConfirmedSessions.contains(key)) {
+      if (!context.mounted) return;
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (d) => AlertDialog(
+          key: const ValueKey('full-access-confirm'),
+          title: const Text('Switch to Full Access?'),
+          content: SingleChildScrollView(
+            child: Text(
+              'Ovid will run commands and change files without asking. '
+              'Destructive commands still ask.'
+              '${running ? '\n\nA task is running in this chat. The change '
+                        'applies from its next tool call.' : ''}',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(d, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Aether.dangerC,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(d, true),
+              child: const Text('Switch to Full Access'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      _fullAccessConfirmedSessions.add(key);
+    }
+  }
+  if (sessionId != null) {
+    // The chat may have been deleted while the dialog was open.
+    if (AppState.I.sessionById(sessionId) == null) return;
+    AgentService.I.setMode(m, sessionId: sessionId);
+  } else {
+    AgentService.I.setMode(m);
   }
 }
 
@@ -8627,6 +8900,9 @@ class _OvidMarkdown extends StatelessWidget {
       // in-app browser, matching a real chat surface.
       selectable: true,
       onTapLink: (text, href, title) => _openLink(context, text, href, title),
+      // Never the package default (Image.network on render / Image.file for
+      // any path): remote images wait for a tap, see [safeMarkdownImage].
+      imageBuilder: safeMarkdownImage,
       builders: {'code': _OvidInlineCodeBuilder()},
       styleSheet: MarkdownStyleSheet(
         // Line-heights follow the captured reference: base 24px at 14px,
@@ -8694,10 +8970,36 @@ class _OvidMarkdown extends StatelessWidget {
   }
 }
 
+/// Open a URL found in tool output — only after the user has seen its real
+/// host in the confirm sheet. http(s) only; userinfo is stripped.
+Future<void> _openToolOutputLink(BuildContext context, String raw) async {
+  final link = safeLinkFrom(raw, webOnly: true);
+  if (link == null) return;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final choice = await confirmLinkSheet(context, link);
+  if (choice != LinkChoice.open) return;
+  try {
+    final ok = await launchUrl(link.uri, mode: LaunchMode.externalApplication);
+    if (!ok) throw StateError('not launched');
+  } catch (_) {
+    messenger?.showSnackBar(
+      const SnackBar(
+        content: Text('Could not open this link.'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+}
+
 /// Open a markdown link: http(s) in the in-app browser (so the agent and the
-/// user share one browsing surface), everything else (mailto:, tel:, custom
-/// schemes) through the platform handler. External launches that nothing can
-/// handle fall back to the in-app browser so the tap never dies silently.
+/// user share one browsing surface, and its address bar shows the real
+/// domain), everything else (mailto:, tel:, custom schemes) through the
+/// platform handler.
+///
+/// Model-authored links are attacker-influenced, so a confirm sheet with the
+/// real host comes first whenever the link could deceive: a non-http(s)
+/// scheme (it triggers another app), a `user@` prefix, an internationalized
+/// host, or link text that names a different site than the href.
 Future<void> _openLink(
   BuildContext context,
   String text,
@@ -8713,7 +9015,7 @@ Future<void> _openLink(
       r'^(www\.)?[\w-]+(\.[\w-]+)+(/.*)?$',
     ).firstMatch(t);
     if (domainLike == null) return;
-    raw = t.startsWith('www.') ? 'https://$t' : 'https://$t';
+    raw = 'https://$t';
   }
   var uri = Uri.tryParse(raw);
   // Schemeless hrefs ("example.com/a") are relative in markdown terms, but
@@ -8722,35 +9024,41 @@ Future<void> _openLink(
     uri = Uri.tryParse('https://$raw');
   }
   if (uri == null) return;
+  final link = safeLinkFrom(uri.toString());
+  if (link == null) return;
   final messenger = ScaffoldMessenger.of(context);
-  void fallback() => launchUrl(uri!, mode: LaunchMode.externalApplication);
-  if (uri.scheme == 'http' || uri.scheme == 'https') {
-    await BrowserScreen.open(context, url: uri.toString());
+  final needsConfirm =
+      !link.isWeb ||
+      link.hadUserInfo ||
+      link.isIdn ||
+      linkTextMisleads(text, link);
+  if (needsConfirm) {
+    final choice = await confirmLinkSheet(context, link, linkText: text);
+    if (choice != LinkChoice.open || !context.mounted) return;
+  }
+  if (link.isWeb) {
+    await BrowserScreen.open(context, url: link.uri.toString());
     return;
   }
   try {
-    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    final ok = await launchUrl(link.uri, mode: LaunchMode.externalApplication);
     if (!ok) {
       // No handler (missing <queries> entry / app not installed) — tell the
       // user instead of swallowing the failure.
       messenger.showSnackBar(
         SnackBar(
-          content: Text('No app can open ${uri.scheme} links.'),
+          content: Text('No app can open ${link.uri.scheme} links.'),
           behavior: SnackBarBehavior.floating,
         ),
       );
     }
   } catch (_) {
-    try {
-      fallback();
-    } catch (_) {
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Could not open this link.'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('Could not open this link.'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 }
 

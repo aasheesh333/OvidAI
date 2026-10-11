@@ -900,10 +900,10 @@ class _StudioScreenState extends State<StudioScreen> {
                 // the gate, Decline rejects it. Both actions tick off the
                 // approval contract in agent_service.dart via approve().
                 _ApprovalBanner(
-                  onDecision: (ok) {
-                    final a = AgentService.I.pendingApproval;
-                    if (a == null) return;
-                    AgentService.I.approve(ok);
+                  onDecision: (a, ok) {
+                    // Bound to the request the banner rendered: a stale tap
+                    // must never resolve the NEXT pending approval.
+                    if (!AgentService.I.approveRequest(a, ok)) return;
                     if (!ok) {
                       showStudioToast(context, 'Declined ${a.tool}');
                     }
@@ -2207,7 +2207,7 @@ class _Avatar extends StatelessWidget {
 class _ApprovalBanner extends StatelessWidget {
   const _ApprovalBanner({required this.onDecision});
 
-  final void Function(bool ok) onDecision;
+  final void Function(ApprovalRequest request, bool ok) onDecision;
 
   @override
   Widget build(BuildContext context) {
@@ -2264,13 +2264,22 @@ class _ApprovalBanner extends StatelessWidget {
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(color: Aether.hairline),
                       ),
-                      child: Text(
-                        a.detail,
-                        style: TextStyle(
-                          fontFamily: Aether.mono,
-                          fontFamilyFallback: kStudioMonoFallback,
-                          fontSize: 12,
-                          color: Aether.textMuted,
+                      // Capped so a long write_file body cannot push the
+                      // editor off screen, but scrollable so nothing being
+                      // approved is hidden.
+                      constraints: const BoxConstraints(maxHeight: 160),
+                      child: Scrollbar(
+                        child: SingleChildScrollView(
+                          key: ObjectKey(a),
+                          child: Text(
+                            a.detail,
+                            style: TextStyle(
+                              fontFamily: Aether.mono,
+                              fontFamilyFallback: kStudioMonoFallback,
+                              fontSize: 12,
+                              color: Aether.textMuted,
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -2287,7 +2296,7 @@ class _ApprovalBanner extends StatelessWidget {
                         child: AetherGhostButton(
                         label: 'Decline',
                         icon: Icons.block,
-                        onPressed: () => onDecision(false),
+                        onPressed: () => onDecision(a, false),
                         ),
                       ),
                       SizedBox(
@@ -2296,7 +2305,7 @@ class _ApprovalBanner extends StatelessWidget {
                         child: AetherPrimaryButton(
                         label: 'Approve',
                         icon: Icons.check,
-                        onPressed: () => onDecision(true),
+                        onPressed: () => onDecision(a, true),
                         ),
                       ),
                     ],

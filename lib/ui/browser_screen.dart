@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../core/theme.dart';
 import '../core/agent_service.dart';
+import '../core/url_safety.dart';
 import 'widgets/aether_primitives.dart';
 
 /// Turns address-bar input into a web URL when it looks like a host, while
@@ -54,7 +55,7 @@ class BrowserScreen extends StatefulWidget {
 
 class _BrowserScreenState extends State<BrowserScreen> {
   final _agent = AgentService.I;
-  final TextEditingController _url = TextEditingController();
+  final _OmnibarController _url = _OmnibarController();
   // The focus node is owned here (not by AetherField) because tapping the
   // omnibar must flip the controller from the displayed title back to the
   // live URL, and the Aether primitive does not expose an onTap/onTapOutside
@@ -90,7 +91,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final t = agent.browserTabs.isNotEmpty
         ? agent.browserTabs[agent.activeTabIndex]
         : null;
-    if (t != null) _url.text = _omnibarText(t);
+    if (t != null) _syncOmnibar(t);
   }
 
   void _onUrlFocusChanged() {
@@ -112,9 +113,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (!mounted) return;
     // Keep the omnibar synced with the active tab (agent navigations too).
     final tab = _activeTab;
-    if (tab != null && !_editingUrl && _url.text != _omnibarText(tab)) {
-      _url.text = _omnibarText(tab);
-    }
+    if (tab != null && !_editingUrl) _syncOmnibar(tab);
     setState(() {});
     unawaited(_refreshHistoryAvailability());
   }
@@ -166,10 +165,30 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
+  /// What the omnibar shows while not editing: ALWAYS where the page is,
+  /// never the page `<title>` (a page at evil.example titled "Sign in –
+  /// Google Accounts" must not read as Google). The host is shown in ASCII
+  /// form, so a punycode look-alike stays visibly odd; the title lives in the
+  /// tab chip only.
   String _omnibarText(BrowserTab tab) {
     if (tab.localPreviewPath != null) return 'Live preview';
-    final title = tab.title?.trim();
-    return title == null || title.isEmpty ? tab.url : title;
+    final link = safeLinkFrom(tab.url);
+    final host = link?.asciiHost ?? '';
+    return host.isEmpty ? tab.url : host;
+  }
+
+  /// Registrable domain (eTLD+1) of the active tab, emphasised in the
+  /// omnibar so the attacker-controllable subdomain part reads as secondary.
+  String? _omnibarEmphasis(BrowserTab tab) {
+    if (tab.localPreviewPath != null) return null;
+    final link = safeLinkFrom(tab.url);
+    if (link == null || link.asciiHost.isEmpty) return null;
+    return registrableDomainOf(link.asciiHost);
+  }
+
+  void _syncOmnibar(BrowserTab tab) {
+    _url.emphasis = _omnibarEmphasis(tab);
+    if (_url.text != _omnibarText(tab)) _url.text = _omnibarText(tab);
   }
 
   void _beginUrlEditing() {
@@ -178,6 +197,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     setState(() {
       _editingUrl = true;
       _url
+        ..emphasis = null
         ..text = tab.url
         ..selection = TextSelection.collapsed(offset: tab.url.length);
     });
@@ -187,7 +207,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     setState(() {
       _editingUrl = false;
       final tab = _activeTab;
-      if (tab != null) _url.text = _omnibarText(tab);
+      if (tab != null) _syncOmnibar(tab);
     });
   }
 
@@ -458,20 +478,44 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     horizontal: 10,
                     vertical: 11,
                   ),
+                  // Connection state, never a trust signal: the lock is
+                  // neutral (https says nothing about WHO the site is), and
+                  // plain http is called out as "Not secure".
                   prefixIcon: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Icon(
-                      tab?.localPreviewPath != null
-                          ? Icons.preview_outlined
-                          : (tab?.url ?? '').startsWith('https')
-                          ? Icons.lock_outline
-                          : Icons.public,
-                      size: 14,
-                      color: tab?.localPreviewPath != null
-                          ? Aether.accent
-                          : (tab?.url ?? '').startsWith('https')
-                          ? Aether.successLight
-                          : Aether.textFaint,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          tab?.localPreviewPath != null
+                              ? Icons.preview_outlined
+                              : (tab?.url ?? '').startsWith('https:')
+                              ? Icons.lock_outline
+                              : (tab?.url ?? '').startsWith('http:')
+                              ? Icons.no_encryption_outlined
+                              : Icons.public,
+                          size: 14,
+                          color: tab?.localPreviewPath != null
+                              ? Aether.accent
+                              : (tab?.url ?? '').startsWith('http:')
+                              ? Aether.warnLight
+                              : Aether.textMuted,
+                        ),
+                        if (tab?.localPreviewPath == null &&
+                            (tab?.url ?? '').startsWith('http:') &&
+                            !_editingUrl) ...[
+                          const SizedBox(width: 4),
+                          Text(
+                            'Not secure',
+                            key: const ValueKey('browser-not-secure'),
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: Aether.warnLight,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                   onSubmitted: (value) {
@@ -903,6 +947,44 @@ class _PopupNotice extends StatelessWidget {
           );
         },
       ),
+    );
+  }
+}
+
+/// Omnibar controller that, while showing an address (not editing), dims
+/// everything before the registrable domain: in `accounts.google.com.evil.example`
+/// only `evil.example` is emphasised.
+class _OmnibarController extends TextEditingController {
+  String? emphasis;
+
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final e = emphasis;
+    final t = text;
+    if (e == null || e.isEmpty || !t.endsWith(e) || t.length == e.length) {
+      return super.buildTextSpan(
+        context: context,
+        style: style,
+        withComposing: withComposing,
+      );
+    }
+    final cut = t.length - e.length;
+    return TextSpan(
+      style: style,
+      children: [
+        TextSpan(
+          text: t.substring(0, cut),
+          style: TextStyle(color: Aether.textMuted),
+        ),
+        TextSpan(
+          text: e,
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ],
     );
   }
 }

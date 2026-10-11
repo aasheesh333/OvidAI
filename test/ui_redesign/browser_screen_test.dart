@@ -136,10 +136,8 @@ void main() {
 
     final field = find.byType(TextField);
     expect(field, findsOneWidget);
-    expect(
-      tester.widget<TextField>(field).controller!.text,
-      'Some page title',
-    );
+    // At rest the omnibar shows the host, never the page title (F-028).
+    expect(tester.widget<TextField>(field).controller!.text, 'example.test');
 
     await tester.tap(field);
     await tester.pump();
@@ -148,6 +146,42 @@ void main() {
       'https://example.test/page',
     );
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('omnibar shows the real domain, not a spoofed title', (
+    tester,
+  ) async {
+    AgentService.I.browserTabs.add(
+      BrowserTab(url: 'https://accounts.google.com.evil.example/signin')
+        ..title = 'Google',
+    );
+    await pumpBrowser(tester);
+    final field = find.byType(TextField);
+    final text = tester.widget<TextField>(field).controller!.text;
+    expect(text, contains('evil.example'));
+    expect(text, isNot(contains('Google')));
+    // The registrable domain is the emphasised part.
+    final span = tester
+        .widget<TextField>(field)
+        .controller!
+        .buildTextSpan(
+          context: tester.element(field),
+          style: const TextStyle(),
+          withComposing: false,
+        );
+    final parts = span.children!.cast<TextSpan>();
+    expect(parts.last.text, 'evil.example');
+    expect(parts.last.style!.fontWeight, FontWeight.w600);
+    expect(find.byKey(const ValueKey('browser-not-secure')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('plain http is labelled Not secure', (tester) async {
+    AgentService.I.browserTabs.add(BrowserTab(url: 'http://example.org/'));
+    await pumpBrowser(tester);
+    expect(find.byKey(const ValueKey('browser-not-secure')), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'example.org');
   });
 
   testWidgets(
