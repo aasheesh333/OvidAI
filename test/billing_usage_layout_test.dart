@@ -93,8 +93,11 @@ void main() {
       await pump(tester, const BillingScreen(), width);
       expect(tester.takeException(), isNull);
       expect(find.text('37% remaining'), findsOneWidget);
-      for (final price in ['₹499', '₹899', '₹1699']) {
-        await tester.scrollUntilVisible(find.text(price), 150);
+      for (final plan in ['3x', '7x', '15x']) {
+        await tester.scrollUntilVisible(
+          find.byKey(ValueKey('plan-$plan')),
+          150,
+        );
         expectNoInternalCopy(tester);
         expect(tester.takeException(), isNull);
       }
@@ -107,7 +110,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('upgrade-3x')));
       await tester.pumpAndSettle();
-      expect(find.textContaining('Pay now · ₹'), findsOneWidget);
+      expect(find.byKey(const ValueKey('billing-pay-now')), findsOneWidget);
       expect(tester.takeException(), isNull);
       expectNoInternalCopy(tester);
     });
@@ -238,7 +241,7 @@ void main() {
         await tester.scrollUntilVisible(find.text('Upgrade').first, 150);
         await tester.tap(find.text('Upgrade').first);
         await tester.pumpAndSettle();
-        final pay = find.widgetWithText(FilledButton, 'Pay now · ₹499');
+        final pay = find.byKey(const ValueKey('billing-pay-now'));
         await tester.tap(pay);
         await tester.pump();
         expect(
@@ -256,13 +259,16 @@ void main() {
         await tester.pumpAndSettle();
         expect(AppState.I.ovidCloudTier, tier);
         expect(
-          find.text(
-            success
-                ? 'You are now on the Plus plan.'
-                : 'Could not complete the upgrade. Try again.',
-          ),
+          success
+              ? find.text('You are now on the Plus plan.')
+              : find.textContaining('could not confirm this plan'),
           findsOneWidget,
         );
+        if (!success) {
+          // The sheet stays open on failure; close it to inspect the screen.
+          await tester.tap(find.text('Cancel'));
+          await tester.pumpAndSettle();
+        }
         await tester.drag(find.byType(ListView), const Offset(0, 1500));
         await tester.pumpAndSettle();
         expect(find.text(success ? 'PLUS' : 'FREE'), findsOneWidget);

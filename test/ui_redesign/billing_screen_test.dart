@@ -67,22 +67,13 @@ void main() {
     AppState.resetTestInstance();
   });
 
-  testWidgets('renders four plan cards with INR prices and multipliers', (
+  testWidgets('renders four plan cards with multipliers and no fixed prices', (
     tester,
   ) async {
     await _pumpBilling(tester);
 
     // Scroll the whole list so every lazily-built card is materialised.
-    for (final marker in [
-      'Free',
-      'Plus',
-      '₹499',
-      'Pro',
-      '₹899',
-      'Max',
-      '₹1699',
-      '×15',
-    ]) {
+    for (final marker in ['Free', 'Plus', 'Pro', 'Max', '×15']) {
       await tester.scrollUntilVisible(find.text(marker).first, 140);
       await tester.pump();
     }
@@ -93,10 +84,8 @@ void main() {
     expect(find.text('Pro'), findsOneWidget);
     expect(find.text('Max'), findsOneWidget);
 
-    // INR prices for paid plans; 'Free' label for the free tile.
-    expect(find.text('₹499'), findsOneWidget);
-    expect(find.text('₹899'), findsOneWidget);
-    expect(find.text('₹1699'), findsOneWidget);
+    // Prices come only from Google Play (localised); never hard-coded INR.
+    expect(find.textContaining('₹'), findsNothing);
 
     // Multiplier chips.
     expect(find.text('×1'), findsOneWidget);
@@ -157,8 +146,8 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('upgrade-3x')));
       await tester.pumpAndSettle();
 
-      // Confirm the "Pay now" sheet is open and tap it.
-      final pay = find.widgetWithText(FilledButton, 'Pay now · ₹499');
+      // Confirm the checkout sheet is open and tap it.
+      final pay = find.widgetWithText(FilledButton, 'Activate test plan');
       expect(pay, findsOneWidget);
       await tester.tap(pay);
       await tester.pumpAndSettle();

@@ -202,11 +202,13 @@ class PlayBillingService extends ChangeNotifier {
   Future<void> ensureLoaded() => _loading ??= _load();
 
   Future<void> _load() async {
-    _subscription ??= _platform.purchaseStream.listen(
-      _onPurchases,
-      onError: (Object e) => Diag.swallow('play_billing.stream', e),
-    );
     try {
+      // Inside the try: without the platform plugin (tests, unsupported
+      // devices) the stream getter throws; that simply means no Play.
+      _subscription ??= _platform.purchaseStream.listen(
+        _onPurchases,
+        onError: (Object e) => Diag.swallow('play_billing.stream', e),
+      );
       _available = await _platform.isAvailable();
       if (_available) {
         final response = await _platform.queryProductDetails(
