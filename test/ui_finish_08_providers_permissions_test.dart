@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/grant_store.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -34,6 +36,7 @@ void main() {
 
   tearDown(() {
     fetchProviderModelsForTest = null;
+    providerModelsHttpClientForTest = null;
     removeCustomProviderForTest = null;
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AppState.resetTestInstance();
@@ -264,6 +267,10 @@ void main() {
     app = AppState.createForTest();
     app.providers.removeWhere((p) => p.id != AppState.ovidCloudProviderId);
     final provider = populate();
+    // The save path verifies the key with a /models probe before closing.
+    providerModelsHttpClientForTest = MockClient(
+      (_) async => http.Response('{"data":[{"id":"m1"}]}', 200),
+    );
     await host(tester, const ProvidersScreen());
     await reveal(tester, find.widgetWithText(TextButton, 'API key'));
     await tester.tap(find.widgetWithText(TextButton, 'API key'));

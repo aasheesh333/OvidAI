@@ -23,7 +23,122 @@ Future<String?> Function(String providerId)? removeCustomProviderForTest;
 @visibleForTesting
 Future<String?> Function(ProviderConfig provider)? fetchProviderModelsForTest;
 
+/// Test seam: HTTP client used for the provider `/models` probe (Fetch
+/// models and the post-save key check). Null uses a fresh [http.Client].
+@visibleForTesting
+http.Client? providerModelsHttpClientForTest;
+
 enum _FetchState { idle, busy, success, error, empty }
+
+/// Outcome of a `GET {baseUrl}/models` probe against a BYOK provider.
+@visibleForTesting
+class ProviderModelsProbe {
+  /// Model ids returned (empty on failure or an empty listing).
+  final List<String> ids;
+
+  /// Human-readable failure, or null on HTTP 200.
+  final String? error;
+
+  const ProviderModelsProbe.ok(this.ids) : error = null;
+  const ProviderModelsProbe.failed(this.error) : ids = const [];
+
+  bool get ok => error == null;
+}
+
+/// Map a `/models` HTTP status to something the user can act on.
+@visibleForTesting
+String describeProviderProbeStatus(int status) {
+  if (status == 401 || status == 403) {
+    return 'Key rejected by the provider (HTTP $status). Check that you '
+        'pasted the whole key and that it is still active.';
+  }
+  if (status == 404) {
+    return 'No /models endpoint found (HTTP 404). Check the base URL in Edit.';
+  }
+  if (status == 429) {
+    return 'The provider is rate limiting requests (HTTP 429). Try again '
+        'in a minute.';
+  }
+  if (status >= 500) {
+    return 'The provider had a server error (HTTP $status). Try again later.';
+  }
+  return 'The provider answered HTTP $status. Check the key and base URL.';
+}
+
+/// Lightweight `/models` probe shared by "Fetch models" and key verification.
+/// Never throws; failures come back as [ProviderModelsProbe.failed].
+@visibleForTesting
+Future<ProviderModelsProbe> probeProviderModels(
+  ProviderConfig provider, {
+  http.Client? client,
+}) async {
+  final injected = client ?? providerModelsHttpClientForTest;
+  final c = injected ?? http.Client();
+  try {
+    var url = provider.baseUrl.trim();
+    if (!url.endsWith('/')) url += '/';
+    final uri = Uri.tryParse('${url}models');
+    if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
+      return const ProviderModelsProbe.failed(
+        'The base URL is not a valid address. Fix it in Edit.',
+      );
+    }
+    final cleanKey = provider.cleanApiKey;
+    final isAnthropic = provider.effectiveApiFormat == ApiFormat.anthropic;
+    final res = await c
+        .get(
+          uri,
+          headers: {
+            if (isAnthropic && cleanKey.isNotEmpty) 'x-api-key': cleanKey,
+            if (isAnthropic) 'anthropic-version': '2023-06-01',
+            if (!isAnthropic && cleanKey.isNotEmpty)
+              'Authorization': 'Bearer $cleanKey',
+          },
+        )
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode != 200) {
+      return ProviderModelsProbe.failed(
+        describeProviderProbeStatus(res.statusCode),
+      );
+    }
+    final j = jsonDecode(res.body);
+    final fetched = j is Map ? (j['data'] ?? j['models']) : j;
+    final ids = <String>[
+      if (fetched is List)
+        for (final m in fetched)
+          (m is Map ? (m['id'] ?? m['name'] ?? '') : '$m').toString(),
+    ].where((s) => s.isNotEmpty).toList();
+    return ProviderModelsProbe.ok(ids);
+  } on TimeoutException {
+    return const ProviderModelsProbe.failed(
+      'The provider did not answer within 15 seconds. Check your connection '
+      'and the base URL.',
+    );
+  } on FormatException catch (e) {
+    if (e.message.contains('Invalid HTTP header field value')) {
+      return const ProviderModelsProbe.failed(
+        'API key looks invalid (contains whitespace or extra text). '
+        'Please re-enter your key.',
+      );
+    }
+    return const ProviderModelsProbe.failed(
+      'The provider returned a response that is not a model list. Check the '
+      'base URL.',
+    );
+  } catch (e) {
+    final text = '$e';
+    if (e is http.ClientException ||
+        text.contains('SocketException') ||
+        text.contains('HandshakeException')) {
+      return const ProviderModelsProbe.failed(
+        "Can't reach the provider. Check your connection and the base URL.",
+      );
+    }
+    return ProviderModelsProbe.failed('Could not check the provider: $text');
+  } finally {
+    if (injected == null) c.close();
+  }
+}
 
 /// Premium Providers screen — managed Ovid Cloud + BYOK providers.
 ///
@@ -112,6 +227,21 @@ class ProvidersScreen extends StatelessWidget {
   }
 }
 
+/// One-line result of a successful Fetch models run.
+@visibleForTesting
+String fetchResultSummary({
+  required int fetched,
+  required int added,
+  required int removed,
+}) {
+  final parts = <String>[
+    '$fetched models fetched',
+    if (added > 0) '$added new',
+    if (removed > 0) '$removed no longer offered removed',
+  ];
+  return '${parts.join(' · ')} ✓';
+}
+
 /// Managed Ovid Cloud tile. Status pill reflects the current plan tier; the
 /// trailing 'Manage plan' button opens [BillingScreen] where the user can
 /// mint/revoke the gateway token. The base URL is intentionally not shown —
@@ -192,6 +322,9 @@ class _ProviderTileState extends State<_ProviderTile> {
 
   Color get _statusColor {
     if (!provider.requiresApiKey) return Aether.successLight;
+    if (provider.hasKey && provider.verifiedAt != null) {
+      return Aether.successLight;
+    }
     if (provider.hasKey) return Aether.accent;
     if (provider.isFree) return Aether.accent;
     return Aether.textFaint;
@@ -199,6 +332,7 @@ class _ProviderTileState extends State<_ProviderTile> {
 
   String get _statusLabel {
     if (!provider.requiresApiKey) return 'Connected · no key required';
+    if (provider.hasKey && provider.verifiedAt != null) return 'Key verified';
     if (provider.hasKey) return 'Key saved · not verified';
     if (provider.isFree) return 'Free tier — key required';
     return 'Not connected · key required';
@@ -262,64 +396,33 @@ class _ProviderTileState extends State<_ProviderTile> {
         }
         return;
       }
-      var url = provider.baseUrl;
-      if (!url.endsWith('/')) url += '/';
-      final uri = Uri.parse('${url}models');
-      final cleanKey = provider.cleanApiKey;
-      final isAnthropic = provider.effectiveApiFormat == ApiFormat.anthropic;
-      final res = await http
-          .get(
-            uri,
-            headers: {
-              if (isAnthropic && cleanKey.isNotEmpty) 'x-api-key': cleanKey,
-              if (isAnthropic) 'anthropic-version': '2023-06-01',
-              if (!isAnthropic && cleanKey.isNotEmpty)
-                'Authorization': 'Bearer $cleanKey',
-            },
-          )
-          .timeout(const Duration(seconds: 15));
+      final probe = await probeProviderModels(provider);
       if (!mounted) return;
-      if (res.statusCode == 200) {
-        final j = jsonDecode(res.body);
-        final List fetched = j['data'] ?? j['models'] ?? [];
-        final ids = [
-          for (final m in fetched)
-            (m is Map ? (m['id'] ?? m['name'] ?? '') : '$m').toString(),
-        ].where((s) => s.isNotEmpty).toList();
-        if (ids.isNotEmpty) {
-          final existing = provider.models.toSet();
-          for (final id in ids) {
-            if (!existing.contains(id)) {
-              provider.models.add(id);
-              existing.add(id);
-            }
-          }
-        }
-        AppState.I.reconcileProviderModels(provider.id);
-        if (ids.isEmpty) {
-          _fetchState = _FetchState.empty;
-          _fetchResult =
-              'No models returned. Existing models were kept; you can add one manually in Edit.';
-        } else {
-          _fetchState = _FetchState.success;
-          _fetchResult = '${ids.length} models fetched and merged ✓';
-        }
-      } else {
+      if (!probe.ok) {
         _fetchState = _FetchState.error;
-        _fetchResult = 'Failed: HTTP ${res.statusCode} — check key/URL';
+        _fetchResult = probe.error;
+      } else if (probe.ids.isEmpty) {
+        _fetchState = _FetchState.empty;
+        _fetchResult =
+            'No models returned. Existing models were kept; you can add one manually in Edit.';
+      } else {
+        final before = provider.models.toSet();
+        final removed = await AppState.I.replaceProviderModels(
+          provider,
+          probe.ids,
+        );
+        if (!mounted) return;
+        final added = provider.models.where((m) => !before.contains(m)).length;
+        _fetchState = _FetchState.success;
+        _fetchResult = fetchResultSummary(
+          fetched: probe.ids.length,
+          added: added,
+          removed: removed.length,
+        );
       }
     } catch (e) {
-      String msg;
-      if (e is FormatException &&
-          e.message.contains('Invalid HTTP header field value')) {
-        msg =
-            'API key looks invalid (contains whitespace or extra text). '
-            'Please re-enter your key.';
-      } else {
-        msg = 'Fetch failed: $e';
-      }
       _fetchState = _FetchState.error;
-      _fetchResult = msg;
+      _fetchResult = 'Fetch failed: $e';
     } finally {
       if (mounted) setState(() => _fetching = false);
     }
@@ -545,6 +648,7 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
   late final TextEditingController _controller;
   bool _saving = false;
   String? _error;
+  String? _status;
 
   @override
   void initState() {
@@ -563,15 +667,19 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
     setState(() {
       _saving = true;
       _error = null;
+      _status = null;
     });
     final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final provider = widget.provider;
     // Strip whitespace/control chars so pasted blobs never hit HTTP headers.
     final sanitized = _controller.text.replaceAll(
       RegExp(r'[\s\x00-\x1f\x7f]'),
       '',
     );
+    final keyChanged = sanitized != provider.cleanApiKey;
     try {
-      await AppState.I.updateProviderApiKey(widget.provider, sanitized);
+      await AppState.I.updateProviderApiKey(provider, sanitized);
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -580,7 +688,43 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
       });
       return;
     }
+    if (keyChanged) provider.verifiedAt = null;
+    if (sanitized.isEmpty) {
+      if (!mounted) return;
+      navigator.pop();
+      return;
+    }
+    // Verify the key with a lightweight /models probe before closing so a
+    // typo surfaces here, not as a failed chat turn later.
     if (!mounted) return;
+    setState(() => _status = 'Checking key…');
+    final probe = await probeProviderModels(provider);
+    if (!mounted) return;
+    if (!probe.ok) {
+      setState(() {
+        _saving = false;
+        _status = null;
+        _error = 'Key saved, but it could not be verified. ${probe.error}';
+      });
+      AppState.I.refresh();
+      unawaited(AppState.I.persistProviderState());
+      return;
+    }
+    if (probe.ids.isNotEmpty) {
+      await AppState.I.replaceProviderModels(provider, probe.ids);
+    }
+    await AppState.I.markProviderVerified(provider);
+    if (!mounted) return;
+    final n = probe.ids.length;
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text(
+          n > 0
+              ? 'Key verified ✓ · $n ${n == 1 ? 'model' : 'models'}'
+              : 'Key verified ✓',
+        ),
+      ),
+    );
     navigator.pop();
   }
 
@@ -619,7 +763,9 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
         ),
         TextButton(
           onPressed: _saving ? null : _save,
-          child: Text(_saving ? 'Saving…' : 'Save'),
+          child: Text(
+            _saving ? (_status != null ? 'Checking…' : 'Saving…') : 'Save',
+          ),
         ),
       ],
       child: Column(
@@ -641,6 +787,24 @@ class _ApiKeySheetState extends State<_ApiKeySheet> {
             controller: _controller,
             autofocus: true,
           ),
+          if (_status != null) ...[
+            const SizedBox(height: 12),
+            Semantics(
+              liveRegion: true,
+              child: Row(
+                children: [
+                  const SizedBox.square(
+                    dimension: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(_status!, style: AetherType.bodyMuted),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if (_error != null) ...[
             const SizedBox(height: 12),
             Semantics(
