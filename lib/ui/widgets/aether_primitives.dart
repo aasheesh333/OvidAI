@@ -667,6 +667,11 @@ class AetherField extends StatelessWidget {
   final Widget? suffix;
   final bool autofocus;
 
+  /// Keyboard learning controls; switch both off for one-time secrets such
+  /// as OAuth callback URLs so the IME never stores them.
+  final bool autocorrect;
+  final bool enableSuggestions;
+
   /// Optional key forwarded to the inner [TextField]. Lets callers (e.g. the
   /// chat composer) hand tests a stable handle on the real text field even
   /// though the public widget is the [AetherField] wrapper.
@@ -694,6 +699,8 @@ class AetherField extends StatelessWidget {
     this.prefixIcon,
     this.suffix,
     this.autofocus = false,
+    this.autocorrect = true,
+    this.enableSuggestions = true,
     this.fieldKey,
   });
 
@@ -724,6 +731,8 @@ class AetherField extends StatelessWidget {
             maxLines: obscure ? 1 : maxLines,
             minLines: obscure ? 1 : minLines,
             autofocus: autofocus,
+            autocorrect: autocorrect,
+            enableSuggestions: enableSuggestions,
             style: AetherType.body,
             decoration: InputDecoration(
               filled: true,
