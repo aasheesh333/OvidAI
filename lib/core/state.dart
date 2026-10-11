@@ -155,6 +155,15 @@ class ProviderConfig {
   /// loosening detection for every other model.
   final Map<String, bool> _visionOverrides = {};
 
+  /// Model ids that came from the provider's `/models` endpoint (as opposed
+  /// to ids added by hand or shipped with the app). A later fetch that no
+  /// longer lists one of these drops it, so retired models do not linger
+  /// and fail at send time; manual ids are never touched by a fetch.
+  final Set<String> fetchedModels = {};
+
+  /// When the stored key last passed a `/models` probe (null = never).
+  DateTime? verifiedAt;
+
   bool? modelVisionSupport(String model) {
     final key = model.trim();
     final manual = _visionOverrides[key];
@@ -195,6 +204,14 @@ class ProviderConfig {
     if (custom && _usesGeneratedDescription) {
       description = _protocolDescription;
     }
+    final fetched = entry['fetchedModels'];
+    if (fetched is List) {
+      fetchedModels
+        ..clear()
+        ..addAll(fetched.whereType<String>().where((m) => m.isNotEmpty));
+    }
+    final verified = entry['verifiedAt'];
+    verifiedAt = verified is String ? DateTime.tryParse(verified) : null;
     final raw = entry['visionOverrides'];
     if (raw is Map) {
       _visionOverrides.clear();
@@ -270,6 +287,8 @@ class ProviderConfig {
     'apiFormat': apiFormat.wire,
     if (_visionOverrides.isNotEmpty)
       'visionOverrides': Map<String, bool>.from(_visionOverrides),
+    if (fetchedModels.isNotEmpty) 'fetchedModels': fetchedModels.toList(),
+    if (verifiedAt != null) 'verifiedAt': verifiedAt!.toUtc().toIso8601String(),
   };
 }
 
@@ -4147,6 +4166,7 @@ class AppState extends ChangeNotifier {
             apiFormat: format,
           ),
         );
+        providers.last.applyPersistedJson(entry);
       }
     } catch (_) {
       // Invalid provider metadata must not prevent the app from starting.
@@ -6808,6 +6828,53 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
+  /// Replace the fetched model ids of [provider] with [ids] from a fresh
+  /// `/models` call. Ids that an earlier fetch added but this one no longer
+  /// lists are removed; with [keepManual] (the default) ids the user added
+  /// by hand, or that shipped with the app, are kept. Persists once and
+  /// returns the ids that were dropped.
+  Future<List<String>> replaceProviderModels(
+    ProviderConfig provider,
+    Iterable<String> ids, {
+    bool keepManual = true,
+  }) async {
+    final fresh = <String>[];
+    final seen = <String>{};
+    for (final raw in ids) {
+      final id = raw.trim();
+      if (id.isNotEmpty && seen.add(id)) fresh.add(id);
+    }
+    final previous = provider.fetchedModels.toSet();
+    final kept = <String>[
+      for (final m in provider.models)
+        if (seen.contains(m) || (keepManual && !previous.contains(m))) m,
+    ];
+    final removed = [
+      for (final m in provider.models)
+        if (!kept.contains(m)) m,
+    ];
+    final keptSet = kept.toSet();
+    provider.models = [
+      ...kept,
+      for (final id in fresh)
+        if (!keptSet.contains(id)) id,
+    ];
+    provider.fetchedModels
+      ..clear()
+      ..addAll(fresh);
+    // reconcileProviderModels refreshes and persists provider + sessions.
+    reconcileProviderModels(provider.id);
+    await _providerWrite;
+    return removed;
+  }
+
+  /// Record that [provider]'s stored key passed a `/models` probe.
+  Future<void> markProviderVerified(ProviderConfig provider) async {
+    provider.verifiedAt = DateTime.now();
+    refresh();
+    await persistProviderState();
+  }
+
   /// Add a model id to a provider (dedup). Empty ids are rejected.
   Future<String?> addProviderModel(
     ProviderConfig provider,
@@ -6819,6 +6886,7 @@ class AppState extends ChangeNotifier {
       return '"$m" is already listed for ${provider.name}.';
     }
     provider.models.add(m);
+    provider.fetchedModels.remove(m);
     refresh();
     await persistProviderState();
     return null;
