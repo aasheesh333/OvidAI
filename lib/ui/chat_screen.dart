@@ -1981,6 +1981,7 @@ class _ChatScreenState extends State<ChatScreen>
   /// `/permission` popupSelect: the mode sheet (same rows as the composer
   /// mode chip), command-driven.
   void _showModeSheetFromCommand(BuildContext context) {
+    final sessionId = AppState.I.activeSessionId;
     showModalBottomSheet(
       context: context,
       backgroundColor: Aether.surface,
@@ -2000,21 +2001,23 @@ class _ChatScreenState extends State<ChatScreen>
             for (final m in modeOptionsForPicker())
               ListTile(
                 dense: true,
-                title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
-                subtitle: Text(
-                  m.hint,
-                  style: TextStyle(fontSize: 11, color: Aether.textMuted),
+                title: Text(
+                  m.label,
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    color: _skipsApprovals(m) ? Aether.dangerC : null,
+                  ),
+                ),
+                subtitle: _accessModeSubtitle(
+                  m,
+                  TextStyle(fontSize: 11, color: Aether.textMuted),
                 ),
                 trailing: AgentService.I.mode == m
                     ? Icon(Icons.check, size: 16, color: Aether.accent)
                     : null,
                 onTap: () async {
                   Navigator.pop(context);
-                  if (m == AgentMode.control) {
-                    await _enableControlMode(context);
-                  } else {
-                    AgentService.I.setMode(m);
-                  }
+                  await _pickAccessMode(context, m, sessionId);
                 },
               ),
             const SizedBox(height: 10),
@@ -8219,6 +8222,7 @@ class _ModeChip extends StatelessWidget {
   }
 
   void _showModeSheet(BuildContext context) {
+    final sessionId = AppState.I.activeSessionId;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -8240,11 +8244,21 @@ class _ModeChip extends StatelessWidget {
               for (final m in modeOptionsForPicker())
                 ListTile(
                   dense: true,
-                  leading: Icon(m.icon, size: 18, color: m.color),
-                  title: Text(m.label, style: const TextStyle(fontSize: 13.5)),
-                  subtitle: Text(
-                    m.hint,
+                  leading: Icon(
+                    m.icon,
+                    size: 18,
+                    color: _skipsApprovals(m) ? Aether.dangerC : m.color,
+                  ),
+                  title: Text(
+                    m.label,
                     style: TextStyle(
+                      fontSize: 13.5,
+                      color: _skipsApprovals(m) ? Aether.dangerC : null,
+                    ),
+                  ),
+                  subtitle: _accessModeSubtitle(
+                    m,
+                    TextStyle(
                       fontSize: 11,
                       color: Aether.textFaint,
                       height: 1.4,
@@ -8255,11 +8269,7 @@ class _ModeChip extends StatelessWidget {
                       : null,
                   onTap: () async {
                     Navigator.pop(context);
-                    if (m == AgentMode.control) {
-                      await _enableControlMode(context);
-                    } else {
-                      AgentService.I.setMode(m);
-                    }
+                    await _pickAccessMode(context, m, sessionId);
                   },
                 ),
               const SizedBox(height: 8),
@@ -8268,6 +8278,104 @@ class _ModeChip extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Modes that skip every app-level approval prompt. They get a danger
+/// accent and an explicit "Tools run without asking" line in both access-mode
+/// sheets, and a confirmation before they are switched on.
+bool _skipsApprovals(AgentMode m) => m == AgentMode.drive;
+
+Widget _accessModeSubtitle(AgentMode m, TextStyle base) {
+  if (!_skipsApprovals(m)) return Text(m.hint, style: base);
+  return Text.rich(
+    TextSpan(
+      style: base,
+      children: [
+        TextSpan(
+          text: 'Tools run without asking. ',
+          style: TextStyle(
+            color: Aether.dangerC,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        TextSpan(text: m.hint),
+      ],
+    ),
+  );
+}
+
+/// Sessions (this process) where the user already confirmed Full Access.
+/// Re-confirmation is still required while a run is active in the session.
+final Set<String> _fullAccessConfirmedSessions = <String>{};
+
+@visibleForTesting
+void debugResetFullAccessConfirmations() =>
+    _fullAccessConfirmedSessions.clear();
+
+/// The single path both access-mode sheets use to apply a pick. Switching to
+/// Full Access is confirmed the first time per session and whenever a run is
+/// in progress there (it takes effect on that run's next tool call), and the
+/// change is pinned to the composer's [sessionId] so a background run's
+/// session is never the one modified.
+Future<void> _pickAccessMode(
+  BuildContext context,
+  AgentMode m,
+  String? sessionId,
+) async {
+  if (m == AgentMode.control) {
+    await _enableControlMode(context);
+    return;
+  }
+  final session = AppState.I.sessionById(sessionId);
+  final current = AgentMode.values.firstWhere(
+    (x) => x.name == session?.mode,
+    orElse: () => AgentService.I.mode,
+  );
+  if (_skipsApprovals(m) && current != m) {
+    final key = sessionId ?? '';
+    final running = sessionId != null && AgentService.I.busyFor(sessionId);
+    if (running || !_fullAccessConfirmedSessions.contains(key)) {
+      if (!context.mounted) return;
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (d) => AlertDialog(
+          key: const ValueKey('full-access-confirm'),
+          title: const Text('Switch to Full Access?'),
+          content: SingleChildScrollView(
+            child: Text(
+              'Ovid will run commands and change files without asking. '
+              'Destructive commands still ask.'
+              '${running ? '\n\nA task is running in this chat. The change '
+                        'applies from its next tool call.' : ''}',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(d, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Aether.dangerC,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(d, true),
+              child: const Text('Switch to Full Access'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      _fullAccessConfirmedSessions.add(key);
+    }
+  }
+  if (sessionId != null) {
+    // The chat may have been deleted while the dialog was open.
+    if (AppState.I.sessionById(sessionId) == null) return;
+    AgentService.I.setMode(m, sessionId: sessionId);
+  } else {
+    AgentService.I.setMode(m);
   }
 }
 

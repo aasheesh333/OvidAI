@@ -1018,6 +1018,10 @@ class AgentService extends ChangeNotifier {
   set mode(AgentMode m) {
     final s = _runCtx?.session ?? AppState.I.activeSession;
     if (s == null) return;
+    _writeMode(s, m);
+  }
+
+  void _writeMode(ChatSession s, AgentMode m) {
     final wasControl = s.mode == AgentMode.control.name;
     s.mode = m.name;
     if (wasControl && m != AgentMode.control) {
@@ -5762,11 +5766,20 @@ user which one instead of assuming this one.''';
   /// True while ANY session has a run — for global indicators.
   bool get anyBusy => _runs.values.any((r) => r.activeRunId != null);
 
-  void setMode(AgentMode m) {
+  ///
+  /// [sessionId] pins the change to the session whose composer made the pick.
+  /// Without it the target is `_runSession ?? activeSession`, which inside a
+  /// background run's zone is the BACKGROUND session — a foreground mode pick
+  /// must never change (or clear plan mode on) a different chat.
+  void setMode(AgentMode m, {String? sessionId}) {
     // Picking an access mode directly ends plan mode: the picker and the
     // enforcement gate must agree, and any plan-owned read-only is released
     // as part of that exit.
-    final s = _runSession ?? AppState.I.activeSession;
+    final pinned = sessionId == null
+        ? null
+        : AppState.I.sessionById(sessionId);
+    if (sessionId != null && pinned == null) return;
+    final s = pinned ?? _runSession ?? AppState.I.activeSession;
     // FIX 4 (e): a pending entry must be cancelled even when plan mode is not
     // live yet. The old guard was `s.planMode` alone, so a session with
     // `planMode == false && planModePending == true` (a `/plan` queued while a
@@ -5782,7 +5795,11 @@ user which one instead of assuming this one.''';
       s.planModePending = null;
       _releasePlanOwnedMode(s);
     }
-    mode = m; // writes to active session (or detached child)
+    if (pinned != null) {
+      _writeMode(pinned, m);
+    } else {
+      mode = m; // writes to active session (or detached child)
+    }
     events.add(AgentEvent('think', 'access mode → ${m.label}'));
     notifyListeners();
   }
