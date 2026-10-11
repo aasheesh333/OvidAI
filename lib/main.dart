@@ -4,6 +4,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 
 import 'core/state.dart';
+import 'core/studio_drafts.dart';
 import 'core/agent_service.dart';
 import 'core/theme.dart';
 import 'ui/login_gate.dart';
@@ -30,6 +31,8 @@ Future<void> main() async {
   AppState.I.registerProductionAccountFeatures();
   // Coalesce session writes in production; tests keep the zero-window default.
   AppState.enableSessionPersistDebounce();
+  // Unsaved Studio drafts survive process death (app-private directory).
+  StudioDraftStore.I.enable();
   await AppState.I.initializeForFirstFrame();
   // Apply persisted theme BEFORE first frame (no dark flash on light).
   if (AppState.I.themeMode == 'system') {
@@ -149,6 +152,10 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     AppState.I.setAccountFeaturesForeground(state == AppLifecycleState.resumed);
     if (state == AppLifecycleState.resumed) {
       unawaited(AgentService.I.wakeSchedules());
+    }
+    // Android may kill a paused process: write pending Studio drafts now.
+    if (state == AppLifecycleState.paused) {
+      unawaited(StudioDraftStore.I.flush());
     }
   }
 
