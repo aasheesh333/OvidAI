@@ -360,7 +360,11 @@ class _SidebarHeader extends StatelessWidget {
                   const SizedBox(width: 8),
                   // brand/connection parity — live connection chip.
                   if (MediaQuery.textScalerOf(context).scale(14) <= 20)
-                    const _ConnectionChip(),
+                    const _ConnectionChip()
+                  else if (compact)
+                    // Compact large-text header has no room for the label
+                    // row below; keep the status visible as a dot.
+                    const _ConnectionChip(dotOnly: true),
                   // No close button in wide mode: the sidebar is embedded,
                   // not a route — popping here would exit the app.
                   if (isDrawer)
@@ -913,7 +917,10 @@ class _SessionTileState extends State<_SessionTile> {
 /// Green dot = online, red = offline, grey pulse = checking.
 /// Tap re-probes (also the "reset handling" affordance).
 class _ConnectionChip extends StatelessWidget {
-  const _ConnectionChip();
+  const _ConnectionChip({this.dotOnly = false});
+
+  /// Dot without the text label (compact large-text header).
+  final bool dotOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -937,7 +944,7 @@ class _ConnectionChip extends StatelessWidget {
         // hit area is now opaque and padded, and it announces itself.
         return Semantics(
           button: true,
-          label: 'Connection status — tap to re-check',
+          label: 'Connection status: $label — tap to re-check',
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => c.probe(),
@@ -965,15 +972,17 @@ class _ConnectionChip extends StatelessWidget {
                         shape: BoxShape.circle,
                       ),
                     ),
-                    const SizedBox(width: 5),
-                    Text(
-                      label,
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w600,
-                        color: color,
+                    if (!dotOnly) ...[
+                      const SizedBox(width: 5),
+                      Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: color,
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),

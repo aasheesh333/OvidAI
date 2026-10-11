@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/agent_notification_service.dart';
 import '../core/agent_service.dart';
+import '../core/connection_service.dart';
 import '../core/device_control_service.dart';
 import '../core/github_service.dart';
 import '../core/firebase_service.dart';
@@ -41,6 +42,60 @@ class _PersistWarningBanner extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Thin app-wide "You're offline" strip. Phones only saw connectivity
+/// inside the drawer (and not at all in compact large-text mode); this sits
+/// above every screen while the last probe failed, with a Retry that
+/// re-probes immediately.
+class OfflineBanner extends StatelessWidget {
+  const OfflineBanner({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = ConnectionService.I;
+    return AnimatedBuilder(
+      animation: c,
+      builder: (context, _) {
+        if (!c.offline) return const SizedBox.shrink();
+        final checking = c.status == ConnectionStatus.checking;
+        return SafeArea(
+          bottom: false,
+          child: Semantics(
+            liveRegion: true,
+            child: Material(
+              key: const ValueKey('offline-banner'),
+              color: Aether.warnLight.withValues(alpha: 0.16),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.cloud_off_outlined,
+                      size: 16,
+                      color: Aether.warnLight,
+                    ),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        "You're offline — messages can't be sent until the "
+                        'connection is back.',
+                        style: TextStyle(fontSize: 12, height: 1.3),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: checking ? null : c.probe,
+                      child: Text(checking ? 'Checking…' : 'Retry'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -236,6 +291,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(AppState.I.reconnectServicesAfterResume());
+        // Connectivity may have changed while backgrounded.
+        unawaited(ConnectionService.I.probe());
         // If Ovid's accessibility service is enabled in Settings but the
         // OS has not rebound it (app restart), absorb the rebind window
         // now (pure wait — no programmatic toggle, which could disable the
@@ -286,6 +343,11 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
       // The inner chat Scaffold owns keyboard avoidance. Resizing both shells
       // subtracts the same inset twice and crowds out the composer.
       resizeToAvoidBottomInset: false,
+      // Re-check connectivity whenever the drawer (with its status chip)
+      // opens, as the chip has always promised.
+      onDrawerChanged: (open) {
+        if (open) unawaited(ConnectionService.I.probe());
+      },
       drawer: wide
           ? null
           : Drawer(
@@ -295,6 +357,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
             ),
       body: Column(
         children: [
+          const OfflineBanner(),
           if (_persistWarned)
             SafeArea(
               bottom: false,
