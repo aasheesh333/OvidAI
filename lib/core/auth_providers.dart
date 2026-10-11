@@ -114,7 +114,8 @@ String authError(Object error) {
     'invalid-verification-id' ||
     'code-expired' => 'The verification code expired. Request a new code.',
     'invalid-phone-number' =>
-      'Enter a valid phone number with country code, such as +14155550100.',
+      'Enter a valid mobile number. Pick your country code, or type the '
+      'full number starting with +, such as +91 98765 43210.',
     'too-many-requests' => 'Too many attempts. Wait before trying again.',
     'quota-exceeded' =>
       'SMS quota is currently exhausted. Try later or use another configured provider.',

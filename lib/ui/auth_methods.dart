@@ -251,6 +251,14 @@ class _AuthPhoneDialogState extends State<AuthPhoneDialog> {
   bool _finished = false;
   int _otpGeneration = 0;
 
+  /// Country code prepended to numbers typed without `+`. Defaults to the
+  /// device region, falling back to India.
+  late PhoneDialCode _dial = phoneDialCodeForRegion(
+    WidgetsBinding.instance.platformDispatcher.locale.countryCode,
+  );
+
+  void _send() => widget.flow.send(_number.text, dialCode: _dial.dialCode);
+
   void _clearCode() {
     _code.clear();
     // The OTP primitive owns its cell controllers. Recreate them even when
@@ -301,14 +309,51 @@ class _AuthPhoneDialogState extends State<AuthPhoneDialog> {
         style: AetherType.bodyMuted,
       ),
       const SizedBox(height: 16),
-      AetherField(
-        label: 'Phone number',
-        hint: '+14155550100',
-        controller: _number,
-        keyboardType: TextInputType.phone,
-        autofillHints: const [AutofillHints.telephoneNumber],
-        enabled: numberEnabled,
-        onSubmitted: numberEnabled ? (_) => flow.send(_number.text) : null,
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (widget.fixedNumber == null) ...[
+            Semantics(
+              label: 'Country code',
+              child: DropdownButton<PhoneDialCode>(
+                key: const ValueKey('phone-country-code'),
+                value: _dial,
+                underline: const SizedBox.shrink(),
+                onChanged: numberEnabled
+                    ? (v) {
+                        if (v != null) setState(() => _dial = v);
+                      }
+                    : null,
+                selectedItemBuilder: (_) => [
+                  for (final c in kPhoneDialCodes)
+                    Center(child: Text(c.label, style: AetherType.body)),
+                ],
+                items: [
+                  for (final c in kPhoneDialCodes)
+                    DropdownMenuItem(
+                      value: c,
+                      child: Text(
+                        '${c.dialCode}  ${c.name}',
+                        style: AetherType.body,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          Expanded(
+            child: AetherField(
+              label: 'Phone number',
+              hint: _dial.example,
+              controller: _number,
+              keyboardType: TextInputType.phone,
+              autofillHints: const [AutofillHints.telephoneNumber],
+              enabled: numberEnabled,
+              onSubmitted: numberEnabled ? (_) => _send() : null,
+            ),
+          ),
+        ],
       ),
     ];
 
@@ -320,9 +365,7 @@ class _AuthPhoneDialogState extends State<AuthPhoneDialog> {
           label: 'Send code',
           icon: Icons.send,
           loading: flow.sending,
-          onPressed: flow.sending || flow.submitting
-              ? null
-              : () => flow.send(_number.text),
+          onPressed: flow.sending || flow.submitting ? null : _send,
         ),
       );
     }

@@ -16,6 +16,69 @@ class PhoneCallbacks {
   final void Function(String) timedOut;
 }
 
+/// A country calling code offered by the phone sign-in picker.
+class PhoneDialCode {
+  const PhoneDialCode(this.region, this.dialCode, this.name, this.example);
+
+  /// ISO 3166-1 alpha-2 region, e.g. `IN`.
+  final String region;
+
+  /// Calling code with leading `+`, e.g. `+91`.
+  final String dialCode;
+  final String name;
+
+  /// A national-format example number for the hint.
+  final String example;
+
+  String get label => '$region $dialCode';
+}
+
+/// Regions offered in the picker. India first: it is Ovid's primary market
+/// and the fallback when the device region is unknown or not listed.
+const List<PhoneDialCode> kPhoneDialCodes = [
+  PhoneDialCode('IN', '+91', 'India', '98765 43210'),
+  PhoneDialCode('US', '+1', 'United States', '415 555 0100'),
+  PhoneDialCode('CA', '+1', 'Canada', '604 555 0100'),
+  PhoneDialCode('GB', '+44', 'United Kingdom', '7700 900123'),
+  PhoneDialCode('AE', '+971', 'United Arab Emirates', '50 123 4567'),
+  PhoneDialCode('SA', '+966', 'Saudi Arabia', '51 234 5678'),
+  PhoneDialCode('SG', '+65', 'Singapore', '8123 4567'),
+  PhoneDialCode('MY', '+60', 'Malaysia', '12 345 6789'),
+  PhoneDialCode('NP', '+977', 'Nepal', '984 1234567'),
+  PhoneDialCode('BD', '+880', 'Bangladesh', '1812 345678'),
+  PhoneDialCode('LK', '+94', 'Sri Lanka', '71 234 5678'),
+  PhoneDialCode('PK', '+92', 'Pakistan', '301 2345678'),
+  PhoneDialCode('AU', '+61', 'Australia', '412 345 678'),
+  PhoneDialCode('DE', '+49', 'Germany', '1512 3456789'),
+  PhoneDialCode('FR', '+33', 'France', '6 12 34 56 78'),
+];
+
+/// Picker entry for [region] (device locale country), falling back to India.
+PhoneDialCode phoneDialCodeForRegion(String? region) {
+  final r = region?.trim().toUpperCase();
+  for (final c in kPhoneDialCodes) {
+    if (c.region == r) return c;
+  }
+  return kPhoneDialCodes.first;
+}
+
+/// Normalise a typed phone number to E.164. Numbers already starting with
+/// `+` (or the international `00` prefix) keep their own country code;
+/// otherwise a national trunk `0` is dropped and [dialCode] is prepended.
+/// Separators (spaces, dots, dashes, parentheses) are ignored.
+String normalizePhoneNumber(String raw, {required String dialCode}) {
+  var v = raw.trim().replaceAll(RegExp(r'[\s().-]'), '');
+  if (v.isEmpty) return v;
+  if (v.startsWith('+')) return v;
+  if (v.startsWith('00')) return '+${v.substring(2)}';
+  final code = dialCode.startsWith('+') ? dialCode : '+$dialCode';
+  final codeDigits = code.substring(1);
+  // Users often type the country code without the plus (9198765 43210).
+  if (v.length > 10 && v.startsWith(codeDigits)) return '+$v';
+  v = v.replaceFirst(RegExp(r'^0+'), '');
+  return '$code$v';
+}
+
 typedef PhoneVerifier =
     Future<void> Function(
       String number,
@@ -69,9 +132,13 @@ class PhoneAuthFlow extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  Future<void> send(String value) async {
+  /// Request a code for [value]. With [dialCode] a national number (no
+  /// leading `+`) is completed with that country code first.
+  Future<void> send(String value, {String? dialCode}) async {
     if (sending || submitting || _disposed) return;
-    final normalized = value.replaceAll(RegExp(r'[\s()-]'), '');
+    final normalized = dialCode == null
+        ? value.replaceAll(RegExp(r'[\s()-]'), '')
+        : normalizePhoneNumber(value, dialCode: dialCode);
     if (!RegExp(r'^\+[1-9]\d{7,14}$').hasMatch(normalized)) {
       error = authError(FirebaseAuthException(code: 'invalid-phone-number'));
       _notify();
