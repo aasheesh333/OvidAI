@@ -489,6 +489,84 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Keep task'**
   String get scheduleKeepTask;
+
+  /// Schedule editor: smallest allowed interval.
+  ///
+  /// In en, this message translates to:
+  /// **'Minimum 5 minutes.'**
+  String get scheduleMinimumInterval;
+
+  /// Schedule editor: label above One-off / Daily / Interval.
+  ///
+  /// In en, this message translates to:
+  /// **'Recurrence'**
+  String get scheduleRecurrence;
+
+  /// Schedule editor: expands the raw spec field.
+  ///
+  /// In en, this message translates to:
+  /// **'Advanced'**
+  String get scheduleAdvanced;
+
+  /// Schedule editor: label above the next-run preview.
+  ///
+  /// In en, this message translates to:
+  /// **'Preview'**
+  String get schedulePreview;
+
+  /// Schedule details: label above the task prompt.
+  ///
+  /// In en, this message translates to:
+  /// **'Description'**
+  String get scheduleDescription;
+
+  /// Schedule details: label above the raw schedule spec.
+  ///
+  /// In en, this message translates to:
+  /// **'Raw spec'**
+  String get scheduleRawSpec;
+
+  /// Dialog title when chats exceed a backup limit.
+  ///
+  /// In en, this message translates to:
+  /// **'Backup limit reached'**
+  String get backupLimitReachedTitle;
+
+  /// Button: export only the chats that fit the backup limits.
+  ///
+  /// In en, this message translates to:
+  /// **'Export recent chats'**
+  String get backupExportRecent;
+
+  /// Confirm dialog title before restoring a backup.
+  ///
+  /// In en, this message translates to:
+  /// **'Restore backup?'**
+  String get backupRestoreTitle;
+
+  /// Confirm button: restore the validated backup.
+  ///
+  /// In en, this message translates to:
+  /// **'Restore'**
+  String get backupRestoreConfirm;
+
+  /// Dismiss button in backup dialogs.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get backupCancel;
+
+  /// Button: export chats as JSON for other tools (not restorable).
+  ///
+  /// In en, this message translates to:
+  /// **'JSON (for other tools)'**
+  String get backupJsonExport;
+
+  /// Card title for the portable backup archive format.
+  ///
+  /// In en, this message translates to:
+  /// **'Export-ready archive'**
+  String get backupExportReadyTitle;
 }
 
 class _AppLocalizationsDelegate

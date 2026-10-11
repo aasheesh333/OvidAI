@@ -187,5 +187,44 @@
   "@scheduleCancelTaskMessage": {"description": "Cancel-task confirmation when the task is idle."},
 
   "scheduleKeepTask": "Keep task",
-  "@scheduleKeepTask": {"description": "Dismiss button of the cancel-task confirmation."}
+  "@scheduleKeepTask": {"description": "Dismiss button of the cancel-task confirmation."},
+
+  "scheduleMinimumInterval": "Minimum 5 minutes.",
+  "@scheduleMinimumInterval": {"description": "Schedule editor: smallest allowed interval."},
+
+  "scheduleRecurrence": "Recurrence",
+  "@scheduleRecurrence": {"description": "Schedule editor: label above One-off / Daily / Interval."},
+
+  "scheduleAdvanced": "Advanced",
+  "@scheduleAdvanced": {"description": "Schedule editor: expands the raw spec field."},
+
+  "schedulePreview": "Preview",
+  "@schedulePreview": {"description": "Schedule editor: label above the next-run preview."},
+
+  "scheduleDescription": "Description",
+  "@scheduleDescription": {"description": "Schedule details: label above the task prompt."},
+
+  "scheduleRawSpec": "Raw spec",
+  "@scheduleRawSpec": {"description": "Schedule details: label above the raw schedule spec."},
+
+  "backupLimitReachedTitle": "Backup limit reached",
+  "@backupLimitReachedTitle": {"description": "Dialog title when chats exceed a backup limit."},
+
+  "backupExportRecent": "Export recent chats",
+  "@backupExportRecent": {"description": "Button: export only the chats that fit the backup limits."},
+
+  "backupRestoreTitle": "Restore backup?",
+  "@backupRestoreTitle": {"description": "Confirm dialog title before restoring a backup."},
+
+  "backupRestoreConfirm": "Restore",
+  "@backupRestoreConfirm": {"description": "Confirm button: restore the validated backup."},
+
+  "backupCancel": "Cancel",
+  "@backupCancel": {"description": "Dismiss button in backup dialogs."},
+
+  "backupJsonExport": "JSON (for other tools)",
+  "@backupJsonExport": {"description": "Button: export chats as JSON for other tools (not restorable)."},
+
+  "backupExportReadyTitle": "Export-ready archive",
+  "@backupExportReadyTitle": {"description": "Card title for the portable backup archive format."}
 }

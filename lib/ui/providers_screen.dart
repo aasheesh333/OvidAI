@@ -175,7 +175,7 @@ Future<ProviderModelsProbe> probeProviderModels(
       cause: e,
     );
   } catch (e) {
-    final text = '$e';
+    final text = e.toString();
     if (e is http.ClientException ||
         text.contains('SocketException') ||
         text.contains('HandshakeException')) {
@@ -184,8 +184,9 @@ Future<ProviderModelsProbe> probeProviderModels(
         cause: e,
       );
     }
+    // The raw error stays in [cause] (logged by callers), never in copy.
     return ProviderModelsProbe.failed(
-      'Could not check the provider: $text',
+      'Could not check the provider. Check the key and base URL.',
       cause: e,
     );
   } finally {

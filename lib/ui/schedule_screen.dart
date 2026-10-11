@@ -552,7 +552,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
               ],
             ),
             const SizedBox(height: 4),
-            Text('Minimum 5 minutes.', style: AetherType.caption),
+            Text(context.l10n.scheduleMinimumInterval, style: AetherType.caption),
             ?errorText,
           ],
         );
@@ -618,7 +618,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                 maxLines: 2,
               ),
               const SizedBox(height: 16),
-              Text('Recurrence', style: AetherType.label),
+              Text(context.l10n.scheduleRecurrence, style: AetherType.label),
               const SizedBox(height: 6),
               Wrap(
                 spacing: 8,
@@ -659,7 +659,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                     _advanced ? Icons.expand_less : Icons.expand_more,
                     size: 18,
                   ),
-                  label: const Text('Advanced'),
+                  label: Text(context.l10n.scheduleAdvanced),
                 ),
               ),
               if (_advanced) ...[
@@ -690,7 +690,7 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                 ),
                 const SizedBox(height: 8),
               ],
-              Text('Preview', style: AetherType.label),
+              Text(context.l10n.schedulePreview, style: AetherType.label),
               const SizedBox(height: 4),
               Text(
                 _previewLabel(context),
@@ -1063,7 +1063,7 @@ class _TaskCardState extends State<_TaskCard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Description', style: AetherType.label),
+        Text(context.l10n.scheduleDescription, style: AetherType.label),
         const SizedBox(height: 4),
         Text(
           prompt.isEmpty ? '(empty)' : prompt,
@@ -1093,7 +1093,7 @@ class _TaskCardState extends State<_TaskCard> {
         ),
         if (error != null) _detailRow('Last error', '$error'),
         const SizedBox(height: 8),
-        Text('Raw spec', style: AetherType.label),
+        Text(context.l10n.scheduleRawSpec, style: AetherType.label),
         const SizedBox(height: 4),
         Container(
           width: double.infinity,

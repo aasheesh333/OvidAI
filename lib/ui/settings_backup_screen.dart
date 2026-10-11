@@ -132,7 +132,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
   Future<bool?> _confirmPartial(BackupExportPlan plan) => showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
-      title: const Text('Backup limit reached'),
+      title: Text(context.l10n.backupLimitReachedTitle),
       content: Text(
         'Your chats exceed ${plan.limitHit}. '
         '${plan.included.isEmpty ? 'No chat fits in a backup.' : 'Export your ${plan.included.length} most recent chat(s) now? ${plan.skipped.length} older chat(s) will not be included.'}',
@@ -140,12 +140,12 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context, false),
-          child: const Text('Cancel'),
+          child: Text(context.l10n.backupCancel),
         ),
         if (plan.included.isNotEmpty)
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Export recent chats'),
+            child: Text(context.l10n.backupExportRecent),
           ),
       ],
     ),
@@ -258,7 +258,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Restore backup?'),
+        title: Text(context.l10n.backupRestoreTitle),
         content: Text(
           '$summary\n\nThey will be added as new, inactive chats in the '
           'current account. Existing chats are not changed or merged.',
@@ -266,11 +266,11 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(context.l10n.backupCancel),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Restore'),
+            child: Text(context.l10n.backupRestoreConfirm),
           ),
         ],
       ),
@@ -393,7 +393,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
             child: TextButton.icon(
               onPressed: _busy ? null : _exportJson,
               icon: const Icon(Icons.data_object, size: 18),
-              label: const Text('JSON (for other tools)'),
+              label: Text(context.l10n.backupJsonExport),
             ),
           ),
           Text(
@@ -402,7 +402,7 @@ class _SettingsBackupScreenState extends State<SettingsBackupScreen> {
           ),
           const SizedBox(height: 16),
           AetherCard(
-            title: const Text('Export-ready archive'),
+            title: Text(context.l10n.backupExportReadyTitle),
             trailing: AetherPill(label: 'V1', color: Aether.accent),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,

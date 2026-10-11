@@ -268,4 +268,43 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get scheduleKeepTask => 'Keep task';
+
+  @override
+  String get scheduleMinimumInterval => 'Minimum 5 minutes.';
+
+  @override
+  String get scheduleRecurrence => 'Recurrence';
+
+  @override
+  String get scheduleAdvanced => 'Advanced';
+
+  @override
+  String get schedulePreview => 'Preview';
+
+  @override
+  String get scheduleDescription => 'Description';
+
+  @override
+  String get scheduleRawSpec => 'Raw spec';
+
+  @override
+  String get backupLimitReachedTitle => 'Backup limit reached';
+
+  @override
+  String get backupExportRecent => 'Export recent chats';
+
+  @override
+  String get backupRestoreTitle => 'Restore backup?';
+
+  @override
+  String get backupRestoreConfirm => 'Restore';
+
+  @override
+  String get backupCancel => 'Cancel';
+
+  @override
+  String get backupJsonExport => 'JSON (for other tools)';
+
+  @override
+  String get backupExportReadyTitle => 'Export-ready archive';
 }
