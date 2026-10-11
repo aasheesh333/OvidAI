@@ -1028,9 +1028,6 @@ class AgentService extends ChangeNotifier {
   set mode(AgentMode m) {
     final s = _runCtx?.session ?? AppState.I.activeSession;
     if (s == null) return;
-    if (m == AgentMode.control && !Distribution.controlModeAvailable) {
-      m = AgentMode.auto;
-    }
     final wasControl = s.mode == AgentMode.control.name;
     s.mode = m.name;
     if (wasControl && m != AgentMode.control) {
