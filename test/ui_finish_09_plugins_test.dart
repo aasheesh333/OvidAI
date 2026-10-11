@@ -320,8 +320,8 @@ void main() {
       await reveal(tester, remove);
       await tester.tap(remove);
       await _frames(tester);
-      await reveal(tester, find.text('Delete'));
-      await tester.tap(find.text('Delete'));
+      await reveal(tester, find.text('Remove'));
+      await tester.tap(find.text('Remove'));
       await _frames(tester);
       expect(app.marketplaces, isNot(contains(repo)));
     });

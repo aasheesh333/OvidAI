@@ -2307,7 +2307,12 @@ class AppState extends ChangeNotifier {
     final id = row.runtimeId;
     if (id == null) {
       final tools = AgentService.I.pluginToolNames(row);
-      if (tools.isNotEmpty) {
+      // Hook-only / MCP-only legacy rows contribute real capability too.
+      final hasHooks = row.hooks.isNotEmpty || row.pluginHooks.isNotEmpty;
+      final hasMcp = mcpServers.any(
+        (s) => s.ownerPluginId == null && s.source == 'plugin:${row.name}',
+      );
+      if (tools.isNotEmpty || hasHooks || hasMcp) {
         return StartupItemStatus.ready(label, StartupItemKind.plugin, label);
       }
       return StartupItemStatus.failed(
@@ -2625,22 +2630,49 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
-  Future<void> enablePlugin(PluginItem plugin) async {
+  /// Test seam: replaces [PluginRuntimeManager.enable] in [enablePlugin].
+  @visibleForTesting
+  static Future<void> Function(String runtimeId)? runtimeEnableOverrideForTest;
+
+  /// Enable [plugin] and report the real outcome: `ok` only when the row
+  /// ends up enabled with a non-failed activation; otherwise `error` says
+  /// why (runtime enable error, failed activation reason, or the
+  /// fail-closed migration gate) instead of the switch silently snapping
+  /// back.
+  Future<({bool ok, String? error})> enablePlugin(PluginItem plugin) async {
     final runtimeId = plugin.runtimeId;
+    String? error;
     if (plugin.runtimeId != null) {
       // Task 7: runtime-managed rows re-register their contributions
       // (applying any promotion that came due while disabled).
       try {
-        await PluginRuntimeManager.I.enable(plugin.runtimeId!);
+        final override = runtimeEnableOverrideForTest;
+        if (override != null) {
+          await override(plugin.runtimeId!);
+        } else {
+          await PluginRuntimeManager.I.enable(plugin.runtimeId!);
+        }
       } catch (e) {
         Diag.swallow('state', e);
+        error = '$e';
       }
       final current = plugins
           .where((row) => row.runtimeId == plugin.runtimeId)
           .firstOrNull;
       plugin.enabled = current?.enabled ?? false;
+      if (error == null &&
+          (!plugin.enabled || plugin.activation == PluginActivation.failed)) {
+        final reason = plugin.runtimeReason ?? statusFor(runtimeId!)?.reason;
+        error = reason == null || reason.isEmpty
+            ? 'activation failed'
+            : reason;
+      }
     } else if (!plugin.migrationRequired) {
       plugin.enabled = true;
+    } else {
+      error =
+          'Migration required: '
+          '${plugin.runtimeReason ?? 're-approve this plugin before it can run'}';
     }
     await persistPluginState();
     try {
@@ -2649,6 +2681,7 @@ class AppState extends ChangeNotifier {
       Diag.swallow('state', e);
     }
     refresh();
+    return (ok: error == null && plugin.enabled, error: error);
   }
 
   Future<PluginActivation> retryPlugin(PluginItem plugin) async {
@@ -7401,6 +7434,22 @@ class AppState extends ChangeNotifier {
     return normalized;
   }
 
+  /// Installed plugins that [removeMarketplace] would uninstall — the
+  /// confirmation lists them so the copy matches the behaviour.
+  List<PluginItem> installedPluginsFromMarketplace(String repo) {
+    final normalized = normalizeMarketplace(repo);
+    return plugins
+        .where(
+          (p) =>
+              p.installed &&
+              (p.marketplace == repo ||
+                  p.marketplace == normalized ||
+                  p.source == repo ||
+                  p.source == normalized),
+        )
+        .toList();
+  }
+
   Future<void> removeMarketplace(String repo) async {
     final normalized = normalizeMarketplace(repo);
     marketplaces.remove(repo);
@@ -9239,25 +9288,35 @@ class AppState extends ChangeNotifier {
     // report working from their real active capability. Non-ready states map
     // to an accurate scrubbed detail (never the misleading "no agent tools").
     for (final p in plugins.where((p) => p.installed && p.enabled)) {
-      final tools = AgentService.I.pluginToolNames(p);
-      if (tools.isNotEmpty) {
-        updateServiceStatus(
-          'plugin:${p.name}',
-          ServiceHealth.working,
-          detail: 'probe ok · tools: ${tools.join(', ')}',
-        );
-        continue;
-      }
-      final health = await pluginHealthFor(p);
-      updateServiceStatus(
-        'plugin:${p.name}',
-        health.state == StartupItemState.ready
-            ? ServiceHealth.working
-            : ServiceHealth.failed,
-        detail: _serviceDetailForHealth(p, health),
-      );
+      await probePluginServiceStatus(p);
     }
     refresh();
+  }
+
+  /// Stamp `plugin:<name>` service status from a real capability probe of
+  /// [p]: roster tools first, else the full health probe (registered hooks,
+  /// owned MCP, skills/commands), so hook-only and MCP-only plugins are not
+  /// reported as failed. Returns the stamped health.
+  Future<ServiceHealth> probePluginServiceStatus(PluginItem p) async {
+    final tools = AgentService.I.pluginToolNames(p);
+    if (tools.isNotEmpty) {
+      updateServiceStatus(
+        'plugin:${p.name}',
+        ServiceHealth.working,
+        detail: 'probe ok · tools: ${tools.join(', ')}',
+      );
+      return ServiceHealth.working;
+    }
+    final health = await pluginHealthFor(p);
+    final stamped = health.state == StartupItemState.ready
+        ? ServiceHealth.working
+        : ServiceHealth.failed;
+    updateServiceStatus(
+      'plugin:${p.name}',
+      stamped,
+      detail: _serviceDetailForHealth(p, health),
+    );
+    return stamped;
   }
 
   /// Accurate, scrubbed ServiceHealth detail for a plugin probe outcome.

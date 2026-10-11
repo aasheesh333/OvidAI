@@ -156,6 +156,216 @@ Future<bool> showDeleteConfirmationDialog(
   return confirmed == true;
 }
 
+/// Confirm, then remove marketplace [repo]. Removal uninstalls every
+/// installed plugin from it (grant, secrets, dependency sandbox), so the
+/// dialog names them. Returns true when removed.
+Future<bool> confirmAndRemoveMarketplace(
+  BuildContext context,
+  String repo,
+) async {
+  final app = AppState.I;
+  final installed = app.installedPluginsFromMarketplace(repo);
+  final names = installed.map((p) => p.name).toList();
+  final shown = names.length > 5
+      ? '${names.take(5).join(', ')} and ${names.length - 5} more'
+      : names.join(', ');
+  final ok = await showDeleteConfirmationDialog(
+    context,
+    title: 'Remove $repo?',
+    content: installed.isEmpty
+        ? 'Removes this marketplace and its catalog entries. No installed '
+              'plugins come from it.'
+        : 'Also uninstalls ${installed.length} '
+              'plugin${installed.length == 1 ? '' : 's'}: $shown. Their '
+              'permissions, saved secrets and dependencies are deleted.',
+    confirmLabel: installed.isEmpty ? 'Remove' : 'Remove & uninstall',
+  );
+  if (!ok) return false;
+  await app.removeMarketplace(repo);
+  return true;
+}
+
+/// The one enable/disable path for the card switch, detail switch and
+/// detail button. Enabling reports the real outcome: a runtime/migration
+/// failure shows its reason (snackbar + failed status) and success is
+/// probed across every contribution kind (tools, hooks, MCP, skills), so
+/// hook-only and MCP-only plugins are not marked failed.
+Future<bool> setPluginEnabled(
+  BuildContext context,
+  PluginItem plugin,
+  bool enable,
+) async {
+  final app = AppState.I;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  PluginRuntimeCallRecorderForTest.record?.call(enable ? 'enable' : 'disable');
+  if (!enable) {
+    await app.disablePlugin(plugin);
+    app.serviceStatus.remove('plugin:${plugin.name}');
+    await app.persistPluginState();
+    app.refresh();
+    return true;
+  }
+  final result = await app.enablePlugin(plugin);
+  if (!result.ok) {
+    final reason = result.error ?? 'activation failed';
+    app.updateServiceStatus(
+      'plugin:${plugin.name}',
+      ServiceHealth.failed,
+      detail: reason,
+    );
+    app.refresh();
+    if (messenger != null && messenger.mounted) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text("Couldn't enable ${plugin.name}: $reason"),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+    return false;
+  }
+  // Task 10: probe-derived, not hardcoded — only stamp working when a real
+  // capability resolves.
+  await app.probePluginServiceStatus(plugin);
+  app.refresh();
+  return true;
+}
+
+/// Whether an UNINSTALLED [plugin] row may be removed from the list: only
+/// rows the user added (no marketplace catalog, not a built-in/native row).
+/// Catalog rows would simply vanish until the next marketplace sync.
+bool pluginRemovableFromList(PluginItem plugin) =>
+    !plugin.installed &&
+    plugin.marketplace == null &&
+    !(plugin.source?.startsWith('marketplace:') ?? false) &&
+    !_isInbuiltPlugin(plugin) &&
+    !NativePluginRegistry.I.has(plugin.name);
+
+/// MCP servers [AppState.uninstallPlugin] removes along with [plugin].
+List<McpServer> _pluginOwnedServers(PluginItem plugin) {
+  final runtimeId = plugin.runtimeId;
+  return AppState.I.mcpServers.where((s) {
+    if (runtimeId != null && s.ownerPluginId == runtimeId) return true;
+    if (s.ownerPluginId != null) return false;
+    return s.source == 'plugin:${plugin.name}' ||
+        (runtimeId != null && s.source == 'plugin:$runtimeId') ||
+        (plugin.source != null &&
+            (s.source == 'plugin:${plugin.source}' ||
+                s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}'));
+  }).toList();
+}
+
+/// Confirm, then uninstall [plugin]. The dialog says what is removed. The
+/// row stays in the list (as Available). Returns true when uninstalled.
+Future<bool> confirmAndUninstallPlugin(
+  BuildContext context,
+  PluginItem plugin,
+) async {
+  final app = AppState.I;
+  final servers = _pluginOwnedServers(plugin);
+  final removed = <String>[
+    if (plugin.runtimeId != null) ...[
+      'its permission grant',
+      'stored plugin secrets',
+      'installed files and dependencies',
+    ] else
+      'its installed files',
+    if (servers.isNotEmpty)
+      'its MCP server${servers.length == 1 ? '' : 's'} '
+          '(${servers.map((s) => s.name).join(', ')}) with their credentials',
+  ];
+  final list = removed.length == 1
+      ? removed.single
+      : '${removed.take(removed.length - 1).join(', ')} and ${removed.last}';
+  final ok = await showDeleteConfirmationDialog(
+    context,
+    title: 'Uninstall ${plugin.name}?',
+    content: 'Removes $list from this device. You can install it again later.',
+    confirmLabel: 'Uninstall',
+  );
+  if (!ok || !context.mounted) return false;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  PluginRuntimeCallRecorderForTest.record?.call('uninstall');
+  await app.uninstallPlugin(plugin);
+  app.serviceStatus.remove('plugin:${plugin.name}');
+  app.refresh();
+  if (messenger != null && messenger.mounted) {
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('${plugin.name} uninstalled'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+  return true;
+}
+
+/// Confirm, then drop an uninstalled user-added [plugin] row from the list.
+Future<bool> confirmAndRemovePluginRow(
+  BuildContext context,
+  PluginItem plugin,
+) async {
+  final app = AppState.I;
+  final ok = await showDeleteConfirmationDialog(
+    context,
+    title: 'Remove ${plugin.name} from the list?',
+    content: 'It is not installed; this only removes the entry.',
+    confirmLabel: 'Remove',
+  );
+  if (!ok) return false;
+  app.plugins.remove(plugin);
+  await app.persistPluginState();
+  app.refresh();
+  return true;
+}
+
+/// "Reset to defaults": confirm, clear the plugin's saved settings, then
+/// enable it through [setPluginEnabled] (real mount, migration gate,
+/// reported outcome).
+Future<void> resetPluginToDefaults(
+  BuildContext context,
+  PluginItem plugin,
+  List<NativePluginConfigField> fields,
+) async {
+  final ok = await showDeleteConfirmationDialog(
+    context,
+    title: 'Reset ${plugin.name} to defaults?',
+    content: fields.isEmpty
+        ? 'Re-enables the plugin with its default configuration.'
+        : 'Deletes the settings saved for this plugin (including secrets) '
+              'and re-enables it.',
+    confirmLabel: 'Reset',
+  );
+  if (!ok || !context.mounted) return;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final runtimeId = plugin.runtimeId;
+  if (fields.isNotEmpty && runtimeId != null) {
+    try {
+      await NativePluginConfigStore.I.clear(
+        pluginName: runtimeId,
+        fields: fields,
+      );
+    } catch (e) {
+      Diag.swallow('plugin-reset', e);
+      if (messenger != null && messenger.mounted) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text("Couldn't clear saved settings. Try again."),
+          ),
+        );
+      }
+      return;
+    }
+  }
+  if (!context.mounted) return;
+  final enabled = await setPluginEnabled(context, plugin, true);
+  if (enabled && messenger != null && messenger.mounted) {
+    messenger.showSnackBar(
+      SnackBar(content: Text('${plugin.name} reset to defaults')),
+    );
+  }
+}
+
 /// True when [plugin] is an inbuilt (source-less) row that ships with the
 /// app and should install directly rather than opening the add sheet.
 bool _isInbuiltPlugin(PluginItem plugin) {
@@ -676,8 +886,11 @@ Future<void> showPluginAddSheet(BuildContext context) {
                         // Every entry — including the legacy default, which
                         // 404s and is no longer seeded — is removable.
                         IconButton(
+                          key: ValueKey('sheet-marketplace-remove-$m'),
                           tooltip: 'Remove marketplace',
-                          onPressed: () => app.removeMarketplace(m),
+                          // Removal uninstalls its plugins — never one tap.
+                          onPressed: () =>
+                              confirmAndRemoveMarketplace(ctx, m),
                           icon: const Icon(
                             Icons.delete_outline,
                             size: 16,
@@ -1321,15 +1534,7 @@ class _MarketplaceCardState extends State<_MarketplaceCard> {
             onPressed: _busy
                 ? null
                 : () async {
-                    final ok = await showDeleteConfirmationDialog(
-                      context,
-                      title: 'Remove ${widget.repo}?',
-                      content:
-                          'Removes this marketplace repo. Plugins already '
-                          'installed from it stay installed.',
-                    );
-                    if (!ok) return;
-                    app.removeMarketplace(widget.repo);
+                    await confirmAndRemoveMarketplace(context, widget.repo);
                   },
           ),
             ],
@@ -1542,70 +1747,49 @@ class PluginCard extends StatelessWidget {
                           activeTrackColor: Aether.accent,
                           materialTapTargetSize:
                               MaterialTapTargetSize.shrinkWrap,
-                          onChanged: (val) async {
-                            PluginRuntimeCallRecorderForTest.record?.call(
-                              val ? 'enable' : 'disable',
-                            );
-                            if (val) {
-                              await app.enablePlugin(plugin);
-                              final tools = AgentService.I.pluginToolNames(
-                                plugin,
-                              );
-                              if (tools.isNotEmpty) {
-                                app.updateServiceStatus(
-                                  'plugin:${plugin.name}',
-                                  ServiceHealth.working,
-                                  detail:
-                                      'probe ok · tools: ${tools.join(', ')}',
-                                );
-                              } else {
-                                app.updateServiceStatus(
-                                  'plugin:${plugin.name}',
-                                  ServiceHealth.failed,
-                                  detail:
-                                      'probe failed: contributes no agent tools, '
-                                      'skills, hooks, or MCP servers',
-                                );
-                              }
-                            } else {
-                              await app.disablePlugin(plugin);
-                              app.serviceStatus.remove('plugin:${plugin.name}');
-                              await app.persistPluginState();
-                            }
-                            app.refresh();
-                          },
+                          onChanged: (val) =>
+                              setPluginEnabled(context, plugin, val),
                         ),
                       ),
                       const SizedBox(width: 4),
                     ],
-                    IconButton(
-                      key: ValueKey('plugin-delete-${plugin.name}'),
-                      icon: const Icon(
-                        Icons.delete_outline,
-                        size: 18,
-                        color: Aether.danger,
+                    // One destructive action per row: Uninstall (with
+                    // confirmation) on installed rows; "Remove from list"
+                    // only for user-added rows. Catalog rows have neither.
+                    if (plugin.installed)
+                      IconButton(
+                        key: ValueKey('plugin-delete-${plugin.name}'),
+                        icon: const Icon(
+                          Icons.delete_outline,
+                          size: 18,
+                          color: Aether.danger,
+                        ),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
+                        tooltip: 'Uninstall plugin',
+                        onPressed: () =>
+                            confirmAndUninstallPlugin(context, plugin),
+                      )
+                    else if (pluginRemovableFromList(plugin))
+                      IconButton(
+                        key: ValueKey('plugin-remove-${plugin.name}'),
+                        icon: Icon(
+                          Icons.playlist_remove,
+                          size: 18,
+                          color: Aether.textMuted,
+                        ),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
+                        tooltip: 'Remove from list',
+                        onPressed: () =>
+                            confirmAndRemovePluginRow(context, plugin),
                       ),
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                        minWidth: 48,
-                        minHeight: 48,
-                      ),
-                      tooltip: 'Delete plugin',
-                      onPressed: () async {
-                        final ok = await showDeleteConfirmationDialog(
-                          context,
-                          title: 'Delete ${plugin.name}?',
-                        );
-                        if (!ok) return;
-                        PluginRuntimeCallRecorderForTest.record?.call(
-                          'uninstall',
-                        );
-                        await app.uninstallPlugin(plugin);
-                        app.plugins.remove(plugin);
-                        await app.persistPluginState();
-                        app.refresh();
-                      },
-                    ),
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -1718,61 +1902,31 @@ class PluginDetailScreen extends StatelessWidget {
                 value: plugin.enabled,
                 activeTrackColor: Aether.accent,
                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                onChanged: (val) async {
-                  PluginRuntimeCallRecorderForTest.record?.call(
-                    val ? 'enable' : 'disable',
-                  );
-                  if (val) {
-                    await app.enablePlugin(plugin);
-                    final tools = AgentService.I.pluginToolNames(plugin);
-                    if (tools.isNotEmpty) {
-                      app.updateServiceStatus(
-                        'plugin:${plugin.name}',
-                        ServiceHealth.working,
-                        detail: 'probe ok · tools: ${tools.join(', ')}',
-                      );
-                    } else {
-                      app.updateServiceStatus(
-                        'plugin:${plugin.name}',
-                        ServiceHealth.failed,
-                        detail:
-                            'probe failed: contributes no agent tools, '
-                            'skills, hooks, or MCP servers',
-                      );
-                    }
-                  } else {
-                    await app.disablePlugin(plugin);
-                    app.serviceStatus.remove('plugin:${plugin.name}');
-                    await app.persistPluginState();
-                  }
-                  app.refresh();
-                },
+                onChanged: (val) => setPluginEnabled(context, plugin, val),
               ),
             ),
             const SizedBox(width: 4),
           ],
-          IconButton(
-            key: ValueKey('plugin-detail-delete-${plugin.name}'),
-            tooltip: 'Delete plugin',
-            icon: const Icon(
-              Icons.delete_outline,
-              size: 19,
-              color: Aether.danger,
+          // Installed rows uninstall from the body's Uninstall button (one
+          // action); the app bar only offers "Remove from list" for
+          // uninstalled user-added rows.
+          if (!plugin.installed && pluginRemovableFromList(plugin))
+            IconButton(
+              key: ValueKey('plugin-detail-delete-${plugin.name}'),
+              tooltip: 'Remove from list',
+              icon: Icon(
+                Icons.playlist_remove,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              onPressed: () async {
+                final removed = await confirmAndRemovePluginRow(
+                  context,
+                  plugin,
+                );
+                if (removed && context.mounted) Navigator.pop(context);
+              },
             ),
-            onPressed: () async {
-              final ok = await showDeleteConfirmationDialog(
-                context,
-                title: 'Delete ${plugin.name}?',
-              );
-              if (!ok) return;
-              PluginRuntimeCallRecorderForTest.record?.call('uninstall');
-              await app.uninstallPlugin(plugin);
-              app.plugins.remove(plugin);
-              await app.persistPluginState();
-              app.refresh();
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
           const SizedBox(width: 4),
         ],
       ),
@@ -1917,36 +2071,8 @@ class PluginDetailScreen extends StatelessWidget {
                       plugin.enabled ? 'Disable' : 'Enable',
                       style: const TextStyle(fontSize: 13.5),
                     ),
-                    onPressed: () async {
-                      PluginRuntimeCallRecorderForTest.record?.call(
-                        plugin.enabled ? 'disable' : 'enable',
-                      );
-                      if (plugin.enabled) {
-                        await app.disablePlugin(plugin);
-                        app.serviceStatus.remove('plugin:${plugin.name}');
-                        await app.persistPluginState();
-                      } else {
-                        await app.enablePlugin(plugin);
-                        // Task 10: probe-derived, not hardcoded — only
-                        // stamp working when real capability resolves.
-                        final tools = AgentService.I.pluginToolNames(plugin);
-                        if (tools.isNotEmpty) {
-                          app.updateServiceStatus(
-                            'plugin:${plugin.name}',
-                            ServiceHealth.working,
-                            detail: 'probe ok · tools: ${tools.join(', ')}',
-                          );
-                        } else {
-                          app.updateServiceStatus(
-                            'plugin:${plugin.name}',
-                            ServiceHealth.failed,
-                            detail:
-                                'probe failed: contributes no agent tools, '
-                                'skills, hooks, or MCP servers',
-                          );
-                        }
-                      }
-                    },
+                    onPressed: () =>
+                        setPluginEnabled(context, plugin, !plugin.enabled),
                   )
                 : inbuiltUninstallableForTest(plugin)
                 // No Install button for a row nothing can install — an
@@ -2115,16 +2241,14 @@ class PluginDetailScreen extends StatelessWidget {
                       'Reset to defaults',
                       style: TextStyle(fontSize: 12.5),
                     ),
-                    onPressed: () {
-                      plugin.enabled = true;
-                      app.persistPluginState();
-                      app.refresh();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Plugin reset to defaults'),
-                        ),
-                      );
-                    },
+                    // Clears the saved settings, then enables through the
+                    // real path (contributions mount; the fail-closed
+                    // migration gate applies) and reports the outcome.
+                    onPressed: () => resetPluginToDefaults(
+                      context,
+                      plugin,
+                      configFieldsForSettings(settingsFields),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -2145,15 +2269,10 @@ class PluginDetailScreen extends StatelessWidget {
                       'Uninstall',
                       style: TextStyle(fontSize: 12.5),
                     ),
-                    onPressed: () async {
-                      // Task 11: uninstall routes through the runtime
-                      // manager (registry + content + deps + record +
-                      // grant + secrets) via AppState.uninstallPlugin.
-                      PluginRuntimeCallRecorderForTest.record?.call(
-                        'uninstall',
-                      );
-                      await app.uninstallPlugin(plugin);
-                    },
+                    // Task 11: uninstall routes through the runtime
+                    // manager (registry + content + deps + record + grant +
+                    // secrets) via AppState.uninstallPlugin — confirmed.
+                    onPressed: () => confirmAndUninstallPlugin(context, plugin),
                   ),
                 ),
               ],

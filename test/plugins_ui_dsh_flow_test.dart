@@ -299,10 +299,10 @@ void main() {
       await tester.pumpAndSettle();
 
       // Verify confirmation dialog
-      expect(find.text('Delete delete_plugin?'), findsOneWidget);
+      expect(find.text('Uninstall delete_plugin?'), findsOneWidget);
 
-      // Tap Delete in dialog
-      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      // Tap Uninstall in dialog
+      await tester.tap(find.widgetWithText(TextButton, 'Uninstall'));
       await tester.pumpAndSettle();
 
       expect(plugin.installed, isFalse);

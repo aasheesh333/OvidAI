@@ -431,4 +431,225 @@ void main() {
       expect(await McpService.I.missingCredentialsFor(s), ['A']);
     });
   });
+
+  group('marketplace removal (F-078)', () {
+    PluginItem installedFrom(String repo) => PluginItem(
+      name: 'Market Tool',
+      author: 'mk',
+      description: 'from a marketplace',
+      version: '1.0.0',
+      category: 'Tool',
+      installed: true,
+      enabled: true,
+      marketplace: repo,
+    );
+
+    Future<void> pumpLauncher(WidgetTester tester, String repo) => _pump(
+      tester,
+      Scaffold(
+        body: Builder(
+          builder: (context) => Column(
+            children: [
+              TextButton(
+                onPressed: () => confirmAndRemoveMarketplace(context, repo),
+                child: const Text('remove-it'),
+              ),
+              TextButton(
+                onPressed: () => showPluginAddSheet(context),
+                child: const Text('open-sheet'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    testWidgets('the confirm names the plugins it will uninstall', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      const repo = 'mk/market';
+      app.marketplaces.add(repo);
+      final plugin = installedFrom(repo);
+      app.plugins.add(plugin);
+      await pumpLauncher(tester, repo);
+      await tester.tap(find.text('remove-it'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Also uninstalls 1 plugin: Market Tool'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('stay installed'), findsNothing);
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(app.marketplaces, contains(repo));
+      expect(plugin.installed, isTrue);
+    });
+
+    testWidgets('the add-sheet trash requires confirmation', (tester) async {
+      final app = AppState.I;
+      const repo = 'mk/sheet-market';
+      app.marketplaces.add(repo);
+      await pumpLauncher(tester, repo);
+      await tester.tap(find.text('open-sheet'));
+      await tester.pumpAndSettle();
+      final trash = find.byKey(const ValueKey('sheet-marketplace-remove-$repo'));
+      await tester.ensureVisible(trash);
+      await tester.pumpAndSettle();
+      await tester.tap(trash);
+      await tester.pumpAndSettle();
+      expect(find.text('Remove $repo?'), findsOneWidget);
+      expect(app.marketplaces, contains(repo), reason: 'not removed yet');
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(app.marketplaces, contains(repo));
+    });
+
+    test('installedPluginsFromMarketplace matches what removal uninstalls',
+        () {
+      final app = AppState.I;
+      const repo = 'mk/m2';
+      final installed = installedFrom(repo);
+      final catalogOnly = installedFrom(repo)..installed = false;
+      app.plugins.addAll([installed, catalogOnly]);
+      expect(app.installedPluginsFromMarketplace(repo), [installed]);
+    });
+  });
+
+  group('plugin enable, reset and uninstall (F-087, F-088, F-089)', () {
+    PluginItem row(
+      String name, {
+      bool installed = true,
+      bool enabled = false,
+      Map<String, String> hooks = const {},
+      String? marketplace,
+      String? runtimeId,
+      bool migrationRequired = false,
+      String? runtimeReason,
+    }) => PluginItem(
+      name: name,
+      author: 'fixture',
+      description: 'fixture',
+      version: '1.0.0',
+      category: 'Tool',
+      installed: installed,
+      enabled: enabled,
+      hooks: hooks,
+      marketplace: marketplace,
+      runtimeId: runtimeId,
+      migrationRequired: migrationRequired,
+      runtimeReason: runtimeReason,
+    );
+
+    tearDown(() => AppState.runtimeEnableOverrideForTest = null);
+
+    testWidgets('a hook-only plugin toggled on is not marked failed', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final p = row('Hook Only', hooks: {'on_turn_start': 'echo hi'});
+      app.plugins.add(p);
+      await _pump(tester, Scaffold(body: PluginCard(plugin: p)));
+      await tester.tap(find.byKey(ValueKey('plugin-switch-${p.name}')));
+      await tester.pumpAndSettle();
+      expect(p.enabled, isTrue);
+      expect(
+        app.serviceStatus['plugin:${p.name}']?.health,
+        ServiceHealth.working,
+      );
+    });
+
+    testWidgets('a runtime enable failure shows the real reason', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final p = row('Broken', runtimeId: 'acme/broken');
+      app.plugins.add(p);
+      AppState.runtimeEnableOverrideForTest = (_) async =>
+          throw StateError('content directory missing');
+      await _pump(tester, Scaffold(body: PluginCard(plugin: p)));
+      await tester.tap(find.byKey(ValueKey('plugin-switch-${p.name}')));
+      // Persistence awaits run on the real event loop; let them land.
+      for (var i = 0; i < 10; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(p.enabled, isFalse);
+      expect(
+        find.textContaining('content directory missing'),
+        findsOneWidget,
+      );
+      expect(
+        app.serviceStatus['plugin:${p.name}']?.detail,
+        contains('content directory missing'),
+      );
+    });
+
+    testWidgets('"Reset to defaults" never enables a migration-required row', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final p = row(
+        'Needs Migration',
+        migrationRequired: true,
+        runtimeReason: 'Re-approve this plugin',
+      );
+      app.plugins.add(p);
+      await _pump(tester, PluginDetailScreen(plugin: p));
+      final reset = find.text('Reset to defaults');
+      await tester.ensureVisible(reset);
+      await tester.pumpAndSettle();
+      await tester.tap(reset);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Reset'));
+      await tester.pumpAndSettle();
+      expect(p.enabled, isFalse);
+      expect(find.textContaining('Migration required'), findsWidgets);
+    });
+
+    testWidgets('detail Uninstall requires confirmation', (tester) async {
+      final app = AppState.I;
+      final p = row('Keep Me', enabled: true);
+      app.plugins.add(p);
+      await _pump(tester, PluginDetailScreen(plugin: p));
+      final un = find.widgetWithText(OutlinedButton, 'Uninstall');
+      await tester.ensureVisible(un);
+      await tester.pumpAndSettle();
+      await tester.tap(un);
+      await tester.pumpAndSettle();
+      expect(find.text('Uninstall Keep Me?'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(p.installed, isTrue);
+      await tester.tap(un);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Uninstall'));
+      await tester.pumpAndSettle();
+      expect(p.installed, isFalse);
+      expect(app.plugins.contains(p), isTrue, reason: 'row stays listed');
+    });
+
+    testWidgets('catalog rows offer no delete; user rows "Remove from list"', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final catalog = row('Catalog Row', installed: false, marketplace: 'o/r');
+      final mine = row('My Row', installed: false);
+      app.plugins.addAll([catalog, mine]);
+      await _pump(tester, Scaffold(body: PluginCard(plugin: catalog)));
+      expect(find.byKey(ValueKey('plugin-delete-${catalog.name}')), findsNothing);
+      expect(find.byKey(ValueKey('plugin-remove-${catalog.name}')), findsNothing);
+      await _pump(tester, Scaffold(body: PluginCard(plugin: mine)));
+      final remove = find.byKey(ValueKey('plugin-remove-${mine.name}'));
+      expect(remove, findsOneWidget);
+      await tester.tap(remove);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Remove'));
+      await tester.pumpAndSettle();
+      expect(app.plugins.contains(mine), isFalse);
+    });
+  });
 }

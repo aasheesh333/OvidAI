@@ -21739,6 +21739,11 @@ cwd = 'tools'
         );
         expect(calls, isNot(contains('uninstall')));
         await tester.tap(find.text('Uninstall'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        // Uninstall is confirmed first (F-088) and nothing runs before it.
+        expect(calls, isNot(contains('uninstall')));
+        await tester.tap(find.widgetWithText(TextButton, 'Uninstall'));
         // uninstallPlugin awaits real async teardown (MCP unmount, prefs
         // persistence, secure-storage delete) — poll with real event-loop
         // turns until the row flips. NOTE: runAsync + pump do NOT advance
