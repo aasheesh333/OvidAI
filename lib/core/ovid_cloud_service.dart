@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show SocketException;
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
@@ -40,6 +41,72 @@ class MintOutcome {
   final MintResult? result;
   final String? message;
   bool get ok => status == MintStatus.ok;
+}
+
+/// How a plan change ended (test `/upgrade` or a Google Play purchase), so the
+/// UI can show specific copy instead of one generic failure (F-202).
+enum UpgradeResult {
+  /// The server confirmed the new tier.
+  ok,
+
+  /// Google Play reports a deferred/pending payment; nothing is active yet.
+  pending,
+
+  /// The user closed the Google Play purchase sheet.
+  cancelled,
+
+  /// No connection / timeout. Retrying makes sense.
+  offline,
+
+  /// Paid plans are not on sale (server disabled the path, no Play Billing).
+  /// Never suggest retrying.
+  notAvailable,
+
+  /// The server refused (auth, account mismatch, invalid purchase, 402…).
+  rejected,
+
+  /// Restore found no active subscription for this Google account.
+  nothingToRestore,
+
+  /// Anything else.
+  unknown,
+}
+
+class UpgradeOutcome {
+  const UpgradeOutcome(
+    this.result, {
+    this.tier,
+    this.expiresAt,
+    this.autoRenewing,
+  });
+  final UpgradeResult result;
+
+  /// The server-confirmed tier when [result] is [UpgradeResult.ok].
+  final String? tier;
+
+  /// Subscription period end reported by `/billing/verify`, when known.
+  final DateTime? expiresAt;
+  final bool? autoRenewing;
+  bool get ok => result == UpgradeResult.ok;
+}
+
+/// Server verdict for one Google Play purchase token (`/billing/verify`).
+class PlayVerifyOutcome {
+  const PlayVerifyOutcome(
+    this.result, {
+    this.tier,
+    this.acknowledge = false,
+    this.expiresAt,
+    this.autoRenewing,
+  });
+  final UpgradeResult result;
+  final String? tier;
+
+  /// The client may acknowledge (complete) the purchase ONLY when true: the
+  /// server verified the token with Google and set the tier.
+  final bool acknowledge;
+  final DateTime? expiresAt;
+  final bool? autoRenewing;
 }
 
 enum CloudConnectionStatus { idle, connecting, loadingCatalog, ready, failed }
@@ -290,6 +357,12 @@ class OvidCloudService extends ChangeNotifier {
   /// TEST-only upgrade endpoint (the "Pay now" button). The server gates it
   /// behind ALLOW_TEST_UPGRADE; a real payment webhook replaces it later.
   static const String upgradeUrl = 'https://api.ovidsi.com/upgrade';
+
+  /// Google Play purchase-token verification (server/billing). The server
+  /// checks the token with the Play Developer API and sets the tier; only
+  /// then does the app acknowledge the purchase.
+  static const String billingVerifyUrl =
+      'https://api.ovidsi.com/billing/verify';
 
   /// Test seam: force a specific [CloudConnectionState] for [state] without
   /// going through the mint/retry round-trip. Lets widget tests exercise the
@@ -669,16 +742,20 @@ class OvidCloudService extends ChangeNotifier {
 
   /// TEST "Pay now": upgrade the signed-in user's plan tier. Server-gated by
   /// ALLOW_TEST_UPGRADE. Returns the new tier on success, null on failure.
-  Future<String?> upgrade(String tier, {http.Client? client}) {
+  Future<String?> upgrade(String tier, {http.Client? client}) async =>
+      (await upgradeResult(tier, client: client)).tier;
+
+  /// [upgrade] with the failure reason (offline / disabled / rejected …).
+  Future<UpgradeOutcome> upgradeResult(String tier, {http.Client? client}) {
     final state = AppState.I;
-    return _serializeMutation<String?>(
+    return _serializeMutation<UpgradeOutcome>(
       state,
       () => _upgrade(tier, state, client),
-      null,
+      const UpgradeOutcome(UpgradeResult.rejected),
     );
   }
 
-  Future<String?> _upgrade(
+  Future<UpgradeOutcome> _upgrade(
     String tier,
     AppState state,
     http.Client? client,
@@ -706,31 +783,155 @@ class OvidCloudService extends ChangeNotifier {
         // disabled"). Hide purchase CTAs instead of offering a dead button.
         _upgradeDisabledByServer = true;
         notifyListeners();
-        return null;
+        return const UpgradeOutcome(UpgradeResult.notAvailable);
       }
-      if (res.statusCode != 200) return null;
+      if (res.statusCode == 404 || res.statusCode == 501) {
+        return const UpgradeOutcome(UpgradeResult.notAvailable);
+      }
+      if (res.statusCode >= 500) {
+        return const UpgradeOutcome(UpgradeResult.unknown);
+      }
+      if (res.statusCode != 200) {
+        return const UpgradeOutcome(UpgradeResult.rejected);
+      }
       final j = jsonDecode(res.body) as Map<String, dynamic>;
       final newTier = j['tier'];
       if (j['ok'] != true ||
           newTier is! String ||
           newTier != tier ||
           !ovidPlanMultipliers.containsKey(newTier)) {
-        return null;
+        return const UpgradeOutcome(UpgradeResult.rejected);
       }
-      _confirmTier(newTier);
-      state.setOvidCloudTier(newTier);
-      scope.check();
-      _allowanceChanged();
-      await _refreshModels(scope, c);
-      scope.check();
-      return newTier;
+      await _applyConfirmedTier(newTier, scope, c);
+      return UpgradeOutcome(UpgradeResult.ok, tier: newTier);
     } catch (e) {
       Diag.swallow('ovid_cloud.upgrade', e);
-      return null;
+      return UpgradeOutcome(_failureResult(e));
     } finally {
       if (client == null) c.close();
     }
   }
+
+  /// Ask the server to verify a Google Play purchase token and set the tier.
+  /// Never acknowledges anything itself; see [PlayVerifyOutcome.acknowledge].
+  Future<PlayVerifyOutcome> verifyPlayPurchase({
+    required String productId,
+    required String purchaseToken,
+    required String packageName,
+    http.Client? client,
+  }) {
+    final state = AppState.I;
+    return _serializeMutation<PlayVerifyOutcome>(
+      state,
+      () => _verifyPlayPurchase(
+        productId,
+        purchaseToken,
+        packageName,
+        state,
+        client,
+      ),
+      const PlayVerifyOutcome(UpgradeResult.rejected),
+    );
+  }
+
+  Future<PlayVerifyOutcome> _verifyPlayPurchase(
+    String productId,
+    String purchaseToken,
+    String packageName,
+    AppState state,
+    http.Client? client,
+  ) async {
+    final revision = ++_mutationRevision;
+    final scope = _CloudRequestScope(
+      this,
+      state,
+      isLatest: () => revision == _mutationRevision,
+    );
+    final c = client ?? _newClient();
+    try {
+      final headers = await _headers(scope);
+      final res = await c
+          .post(
+            Uri.parse(billingVerifyUrl),
+            headers: {...headers, 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'product_id': productId,
+              'purchase_token': purchaseToken,
+              'package_name': packageName,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+      scope.check();
+      Map<String, dynamic> body;
+      try {
+        body = jsonDecode(res.body) as Map<String, dynamic>;
+      } catch (_) {
+        body = const {};
+      }
+      if (res.statusCode == 202 || body['status'] == 'pending') {
+        return const PlayVerifyOutcome(UpgradeResult.pending);
+      }
+      if (res.statusCode == 404 ||
+          (res.statusCode == 503 &&
+              (body['error'] is Map) &&
+              (body['error'] as Map)['code'] == 'billing_unavailable')) {
+        return const PlayVerifyOutcome(UpgradeResult.notAvailable);
+      }
+      if (res.statusCode >= 500) {
+        return const PlayVerifyOutcome(UpgradeResult.unknown);
+      }
+      if (res.statusCode != 200) {
+        return const PlayVerifyOutcome(UpgradeResult.rejected);
+      }
+      final tier = body['tier'];
+      final expires = DateTime.tryParse('${body['expires_at'] ?? ''}');
+      final autoRenewing = body['auto_renewing'] is bool
+          ? body['auto_renewing'] as bool
+          : null;
+      if (tier is String && ovidPlanMultipliers.containsKey(tier)) {
+        // Active or not, the server's tier is authoritative for this account.
+        await _applyConfirmedTier(tier, scope, c);
+      }
+      if (body['ok'] != true || tier is! String) {
+        return PlayVerifyOutcome(
+          UpgradeResult.rejected,
+          tier: tier is String ? tier : null,
+        );
+      }
+      return PlayVerifyOutcome(
+        UpgradeResult.ok,
+        tier: tier,
+        acknowledge: body['acknowledge'] == true,
+        expiresAt: expires,
+        autoRenewing: autoRenewing,
+      );
+    } catch (e) {
+      Diag.swallow('ovid_cloud.billing_verify', e);
+      return PlayVerifyOutcome(_failureResult(e));
+    } finally {
+      if (client == null) c.close();
+    }
+  }
+
+  Future<void> _applyConfirmedTier(
+    String tier,
+    _CloudRequestScope scope,
+    http.Client c,
+  ) async {
+    _confirmTier(tier);
+    scope.state.setOvidCloudTier(tier);
+    scope.check();
+    _allowanceChanged();
+    await _refreshModels(scope, c);
+    scope.check();
+  }
+
+  static UpgradeResult _failureResult(Object e) =>
+      e is TimeoutException || e is http.ClientException || e is SocketException
+      ? UpgradeResult.offline
+      : e is CloudUsageException
+      ? UpgradeResult.rejected
+      : UpgradeResult.unknown;
 }
 
 class CloudUsageException implements Exception {
@@ -817,9 +1018,27 @@ class OvidUsage {
     required this.models,
     this.hasRemainingPct = true,
     this.billingEnabled = false,
+    this.planExpiresAt,
+    this.planAutoRenews,
+    this.resetsAt,
+    this.planFeatures = const {},
   });
 
   final String tier;
+
+  /// Server field `plan_expires_at`: end of the current paid period (Play
+  /// subscription), for "Renews on / Ends on". Null when free or unknown.
+  final DateTime? planExpiresAt;
+
+  /// Server field `plan_auto_renews`: false after the user cancelled in Play.
+  final bool? planAutoRenews;
+
+  /// Server field `resets_at`: when the current allowance window resets.
+  final DateTime? resetsAt;
+
+  /// Server field `plans`: per-tier feature lines (F-200). Empty when absent;
+  /// the UI then falls back to built-in copy.
+  final Map<String, List<String>> planFeatures;
   final bool isPaid;
 
   /// Server flag `billing_enabled`: a real purchase path exists. Absent or
@@ -841,7 +1060,7 @@ class OvidUsage {
   /// Internal (server field `month_free_cap_usd`) — never render.
   final double monthFreeCapUsd;
 
-  /// Server field `requests_today` (parsed, not rendered).
+  /// Server field `requests_today`.
   final int requestsToday;
 
   /// Raw server window string, parsed as-is. The client applies NO window
@@ -878,6 +1097,22 @@ class OvidUsage {
     remainingPct: (j['remaining_pct'] as num?)?.toDouble() ?? 0,
     hasRemainingPct: j['remaining_pct'] is num,
     billingEnabled: j['billing_enabled'] == true,
+    planExpiresAt: _parseServerTime(j['plan_expires_at']),
+    planAutoRenews: j['plan_auto_renews'] is bool
+        ? j['plan_auto_renews'] as bool
+        : null,
+    resetsAt: _parseServerTime(j['resets_at']),
+    planFeatures: {
+      for (final p in (j['plans'] is List ? j['plans'] as List : const []))
+        if (p is Map &&
+            p['tier'] is String &&
+            ovidPlanMultipliers.containsKey(p['tier']) &&
+            p['features'] is List)
+          p['tier'] as String: [
+            for (final f in p['features'] as List)
+              if (f is String && f.trim().isNotEmpty && f.length <= 120) f,
+          ].take(6).toList(),
+    },
     models: [
       for (final m in (j['models'] as List? ?? const []))
         if (m is Map<String, dynamic>) OvidModelUsage.fromJson(m),
@@ -921,6 +1156,9 @@ class OvidModelUsage {
     hasRemainingPct: j['remaining_pct'] is num,
   );
 }
+
+DateTime? _parseServerTime(Object? value) =>
+    value is String ? DateTime.tryParse(value)?.toUtc() : null;
 
 double? _validRemainingFraction(double value) =>
     value.isFinite && value >= 0 && value <= 1 ? value : null;
