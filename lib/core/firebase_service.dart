@@ -230,10 +230,90 @@ class FirebaseService extends ChangeNotifier {
     }
   }
 
+  /// Retries account admission. With the server account feature on this
+  /// re-runs the login acknowledgement; with it off the only admission step
+  /// is the local session namespace transition, so that is retried instead
+  /// (otherwise a failed local transition would leave no way forward).
   Future<void> retryAccountLogin() async {
     final u = _user;
-    if (u == null || u.isAnonymous || !accountService.enabled) return;
+    if (u == null || u.isAnonymous) return;
+    if (!accountService.enabled) {
+      return _admitAccount(u.uid, () async {
+        final revision = _authRevision;
+        await AppState.I.transitionSessionAccount('firebase:${u.uid}');
+        if (revision != _authRevision || _user?.uid != u.uid) return;
+        notifyListeners();
+      });
+    }
     return _admitAccount(u.uid, () => _retryAccountLogin(u));
+  }
+
+  /// True when the signed-in account's local session namespace failed to
+  /// load, so the account-not-ready screen must offer Retry / Sign out.
+  bool get accountTransitionFailed =>
+      isSignedIn &&
+      AppState.I.lastSessionPersistFailed &&
+      !AppState.I.sessionAccountReady;
+
+  /// Minimum gap between background account-state re-checks (app resume).
+  static const accountRecheckInterval = Duration(minutes: 15);
+
+  /// Minimum gap between forced re-checks (gateway 401/403), so a burst of
+  /// rejected requests cannot become a burst of account calls.
+  static const accountForcedRecheckInterval = Duration(minutes: 1);
+  DateTime? _lastAccountCheck;
+  Future<void>? _accountRecheck;
+
+  /// Re-reads the server deletion state for an admitted account, so a
+  /// deletion requested on another device is noticed without a cold start.
+  /// Called on app resume (throttled to [accountRecheckInterval]) and with
+  /// [force] when the gateway rejects this account (401/403).
+  Future<void> recheckAccountState({bool force = false}) {
+    final u = _user;
+    if (u == null ||
+        u.isAnonymous ||
+        !accountService.enabled ||
+        !_accountSession.ready) {
+      return Future<void>.value();
+    }
+    final inFlight = _accountRecheck;
+    if (inFlight != null) return inFlight;
+    final now = DateTime.now();
+    final last = _lastAccountCheck;
+    final interval = force
+        ? accountForcedRecheckInterval
+        : accountRecheckInterval;
+    if (last != null && now.difference(last) < interval) {
+      return Future<void>.value();
+    }
+    _lastAccountCheck = now;
+    late final Future<void> check;
+    check = _recheckAccountState(u).whenComplete(() {
+      if (identical(_accountRecheck, check)) _accountRecheck = null;
+    });
+    return _accountRecheck = check;
+  }
+
+  Future<void> _recheckAccountState(User u) async {
+    final revision = _authRevision;
+    try {
+      final result = await accountService.acknowledgeLogin();
+      if (revision != _authRevision || _user?.uid != u.uid) return;
+      lastDeletionReceipt = result;
+      if (result.allowsLogin) return;
+      // Deletion was requested elsewhere: drop admission and re-run it so the
+      // account-not-ready screen explains the state and offers Restore.
+      _accountSession.clear();
+      ImageStudio.I.bindAccount(null);
+      notifyListeners();
+      unawaited(retryAccountLogin().catchError((Object e) {
+        Diag.swallow('account.recheck_admission', e);
+      }));
+    } catch (e) {
+      // A transient failure keeps the current admission; the next resume or
+      // gateway rejection checks again.
+      Diag.swallow('account.recheck', e);
+    }
   }
 
   Future<void> _retryAccountLogin(User u) async {
@@ -259,6 +339,7 @@ class FirebaseService extends ChangeNotifier {
       }
     });
     if (revision != _authRevision) return;
+    if (_accountSession.ready) _lastAccountCheck = DateTime.now();
     if (accountReady) {
       ImageStudio.I.bindAccount(u.uid);
       try {

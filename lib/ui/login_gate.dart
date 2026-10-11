@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/account_service.dart';
 import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
 import '../core/theme.dart';
@@ -116,6 +117,12 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
         _firebase.accountReady &&
         widget.bindCloud == null) {
       unawaited(OvidCloudService.I.ensureConnected());
+    }
+    if (state == AppLifecycleState.resumed &&
+        _firebase.isAvailable &&
+        _firebase.isSignedIn) {
+      // Notice a deletion requested on another device (throttled).
+      unawaited(_firebase.recheckAccountState());
     }
   }
 
@@ -321,13 +328,80 @@ class _AccountNotReadyScreen extends StatefulWidget {
 }
 
 class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
+  /// After this long without admission the screen offers Retry / Sign out
+  /// even when no error was reported, so it can never be a dead end.
+  static const stuckAfter = Duration(seconds: 15);
+
   bool _restoreBusy = false;
   bool _retryBusy = false;
+  bool _stuck = false;
+  String? _actionError;
+  Timer? _stuckTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _armStuckTimer();
+  }
+
+  @override
+  void dispose() {
+    _stuckTimer?.cancel();
+    super.dispose();
+  }
+
+  void _armStuckTimer() {
+    _stuckTimer?.cancel();
+    _stuckTimer = Timer(stuckAfter, () {
+      if (mounted) setState(() => _stuck = true);
+    });
+  }
+
+  Future<void> _run(
+    Future<void> Function() action,
+    void Function(bool busy) setBusy,
+    String failure,
+  ) async {
+    setState(() {
+      setBusy(true);
+      _actionError = null;
+    });
+    try {
+      await action();
+    } catch (e) {
+      // Expected account/network failures are shown inline; they are not
+      // crashes and must not reach the fatal error handler.
+      if (mounted) {
+        setState(
+          () => _actionError = e is AccountException ? e.message : failure,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => setBusy(false));
+    }
+  }
+
+  void _retry() {
+    _stuck = false;
+    _armStuckTimer();
+    _run(
+      widget.service.retryAccountLogin,
+      (busy) => _retryBusy = busy,
+      'Could not confirm your account. Check your connection and retry.',
+    );
+  }
+
+  void _restore() => _run(
+    widget.service.restoreAccount,
+    (busy) => _restoreBusy = busy,
+    'Could not restore your account. Check your connection and retry.',
+  );
 
   @override
   Widget build(BuildContext context) {
     final service = widget.service;
     final error = service.accountError;
+    final transitionFailed = service.accountTransitionFailed;
     final receipt = service.lastDeletionReceipt;
     final deadline = receipt?.deleteAfter
         ?.toUtc()
@@ -335,6 +409,16 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
         .replaceFirst('T', '\n')
         .replaceFirst('Z', ' UTC');
     final pending = receipt?.isPending == true;
+    final showActions = error != null || transitionFailed || _stuck;
+    final message = pending
+        ? 'Signing in did not cancel deletion. Restore the account explicitly before the server deadline.'
+        : error ??
+              (transitionFailed
+                  ? 'Your chats on this device could not be loaded. Retry, or sign out.'
+                  : _stuck
+                  ? 'This is taking longer than usual. Retry, or sign out.'
+                  : 'Checking your account with the Ovid service. '
+                        'This usually takes a moment.');
     return Scaffold(
       backgroundColor: Aether.bg,
       body: SafeArea(
@@ -359,14 +443,7 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
                       ),
                     ),
                     const SizedBox(height: AetherSpacing.space3),
-                    Text(
-                      pending
-                          ? 'Signing in did not cancel deletion. Restore the account explicitly before the server deadline.'
-                          : error ??
-                                'Checking your account with the Ovid service. '
-                                    'This usually takes a moment.',
-                      style: AetherType.bodyMuted,
-                    ),
+                    Text(message, style: AetherType.bodyMuted),
                     if (deadline != null) ...[
                       const SizedBox(height: AetherSpacing.space3),
                       Text(
@@ -375,7 +452,7 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
                       ),
                     ],
                     const SizedBox(height: AetherSpacing.space5),
-                    if (error == null)
+                    if (!showActions || _retryBusy)
                       Center(
                         child: SizedBox(
                           width: 24,
@@ -388,46 +465,38 @@ class _AccountNotReadyScreenState extends State<_AccountNotReadyScreen> {
                             ),
                           ),
                         ),
-                      )
-                    else ...[
+                      ),
+                    if (showActions) ...[
+                      if (_retryBusy)
+                        const SizedBox(height: AetherSpacing.space4),
                       if (pending) ...[
                         AetherPrimaryButton(
                           label: 'Restore account',
-                          onPressed: _restoreBusy
-                              ? null
-                              : () async {
-                                  setState(() => _restoreBusy = true);
-                                  try {
-                                    await service.restoreAccount();
-                                  } finally {
-                                    if (mounted) {
-                                      setState(() => _restoreBusy = false);
-                                    }
-                                  }
-                                },
+                          onPressed: _restoreBusy ? null : _restore,
                         ),
                         const SizedBox(height: AetherSpacing.space2),
                       ],
                       AetherPrimaryButton(
                         label: 'Retry',
-                        onPressed: _retryBusy
-                            ? null
-                            : () async {
-                                setState(() => _retryBusy = true);
-                                try {
-                                  await service.retryAccountLogin();
-                                } finally {
-                                  if (mounted) {
-                                    setState(() => _retryBusy = false);
-                                  }
-                                }
-                              },
+                        onPressed: _retryBusy ? null : _retry,
                       ),
                       const SizedBox(height: AetherSpacing.space2),
                       AetherGhostButton(
                         label: 'Sign out',
                         onPressed: service.signOut,
                       ),
+                      if (_actionError != null) ...[
+                        const SizedBox(height: AetherSpacing.space3),
+                        Semantics(
+                          liveRegion: true,
+                          child: Text(
+                            _actionError!,
+                            style: AetherType.body.copyWith(
+                              color: Aether.dangerC,
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ],
                 ),

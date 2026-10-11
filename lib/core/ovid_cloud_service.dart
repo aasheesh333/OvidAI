@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -411,6 +412,9 @@ class OvidCloudService extends ChangeNotifier {
         );
       }
       if (res.statusCode == 401 || res.statusCode == 403) {
+        // The gateway may reject an account whose deletion was requested on
+        // another device; re-read the account state (throttled).
+        unawaited(FirebaseService.I.recheckAccountState(force: true));
         return MintOutcome(
           MintStatus.rejected,
           message: 'Sign-in could not be verified (${res.statusCode}).',
