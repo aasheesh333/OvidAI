@@ -1099,42 +1099,47 @@ class _StudioScreenState extends State<StudioScreen> {
       ],
     );
 
+    final overlayTree = showTree && m.treeOverlays;
     return Column(
       children: [
         Expanded(
-          child: showTree && m.treeOverlays
-              ? Stack(
-                  children: [
-                    split,
-                    Positioned.fill(
-                      child: GestureDetector(
-                        key: studioTreeScrimKey,
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => setState(() => _showFilesOverride = false),
-                        child: const ColoredBox(color: Color(0x73000000)),
+          // Always a Stack with the split as its first child: swapping
+          // `Row` ↔ `Stack` here unmounted the editor (undo, find, scroll and
+          // the draft state) every time the compact file panel opened or
+          // closed (screen review 06 §7 / F-072).
+          child: Stack(
+            children: [
+              split,
+              if (overlayTree)
+                Positioned.fill(
+                  child: GestureDetector(
+                    key: studioTreeScrimKey,
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setState(() => _showFilesOverride = false),
+                    child: const ColoredBox(color: Color(0x73000000)),
+                  ),
+                ),
+              if (overlayTree)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: math.min(m.treeWidth, c.maxWidth),
+                  child: Material(
+                    elevation: 8,
+                    color: Aether.surface,
+                    child: Semantics(
+                      label: 'Files panel',
+                      container: true,
+                      child: SizedBox(
+                        key: studioTreePaneKey,
+                        child: const StudioFileTree(),
                       ),
                     ),
-                    Positioned(
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: math.min(m.treeWidth, c.maxWidth),
-                      child: Material(
-                        elevation: 8,
-                        color: Aether.surface,
-                        child: Semantics(
-                          label: 'Files panel',
-                          container: true,
-                          child: SizedBox(
-                            key: studioTreePaneKey,
-                            child: const StudioFileTree(),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                )
-              : split,
+                  ),
+                ),
+            ],
+          ),
         ),
         SizedBox(
           key: studioTerminalPaneKey,
