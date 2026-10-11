@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'distribution.dart';
 import 'sandbox_pkg.dart';
 import 'global_repo_registry.dart';
 import 'pty_service.dart' show OwnedProcessTree;
@@ -88,7 +89,15 @@ class SandboxCancelledException implements Exception {
 SandboxUnsupportedException? sandboxPreflightGate({
   required int sdkInt,
   required bool dataExecAllowed,
+  bool? onDeviceSandboxAvailable,
 }) {
+  // Google Play build: no bundled userland, never download one (targetSdk 36
+  // forbids exec from app data; Play forbids downloaded executables).
+  if (!(onDeviceSandboxAvailable ?? Distribution.onDeviceSandboxAvailable)) {
+    return const SandboxUnsupportedException(
+      Distribution.sandboxUnavailableMessage,
+    );
+  }
   if (sdkInt > 0 && sdkInt < 24) {
     return SandboxUnsupportedException(
       'This device runs Android 6.x or older (API $sdkInt). The native '
@@ -567,6 +576,7 @@ class SandboxService {
   }
 
   Future<bool> checkExisting() async {
+    if (!Distribution.onDeviceSandboxAvailable) return false;
     if (_installInFlight) return _installed;
     if (_checked) return _installed;
     try {

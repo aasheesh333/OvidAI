@@ -1190,10 +1190,23 @@ class MainActivity : FlutterActivity() {
                             if (pm.isIgnoringBatteryOptimizations(packageName)) {
                                 result.success(true)
                             } else {
-                                val intent = Intent(
-                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                    Uri.parse("package:$packageName")
-                                )
+                                // Play builds do not declare
+                                // REQUEST_IGNORE_BATTERY_OPTIMIZATIONS (not an
+                                // approvable core use); without it the direct
+                                // request dialog is unavailable, so open the
+                                // system battery-optimization list instead.
+                                val declared = packageManager
+                                    .getPackageInfo(packageName, android.content.pm.PackageManager.GET_PERMISSIONS)
+                                    .requestedPermissions.orEmpty()
+                                    .contains(android.Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                val intent = if (declared) {
+                                    Intent(
+                                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:$packageName")
+                                    )
+                                } else {
+                                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                }
                                 startActivity(intent)
                                 result.success(false)
                             }

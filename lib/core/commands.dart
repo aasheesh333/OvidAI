@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'agent_service.dart';
+import 'distribution.dart';
 import 'presets.dart';
 import 'session_ledger.dart';
 import 'state.dart';
@@ -299,6 +300,12 @@ class CommandService {
               feedback:
                   'Unknown preset "$q". Options: '
                   '${modeOptionsForPicker().map(_permName).join(', ')}.',
+            );
+          }
+          if (target == AgentMode.control &&
+              !Distribution.controlModeAvailable) {
+            return const CommandResult(
+              feedback: Distribution.controlUnavailableMessage,
             );
           }
           if ((target == AgentMode.drive || target == AgentMode.control) &&
