@@ -116,10 +116,14 @@ void main() {
     expect(find.text('Edit schedule'), findsOneWidget);
     // Task field is the first TextField in the sheet.
     await tester.enterText(find.byType(TextField).at(0), 'Rewritten task');
+    await tester.tap(find.text('Advanced'));
+    await _settle(tester);
     await tester.enterText(
-      find.byType(TextField).at(1),
+      find.byKey(const ValueKey('schedule-time')),
       '2026-12-01T12:00:00Z',
     );
+    await tester.ensureVisible(find.text('Save'));
+    await _settle(tester);
     await tester.tap(find.text('Save'));
     await _settle(tester);
     await tester.pump(const Duration(milliseconds: 400));

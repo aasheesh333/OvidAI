@@ -188,7 +188,13 @@ class _EditScheduleSheet extends StatefulWidget {
 
 class _EditScheduleSheetState extends State<_EditScheduleSheet> {
   late final TextEditingController _prompt;
+
+  /// Raw value in the coordinator's stored format (HH:mm, seconds, or a
+  /// date/time). The pickers write into it; it is editable directly only
+  /// under "Advanced".
   late final TextEditingController _time;
+  late final TextEditingController _intervalValue;
+  ScheduleIntervalUnit _intervalUnit = ScheduleIntervalUnit.minutes;
   late String _kind;
   late int _retries;
   late final Map<String, String> _draftTimes;
@@ -197,6 +203,9 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
   String? _timeError;
   bool _saving = false;
 
+  /// Raw-text editing ("Advanced") is collapsed by default.
+  bool _advanced = false;
+
   @override
   void initState() {
     super.initState();
@@ -204,17 +213,18 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
     _kind = t['dailyAt'] != null
         ? 'daily_at'
         : t['every'] != null
-            ? 'every_seconds'
-            : 'at';
+        ? 'every_seconds'
+        : 'at';
     _prompt = TextEditingController(text: (t['prompt'] as String?) ?? '');
-    _time = TextEditingController(
-      text: '${t['dailyAt'] ?? t['every'] ?? t['fireAt'] ?? ''}',
-    );
     _draftTimes = {
       'daily_at': t['dailyAt']?.toString() ?? '',
       'every_seconds': t['every']?.toString() ?? '',
-      'at': t['fireAt']?.toString() ?? '',
+      // Stored one-offs are UTC ISO strings ("…Z"); edit them in local time.
+      'at': scheduleLocalText(t['fireAt']?.toString() ?? ''),
     };
+    _time = TextEditingController(text: _draftTimes[_kind]);
+    _intervalValue = TextEditingController();
+    _syncIntervalFromRaw();
     final maxRetries = (t['maxRetries'] as int?) ?? 0;
     _retries = maxRetries.clamp(0, 3);
   }
@@ -223,7 +233,103 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
   void dispose() {
     _prompt.dispose();
     _time.dispose();
+    _intervalValue.dispose();
     super.dispose();
+  }
+
+  /// Raw seconds → number + unit (largest unit that divides evenly).
+  void _syncIntervalFromRaw() {
+    final seconds = int.tryParse(_draftTimes['every_seconds'] ?? '');
+    if (_kind == 'every_seconds') {
+      final raw = int.tryParse(_time.text.trim());
+      if (raw != null) {
+        _setInterval(raw);
+        return;
+      }
+    }
+    if (seconds != null) {
+      _setInterval(seconds);
+    } else {
+      _intervalValue.text = '';
+    }
+  }
+
+  void _setInterval(int seconds) {
+    final (value, unit) = splitScheduleInterval(seconds);
+    _intervalUnit = unit;
+    _intervalValue.text = value;
+  }
+
+  /// Number + unit → raw seconds.
+  void _syncRawFromInterval() {
+    final n = num.tryParse(_intervalValue.text.trim());
+    _time.text = n == null
+        ? ''
+        : (n * _intervalUnit.seconds).round().toString();
+  }
+
+  Future<void> _pickDailyTime() async {
+    final current =
+        _parseHm(_time.text.trim()) ?? const TimeOfDay(hour: 9, minute: 0);
+    final picked = await showTimePicker(context: context, initialTime: current);
+    if (picked == null || !mounted) return;
+    setState(() {
+      _time.text = '${_two(picked.hour)}:${_two(picked.minute)}';
+      _timeError = null;
+    });
+  }
+
+  DateTime? _oneOffLocal() {
+    final text = _time.text.trim();
+    if (text.isEmpty) return null;
+    try {
+      return ScheduleCoordinator.parseDate(text).toLocal();
+    } on FormatException {
+      return null;
+    }
+  }
+
+  DateTime _oneOffSeed() {
+    final current = _oneOffLocal();
+    if (current != null) return current;
+    final now = DateTime.now().add(const Duration(hours: 1));
+    return DateTime(now.year, now.month, now.day, now.hour);
+  }
+
+  Future<void> _pickOneOffDate() async {
+    final seed = _oneOffSeed();
+    final now = DateTime.now();
+    final first = DateTime(now.year, now.month, now.day);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: seed.isBefore(first) ? first : seed,
+      firstDate: seed.isBefore(first)
+          ? DateTime(seed.year, seed.month, seed.day)
+          : first,
+      lastDate: DateTime(now.year + 5, 12, 31),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _time.text = formatScheduleLocal(
+        DateTime(picked.year, picked.month, picked.day, seed.hour, seed.minute),
+      );
+      _timeError = null;
+    });
+  }
+
+  Future<void> _pickOneOffTime() async {
+    final seed = _oneOffSeed();
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(seed),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _time.text = formatScheduleLocal(
+        DateTime(seed.year, seed.month, seed.day, picked.hour, picked.minute),
+      );
+      _timeError = null;
+    });
   }
 
   Future<void> _save() async {
@@ -232,30 +338,33 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
     String? timeError;
     if (_kind == 'daily_at') {
       if (!RegExp(r'^(?:[01]\d|2[0-3]):[0-5]\d$').hasMatch(time)) {
-        timeError = 'Use HH:mm, from 00:00 to 23:59.';
+        timeError = 'Pick a time of day (HH:mm, 00:00 to 23:59).';
       }
     } else if (_kind == 'every_seconds') {
-      if ((int.tryParse(time) ?? -1) < 300) {
-        timeError = 'Enter a whole number of seconds, at least 300.';
+      final seconds = int.tryParse(time);
+      if (seconds == null) {
+        timeError = 'Enter how often to run, e.g. 15 minutes.';
+      } else if (seconds < minScheduleIntervalSeconds) {
+        timeError = 'The shortest interval is 5 minutes.';
       }
     } else {
       try {
         ScheduleCoordinator.parseDate(time);
       } on FormatException catch (e) {
-        timeError = e.message;
+        timeError = time.isEmpty ? 'Pick a date and time.' : e.message;
       }
     }
     setState(() {
       _error = null;
-      _promptError = _prompt.text.trim().isEmpty ? 'Enter a task description.' : null;
+      _promptError = _prompt.text.trim().isEmpty
+          ? 'Enter a task description.'
+          : null;
       _timeError = timeError;
     });
     if (_promptError != null || _timeError != null) return;
     setState(() => _saving = true);
     try {
-      final value = _kind == 'every_seconds'
-          ? int.parse(time)
-          : time;
+      final value = _kind == 'every_seconds' ? int.parse(time) : time;
       await AgentService.I.editSchedule(widget.entry, {
         'prompt': _prompt.text,
         _kind: value,
@@ -270,10 +379,141 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
   }
 
   String _timeLabel() => switch (_kind) {
-        'daily_at' => 'Time HH:mm',
-        'every_seconds' => 'Interval seconds (>=300)',
-        _ => 'Date/time YYYY-MM-DD HH:mm',
-      };
+    'daily_at' => 'Time HH:mm',
+    'every_seconds' => 'Interval in seconds (300 or more)',
+    _ => 'Date/time YYYY-MM-DD HH:mm',
+  };
+
+  Widget _pickerButton({
+    required Key key,
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+  }) => OutlinedButton.icon(
+    key: key,
+    onPressed: _saving ? null : onPressed,
+    icon: Icon(icon, size: 18),
+    label: Text(label),
+  );
+
+  Widget _primaryTimeControl(BuildContext context) {
+    final l10n = MaterialLocalizations.of(context);
+    final errorText = _timeError == null
+        ? null
+        : Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Semantics(
+              liveRegion: true,
+              child: Text(
+                _timeError!,
+                key: const ValueKey('schedule-time-error'),
+                style: TextStyle(color: Aether.dangerC, fontSize: 12),
+              ),
+            ),
+          );
+    switch (_kind) {
+      case 'daily_at':
+        final t = _parseHm(_time.text.trim());
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _pickerButton(
+              key: const ValueKey('schedule-daily-time'),
+              icon: Icons.schedule,
+              label: t == null ? 'Pick a time' : l10n.formatTimeOfDay(t),
+              onPressed: _pickDailyTime,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Repeats every day in device-local time.',
+              style: AetherType.caption,
+            ),
+            ?errorText,
+          ],
+        );
+      case 'every_seconds':
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: AetherField(
+                    fieldKey: const ValueKey('schedule-interval-value'),
+                    label: 'Every',
+                    controller: _intervalValue,
+                    enabled: !_saving,
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => setState(() {
+                      _syncRawFromInterval();
+                      _timeError = null;
+                    }),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                DropdownButton<ScheduleIntervalUnit>(
+                  key: const ValueKey('schedule-interval-unit'),
+                  value: _intervalUnit,
+                  onChanged: _saving
+                      ? null
+                      : (u) {
+                          if (u == null) return;
+                          setState(() {
+                            _intervalUnit = u;
+                            _syncRawFromInterval();
+                            _timeError = null;
+                          });
+                        },
+                  items: [
+                    for (final u in ScheduleIntervalUnit.values)
+                      DropdownMenuItem(value: u, child: Text(u.label)),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text('Minimum 5 minutes.', style: AetherType.caption),
+            ?errorText,
+          ],
+        );
+      default:
+        final local = _oneOffLocal();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _pickerButton(
+                  key: const ValueKey('schedule-oneoff-date'),
+                  icon: Icons.calendar_today_outlined,
+                  label: local == null
+                      ? 'Pick a date'
+                      : l10n.formatMediumDate(local),
+                  onPressed: _pickOneOffDate,
+                ),
+                _pickerButton(
+                  key: const ValueKey('schedule-oneoff-time'),
+                  icon: Icons.schedule,
+                  label: local == null
+                      ? 'Pick a time'
+                      : l10n.formatTimeOfDay(TimeOfDay.fromDateTime(local)),
+                  onPressed: _pickOneOffTime,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Device-local time. A time in the past runs right away.',
+              style: AetherType.caption,
+            ),
+            ?errorText,
+          ],
+        );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -313,39 +553,68 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                     ChoiceChip(
                       label: Text(option.label),
                       selected: _kind == option.value,
-                      onSelected: _saving ? null : (_) => setState(() {
-                        if (_kind == option.value) return;
-                        _draftTimes[_kind] = _time.text;
-                        _kind = option.value;
-                        _time.text = _draftTimes[_kind] ?? '';
-                        _timeError = null;
-                        _error = null;
-                      }),
+                      onSelected: _saving
+                          ? null
+                          : (_) => setState(() {
+                              if (_kind == option.value) return;
+                              _draftTimes[_kind] = _time.text;
+                              _kind = option.value;
+                              _time.text = _draftTimes[_kind] ?? '';
+                              if (_kind == 'every_seconds') {
+                                _syncIntervalFromRaw();
+                              }
+                              _timeError = null;
+                              _error = null;
+                            }),
                     ),
                 ],
               ),
               const SizedBox(height: 16),
-              AetherField(
-                fieldKey: const ValueKey('schedule-time'),
-                label: _timeLabel(),
-                controller: _time,
-                enabled: !_saving,
-                errorText: _timeError,
-                onChanged: (_) => setState(() {}),
-                keyboardType: _kind == 'every_seconds'
-                    ? TextInputType.number
-                    : _kind == 'daily_at' ? TextInputType.datetime : TextInputType.text,
-                helper: switch (_kind) {
-                  'daily_at' => 'Repeats in device-local time. Follows device time zone changes.',
-                  'every_seconds' => 'Fixed interval; minimum 300 seconds (5 minutes).',
-                  _ => 'Device-local time unless you include Z or an offset, e.g. +05:30. Past times are due immediately.',
-                },
+              _primaryTimeControl(context),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: TextButton.icon(
+                  key: const ValueKey('schedule-advanced'),
+                  onPressed: () => setState(() => _advanced = !_advanced),
+                  icon: Icon(
+                    _advanced ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                  ),
+                  label: const Text('Advanced'),
+                ),
               ),
-              const SizedBox(height: 8),
+              if (_advanced) ...[
+                AetherField(
+                  fieldKey: const ValueKey('schedule-time'),
+                  label: _timeLabel(),
+                  controller: _time,
+                  enabled: !_saving,
+                  onChanged: (_) => setState(() {
+                    _timeError = null;
+                    if (_kind == 'every_seconds') {
+                          _syncIntervalFromRaw();
+                        }
+                  }),
+                  keyboardType: _kind == 'every_seconds'
+                      ? TextInputType.number
+                      : _kind == 'daily_at'
+                      ? TextInputType.datetime
+                      : TextInputType.text,
+                  helper: switch (_kind) {
+                    'daily_at' =>
+                      'Repeats in device-local time. Follows device time zone changes.',
+                    'every_seconds' =>
+                      'Fixed interval; minimum 300 seconds (5 minutes).',
+                    _ =>
+                      'Device-local time unless you include Z or an offset, e.g. +05:30. Past times are due immediately.',
+                  },
+                ),
+                const SizedBox(height: 8),
+              ],
               Text('Preview', style: AetherType.label),
               const SizedBox(height: 4),
               Text(
-                _previewLabel(),
+                _previewLabel(context),
                 key: const ValueKey('schedule-preview'),
                 style: AetherType.caption,
               ),
@@ -360,7 +629,10 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
                 },
               ),
               const SizedBox(height: 6),
-              Text('Only failures before execution are safe to retry.', style: AetherType.caption),
+              Text(
+                'Only failures before execution are safe to retry.',
+                style: AetherType.caption,
+              ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
                 Semantics(
@@ -398,14 +670,99 @@ class _EditScheduleSheetState extends State<_EditScheduleSheet> {
     );
   }
 
-  String _previewLabel() {
+  String _previewLabel(BuildContext context) {
     final value = _time.text.trim();
-    if (value.isEmpty) return 'Enter a value to preview the next run.';
-    return switch (_kind) {
-      'daily_at' => 'Runs daily at $value in device-local time.',
-      'every_seconds' => 'Runs every $value seconds after the next save.',
-      _ => 'Runs once at $value.',
-    };
+    if (value.isEmpty) return 'Choose when to run to preview the next run.';
+    final l10n = MaterialLocalizations.of(context);
+    switch (_kind) {
+      case 'daily_at':
+        final t = _parseHm(value);
+        return t == null
+            ? 'Runs daily at $value in device-local time.'
+            : 'Runs daily at ${l10n.formatTimeOfDay(t)} in device-local time.';
+      case 'every_seconds':
+        final seconds = int.tryParse(value);
+        if (seconds == null) {
+          return 'Runs every $value seconds after the next save.';
+        }
+        return 'Runs every ${describeScheduleInterval(seconds)} after the next save.';
+      default:
+        final local = _oneOffLocal();
+        if (local == null) return 'Runs once at $value.';
+        return 'Runs once on ${l10n.formatMediumDate(local)} at '
+            '${l10n.formatTimeOfDay(TimeOfDay.fromDateTime(local))} (device-local time).';
+    }
+  }
+}
+
+String _two(int v) => v.toString().padLeft(2, '0');
+
+TimeOfDay? _parseHm(String value) {
+  final m = RegExp(r'^([01]\d|2[0-3]):([0-5]\d)$').firstMatch(value);
+  if (m == null) return null;
+  return TimeOfDay(hour: int.parse(m[1]!), minute: int.parse(m[2]!));
+}
+
+/// Shortest allowed interval (the coordinator's floor).
+const minScheduleIntervalSeconds = 300;
+
+enum ScheduleIntervalUnit {
+  minutes('minutes', 60),
+  hours('hours', 3600),
+  days('days', 86400);
+
+  const ScheduleIntervalUnit(this.label, this.seconds);
+  final String label;
+  final int seconds;
+}
+
+/// Seconds → (number text, unit), using the largest unit that divides
+/// evenly (falls back to fractional minutes for odd raw values).
+@visibleForTesting
+(String, ScheduleIntervalUnit) splitScheduleInterval(int seconds) {
+  for (final u in ScheduleIntervalUnit.values.reversed) {
+    if (seconds > 0 && seconds % u.seconds == 0) {
+      return ((seconds ~/ u.seconds).toString(), u);
+    }
+  }
+  final minutes = seconds / 60;
+  return (
+    minutes == minutes.roundToDouble()
+        ? minutes.round().toString()
+        : minutes.toStringAsFixed(2),
+    ScheduleIntervalUnit.minutes,
+  );
+}
+
+/// "15 minutes", "2 hours", "1 day".
+@visibleForTesting
+String describeScheduleInterval(int seconds) {
+  final (value, unit) = splitScheduleInterval(seconds);
+  final label = value == '1'
+      ? unit.label.substring(0, unit.label.length - 1)
+      : unit.label;
+  return '$value $label';
+}
+
+/// Local `YYYY-MM-DD HH:mm` (the coordinator reads a value without Z or an
+/// offset as device-local time).
+@visibleForTesting
+String formatScheduleLocal(DateTime local) =>
+    '${local.year.toString().padLeft(4, '0')}-${_two(local.month)}-${_two(local.day)} '
+    '${_two(local.hour)}:${_two(local.minute)}'
+    '${local.second != 0 ? ':${_two(local.second)}' : ''}';
+
+/// Stored one-off value (usually UTC `…Z`) → editable local text. Values that
+/// do not parse are returned unchanged.
+@visibleForTesting
+String scheduleLocalText(String stored) {
+  if (stored.trim().isEmpty) return '';
+  try {
+    return formatScheduleLocal(
+      ScheduleCoordinator.parseDate(stored.trim()).toLocal(),
+    );
+  } on FormatException {
+    return stored;
   }
 }
 
