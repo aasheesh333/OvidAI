@@ -4,7 +4,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/firebase_service.dart';
 import '../core/model_limits.dart';
+import '../core/ovid_cloud_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'billing_screen.dart';
@@ -112,22 +114,45 @@ class ProvidersScreen extends StatelessWidget {
   }
 }
 
-/// Managed Ovid Cloud tile. Status pill reflects the current plan tier; the
-/// trailing 'Manage plan' button opens [BillingScreen] where the user can
-/// mint/revoke the gateway token. The base URL is intentionally not shown —
-/// the gateway address is a server-side detail.
+/// Managed Ovid Cloud tile. Shows the live connection state (connecting,
+/// failed with its reason, ready) with Retry / Refresh actions, plus the plan
+/// tier and a 'Manage plan' route into [BillingScreen]. The base URL is
+/// intentionally not shown — the gateway address is a server-side detail.
 class _OvidCloudTile extends StatelessWidget {
   final ProviderConfig provider;
   const _OvidCloudTile({required this.provider});
 
   @override
   Widget build(BuildContext context) {
+    final cloud = OvidCloudService.I;
+    return AnimatedBuilder(
+      animation: cloud,
+      builder: (context, _) => _buildTile(context, cloud),
+    );
+  }
+
+  Widget _buildTile(BuildContext context, OvidCloudService cloud) {
     final app = AppState.I;
     final tier = app.ovidCloudTier;
     final paid = app.ovidCloudIsPaid;
-    final connected = provider.hasKey;
+    final connection = cloud.connectionFor(app);
     final statusLabel = paid ? tier.toUpperCase() : 'FREE';
     final statusColor = paid ? Aether.accent : Aether.successLight;
+    final modelCount = <String>{'auto', ...provider.models}.length;
+    final modelsLabel = '$modelCount ${modelCount == 1 ? 'model' : 'models'}';
+    final String connectionLabel = switch (connection.status) {
+      CloudConnectionStatus.idle =>
+        provider.hasKey ? 'Not connected' : 'Sign in to activate',
+      CloudConnectionStatus.connecting => 'Connecting your account…',
+      CloudConnectionStatus.loadingCatalog => 'Loading models…',
+      CloudConnectionStatus.ready => 'Signed in · $modelsLabel',
+      CloudConnectionStatus.failed =>
+        (connection.error == null || connection.error!.trim().isEmpty)
+            ? 'Ovid Cloud connection failed.'
+            : connection.error!,
+    };
+    final failed = connection.status == CloudConnectionStatus.failed;
+    final ready = connection.status == CloudConnectionStatus.ready;
     return AetherCard(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -148,23 +173,78 @@ class _OvidCloudTile extends StatelessWidget {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               AetherPill(label: statusLabel, color: statusColor),
-              Text(
-                connected ? 'Signed in' : 'Sign in to activate',
-                style: AetherType.caption,
-              ),
-              Text(
-                '${provider.models.length} models',
-                style: AetherType.caption,
+              AetherStatusDot(
+                color: switch (connection.status) {
+                  CloudConnectionStatus.ready => Aether.successLight,
+                  CloudConnectionStatus.failed => Aether.dangerC,
+                  CloudConnectionStatus.connecting ||
+                  CloudConnectionStatus.loadingCatalog => Aether.accent,
+                  CloudConnectionStatus.idle => Aether.textFaint,
+                },
+                pulsing: connection.loading,
               ),
             ],
           ),
           const SizedBox(height: 8),
-          TextButton.icon(
-            label: const Text('Manage plan'),
-            icon: const Icon(Icons.open_in_new, size: 16),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const BillingScreen()),
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              connectionLabel,
+              key: const ValueKey('ovid-cloud-connection-status'),
+              style: failed
+                  ? AetherType.caption.copyWith(color: Aether.dangerC)
+                  : AetherType.caption,
             ),
+          ),
+          if (failed)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '$modelsLabel available · catalog may be out of date',
+                style: AetherType.caption,
+              ),
+            ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 4,
+            runSpacing: 4,
+            children: [
+              if (ready)
+                TextButton.icon(
+                  key: const ValueKey('ovid-cloud-refresh-models'),
+                  label: const Text('Refresh models'),
+                  icon: const Icon(Icons.refresh, size: 16),
+                  onPressed: () =>
+                      unawaited(cloud.ensureConnected(app: app, force: true)),
+                )
+              else
+                TextButton.icon(
+                  key: const ValueKey('ovid-cloud-retry-connection'),
+                  label: Text(
+                    connection.loading ? 'Connecting…' : 'Retry connection',
+                  ),
+                  icon: const Icon(Icons.refresh, size: 16),
+                  onPressed: connection.loading
+                      ? null
+                      : () => unawaited(cloud.ensureConnected(app: app)),
+                ),
+              if (connection.mintStatus == MintStatus.sessionExpired)
+                TextButton.icon(
+                  key: const ValueKey('ovid-cloud-sign-out'),
+                  label: const Text('Sign out'),
+                  icon: const Icon(Icons.logout, size: 16),
+                  onPressed: () => unawaited(FirebaseService.I.signOut()),
+                ),
+              TextButton.icon(
+                label: const Text('Manage plan'),
+                icon: const Icon(Icons.open_in_new, size: 16),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const BillingScreen(),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
