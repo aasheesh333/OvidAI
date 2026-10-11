@@ -133,7 +133,10 @@ class CommandService {
     register(
       AgentCommand(
         name: 'compact',
-        description: 'Summarize the current session now',
+        hint: '[focus instructions]',
+        description:
+            'Compact the context now (keeps every user message + the work '
+            'log); optional focus text steers the summary',
         handler: (args) async {
           final s = AppState.I.activeSession;
           final p = AppState.I.providerForSession(s);
@@ -155,7 +158,7 @@ class CommandService {
           // PR29: compactNow returns an HONEST status line — the old
           // forceCompact path silently did nothing on short/already-
           // compacted chats while the command claimed success.
-          final status = await AgentService.I.compactNow(s, p);
+          final status = await AgentService.I.compactNow(s, p, focus: args);
           return CommandResult(feedback: status);
         },
       ),

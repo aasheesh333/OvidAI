@@ -55,6 +55,9 @@ import 'plugin_source_resolver.dart';
 import 'pty_service.dart';
 import 'skills.dart';
 import 'commands.dart';
+import 'compaction/compaction_checkpoint.dart';
+import 'compaction/compaction_ledger.dart';
+import 'compaction/compaction_policy.dart';
 import 'device_control_service.dart';
 import 'model_limits.dart';
 import 'diag.dart';
@@ -10524,31 +10527,35 @@ user which one instead of assuming this one.''';
 
   /// summarization (PR29): the summarizer call REPLAYS the span
   /// verbatim — same content the model already saw (content + tool
-  /// cards' toolDetail, no lossy truncation) — with the EXACT reference
-  /// compaction instruction as the final user message. A prior summary
-  /// merges per rules (never copied forward verbatim).
+  /// cards' toolDetail). Lossless compaction: the model writes ONLY the
+  /// narrative (decisions / current work / next steps / context) and merges
+  /// the PRIOR narrative — user messages and the work log are preserved
+  /// deterministically by [CompactionEngine], never re-summarised.
   Future<String?> _summarizeCompactSpan(
     ProviderConfig p,
     ChatSession s,
     int from,
-    int cutoff,
-  ) async {
+    int cutoff, {
+    String? focus,
+    CompactionLedger? ledger,
+  }) async {
     final custom = compactionSummarizerForTest;
     if (custom != null) return custom(s, from, cutoff);
     final span = s.messages.sublist(from, cutoff);
     final replay = StringBuffer();
     for (final m in span) {
+      if (m.kind == MsgKind.compact) continue;
       final who = m.role == 'user' ? 'User' : 'Assistant';
-      replay.writeln('$who: ${m.content}');
+      final tool = m.kind == MsgKind.tool ? '[tool ${m.toolName}] ' : '';
+      replay.writeln('$who: $tool${m.content}');
       final d = (m.toolDetail ?? '').trim();
       if (d.isNotEmpty) {
         replay.writeln('  [tool output] ${cleanTruncate(d, 2000)}');
       }
     }
-    final prior = s.compactedSummary;
-    // F4 (the compaction summarizer ovid-compaction convergence): reject a summary that does not
-    // shrink its source — retry once with a stricter instruction, and only
-    // after that accept whatever came back.
+    final prior = CompactionEngine.priorNarrative(s);
+    // F4: reject a summary that does not shrink its source — retry once
+    // with a stricter instruction, then accept whatever came back.
     final spanTokens = span.fold<int>(
       0,
       (a, m) =>
@@ -10562,66 +10569,18 @@ user which one instead of assuming this one.''';
         [
           {
             'role': 'system',
-            'content':
-                'You are now acting as a compaction engine for this AI coding '
-                'assistant. Condense the conversation ABOVE into a structured '
-                'checkpoint that lets another model resume the work with no '
-                'loss of essential context.\n'
-                '\n'
-                'Output EXACTLY the Markdown structure below: keep every '
-                'section, in order. Use terse bullets, not prose paragraphs. '
-                'Write "(none)" for an empty section — never drop a section.\n'
-                '\n'
-                '## Primary Request and Intent\n'
-                '- [the user\'s original and evolving goals; quote verbatim '
-                'where the exact wording matters]\n'
-                '\n'
-                '## Key Technical Concepts\n'
-                '- [technologies, frameworks, patterns, and conventions in '
-                'play]\n'
-                '\n'
-                '## Files and Code\n'
-                '- [exact path: why it matters, key changes or snippets]\n'
-                '\n'
-                '## Errors and Fixes\n'
-                '- [error: how it was resolved, plus any related user '
-                'feedback]\n'
-                '\n'
-                '## Pending Jobs\n'
-                '- [explicitly requested work not yet completed]\n'
-                '\n'
-                '## Current Work\n'
-                '- [precisely what was in progress at this checkpoint]\n'
-                '\n'
-                '## Next Step\n'
-                '- [the single next action, directly in line with the most '
-                'recent request, or "(none)"]\n'
-                '\n'
-                '## Critical Context\n'
-                '- [decisions and their rationale, constraints, user '
-                'preferences, open questions, data needed to continue]\n'
-                '\n'
-                'Rules:\n'
-                '- Write concise English engineering prose. Preserve exact '
-                'file paths, commands, error strings, identifiers, numeric '
-                'values, function signatures, and syntax fragments.\n'
-                '- Capture user feedback and explicit instructions '
-                'faithfully, especially corrections.\n'
-                '- Do NOT mention this summarization request or that the '
-                'context was compacted.\n'
-                '- Output only the checkpoint text: do not call any tool or '
-                'take any other action.\n'
-                '- If the conversation already contains a prior checkpoint, '
-                'do not copy it forward verbatim: preserve still-true facts, '
-                'drop stale ones, and merge newer information into a single '
-                'consolidated summary under the same structure.'
-                '${attempt > 0 ? '\n\nSTRICTNESS: the previous summary was longer than its source — halve the length this time.' : ''}',
+            'content': CompactionEngine.summarizerSystemPrompt(
+              strict: attempt > 0,
+            ),
           },
           {
             'role': 'user',
-            'content':
-                '${prior == null || prior.isEmpty ? '' : 'A PRIOR CHECKPOINT already exists — merge it with the new span per the rules above.\n\n'}'
-                'Conversation span to condense:\n\n$replay',
+            'content': CompactionEngine.summarizerUserPrompt(
+              replay: replay.toString(),
+              priorNarrative: prior,
+              ledger: ledger ?? CompactionEngine.ledgerFor(s, from, cutoff),
+              focus: focus,
+            ),
           },
         ],
         s,
@@ -10633,18 +10592,51 @@ user which one instead of assuming this one.''';
       if (summary == null || summary['content'] == null) continue;
       final text = summary['content'] as String;
       if (text.trim().isEmpty) continue;
-      // F4: size check — summary must be smaller than the span it replaces.
-      final summaryToks = estimateMessageTokens(text);
-      if (summaryToks < spanTokens) return text;
-      if (attempt == 0) {
-        // Didn't shrink — retry once with a stricter budget.
-        continue;
+      if (estimateMessageTokens(text) < spanTokens || attempt > 0) {
+        return text;
       }
-      // Still not shorter — note: throw; mobile-pragmatic: keep whatever we
-      // have (nothing is lost either way, the span stays in the transcript).
-      return text;
     }
     return null;
+  }
+
+  /// Summarise `[compactedAtCount, cutoff)` and apply the checkpoint. A
+  /// summariser failure never drops context: the deterministic checkpoint
+  /// (verbatim user messages + work log + prior narrative) is applied anyway.
+  Future<({String status, bool modelSummary})> _compactSpan(
+    ChatSession s,
+    ProviderConfig p,
+    int cutoff, {
+    required bool forced,
+    String? focus,
+  }) async {
+    final from = s.compactedAtCount;
+    final ledger = CompactionEngine.ledgerFor(s, from, cutoff);
+    String? narrative;
+    try {
+      narrative = await _summarizeCompactSpan(
+        p,
+        s,
+        from,
+        cutoff,
+        focus: focus,
+        ledger: ledger,
+      );
+    } catch (e) {
+      _emit('think', 'compaction summary failed ($e) — deterministic only');
+    }
+    final status = _applyCompaction(
+      s,
+      from,
+      cutoff,
+      narrative,
+      forced: forced,
+      focus: focus,
+      ledger: ledger,
+    );
+    return (
+      status: status,
+      modelSummary: narrative != null && narrative.trim().isNotEmpty,
+    );
   }
 
   /// Apply a successful compaction: fold [from, cutoff) into the summary,
@@ -10654,8 +10646,10 @@ user which one instead of assuming this one.''';
     ChatSession s,
     int from,
     int cutoff,
-    String summary, {
+    String? narrative, {
     required bool forced,
+    String? focus,
+    CompactionLedger? ledger,
   }) {
     // Task 8 (spec §8.1): compaction hooks — pre_compact before the span
     // is folded, post_compact after (fire-and-forget observe).
@@ -10688,7 +10682,21 @@ user which one instead of assuming this one.''';
               estimateMessageTokens(m.content) +
               estimateMessageTokens(m.toolDetail ?? ''),
         );
+    final l = ledger ?? CompactionEngine.ledgerFor(s, from, cutoff);
+    final ck = CompactionEngine.finalize(
+      l,
+      state: CheckpointState.of(
+        s,
+        retainedMessages: s.messages.length - cutoff,
+      ),
+      windowTokens: contextWindowForSession(s),
+      folded: shadowed,
+      narrative: narrative,
+      focus: focus,
+    );
+    final summary = ck.text;
     s.compactedSummary = summary;
+    s.compactionState = l.toJson();
     s.compactedAtCount = cutoff;
     s.messages.insert(
       cutoff,
@@ -10697,9 +10705,9 @@ user which one instead of assuming this one.''';
         kind: MsgKind.compact,
         content: forced
             ? 'Context force-pruned · $shadowed message${shadowed == 1 ? '' : 's'} '
-                  '(overflow recovery)'
+                  '(overflow recovery) · ${ck.preservedLine}'
             : 'Context compacted · $shadowed message${shadowed == 1 ? '' : 's'} '
-                  '(~${_fmtK(shadowedTok)} tokens)',
+                  '(~${_fmtK(shadowedTok)} tokens) · ${ck.preservedLine}',
         toolDetail: summary,
         toolState: 'ok',
       ),
@@ -10810,6 +10818,13 @@ user which one instead of assuming this one.''';
           estimateMessageTokens(m.toolDetail ?? '');
       cutoff--;
     }
+    // Never cut inside a turn's tool run (lossless compaction policy).
+    cutoff = CompactionPolicy.snapCutoff(
+      s.messages,
+      s.compactedAtCount,
+      cutoff,
+      minFold: 4,
+    );
     if (cutoff - s.compactedAtCount < 4) return; // nothing worth compacting
     _emit(
       'think',
@@ -10818,22 +10833,8 @@ user which one instead of assuming this one.''';
           '${(window / 1000).toStringAsFixed(0)}K window — compacting…',
     );
     try {
-      final summaryText = await _summarizeCompactSpan(
-        p,
-        s,
-        s.compactedAtCount,
-        cutoff,
-      );
-      if (summaryText != null) {
-        final status = _applyCompaction(
-          s,
-          s.compactedAtCount,
-          cutoff,
-          summaryText,
-          forced: false,
-        );
-        _emit('think', 'context compacted ✓ ($status)');
-      }
+      final r = await _compactSpan(s, p, cutoff, forced: false);
+      _emit('think', 'context compacted ✓ (${r.status})');
     } catch (e) {
       // Compaction failure is non-fatal — continue with full history.
       _emit('think', 'compaction skipped: $e');
@@ -10859,7 +10860,11 @@ user which one instead of assuming this one.''';
   /// an honest human status line instead of letting the command lie
   /// "Session compacted." when nothing happened (short history, already
   /// fully compacted, busy lock, or a summarizer failure are all reported).
-  Future<String> compactNow(ChatSession s, ProviderConfig p) async {
+  Future<String> compactNow(
+    ChatSession s,
+    ProviderConfig p, {
+    String focus = '',
+  }) async {
     if (!_compacting.add(s.id)) {
       return 'Compaction is already running in this chat.';
     }
@@ -10884,6 +10889,12 @@ user which one instead of assuming this one.''';
             estimateMessageTokens(m.toolDetail ?? '');
         cutoff--;
       }
+      cutoff = CompactionPolicy.snapCutoff(
+        s.messages,
+        s.compactedAtCount,
+        cutoff,
+        minFold: 4,
+      );
       final foldable = cutoff - s.compactedAtCount;
       if (foldable < 4) {
         final left = s.messages.length - s.compactedAtCount;
@@ -10894,25 +10905,19 @@ user which one instead of assuming this one.''';
       }
       _emit('think', 'manual /compact — folding $foldable message(s)…');
       try {
-        final summary = await _summarizeCompactSpan(
+        final r = await _compactSpan(
+          s,
           p,
-          s,
-          s.compactedAtCount,
           cutoff,
-        );
-        if (summary == null) {
-          return 'Compaction failed — the model returned no summary '
-              '(provider error or empty reply). Nothing was changed.';
-        }
-        final status = _applyCompaction(
-          s,
-          s.compactedAtCount,
-          cutoff,
-          summary,
           forced: false,
+          focus: focus.trim().isEmpty ? null : focus.trim(),
         );
-        return 'Session compacted — $status. View the checkpoint row '
-            'in the transcript.';
+        return r.modelSummary
+            ? 'Session compacted — ${r.status}. View the checkpoint row '
+                  'in the transcript.'
+            : 'Session compacted from the transcript only — the model '
+                  'returned no summary, so every user message and the work '
+                  'log were kept verbatim (${r.status}).';
       } catch (e) {
         return 'Compaction failed: ${e.toString().split('\n').first} '
             '— history is untouched.';
@@ -10933,6 +10938,12 @@ user which one instead of assuming this one.''';
       tail += estimateMessageTokens(m.content);
       cutoff--;
     }
+    cutoff = CompactionPolicy.snapCutoff(
+      s.messages,
+      s.compactedAtCount,
+      cutoff,
+      minFold: 2,
+    );
     if (cutoff - s.compactedAtCount < 2) return;
     _emit('think', 'provider rejected (context too long) — force pruning…');
     await _maybeCompactForceSpan(s, p, cutoff);
@@ -10945,22 +10956,8 @@ user which one instead of assuming this one.''';
   ) async {
     if (cutoff - s.compactedAtCount < 2) return;
     try {
-      final summaryText = await _summarizeCompactSpan(
-        p,
-        s,
-        s.compactedAtCount,
-        cutoff,
-      );
-      if (summaryText != null) {
-        _applyCompaction(
-          s,
-          s.compactedAtCount,
-          cutoff,
-          summaryText,
-          forced: true,
-        );
-        _emit('think', 'context force-pruned ✓ — retrying the request');
-      }
+      await _compactSpan(s, p, cutoff, forced: true);
+      _emit('think', 'context force-pruned ✓ — retrying the request');
     } catch (e) {
       _emit('think', 'force compaction failed: $e');
     }
@@ -11668,7 +11665,9 @@ ${await _agentsMdBlock()}
         s,
         sys,
         atts: atts,
-        volatile: volatileCtx,
+        // Re-derived per (re)build so a post-compaction rebuild re-injects
+        // the LIVE goal/todos, not the run-start snapshot.
+        volatile: _volatileContextBlock(s),
         fullTextMessages: fullTextMessages,
       );
       if (expanded) {
@@ -12169,6 +12168,7 @@ ${await _agentsMdBlock()}
           final toolMsg = _silentTools.contains(name)
               ? null
               : _toolStart(name, _toolArgSummary(name, args));
+          toolMsg?.toolInput = CompactionLedger.toolInputRecord(name, args);
           String result;
           try {
             if (argError != null) {

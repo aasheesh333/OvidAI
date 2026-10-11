@@ -4480,7 +4480,7 @@ class _CompactionRowState extends State<_CompactionRow> {
                   ),
                   if (hasSummary)
                     Text(
-                      'View summary',
+                      _open ? 'Hide' : 'What was kept',
                       style: TextStyle(fontSize: 10.5, color: Aether.accent),
                     ),
                 ],

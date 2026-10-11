@@ -1093,6 +1093,10 @@ class Message {
   /// child session exists (the card is created before the dispatch runs).
   String? toolSessionId;
 
+  /// Lossless compaction: the small identifying args of a tool card (path,
+  /// command, URL, …) as JSON, recorded at dispatch. Never file bodies.
+  String? toolInput;
+
   Message({
     required this.role,
     this.kind = MsgKind.text,
@@ -1106,6 +1110,7 @@ class Message {
     this.toolDetail,
     this.toolState = 'running',
     this.toolSessionId,
+    this.toolInput,
     this.attachments = const [],
     this.imagePath,
     this.htmlArtifact,
@@ -1163,6 +1168,7 @@ class Message {
     toolDetail: j['toolDetail'] as String?,
     toolState: j['toolState'] as String? ?? 'ok',
     toolSessionId: j['toolSessionId'] as String?,
+    toolInput: j['toolInput'] as String?,
     imagePath: j['imagePath'] as String?,
     htmlArtifact: HtmlArtifact.tryFromJson(j['htmlArtifact']),
     feedback: j['feedback'] as String?,
@@ -1188,6 +1194,7 @@ class Message {
     if (toolDetail != null) 'toolDetail': toolDetail,
     if (toolState != 'ok') 'toolState': toolState,
     if (toolSessionId != null) 'toolSessionId': toolSessionId,
+    if (toolInput != null) 'toolInput': toolInput,
     if (imagePath != null) 'imagePath': imagePath,
     if (htmlArtifact != null) 'htmlArtifact': htmlArtifact!.toJson(),
     if (feedback != null) 'feedback': feedback,
@@ -1464,6 +1471,10 @@ class ChatSession {
   /// the full history.  Persisted.
   String? compactedSummary;
 
+  /// Lossless compaction ledger carried across compactions (verbatim user
+  /// messages + deterministic work log) — see lib/core/compaction/. Persisted.
+  Map<String, dynamic>? compactionState;
+
   /// Active goal (the goal manager goal-round equivalent) — created by create_goal,
   /// advanced by update_goal.  One goal per session at a time.  Persisted.
   Map<String, dynamic>? goal;
@@ -1580,6 +1591,7 @@ class ChatSession {
     this.workspaceFolder,
     this.workspaceFolderPinned = false,
     this.compactedSummary,
+    this.compactionState,
     this.systemPromptSnapshot,
     this.goal,
     this.planMode = false,
@@ -1630,6 +1642,7 @@ class ChatSession {
     workspaceFolder: j['workspaceFolder'] as String?,
     workspaceFolderPinned: j['workspaceFolderPinned'] as bool? ?? false,
     compactedSummary: j['compactedSummary'] as String?,
+    compactionState: (j['compactionState'] as Map?)?.cast<String, dynamic>(),
     systemPromptSnapshot: j['systemPromptSnapshot'] as String?,
     compactedAtCount: (j['compactedAtCount'] as num?)?.toInt() ?? 0,
     parentId: j['parentId'] as String?,
@@ -1702,6 +1715,7 @@ class ChatSession {
       'workspaceFolder': workspaceFolder,
     if (workspaceFolderPinned) 'workspaceFolderPinned': true,
     if (compactedSummary != null) 'compactedSummary': compactedSummary,
+    if (compactionState != null) 'compactionState': compactionState,
     if (systemPromptSnapshot != null)
       'systemPromptSnapshot': systemPromptSnapshot,
     if (compactedAtCount > 0) 'compactedAtCount': compactedAtCount,
@@ -7103,6 +7117,7 @@ class AppState extends ChangeNotifier {
     s.messages.removeWhere(removed.contains);
     if (idx == 0) {
       s.compactedSummary = null;
+      s.compactionState = null;
       s.compactedAtCount = 0;
     }
     _markSessionDirty(s.id);

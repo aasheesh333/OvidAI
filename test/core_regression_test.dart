@@ -7351,12 +7351,16 @@ block</pre>
       expect(res!.feedback, contains('busy'));
     });
 
-    test('summarizer prompt demands the 8-section checkpoint', () {
+    test('summarizer prompt demands the structured checkpoint', () {
       final src = File('lib/core/agent_service.dart').readAsStringSync();
-      // PR29: the exact section names (updated from the older set).
-      expect(src, contains('## Primary Request and Intent'));
-      expect(src, contains('## Critical Context'));
-      expect(src, contains('## Next Step'));
+      // Lossless compaction: the model writes only the narrative sections;
+      // the template's deterministic sections come from the ledger.
+      final ck = File(
+        'lib/core/compaction/compaction_checkpoint.dart',
+      ).readAsStringSync();
+      expect(ck, contains('## Decisions'));
+      expect(ck, contains('## Next Steps'));
+      expect(ck, contains('## User instructions & constraints'));
       // Overflow rebuild + budget-boundary rebuild reuse the shared
       // assembly (never drop the checkpoint). Wave2 routes both through
       // the local requestMessages() wrapper around
@@ -7637,7 +7641,7 @@ block</pre>
       },
     );
 
-    test('summarizer failure is reported honestly (nothing changes)', () async {
+    test('summarizer failure keeps the deterministic checkpoint', () async {
       final app = AppState.I;
       final s = newCompactSession('c29-fail', msgs: 40);
       AgentService.I.compactionSummarizerForTest = (sess, from, cutoff) async {
@@ -7649,10 +7653,17 @@ block</pre>
 
       final prov = fakeProvider();
       final status = await AgentService.I.compactNow(s, prov);
-      expect(status, contains('failed'));
+      // Lossless compaction: a model failure no longer drops the fold —
+      // the transcript-derived checkpoint (every user message) is applied.
+      expect(status, contains('transcript only'));
       expect(status, contains('no summary'));
-      expect(s.compactedSummary, isNull);
-      expect(s.messages.length, 40, reason: 'history untouched');
+      expect(s.compactedSummary, contains('message 0 '));
+      expect(s.compactedSummary, contains('model summary unavailable'));
+      expect(
+        s.messages.where((m) => m.kind != MsgKind.compact).length,
+        40,
+        reason: 'visible history untouched',
+      );
     });
 
     test('buildRequestMessages uses the checkpoint framing', () {
@@ -7672,18 +7683,22 @@ block</pre>
       expect(msgs.length, greaterThan(2));
     });
 
-    test('summarizer instruction matches the 8-section checkpoint', () {
-      final src = File('lib/core/agent_service.dart').readAsStringSync();
-      expect(src, contains('## Primary Request and Intent'));
-      expect(src, contains('## Key Technical Concepts'));
-      expect(src, contains('## Files and Code'));
-      expect(src, contains('## Errors and Fixes'));
-      expect(src, contains('## Pending Jobs'));
-      expect(src, contains('## Current Work'));
-      expect(src, contains('## Next Step'));
-      expect(src, contains('## Critical Context'));
+    test('checkpoint template carries the lossless sections', () {
+      final src = File(
+        'lib/core/compaction/compaction_checkpoint.dart',
+      ).readAsStringSync();
+      expect(src, contains('## Goal (original request, verbatim)'));
+      expect(src, contains('## User instructions & constraints'));
+      expect(src, contains('## Facts & data the user provided'));
+      expect(src, contains('## Files & artifacts'));
+      expect(src, contains('## Actions taken (chronological)'));
+      expect(src, contains('## Decisions'));
+      expect(src, contains('## Errors & fixes'));
+      expect(src, contains('## Current state / todos'));
+      expect(src, contains('## Next steps'));
       // Span replay is verbatim, not 400-char truncated blobs.
-      expect(src, isNot(contains('cleanTruncate(m.content, 400)')));
+      final agent = File('lib/core/agent_service.dart').readAsStringSync();
+      expect(agent, isNot(contains('cleanTruncate(m.content, 400)')));
     });
   });
 
