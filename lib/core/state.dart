@@ -20,6 +20,7 @@ import 'cloud_app_check.dart';
 import 'github_service.dart';
 import 'grant_store.dart';
 import 'hook_service.dart';
+import 'tool_usage_store.dart';
 import 'html_artifact.dart';
 import 'image_receipt_store.dart';
 import 'image_studio.dart';
@@ -2024,6 +2025,27 @@ void registerAllNativePlugins() {
 /// (node/python toolchain). `idle` also covers "banner dismissed".
 enum RuntimeInstallState { idle, running, done, failed }
 
+/// Why [AppState.addMarketplaceChecked] refused an input.
+enum MarketplaceAddError { invalid, duplicate }
+
+/// Prefix of the fetch message when no marketplace host could be reached.
+const kMarketplaceOfflinePrefix = "Couldn't reach GitHub for";
+
+/// Per-repo outcome of one marketplace sync.
+class MarketplaceSyncReport {
+  final int fetched;
+
+  /// Normalized repo → failure message.
+  final Map<String, String> failures;
+
+  const MarketplaceSyncReport({required this.fetched, required this.failures});
+
+  /// Every failure was "no host reachable": the device is offline.
+  bool get offline =>
+      failures.isNotEmpty &&
+      failures.values.every((m) => m.startsWith(kMarketplaceOfflinePrefix));
+}
+
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static AppState? _testInstance;
@@ -2508,7 +2530,12 @@ class AppState extends ChangeNotifier {
     final id = row.runtimeId;
     if (id == null) {
       final tools = AgentService.I.pluginToolNames(row);
-      if (tools.isNotEmpty) {
+      // Hook-only / MCP-only legacy rows contribute real capability too.
+      final hasHooks = row.hooks.isNotEmpty || row.pluginHooks.isNotEmpty;
+      final hasMcp = mcpServers.any(
+        (s) => s.ownerPluginId == null && s.source == 'plugin:${row.name}',
+      );
+      if (tools.isNotEmpty || hasHooks || hasMcp) {
         return StartupItemStatus.ready(label, StartupItemKind.plugin, label);
       }
       return StartupItemStatus.failed(
@@ -2826,22 +2853,49 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
-  Future<void> enablePlugin(PluginItem plugin) async {
+  /// Test seam: replaces [PluginRuntimeManager.enable] in [enablePlugin].
+  @visibleForTesting
+  static Future<void> Function(String runtimeId)? runtimeEnableOverrideForTest;
+
+  /// Enable [plugin] and report the real outcome: `ok` only when the row
+  /// ends up enabled with a non-failed activation; otherwise `error` says
+  /// why (runtime enable error, failed activation reason, or the
+  /// fail-closed migration gate) instead of the switch silently snapping
+  /// back.
+  Future<({bool ok, String? error})> enablePlugin(PluginItem plugin) async {
     final runtimeId = plugin.runtimeId;
+    String? error;
     if (plugin.runtimeId != null) {
       // Task 7: runtime-managed rows re-register their contributions
       // (applying any promotion that came due while disabled).
       try {
-        await PluginRuntimeManager.I.enable(plugin.runtimeId!);
+        final override = runtimeEnableOverrideForTest;
+        if (override != null) {
+          await override(plugin.runtimeId!);
+        } else {
+          await PluginRuntimeManager.I.enable(plugin.runtimeId!);
+        }
       } catch (e) {
         Diag.swallow('state', e);
+        error = '$e';
       }
       final current = plugins
           .where((row) => row.runtimeId == plugin.runtimeId)
           .firstOrNull;
       plugin.enabled = current?.enabled ?? false;
+      if (error == null &&
+          (!plugin.enabled || plugin.activation == PluginActivation.failed)) {
+        final reason = plugin.runtimeReason ?? statusFor(runtimeId!)?.reason;
+        error = reason == null || reason.isEmpty
+            ? 'activation failed'
+            : reason;
+      }
     } else if (!plugin.migrationRequired) {
       plugin.enabled = true;
+    } else {
+      error =
+          'Migration required: '
+          '${plugin.runtimeReason ?? 're-approve this plugin before it can run'}';
     }
     await persistPluginState();
     try {
@@ -2850,6 +2904,7 @@ class AppState extends ChangeNotifier {
       Diag.swallow('state', e);
     }
     refresh();
+    return (ok: error == null && plugin.enabled, error: error);
   }
 
   Future<PluginActivation> retryPlugin(PluginItem plugin) async {
@@ -3834,6 +3889,7 @@ class AppState extends ChangeNotifier {
     await _loadPluginState();
     await _loadMemories();
     await HookService.I.loadEnabled();
+    await ToolUsageStore.I.load();
     await hydrateRuntimeStatuses();
   }
 
@@ -7868,15 +7924,55 @@ class AppState extends ChangeNotifier {
   /// or null when the input is empty/invalid/already present. The caller is
   /// expected to follow up with [fetchMarketplaceCatalog] — registering alone
   /// imports nothing.
-  String? addMarketplace(String repo) {
-    final normalized = normalizeMarketplace(repo);
-    if (normalized.isEmpty) return null;
-    if (normalized.split('/').length < 2) return null;
-    if (marketplaces.contains(normalized)) return null;
+  String? addMarketplace(String repo) => addMarketplaceChecked(repo).repo;
+
+  /// [addMarketplace] with the reason a rejected input was refused, so the
+  /// add sheet can say "invalid" and "already added" differently. Accepts
+  /// `owner/repo`, GitHub URLs (with or without scheme, `.git`, a trailing
+  /// `/tree/<ref>/…`) and `git@github.com:owner/repo(.git)`.
+  ({String? repo, MarketplaceAddError? error}) addMarketplaceChecked(
+    String repo,
+  ) {
+    var normalized = normalizeMarketplace(
+      repo.trim().replaceFirst(RegExp(r'^git@github\.com:'), ''),
+    );
+    final parts = normalized.split('/');
+    if (parts.length > 2 && (parts[2] == 'tree' || parts[2] == 'blob')) {
+      normalized = '${parts[0]}/${parts[1]}';
+    }
+    final valid = RegExp(
+      r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$',
+    ).hasMatch(normalized);
+    if (!valid) return (repo: null, error: MarketplaceAddError.invalid);
+    if (marketplaces.contains(normalized)) {
+      return (repo: null, error: MarketplaceAddError.duplicate);
+    }
     marketplaces.add(normalized);
     _persistMarketplaces();
     refresh();
-    return normalized;
+    return (repo: normalized, error: null);
+  }
+
+  /// When each marketplace last synced successfully this launch.
+  final Map<String, DateTime> marketplaceLastSynced = {};
+
+  /// The last fetch failure per marketplace (cleared on success).
+  final Map<String, String> marketplaceSyncErrors = {};
+
+  /// Installed plugins that [removeMarketplace] would uninstall — the
+  /// confirmation lists them so the copy matches the behaviour.
+  List<PluginItem> installedPluginsFromMarketplace(String repo) {
+    final normalized = normalizeMarketplace(repo);
+    return plugins
+        .where(
+          (p) =>
+              p.installed &&
+              (p.marketplace == repo ||
+                  p.marketplace == normalized ||
+                  p.source == repo ||
+                  p.source == normalized),
+        )
+        .toList();
   }
 
   Future<void> removeMarketplace(String repo) async {
@@ -8065,19 +8161,31 @@ class AppState extends ChangeNotifier {
 
   /// Merge every registered marketplace catalog that has not been merged yet
   /// this launch. Returns the number of repos actually fetched.
-  Future<int> syncMarketplaceCatalogs({bool force = false}) async {
+  Future<int> syncMarketplaceCatalogs({bool force = false}) async =>
+      (await syncMarketplaceCatalogsReport(force: force)).fetched;
+
+  /// [syncMarketplaceCatalogs] with each repo's outcome: the Plugins screen
+  /// reports "Couldn't refresh N marketplaces" / offline instead of
+  /// swallowing failures.
+  Future<MarketplaceSyncReport> syncMarketplaceCatalogsReport({
+    bool force = false,
+  }) async {
     var fetched = 0;
+    final failures = <String, String>{};
     for (final repo in List.of(marketplaces)) {
       final normalized = normalizeMarketplace(repo);
       if (!force && _fetchedMarketplaces.contains(normalized)) continue;
       final message = await fetchMarketplaceCatalog(repo);
       // Record the fetch only AFTER it succeeded so a failed attempt stays
       // retryable (startup Retry re-fetches instead of short-circuiting).
-      if (!_marketplaceFetchSucceeded(message)) continue;
+      if (!_marketplaceFetchSucceeded(message)) {
+        failures[normalized] = message;
+        continue;
+      }
       _fetchedMarketplaces.add(normalized);
       fetched++;
     }
-    return fetched;
+    return MarketplaceSyncReport(fetched: fetched, failures: failures);
   }
 
   /// Fetch a marketplace catalog from a GitHub repo and merge plugin/MCP
@@ -8099,6 +8207,18 @@ class AppState extends ChangeNotifier {
   /// `.claude-plugin/marketplace.json`, then the jsdelivr and githack
   /// mirrors for every path (some networks block raw.githubusercontent).
   Future<String> fetchMarketplaceCatalog(String repo) async {
+    final message = await _fetchMarketplaceCatalog(repo);
+    final key = normalizeMarketplace(repo);
+    if (_marketplaceFetchSucceeded(message)) {
+      marketplaceLastSynced[key] = DateTime.now();
+      marketplaceSyncErrors.remove(key);
+    } else {
+      marketplaceSyncErrors[key] = message;
+    }
+    return message;
+  }
+
+  Future<String> _fetchMarketplaceCatalog(String repo) async {
     final normalized = repo.trim();
     if (normalized.isEmpty) return 'Repository name is empty';
     final parts = normalized.split('/');
@@ -8139,6 +8259,9 @@ class AppState extends ChangeNotifier {
       ],
     ];
     String? parseError;
+    // Whether any host answered at all: when none did, the device is offline
+    // (or GitHub and every mirror are blocked) — say so, not "not found".
+    var reachedServer = false;
     for (final url in urls) {
       final client = HttpClient()
         ..connectionTimeout = const Duration(seconds: 15);
@@ -8147,6 +8270,7 @@ class AppState extends ChangeNotifier {
             .getUrl(Uri.parse(url))
             .timeout(const Duration(seconds: 15));
         final res = await req.close().timeout(const Duration(seconds: 15));
+        reachedServer = true;
         if (res.statusCode != 200) continue;
         // Bounded read (2 MB cap) — marketplace files are small.
         final builder = BytesBuilder();
@@ -8176,6 +8300,10 @@ class AppState extends ChangeNotifier {
     if (parseError != null) {
       return 'Found a marketplace file in $owner/$name but could not parse '
           'it: $parseError';
+    }
+    if (!reachedServer) {
+      return '$kMarketplaceOfflinePrefix $owner/$name — check your '
+          'connection and try again.';
     }
     return 'No marketplace.json found in $owner/$name '
         '(tried main, master, .claude-plugin/marketplace.json and mirrors). '
@@ -9504,8 +9632,14 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void toggleMcpServer(McpServer s) {
+  /// Flip [s] between connected and disconnected. The flag flips (and the
+  /// `connecting` status publishes) synchronously; the returned future
+  /// completes with the real connect outcome — `ok` plus the connect detail
+  /// — so the UI can report it. A disconnect completes immediately with
+  /// `ok: true, detail: null`.
+  Future<({bool ok, String? detail})> toggleMcpServer(McpServer s) {
     s.connected = !s.connected;
+    final Future<({bool ok, String? detail})> outcome;
     if (s.connected) {
       // Spawn the real MCP server process in the sandbox.
       updateServiceStatus(
@@ -9513,40 +9647,48 @@ class AppState extends ChangeNotifier {
         ServiceHealth.connecting,
         detail: 'connecting…',
       );
-      unawaited(
-        McpService.I
-            .connect(s)
-            .then((msg) async {
-              final isOk = McpService.I.isConnected(s.canonicalId);
-              s.connected = isOk;
-              updateServiceStatus(
-                'mcp:${s.canonicalId}',
-                isOk ? ServiceHealth.working : ServiceHealth.failed,
-                detail: msg,
-              );
-              await _recordMcpConnectDurable(s, isOk: isOk, detail: msg);
-              refresh();
-            })
-            .catchError((e) async {
-              s.connected = false;
-              updateServiceStatus(
-                'mcp:${s.canonicalId}',
-                ServiceHealth.failed,
-                detail: '$e',
-              );
-              await _recordMcpFailed(s, '$e');
-              refresh();
-            }),
-      );
+      outcome = _connectAndRecord(s);
     } else {
       serviceStatus.remove('mcp:${s.canonicalId}');
       unawaited(McpService.I.disconnect(s.canonicalId));
       unawaited(_recordMcpDisabled(s));
+      outcome = Future.value((ok: true, detail: null));
     }
     _persistMcpConnectedIntent(
       removed: s.connected ? const [] : [s.canonicalId],
     );
     refresh();
+    return outcome;
+  }
+
+  Future<({bool ok, String? detail})> _connectAndRecord(McpServer s) async {
+    try {
+      final msg = await McpService.I.connect(s);
+      final isOk = McpService.I.isConnected(s.canonicalId);
+      s.connected = isOk;
+      updateServiceStatus(
+        'mcp:${s.canonicalId}',
+        isOk ? ServiceHealth.working : ServiceHealth.failed,
+        detail: msg,
+      );
+      await _recordMcpConnectDurable(s, isOk: isOk, detail: msg);
+      refresh();
+      return (ok: isOk, detail: msg);
+    } catch (e) {
+      s.connected = false;
+      updateServiceStatus(
+        'mcp:${s.canonicalId}',
+        ServiceHealth.failed,
+        detail: '$e',
+      );
+      try {
+        await _recordMcpFailed(s, '$e');
+      } catch (err) {
+        Diag.swallow('state', err);
+      }
+      refresh();
+      return (ok: false, detail: '$e');
+    }
   }
 
   // ── MCP auto-reconnect (the MCP supervisor tier-2 lifecycle parity) ──
@@ -9703,25 +9845,35 @@ class AppState extends ChangeNotifier {
     // report working from their real active capability. Non-ready states map
     // to an accurate scrubbed detail (never the misleading "no agent tools").
     for (final p in plugins.where((p) => p.installed && p.enabled)) {
-      final tools = AgentService.I.pluginToolNames(p);
-      if (tools.isNotEmpty) {
-        updateServiceStatus(
-          'plugin:${p.name}',
-          ServiceHealth.working,
-          detail: 'probe ok · tools: ${tools.join(', ')}',
-        );
-        continue;
-      }
-      final health = await pluginHealthFor(p);
-      updateServiceStatus(
-        'plugin:${p.name}',
-        health.state == StartupItemState.ready
-            ? ServiceHealth.working
-            : ServiceHealth.failed,
-        detail: _serviceDetailForHealth(p, health),
-      );
+      await probePluginServiceStatus(p);
     }
     refresh();
+  }
+
+  /// Stamp `plugin:<name>` service status from a real capability probe of
+  /// [p]: roster tools first, else the full health probe (registered hooks,
+  /// owned MCP, skills/commands), so hook-only and MCP-only plugins are not
+  /// reported as failed. Returns the stamped health.
+  Future<ServiceHealth> probePluginServiceStatus(PluginItem p) async {
+    final tools = AgentService.I.pluginToolNames(p);
+    if (tools.isNotEmpty) {
+      updateServiceStatus(
+        'plugin:${p.name}',
+        ServiceHealth.working,
+        detail: 'probe ok · tools: ${tools.join(', ')}',
+      );
+      return ServiceHealth.working;
+    }
+    final health = await pluginHealthFor(p);
+    final stamped = health.state == StartupItemState.ready
+        ? ServiceHealth.working
+        : ServiceHealth.failed;
+    updateServiceStatus(
+      'plugin:${p.name}',
+      stamped,
+      detail: _serviceDetailForHealth(p, health),
+    );
+    return stamped;
   }
 
   /// Accurate, scrubbed ServiceHealth detail for a plugin probe outcome.
@@ -9804,6 +9956,108 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
+  /// Add an MCP server the user configured by hand (Plugins → + → MCP
+  /// server: a stdio command, a remote http/sse url, or a pasted
+  /// `mcpServers` entry). Validates the name (unique, `[A-Za-z0-9_.-]`),
+  /// the command or url, and the transport; then stores env values and
+  /// headers in secure storage (strict — a failed write adds nothing).
+  ///
+  /// Env keys whose value is blank are declared but not stored, so the
+  /// credential sheet asks for them on connect. Returns the new server, or
+  /// the user-facing reason it was refused.
+  Future<({McpServer? server, String? error})> addUserMcpServer({
+    required String name,
+    String command = '',
+    List<String> args = const [],
+    Map<String, String> env = const {},
+    String? url,
+    String? transport,
+    Map<String, String> headers = const {},
+    String? cwd,
+    int? startupTimeoutS,
+    int? toolTimeoutS,
+    McpOAuthConfig? oauth,
+  }) async {
+    final n = name.trim();
+    if (n.isEmpty) return (server: null, error: 'Give the server a name.');
+    if (!RegExp(r'^[A-Za-z0-9_.-]+$').hasMatch(n)) {
+      return (
+        server: null,
+        error: 'Use only letters, digits, ".", "_" or "-" in the name.',
+      );
+    }
+    if (mcpServers.any((s) => s.canonicalId == n || s.name == n)) {
+      return (server: null, error: 'A server named "$n" already exists.');
+    }
+    final trimmedUrl = url?.trim() ?? '';
+    final resolvedTransport =
+        transport ?? (trimmedUrl.isNotEmpty ? 'http' : 'stdio');
+    final remote = resolvedTransport == 'http' || resolvedTransport == 'sse';
+    if (remote) {
+      final uri = Uri.tryParse(trimmedUrl);
+      if (uri == null ||
+          !(uri.scheme == 'https' || uri.scheme == 'http') ||
+          uri.host.isEmpty) {
+        return (
+          server: null,
+          error: 'Enter the server URL (https://…).',
+        );
+      }
+    } else if (command.trim().isEmpty) {
+      return (
+        server: null,
+        error: 'Enter the command that starts the server (e.g. npx -y …).',
+      );
+    }
+    final cleanHeaders = {
+      for (final e in headers.entries)
+        if (e.key.trim().isNotEmpty) e.key.trim(): e.value,
+    };
+    final declaredEnv = [
+      for (final k in env.keys)
+        if (k.trim().isNotEmpty) k.trim(),
+    ];
+    final storedEnv = {
+      for (final e in env.entries)
+        if (e.key.trim().isNotEmpty && e.value.isNotEmpty) e.key.trim(): e.value,
+    };
+    final reason = addCustomMcpServer(
+      name: n,
+      command: remote ? '' : command.trim(),
+      args: remote ? const [] : args,
+      envHint: declaredEnv.isEmpty ? null : declaredEnv.join(','),
+      url: remote ? trimmedUrl : null,
+      headers: cleanHeaders,
+      transport: resolvedTransport,
+      cwd: cwd == null || cwd.trim().isEmpty ? null : cwd.trim(),
+      startupTimeoutS: startupTimeoutS,
+      toolTimeoutS: toolTimeoutS,
+    );
+    if (reason != null) return (server: null, error: reason);
+    final server = mcpServers.lastWhere((s) => s.canonicalId == n);
+    try {
+      await setMcpEnv(n, storedEnv, strict: true);
+      await setMcpHeaders(n, cleanHeaders, strict: true);
+      if (oauth != null && oauth.isUsable) {
+        await McpService.I.setMcpOAuthConfig(n, oauth);
+      }
+    } catch (e) {
+      Diag.swallow('state', e);
+      mcpServers.remove(server);
+      await deleteMcpEnv(n);
+      await deleteMcpHeaders(n);
+      await _persistCustomMcpServers();
+      refresh();
+      return (
+        server: null,
+        error:
+            "Couldn't save the server's credentials to secure storage. "
+            'Nothing was added — try again.',
+      );
+    }
+    return (server: server, error: null);
+  }
+
   Future<void> removeMcpServer(McpServer s) async {
     // Drain any still-queued OAuth-config import write for this canonical
     // id so the removal cannot race ahead of its secure-store sidecar
@@ -9832,10 +10086,45 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
+  /// Why an edit of [s] to this command/args/url/transport cannot run, or
+  /// null when it can: the [addCustomMcpServer] transport gate plus a url
+  /// check for http/sse.
+  String? customMcpEditRejection(
+    McpServer s, {
+    required String command,
+    required List<String> args,
+    String? url,
+    String? transport,
+  }) {
+    final nextUrl = url != null && url.isNotEmpty ? url : null;
+    final nextTransport = transport ?? (nextUrl != null ? 'http' : 'stdio');
+    final probe = McpServer(
+      name: s.name,
+      author: s.author,
+      description: s.description,
+      category: s.category,
+      command: command.trim(),
+      args: args,
+      transport: nextTransport,
+      url: nextUrl,
+    );
+    final unsupported = McpService.I.unsupportedTransportReason(probe);
+    if (unsupported != null) return unsupported;
+    if ((nextTransport == 'http' || nextTransport == 'sse') &&
+        nextUrl == null) {
+      return '"$nextTransport" transport needs a url';
+    }
+    return null;
+  }
+
   /// Update an existing custom MCP server from an edited config — round-trips
   /// command/args/url/transport/headers/cwd/startup timeout. HTTP auth
   /// headers go to secure storage (never plaintext prefs).
-  void updateCustomMcpServer(
+  ///
+  /// Returns null on success, or the actionable reason when the edited
+  /// transport cannot run (same gate as [addCustomMcpServer]); a rejected
+  /// edit leaves the server untouched.
+  String? updateCustomMcpServer(
     McpServer s, {
     required String command,
     required List<String> args,
@@ -9846,11 +10135,20 @@ class AppState extends ChangeNotifier {
     int? startupTimeoutS,
     int? toolTimeoutS,
   }) {
+    final rejected = customMcpEditRejection(
+      s,
+      command: command,
+      args: args,
+      url: url,
+      transport: transport,
+    );
+    if (rejected != null) return rejected;
+    final nextUrl = url != null && url.isNotEmpty ? url : null;
+    final nextTransport = transport ?? (nextUrl != null ? 'http' : 'stdio');
     s.command = command.trim();
     s.args = args;
-    s.url = url != null && url.isNotEmpty ? url : null;
-    s.transport =
-        transport ?? (s.url != null && s.url!.isNotEmpty ? 'http' : 'stdio');
+    s.url = nextUrl;
+    s.transport = nextTransport;
     s.headers = headers;
     s.cwd = cwd;
     if (startupTimeoutS != null) s.startupTimeoutS = startupTimeoutS;
@@ -9860,6 +10158,7 @@ class AppState extends ChangeNotifier {
     }
     _persistCustomMcpServers();
     refresh();
+    return null;
   }
 
   // ── Custom MCP server + plugin persistence ─────────────────────────
@@ -10314,6 +10613,65 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Save credentials collected for [server] (the MCP credential sheet).
+  ///
+  /// Env values go to the env blob and header values to the headers blob —
+  /// the HTTP transport reads only the latter. Each group is MERGED into
+  /// what is already stored (the sheet only asks for the missing names, and
+  /// both setters replace the whole blob). Strict: a secure-storage failure
+  /// throws instead of reporting a save that never happened.
+  Future<void> saveMcpCredentials(
+    McpServer server, {
+    Map<String, String> env = const {},
+    Map<String, String> headers = const {},
+  }) async {
+    final id = server.canonicalId;
+    if (env.isNotEmpty) {
+      final merged = {...await getMcpEnv(id, strict: true), ...env};
+      await setMcpEnv(id, merged, strict: true);
+    }
+    if (headers.isNotEmpty) {
+      final merged = {...await getMcpHeaders(id, strict: true), ...headers};
+      await setMcpHeaders(id, merged, strict: true);
+      // Ownerless HTTP servers send their in-memory headers; plugin-owned
+      // rows reload them from secure storage at connect.
+      server.headers = merged;
+    }
+  }
+
+  /// Remove one stored credential ([name] from the env blob, or from the
+  /// headers blob when [header]) for [server]. Strict: throws on storage
+  /// failure rather than reporting a deletion that did not happen.
+  Future<void> deleteMcpCredential(
+    McpServer server,
+    String name, {
+    required bool header,
+  }) async {
+    final id = server.canonicalId;
+    if (header) {
+      final next = {...await getMcpHeaders(id, strict: true)}..remove(name);
+      await setMcpHeaders(id, next, strict: true);
+      server.headers = next;
+    } else {
+      final next = {...await getMcpEnv(id, strict: true)}..remove(name);
+      await setMcpEnv(id, next, strict: true);
+    }
+  }
+
+  /// "Reset credentials" for [s]: disconnect, then delete its stored env,
+  /// HTTP headers and OAuth token. The server row and its OAuth client
+  /// config stay, so the user can sign in again.
+  Future<void> resetMcpServerConfig(McpServer s) async {
+    if (s.connected) await toggleMcpServer(s);
+    await McpService.I.clearMcpOAuthToken(s.canonicalId);
+    await Future.wait([
+      deleteMcpEnv(s.canonicalId),
+      deleteMcpHeaders(s.canonicalId),
+    ]);
+    s.headers = const {};
+    refresh();
+  }
+
   /// Delete a server's env var blob from secure storage (on remove/reset).
   Future<void> deleteMcpEnv(String serverName) async {
     try {
@@ -10328,8 +10686,9 @@ class AppState extends ChangeNotifier {
   // SharedPreferences plaintext. They live alongside env in secure storage.
   Future<void> setMcpHeaders(
     String serverName,
-    Map<String, String> headers,
-  ) async {
+    Map<String, String> headers, {
+    bool strict = false,
+  }) async {
     try {
       if (headers.isEmpty) {
         await _secureStorage.delete(key: '$_kMcpHeadersPrefix$serverName');
@@ -10340,11 +10699,15 @@ class AppState extends ChangeNotifier {
         );
       }
     } catch (e) {
+      if (strict) rethrow;
       Diag.swallow('state', e);
     }
   }
 
-  Future<Map<String, String>> getMcpHeaders(String serverName) async {
+  Future<Map<String, String>> getMcpHeaders(
+    String serverName, {
+    bool strict = false,
+  }) async {
     try {
       final raw = await _secureStorage.read(
         key: '$_kMcpHeadersPrefix$serverName',
@@ -10353,6 +10716,7 @@ class AppState extends ChangeNotifier {
       final m = jsonDecode(raw) as Map<String, dynamic>;
       return m.map((k, v) => MapEntry(k, v.toString()));
     } catch (_) {
+      if (strict) rethrow;
       return {};
     }
   }

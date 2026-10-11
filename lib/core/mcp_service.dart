@@ -11,12 +11,15 @@ import 'package:path_provider/path_provider.dart';
 
 import 'github_service.dart';
 import 'mcp_config_parse.dart';
+import 'mcp_oauth_discovery.dart';
 import 'native_mcp.dart';
 import 'sandbox_service.dart';
 import 'secure_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
+import 'plugin_user_config.dart';
 import 'state.dart';
+import 'tool_usage_store.dart';
 import 'diag.dart';
 
 /// Sends one Streamable-HTTP request without allowing the HTTP client to
@@ -113,6 +116,10 @@ class McpOAuthToken {
 
 /// Browser handoff. State and the PKCE verifier stay owned by the service;
 /// callers pass the complete callback URI to completeMcpOAuthAuthorization.
+///
+/// The attempt is also persisted in secure storage (state, verifier, expiry
+/// and the config it was issued for), so a callback that arrives after
+/// Android killed the app in the background can still be completed.
 class McpOAuthAuthorization {
   final String authorizationUrl;
   final DateTime expiresAt;
@@ -128,6 +135,57 @@ class McpOAuthAuthorization {
     this._verifier,
     this._generation,
   );
+
+  Map<String, dynamic> _toJson() => {
+    'v': 1,
+    'authorization_url': authorizationUrl,
+    'expires_at': expiresAt.toUtc().toIso8601String(),
+    'state': _state,
+    'verifier': _verifier,
+    'config': _config.toJson(),
+  };
+
+  static McpOAuthAuthorization? _fromJson(
+    Map<String, dynamic> j,
+    Object generation,
+  ) {
+    final url = j['authorization_url'];
+    final expires = DateTime.tryParse('${j['expires_at']}');
+    final state = j['state'];
+    final verifier = j['verifier'];
+    final config = j['config'];
+    if (j['v'] != 1 ||
+        url is! String ||
+        expires == null ||
+        state is! String ||
+        state.isEmpty ||
+        verifier is! String ||
+        verifier.isEmpty ||
+        config is! Map) {
+      return null;
+    }
+    final cfg = McpOAuthConfig.fromJson(config.cast<String, dynamic>());
+    if ((cfg.redirectUri ?? '').isEmpty) return null;
+    return McpOAuthAuthorization._(
+      url,
+      expires.toLocal(),
+      cfg,
+      state,
+      verifier,
+      generation,
+    );
+  }
+}
+
+/// Thrown by the SSE transport when the event-stream GET is refused, so a
+/// 401 can carry its `WWW-Authenticate` challenge to OAuth discovery. The
+/// message matches the historical plain-exception text.
+class _McpHttpStatusException implements Exception {
+  const _McpHttpStatusException(this.status, this.wwwAuthenticate);
+  final int status;
+  final String? wwwAuthenticate;
+  @override
+  String toString() => 'Exception: SSE stream failed: HTTP $status';
 }
 
 /// Legacy MCP SSE transport channel (GET /sse event stream + POST
@@ -198,7 +256,10 @@ class _SseMcpChannel {
     if (res.statusCode < 200 || res.statusCode >= 300) {
       unawaited(res.stream.listen(null).cancel());
       _closeClient();
-      throw Exception('SSE stream failed: HTTP ${res.statusCode}');
+      throw _McpHttpStatusException(
+        res.statusCode,
+        res.headers['www-authenticate'],
+      );
     }
     _sub = res.stream
         .transform(utf8.decoder)
@@ -655,6 +716,19 @@ class McpService {
 
   String _key(McpServer server) => server.canonicalId;
 
+  /// Saved plugin settings per owning plugin, refreshed at every connect.
+  final Map<String, Map<String, String>> _userConfigByPlugin = {};
+
+  /// [server]'s url with `${user_config.<key>}` resolved for plugin-owned
+  /// servers. The persisted row keeps the template (a secret setting must
+  /// never land in the plaintext roster).
+  String? _urlFor(McpServer server) {
+    final url = server.url;
+    final owner = server.ownerPluginId;
+    if (url == null || owner == null) return url;
+    return substituteUserConfig(url, _userConfigByPlugin[owner] ?? const {});
+  }
+
   String _keyForName(String serverName) {
     if (_running.containsKey(serverName)) return serverName;
     final match = AppState.I.mcpServers
@@ -678,6 +752,26 @@ class McpService {
   @visibleForTesting
   Map<String, dynamic> capabilitiesForTest(String serverName) =>
       _running[_keyForName(serverName)]?.capabilities ?? const {};
+
+  /// Capabilities [serverName] advertised in its initialize result (empty
+  /// when not connected). The MCP detail screen uses this to decide whether
+  /// to list resources and prompts.
+  Map<String, dynamic> capabilitiesFor(String serverName) {
+    final rs = _running[_keyForName(serverName)];
+    if (rs == null || !rs.handshakeDone) return const {};
+    return rs.capabilities;
+  }
+
+  /// Protocol version negotiated with [serverName], or null.
+  String? protocolVersionFor(String serverName) =>
+      _running[_keyForName(serverName)]?.protocolVersion;
+
+  /// The last [lines] stderr lines of a stdio server (diagnostics only).
+  List<String> stderrTail(String serverName, {int lines = 20}) {
+    final all = _running[_keyForName(serverName)]?.stderrLines;
+    if (all == null || all.isEmpty) return const [];
+    return List.unmodifiable(all.skip(max(0, all.length - lines)));
+  }
 
   /// Test seam: the remembered `Mcp-Session-Id` for [serverName].
   @visibleForTesting
@@ -877,7 +971,16 @@ class McpService {
         return McpConnectOutcome(McpConnectOutcomeKind.needsSetup, reason);
       }
       if (server.ownerPluginId != null) {
-        server.headers = await AppState.I.getMcpHeaders(server.canonicalId);
+        // Plugin userConfig parity: `${user_config.<key>}` in stored headers
+        // (and the url, via [_urlFor]) resolves to the saved setting.
+        final values = await pluginUserConfigValues(server.ownerPluginId!);
+        _userConfigByPlugin[server.ownerPluginId!] = values;
+        server.headers = {
+          for (final e in (await AppState.I.getMcpHeaders(
+            server.canonicalId,
+          )).entries)
+            e.key: substituteUserConfig(e.value, values),
+        };
         _requireCurrent(rs);
       }
       // Probe only; this wait is covered by the same overall budget.
@@ -1016,8 +1119,19 @@ class McpService {
   /// Side-effect-free credential probe used by health checks: returns the
   /// declared env/header names that have no stored value. Never dials or
   /// spawns a process.
-  Future<List<String>> missingCredentialsFor(McpServer server) =>
-      _missingCredentials(server);
+  Future<List<String>> missingCredentialsFor(McpServer server) async {
+    final split = await missingCredentialsSplitFor(server);
+    return [...split.env, ...split.headers];
+  }
+
+  /// [missingCredentialsFor] split by storage: env var names (saved with
+  /// [AppState.setMcpEnv]) and HTTP header names (saved with
+  /// [AppState.setMcpHeaders]). Callers that collect values must route each
+  /// group to its own setter — a header written as env never reaches the
+  /// HTTP transport.
+  Future<({List<String> env, List<String> headers})> missingCredentialsSplitFor(
+    McpServer server,
+  ) => _missingCredentials(server);
 
   /// Test seam: overrides the runtime probe in connect paths so tests
   /// never touch the real sandbox. Null in production.
@@ -1125,6 +1239,30 @@ class McpService {
   static String _oauthTokenKey(String serverKey) => 'ovid_mcp_oauth_$serverKey';
   static String _oauthConfigKey(String serverKey) =>
       'ovid_mcp_oauth_cfg_$serverKey';
+  static const _oauthAttemptPrefix = 'ovid_oauth_attempt_';
+  static String _oauthAttemptKey(String serverKey) =>
+      '$_oauthAttemptPrefix$serverKey';
+
+  /// Redirect URI used for discovered (dynamically registered) clients and
+  /// for static configs that omit `redirect_uri`. A reverse-DNS custom
+  /// scheme (RFC 8252 §7.1) caught by `OAuthCallbackActivity`, which hands
+  /// it to the running app through `app_links` — no server page needed.
+  static const mcpOAuthRedirectUri = 'com.dhanuk.ovidai://oauth/callback';
+
+  /// Optional verified App Link callback (`https://ovidsi.com/oauth/callback`).
+  /// Recognised when it arrives, but only used as a redirect when a static
+  /// config names it, because it needs the web route + assetlinks entry.
+  static const mcpOAuthAppLinkRedirectUri = 'https://ovidsi.com/oauth/callback';
+
+  /// True when [uri] is an OAuth redirect back into the app (custom scheme
+  /// or the App Link path), as opposed to a share or chat link.
+  static bool isMcpOAuthCallback(Uri uri) =>
+      (uri.scheme == 'com.dhanuk.ovidai' &&
+          uri.host == 'oauth' &&
+          uri.path == '/callback') ||
+      (uri.scheme == 'https' &&
+          (uri.host == 'ovidsi.com' || uri.host == 'www.ovidsi.com') &&
+          uri.path == '/oauth/callback');
 
   final Map<String, McpOAuthConfig> _oauthConfigs = {};
   final Map<String, McpOAuthToken> _oauthTokens = {};
@@ -1134,14 +1272,78 @@ class McpService {
   final _oauthRefreshes = <String, Future<McpOAuthToken?>>{};
   final _oauthAttempts = <String, McpOAuthAuthorization>{};
 
+  /// Servers whose attempt may sit in secure storage (written this process
+  /// or restored from it), so invalidation knows to delete it.
+  final _persistedAttemptKeys = <String>{};
+
+  /// Last `WWW-Authenticate` value (or '' when absent) from a 401 for each
+  /// remote server — the "needs sign-in" signal and the discovery hint.
+  final _oauthChallenges = <String, String>{};
+
+  /// Test seam: replaces discovery + dynamic client registration.
+  @visibleForTesting
+  Future<McpOAuthConfig> Function({
+    required String serverUrl,
+    required String redirectUri,
+    String? wwwAuthenticate,
+  })?
+  oauthDiscoveryForTest;
+
   Object _oauthGeneration(String key) =>
       _oauthGenerations.putIfAbsent(key, Object.new);
 
   Object _invalidateOAuth(String key) {
     _oauthRefreshes.remove(key);
     _oauthAttempts.remove(key);
+    _forgetPersistedAttempt(key);
     return _oauthGenerations[key] = Object();
   }
+
+  void _forgetPersistedAttempt(String key) {
+    if (!_persistedAttemptKeys.remove(key) ||
+        oauthSecureStorageDisabledForTest) {
+      return;
+    }
+    unawaited(
+      _oauthStorage(key, () async {
+        try {
+          await ovidSecureStorage().delete(key: _oauthAttemptKey(key));
+        } catch (e) {
+          Diag.swallow('mcp_oauth', e);
+        }
+      }),
+    );
+  }
+
+  /// True when the last connect of [serverKey] was refused with 401 (or a
+  /// Bearer 403): the UI offers "Sign in" even without an `oauth` block.
+  bool mcpNeedsOAuthSignIn(String serverKey) =>
+      _oauthChallenges.containsKey(serverKey);
+
+  void _recordOAuthChallenge(String key, int status, String? header) {
+    if (status == 401 ||
+        (status == 403 && McpBearerChallenge.parse(header) != null)) {
+      _oauthChallenges[key] = header ?? '';
+    }
+  }
+
+  /// Test seam: simulate Android process death — every in-memory OAuth
+  /// structure is dropped; only secure storage survives.
+  @visibleForTesting
+  void forgetOAuthMemoryForTest() {
+    _oauthConfigs.clear();
+    _oauthTokens.clear();
+    _oauthGenerations.clear();
+    _oauthConfigGenerations.clear();
+    _oauthRefreshes.clear();
+    _oauthAttempts.clear();
+    _persistedAttemptKeys.clear();
+    _oauthChallenges.clear();
+  }
+
+  @visibleForTesting
+  void recordOAuthChallengeForTest(String key, String header) =>
+      _oauthChallenges[key] = header;
 
   bool _ownsOAuth(String key, Object generation) =>
       identical(_oauthGenerations[key], generation);
@@ -1265,12 +1467,14 @@ class McpService {
     _invalidateOAuthConfig(serverKey);
     _oauthTokens.remove(serverKey);
     _oauthConfigs.remove(serverKey);
+    _oauthChallenges.remove(serverKey);
     final disconnecting = disconnect(serverKey);
     final deleting = oauthSecureStorageDisabledForTest
         ? Future<void>.value()
         : _oauthStorage(serverKey, () async {
             await ovidSecureStorage().delete(key: _oauthTokenKey(serverKey));
             await ovidSecureStorage().delete(key: _oauthConfigKey(serverKey));
+            await ovidSecureStorage().delete(key: _oauthAttemptKey(serverKey));
           });
     await Future.wait([disconnecting, deleting]);
   }
@@ -1308,18 +1512,65 @@ class McpService {
     });
   }
 
+  /// The remote URL of the server with canonical id [serverKey], if any.
+  String? _oauthServerUrl(String serverKey) {
+    final server = AppState.I.mcpServers
+        .where((s) => s.canonicalId == serverKey)
+        .firstOrNull;
+    if (server == null ||
+        (server.transport != 'http' && server.transport != 'sse')) {
+      return null;
+    }
+    return _urlFor(server);
+  }
+
   /// Begin a ten-minute, one-use S256 authorization attempt for a canonical id.
   /// Starting again invalidates the previous attempt and pending refresh writes.
+  ///
+  /// Without a usable static `oauth` config, runs RFC 9728/8414 discovery and
+  /// RFC 7591 dynamic client registration first (using the last 401's
+  /// `WWW-Authenticate` hint) and stores the registered client, so the next
+  /// sign-in reuses it.
   Future<McpOAuthAuthorization> beginMcpOAuthAuthorization(
-    String serverKey,
-  ) async {
-    final generation = _invalidateOAuth(serverKey);
-    final config = await mcpOAuthConfigForAsync(serverKey);
-    if (!_ownsOAuth(serverKey, generation) || config == null) {
-      throw StateError('OAuth configuration unavailable or replaced');
+    String serverKey, {
+    String? serverUrl,
+  }) async {
+    final existing = await mcpOAuthConfigForAsync(serverKey);
+    if (existing == null || !existing.isUsable) {
+      final url = serverUrl ?? _oauthServerUrl(serverKey);
+      if (url == null || url.isEmpty) {
+        throw McpOAuthException(
+          McpOAuthErrorKind.config,
+          'OAuth configuration unavailable or replaced',
+        );
+      }
+      final discover =
+          oauthDiscoveryForTest ??
+          McpOAuthDiscovery(client: httpClientForTest).discover;
+      final discovered = await discover(
+        serverUrl: url,
+        redirectUri: mcpOAuthRedirectUri,
+        wwwAuthenticate: _oauthChallenges[serverKey],
+      );
+      await setMcpOAuthConfig(serverKey, discovered);
     }
-    _oauthEndpoint(config.authorizationUrl);
-    _oauthEndpoint(config.tokenUrl);
+    final generation = _invalidateOAuth(serverKey);
+    var config = await mcpOAuthConfigForAsync(serverKey);
+    if (!_ownsOAuth(serverKey, generation) || config == null) {
+      throw McpOAuthException(
+        McpOAuthErrorKind.replaced,
+        'OAuth configuration unavailable or replaced',
+      );
+    }
+    if ((config.redirectUri ?? '').isEmpty) {
+      config = config.withRedirectUri(mcpOAuthRedirectUri);
+    }
+    try {
+      _oauthEndpoint(config.authorizationUrl);
+      _oauthEndpoint(config.tokenUrl);
+    } on StateError catch (e) {
+      throw McpOAuthException(McpOAuthErrorKind.config, e.message);
+    }
     final redirect = Uri.tryParse(config.redirectUri ?? '');
     if (redirect == null ||
         !redirect.hasScheme ||
@@ -1330,9 +1581,12 @@ class McpService {
             !redirect.hasAuthority) ||
         redirect.queryParametersAll.values.any((v) => v.length != 1) ||
         redirect.queryParameters.keys.any(
-          const {'code', 'state', 'error'}.contains,
+          const {'code', 'state', 'error', 'iss'}.contains,
         )) {
-      throw StateError('OAuth redirect URI is invalid');
+      throw McpOAuthException(
+        McpOAuthErrorKind.config,
+        'OAuth redirect URI is invalid',
+      );
     }
     final random = Random.secure();
     String nonce() => base64Url
@@ -1343,12 +1597,18 @@ class McpService {
     final challenge = base64Url
         .encode(sha256.convert(ascii.encode(verifier)).bytes)
         .replaceAll('=', '');
-    final attempt = McpOAuthAuthorization._(
-      buildMcpAuthorizeUrl(
+    final String authorizationUrl;
+    try {
+      authorizationUrl = buildMcpAuthorizeUrl(
         config: config,
         state: state,
         codeChallenge: challenge,
-      ),
+      );
+    } on ArgumentError catch (e) {
+      throw McpOAuthException(McpOAuthErrorKind.config, '${e.message}');
+    }
+    final attempt = McpOAuthAuthorization._(
+      authorizationUrl,
       _now().add(const Duration(minutes: 10)),
       config,
       state,
@@ -1356,23 +1616,119 @@ class McpService {
       generation,
     );
     _oauthAttempts[serverKey] = attempt;
+    await _persistAttempt(serverKey, attempt);
     return attempt;
   }
 
+  Future<void> _persistAttempt(
+    String serverKey,
+    McpOAuthAuthorization attempt,
+  ) async {
+    if (oauthSecureStorageDisabledForTest) return;
+    _persistedAttemptKeys.add(serverKey);
+    await _oauthStorage(serverKey, () async {
+      if (!_ownsOAuth(serverKey, attempt._generation)) return;
+      try {
+        await ovidSecureStorage().write(
+          key: _oauthAttemptKey(serverKey),
+          value: jsonEncode(attempt._toJson()),
+        );
+      } catch (e) {
+        // Persistence is best effort: the in-memory attempt still works
+        // while the process lives.
+        Diag.swallow('mcp_oauth', e);
+      }
+    });
+  }
+
+  /// The pending attempt for [serverKey]: memory first, then the copy in
+  /// secure storage (after process death). Expired copies are deleted.
+  Future<McpOAuthAuthorization?> _pendingAttempt(String serverKey) async {
+    final mem = _oauthAttempts[serverKey];
+    if (mem != null || oauthSecureStorageDisabledForTest) return mem;
+    final generation = _oauthGeneration(serverKey);
+    try {
+      await _oauthStorageOperations[serverKey];
+      final raw = await ovidSecureStorage().read(
+        key: _oauthAttemptKey(serverKey),
+      );
+      if (raw == null || raw.isEmpty) return null;
+      _persistedAttemptKeys.add(serverKey);
+      final attempt = McpOAuthAuthorization._fromJson(
+        (jsonDecode(raw) as Map).cast<String, dynamic>(),
+        generation,
+      );
+      if (!_ownsOAuth(serverKey, generation)) return null;
+      if (attempt == null || !_now().isBefore(attempt.expiresAt)) {
+        _forgetPersistedAttempt(serverKey);
+        return null;
+      }
+      return _oauthAttempts[serverKey] ??= attempt;
+    } catch (e) {
+      Diag.swallow('mcp_oauth', e);
+      return null;
+    }
+  }
+
+  /// Expiry of the pending attempt for [serverKey], or null when none.
+  Future<DateTime?> mcpOAuthAttemptExpiry(String serverKey) async =>
+      (await _pendingAttempt(serverKey))?.expiresAt;
+
+  /// The canonical id whose pending attempt issued the `state` carried by
+  /// [callback] — memory first, then secure storage (process death). Null
+  /// when no attempt matches, so stray or replayed links are ignored.
+  Future<String?> mcpOAuthServerForCallback(Uri callback) async {
+    final state = callback.queryParameters['state'];
+    if (state == null || state.isEmpty) return null;
+    for (final e in _oauthAttempts.entries) {
+      if (e.value._state == state) return e.key;
+    }
+    if (oauthSecureStorageDisabledForTest) return null;
+    try {
+      final all = await ovidSecureStorage().readAll();
+      for (final e in all.entries) {
+        if (!e.key.startsWith(_oauthAttemptPrefix)) continue;
+        final serverKey = e.key.substring(_oauthAttemptPrefix.length);
+        final attempt = await _pendingAttempt(serverKey);
+        if (attempt != null && attempt._state == state) return serverKey;
+      }
+    } catch (e) {
+      Diag.swallow('mcp_oauth', e);
+    }
+    return null;
+  }
+
+  void _consumeAttempt(String serverKey, McpOAuthAuthorization? attempt) {
+    if (attempt == null || identical(_oauthAttempts[serverKey], attempt)) {
+      _oauthAttempts.remove(serverKey);
+    }
+    _forgetPersistedAttempt(serverKey);
+  }
+
   /// Validate the entire callback before exchanging, then store only if the
-  /// server/config generation is still current. Invalid callbacks consume the
-  /// attempt too. No callback secrets are included in exception messages.
+  /// server/config generation is still current. No callback secrets are
+  /// included in exception messages.
+  ///
+  /// Text that is not this attempt's redirect (wrong address, extra
+  /// parameters, missing `code`) or that carries another attempt's `state`
+  /// leaves the attempt pending, so a bad paste can simply be retried. A
+  /// genuine callback — success, `error=…`, or a failed token exchange —
+  /// consumes it (one use).
   Future<McpOAuthToken> completeMcpOAuthAuthorization(
     String serverKey,
     String callbackUri,
   ) async {
-    final attempt = _oauthAttempts.remove(serverKey);
+    final attempt = await _pendingAttempt(serverKey);
     if (attempt == null ||
         !_ownsOAuth(serverKey, attempt._generation) ||
         !_now().isBefore(attempt.expiresAt)) {
-      throw StateError('OAuth attempt expired or unavailable');
+      _consumeAttempt(serverKey, attempt);
+      throw McpOAuthException(
+        McpOAuthErrorKind.expired,
+        'OAuth attempt expired or unavailable',
+      );
     }
-    final callback = Uri.tryParse(callbackUri);
+    final callback = Uri.tryParse(callbackUri.trim());
     final expected = Uri.parse(attempt._config.redirectUri!);
     if (callback == null ||
         callback.hasFragment ||
@@ -1382,27 +1738,75 @@ class McpService {
         callback.port != expected.port ||
         callback.path != expected.path ||
         callback.queryParametersAll.values.any((v) => v.length != 1) ||
-        !callback.queryParameters.keys.every(
-          (key) =>
-              expected.queryParameters.containsKey(key) ||
-              const {'code', 'state'}.contains(key),
-        ) ||
         expected.queryParameters.entries.any(
           (e) => callback.queryParameters[e.key] != e.value,
-        ) ||
-        callback.queryParameters['state'] != attempt._state ||
-        callback.queryParameters.containsKey('error') ||
-        (callback.queryParameters['code'] ?? '').isEmpty) {
-      throw StateError('OAuth callback rejected');
+        )) {
+      throw McpOAuthException(
+        McpOAuthErrorKind.redirectMismatch,
+        'OAuth callback rejected: not the redirect for this sign-in',
+      );
     }
-    final token = await exchangeMcpOAuthCode(
-      config: attempt._config,
-      code: callback.queryParameters['code']!,
-      codeVerifier: attempt._verifier,
-    );
+    final q = callback.queryParameters;
+    if (q['state'] != attempt._state) {
+      throw McpOAuthException(
+        McpOAuthErrorKind.stateMismatch,
+        'OAuth callback rejected: state from another attempt',
+      );
+    }
+    if (q.containsKey('error')) {
+      _consumeAttempt(serverKey, attempt);
+      final code = q['error']!;
+      final safe = RegExp(r'^[A-Za-z0-9_.\-]{1,64}$').hasMatch(code)
+          ? code
+          : 'error';
+      throw McpOAuthException(
+        McpOAuthErrorKind.denied,
+        'OAuth callback rejected: $safe',
+      );
+    }
+    final allowed = {...expected.queryParameters.keys, 'code', 'state', 'iss'};
+    if (!q.keys.every(allowed.contains) || (q['code'] ?? '').isEmpty) {
+      throw McpOAuthException(
+        McpOAuthErrorKind.redirectMismatch,
+        'OAuth callback rejected: missing code or unexpected parameters',
+      );
+    }
+    final issuer = attempt._config.issuer;
+    if (q.containsKey('iss') && issuer != null && q['iss'] != issuer) {
+      // RFC 9207 mix-up defence: a different authorization server answered.
+      _consumeAttempt(serverKey, attempt);
+      throw McpOAuthException(
+        McpOAuthErrorKind.config,
+        'OAuth callback rejected: issuer mismatch',
+      );
+    }
+    _consumeAttempt(serverKey, attempt);
+    final McpOAuthToken token;
+    try {
+      token = await exchangeMcpOAuthCode(
+        config: attempt._config,
+        code: q['code']!,
+        codeVerifier: attempt._verifier,
+      );
+    } on McpOAuthException {
+      rethrow;
+    } catch (e) {
+      final status = RegExp(r'HTTP (\d{3})').firstMatch('$e')?.group(1);
+      throw McpOAuthException(
+        McpOAuthErrorKind.tokenExchange,
+        status == null
+            ? 'OAuth token exchange failed'
+            : 'OAuth token exchange failed: HTTP $status',
+        status: status == null ? null : int.parse(status),
+      );
+    }
     if (!await _storeOAuthToken(serverKey, token, attempt._generation)) {
-      throw StateError('OAuth attempt replaced or removed');
+      throw McpOAuthException(
+        McpOAuthErrorKind.replaced,
+        'OAuth attempt replaced or removed',
+      );
     }
+    _oauthChallenges.remove(serverKey);
     return token;
   }
 
@@ -1474,6 +1878,8 @@ class McpService {
             if ((config.redirectUri ?? '').isNotEmpty)
               'redirect_uri': config.redirectUri!,
             if (config.scopes.isNotEmpty) 'scope': config.scopes.join(' '),
+            if ((config.resource ?? '').isNotEmpty)
+              'resource': config.resource!,
             'state': state,
             if (codeChallenge != null && codeChallenge.isNotEmpty) ...{
               'code_challenge': codeChallenge,
@@ -1503,6 +1909,9 @@ class McpService {
         'code': code,
         'redirect_uri': config.redirectUri ?? '',
         'client_id': config.clientId ?? '',
+        if ((config.clientSecret ?? '').isNotEmpty)
+          'client_secret': config.clientSecret!,
+        if ((config.resource ?? '').isNotEmpty) 'resource': config.resource!,
         if (codeVerifier != null && codeVerifier.isNotEmpty)
           'code_verifier': codeVerifier,
       });
@@ -1558,6 +1967,9 @@ class McpService {
         'grant_type': 'refresh_token',
         'refresh_token': current.refreshToken!,
         'client_id': config!.clientId ?? '',
+        if ((config.clientSecret ?? '').isNotEmpty)
+          'client_secret': config.clientSecret!,
+        if ((config.resource ?? '').isNotEmpty) 'resource': config.resource!,
       });
       if (res.statusCode < 200 || res.statusCode >= 300) return null;
       final j = jsonDecode(res.body) as Map<String, dynamic>;
@@ -1655,7 +2067,7 @@ class McpService {
       rs.sseChannel = channel;
       try {
         await channel.open(
-          server.url!,
+          _urlFor(server)!,
           headers,
           timeout: phaseTimeout('sse/open'),
         );
@@ -1670,7 +2082,7 @@ class McpService {
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('MCP handshake timed out', Duration.zero);
       }
-      final url = server.url;
+      final url = _urlFor(server);
       if (url == null || url.isEmpty) {
         throw Exception('no url configured for SSE transport');
       }
@@ -1731,6 +2143,9 @@ class McpService {
       if (e.toString().contains('SSE stream failed: HTTP 401') ||
           e.toString().contains('SSE stream failed: HTTP 403')) {
         rs.authenticationFailed = true;
+      }
+      if (e is _McpHttpStatusException) {
+        _recordOAuthChallenge(key, e.status, e.wwwAuthenticate);
       }
       rs.sseChannel = null;
       try {
@@ -1871,14 +2286,17 @@ class McpService {
     }
   }
 
-  Future<List<String>> _missingCredentials(McpServer server) async {
+  Future<({List<String> env, List<String> headers})> _missingCredentials(
+    McpServer server,
+  ) async {
+    const none = (env: <String>[], headers: <String>[]);
     // For native GitHub MCP, credentials can be fulfilled by GitHubService.I.token.
     if (server.transport == 'native' &&
         (server.name.toLowerCase() == 'github' ||
             server.canonicalId.toLowerCase() == 'github')) {
       final token = GitHubService.I.token;
       if (token != null && token.trim().isNotEmpty) {
-        return const [];
+        return none;
       }
     }
     // Task 10 fix round 1 (finding 2): the credential gate covers BOTH
@@ -1897,15 +2315,19 @@ class McpService {
     // envHint is env-only; headers come through requiredHeaderNames
     // exclusively (ownerless HTTP auth headers are set at add time).
     final declaredHeaders = server.requiredHeaderNames;
-    if (declaredEnv.isEmpty && declaredHeaders.isEmpty) return const [];
+    if (declaredEnv.isEmpty && declaredHeaders.isEmpty) return none;
     final env = await AppState.I.getMcpEnv(server.canonicalId);
     final headers = await AppState.I.getMcpHeaders(server.canonicalId);
-    return [
-      for (final name in declaredEnv)
-        if ((env[name] ?? '').isEmpty) name,
-      for (final name in declaredHeaders)
-        if ((headers[name] ?? '').isEmpty) name,
-    ];
+    return (
+      env: [
+        for (final name in declaredEnv)
+          if ((env[name] ?? '').isEmpty) name,
+      ],
+      headers: [
+        for (final name in declaredHeaders)
+          if ((headers[name] ?? '').isEmpty) name,
+      ],
+    );
   }
 
   /// envHint is a display hint that doubles as a credential declaration
@@ -2159,7 +2581,7 @@ class McpService {
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('MCP handshake timed out', Duration.zero);
       }
-      final url = server.url;
+      final url = _urlFor(server);
       if (url == null || url.isEmpty) {
         throw Exception('no url configured for HTTP transport');
       }
@@ -2389,13 +2811,23 @@ class McpService {
       // Per-server env vars (API keys etc.) from secure storage.
       final secretEnv = await AppState.I.getMcpEnv(server.canonicalId);
       final runtimeRoot = _runtimeRoot(server);
+      // Plugin userConfig parity: saved plugin settings reach the server as
+      // CLAUDE_PLUGIN_OPTION_<KEY> and through `${user_config.<key>}`.
+      final userConfig = server.ownerPluginId == null
+          ? const <String, String>{}
+          : await pluginUserConfigValues(server.ownerPluginId!);
       final env = {
         if (runtimeRoot != null)
           ...SandboxService.pluginRuntimeEnv(runtimeRoot),
         if (server.ownerPluginId != null)
           ..._pluginRootEnv(server.ownerPluginId!),
-        ...secretEnv,
+        ...pluginOptionEnv(userConfig),
+        for (final e in secretEnv.entries)
+          e.key: substituteUserConfig(e.value, userConfig),
       };
+      final spawnArgs = [
+        for (final a in server.args) substituteUserConfig(a, userConfig),
+      ];
       // Optional working directory for the spawned server (best-effort:
       // only used when the resolved directory actually exists).
       final cwdDir = _resolveWorkingDirectory(server, sandbox.prefixPath);
@@ -2405,12 +2837,12 @@ class McpService {
       // A test spawn override runs the command directly on the host.
       final proc = testSpawn != null
           ? await testSpawn(
-              [server.command, ...server.args],
+              [server.command, ...spawnArgs],
               env: env.isEmpty ? null : env,
               hostWorkDir: cwdDir,
             )
           : await sandbox.spawn(
-              [server.command, ...server.args],
+              [server.command, ...spawnArgs],
               env: env.isEmpty ? null : env,
               hostWorkDir: cwdDir,
             );
@@ -2499,7 +2931,13 @@ class McpService {
     process.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen(rs.stderrLines.add);
+        .listen((line) {
+          // Bounded: a chatty server must not grow this without limit.
+          rs.stderrLines.add(line);
+          if (rs.stderrLines.length > 200) {
+            rs.stderrLines.removeRange(0, rs.stderrLines.length - 200);
+          }
+        });
     rs.stdoutLines.stream.listen((line) {
       try {
         final json = jsonDecode(line) as Map<String, dynamic>;
@@ -3092,7 +3530,45 @@ class McpService {
   /// come back as an explicit `MCP error: …` string so the model knows the
   /// call failed — they used to masquerade as results (or as the text
   /// "null").
+  ///
+  /// Every finished call is recorded in [ToolUsageStore] under the server's
+  /// canonical id (and owning plugin), feeding the per-server usage block.
   Future<String> callTool(
+    String serverName,
+    String toolName,
+    Map<String, dynamic> args, {
+    Duration? timeout,
+    UtilityCancellation? cancellation,
+  }) async {
+    final sw = Stopwatch()..start();
+    final key = _keyForName(serverName);
+    final server =
+        _running[key]?.server ??
+        AppState.I.mcpServers.where((s) => s.canonicalId == key).firstOrNull;
+    final result = await _callTool(
+      serverName,
+      toolName,
+      args,
+      timeout: timeout,
+      cancellation: cancellation,
+    );
+    final failed = result.startsWith('MCP error:');
+    final cancelled = failed && result.endsWith('was cancelled.');
+    if (!cancelled) {
+      ToolUsageStore.I.record(
+        kind: ToolUsageKind.mcp,
+        tool: toolName,
+        mcpServerId: server?.canonicalId ?? key,
+        pluginId: server?.ownerPluginId,
+        ok: !failed,
+        elapsed: sw.elapsed,
+        error: failed ? result.substring('MCP error:'.length).trim() : null,
+      );
+    }
+    return result;
+  }
+
+  Future<String> _callTool(
     String serverName,
     String toolName,
     Map<String, dynamic> args, {
@@ -3316,7 +3792,7 @@ class McpService {
     Map<String, dynamic> params, {
     Duration? timeout,
   }) async {
-    final url = rs.server.url;
+    final url = _urlFor(rs.server);
     if (url == null) return;
     final client = httpClientForTest ?? http.Client();
     final ownsClient = httpClientForTest == null;
@@ -3376,7 +3852,7 @@ class McpService {
     Duration? timeout,
     bool cancelOnTimeout = false,
   }) async {
-    final url = rs.server.url;
+    final url = _urlFor(rs.server);
     if (url == null) {
       return McpRpcResult._error('no url configured');
     }
@@ -3449,6 +3925,11 @@ class McpService {
       }
       if (res.statusCode == 401 || res.statusCode == 403) {
         rs.authenticationFailed = true;
+        _recordOAuthChallenge(
+          _key(rs.server),
+          res.statusCode,
+          res.headers['www-authenticate'],
+        );
         // Authentication failure is NOT a transient connection problem —
         // reconnecting would just loop forever. Re-prompt the user to fix
         // the credential; never schedule an automatic reconnect for it.
@@ -3512,7 +3993,7 @@ class McpService {
   /// Best-effort HTTP DELETE terminating a Streamable-HTTP session. Never
   /// throws — a server that can't be reached still disconnects locally.
   Future<void> _deleteHttpSession(_RunningServer rs) async {
-    final url = rs.server.url;
+    final url = _urlFor(rs.server);
     final sessionId = rs.sessionId;
     if (url == null || sessionId == null) return;
     final injected = httpClientForTest;
@@ -3587,6 +4068,7 @@ class McpService {
 
   void _markConnected(_RunningServer rs, String detail) {
     if (!_canPublishStatus(rs)) return;
+    _oauthChallenges.remove(_key(rs.server));
     rs.server.connected = true;
     AppState.I.updateServiceStatus(
       'mcp:${rs.server.canonicalId}',

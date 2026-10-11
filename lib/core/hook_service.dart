@@ -12,6 +12,7 @@ import 'hook_execution_scope.dart';
 import 'hook_context_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
+import 'plugin_user_config.dart';
 import 'sandbox_service.dart';
 import 'session_ledger.dart';
 import 'state.dart';
@@ -401,9 +402,48 @@ class HookService extends ChangeNotifier {
   /// may veto.
   bool Function(String sessionId)? userStopChecker;
 
-  /// Invocations this boot (diagnostics surface).
+  /// Invocations this boot, all plugins (diagnostics surface). Per-plugin
+  /// numbers live in [statsFor].
   int fired = 0;
   int failed = 0;
+
+  final Map<String, HookPluginStats> _pluginStats = {};
+
+  /// This boot's hook counters for one plugin, or null when none of its
+  /// hooks ran yet.
+  HookPluginStats? statsFor(String pluginId) => _pluginStats[pluginId];
+
+  /// Whether [pluginId]'s breaker is tripped in any session.
+  bool isPluginTrippedAnySession(String pluginId) =>
+      _tripped.any((k) => k.startsWith('$pluginId|'));
+
+  void _countFired(String pluginId) {
+    fired++;
+    (_pluginStats[pluginId] ??= HookPluginStats())
+      ..fired += 1
+      ..lastFiredAt = DateTime.now();
+  }
+
+  /// A failed hook run, or (with [blocked]) a hook that denied/blocked the
+  /// action — counted in the boot-global [failed] as before, but kept apart
+  /// per plugin so a deny is not shown as a failure.
+  void _countFailed(String pluginId, {String? error, bool blocked = false}) {
+    failed++;
+    final stats = _pluginStats[pluginId] ??= HookPluginStats();
+    if (blocked) {
+      stats.blocked++;
+      return;
+    }
+    final safe = error == null ? '' : _safeOutput(error, const {}).trim();
+    stats
+      ..failed += 1
+      ..lastFailedAt = DateTime.now()
+      ..lastError = safe.isEmpty
+          ? null
+          : safe.length > 200
+          ? '${safe.substring(0, 200)}…'
+          : safe;
+  }
 
   /// Default per-hook timeout when the hook declares none (§8.1).
   static const int defaultTimeoutS = 30;
@@ -676,6 +716,7 @@ class HookService extends ChangeNotifier {
     _firingEvents.clear();
     fired = 0;
     failed = 0;
+    _pluginStats.clear();
   }
 
   /// Restore the persisted kill-switch (call once at boot).
@@ -1618,11 +1659,16 @@ class HookService extends ChangeNotifier {
     if (runtime != null && SandboxService.I.prefixPath == null) {
       await SandboxService.I.checkExisting();
     }
+    // Plugin userConfig parity: saved settings as CLAUDE_PLUGIN_OPTION_<KEY>.
+    final optionEnv = pluginId.startsWith('legacy:')
+        ? const <String, String>{}
+        : await pluginOptionEnvFor(pluginId);
     return {
       if (runtime != null) ...SandboxService.pluginRuntimeEnv(runtime),
       if (runtime != null) 'NODE_PATH': '$runtime/node/node_modules',
       if (runtime != null) 'PYTHONPATH': '$runtime/python',
       ...sessionEnv,
+      ...optionEnv,
       // Legacy env contract: the DECLARED name (a hook that registered
       // on_turn_start sees "on_turn_start"), never the internal prefix.
       'OVID_HOOK_EVENT': declaredEvent,
@@ -1768,7 +1814,8 @@ class HookService extends ChangeNotifier {
     );
     // Windows-style entrypoints never reach a shell verbatim: prefer the
     // runnable sibling when one exists (fail-open keeps the old string).
-    var command = resolveHookPayload(hook);
+    // `${user_config.<key>}` → the exported CLAUDE_PLUGIN_OPTION_<KEY>.
+    var command = rewriteUserConfigRefsForShell(resolveHookPayload(hook));
     final root = _rootPathFor(hook.pluginId, hook);
     if (root.isNotEmpty) {
       command = expandPluginRoot(command, root);
@@ -2082,7 +2129,7 @@ class HookService extends ChangeNotifier {
     final record = {'plugin': pluginId, 'event': canonical, 'type': 'prompt'};
     final eval = promptHookEvaluator;
     if (eval == null) {
-      fired++;
+      _countFired(pluginId);
       try {
         await _ledger(sessionId, 'hook/result', {
           ...record,
@@ -2096,7 +2143,7 @@ class HookService extends ChangeNotifier {
       }
       return null;
     }
-    fired++;
+    _countFired(pluginId);
     try {
       await _ledger(sessionId, 'hook/invoked', {
         ...Map<String, dynamic>.from(record),
@@ -2130,7 +2177,7 @@ class HookService extends ChangeNotifier {
           );
     } catch (e) {
       if (!_hookCurrent(sessionId, pluginId, hook, epoch)) return null;
-      failed++;
+      _countFailed(pluginId, error: '$e');
       _recordFailure(pluginId, sessionId);
       try {
         await _ledger(sessionId, 'hook/result', {
@@ -2190,7 +2237,7 @@ class HookService extends ChangeNotifier {
   }) async {
     final epoch = _sessionContextEpochs[sessionId] ?? 0;
     final record = {'plugin': pluginId, 'event': canonical, 'type': 'agent'};
-    fired++;
+    _countFired(pluginId);
     final evaluator = agentHookEvaluator;
     if (evaluator == null) {
       await _ledger(sessionId, 'hook/result', {
@@ -2399,7 +2446,7 @@ class HookService extends ChangeNotifier {
           }
           continue;
         }
-        fired++;
+        _countFired(pluginId);
         try {
           await _ledger(sessionId, 'hook/result', {
             'plugin': pluginId,
@@ -2432,7 +2479,7 @@ class HookService extends ChangeNotifier {
         'hook': hook.canonicalId,
       };
       if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
-      fired++;
+      _countFired(pluginId);
       try {
         await _ledger(
           sessionId,
@@ -2548,7 +2595,7 @@ class HookService extends ChangeNotifier {
             }
             break;
           }
-          failed++;
+          _countFailed(pluginId, error: 'hook exited with code $code');
           retryableFailure = true;
           if (code == 126 || code == 127) {
             _noteBlocker(
@@ -2650,7 +2697,7 @@ class HookService extends ChangeNotifier {
         }
       } catch (e) {
         if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) continue;
-        failed++;
+        _countFailed(pluginId, error: '$e');
         retryableFailure = true;
         if (e is! HookRuntimeUnavailable && canonical != 'session_start') {
           _recordFailure(pluginId, sessionId);
@@ -3182,7 +3229,7 @@ class HookService extends ChangeNotifier {
         if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
         reconcileContributions();
         if (verdict != null && verdict.decision == 'block') {
-          failed++;
+          _countFailed(pluginId, blocked: true);
           final reason = verdict.reason ?? '$displayName denied this action';
           try {
             await _ledger(sessionId, 'hook/result', {
@@ -3225,7 +3272,7 @@ class HookService extends ChangeNotifier {
         'hook': hook.canonicalId,
       };
       if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
-      fired++;
+      _countFired(pluginId);
       try {
         await _ledger(
           sessionId,
@@ -3253,7 +3300,7 @@ class HookService extends ChangeNotifier {
         final out = _safeOutput(rawOut, known);
         final err = _safeOutput(rawErr, known);
         if (code != 0 && code != 2) {
-          failed++;
+          _countFailed(pluginId, error: 'hook exited with code $code');
           if (code == 126 || code == 127) {
             _noteBlocker(
               pluginId,
@@ -3301,7 +3348,7 @@ class HookService extends ChangeNotifier {
           bypassPermission = true;
         }
         if (denies || asks) {
-          failed++;
+          _countFailed(pluginId, blocked: true);
           final reason = _safeOutput(
             (code == 2 && err.trim().isNotEmpty
                     ? cleanHookJson(err.trim())
@@ -3367,7 +3414,7 @@ class HookService extends ChangeNotifier {
         // Exec error/timeout/missing sandbox — fail-open, but count
         // toward the breaker and record the visible warning.
         if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
-        failed++;
+        _countFailed(pluginId, error: '$e');
         if (e is! HookRuntimeUnavailable) _recordFailure(pluginId, sessionId);
         try {
           await _ledger(sessionId, 'hook/result', {
@@ -3408,4 +3455,16 @@ class _AgentEvalState {
   final Completer<void> fence = Completer<void>();
   final Completer<bool> cancelSignal = Completer<bool>();
   bool fenced = false;
+}
+
+/// One plugin's hook counters for this boot (diagnostics surface).
+class HookPluginStats {
+  int fired = 0;
+  int failed = 0;
+
+  /// Hooks that denied or blocked the action (a decision, not a failure).
+  int blocked = 0;
+  DateTime? lastFiredAt;
+  DateTime? lastFailedAt;
+  String? lastError;
 }

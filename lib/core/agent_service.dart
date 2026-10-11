@@ -49,6 +49,7 @@ import 'native_plugins/prompt_framework.dart';
 import 'native_plugins/utility_cancellation_bridge.dart';
 import 'plugin_permissions.dart';
 import 'plugin_registry.dart';
+import 'tool_usage_store.dart';
 import 'plugin_runtime.dart';
 import 'plugin_source_resolver.dart';
 import 'pty_service.dart';
@@ -14400,6 +14401,12 @@ ${await _agentsMdBlock()}
       if (_runChainStale || !AppState.I.sessionAccountReady) {
         return 'Cancelled: session account changed.';
       }
+      _recordPluginToolUsage(
+        name,
+        sw.elapsed,
+        ok: !res.startsWith('DENIED') && !_looksLikeToolError(res),
+        error: _looksLikeToolError(res) ? cleanTruncate(res, 200) : null,
+      );
       if (ledgerSid != null) {
         unawaited(
           SessionLedger.I.append(ledgerSid, 'tool_end', {
@@ -14433,6 +14440,7 @@ ${await _agentsMdBlock()}
       }
       return res;
     } catch (e) {
+      _recordPluginToolUsage(name, sw.elapsed, ok: false, error: '$e');
       if (ledgerSid != null) {
         unawaited(
           SessionLedger.I.append(ledgerSid, 'tool_end', {
@@ -24544,4 +24552,26 @@ class AgentTool {
   final String name;
   final String description;
   const AgentTool(this.name, this.description);
+}
+
+/// Usage tracking for plugin contributions (commands, skills, agents): a
+/// roster call whose model-visible name belongs to a registered plugin is
+/// recorded under that plugin. Other tools (built-ins, MCP — recorded by
+/// McpService itself) are ignored here.
+void _recordPluginToolUsage(
+  String toolName,
+  Duration elapsed, {
+  required bool ok,
+  String? error,
+}) {
+  final c = PluginContributionRegistry.I.contributionByToolName(toolName);
+  if (c == null || !c.isRosterTool) return;
+  ToolUsageStore.I.record(
+    kind: ToolUsageKind.pluginTool,
+    tool: c.name,
+    pluginId: c.pluginId,
+    ok: ok,
+    elapsed: elapsed,
+    error: ok ? null : error,
+  );
 }

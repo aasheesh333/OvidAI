@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
 import '../core/agent_service.dart';
+import '../core/diag.dart';
 import 'widgets/aether_primitives.dart';
 import '../core/github_service.dart';
 import '../core/hook_service.dart';
@@ -17,9 +19,11 @@ import '../core/plugin_source_resolver.dart';
 import '../core/sandbox_service.dart';
 import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
+import '../core/tool_usage_store.dart';
 import '../core/state.dart';
 import 'github_login_sheet.dart';
 import 'mcp_oauth_sheet.dart';
+import 'mcp_server_add_form.dart';
 import 'plugin_install_progress.dart';
 import 'plugin_permission_sheet.dart';
 import 'plugin_settings_panel.dart';
@@ -129,6 +133,7 @@ Future<bool> showDeleteConfirmationDialog(
   BuildContext context, {
   required String title,
   String content = 'This action cannot be undone.',
+  String confirmLabel = 'Delete',
 }) async {
   final confirmed = await showDialog<bool>(
     context: context,
@@ -143,12 +148,257 @@ Future<bool> showDeleteConfirmationDialog(
         ),
         TextButton(
           onPressed: () => Navigator.pop(dialogContext, true),
-          child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+          child: Text(
+            confirmLabel,
+            style: const TextStyle(color: Aether.danger),
+          ),
         ),
       ],
     ),
   );
   return confirmed == true;
+}
+
+/// Confirm, then remove marketplace [repo]. Removal uninstalls every
+/// installed plugin from it (grant, secrets, dependency sandbox), so the
+/// dialog names them. Returns true when removed.
+Future<bool> confirmAndRemoveMarketplace(
+  BuildContext context,
+  String repo,
+) async {
+  final app = AppState.I;
+  final installed = app.installedPluginsFromMarketplace(repo);
+  final names = installed.map((p) => p.name).toList();
+  final shown = names.length > 5
+      ? '${names.take(5).join(', ')} and ${names.length - 5} more'
+      : names.join(', ');
+  final ok = await showDeleteConfirmationDialog(
+    context,
+    title: 'Remove $repo?',
+    content: installed.isEmpty
+        ? 'Removes this marketplace and its catalog entries. No installed '
+              'plugins come from it.'
+        : 'Also uninstalls ${installed.length} '
+              'plugin${installed.length == 1 ? '' : 's'}: $shown. Their '
+              'permissions, saved secrets and dependencies are deleted.',
+    confirmLabel: installed.isEmpty ? 'Remove' : 'Remove & uninstall',
+  );
+  if (!ok) return false;
+  await app.removeMarketplace(repo);
+  return true;
+}
+
+/// The one enable/disable path for the card switch, detail switch and
+/// detail button. Enabling reports the real outcome: a runtime/migration
+/// failure shows its reason (snackbar + failed status) and success is
+/// probed across every contribution kind (tools, hooks, MCP, skills), so
+/// hook-only and MCP-only plugins are not marked failed.
+Future<bool> setPluginEnabled(
+  BuildContext context,
+  PluginItem plugin,
+  bool enable,
+) async {
+  final app = AppState.I;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  PluginRuntimeCallRecorderForTest.record?.call(enable ? 'enable' : 'disable');
+  if (!enable) {
+    await app.disablePlugin(plugin);
+    app.serviceStatus.remove('plugin:${plugin.name}');
+    await app.persistPluginState();
+    app.refresh();
+    return true;
+  }
+  final result = await app.enablePlugin(plugin);
+  if (!result.ok) {
+    final reason = result.error ?? 'activation failed';
+    app.updateServiceStatus(
+      'plugin:${plugin.name}',
+      ServiceHealth.failed,
+      detail: reason,
+    );
+    app.refresh();
+    if (messenger != null && messenger.mounted) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text("Couldn't enable ${plugin.name}: $reason"),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+    return false;
+  }
+  // Task 10: probe-derived, not hardcoded — only stamp working when a real
+  // capability resolves.
+  await app.probePluginServiceStatus(plugin);
+  app.refresh();
+  return true;
+}
+
+/// Whether an UNINSTALLED [plugin] row may be removed from the list: only
+/// rows the user added (no marketplace catalog, not a built-in/native row).
+/// Catalog rows would simply vanish until the next marketplace sync.
+bool pluginRemovableFromList(PluginItem plugin) =>
+    !plugin.installed &&
+    plugin.marketplace == null &&
+    !(plugin.source?.startsWith('marketplace:') ?? false) &&
+    !_isInbuiltPlugin(plugin) &&
+    !NativePluginRegistry.I.has(plugin.name);
+
+/// MCP servers [AppState.uninstallPlugin] removes along with [plugin].
+List<McpServer> _pluginOwnedServers(PluginItem plugin) {
+  final runtimeId = plugin.runtimeId;
+  return AppState.I.mcpServers.where((s) {
+    if (runtimeId != null && s.ownerPluginId == runtimeId) return true;
+    if (s.ownerPluginId != null) return false;
+    return s.source == 'plugin:${plugin.name}' ||
+        (runtimeId != null && s.source == 'plugin:$runtimeId') ||
+        (plugin.source != null &&
+            (s.source == 'plugin:${plugin.source}' ||
+                s.source == 'plugin:${plugin.source!.replaceAll('/', '_')}'));
+  }).toList();
+}
+
+/// Confirm, then uninstall [plugin]. The dialog says what is removed. The
+/// row stays in the list (as Available). Returns true when uninstalled.
+Future<bool> confirmAndUninstallPlugin(
+  BuildContext context,
+  PluginItem plugin,
+) async {
+  final app = AppState.I;
+  final servers = _pluginOwnedServers(plugin);
+  final removed = <String>[
+    if (plugin.runtimeId != null) ...[
+      'its permission grant',
+      'stored plugin secrets',
+      'installed files and dependencies',
+    ] else
+      'its installed files',
+    if (servers.isNotEmpty)
+      'its MCP server${servers.length == 1 ? '' : 's'} '
+          '(${servers.map((s) => s.name).join(', ')}) with their credentials',
+  ];
+  final list = removed.length == 1
+      ? removed.single
+      : '${removed.take(removed.length - 1).join(', ')} and ${removed.last}';
+  final ok = await showDeleteConfirmationDialog(
+    context,
+    title: 'Uninstall ${plugin.name}?',
+    content: 'Removes $list from this device. You can install it again later.',
+    confirmLabel: 'Uninstall',
+  );
+  if (!ok || !context.mounted) return false;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  PluginRuntimeCallRecorderForTest.record?.call('uninstall');
+  await app.uninstallPlugin(plugin);
+  app.serviceStatus.remove('plugin:${plugin.name}');
+  app.refresh();
+  if (messenger != null && messenger.mounted) {
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('${plugin.name} uninstalled'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+  return true;
+}
+
+/// Confirm, then drop an uninstalled user-added [plugin] row from the list.
+Future<bool> confirmAndRemovePluginRow(
+  BuildContext context,
+  PluginItem plugin,
+) async {
+  final app = AppState.I;
+  final ok = await showDeleteConfirmationDialog(
+    context,
+    title: 'Remove ${plugin.name} from the list?',
+    content: 'It is not installed; this only removes the entry.',
+    confirmLabel: 'Remove',
+  );
+  if (!ok) return false;
+  app.plugins.remove(plugin);
+  await app.persistPluginState();
+  app.refresh();
+  return true;
+}
+
+/// "Reset to defaults": confirm, clear the plugin's saved settings, then
+/// enable it through [setPluginEnabled] (real mount, migration gate,
+/// reported outcome).
+Future<void> resetPluginToDefaults(
+  BuildContext context,
+  PluginItem plugin,
+  List<NativePluginConfigField> fields,
+) async {
+  final ok = await showDeleteConfirmationDialog(
+    context,
+    title: 'Reset ${plugin.name} to defaults?',
+    content: fields.isEmpty
+        ? 'Re-enables the plugin with its default configuration.'
+        : 'Deletes the settings saved for this plugin (including secrets) '
+              'and re-enables it.',
+    confirmLabel: 'Reset',
+  );
+  if (!ok || !context.mounted) return;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final runtimeId = plugin.runtimeId;
+  if (fields.isNotEmpty && runtimeId != null) {
+    try {
+      await NativePluginConfigStore.I.clear(
+        pluginName: runtimeId,
+        fields: fields,
+      );
+    } catch (e) {
+      Diag.swallow('plugin-reset', e);
+      if (messenger != null && messenger.mounted) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text("Couldn't clear saved settings. Try again."),
+          ),
+        );
+      }
+      return;
+    }
+  }
+  if (!context.mounted) return;
+  final enabled = await setPluginEnabled(context, plugin, true);
+  if (enabled && messenger != null && messenger.mounted) {
+    messenger.showSnackBar(
+      SnackBar(content: Text('${plugin.name} reset to defaults')),
+    );
+  }
+}
+
+/// After a plugin's settings are saved: reconnect its connected MCP servers
+/// so their env/headers/url pick up the new `CLAUDE_PLUGIN_OPTION_*` /
+/// `${user_config.*}` values (hooks read them on every run).
+Future<void> applyPluginSettings(
+  BuildContext context,
+  PluginItem plugin,
+) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final running = _pluginOwnedServers(
+    plugin,
+  ).where((s) => s.connected).toList();
+  var failed = 0;
+  for (final s in running) {
+    await AppState.I.toggleMcpServer(s); // disconnect
+    final outcome = await AppState.I.toggleMcpServer(s); // reconnect
+    if (!outcome.ok) failed++;
+  }
+  if (running.isEmpty || messenger == null || !messenger.mounted) return;
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(
+        failed == 0
+            ? 'Settings applied · restarted ${running.length} MCP '
+                  'server${running.length == 1 ? '' : 's'}'
+            : 'Settings saved, but $failed MCP '
+                  'server${failed == 1 ? '' : 's'} failed to restart',
+      ),
+      behavior: SnackBarBehavior.floating,
+    ),
+  );
 }
 
 /// True when [plugin] is an inbuilt (source-less) row that ships with the
@@ -347,6 +597,7 @@ Future<PluginInstallResult?> startPluginInstallForTest(
   BuildContext? approvalContext,
   void Function(String line)? onProgress,
   PluginSourceProgress? sourceProgress,
+  VoidCallback? onApproved,
 }) async {
   PluginInspection inspection;
   try {
@@ -399,6 +650,8 @@ Future<PluginInstallResult?> startPluginInstallForTest(
     );
   }
 
+  // Approved (fresh or reused grant): only now may the UI say "Installing".
+  onApproved?.call();
   PluginItem row = plugin ?? _catalogRowFor(inspection.manifest);
   // Single-inspection flow (review C1): the approved inspection passes
   // straight through — no re-resolve, no second staging. The manager
@@ -463,17 +716,21 @@ Widget? pluginActivationBadge(PluginItem plugin) {
   return Tag(label, color: badgeSpec.$2 ?? Aether.textFaint, filled: true);
 }
 
-/// Task 2 (contraction spec §5.2): the single "+" sheet — the one add
-/// entry point for sources the catalog doesn't already cover AND for
-/// marketplaces (themselves GitHub repos). One repo field
-/// (`owner/repo` or URL via [_githubSourceFromInput]) funnels into the
-/// single inspection/approval flow ([_runSourceInstall]), and the same
-/// field adds a marketplace (repo recorded + catalog fetched) with the
-/// existing marketplace list + remove below.
-Future<void> showPluginAddSheet(BuildContext context) {
-  final app = AppState.I;
-  final repoC = TextEditingController();
-  String? repoError;
+/// Which half of the add sheet opens first.
+enum PluginAddTab { plugin, mcp }
+
+/// The single "+" sheet — the one add entry point. Two tabs:
+///   • Plugin / marketplace: one repo field (`owner/repo` or URL via
+///     [parseGithubSourceInput]) funnels into the single inspection/approval
+///     flow ([_runSourceInstall]); the same field adds a marketplace (repo
+///     recorded + catalog fetched) with the marketplace list + remove below.
+///   • MCP server (Claude Code `claude mcp add` / `add-json` parity): a
+///     stdio command, a remote http/sse URL, or a pasted `mcpServers` JSON
+///     ([McpServerAddForm]); the server is stored and then connected.
+Future<void> showPluginAddSheet(
+  BuildContext context, {
+  PluginAddTab initialTab = PluginAddTab.plugin,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -482,10 +739,98 @@ Future<void> showPluginAddSheet(BuildContext context) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (ctx) => AnimatedBuilder(
+    builder: (ctx) =>
+        _PluginAddSheet(hostContext: context, initialTab: initialTab),
+  );
+}
+
+/// Test seam: replaces the connect that follows adding an MCP server from
+/// the add sheet. Null in production ([connectMcpServer]).
+@visibleForTesting
+Future<void> Function(BuildContext context, McpServer server)?
+mcpAddConnectOverrideForTest;
+
+class _PluginAddSheet extends StatefulWidget {
+  /// The screen's context — survives the sheet being popped, so the install
+  /// and connect flows can keep reporting after it closes.
+  final BuildContext hostContext;
+  final PluginAddTab initialTab;
+  const _PluginAddSheet({required this.hostContext, required this.initialTab});
+
+  @override
+  State<_PluginAddSheet> createState() => _PluginAddSheetState();
+}
+
+class _PluginAddSheetState extends State<_PluginAddSheet> {
+  final TextEditingController repoC = TextEditingController();
+  String? repoError;
+  late PluginAddTab _tab = widget.initialTab;
+
+  @override
+  void dispose() {
+    repoC.dispose();
+    super.dispose();
+  }
+
+  void _fetchFromGithub() {
+    final parsed = parseGithubSourceInput(repoC.text);
+    final src = parsed.source;
+    if (src == null) {
+      setState(() => repoError = parsed.error);
+      return;
+    }
+    final context = widget.hostContext;
+    Navigator.pop(this.context);
+    _runSourceInstall(context, src, null);
+  }
+
+  Future<void> _addMarketplace() async {
+    final app = AppState.I;
+    final context = widget.hostContext;
+    final messenger = ScaffoldMessenger.of(context);
+    final added = app.addMarketplaceChecked(repoC.text);
+    final repo = added.repo;
+    if (repo == null) {
+      setState(
+        () => repoError = switch (added.error) {
+          MarketplaceAddError.duplicate => 'That marketplace is already added.',
+          _ => 'Enter a marketplace as owner/repo or a GitHub repository URL.',
+        },
+      );
+      return;
+    }
+    Navigator.pop(this.context);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('Importing $repo…'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    // Registering only records the repo — the catalog has to
+    // be fetched for its plugins/MCP servers to show up.
+    final msg = await app.fetchMarketplaceCatalog(repo);
+    if (!context.mounted) return;
+    messenger.showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Future<void> _onMcpAdded(List<McpServer> servers) async {
+    final context = widget.hostContext;
+    Navigator.pop(this.context);
+    final connect = mcpAddConnectOverrideForTest ?? connectMcpServer;
+    for (final server in servers) {
+      if (!context.mounted) return;
+      await connect(context, server);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppState.I;
+    return AnimatedBuilder(
       animation: app,
-      builder: (ctx, _) => StatefulBuilder(
-        builder: (ctx, update) => Padding(
+      builder: (ctx, _) => Padding(
         padding: EdgeInsets.fromLTRB(
           16,
           16,
@@ -515,7 +860,7 @@ Future<void> showPluginAddSheet(BuildContext context) {
                   const SizedBox(width: 12),
                   const Expanded(
                     child: Text(
-                      'Add plugin or marketplace',
+                      'Add plugin, MCP server or marketplace',
                       style: TextStyle(
                         fontSize: 15.5,
                         fontWeight: FontWeight.w700,
@@ -530,179 +875,356 @@ Future<void> showPluginAddSheet(BuildContext context) {
                   ),
                 ],
               ),
-              const SizedBox(height: 6),
-              Text(
-                'Fetch a plugin from GitHub, or add a marketplace (itself '
-                'a GitHub repo with a marketplace.json). Every repo is '
-                'inspected and asks for one capability approval before '
-                'anything installs.',
-                style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-              ),
-              const SizedBox(height: 14),
-              Text(
-                'GITHUB REPO',
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.4,
-                  color: Aether.textFaint,
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: repoC,
-                autofocus: true,
-                style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
-                decoration: InputDecoration(
-                  hintText: 'owner/repo or https://github.com/owner/repo',
-                  errorText: repoError,
-                  errorMaxLines: 4,
-                ),
-              ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Aether.accent,
-                    side: BorderSide(
-                      color: Aether.accent.withValues(alpha: .4),
+                child: SegmentedButton<PluginAddTab>(
+                  key: const ValueKey('plugin-add-tabs'),
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(
+                      value: PluginAddTab.plugin,
+                      icon: Icon(Icons.extension_outlined, size: 16),
+                      label: Text('Plugin / marketplace'),
                     ),
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                  ),
-                  icon: const Icon(Icons.code, size: 16),
-                  label: const Text('Fetch from GitHub'),
-                  onPressed: () {
-                    final txt = repoC.text.trim();
-                    final src = _githubSourceFromInput(txt);
-                    if (src == null) {
-                      update(() => repoError = 'Enter owner/repo or a GitHub repository URL.');
-                      return;
-                    }
-                    Navigator.pop(ctx);
-                    _runSourceInstall(context, src, null);
-                  },
+                    ButtonSegment(
+                      value: PluginAddTab.mcp,
+                      icon: Icon(Icons.usb_outlined, size: 16),
+                      label: Text('MCP server'),
+                    ),
+                  ],
+                  selected: {_tab},
+                  onSelectionChanged: (v) => setState(() => _tab = v.first),
                 ),
               ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Aether.accent,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(11),
-                    ),
-                  ),
-                  icon: const Icon(Icons.link, size: 16),
-                  label: const Text(
-                    'Add marketplace',
-                    style: TextStyle(fontSize: 13.5),
-                  ),
-                  onPressed: () async {
-                    final messenger = ScaffoldMessenger.of(context);
-                    final added = app.addMarketplace(repoC.text);
-                    if (added == null) {
-                      update(() => repoError = 'Enter owner/repo (or a GitHub URL) that is not already added.');
-                      return;
-                    }
-                    Navigator.pop(ctx);
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text('Importing $added…'),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                    // Registering only records the repo — the catalog has to
-                    // be fetched for its plugins/MCP servers to show up.
-                    final msg = await app.fetchMarketplaceCatalog(added);
-                    if (!context.mounted) return;
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text(msg),
-                        behavior: SnackBarBehavior.floating,
-                      ),
-                    );
-                  },
-                ),
-              ),
-              if (app.marketplaces.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                Text(
-                  'YOUR MARKETPLACES',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.4,
-                    color: Aether.textFaint,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                for (final m in app.marketplaces)
-                  Container(
-                    margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 9,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Aether.surfaceAlt,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Aether.hairline),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.inventory_2_outlined,
-                          size: 14,
-                          color: Aether.textMuted,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            m,
-                            style: const TextStyle(
-                              fontSize: 12.5,
-                              fontFamily: Aether.mono,
-                            ),
-                          ),
-                        ),
-                        // Every entry — including the legacy default, which
-                        // 404s and is no longer seeded — is removable.
-                        IconButton(
-                          tooltip: 'Remove marketplace',
-                          onPressed: () => app.removeMarketplace(m),
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            size: 16,
-                            color: Aether.danger,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
+              const SizedBox(height: 12),
+              if (_tab == PluginAddTab.mcp)
+                McpServerAddForm(onAdded: _onMcpAdded)
+              else
+                ..._pluginTab(ctx, app),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  List<Widget> _pluginTab(BuildContext ctx, AppState app) => [
+    Text(
+      'Fetch a plugin from GitHub, or add a marketplace (itself '
+      'a GitHub repo with a marketplace.json). Every repo is '
+      'inspected and asks for one capability approval before '
+      'anything installs.',
+      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+    ),
+    const SizedBox(height: 14),
+    Text(
+      'GITHUB REPO',
+      style: TextStyle(
+        fontSize: 10,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 1.4,
+        color: Aether.textFaint,
       ),
     ),
+    const SizedBox(height: 8),
+    TextField(
+      controller: repoC,
+      autofocus: true,
+      textInputAction: TextInputAction.go,
+      onSubmitted: (_) => _fetchFromGithub(),
+      onChanged: (_) {
+        if (repoError != null) setState(() => repoError = null);
+      },
+      style: const TextStyle(fontSize: 13.5, fontFamily: Aether.mono),
+      decoration: InputDecoration(
+        hintText: 'owner/repo or https://github.com/owner/repo',
+        errorText: repoError,
+        errorMaxLines: 4,
+      ),
+    ),
+    const SizedBox(height: 8),
+    SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: Aether.accent,
+          side: BorderSide(color: Aether.accent.withValues(alpha: .4)),
+          padding: const EdgeInsets.symmetric(vertical: 11),
+        ),
+        icon: const Icon(Icons.code, size: 16),
+        label: const Text('Fetch from GitHub'),
+        onPressed: _fetchFromGithub,
+      ),
+    ),
+    const SizedBox(height: 8),
+    SizedBox(
+      width: double.infinity,
+      child: FilledButton.icon(
+        style: FilledButton.styleFrom(
+          backgroundColor: Aether.accent,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(11),
+          ),
+        ),
+        icon: const Icon(Icons.link, size: 16),
+        label: const Text('Add marketplace', style: TextStyle(fontSize: 13.5)),
+        onPressed: _addMarketplace,
+      ),
+    ),
+    if (app.marketplaces.isNotEmpty) ...[
+      const SizedBox(height: 14),
+      Text(
+        'YOUR MARKETPLACES',
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.4,
+          color: Aether.textFaint,
+        ),
+      ),
+      const SizedBox(height: 6),
+      for (final m in app.marketplaces)
+        Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            color: Aether.surfaceAlt,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.inventory_2_outlined,
+                size: 14,
+                color: Aether.textMuted,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  m,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontFamily: Aether.mono,
+                  ),
+                ),
+              ),
+              // Every entry — including the legacy default, which
+              // 404s and is no longer seeded — is removable.
+              IconButton(
+                key: ValueKey('sheet-marketplace-remove-$m'),
+                tooltip: 'Remove marketplace',
+                // Removal uninstalls its plugins — never one tap.
+                onPressed: () => confirmAndRemoveMarketplace(ctx, m),
+                icon: const Icon(
+                  Icons.delete_outline,
+                  size: 16,
+                  color: Aether.danger,
+                ),
+              ),
+            ],
+          ),
+        ),
+    ],
+  ];
+}
+
+final _ghSegment = RegExp(r'^[A-Za-z0-9_.-]+$');
+
+/// Parses what a user types into the add sheet's repo field:
+///   • `owner/repo`, `owner/repo@ref`, `owner/repo#ref`
+///   • `github.com/owner/repo` (with or without `https://`, `www.`, `.git`)
+///   • `https://github.com/owner/repo/tree/<ref>/<path>` → ref + subPath
+///     (installs that subdirectory, not the repo root)
+///   • `git@github.com:owner/repo.git`
+/// Anything else after `owner/repo` is rejected with a specific error.
+({GithubPluginSource? source, String? error}) parseGithubSourceInput(
+  String input,
+) {
+  const hint =
+      'Use owner/repo, owner/repo@ref, or a GitHub URL '
+      '(…/tree/<ref>/<folder> installs that folder).';
+  var txt = input.trim();
+  if (txt.isEmpty) {
+    return (source: null, error: 'Enter owner/repo or a GitHub URL.');
+  }
+  txt = txt.replaceFirst(RegExp(r'^git@github\.com:'), '');
+  final hadScheme = RegExp(r'^[a-z]+://').hasMatch(txt);
+  txt = txt
+      .replaceFirst(RegExp(r'^[a-z]+://'), '')
+      .replaceFirst(RegExp(r'^www\.'), '');
+  if (txt.startsWith('github.com/')) {
+    txt = txt.substring('github.com/'.length);
+  } else if (hadScheme || RegExp(r'^[^/]+\.[a-z]{2,}/').hasMatch(txt)) {
+    return (
+      source: null,
+      error: 'Only GitHub repositories are supported here. $hint',
+    );
+  }
+  txt = txt.split('?').first.replaceFirst(RegExp(r'/+$'), '');
+  String? ref;
+  // `owner/repo@ref` / `owner/repo#ref` (short form).
+  final short = RegExp(r'^([^/@#]+)/([^/@#]+)[@#]([^/@#\s]+)$').firstMatch(txt);
+  if (short != null) {
+    txt = '${short.group(1)}/${short.group(2)}';
+    ref = short.group(3);
+  } else if (txt.contains('#')) {
+    final i = txt.indexOf('#');
+    final frag = txt.substring(i + 1);
+    txt = txt.substring(0, i);
+    if (frag.isNotEmpty) ref = frag;
+  }
+  final parts = txt.split('/');
+  if (parts.length < 2 || parts[0].isEmpty || parts[1].isEmpty) {
+    return (source: null, error: 'Enter owner/repo or a GitHub URL. $hint');
+  }
+  final owner = parts[0];
+  final repo = parts[1].replaceFirst(RegExp(r'\.git$'), '');
+  if (!_ghSegment.hasMatch(owner) || !_ghSegment.hasMatch(repo)) {
+    return (source: null, error: '"$owner/$repo" is not a valid repository.');
+  }
+  String? subPath;
+  if (parts.length > 2) {
+    final rest = parts.sublist(2);
+    if ((rest[0] == 'tree' || rest[0] == 'blob') &&
+        rest.length >= 2 &&
+        rest[1].isNotEmpty) {
+      ref = rest[1];
+      final sub = rest.sublist(2).where((p) => p.isNotEmpty).join('/');
+      if (sub.isNotEmpty) {
+        if (sub.split('/').any((p) => p == '..' || p == '.')) {
+          return (source: null, error: 'The folder path is not valid. $hint');
+        }
+        subPath = sub;
+      }
+    } else {
+      return (
+        source: null,
+        error: 'Unexpected "/${rest.join('/')}" after $owner/$repo. $hint',
+      );
+    }
+  }
+  return (
+    source: GithubPluginSource(
+      owner: owner,
+      repo: repo,
+      ref: ref,
+      subPath: subPath,
+    ),
+    error: null,
   );
 }
 
-/// `owner/repo` / full GitHub URL → [GithubPluginSource]. Null when the
-/// input names no usable repo.
-GithubPluginSource? _githubSourceFromInput(String input) {
-  var txt = input.trim();
-  final m = RegExp(r'^https?://github\.com/([^/]+)/([^/#?]+)').firstMatch(txt);
-  if (m != null) {
-    return GithubPluginSource(owner: m.group(1)!, repo: m.group(2)!);
+/// User-facing copy for an install failure — never a raw Dart exception
+/// string. The raw text stays available under "Details".
+String describeInstallFailure(Object? error) {
+  final raw = '${error ?? ''}';
+  final lower = raw.toLowerCase();
+  if (error is SocketException ||
+      error is TimeoutException ||
+      lower.contains('socketexception') ||
+      lower.contains('failed host lookup') ||
+      lower.contains('network is unreachable') ||
+      lower.contains('connection refused') ||
+      lower.contains('connection timed out') ||
+      lower.contains('timed out')) {
+    return "You're offline or GitHub can't be reached. Check your "
+        'connection and try again.';
   }
-  final parts = txt.split('/');
-  if (parts.length < 2 || parts[0].isEmpty || parts[1].isEmpty) return null;
-  return GithubPluginSource(owner: parts[0], repo: parts[1]);
+  if (lower.contains('rate limit') ||
+      lower.contains('http 403') ||
+      lower.contains('http 429')) {
+    return 'GitHub rate limit reached. Sign in to GitHub (Settings → '
+        'GitHub) to raise the limit, then retry.';
+  }
+  if (lower.contains('http 404') ||
+      lower.contains('not found') ||
+      lower.contains('tree unreachable')) {
+    return "Couldn't find that repository. Check owner/repo — private "
+        'repositories need GitHub sign-in.';
+  }
+  if (lower.contains('no plugin content') ||
+      lower.contains('canonical publisher/name') ||
+      lower.contains('manifest')) {
+    return 'No usable plugin manifest found in this repository '
+        '(.claude-plugin/plugin.json, .codex-plugin/plugin.json or .mcp.json).';
+  }
+  if (lower.contains('required compatibility')) {
+    return "This plugin needs features Ovid can't provide on this device.";
+  }
+  if (lower.contains('dependenc')) {
+    return 'A required dependency failed to install. See Details.';
+  }
+  if (lower.contains('approval required')) {
+    return 'This install needs your approval first.';
+  }
+  if (error is FormatException || lower.contains('formatexception')) {
+    return "The plugin's files couldn't be read (invalid format).";
+  }
+  return 'The install failed. See Details for the technical error.';
+}
+
+/// Honest summary of a finished install (outcome + copy + raw details),
+/// built from the result's activation record and probe failures.
+@visibleForTesting
+({InstallOutcome outcome, String summary, String? details})
+describeInstallOutcome(PluginInstallResult? result, {Object? crash}) {
+  if (crash != null) {
+    return (
+      outcome: InstallOutcome.failed,
+      summary: describeInstallFailure(crash),
+      details: '$crash',
+    );
+  }
+  if (result == null) {
+    return (
+      outcome: InstallOutcome.cancelled,
+      summary: 'Install cancelled — nothing was changed.',
+      details: null,
+    );
+  }
+  final record = result.record;
+  final activation = switch (record?.state) {
+    PluginActivation.sessionActive => 'Active in this chat now.',
+    PluginActivation.globalActive => 'Enabled everywhere.',
+    PluginActivation.pendingGlobal => 'Restart Ovid to enable it everywhere.',
+    _ when record?.promoteOnNextBoot ?? false =>
+      'Restart Ovid to enable it everywhere.',
+    _ => null,
+  };
+  switch (result.status) {
+    case PluginInstallStatus.ok:
+      return (
+        outcome: InstallOutcome.success,
+        summary: activation == null
+            ? 'Installed ✓'
+            : 'Installed ✓ — $activation',
+        details: null,
+      );
+    case PluginInstallStatus.degraded:
+      final warnings = [
+        if (result.degradedNames.isNotEmpty)
+          'optional dependencies failed (${result.degradedNames.join(', ')})',
+        if (result.probeFailures.isNotEmpty)
+          'missing files: ${result.probeFailures.join(', ')}',
+      ];
+      return (
+        outcome: InstallOutcome.degraded,
+        summary:
+            'Installed with warnings'
+            '${warnings.isEmpty ? '' : ': ${warnings.join('; ')}'}.'
+            '${activation == null ? '' : ' $activation'}',
+        details: null,
+      );
+    case PluginInstallStatus.failed:
+      return (
+        outcome: InstallOutcome.failed,
+        summary: describeInstallFailure(result.error),
+        details: result.error,
+      );
+  }
 }
 
 /// Runs one source install to completion with live progress + honest
@@ -719,31 +1241,48 @@ Future<void> _runSourceInstall(
   PluginItem? row,
 ) async {
   final messenger = ScaffoldMessenger.of(context);
+  final navigator = Navigator.of(context);
 
   // WS2 live progress: created before the install starts so no line is
-  // lost; the sheet reads the controller's current state on build.
+  // lost; the sheet reads the controller's current state when it opens.
   final progress = PluginInstallProgress();
   progress.setPhase('Fetching plugin source…');
   progress.line('Fetching ${source.sourceId}…');
-  unawaited(
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Aether.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (_) => PluginInstallProgressSheet(
-        progress: progress,
-        title: 'Installing ${row?.name ?? source.sourceId}',
-        subtitle: 'Plugin install — live log',
-      ),
+
+  // Order (F-103): inspect inline → capability approval → only THEN the
+  // "Installing" sheet. Declining never leaves a red result behind.
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text('Fetching ${source.sourceId}…'),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(minutes: 5),
     ),
   );
+  var sheetOpen = false;
+  void openSheet() {
+    if (sheetOpen || !context.mounted) return;
+    sheetOpen = true;
+    messenger.hideCurrentSnackBar();
+    unawaited(
+      showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Aether.surface,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => PluginInstallProgressSheet(
+          progress: progress,
+          title: 'Installing ${row?.name ?? source.sourceId}',
+          subtitle: 'Plugin install — live log',
+        ),
+      ),
+    );
+  }
 
   PluginInstallResult? result;
-  String? crash;
+  Object? crash;
   var depsStarted = false;
   try {
     result = await startPluginInstallForTest(
@@ -751,6 +1290,10 @@ Future<void> _runSourceInstall(
       row,
       source: source,
       approvalContext: context,
+      onApproved: () {
+        progress.setPhase('Installing…');
+        openSheet();
+      },
       sourceProgress: (received, total) {
         final value = total == null || total <= 0
             ? null
@@ -772,29 +1315,50 @@ Future<void> _runSourceInstall(
       },
     );
   } catch (e) {
-    crash = '$e';
+    crash = e;
   }
-  final msg = crash != null
-      ? 'Install crashed: $crash'
-      : result == null
-      ? 'Install cancelled — nothing was changed.'
-      : switch (result.status) {
-          PluginInstallStatus.ok =>
-            'Installed ✓ — restart Ovid to enable it everywhere '
-                '(this session: contributions pending restart).',
-          PluginInstallStatus.degraded =>
-            'Installed with degraded dependencies: '
-                '${result.degradedNames.join(', ')} — restart to enable.',
-          PluginInstallStatus.failed =>
-            'Install failed: ${result.error ?? 'unknown error'}',
-        };
+  final described = describeInstallOutcome(result, crash: crash);
+  final installedId = result?.manifest?.id;
+  final installedRow = installedId == null
+      ? null
+      : AppState.I.plugins.where((p) => p.runtimeId == installedId).firstOrNull;
+  void openPlugin() {
+    final target = installedRow ?? row;
+    if (target == null) return;
+    navigator.push(
+      MaterialPageRoute(builder: (_) => PluginDetailScreen(plugin: target)),
+    );
+  }
+
+  final details = described.details;
+  if (details != null) progress.line(details);
   progress.finish(
-    ok: crash == null && result?.status == PluginInstallStatus.ok,
-    summary: msg,
+    outcome: described.outcome,
+    summary: described.summary,
+    details: details,
+    onOpenPlugin: (installedRow ?? row) == null ? null : openPlugin,
   );
-  messenger.showSnackBar(
-    SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
-  );
+  if (!sheetOpen) messenger.hideCurrentSnackBar();
+  if (messenger.mounted) {
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(described.summary),
+        behavior: SnackBarBehavior.floating,
+        action:
+            sheetOpen ||
+                described.outcome == InstallOutcome.cancelled ||
+                details == null
+            ? null
+            : SnackBarAction(
+                label: 'Details',
+                onPressed: () {
+                  if (!context.mounted) return;
+                  openSheet();
+                },
+              ),
+      ),
+    );
+  }
   AppState.I.refresh();
 }
 
@@ -908,15 +1472,107 @@ class _PluginsScreenState extends State<PluginsScreen> {
     }
   }
 
+  /// The last refresh's per-repo outcome (null before the first one).
+  MarketplaceSyncReport? _syncReport;
+
+  /// Error of a refresh that threw outright (not a per-repo failure).
+  String? _syncCrash;
+
   Future<void> _syncCatalogs({bool force = false}) async {
     if (!mounted || _syncing) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     setState(() => _syncing = true);
+    MarketplaceSyncReport? report;
+    String? crash;
     try {
-      await AppState.I.syncMarketplaceCatalogs(force: force);
-    } catch (_) {
-      // Offline / bad repo — the built-in catalog still renders.
+      report = await AppState.I.syncMarketplaceCatalogsReport(force: force);
+    } catch (e) {
+      // The built-in catalog still renders; say the refresh failed.
+      Diag.swallow('plugins-sync', e);
+      crash = "Couldn't refresh marketplaces. Try again.";
     }
-    if (mounted) setState(() => _syncing = false);
+    if (!mounted) return;
+    setState(() {
+      _syncing = false;
+      _syncReport = report;
+      _syncCrash = crash;
+    });
+    // An explicit Refresh always answers, even when everything worked.
+    if (force &&
+        crash == null &&
+        report != null &&
+        report.failures.isEmpty &&
+        messenger != null &&
+        messenger.mounted) {
+      final n = report.fetched;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            n == 0
+                ? 'No marketplaces to refresh'
+                : 'Refreshed $n marketplace${n == 1 ? '' : 's'}',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// "Couldn't refresh 2 marketplaces · Retry" / offline banner.
+  Widget? _syncBanner() {
+    final report = _syncReport;
+    final failures = report?.failures ?? const <String, String>{};
+    if (_syncCrash == null && failures.isEmpty) return null;
+    final offline = report?.offline ?? false;
+    final text = _syncCrash != null
+        ? _syncCrash!
+        : offline
+        ? "You're offline — showing saved catalogs. Marketplaces will "
+              'refresh when you reconnect.'
+        : "Couldn't refresh ${failures.length} "
+              'marketplace${failures.length == 1 ? '' : 's'}: '
+              '${failures.keys.join(', ')}';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+      child: Container(
+        key: const ValueKey('marketplace-sync-banner'),
+        padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+        decoration: BoxDecoration(
+          color: Aether.surfaceAlt,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              offline ? Icons.cloud_off_outlined : Icons.warning_amber,
+              size: 16,
+              color: Aether.warnLight,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(fontSize: 12, color: Aether.textMuted),
+              ),
+            ),
+            TextButton(
+              onPressed: _syncing ? null : () => _syncCatalogs(force: true),
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// MCP servers matching the search query (name, description, id).
+  bool _mcpMatches(McpServer s) {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    return s.name.toLowerCase().contains(q) ||
+        s.description.toLowerCase().contains(q) ||
+        s.canonicalId.toLowerCase().contains(q);
   }
 
   @override
@@ -952,7 +1608,7 @@ class _PluginsScreenState extends State<PluginsScreen> {
           // Task 2 (contraction spec §5.2): exactly one "+" — the single
           // add sheet (GitHub fetch + marketplace add).
           IconButton(
-            tooltip: 'Add plugin or marketplace',
+            tooltip: 'Add plugin, MCP server or marketplace',
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.add, size: 22),
             onPressed: () => showPluginAddSheet(context),
@@ -1006,9 +1662,13 @@ class _PluginsScreenState extends State<PluginsScreen> {
               s.custom ||
               (s.ownerPluginId?.isNotEmpty ?? false) ||
               installedMcpIds.contains(s.canonicalId);
+          // Search and the category chips filter the MCP section too: it
+          // renders only for All/MCP, and only matching servers.
+          final showMcp = _cat == 'All' || _cat == 'MCP';
+          final visibleServers = app.mcpServers.where(_mcpMatches);
           final servers = [
-            ...app.mcpServers.where(configured),
-            ...app.mcpServers.where((s) => !configured(s)),
+            ...visibleServers.where(configured),
+            ...visibleServers.where((s) => !configured(s)),
           ];
           _scheduleFocusReveal(items, focusIds);
           return CustomScrollView(
@@ -1022,7 +1682,9 @@ class _PluginsScreenState extends State<PluginsScreen> {
                     onChanged: (v) => setState(() => _query = v),
                     style: const TextStyle(fontSize: 13),
                     decoration: InputDecoration(
-                      hintText: 'Search ${items.length} plugins…',
+                      hintText:
+                          'Search ${app.plugins.length} plugins & '
+                          '${app.mcpServers.length} MCP servers…',
                       prefixIcon: Icon(
                         Icons.search,
                         size: 16,
@@ -1066,11 +1728,14 @@ class _PluginsScreenState extends State<PluginsScreen> {
                   ),
                 ),
               ),
+              if (_syncBanner() case final banner?)
+                SliverToBoxAdapter(child: banner),
               // ── MCP section ──
-              if (!migrationOnly)
+              if (!migrationOnly && showMcp)
                 SliverToBoxAdapter(
                   child: _McpSection(
                     servers: servers,
+                    totalServers: app.mcpServers.length,
                     focusCanonicalId: widget.focusCanonicalId,
                     cardKeys: _mcpCardKeys,
                   ),
@@ -1265,8 +1930,22 @@ class _MarketplaceCardState extends State<_MarketplaceCard> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  'GitHub marketplace',
-                  style: AetherType.caption,
+                  switch ((
+                    app.marketplaceSyncErrors[widget.repo],
+                    app.marketplaceLastSynced[widget.repo],
+                  )) {
+                    (final String _, _) =>
+                      'GitHub marketplace · last refresh failed',
+                    (null, final DateTime at) =>
+                      'GitHub marketplace · synced ${usageRelativeTime(at, now: DateTime.now())}',
+                    _ => 'GitHub marketplace',
+                  },
+                  key: ValueKey('marketplace-sync-${widget.repo}'),
+                  style: AetherType.caption.copyWith(
+                    color: app.marketplaceSyncErrors.containsKey(widget.repo)
+                        ? Aether.warnLight
+                        : null,
+                  ),
                 ),
               ],
             ),
@@ -1295,8 +1974,16 @@ class _MarketplaceCardState extends State<_MarketplaceCard> {
                         ),
                       );
                     } catch (e) {
+                      Diag.swallow('marketplace-browse', e);
                       if (mounted) {
-                        messenger.showSnackBar(SnackBar(content: Text('Could not load marketplace: $e')));
+                        messenger.showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              "Couldn't load this marketplace. Check your "
+                              'connection and try again.',
+                            ),
+                          ),
+                        );
                       }
                     } finally {
                       if (mounted) setState(() => _busy = false);
@@ -1316,15 +2003,7 @@ class _MarketplaceCardState extends State<_MarketplaceCard> {
             onPressed: _busy
                 ? null
                 : () async {
-                    final ok = await showDeleteConfirmationDialog(
-                      context,
-                      title: 'Remove ${widget.repo}?',
-                      content:
-                          'Removes this marketplace repo. Plugins already '
-                          'installed from it stay installed.',
-                    );
-                    if (!ok) return;
-                    app.removeMarketplace(widget.repo);
+                    await confirmAndRemoveMarketplace(context, widget.repo);
                   },
           ),
             ],
@@ -1537,70 +2216,49 @@ class PluginCard extends StatelessWidget {
                           activeTrackColor: Aether.accent,
                           materialTapTargetSize:
                               MaterialTapTargetSize.shrinkWrap,
-                          onChanged: (val) async {
-                            PluginRuntimeCallRecorderForTest.record?.call(
-                              val ? 'enable' : 'disable',
-                            );
-                            if (val) {
-                              await app.enablePlugin(plugin);
-                              final tools = AgentService.I.pluginToolNames(
-                                plugin,
-                              );
-                              if (tools.isNotEmpty) {
-                                app.updateServiceStatus(
-                                  'plugin:${plugin.name}',
-                                  ServiceHealth.working,
-                                  detail:
-                                      'probe ok · tools: ${tools.join(', ')}',
-                                );
-                              } else {
-                                app.updateServiceStatus(
-                                  'plugin:${plugin.name}',
-                                  ServiceHealth.failed,
-                                  detail:
-                                      'probe failed: contributes no agent tools, '
-                                      'skills, hooks, or MCP servers',
-                                );
-                              }
-                            } else {
-                              await app.disablePlugin(plugin);
-                              app.serviceStatus.remove('plugin:${plugin.name}');
-                              await app.persistPluginState();
-                            }
-                            app.refresh();
-                          },
+                          onChanged: (val) =>
+                              setPluginEnabled(context, plugin, val),
                         ),
                       ),
                       const SizedBox(width: 4),
                     ],
-                    IconButton(
-                      key: ValueKey('plugin-delete-${plugin.name}'),
-                      icon: const Icon(
-                        Icons.delete_outline,
-                        size: 18,
-                        color: Aether.danger,
+                    // One destructive action per row: Uninstall (with
+                    // confirmation) on installed rows; "Remove from list"
+                    // only for user-added rows. Catalog rows have neither.
+                    if (plugin.installed)
+                      IconButton(
+                        key: ValueKey('plugin-delete-${plugin.name}'),
+                        icon: const Icon(
+                          Icons.delete_outline,
+                          size: 18,
+                          color: Aether.danger,
+                        ),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
+                        tooltip: 'Uninstall plugin',
+                        onPressed: () =>
+                            confirmAndUninstallPlugin(context, plugin),
+                      )
+                    else if (pluginRemovableFromList(plugin))
+                      IconButton(
+                        key: ValueKey('plugin-remove-${plugin.name}'),
+                        icon: Icon(
+                          Icons.playlist_remove,
+                          size: 18,
+                          color: Aether.textMuted,
+                        ),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
+                        tooltip: 'Remove from list',
+                        onPressed: () =>
+                            confirmAndRemovePluginRow(context, plugin),
                       ),
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                        minWidth: 48,
-                        minHeight: 48,
-                      ),
-                      tooltip: 'Delete plugin',
-                      onPressed: () async {
-                        final ok = await showDeleteConfirmationDialog(
-                          context,
-                          title: 'Delete ${plugin.name}?',
-                        );
-                        if (!ok) return;
-                        PluginRuntimeCallRecorderForTest.record?.call(
-                          'uninstall',
-                        );
-                        await app.uninstallPlugin(plugin);
-                        app.plugins.remove(plugin);
-                        await app.persistPluginState();
-                        app.refresh();
-                      },
-                    ),
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -1683,7 +2341,7 @@ class PluginDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: AppState.I,
+      animation: Listenable.merge([AppState.I, ToolUsageStore.I]),
       builder: (context, _) => _buildDetail(context),
     );
   }
@@ -1713,61 +2371,31 @@ class PluginDetailScreen extends StatelessWidget {
                 value: plugin.enabled,
                 activeTrackColor: Aether.accent,
                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                onChanged: (val) async {
-                  PluginRuntimeCallRecorderForTest.record?.call(
-                    val ? 'enable' : 'disable',
-                  );
-                  if (val) {
-                    await app.enablePlugin(plugin);
-                    final tools = AgentService.I.pluginToolNames(plugin);
-                    if (tools.isNotEmpty) {
-                      app.updateServiceStatus(
-                        'plugin:${plugin.name}',
-                        ServiceHealth.working,
-                        detail: 'probe ok · tools: ${tools.join(', ')}',
-                      );
-                    } else {
-                      app.updateServiceStatus(
-                        'plugin:${plugin.name}',
-                        ServiceHealth.failed,
-                        detail:
-                            'probe failed: contributes no agent tools, '
-                            'skills, hooks, or MCP servers',
-                      );
-                    }
-                  } else {
-                    await app.disablePlugin(plugin);
-                    app.serviceStatus.remove('plugin:${plugin.name}');
-                    await app.persistPluginState();
-                  }
-                  app.refresh();
-                },
+                onChanged: (val) => setPluginEnabled(context, plugin, val),
               ),
             ),
             const SizedBox(width: 4),
           ],
-          IconButton(
-            key: ValueKey('plugin-detail-delete-${plugin.name}'),
-            tooltip: 'Delete plugin',
-            icon: const Icon(
-              Icons.delete_outline,
-              size: 19,
-              color: Aether.danger,
+          // Installed rows uninstall from the body's Uninstall button (one
+          // action); the app bar only offers "Remove from list" for
+          // uninstalled user-added rows.
+          if (!plugin.installed && pluginRemovableFromList(plugin))
+            IconButton(
+              key: ValueKey('plugin-detail-delete-${plugin.name}'),
+              tooltip: 'Remove from list',
+              icon: Icon(
+                Icons.playlist_remove,
+                size: 19,
+                color: Aether.textMuted,
+              ),
+              onPressed: () async {
+                final removed = await confirmAndRemovePluginRow(
+                  context,
+                  plugin,
+                );
+                if (removed && context.mounted) Navigator.pop(context);
+              },
             ),
-            onPressed: () async {
-              final ok = await showDeleteConfirmationDialog(
-                context,
-                title: 'Delete ${plugin.name}?',
-              );
-              if (!ok) return;
-              PluginRuntimeCallRecorderForTest.record?.call('uninstall');
-              await app.uninstallPlugin(plugin);
-              app.plugins.remove(plugin);
-              await app.persistPluginState();
-              app.refresh();
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
           const SizedBox(width: 4),
         ],
       ),
@@ -1912,36 +2540,8 @@ class PluginDetailScreen extends StatelessWidget {
                       plugin.enabled ? 'Disable' : 'Enable',
                       style: const TextStyle(fontSize: 13.5),
                     ),
-                    onPressed: () async {
-                      PluginRuntimeCallRecorderForTest.record?.call(
-                        plugin.enabled ? 'disable' : 'enable',
-                      );
-                      if (plugin.enabled) {
-                        await app.disablePlugin(plugin);
-                        app.serviceStatus.remove('plugin:${plugin.name}');
-                        await app.persistPluginState();
-                      } else {
-                        await app.enablePlugin(plugin);
-                        // Task 10: probe-derived, not hardcoded — only
-                        // stamp working when real capability resolves.
-                        final tools = AgentService.I.pluginToolNames(plugin);
-                        if (tools.isNotEmpty) {
-                          app.updateServiceStatus(
-                            'plugin:${plugin.name}',
-                            ServiceHealth.working,
-                            detail: 'probe ok · tools: ${tools.join(', ')}',
-                          );
-                        } else {
-                          app.updateServiceStatus(
-                            'plugin:${plugin.name}',
-                            ServiceHealth.failed,
-                            detail:
-                                'probe failed: contributes no agent tools, '
-                                'skills, hooks, or MCP servers',
-                          );
-                        }
-                      }
-                    },
+                    onPressed: () =>
+                        setPluginEnabled(context, plugin, !plugin.enabled),
                   )
                 : inbuiltUninstallableForTest(plugin)
                 // No Install button for a row nothing can install — an
@@ -2110,16 +2710,14 @@ class PluginDetailScreen extends StatelessWidget {
                       'Reset to defaults',
                       style: TextStyle(fontSize: 12.5),
                     ),
-                    onPressed: () {
-                      plugin.enabled = true;
-                      app.persistPluginState();
-                      app.refresh();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Plugin reset to defaults'),
-                        ),
-                      );
-                    },
+                    // Clears the saved settings, then enables through the
+                    // real path (contributions mount; the fail-closed
+                    // migration gate applies) and reports the outcome.
+                    onPressed: () => resetPluginToDefaults(
+                      context,
+                      plugin,
+                      configFieldsForSettings(settingsFields),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -2140,15 +2738,10 @@ class PluginDetailScreen extends StatelessWidget {
                       'Uninstall',
                       style: TextStyle(fontSize: 12.5),
                     ),
-                    onPressed: () async {
-                      // Task 11: uninstall routes through the runtime
-                      // manager (registry + content + deps + record +
-                      // grant + secrets) via AppState.uninstallPlugin.
-                      PluginRuntimeCallRecorderForTest.record?.call(
-                        'uninstall',
-                      );
-                      await app.uninstallPlugin(plugin);
-                    },
+                    // Task 11: uninstall routes through the runtime
+                    // manager (registry + content + deps + record + grant +
+                    // secrets) via AppState.uninstallPlugin — confirmed.
+                    onPressed: () => confirmAndUninstallPlugin(context, plugin),
                   ),
                 ),
               ],
@@ -2170,14 +2763,24 @@ class PluginDetailScreen extends StatelessWidget {
             const SectionHeader(
               'Settings',
               subtitle:
-                  'Declared by the plugin manifest — secrets stay in '
-                  'secure storage on this device',
+                  'Passed to the plugin as CLAUDE_PLUGIN_OPTION_<KEY> and '
+                  r'${user_config.<key>} — secrets stay in secure storage '
+                  'on this device',
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
               child: PluginSettingsPanel(
+                // A changed field set (Retry activation / update) gets a
+                // fresh panel state; didUpdateWidget covers the rest.
+                key: ValueKey(
+                  '${plugin.runtimeId}|'
+                  '${settingsFields.map((f) => f.key).join(',')}',
+                ),
                 pluginName: plugin.runtimeId!,
                 fields: configFieldsForSettings(settingsFields),
+                // New values reach hooks on their next run; running MCP
+                // servers restart so their env/headers pick them up.
+                onSaved: () => applyPluginSettings(context, plugin),
               ),
             ),
           ],
@@ -2311,21 +2914,28 @@ class _PluginDiagnostics extends StatelessWidget {
         if (owned.isEmpty && (manifest == null || manifest.mcpServers.isEmpty))
           const _DiagRow('No MCP servers declared.'),
         for (final s in owned) ...[
-          // Durable-only status (spec §5.3, Task 3): canonical label ·
-          // reason, or neutral "Not started" — never a binary
-          // Connected/Not connected inference.
-          _DiagRow(
-            '${s.canonicalId} · ${s.transport} · '
-            '${mcpDurableStatusText(s)}',
-          ),
+          // Actionable row: open the server (tools, credentials, usage) or
+          // set it up / connect inline. Durable-only status text (spec §5.3).
+          _OwnedMcpTile(server: s),
+          // Driven by the real credential probe, not the declaration:
+          // stored credentials read "configured", missing ones are named.
           if (s.envHint != null ||
               s.requiredEnvNames.isNotEmpty ||
               s.requiredHeaderNames.isNotEmpty)
-            _DiagRow(
-              'Needs setup: '
-              '${s.requiredEnvNames.isNotEmpty ? s.requiredEnvNames.join(', ') : s.envHint ?? s.requiredHeaderNames.join(', ')} '
-              'must be configured (secure storage)',
-              warn: true,
+            FutureBuilder<List<String>>(
+              future: McpService.I.missingCredentialsFor(s),
+              builder: (context, snap) {
+                final missing = snap.data;
+                if (missing == null) return const SizedBox.shrink();
+                if (missing.isEmpty) {
+                  return _DiagRow('${s.name}: credentials configured ✓');
+                }
+                return _DiagRow(
+                  'Needs setup: ${missing.join(', ')} '
+                  'must be configured (secure storage)',
+                  warn: true,
+                );
+              },
             ),
           if (mcpUnsupportedReason(s) != null)
             _DiagRow(
@@ -2382,15 +2992,77 @@ class _PluginDiagnostics extends StatelessWidget {
               '${h.matcher != null ? 'matcher ${h.matcher} · ' : ''}'
               '${h.payload.isEmpty ? '' : h.payload}',
             ),
-        _DiagRow(
-          'Last result: '
-          '${HookService.I.failed > 0 ? 'failures seen this boot' : 'no failures this boot'} '
-          '(fired ${HookService.I.fired}, failed ${HookService.I.failed} this boot)',
+        // Per-plugin counters (this plugin's hooks only), not the
+        // process-global totals.
+        Builder(
+          builder: (_) {
+            final stats = HookService.I.statsFor(runtimeId);
+            if (stats == null) {
+              return const _DiagRow(
+                'Last result: none of this plugin\'s hooks ran this boot',
+              );
+            }
+            final fired = stats.lastFiredAt;
+            return Column(
+              key: ValueKey('plugin-hook-stats-$runtimeId'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _DiagRow(
+                  'Last result: '
+                  '${stats.failed > 0 ? 'failures seen this boot' : 'no failures this boot'} '
+                  '(fired ${stats.fired}, failed ${stats.failed}'
+                  '${stats.blocked > 0 ? ', blocked ${stats.blocked}' : ''}'
+                  ' this boot'
+                  '${fired == null ? '' : ' · last fired ${usageRelativeTime(fired, now: DateTime.now())}'})',
+                  warn: stats.failed > 0,
+                ),
+                if (stats.lastError case final err?)
+                  _DiagRow('Last error: $err', warn: true),
+              ],
+            );
+          },
         ),
         _DiagRow(
-          'Circuit breaker: ${HookService.breakerThreshold} consecutive '
-          'failures in a session disable this plugin\'s hooks '
-          '(fail-open — the run continues)',
+          HookService.I.isPluginTrippedAnySession(runtimeId)
+              ? 'Circuit breaker: TRIPPED — this plugin\'s hooks are off '
+                    'for the affected session; re-enable the plugin to retry'
+              : 'Circuit breaker: closed — ${HookService.breakerThreshold} '
+                    'consecutive failures in a session turn this plugin\'s '
+                    'hooks off (fail-open — the run continues)',
+          warn: HookService.I.isPluginTrippedAnySession(runtimeId),
+        ),
+        const SectionHeader('Usage', subtitle: 'Last 30 days on this device'),
+        Builder(
+          builder: (_) {
+            final u = ToolUsageStore.I.summary(pluginId: runtimeId);
+            if (u.isEmpty) {
+              return const _DiagRow(
+                'No calls to this plugin\'s commands, skills, agents or MCP '
+                'tools yet.',
+              );
+            }
+            final top = ToolUsageStore.I
+                .toolSummaries(pluginId: runtimeId)
+                .entries
+                .take(5);
+            return Column(
+              key: ValueKey('plugin-usage-$runtimeId'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _DiagRow(
+                  '${u.calls} call${u.calls == 1 ? '' : 's'} · '
+                  '${u.errors} failed · p50 ${u.p50Ms} ms · p95 ${u.p95Ms} ms'
+                  '${u.lastUsed == null ? '' : ' · last used ${usageRelativeTime(u.lastUsed!)}'}',
+                ),
+                for (final e in top)
+                  _DiagRow(
+                    '${e.key}: ${e.value.calls} call'
+                    '${e.value.calls == 1 ? '' : 's'}'
+                    '${e.value.errors > 0 ? ' (${e.value.errors} failed)' : ''}',
+                  ),
+              ],
+            );
+          },
         ),
         const SectionHeader('Dependencies'),
         if (manifest == null || manifest.dependencies.packages.isEmpty)
@@ -2422,6 +3094,52 @@ class _PluginDiagnostics extends StatelessWidget {
         const SectionHeader('Install log'),
         _InstallLogRow(plugin: plugin),
       ],
+    );
+  }
+}
+
+/// A plugin-owned MCP server in the plugin's diagnostics: tap to open its
+/// detail screen (tools, credentials, usage); inline Set up / Connect runs
+/// [connectMcpServer] with its credential and runtime gates.
+class _OwnedMcpTile extends StatelessWidget {
+  final McpServer server;
+  const _OwnedMcpTile({required this.server});
+
+  @override
+  Widget build(BuildContext context) {
+    final s = server;
+    final durable = durableMcpStatus(s);
+    final needsSetup = durable?.state == StartupItemState.needsSetup;
+    final connecting = mcpConnecting(s);
+    return ListTile(
+      key: ValueKey('plugin-owned-mcp-${s.canonicalId}'),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+      dense: true,
+      leading: Icon(Icons.usb_outlined, size: 18, color: Aether.textMuted),
+      title: Text(
+        s.name,
+        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(
+        '${s.transport} · ${mcpDurableStatusText(s)}',
+        style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+      ),
+      onTap: () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => McpDetailScreen(server: s))),
+      trailing: s.connected
+          ? const Icon(Icons.chevron_right, size: 18)
+          : TextButton(
+              key: ValueKey('plugin-owned-mcp-connect-${s.canonicalId}'),
+              onPressed: connecting ? null : () => connectMcpServer(context, s),
+              child: Text(
+                connecting
+                    ? 'Connecting…'
+                    : needsSetup
+                    ? 'Set up'
+                    : 'Connect',
+              ),
+            ),
     );
   }
 }
@@ -2628,10 +3346,14 @@ class _Perm extends StatelessWidget {
 /// (running process + JSON-RPC, not a downloaded package).
 class _McpSection extends StatelessWidget {
   final List<McpServer> servers;
+
+  /// All configured servers, before search filtering.
+  final int totalServers;
   final String? focusCanonicalId;
   final Map<String, GlobalKey>? cardKeys;
   const _McpSection({
     required this.servers,
+    required this.totalServers,
     this.focusCanonicalId,
     this.cardKeys,
   });
@@ -2663,14 +3385,36 @@ class _McpSection extends StatelessWidget {
             ],
           ),
         ),
-        // Task 2 (contraction spec §5.2): no add-tile — the single "+"
-        // opens the add sheet. An empty list hints at it instead.
-        if (servers.isEmpty)
+        // The single "+" opens the add sheet; an empty list offers its MCP
+        // tab directly, a filtered-out list says nothing matched.
+        if (servers.isEmpty && totalServers > 0)
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
             child: Text(
-              'Use + to add from GitHub',
+              'No MCP servers match your search.',
+              key: const ValueKey('mcp-section-no-match'),
               style: TextStyle(fontSize: 12, color: Aether.textMuted),
+            ),
+          )
+        else if (servers.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+            child: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              children: [
+                Text(
+                  'No MCP servers yet — add one by command, URL or JSON.',
+                  style: TextStyle(fontSize: 12, color: Aether.textMuted),
+                ),
+                TextButton.icon(
+                  key: const ValueKey('mcp-section-add'),
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Add MCP server'),
+                  onPressed: () =>
+                      showPluginAddSheet(context, initialTab: PluginAddTab.mcp),
+                ),
+              ],
             ),
           )
         else
@@ -2745,7 +3489,7 @@ String? Function(McpServer server)? mcpSupportGateForTest;
 Future<void> connectMcpServer(BuildContext context, McpServer server) async {
   final app = AppState.I;
   if (server.connected) {
-    app.toggleMcpServer(server);
+    await app.toggleMcpServer(server);
     return;
   }
   // Sandbox gate first: stdio servers spawn inside it — attempting the
@@ -2783,7 +3527,8 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
     if (go == true && context.mounted) openStudio(context);
     return;
   }
-  final missing = await McpService.I.missingCredentialsFor(server);
+  final split = await McpService.I.missingCredentialsSplitFor(server);
+  final missing = [...split.env, ...split.headers];
   if (!context.mounted) return;
   if (mcpCredentialAskForTest(missing: missing) !=
       McpCredentialAsk.connectDirectly) {
@@ -2798,7 +3543,11 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
         padding: EdgeInsets.only(
           bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
         ),
-        child: _McpCredentialSheet(server: server, missing: missing),
+        child: _McpCredentialSheet(
+          server: server,
+          missingEnv: split.env,
+          missingHeaders: split.headers,
+        ),
       ),
     );
     if (!context.mounted) return;
@@ -2833,8 +3582,103 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
     );
     if (installed != true || !context.mounted) return;
   }
-  app.toggleMcpServer(server);
+  // Await the real outcome and say what happened — the switch flipping back
+  // silently on failure was the only signal before.
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final outcome = await app.toggleMcpServer(server);
+  // A remote server that answered 401 gets a direct "Sign in" (F-193),
+  // whether or not it ships a hand-written oauth block.
+  final needsSignIn =
+      !outcome.ok && McpService.I.mcpNeedsOAuthSignIn(server.canonicalId);
+  _showMcpConnectOutcome(
+    messenger,
+    server,
+    outcome.ok,
+    outcome.detail,
+    onSignIn: needsSignIn
+        ? () {
+            if (context.mounted) unawaited(signInToMcpServer(context, server));
+          }
+        : null,
+  );
 }
+
+/// User-facing copy for a finished connect: "Connected · 12 tools",
+/// "Needs sign-in", "Timed out", … with the raw detail only as a suffix.
+@visibleForTesting
+String mcpConnectOutcomeMessage(McpServer server, bool ok, String? detail) {
+  if (ok) {
+    final n = McpService.I.connectedTools[server.canonicalId]?.length;
+    if (n == null) return '${server.name}: Connected';
+    return '${server.name}: Connected · $n tool${n == 1 ? '' : 's'}';
+  }
+  final d = (detail ?? '').trim();
+  final lower = d.toLowerCase();
+  if (lower.contains('timed out') || lower.contains('timeout')) {
+    return '${server.name}: Timed out while connecting';
+  }
+  if (lower.contains('401') ||
+      lower.contains('unauthorized') ||
+      lower.contains('sign in') ||
+      lower.contains('log in')) {
+    return '${server.name}: Needs sign-in';
+  }
+  if (lower.contains('needs configuration')) {
+    return '${server.name}: Needs setup — add its credentials';
+  }
+  if (lower.contains('needs runtime')) {
+    return '${server.name}: Needs a runtime — install it, then retry';
+  }
+  if (d.isEmpty) return "${server.name}: Couldn't connect";
+  final short = d.length > 140 ? '${d.substring(0, 140)}…' : d;
+  return "${server.name}: Couldn't connect · $short";
+}
+
+void _showMcpConnectOutcome(
+  ScaffoldMessengerState? messenger,
+  McpServer server,
+  bool ok,
+  String? detail, {
+  VoidCallback? onSignIn,
+}) {
+  if (messenger == null || !messenger.mounted) return;
+  final lower = (detail ?? '').toLowerCase();
+  // Setup/runtime failures need the credential or runtime sheet, not a
+  // blind reconnect — Retry is offered only for transient failures.
+  final retryable =
+      !ok &&
+      !lower.contains('needs configuration') &&
+      !lower.contains('needs runtime');
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(mcpConnectOutcomeMessage(server, ok, detail)),
+      behavior: SnackBarBehavior.floating,
+      action: onSignIn != null
+          ? SnackBarAction(label: 'Sign in', onPressed: onSignIn)
+          : !retryable
+          ? null
+          : SnackBarAction(
+              label: 'Retry',
+              onPressed: () async {
+                if (server.connected) return;
+                final again = await AppState.I.toggleMcpServer(server);
+                _showMcpConnectOutcome(
+                  messenger,
+                  server,
+                  again.ok,
+                  again.detail,
+                );
+              },
+            ),
+    ),
+  );
+}
+
+/// True while [server]'s connect attempt is in flight (busy UI state).
+bool mcpConnecting(McpServer server) =>
+    AppState.I.serviceStatus['mcp:${server.canonicalId}']?.health ==
+    ServiceHealth.connecting;
 
 /// Credential sheet for an MCP server with missing credentials: secure
 /// token fields, plus the GitHub login as the first-class path for
@@ -2842,66 +3686,134 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
 /// or 'github-login' (caller opens the GitHub login sheet).
 class _McpCredentialSheet extends StatefulWidget {
   final McpServer server;
-  final List<String> missing;
-  const _McpCredentialSheet({required this.server, required this.missing});
+
+  /// Missing env var names — saved through [AppState.setMcpEnv].
+  final List<String> missingEnv;
+
+  /// Missing HTTP header names (e.g. `Authorization`) — saved through
+  /// [AppState.setMcpHeaders], the only store the HTTP transport reads.
+  final List<String> missingHeaders;
+  /// Edit mode (detail screen "Edit"/"Set"): blank fields keep the stored
+  /// value, the sheet pops 'saved' and never connects.
+  final bool editing;
+  const _McpCredentialSheet({
+    required this.server,
+    this.missingEnv = const [],
+    this.missingHeaders = const [],
+    this.editing = false,
+  });
+
+  List<String> get missing => [...missingEnv, ...missingHeaders];
 
   @override
   State<_McpCredentialSheet> createState() => _McpCredentialSheetState();
 }
 
 class _McpCredentialSheetState extends State<_McpCredentialSheet> {
-  late final Map<String, TextEditingController> _controllers;
+  late final Map<String, TextEditingController> _envControllers;
+  late final Map<String, TextEditingController> _headerControllers;
   bool _saving = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _controllers = {for (final k in widget.missing) k: TextEditingController()};
+    _envControllers = {
+      for (final k in widget.missingEnv) k: TextEditingController(),
+    };
+    _headerControllers = {
+      for (final k in widget.missingHeaders) k: TextEditingController(),
+    };
   }
 
   @override
   void dispose() {
-    for (final c in _controllers.values) {
+    for (final c in [..._envControllers.values, ..._headerControllers.values]) {
       c.dispose();
     }
     super.dispose();
   }
 
-  Future<void> _save() async {
+  /// Collects trimmed values; null (with [_error] set) when one is empty.
+  Map<String, String>? _collect(Map<String, TextEditingController> ctrls) {
     final values = <String, String>{};
-    for (final e in _controllers.entries) {
+    for (final e in ctrls.entries) {
       final v = e.value.text.trim();
+      if (v.isEmpty && widget.editing) continue;
       if (v.isEmpty) {
         setState(() => _error = '${e.key} is required.');
-        return;
+        return null;
       }
       values[e.key] = v;
     }
+    return values;
+  }
+
+  Future<void> _save() async {
+    final env = _collect(_envControllers);
+    if (env == null) return;
+    final headers = _collect(_headerControllers);
+    if (headers == null) return;
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
-      await AppState.I.setMcpEnv(widget.server.canonicalId, values);
+      // Merged into what is already stored, strict (a storage failure must
+      // not pop "connected"), env and headers each to their own store.
+      await AppState.I.saveMcpCredentials(
+        widget.server,
+        env: env,
+        headers: headers,
+      );
     } catch (e) {
+      Diag.swallow('mcp-credentials', e);
       // Reset the spinner and surface the failure instead of stranding
       // the sheet on a disabled Save button.
       if (mounted) {
         setState(() {
           _saving = false;
-          _error = 'Could not save credentials: $e';
+          _error = "Couldn't save to secure storage. Try again.";
         });
       }
       return;
     }
     if (!mounted) return;
-    Navigator.pop(context, 'connected');
+    Navigator.pop(context, widget.editing ? 'saved' : 'connected');
   }
+
+  Widget _field(String name, TextEditingController controller, {
+    required bool header,
+  }) => Padding(
+    padding: const EdgeInsets.only(bottom: 10),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(header ? '$name (HTTP header)' : name, style: AetherType.label),
+        const SizedBox(height: 6),
+        TextField(
+          key: ValueKey('mcp-cred-${header ? 'header' : 'env'}-$name'),
+          controller: controller,
+          enabled: !_saving,
+          obscureText: true,
+          enableSuggestions: false,
+          autocorrect: false,
+          style: const TextStyle(fontSize: 13),
+          decoration: InputDecoration(
+            labelText: name,
+            helperText: header ? 'Sent as an HTTP header' : null,
+            border: const OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
     final offerGithub =
+        !widget.editing &&
         mcpOffersGithubLoginForTest(widget.server) &&
         !GitHubService.I.isLoggedIn;
     return SafeArea(
@@ -2912,14 +3824,20 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'Connect ${widget.server.name}',
+              widget.editing
+                  ? 'Update ${widget.server.name} credentials'
+                  : 'Connect ${widget.server.name}',
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 6),
             Text(
-              '${widget.server.name} needs ${widget.missing.join(', ')} '
-              'before it can connect. Secrets stay in secure storage on '
-              'this device.',
+              widget.editing
+                  ? 'Enter a new value to replace the stored one; leave a '
+                        'field blank to keep it. Secrets stay in secure '
+                        'storage on this device.'
+                  : '${widget.server.name} needs ${widget.missing.join(', ')} '
+                        'before it can connect. Secrets stay in secure '
+                        'storage on this device.',
               style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
             ),
             if (offerGithub) ...[
@@ -2948,30 +3866,10 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
               ),
             ],
             const SizedBox(height: 10),
-            for (final name in widget.missing)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(name, style: AetherType.label),
-                    const SizedBox(height: 6),
-                    TextField(
-                  controller: _controllers[name],
-                  enabled: !_saving,
-                  obscureText: true,
-                  enableSuggestions: false,
-                  autocorrect: false,
-                  style: const TextStyle(fontSize: 13),
-                  decoration: InputDecoration(
-                    labelText: name,
-                    border: const OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                ),
-                  ],
-                ),
-              ),
+            for (final e in _envControllers.entries)
+              _field(e.key, e.value, header: false),
+            for (final e in _headerControllers.entries)
+              _field(e.key, e.value, header: true),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
@@ -2996,7 +3894,11 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
                     )
                   : const Icon(Icons.key_outlined, size: 16),
               label: Text(
-                _saving ? 'Saving…' : 'Save & connect',
+                _saving
+                    ? 'Saving…'
+                    : widget.editing
+                    ? 'Save'
+                    : 'Save & connect',
                 style: const TextStyle(fontSize: 13.5),
               ),
               onPressed: _saving ? null : _save,
@@ -3150,9 +4052,8 @@ class McpCard extends StatelessWidget {
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => McpDetailScreen(server: server)),
       ),
-      onLongPress: server.custom
-          ? () => AppState.I.removeMcpServer(server)
-          : null,
+      // No long-press removal: deleting kills the process and wipes env,
+      // headers and OAuth, so it only runs from the confirmed trash icon.
       child: Container(
         key: ValueKey('mcp-card-${server.canonicalId}'),
         width: MediaQuery.sizeOf(context).width < 600
@@ -3215,7 +4116,10 @@ class McpCard extends StatelessWidget {
                     value: server.connected,
                     activeTrackColor: Aether.accent,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    onChanged: (_) => connectMcpServer(context, server),
+                    // Busy while a connect is in flight (no double toggle).
+                    onChanged: mcpConnecting(server)
+                        ? null
+                        : (_) => connectMcpServer(context, server),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -3315,8 +4219,9 @@ class _LiveMcpOAuthService implements McpOAuthService {
 
   @override
   Future<String> beginAuthorization(String serverKey) async =>
-      (await McpService.I.beginMcpOAuthAuthorization(serverKey))
-          .authorizationUrl;
+      (await McpService.I.beginMcpOAuthAuthorization(
+        serverKey,
+      )).authorizationUrl;
 
   @override
   Future<void> completeAuthorization(String serverKey, String callbackUri) =>
@@ -3325,6 +4230,71 @@ class _LiveMcpOAuthService implements McpOAuthService {
   @override
   void cancelAuthorization(String serverKey) =>
       McpService.I.cancelMcpOAuthAuthorization(serverKey);
+
+  @override
+  Future<DateTime?> attemptExpiry(String serverKey) =>
+      McpService.I.mcpOAuthAttemptExpiry(serverKey);
+}
+
+/// Test seam: replaces the production OAuth service used by the detail
+/// screen's Sign in / Re-authenticate buttons.
+@visibleForTesting
+McpOAuthService? mcpOAuthServiceForTest;
+
+/// Test seam: replaces [connectMcpServer] after a successful sign-in.
+@visibleForTesting
+Future<void> Function(BuildContext context, McpServer server)?
+mcpConnectAfterSignInForTest;
+
+/// Open the MCP sign-in sheet for [server] and act on the result (F-196):
+/// on success say so, (re)connect the server so the new token is used, and
+/// return true. A cancel returns false without touching the connection.
+Future<bool> signInToMcpServer(BuildContext context, McpServer server) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final ok = await showMcpOAuthSheet(
+    context,
+    serverKey: server.canonicalId,
+    serverName: server.name,
+    service: mcpOAuthServiceForTest ?? const _LiveMcpOAuthService(),
+  );
+  if (ok != true) return false;
+  if (messenger != null && messenger.mounted) {
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('Signed in to ${server.name}'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+  if (!context.mounted) return true;
+  final connect = mcpConnectAfterSignInForTest ?? connectMcpServer;
+  if (server.connected) {
+    // Reconnect so the session is re-established with the new token.
+    await AppState.I.toggleMcpServer(server);
+    if (!context.mounted) return true;
+  }
+  await connect(context, server);
+  return true;
+}
+
+/// "Signed in · expires in 52 min" for a stored token.
+@visibleForTesting
+String mcpOAuthTokenStatus(McpOAuthToken token, {DateTime? now}) {
+  final at = token.expiresAt;
+  if (at == null) return 'Signed in';
+  final left = at.difference(now ?? DateTime.now());
+  if (left.isNegative) {
+    return token.canRefresh
+        ? 'Signed in · token refreshes on next use'
+        : 'Sign-in expired';
+  }
+  final text = left.inDays >= 1
+      ? '${left.inDays} d'
+      : left.inHours >= 1
+      ? '${left.inHours} h'
+      : '${left.inMinutes.clamp(1, 59)} min';
+  return 'Signed in · expires in $text';
 }
 
 /// MCP detail — connect/disconnect with config preview.
@@ -3336,10 +4306,857 @@ class McpDetailScreen extends StatefulWidget {
   State<McpDetailScreen> createState() => _McpDetailScreenState();
 }
 
+/// Credential snapshot for the MCP detail screen: what the server still
+/// needs (per store) and which names are stored (values never loaded into
+/// the UI).
+class _McpCredState {
+  final List<String> missingEnv;
+  final List<String> missingHeaders;
+  final List<String> storedEnv;
+  final List<String> storedHeaders;
+  const _McpCredState({
+    required this.missingEnv,
+    required this.missingHeaders,
+    required this.storedEnv,
+    required this.storedHeaders,
+  });
+
+  bool get isEmpty =>
+      missingEnv.isEmpty &&
+      missingHeaders.isEmpty &&
+      storedEnv.isEmpty &&
+      storedHeaders.isEmpty;
+}
+
+/// OAuth snapshot for the detail screen's sign-in row.
+class _McpAuthState {
+  final McpOAuthConfig? config;
+  final McpOAuthToken? token;
+  const _McpAuthState(this.config, this.token);
+}
+
 class _McpDetailScreenState extends State<McpDetailScreen> {
+  late Future<_McpCredState> _credFuture;
+  late Future<_McpAuthState> _authFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _credFuture = _loadCreds();
+    _authFuture = _loadAuth();
+  }
+
+  Future<_McpAuthState> _loadAuth() async {
+    final key = widget.server.canonicalId;
+    return _McpAuthState(
+      await McpService.I.mcpOAuthConfigForAsync(key),
+      await McpService.I.mcpOAuthTokenFor(key),
+    );
+  }
+
+  void _reloadAuth() {
+    if (!mounted) return;
+    final next = _loadAuth();
+    setState(() {
+      _authFuture = next;
+    });
+  }
+
+  /// Sign-in row for remote servers (F-193/F-196): shown when the server
+  /// answered 401, ships an oauth block, or already holds a token. Offers
+  /// Sign in, or Re-authenticate + Sign out with the token's expiry.
+  Widget _authSection(BuildContext context, McpServer s) {
+    if (s.transport != 'http' && s.transport != 'sse') {
+      return const SizedBox.shrink();
+    }
+    return FutureBuilder<_McpAuthState>(
+      future: _authFuture,
+      builder: (context, snap) {
+        final auth = snap.data;
+        final needsSignIn = McpService.I.mcpNeedsOAuthSignIn(s.canonicalId);
+        final token = auth?.token;
+        final hasConfig = auth?.config?.isUsable ?? false;
+        if (token == null && !needsSignIn && !hasConfig) {
+          return const SizedBox.shrink();
+        }
+        final status = token != null
+            ? mcpOAuthTokenStatus(token)
+            : needsSignIn
+            ? 'Sign-in required — the server rejected the connection'
+            : 'Not signed in';
+        Future<void> signIn() async {
+          final ok = await signInToMcpServer(context, s);
+          if (ok) {
+            _reloadAuth();
+            _reloadCreds();
+          }
+        }
+
+        return Container(
+          key: ValueKey('mcp-auth-${s.canonicalId}'),
+          margin: const EdgeInsets.only(top: 8),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Aether.surfaceAlt,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    token != null
+                        ? Icons.verified_user_outlined
+                        : Icons.lock_outline,
+                    size: 15,
+                    color: token != null
+                        ? Aether.successLight
+                        : Aether.textMuted,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      status,
+                      key: ValueKey('mcp-auth-status-${s.canonicalId}'),
+                      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      key: ValueKey('mcp-auth-sign-in-${s.canonicalId}'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: token == null
+                            ? Aether.accent
+                            : Aether.surfaceRaised,
+                      ),
+                      icon: Icon(
+                        token == null ? Icons.login : Icons.refresh,
+                        size: 16,
+                      ),
+                      label: Text(
+                        token == null ? 'Sign in' : 'Re-authenticate',
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      onPressed: signIn,
+                    ),
+                  ),
+                  if (token != null) ...[
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        key: ValueKey('mcp-auth-sign-out-${s.canonicalId}'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Aether.textMuted,
+                          side: BorderSide(color: Aether.hairlineStrong),
+                        ),
+                        icon: const Icon(Icons.logout, size: 16),
+                        label: const Text(
+                          'Sign out',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        onPressed: () async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          if (s.connected) {
+                            await AppState.I.toggleMcpServer(s);
+                          }
+                          await McpService.I.clearMcpOAuthToken(
+                            s.canonicalId,
+                          );
+                          _reloadAuth();
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text('Signed out of ${s.name}'),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  void didUpdateWidget(McpDetailScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.server, widget.server)) {
+      _credFuture = _loadCreds();
+      _authFuture = _loadAuth();
+      _catalog = null;
+      _catalogConnected = false;
+    }
+  }
+
+  Future<_McpCredState> _loadCreds() async {
+    final s = widget.server;
+    final split = await McpService.I.missingCredentialsSplitFor(s);
+    final env = await AppState.I.getMcpEnv(s.canonicalId);
+    final headers = await AppState.I.getMcpHeaders(s.canonicalId);
+    return _McpCredState(
+      missingEnv: split.env,
+      missingHeaders: split.headers,
+      storedEnv: env.keys.toList(),
+      storedHeaders: {...headers.keys, ...s.headers.keys}.toList(),
+    );
+  }
+
+  void _reloadCreds() {
+    if (!mounted) return;
+    final next = _loadCreds();
+    final auth = _loadAuth();
+    setState(() {
+      _credFuture = next;
+      _authFuture = auth;
+    });
+  }
+
+  static bool _declaresCredentials(McpServer s) =>
+      s.requiredEnvNames.isNotEmpty ||
+      s.requiredHeaderNames.isNotEmpty ||
+      (s.envHint ?? '').trim().isNotEmpty;
+
+  /// Opens the credential sheet in edit mode for [env]/[headers] names;
+  /// blank fields keep the stored value.
+  Future<void> _editCredentials(
+    BuildContext context,
+    McpServer s, {
+    List<String> env = const [],
+    List<String> headers = const [],
+  }) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final res = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Aether.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
+        ),
+        child: _McpCredentialSheet(
+          server: s,
+          missingEnv: env,
+          missingHeaders: headers,
+          editing: true,
+        ),
+      ),
+    );
+    _reloadCreds();
+    if (res == 'saved') {
+      messenger.showSnackBar(
+        SnackBar(content: Text('${s.name} credentials saved')),
+      );
+    }
+  }
+
+  Widget _needsSetupBanner(
+    BuildContext context,
+    McpServer s,
+    List<String> missing,
+  ) => Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Aether.surfaceAlt,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Aether.warnLight.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.key_outlined, size: 15, color: Aether.warnLight),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Needs setup: ${missing.join(', ')} must be configured '
+                  '(secure storage) before this server can connect. '
+                  'It will not start automatically.',
+                  style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(
+              backgroundColor: Aether.accent,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            icon: const Icon(Icons.key_outlined, size: 15),
+            label: const Text(
+              'Set up & connect',
+              style: TextStyle(fontSize: 12.5),
+            ),
+            onPressed: mcpConnecting(s)
+                ? null
+                : () async {
+                    await connectMcpServer(context, s);
+                    _reloadCreds();
+                  },
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _configuredRow(
+    BuildContext context,
+    McpServer s,
+    _McpCredState creds,
+  ) => Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: Container(
+      key: ValueKey('mcp-credentials-configured-${s.canonicalId}'),
+      padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+      decoration: BoxDecoration(
+        color: Aether.surfaceAlt,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.check_circle_outline, size: 15, color: Aether.successLight),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Credentials configured',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+          ),
+          TextButton(
+            onPressed: () => _editCredentials(
+              context,
+              s,
+              env: creds.storedEnv,
+              headers: creds.storedHeaders,
+            ),
+            child: const Text('Edit'),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  /// "Environment & headers": stored names with masked values (Edit /
+  /// Delete) and declared-but-missing names (Set).
+  Widget _credentialsSection(
+    BuildContext context,
+    McpServer s,
+    _McpCredState creds,
+  ) {
+    Widget row(String name, {required bool header, required bool stored}) {
+      return Padding(
+        key: ValueKey('mcp-cred-row-${header ? 'header' : 'env'}-$name'),
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 2, 2, 2),
+          decoration: BoxDecoration(
+            color: Aether.surfaceAlt,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                header ? Icons.http : Icons.key_outlined,
+                size: 15,
+                color: stored ? Aether.textMuted : Aether.warnLight,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      header ? '$name · HTTP header' : name,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontFamily: Aether.mono,
+                      ),
+                    ),
+                    Text(
+                      stored ? '••••••••' : 'Not set',
+                      style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: stored ? 'Edit $name' : 'Set $name',
+                icon: Icon(
+                  stored ? Icons.edit_outlined : Icons.add,
+                  size: 17,
+                ),
+                onPressed: () => _editCredentials(
+                  context,
+                  s,
+                  env: header ? const [] : [name],
+                  headers: header ? [name] : const [],
+                ),
+              ),
+              if (stored)
+                IconButton(
+                  tooltip: 'Delete $name',
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    size: 17,
+                    color: Aether.danger,
+                  ),
+                  onPressed: () async {
+                    final ok = await showDeleteConfirmationDialog(
+                      context,
+                      title: 'Delete $name?',
+                      content:
+                          'Removes the stored value from this device. '
+                          '${s.name} may stop working until it is set again.',
+                    );
+                    if (!ok || !context.mounted) return;
+                    final messenger = ScaffoldMessenger.of(context);
+                    try {
+                      await AppState.I.deleteMcpCredential(
+                        s,
+                        name,
+                        header: header,
+                      );
+                    } catch (e) {
+                      Diag.swallow('mcp-credentials', e);
+                      messenger.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            "Couldn't update secure storage. Try again.",
+                          ),
+                        ),
+                      );
+                    }
+                    _reloadCreds();
+                  },
+                ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SectionHeader(
+          'Environment & headers',
+          subtitle: 'Stored in secure storage on this device',
+        ),
+        for (final n in creds.storedEnv) row(n, header: false, stored: true),
+        for (final n in creds.missingEnv)
+          if (!creds.storedEnv.contains(n)) row(n, header: false, stored: false),
+        for (final n in creds.storedHeaders) row(n, header: true, stored: true),
+        for (final n in creds.missingHeaders)
+          if (!creds.storedHeaders.contains(n))
+            row(n, header: true, stored: false),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Listen to AppState: the connect outcome lands asynchronously, so the
+    // real ready/failed state must repaint without leaving the screen.
+    // ToolUsageStore: the usage block updates as calls finish.
+    return AnimatedBuilder(
+      animation: Listenable.merge([AppState.I, ToolUsageStore.I]),
+      builder: (context, _) => _buildDetail(context),
+    );
+  }
+
+  Future<_McpCatalog>? _catalog;
+  bool _catalogConnected = false;
+
+  /// Resources/prompts, loaded once per connection (cached, not per build).
+  Future<_McpCatalog>? _catalogFor(McpServer s) {
+    final connected = McpService.I.isConnected(s.canonicalId);
+    if (connected != _catalogConnected) {
+      _catalogConnected = connected;
+      _catalog = connected ? _loadCatalog(s) : null;
+    }
+    return _catalog;
+  }
+
+  void _reloadCatalog(McpServer s) {
+    setState(() {
+      _catalog = McpService.I.isConnected(s.canonicalId)
+          ? _loadCatalog(s, refresh: true)
+          : null;
+    });
+  }
+
+  static Future<_McpCatalog> _loadCatalog(
+    McpServer s, {
+    bool refresh = false,
+  }) async {
+    final caps = McpService.I.capabilitiesFor(s.canonicalId);
+    Future<({List<Map<String, dynamic>>? items, String? error})> load(
+      String capability,
+      Future<List<Map<String, dynamic>>> Function() fetch,
+    ) async {
+      if (caps[capability] is! Map) return (items: null, error: null);
+      try {
+        return (items: await fetch(), error: null);
+      } catch (e) {
+        Diag.swallow('mcp-catalog', e);
+        return (items: null, error: "Couldn't load $capability.");
+      }
+    }
+
+    final resources = await load(
+      'resources',
+      () => McpService.I.listResources(s.canonicalId, refresh: refresh),
+    );
+    final prompts = await load(
+      'prompts',
+      () => McpService.I.listPrompts(s.canonicalId, refresh: refresh),
+    );
+    return _McpCatalog(
+      resources: resources.items,
+      resourcesError: resources.error,
+      prompts: prompts.items,
+      promptsError: prompts.error,
+    );
+  }
+
+  /// "Tools (N)": each advertised tool with its description, usage and an
+  /// input-schema preview (Claude Code `/mcp` per-server tool listing).
+  Widget _toolsSection(McpServer s) {
+    final tools = McpService.I.connectedTools[s.canonicalId];
+    final usage = ToolUsageStore.I.toolSummaries(mcpServerId: s.canonicalId);
+    if (tools == null) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+        child: Text(
+          'Connect the server to list its tools.',
+          key: ValueKey('mcp-tools-disconnected-${s.canonicalId}'),
+          style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+        ),
+      );
+    }
+    return Padding(
+      key: ValueKey('mcp-tools-${s.canonicalId}'),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Material(
+        color: Aether.surface,
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: Aether.hairline),
+        ),
+        child: Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            initiallyExpanded: tools.length <= 8,
+            title: Text(
+              'Tools (${tools.length})',
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            subtitle: Text(
+              'What the model can call on this server',
+              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+            ),
+            children: [
+              if (tools.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: Text(
+                    'This server advertises no tools.',
+                    style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                  ),
+                ),
+              for (final t in tools)
+                ExpansionTile(
+                  key: ValueKey('mcp-tool-${t.name}'),
+                  dense: true,
+                  title: Text(
+                    t.name,
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontFamily: Aether.mono,
+                    ),
+                  ),
+                  subtitle: Text(
+                    [
+                      if ((t.description ?? '').trim().isNotEmpty)
+                        t.description!.trim(),
+                      if (usage[t.name] case final u? when !u.isEmpty)
+                        '${u.calls} call${u.calls == 1 ? '' : 's'}'
+                            '${u.errors > 0 ? ' · ${u.errors} failed' : ''}',
+                    ].join(' · '),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+                  ),
+                  childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  expandedCrossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if ((t.description ?? '').trim().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: SelectableText(
+                          t.description!.trim(),
+                          style: TextStyle(fontSize: 12.5, color: Aether.text),
+                        ),
+                      ),
+                    Text(
+                      'Input schema',
+                      style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                    ),
+                    const SizedBox(height: 4),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Aether.codeBg,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: SelectableText(
+                        mcpSchemaPreview(t.inputSchema),
+                        style: TextStyle(
+                          fontFamily: Aether.mono,
+                          fontSize: 11,
+                          height: 1.45,
+                          color: Aether.textMuted,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _catalogSection(McpServer s) {
+    final future = _catalogFor(s);
+    if (future == null) return const SizedBox.shrink();
+    return FutureBuilder<_McpCatalog>(
+      future: future,
+      builder: (context, snap) {
+        final c = snap.data;
+        if (c == null) return const SizedBox.shrink();
+        Widget list(
+          String title,
+          List<Map<String, dynamic>>? items,
+          String? error,
+          String Function(Map<String, dynamic>) label,
+        ) {
+          if (items == null && error == null) return const SizedBox.shrink();
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SectionHeader(items == null ? title : '$title (${items.length})'),
+              if (error != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          error,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: Aether.warnLight,
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () => _reloadCatalog(s),
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                )
+              else if (items!.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    'None advertised.',
+                    style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                  ),
+                )
+              else
+                for (final item in items.take(50))
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                    child: Text(
+                      label(item),
+                      style: TextStyle(fontSize: 12.5, color: Aether.text),
+                    ),
+                  ),
+            ],
+          );
+        }
+
+        String describe(Map<String, dynamic> m, String id) {
+          final name = '${m[id] ?? m['name'] ?? ''}';
+          final d = '${m['description'] ?? ''}'.trim();
+          return d.isEmpty ? name : '$name — $d';
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            list(
+              'Resources',
+              c.resources,
+              c.resourcesError,
+              (m) => describe(m, 'uri'),
+            ),
+            list(
+              'Prompts',
+              c.prompts,
+              c.promptsError,
+              (m) => describe(m, 'name'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Last error: the durable failure reason, else the live status detail,
+  /// plus the server's recent stderr for stdio servers.
+  Widget _lastErrorSection(McpServer s) {
+    final durable = durableMcpStatus(s);
+    final failing =
+        durable != null &&
+        (durable.state == StartupItemState.failed ||
+            durable.state == StartupItemState.degraded ||
+            durable.state == StartupItemState.unsupported ||
+            durable.state == StartupItemState.needsSetup);
+    final live = AppState.I.serviceStatus['mcp:${s.canonicalId}'];
+    final reason = failing && (durable.reason ?? '').isNotEmpty
+        ? durable.reason!
+        : live?.health == ServiceHealth.failed
+        ? (live?.detail ?? '')
+        : '';
+    final usageErr = ToolUsageStore.I.summary(mcpServerId: s.canonicalId);
+    final stderr = McpService.I.stderrTail(s.canonicalId, lines: 8);
+    if (reason.isEmpty && usageErr.lastError == null && stderr.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Column(
+      key: ValueKey('mcp-last-error-${s.canonicalId}'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SectionHeader('Last error'),
+        if (reason.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: SelectableText(
+              'Connection: $reason',
+              style: TextStyle(fontSize: 12.5, color: Aether.dangerC),
+            ),
+          ),
+        if (usageErr.lastError case final err?)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: SelectableText(
+              'Last failed call'
+              '${usageErr.lastErrorAt == null ? '' : ' (${usageRelativeTime(usageErr.lastErrorAt!)})'}'
+              ': $err',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+          ),
+        if (stderr.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Aether.codeBg,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: SelectableText(
+              stderr.join('\n'),
+              style: TextStyle(
+                fontFamily: Aether.mono,
+                fontSize: 11,
+                color: Aether.textMuted,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Usage: calls, failures, latency and last use over 30 days, from the
+  /// per-server aggregation McpService.callTool feeds.
+  Widget _usageSection(McpServer s) {
+    final u = ToolUsageStore.I.summary(mcpServerId: s.canonicalId);
+    return Column(
+      key: ValueKey('mcp-usage-${s.canonicalId}'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SectionHeader('Usage', subtitle: 'Last 30 days on this device'),
+        if (u.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              'No tool calls yet.',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _runRow('Calls', '${u.calls}'),
+                const SizedBox(height: 6),
+                _runRow(
+                  'Failures',
+                  '${u.errors} (${(u.errors * 100 / u.calls).round()}%)',
+                ),
+                const SizedBox(height: 6),
+                _runRow(
+                  'Latency',
+                  'p50 ${u.p50Ms} ms · p95 ${u.p95Ms} ms · avg ${u.avgMs} ms',
+                ),
+                if (u.lastUsed != null) ...[
+                  const SizedBox(height: 6),
+                  _runRow('Last used', usageRelativeTime(u.lastUsed!)),
+                ],
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildDetail(BuildContext context) {
     final s = widget.server;
+    final connecting = mcpConnecting(s);
     final app = AppState.I;
     final configJson = _configJsonFor(s);
 
@@ -3349,33 +5166,15 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         leading: const BackButton(),
         title: Text(s.name),
         actions: [
-          // OAuth entry hook: shown only when this server carries a usable
-          // OAuth config.
-          FutureBuilder<McpOAuthConfig?>(
-            future: McpService.I.mcpOAuthConfigForAsync(s.canonicalId),
-            builder: (context, snapshot) {
-              final config = snapshot.data;
-              if (config == null || !config.isUsable) {
-                return const SizedBox.shrink();
-              }
-              return IconButton(
-                tooltip: 'Authorize with OAuth',
-                icon: const Icon(Icons.lock_open_outlined, size: 19),
-                onPressed: () => showMcpOAuthSheet(
-                  context,
-                  serverKey: s.canonicalId,
-                  serverName: s.name,
-                  service: const _LiveMcpOAuthService(),
-                ),
-              );
-            },
-          ),
           // Pencil — edit the mcp.json config in place (user request).
-          IconButton(
-            tooltip: 'Edit config',
-            icon: const Icon(Icons.edit_outlined, size: 19),
-            onPressed: () => _editConfigJson(context, s),
-          ),
+          // Only user-added servers: plugin-owned rows are managed by their
+          // manifest and built-in seeds would not persist the edit.
+          if (mcpConfigEditable(s))
+            IconButton(
+              tooltip: 'Edit config',
+              icon: const Icon(Icons.edit_outlined, size: 19),
+              onPressed: () => _editConfigJson(context, s),
+            ),
           SizedBox(
             height: 28,
             child: Switch(
@@ -3383,10 +5182,12 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               value: s.connected,
               activeTrackColor: Aether.accent,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              onChanged: (_) async {
-                await connectMcpServer(context, s);
-                if (context.mounted) setState(() {});
-              },
+              onChanged: connecting
+                  ? null
+                  : (_) async {
+                      await connectMcpServer(context, s);
+                      _reloadCreds();
+                    },
             ),
           ),
           const SizedBox(width: 4),
@@ -3499,18 +5300,30 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                   color: s.connected ? Aether.hairline : Colors.transparent,
                 ),
               ),
-              icon: Icon(
-                s.connected ? Icons.link_off : Icons.power_settings_new,
-                size: 16,
-              ),
+              icon: connecting
+                  ? const SizedBox(
+                      width: 15,
+                      height: 15,
+                      child: CircularProgressIndicator(strokeWidth: 1.6),
+                    )
+                  : Icon(
+                      s.connected ? Icons.link_off : Icons.power_settings_new,
+                      size: 16,
+                    ),
               label: Text(
-                s.connected ? 'Disconnect' : 'Connect server',
+                connecting
+                    ? 'Connecting…'
+                    : s.connected
+                    ? 'Disconnect'
+                    : 'Connect server',
                 style: const TextStyle(fontSize: 13.5),
               ),
-              onPressed: () async {
-                await connectMcpServer(context, s);
-                if (context.mounted) setState(() {});
-              },
+              onPressed: connecting
+                  ? null
+                  : () async {
+                      await connectMcpServer(context, s);
+                      _reloadCreds();
+                    },
             ),
           ),
           // Task 10 (spec §10): Android-incompatible desktop servers show
@@ -3542,98 +5355,73 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
             ),
           ],
           // Task 10 (spec §10): credential-dependent MCPs show their setup
-          // requirements and never auto-spawn until configured.
-          if (s.envHint != null && !s.connected) ...[
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Aether.surfaceAlt,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: Aether.warnLight.withValues(alpha: 0.35),
+          // requirements and never auto-spawn until configured. Driven by
+          // the real credential probe (missingCredentialsFor), not by the
+          // envHint declaration, so stored credentials read "configured".
+          FutureBuilder<_McpCredState>(
+            future: _credFuture,
+            builder: (context, snap) {
+              final creds = snap.data;
+              if (creds == null) return const SizedBox.shrink();
+              final missing = [...creds.missingEnv, ...creds.missingHeaders];
+              if (missing.isNotEmpty && !s.connected) {
+                return _needsSetupBanner(context, s, missing);
+              }
+              if (missing.isEmpty && _declaresCredentials(s)) {
+                return _configuredRow(context, s, creds);
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+          _authSection(context, s),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  key: ValueKey('mcp-reset-credentials-${s.canonicalId}'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Aether.textMuted,
+                    side: BorderSide(color: Aether.hairlineStrong),
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  icon: const Icon(Icons.settings_backup_restore, size: 15),
+                  label: const Text(
+                    'Reset credentials',
+                    style: TextStyle(fontSize: 12.5),
+                  ),
+                  onPressed: connecting
+                      ? null
+                      : () async {
+                          final ok = await showDeleteConfirmationDialog(
+                            context,
+                            title: 'Reset ${s.name} credentials?',
+                            content:
+                                'Disconnects ${s.name} and deletes its stored '
+                                'environment variables, HTTP headers and '
+                                'OAuth sign-in from this device. The server '
+                                'stays in your list.',
+                            confirmLabel: 'Reset',
+                          );
+                          if (!ok || !context.mounted) return;
+                          final messenger = ScaffoldMessenger.of(context);
+                          await app.resetMcpServerConfig(s);
+                          _reloadCreds();
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                '${s.name} disconnected · credentials deleted',
+                              ),
+                            ),
+                          );
+                        },
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.key_outlined,
-                        size: 15,
-                        color: Aether.warnLight,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          'Needs setup: ${s.envHint} must be configured '
-                          '(secure storage) before this server can connect. '
-                          'It will not start automatically.',
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Aether.accent,
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                    icon: const Icon(Icons.key_outlined, size: 15),
-                    label: const Text(
-                      'Set up & connect',
-                      style: TextStyle(fontSize: 12.5),
-                    ),
-                    onPressed: () async {
-                      await connectMcpServer(context, s);
-                      if (context.mounted) setState(() {});
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (s.connected) ...[
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Aether.textMuted,
-                      side: BorderSide(color: Aether.hairlineStrong),
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    icon: const Icon(Icons.settings_backup_restore, size: 15),
-                    label: const Text(
-                      'Reset config',
-                      style: TextStyle(fontSize: 12.5),
-                    ),
-                    onPressed: () {
-                      // Reset = disconnect + clear any custom env
-                      if (s.connected) app.toggleMcpServer(s);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('MCP server config reset'),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ],
+            ],
+          ),
           const SizedBox(height: 18),
           const SectionHeader('Overview'),
           Padding(
@@ -3643,31 +5431,38 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.text),
             ),
           ),
-          if (s.envHint != null) ...[
-            const SectionHeader('Environment'),
-            Container(
-              margin: const EdgeInsets.symmetric(horizontal: 4),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Aether.surfaceAlt,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Aether.hairline),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.key_outlined, size: 15, color: Aether.warnLight),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      '${s.envHint} will be requested when connecting.',
-                      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-                    ),
-                  ),
-                ],
+          FutureBuilder<_McpCredState>(
+            future: _credFuture,
+            builder: (context, snap) {
+              final creds = snap.data;
+              if (creds == null || creds.isEmpty) {
+                return const SizedBox.shrink();
+              }
+              return _credentialsSection(context, s, creds);
+            },
+          ),
+          // Claude Code `/mcp` parity: what the server offers, how it has
+          // been used, and what went wrong last.
+          const SectionHeader('Capabilities'),
+          _toolsSection(s),
+          _catalogSection(s),
+          _usageSection(s),
+          _lastErrorSection(s),
+          const SectionHeader('Config (standard mcp.json)'),
+          if (!mcpConfigEditable(s))
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+              child: Text(
+                switch (mcpManagingPlugin(s)) {
+                  final owner? =>
+                    'Managed by plugin $owner — read-only here. Update or '
+                        'reconfigure the plugin to change it.',
+                  null => 'Built-in server — config is read-only.',
+                },
+                key: ValueKey('mcp-config-readonly-${s.canonicalId}'),
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
               ),
             ),
-          ],
-          const SectionHeader('Config (standard mcp.json)'),
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 4),
             clipBehavior: Clip.antiAlias,
@@ -3751,8 +5546,10 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
   Future<void> _editConfigJson(BuildContext context, McpServer s) async {
     final app = AppState.I;
     Map<String, String> existingEnv;
+    Map<String, String> existingHeaders;
     try {
       existingEnv = await app.getMcpEnv(s.canonicalId, strict: true);
+      existingHeaders = await app.getMcpHeaders(s.canonicalId, strict: true);
     } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3765,7 +5562,11 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
     }
     if (!context.mounted) return;
     final ctrl = TextEditingController(
-      text: _configJsonFor(s, environmentNames: existingEnv.keys),
+      text: _configJsonFor(
+        s,
+        environmentNames: existingEnv.keys,
+        headerNames: existingHeaders.keys,
+      ),
     );
     await showModalBottomSheet<void>(
       context: context,
@@ -3784,33 +5585,61 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         child: SingleChildScrollView(
           child: _McpJsonEditorSheet(
             controller: ctrl,
-            onSave: (command, args, env, url, transport, headers, cwd) async {
+            onSave: (edit) async {
               // The mask means preserve, never a credential value. Read again
               // at save so a credential updated while editing is not reverted.
               final currentEnv = await app.getMcpEnv(
                 s.canonicalId,
                 strict: true,
               );
-              final mergedEnv = <String, String>{
-                for (final entry in env.entries)
+              final currentHeaders = {
+                ...s.headers,
+                ...await app.getMcpHeaders(s.canonicalId, strict: true),
+              };
+              Map<String, String> unmask(
+                Map<String, String> edited,
+                Map<String, String> current,
+              ) => {
+                for (final entry in edited.entries)
                   if (entry.value != _credentialMask)
                     entry.key: entry.value
-                  else if (currentEnv[entry.key] case final value?
+                  else if (current[entry.key] case final value?
                       when value != _credentialMask)
                     entry.key: value,
               };
+              final mergedEnv = unmask(edit.env, currentEnv);
+              final mergedHeaders = unmask(edit.headers, currentHeaders);
+              // Validate before any write so a rejected edit changes nothing.
+              final rejected = app.customMcpEditRejection(
+                s,
+                command: edit.command,
+                args: edit.args,
+                url: edit.url,
+                transport: edit.transport,
+              );
+              if (rejected != null) throw _McpEditRejected(rejected);
               // Omitted keys are explicit removals; all existing names were
               // included in the editor, including ones absent from envHint.
               await app.setMcpEnv(s.canonicalId, mergedEnv, strict: true);
-              app.updateCustomMcpServer(
-                s,
-                command: command,
-                args: args,
-                url: url,
-                transport: transport,
-                headers: headers,
-                cwd: cwd,
+              // Always written: an empty map deletes stored headers, so a
+              // header removed in the editor is really gone.
+              await app.setMcpHeaders(
+                s.canonicalId,
+                mergedHeaders,
+                strict: true,
               );
+              final reason = app.updateCustomMcpServer(
+                s,
+                command: edit.command,
+                args: edit.args,
+                url: edit.url,
+                transport: edit.transport,
+                headers: mergedHeaders,
+                cwd: edit.cwd,
+                startupTimeoutS: edit.startupTimeoutS,
+                toolTimeoutS: edit.toolTimeoutS,
+              );
+              if (reason != null) throw _McpEditRejected(reason);
               if (!ctx.mounted || !context.mounted) return;
               Navigator.pop(ctx);
               ScaffoldMessenger.of(
@@ -3821,6 +5650,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         ),
       ),
     );
+    _reloadCreds();
   }
 
   static const _credentialMask = '••••••••';
@@ -3828,12 +5658,18 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
   String _configJsonFor(
     McpServer s, {
     Iterable<String> environmentNames = const [],
+    Iterable<String> headerNames = const [],
   }) {
     final names = {
       ...environmentNames,
       ...s.requiredEnvNames,
       for (final name in (s.envHint ?? '').split(','))
         if (name.trim().isNotEmpty) name.trim(),
+    };
+    final headers = {
+      ...headerNames,
+      ...s.headers.keys,
+      ...s.requiredHeaderNames,
     };
     return jsonEncode({
       'mcpServers': {
@@ -3843,29 +5679,109 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
           'transport': s.transport,
           if (s.url != null) 'url': s.url,
           if (s.cwd != null) 'cwd': s.cwd,
+          // Round-tripped so an edit never silently resets them.
+          'startupTimeoutS': s.startupTimeoutS,
+          'toolTimeoutS': s.toolTimeoutS,
           if (names.isNotEmpty)
             'env': {for (final name in names) name: _credentialMask},
+          // Masked like env: values stay in secure storage; keep the mask to
+          // preserve, replace to rotate, remove the key to delete.
+          if (headers.isNotEmpty)
+            'headers': {for (final name in headers) name: _credentialMask},
         },
       },
     });
   }
 }
 
+/// Resources/prompts a connected server advertised (null = not advertised).
+class _McpCatalog {
+  final List<Map<String, dynamic>>? resources;
+  final String? resourcesError;
+  final List<Map<String, dynamic>>? prompts;
+  final String? promptsError;
+  const _McpCatalog({
+    this.resources,
+    this.resourcesError,
+    this.prompts,
+    this.promptsError,
+  });
+}
+
+/// Compact, readable preview of a tool's JSON input schema: one line per
+/// property (`name: type — description`, `*` = required), or the raw JSON
+/// when the schema has no `properties`.
+String mcpSchemaPreview(Map<String, dynamic>? schema) {
+  if (schema == null || schema.isEmpty) return 'No parameters';
+  final props = schema['properties'];
+  if (props is! Map || props.isEmpty) {
+    if (schema['type'] == 'object') return 'No parameters';
+    final raw = const JsonEncoder.withIndent('  ').convert(schema);
+    return raw.length > 2000 ? '${raw.substring(0, 2000)}…' : raw;
+  }
+  final required = {
+    for (final r in (schema['required'] as List?) ?? const []) '$r',
+  };
+  final lines = <String>[];
+  for (final e in props.entries) {
+    final p = e.value is Map ? e.value as Map : const {};
+    var type = p['type'];
+    if (type is List) type = type.join('|');
+    if (type == 'array' && p['items'] is Map) {
+      type = '${(p['items'] as Map)['type'] ?? 'any'}[]';
+    }
+    final enumValues = p['enum'];
+    final desc = '${p['description'] ?? ''}'.trim();
+    lines.add(
+      '${e.key}${required.contains('${e.key}') ? '*' : ''}: ${type ?? 'any'}'
+      '${enumValues is List ? ' (${enumValues.join(' | ')})' : ''}'
+      '${desc.isEmpty ? '' : ' — $desc'}',
+    );
+  }
+  if (required.isNotEmpty) lines.add('* required');
+  return lines.join('\n');
+}
+
+/// A config edit rejected by validation — its message is shown verbatim in
+/// the editor (it is already user-facing copy).
+class _McpEditRejected implements Exception {
+  final String message;
+  const _McpEditRejected(this.message);
+}
+
+/// Owning plugin label when [s] is managed by a plugin (its config comes
+/// from the plugin manifest and is not editable here), else null.
+String? mcpManagingPlugin(McpServer s) {
+  final owner = s.ownerPluginId;
+  if (owner != null && owner.isNotEmpty) return owner;
+  if (s.source.startsWith('plugin:')) return s.source.substring(7);
+  return null;
+}
+
+/// Whether the config editor may edit [s]: only user-added (custom) rows
+/// that no plugin manages. Built-in seeds and plugin rows would persist the
+/// change inconsistently (only custom rows are persisted).
+bool mcpConfigEditable(McpServer s) => s.custom && mcpManagingPlugin(s) == null;
+
+/// One parsed config edit from the mcp.json editor.
+typedef McpConfigEdit = ({
+  String command,
+  List<String> args,
+  Map<String, String> env,
+  String? url,
+  String? transport,
+  Map<String, String> headers,
+  String? cwd,
+  int? startupTimeoutS,
+  int? toolTimeoutS,
+});
+
 /// Bottom-sheet mcp.json editor: multiline TextField + live validation.
 /// Save parses the mcpServers.{name} entry and returns command + args +
 /// env (values stored in secure storage, passed to the server process).
 class _McpJsonEditorSheet extends StatefulWidget {
   final TextEditingController controller;
-  final Future<void> Function(
-    String command,
-    List<String> args,
-    Map<String, String> env,
-    String? url,
-    String? transport,
-    Map<String, String> headers,
-    String? cwd,
-  )
-  onSave;
+  final Future<void> Function(McpConfigEdit edit) onSave;
   const _McpJsonEditorSheet({required this.controller, required this.onSave});
 
   @override
@@ -3884,16 +5800,7 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
     });
   }
 
-  ({
-    String command,
-    List<String> args,
-    Map<String, String> env,
-    String? url,
-    String? transport,
-    Map<String, String> headers,
-    String? cwd,
-  })?
-  _parse(String raw) {
+  McpConfigEdit? _parse(String raw) {
     try {
       final j = jsonDecode(raw) as Map<String, dynamic>;
       final servers = j['mcpServers'] as Map<String, dynamic>?;
@@ -3919,6 +5826,14 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
             (k, v) => MapEntry(k, v.toString()),
           ) ??
           <String, String>{};
+      int? timeout(String key) {
+        final v = entry[key];
+        if (v == null) return null;
+        final n = v is num ? v.toInt() : int.tryParse(v.toString());
+        if (n == null || n <= 0) throw const FormatException('timeout');
+        return n;
+      }
+
       return (
         command: (command ?? '').trim(),
         args: args,
@@ -3927,6 +5842,8 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
         transport: transport ?? (isHttp ? 'http' : 'stdio'),
         headers: headers,
         cwd: (entry['cwd'] as String?)?.trim(),
+        startupTimeoutS: timeout('startupTimeoutS'),
+        toolTimeoutS: timeout('toolTimeoutS'),
       );
     } catch (_) {
       return null;
@@ -3956,8 +5873,9 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
         ),
         const SizedBox(height: 4),
         Text(
-          'Edit command, args, or env. Keep masked values to preserve credentials; '
-          'replace a value to update it, or remove its key to delete it.',
+          'Edit command, args, env, headers or timeouts. Keep masked values '
+          'to preserve credentials; replace a value to update it, or remove '
+          'its key to delete it.',
           style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
         ),
         const SizedBox(height: 12),
@@ -4008,15 +5926,9 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
                   }
                   setState(() => _saving = true);
                   try {
-                    await widget.onSave(
-                      parsed.command,
-                      parsed.args,
-                      parsed.env,
-                      parsed.url,
-                      parsed.transport,
-                      parsed.headers,
-                      parsed.cwd,
-                    );
+                    await widget.onSave(parsed);
+                  } on _McpEditRejected catch (e) {
+                    if (mounted) setState(() => _error = e.message);
                   } catch (_) {
                     if (mounted) {
                       setState(

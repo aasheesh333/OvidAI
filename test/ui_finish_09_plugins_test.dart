@@ -320,8 +320,8 @@ void main() {
       await reveal(tester, remove);
       await tester.tap(remove);
       await _frames(tester);
-      await reveal(tester, find.text('Delete'));
-      await tester.tap(find.text('Delete'));
+      await reveal(tester, find.text('Remove'));
+      await tester.tap(find.text('Remove'));
       await _frames(tester);
       expect(app.marketplaces, isNot(contains(repo)));
     });
@@ -366,7 +366,7 @@ void main() {
     await reveal(tester, find.text('Fetch from GitHub'));
     await tester.tap(find.text('Fetch from GitHub'));
     await _frames(tester);
-    expect(find.text('Add plugin or marketplace'), findsOneWidget);
+    expect(find.text('Add plugin, MCP server or marketplace'), findsOneWidget);
     expect(tester.widget<TextField>(field).decoration!.errorText, isNotNull);
     expect(app.plugins, isEmpty);
     expect(tester.takeException(), isNull);

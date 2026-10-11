@@ -35,7 +35,7 @@ String _screenSource() =>
 String _sheetSlice(String src) {
   final start = src.indexOf('Future<void> showPluginAddSheet');
   assert(start >= 0, 'single add sheet missing');
-  final end = src.indexOf('GithubPluginSource? _githubSourceFromInput(String', start);
+  final end = src.indexOf('parseGithubSourceInput(\n  String input', start);
   assert(end > start, 'sheet end marker missing');
   return src.substring(start, end);
 }
@@ -126,15 +126,14 @@ void main() {
     final sheet = _sheetSlice(src);
     // GitHub fetch path survives inside the single sheet.
     expect(sheet, contains('Fetch from GitHub'));
-    expect(sheet, contains('_githubSourceFromInput'));
+    expect(sheet, contains('parseGithubSourceInput'));
     expect(sheet, contains('_runSourceInstall'));
     // The five removed install routes stay gone from the sheet.
     expect(sheet, isNot(contains('Local folder')));
     expect(sheet, isNot(contains('ZIP archive')));
     expect(sheet, isNot(contains('Install from npm')));
-    expect(sheet, isNot(contains('PASTE MCP CONFIG')));
-    expect(sheet, isNot(contains('DIRECT MCP SERVER')));
-    expect(sheet, isNot(contains('Add MCP server')));
+    // F-092: manual MCP entry is the sheet's "MCP server" tab.
+    expect(sheet, contains('McpServerAddForm'));
     // File-picker seams stay deleted with their call sites.
     expect(src, isNot(contains('pluginPickDirectoryForTest')));
     expect(src, isNot(contains('pluginPickZipFileForTest')));
@@ -144,7 +143,7 @@ void main() {
 
   test('single sheet carries both GitHub fetch and marketplace add', () {
     final sheet = _sheetSlice(_screenSource());
-    expect(sheet, contains('Add plugin or marketplace'));
+    expect(sheet, contains('Add plugin, MCP server or marketplace'));
     expect(sheet, contains('Add marketplace'));
     expect(sheet, contains('addMarketplace'));
     expect(sheet, contains('fetchMarketplaceCatalog'));
@@ -167,7 +166,7 @@ void main() {
     // Exactly one "+" in the AppBar, plus the separate refresh affordance.
     // Empty-state CTAs from the redesign carry their own add icons but all
     // route to this same sheet, so the parity contract pins the AppBar entry.
-    expect(find.byTooltip('Add plugin or marketplace'), findsOneWidget);
+    expect(find.byTooltip('Add plugin, MCP server or marketplace'), findsOneWidget);
     expect(
       find.descendant(
         of: find.byType(AppBar),
@@ -177,9 +176,9 @@ void main() {
     );
     expect(find.byTooltip('Refresh marketplaces'), findsOneWidget);
     expect(find.byTooltip('Add marketplace'), findsNothing);
-    expect(find.text('Use + to add from GitHub'), findsOneWidget);
+    expect(find.byKey(const ValueKey('mcp-section-add')), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Add plugin or marketplace'));
+    await tester.tap(find.byTooltip('Add plugin, MCP server or marketplace'));
     for (var i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 100));
     }

@@ -87,6 +87,24 @@
                 <data android:scheme="https" android:host="ovidsi.com" android:pathPrefix="/s/" />
             </intent-filter>
         </activity>
+        <!-- MCP OAuth redirect (RFC 8252 private-use scheme). A trampoline
+             forwards it to the running MainActivity so the Custom Tab is
+             closed and the PKCE callback reaches app_links. -->
+        <activity
+            android:name=".OAuthCallbackActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:launchMode="singleInstance"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.dhanuk.ovidai" android:host="oauth" android:path="/callback" />
+            </intent-filter>
+        </activity>
         <!-- Foreground service: keeps the app alive while the AI agent
              works in the background (notification with Stop action). -->
         <service

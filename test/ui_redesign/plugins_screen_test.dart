@@ -140,11 +140,14 @@ void main() {
       );
       await tester.pumpAndSettle();
       // Confirm the destructive dialog.
-      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.tap(find.widgetWithText(TextButton, 'Uninstall'));
       await tester.pumpAndSettle();
 
       expect(calls, contains('uninstall'));
-      expect(app.plugins.any((p) => p.name == 'Removable'), isFalse);
+      // Uninstall keeps the row (now Available); a user-added row then
+      // offers "Remove from list" instead of a second uninstall.
+      expect(plugin.installed, isFalse);
+      expect(find.byKey(ValueKey('plugin-remove-${plugin.name}')), findsOneWidget);
     },
   );
 

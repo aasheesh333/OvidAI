@@ -49,8 +49,8 @@ class PluginSettingsPanel extends StatefulWidget {
 }
 
 class _PluginSettingsPanelState extends State<PluginSettingsPanel> {
-  late final NativePluginConfigStore _store;
-  late final Map<String, TextEditingController> _controllers;
+  late NativePluginConfigStore _store;
+  final Map<String, TextEditingController> _controllers = {};
   bool _loading = true;
   bool _saving = false;
   bool _saved = false;
@@ -60,9 +60,39 @@ class _PluginSettingsPanelState extends State<PluginSettingsPanel> {
   void initState() {
     super.initState();
     _store = widget.store ?? NativePluginConfigStore.I;
-    _controllers = {
-      for (final f in widget.fields) f.key: TextEditingController(),
-    };
+    for (final f in widget.fields) {
+      _controllers[f.key] = TextEditingController();
+    }
+    _load();
+  }
+
+  /// The manifest's field set can change while the detail page is open
+  /// (Retry activation, plugin update re-registers the manifest). Dispose
+  /// controllers for removed fields, create ones for new fields and reload
+  /// stored values, so a rebuilt field list never dereferences a missing
+  /// controller.
+  @override
+  void didUpdateWidget(covariant PluginSettingsPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final storeChanged = !identical(widget.store, oldWidget.store);
+    if (storeChanged) _store = widget.store ?? NativePluginConfigStore.I;
+    final newKeys = {for (final f in widget.fields) f.key};
+    final oldKeys = {for (final f in oldWidget.fields) f.key};
+    final keysChanged =
+        newKeys.length != oldKeys.length || !newKeys.containsAll(oldKeys);
+    if (!keysChanged &&
+        !storeChanged &&
+        widget.pluginName == oldWidget.pluginName) {
+      return;
+    }
+    for (final key in _controllers.keys.toList()) {
+      if (!newKeys.contains(key)) _controllers.remove(key)?.dispose();
+    }
+    for (final key in newKeys) {
+      _controllers.putIfAbsent(key, TextEditingController.new);
+    }
+    _loading = true;
+    _saved = false;
     _load();
   }
 
