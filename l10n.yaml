@@ -1,0 +1,13 @@
+# Flutter gen-l10n configuration. `flutter pub get` regenerates
+# lib/l10n/app_localizations*.dart from the ARB files in lib/l10n.
+#
+# app_en.arb is the template: add every new user-facing string there first,
+# with an @description for translators. Strings migrate file by file as each
+# screen is edited; test/l10n_literal_ratchet_test.dart stops new literals.
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+output-class: AppLocalizations
+# Keep AppLocalizations.of(context) nullable so widgets pumped without the
+# delegates (many existing tests) fall back to English via context.l10n.
+nullable-getter: true

@@ -9,6 +9,7 @@ import 'core/theme.dart';
 import 'ui/login_gate.dart';
 import 'ui/shell.dart';
 import 'core/share_link_resolver.dart';
+import 'l10n/l10n.dart';
 import 'ui/shared_conversation_screen.dart';
 
 final appNavigatorKey = GlobalKey<NavigatorState>();
@@ -184,6 +185,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
       navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: Aether.theme(),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       home: const LoginGate(child: OvidShell()),
     );
   }

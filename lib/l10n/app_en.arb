@@ -1,0 +1,131 @@
+{
+  "@@locale": "en",
+
+  "actionRetry": "Retry",
+  "@actionRetry": {"description": "Button that repeats a failed action."},
+
+  "errorDetailsShow": "Details",
+  "@errorDetailsShow": {"description": "Expands technical details under an error message."},
+  "errorDetailsHide": "Hide details",
+  "@errorDetailsHide": {"description": "Collapses technical details under an error message."},
+  "errorDetailsCopy": "Copy details",
+  "@errorDetailsCopy": {"description": "Tooltip: copies the technical error details for support."},
+  "errorDetailsCopied": "Details copied",
+  "@errorDetailsCopied": {"description": "Confirmation after error details were copied to the clipboard."},
+
+  "errorGeneric": "Something went wrong. Please try again.",
+  "@errorGeneric": {"description": "Fallback for an error Ovid cannot classify."},
+  "errorOffline": "Ovid couldn't connect. Check your internet connection and try again.",
+  "@errorOffline": {"description": "Network unreachable, DNS failure, connection refused."},
+  "errorTimeout": "That took too long to respond. Please try again.",
+  "@errorTimeout": {"description": "A request or operation timed out."},
+  "errorUnauthorized": "Your sign-in or key was rejected. Check it and try again.",
+  "@errorUnauthorized": {"description": "HTTP 401 or a rejected credential."},
+  "errorForbidden": "You don't have permission to do that.",
+  "@errorForbidden": {"description": "HTTP 403."},
+  "errorNotFound": "Ovid couldn't find what it was looking for.",
+  "@errorNotFound": {"description": "HTTP 404 or a missing resource."},
+  "errorRateLimited": "Too many requests right now. Wait a moment and try again.",
+  "@errorRateLimited": {"description": "HTTP 429."},
+  "errorServer": "The service is having trouble right now. Please try again later.",
+  "@errorServer": {"description": "HTTP 5xx."},
+  "errorBadResponse": "Ovid received an unexpected response. Please try again.",
+  "@errorBadResponse": {"description": "Malformed or unexpected data (parse/type errors)."},
+  "errorDevice": "Your device couldn't complete that action.",
+  "@errorDevice": {"description": "A platform/plugin call failed (file picker, storage, etc.)."},
+  "errorFile": "Ovid couldn't read or write the file.",
+  "@errorFile": {"description": "A file-system operation failed."},
+  "errorNotNow": "That can't be done right now.",
+  "@errorNotNow": {"description": "An action was refused because of the app's current state."},
+  "errorWidgetFallback": "Something went wrong showing this part of the screen.",
+  "@errorWidgetFallback": {"description": "Shown in place of a widget that failed to build in release builds."},
+
+  "scheduleErrorResumeBackgroundFirst": "Background execution is paused. Resume it to run this task.",
+  "@scheduleErrorResumeBackgroundFirst": {"description": "Resuming a scheduled task while background execution is stopped."},
+  "scheduleActionResumeBackground": "Resume background",
+  "@scheduleActionResumeBackground": {"description": "Inline action that resumes background execution."},
+  "scheduleErrorPreviousRunStopping": "The previous run is still stopping. Try again in a moment.",
+  "@scheduleErrorPreviousRunStopping": {"description": "Resuming a task whose previous run has not finished stopping."},
+  "scheduleErrorPauseBeforeEdit": "Pause this task before editing it.",
+  "@scheduleErrorPauseBeforeEdit": {"description": "Editing a task that is currently running."},
+  "scheduleErrorInvalid": "That schedule isn't valid. Check the time, interval and retries.",
+  "@scheduleErrorInvalid": {"description": "The schedule specification was rejected."},
+  "scheduleUpdated": "Schedule updated.",
+  "@scheduleUpdated": {"description": "A schedule action succeeded."},
+  "scheduleUpdateFailed": "Couldn't update the schedule. {reason}",
+  "@scheduleUpdateFailed": {
+    "description": "A schedule action failed; reason is a full friendly sentence.",
+    "placeholders": {"reason": {"type": "String", "example": "Please try again."}}
+  },
+
+  "providerFetchKeyRejected": "Key rejected by provider. Check the API key and try again.",
+  "@providerFetchKeyRejected": {"description": "Fetching models returned HTTP 401/403."},
+  "providerFetchNoModelsEndpoint": "No /models endpoint at this URL. Check the base URL.",
+  "@providerFetchNoModelsEndpoint": {"description": "Fetching models returned HTTP 404. Do not translate /models."},
+  "providerFetchUnreachable": "Couldn't reach provider. Check the URL and your connection.",
+  "@providerFetchUnreachable": {"description": "Fetching models failed with a timeout or network error."},
+  "providerFetchUnexpectedResponse": "Unexpected response from provider. Check the base URL.",
+  "@providerFetchUnexpectedResponse": {"description": "The /models response could not be parsed."},
+  "providerFetchRateLimited": "Provider is limiting requests. Try again shortly.",
+  "@providerFetchRateLimited": {"description": "Fetching models returned HTTP 429."},
+  "providerFetchServerError": "Provider is having trouble right now. Try again later.",
+  "@providerFetchServerError": {"description": "Fetching models returned HTTP 5xx."},
+  "providerFetchFailed": "Provider refused the request. Check the key and URL.",
+  "@providerFetchFailed": {"description": "Fetching models returned another non-200 status."},
+  "providerFetchInvalidKey": "API key looks invalid (contains whitespace or extra text). Please re-enter your key.",
+  "@providerFetchInvalidKey": {"description": "The saved key cannot be sent as an HTTP header."},
+
+  "skillsLoadFailed": "Couldn't load your skills.",
+  "@skillsLoadFailed": {"description": "Skills screen failed to list uploaded skills."},
+  "skillsUploadFailed": "Couldn't upload skills. {reason}",
+  "@skillsUploadFailed": {
+    "description": "Picking or saving skill files failed; reason is a full friendly sentence.",
+    "placeholders": {"reason": {"type": "String", "example": "Your device couldn't complete that action."}}
+  },
+  "skillsUploadFileFailed": "{name} — {reason}",
+  "@skillsUploadFileFailed": {
+    "description": "One skill file could not be copied.",
+    "placeholders": {
+      "name": {"type": "String", "example": "notes.md"},
+      "reason": {"type": "String", "example": "Ovid couldn't read or write the file."}
+    }
+  },
+
+  "storageMeasureFailed": "Couldn't measure storage.",
+  "@storageMeasureFailed": {"description": "Storage screen could not compute folder sizes."},
+  "storageSizeUnknown": "—",
+  "@storageSizeUnknown": {"description": "Placeholder for a size that could not be measured."},
+  "storageCookiesCleared": "Signed out of websites in the in-app browser.",
+  "@storageCookiesCleared": {"description": "All in-app browser cookies were cleared."},
+  "storageCookiesPartial": "Signed out of websites, but {count, plural, =1{1 chat browser profile} other{{count} chat browser profiles}} couldn't be cleared. Try again.",
+  "@storageCookiesPartial": {
+    "description": "Some per-chat browser cookie jars could not be cleared.",
+    "placeholders": {"count": {"type": "int", "example": "2"}}
+  },
+  "storageCookiesFailed": "Couldn't clear cookies on this device.",
+  "@storageCookiesFailed": {"description": "Clearing cookies failed entirely."},
+
+  "settingsExportFailed": "Couldn't export chats. {reason}",
+  "@settingsExportFailed": {
+    "description": "Exporting chats to a JSON file failed; reason is a full friendly sentence.",
+    "placeholders": {"reason": {"type": "String", "example": "Ovid couldn't read or write the file."}}
+  },
+
+  "backupInvalidArchive": "This file isn't a valid Ovid transcript archive.",
+  "@backupInvalidArchive": {"description": "The selected backup file failed validation."},
+  "backupFailedUnchanged": "{operation} failed. {reason} No data was changed.",
+  "@backupFailedUnchanged": {
+    "description": "A backup step failed before anything was written.",
+    "placeholders": {
+      "operation": {"type": "String", "example": "Restore"},
+      "reason": {"type": "String", "example": "This file isn't a valid Ovid transcript archive."}
+    }
+  },
+  "backupRestoreRolledBack": "Restore failed. {reason} Ovid undid the partial restore.",
+  "@backupRestoreRolledBack": {
+    "description": "Restore failed while saving and the partial write was rolled back.",
+    "placeholders": {"reason": {"type": "String", "example": "Please try again."}}
+  },
+  "backupRestoreRollbackUnverified": "Restore failed, and Ovid couldn't confirm the partial restore was undone. Some restored chats or settings may remain. Check your chat list before trying again.",
+  "@backupRestoreRollbackUnverified": {"description": "Restore failed and its rollback could not be verified."}
+}
