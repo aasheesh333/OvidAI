@@ -15,7 +15,21 @@ enum ResetStoreKind {
   imageReceipts('image-receipts'),
   shares('shares'),
   privateSync('private-sync'),
-  collaboration('collaboration');
+  collaboration('collaboration'),
+  // Providers, plugins, MCP servers, custom presets and permission grants.
+  configuration('configuration'),
+  // Secure storage: provider API keys, GitHub token, MCP env/OAuth, SSH keys.
+  secrets('secrets'),
+  // Every remaining SharedPreferences setting (minus a device keep-list).
+  preferences('preferences'),
+  // Uploaded skill files (<documents>/skills).
+  skills('skills'),
+  // Legacy chat JSON exports left in the documents directory.
+  exports('exports'),
+  // App-made temporary artifacts: backup/export archives and staging dirs.
+  cache('cache'),
+  // The default WebView cookie jar.
+  cookies('cookies');
 
   const ResetStoreKind(this.id);
   final String id;

@@ -1479,15 +1479,45 @@ class _ExportChatsScreen extends StatefulWidget {
 
 class _ExportChatsScreenState extends State<_ExportChatsScreen> {
   bool _busy = false;
-  File? _exported;
+  Directory? _staging;
+
+  @override
+  void dispose() {
+    _discardStaging();
+    super.dispose();
+  }
+
+  /// The plaintext export lives only in a temporary staging directory until
+  /// the share sheet has copied it; nothing is left in app documents.
+  void _discardStaging() {
+    final staging = _staging;
+    _staging = null;
+    if (staging == null) return;
+    staging.delete(recursive: true).catchError((Object e) {
+      Diag.swallow('settings.export_cleanup', e);
+      return staging;
+    });
+  }
 
   Future<void> _export() async {
     setState(() => _busy = true);
     try {
-      final dir = await getApplicationDocumentsDirectory();
-      final file = File(
-        '${dir.path}/ovid-sessions-${DateTime.now().millisecondsSinceEpoch}.json',
-      );
+      final temp = await getTemporaryDirectory();
+      // Remove any export left behind by an interrupted earlier attempt.
+      await for (final entity in temp.list(followLinks: false)) {
+        if (entity is Directory &&
+            entity.uri.pathSegments
+                .where((segment) => segment.isNotEmpty)
+                .last
+                .startsWith('ovid-chat-export-')) {
+          await entity.delete(recursive: true);
+        }
+      }
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final staging = _staging = await Directory(
+        '${temp.path}/ovid-chat-export-$stamp',
+      ).create(recursive: true);
+      final file = File('${staging.path}/ovid-sessions-$stamp.json');
       final payload = {
         'exportedAt': DateTime.now().toIso8601String(),
         'sessions': AppState.I.sessions.map((s) => s.toJson()).toList(),
@@ -1496,18 +1526,19 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
         const JsonEncoder.withIndent('  ').convert(payload),
       );
       if (!mounted) return;
-      setState(() => _exported = file);
+      // The native share path copies the file into its own short-lived share
+      // cache before the chooser opens, so the staging copy can go now.
+      await showNativeShare(context, () => NativeShare.file(file.path));
+      _discardStaging();
+    } catch (e) {
+      _discardStaging();
+      Diag.swallow('settings.export', e);
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Exported to:\n${file.path}'),
-          behavior: SnackBarBehavior.floating,
+        const SnackBar(
+          content: Text('Export failed. Free some space and try again.'),
         ),
       );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1522,8 +1553,8 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
         children: [
           Text(
             'Exports every session (messages, todos, goals, schedules, '
-            'attachments metadata) as a single JSON file saved to the app '
-            'documents directory.',
+            'attachments metadata) as a single JSON file and opens the share '
+            'sheet so you can save or send it. No copy is kept in the app.',
             style: TextStyle(
               fontSize: 13.5,
               height: 1.6,
@@ -1539,20 +1570,9 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
                     height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Icon(Icons.download_outlined, size: 18),
-            label: Text(_busy ? 'Exporting…' : 'Export all sessions'),
+                : const Icon(Icons.ios_share_outlined, size: 18),
+            label: Text(_busy ? 'Exporting…' : 'Export and share JSON'),
           ),
-          if (_exported != null)
-            OutlinedButton.icon(
-              onPressed: _busy
-                  ? null
-                  : () => showNativeShare(
-                      context,
-                      () => NativeShare.file(_exported!.path),
-                    ),
-              icon: const Icon(Icons.share_outlined),
-              label: const Text('Share / save JSON'),
-            ),
         ],
       ),
     );
