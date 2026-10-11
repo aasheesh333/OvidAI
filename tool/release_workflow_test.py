@@ -102,7 +102,15 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertEqual(command[0], "pytest")
         self.assertEqual(
             command[1:],
-            ["server/account/tests", "server/sync", "server/collaboration", "server/images", "server/shares"],
+            [
+                "server/account/tests",
+                "server/sync",
+                "server/collaboration",
+                "server/images",
+                "server/shares",
+                "server/billing",
+                "server/reports",
+            ],
         )
         self.assertNotIn("deploy", server.get("name", "").lower())
 
