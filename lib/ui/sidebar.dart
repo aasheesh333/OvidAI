@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/connection_service.dart';
@@ -12,6 +13,97 @@ import 'schedule_screen.dart';
 import 'conversation_share_sheet.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/ovid_mark.dart';
+
+/// What one sidebar row shows. Value-equal, so a refresh that changes
+/// nothing a row displays (a streamed token, a tool event) is a no-op.
+@immutable
+class SessionSummary {
+  const SessionSummary({
+    required this.session,
+    required this.id,
+    required this.title,
+    required this.model,
+    required this.hasImage,
+  });
+
+  factory SessionSummary.of(ChatSession session) => SessionSummary(
+    session: session,
+    id: session.id,
+    title: session.title,
+    model: session.model,
+    hasImage: session.hasImage,
+  );
+
+  /// The live session, for row actions (delete, share, rename).
+  final ChatSession session;
+  final String id;
+  final String title;
+  final String model;
+  final bool hasImage;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SessionSummary &&
+      identical(other.session, session) &&
+      other.id == id &&
+      other.title == title &&
+      other.model == model &&
+      other.hasImage == hasImage;
+
+  @override
+  int get hashCode => Object.hash(id, title, model, hasImage);
+}
+
+/// List-slot key for a session row. Its own type, so it never collides with
+/// the row's inner `Dismissible` key (`ValueKey(session.id)`).
+class _SessionRowKey extends ValueKey<String> {
+  const _SessionRowKey(super.value);
+}
+
+/// The sidebar's list state: root-session rows in stored order plus the
+/// active id.
+@immutable
+class SidebarSessions {
+  const SidebarSessions(this.items, this.activeId);
+
+  final List<SessionSummary> items;
+  final String? activeId;
+}
+
+/// Narrow view of [AppState] for the session list. It recomputes the row
+/// summaries on each [AppState] notification but only notifies its own
+/// listeners when membership, order, a title/model/icon or the active chat
+/// changed. Busy dots are per row ([AgentService.busyListenable]).
+class SidebarSessionsNotifier extends ValueNotifier<SidebarSessions> {
+  SidebarSessionsNotifier() : super(_compute()) {
+    AppState.I.addListener(sync);
+  }
+
+  static SidebarSessions _compute() {
+    final app = AppState.I;
+    // Subagent sessions are apparatus, not chats — they are reached from the
+    // parent's subagent card / catalog, never from the sidebar.
+    return SidebarSessions([
+      for (final s in app.sessions)
+        if (!s.isSubagent) SessionSummary.of(s),
+    ], app.activeSessionId);
+  }
+
+  void sync() {
+    final next = _compute();
+    if (next.activeId == value.activeId &&
+        listEquals(next.items, value.items)) {
+      return;
+    }
+    value = next;
+  }
+
+  @override
+  void dispose() {
+    AppState.I.removeListener(sync);
+    super.dispose();
+  }
+}
 
 /// Sessions sidebar — DeepSeek-style harness: auto-named sessions,
 /// search, new session, swipe to delete, long-press rename.
@@ -38,6 +130,7 @@ class SessionsSidebar extends StatefulWidget {
 class _SessionsSidebarState extends State<SessionsSidebar> {
   String _query = '';
   final TextEditingController _searchController = TextEditingController();
+  final SidebarSessionsNotifier _sessions = SidebarSessionsNotifier();
 
   Future<void> _navigateFromSidebar(
     BuildContext context,
@@ -51,6 +144,7 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
   @override
   void dispose() {
     _searchController.dispose();
+    _sessions.dispose();
     super.dispose();
   }
 
@@ -107,7 +201,12 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: TextField(
                         controller: _searchController,
-                        onChanged: (v) => setState(() => _query = v.trim()),
+                        onChanged: (v) {
+                          // Typing also re-reads the sessions, so an edit
+                          // that skipped AppState.refresh still shows up.
+                          _sessions.sync();
+                          setState(() => _query = v.trim());
+                        },
                         style: const TextStyle(fontSize: 13),
                         decoration: InputDecoration(
                           hintText: 'Search sessions',
@@ -175,61 +274,63 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                 // Only sessions scroll; search and navigation stay reachable
                 // regardless of the session count or filter results.
                 Expanded(
-                  child: SingleChildScrollView(
-                    keyboardDismissBehavior:
-                        ScrollViewKeyboardDismissBehavior.onDrag,
-                    child: AnimatedBuilder(
-                      animation: app,
-                      builder: (_, _) {
-                        final q = _query.toLowerCase();
-                        // Subagent sessions are apparatus, not chats — they are
-                        // reached from the parent's subagent card / catalog, never
-                        // from the sidebar.
-                        final roots = app.rootSessions;
-                        final visible = q.isEmpty
-                            ? roots
-                            : roots
-                                  .where(
-                                    (s) =>
-                                        s.title.toLowerCase().contains(q) ||
-                                        s.model.toLowerCase().contains(q),
-                                  )
-                                  .toList();
-                        if (visible.isEmpty) {
+                  child: ValueListenableBuilder<SidebarSessions>(
+                    valueListenable: _sessions,
+                    builder: (_, data, _) {
+                      final q = _query.toLowerCase();
+                      final visible = q.isEmpty
+                          ? data.items
+                          : data.items
+                                .where(
+                                  (s) =>
+                                      s.title.toLowerCase().contains(q) ||
+                                      s.model.toLowerCase().contains(q),
+                                )
+                                .toList();
+                      if (visible.isEmpty) {
+                        return Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text(
+                            q.isEmpty
+                                ? 'No sessions yet'
+                                : 'No sessions match "$_query"',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Aether.textFaint,
+                            ),
+                          ),
+                        );
+                      }
+                      final indexById = <String, int>{
+                        for (var i = 0; i < visible.length; i++)
+                          visible[i].id: i,
+                      };
+                      // Sessions list — flat, in stored order. No grouping
+                      // headers: the sidebar deliberately shows no repo or
+                      // workspace labels (user decision 2026-09-24); the repo
+                      // name still appears in the studio chatbox folder chip.
+                      // Lazy: only visible rows are built, so thousands of
+                      // chats cost the same as a screenful.
+                      return ListView.builder(
+                        keyboardDismissBehavior:
+                            ScrollViewKeyboardDismissBehavior.onDrag,
+                        itemCount: visible.length,
+                        findChildIndexCallback: (key) =>
+                            key is _SessionRowKey ? indexById[key.value] : null,
+                        itemBuilder: (_, i) {
+                          final summary = visible[i];
                           return Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: Text(
-                              q.isEmpty
-                                  ? 'No sessions yet'
-                                  : 'No sessions match "$_query"',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Aether.textFaint,
-                              ),
+                            key: _SessionRowKey(summary.id),
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: _SessionTile(
+                              summary: summary,
+                              active: summary.id == data.activeId,
+                              isDrawer: widget.isDrawer,
                             ),
                           );
-                        }
-                        // Sessions list — flat, in stored order. No grouping
-                        // headers: the sidebar deliberately shows no repo or
-                        // workspace labels (user decision 2026-09-24); the repo
-                        // name still appears in the studio chatbox folder chip.
-                        return Column(
-                          children: [
-                            for (final s in visible)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                ),
-                                child: _SessionTile(
-                                  session: s,
-                                  active: s.id == app.activeSessionId,
-                                  isDrawer: widget.isDrawer,
-                                ),
-                              ),
-                          ],
-                        );
-                      },
-                    ),
+                        },
+                      );
+                    },
                   ),
                 ),
 
@@ -542,15 +643,24 @@ class _SidebarNavRow extends StatelessWidget {
   }
 }
 
+/// Session-row build counter for rebuild-scope tests (debug builds only).
+@visibleForTesting
+abstract final class SessionTileDebug {
+  static int buildCount = 0;
+  static void reset() => buildCount = 0;
+}
+
 class _SessionTile extends StatefulWidget {
-  final ChatSession session;
+  final SessionSummary summary;
   final bool active;
   final bool isDrawer;
   const _SessionTile({
-    required this.session,
+    required this.summary,
     required this.active,
     required this.isDrawer,
   });
+
+  ChatSession get session => summary.session;
 
   @override
   State<_SessionTile> createState() => _SessionTileState();
@@ -561,162 +671,134 @@ class _SessionTileState extends State<_SessionTile> {
 
   @override
   Widget build(BuildContext context) {
+    assert(() {
+      SessionTileDebug.buildCount++;
+      return true;
+    }());
     final app = AppState.I;
+    final summary = widget.summary;
     final session = widget.session;
     final active = widget.active;
-    return AnimatedBuilder(
-      animation: AgentService.I,
-      builder: (_, _) {
-        final running = AgentService.I.busyFor(session.id);
-        final bg = active
-            ? Aether.surfaceRaised
-            : _hover
-            ? Aether.surfaceAlt
-            : Colors.transparent;
-        return Dismissible(
-          key: ValueKey(session.id),
-          direction: DismissDirection.endToStart,
-          // Swipe delete must confirm like the delete button does — an
-          // accidental swipe used to delete the chat with no way back.
-          confirmDismiss: (_) => _askDeleteConfirmed(context),
-          onDismissed: (_) => app.deleteSession(session.id),
-          background: Container(
-            alignment: Alignment.centerRight,
-            padding: const EdgeInsets.only(right: 20),
-            decoration: BoxDecoration(
-              color: Aether.danger.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Icon(
-              Icons.delete_outline,
-              color: Aether.danger,
-              size: 18,
-            ),
+    final bg = active
+        ? Aether.surfaceRaised
+        : _hover
+        ? Aether.surfaceAlt
+        : Colors.transparent;
+    return Dismissible(
+      key: ValueKey(session.id),
+      direction: DismissDirection.endToStart,
+      // Swipe delete must confirm like the delete button does — an
+      // accidental swipe used to delete the chat with no way back.
+      confirmDismiss: (_) => _askDeleteConfirmed(context),
+      onDismissed: (_) => app.deleteSession(session.id),
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        decoration: BoxDecoration(
+          color: Aether.danger.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: const Icon(Icons.delete_outline, color: Aether.danger, size: 18),
+      ),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          margin: const EdgeInsets.symmetric(vertical: 1.5),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(10),
+            border: active ? Border.all(color: Aether.hairlineStrong) : null,
           ),
-          child: MouseRegion(
-            onEnter: (_) => setState(() => _hover = true),
-            onExit: (_) => setState(() => _hover = false),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
-              margin: const EdgeInsets.symmetric(vertical: 1.5),
-              decoration: BoxDecoration(
-                color: bg,
-                borderRadius: BorderRadius.circular(10),
-                border: active
-                    ? Border.all(color: Aether.hairlineStrong)
-                    : null,
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(10),
-                      onTap: () {
-                        app.selectSession(session.id);
-                        // Only the drawer is a route; in wide mode maybePop
-                        // would pop the app itself.
-                        if (widget.isDrawer) Navigator.maybePop(context);
-                      },
-                      onLongPress: () => _showActions(context),
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 11, 4, 11),
-                        child: Row(
-                          children: [
-                            Icon(
-                              session.messages.any(
-                                    (m) => m.kind == MsgKind.imageGen,
-                                  )
-                                  ? Icons.image_outlined
-                                  : Icons.chat_bubble_outline,
-                              size: 14,
-                              color: active ? Aether.accent : Aether.textFaint,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
+            children: [
+              Expanded(
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () {
+                    app.selectSession(session.id);
+                    // Only the drawer is a route; in wide mode maybePop
+                    // would pop the app itself.
+                    if (widget.isDrawer) Navigator.maybePop(context);
+                  },
+                  onLongPress: () => _showActions(context),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 11, 4, 11),
+                    child: Row(
+                      children: [
+                        Icon(
+                          summary.hasImage
+                              ? Icons.image_outlined
+                              : Icons.chat_bubble_outline,
+                          size: 14,
+                          color: active ? Aether.accent : Aether.textFaint,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                summary.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: active
+                                      ? FontWeight.w600
+                                      : FontWeight.w400,
+                                  color: active
+                                      ? Aether.text
+                                      : Aether.textMuted,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Row(
                                 children: [
-                                  Text(
-                                    session.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: active
-                                          ? FontWeight.w600
-                                          : FontWeight.w400,
-                                      color: active
-                                          ? Aether.text
-                                          : Aether.textMuted,
+                                  Expanded(
+                                    child: Text(
+                                      summary.model,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 10.5,
+                                        color: Aether.textFaint,
+                                      ),
                                     ),
                                   ),
-                                  const SizedBox(height: 2),
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          session.model,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            fontSize: 10.5,
-                                            color: Aether.textFaint,
-                                          ),
-                                        ),
-                                      ),
-                                      if (running) ...[
-                                        const SizedBox(width: 4),
-                                        Container(
-                                          width: 6,
-                                          height: 6,
-                                          decoration: const BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: Aether.accent,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 3),
-                                        Text(
-                                          'running',
-                                          style: TextStyle(
-                                            fontSize: 9.5,
-                                            color: Aether.accent,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ],
-                                    ],
-                                  ),
+                                  _RunningBadge(sessionId: session.id),
                                 ],
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'Session actions',
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(Icons.more_horiz, size: 18),
-                    onPressed: () => _showActions(context),
-                  ),
-                  IconButton(
-                    tooltip: 'Delete chat',
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(
-                      Icons.delete_outline,
-                      size: 17,
-                      color: Aether.danger,
-                    ),
-                    onPressed: () => _confirmDelete(context),
-                  ),
-                  const SizedBox(width: 4),
-                ],
+                ),
               ),
-            ),
+              IconButton(
+                tooltip: 'Session actions',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.more_horiz, size: 18),
+                onPressed: () => _showActions(context),
+              ),
+              IconButton(
+                tooltip: 'Delete chat',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(
+                  Icons.delete_outline,
+                  size: 17,
+                  color: Aether.danger,
+                ),
+                onPressed: () => _confirmDelete(context),
+              ),
+              const SizedBox(width: 4),
+            ],
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -906,6 +988,47 @@ class _SessionTileState extends State<_SessionTile> {
         },
       ),
     ).whenComplete(c.dispose);
+  }
+}
+
+/// "● running" suffix on a session row. Listens to that session's busy flag
+/// only, so the row itself never rebuilds while a reply streams.
+class _RunningBadge extends StatelessWidget {
+  const _RunningBadge({required this.sessionId});
+
+  final String sessionId;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: AgentService.I.busyListenable(sessionId),
+      builder: (_, running, _) {
+        if (!running) return const SizedBox.shrink();
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(width: 4),
+            Container(
+              width: 6,
+              height: 6,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Aether.accent,
+              ),
+            ),
+            const SizedBox(width: 3),
+            Text(
+              'running',
+              style: TextStyle(
+                fontSize: 9.5,
+                color: Aether.accent,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 }
 

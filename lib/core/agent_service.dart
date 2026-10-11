@@ -13,6 +13,7 @@ import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+
 import '../core/theme.dart';
 import 'format.dart';
 import 'model_failure.dart';
@@ -898,6 +899,7 @@ class AgentService extends ChangeNotifier {
     // hook_service import (circular).
     AppState.I.onSessionDeleted = (sessionId) {
       dropSessionRun(sessionId);
+      _busyNotifiers.remove(sessionId);
       SkillService.I.dropSession(sessionId);
       // Drop the session's browser bucket AND its native profile (cookie jar +
       // web storage). Without this, deleting a chat would leave a logged-in
@@ -971,6 +973,9 @@ class AgentService extends ChangeNotifier {
     //    (that method PERFORMS the stop).
     HookService.I.userStopChecker = (sid) =>
         _runs[sid]?.cancelRequested ?? false;
+    // Run state also changes on paths that only refresh AppState; keep the
+    // per-session busy notifiers in step with those too.
+    AppState.I.addListener(_syncBusyNotifiers);
   }
 
   @override
@@ -5750,6 +5755,29 @@ user which one instead of assuming this one.''';
   /// makes session B blink or show a wrong stop/send button.  This was the
   /// "both sessions blinking + old session shows send" bug.
   bool busyFor(String sessionId) => _runs[sessionId]?.activeRunId != null;
+
+  /// Per-session busy flags for list rows. Each notifier only fires when its
+  /// own session's [busyFor] flips, so a sidebar tile no longer rebuilds on
+  /// every [AgentService] notification (one per streamed event).
+  final Map<String, ValueNotifier<bool>> _busyNotifiers = {};
+
+  /// A listenable that tracks [busyFor] for [sessionId]. Synced on every
+  /// [notifyListeners] and on every [AppState] refresh.
+  ValueListenable<bool> busyListenable(String sessionId) => _busyNotifiers
+      .putIfAbsent(sessionId, () => ValueNotifier<bool>(busyFor(sessionId)));
+
+  void _syncBusyNotifiers() {
+    if (_busyNotifiers.isEmpty) return;
+    for (final entry in _busyNotifiers.entries) {
+      entry.value.value = busyFor(entry.key);
+    }
+  }
+
+  @override
+  void notifyListeners() {
+    _syncBusyNotifiers();
+    super.notifyListeners();
+  }
 
   /// Live status line for [sessionId] ("retrying in 9s…", "running npm test").
   /// Null when idle or when nothing has been reported yet.
