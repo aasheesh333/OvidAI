@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -659,6 +660,48 @@ void main() {
     expect(find.text('Share'), findsOneWidget);
     expect(find.byType(ChatShareButton), findsNothing);
   });
+
+  for (final appAvailable in [true, false]) {
+    testWidgets(
+      'generated image Open uses the FileProvider channel '
+      '(app available: $appAvailable)',
+      (tester) async {
+        final dir = Directory.systemTemp.createTempSync('chat-image-open-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final image = File('${dir.path}/image.png')..writeAsBytesSync([0]);
+        final calls = <MethodCall>[];
+        const channel = MethodChannel('ovid/native');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          return call.method == 'openFile' ? appAvailable : null;
+        });
+        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+        a.messages
+          ..clear()
+          ..add(
+            Message(
+              role: 'assistant',
+              kind: MsgKind.imageGen,
+              content: 'Generated image',
+              imagePath: image.path,
+            ),
+          );
+        await pumpChat(tester);
+        await tester.tap(find.text('Open'));
+        await tester.pump();
+        await tester.pump();
+        final open = calls.singleWhere((c) => c.method == 'openFile');
+        expect((open.arguments as Map)['filePath'], image.path);
+        expect((open.arguments as Map)['mime'], 'image/png');
+        expect(
+          find.textContaining('No app can open'),
+          appAvailable ? findsNothing : findsOneWidget,
+        );
+      },
+    );
+  }
 
   testWidgets('last-message edit retains attachments in composer', (
     tester,

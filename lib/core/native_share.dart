@@ -23,6 +23,22 @@ class NativeShare {
   static Future<void> file(String path) =>
       _send('shareFile', {'filePath': path, 'title': 'Share file'});
 
+  /// Open [path] in the best-matching app through the FileProvider with a
+  /// temporary read grant. Throws when no app can open it or the file cannot
+  /// be staged, so callers can tell the user.
+  static Future<void> open(String path, {String? mime}) async {
+    final ok = await _channel.invokeMethod<bool>('openFile', {
+      'filePath': path,
+      'mime': ?mime,
+    });
+    if (ok != true) {
+      throw PlatformException(
+        code: 'NO_APP',
+        message: 'No app can open this file.',
+      );
+    }
+  }
+
   static Future<void> transcript(ChatSession session) =>
       _send('shareTranscript', {
         'text': transcriptText(session),

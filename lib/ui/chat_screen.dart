@@ -4428,20 +4428,22 @@ class _ProducedFilesCard extends StatelessWidget {
                   _fmtSize(f.size),
                   style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
                 ),
+                // "Show in folder" handed Android a file:// URI (throws on
+                // API 24+, result ignored). Share the file through the
+                // FileProvider instead; tapping the row opens it in Studio.
                 trailing: IconButton(
-                  tooltip: 'Show in folder',
+                  tooltip: 'Share file',
                   visualDensity: VisualDensity.compact,
                   icon: Icon(
-                    Icons.folder_open_outlined,
+                    Icons.share_outlined,
                     size: 17,
                     color: Aether.textMuted,
                   ),
                   onPressed: () async {
                     final dir = await AgentService.I.hostDirOf(f.path);
                     if (!sheetCtx.mounted) return;
-                    final messenger = ScaffoldMessenger.of(sheetCtx);
                     if (dir == null) {
-                      messenger.showSnackBar(
+                      ScaffoldMessenger.of(sheetCtx).showSnackBar(
                         SnackBar(
                           content: Text(
                             '${_base(f.path)} is repo-only — not on local disk.',
@@ -4451,16 +4453,11 @@ class _ProducedFilesCard extends StatelessWidget {
                       );
                       return;
                     }
-                    try {
-                      await launchUrl(Uri.file(dir));
-                    } catch (_) {
-                      messenger.showSnackBar(
-                        SnackBar(
-                          content: Text('No file manager app to open folders.'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    }
+                    final hostPath = '$dir/${_base(f.path)}';
+                    await showNativeShare(
+                      sheetCtx,
+                      () => NativeShare.file(hostPath),
+                    );
                   },
                 ),
                 onTap: () {
@@ -5375,18 +5372,33 @@ class _MessageView extends StatelessWidget {
     await showNativeShare(context, () => NativeShare.file(path));
   }
 
-  /// Open a local workspace file with the best-matching app.
-  void _openLocalFile(BuildContext context, String path) {
+  /// Open a local workspace file with the best-matching app via the
+  /// FileProvider (a `file://` URI throws on Android 7+). Awaited, with a
+  /// snackbar when nothing can open it.
+  Future<void> _openLocalFile(BuildContext context, String path) async {
+    final messenger = ScaffoldMessenger.of(context);
     try {
-      launchUrl(Uri.file(path));
+      await NativeShare.open(path, mime: _imageMime(path));
     } catch (_) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(
           content: Text('No app can open ${path.split('/').last}'),
           behavior: SnackBarBehavior.floating,
         ),
       );
     }
+  }
+
+  static String? _imageMime(String path) {
+    final ext = path.split('.').last.toLowerCase();
+    return switch (ext) {
+      'png' => 'image/png',
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'gif' => 'image/gif',
+      'webp' => 'image/webp',
+      'bmp' => 'image/bmp',
+      _ => null,
+    };
   }
 }
 

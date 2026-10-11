@@ -33,6 +33,25 @@ object NativeShare {
         return streamIntent(context, target)
     }
 
+    /** ACTION_VIEW for a local file through the FileProvider (never file://,
+     * which throws FileUriExposedException on API 24+). */
+    fun viewIntent(context: Context, path: String, mime: String?): Intent {
+        val source = File(path)
+        if (!source.isFile || !source.canRead()) throw IOException("File is unavailable")
+        val target = File(shareDirectory(context), source.name)
+        source.inputStream().use { input -> target.outputStream().use { input.copyTo(it) } }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target)
+        val type = mime?.takeIf { it.isNotBlank() }
+            ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(target.extension.lowercase())
+            ?: "application/octet-stream"
+        return Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, type)
+            clipData = ClipData.newRawUri(target.name, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }
+
     fun transcriptIntent(context: Context, text: String, fileName: String): Intent {
         val name = File(fileName).name.takeIf { it.isNotBlank() && it != "." && it != ".." }
             ?: "ovid-chat.txt"
