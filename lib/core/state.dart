@@ -3814,7 +3814,11 @@ class AppState extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final t = prefs.getInt(_kResponseTimeout);
-      if (t != null && t >= 5 && t <= 3600) responseTimeoutSec = t;
+      if (t != null && t >= 5 && t <= maxResponseTimeoutSec) {
+        responseTimeoutSec = t < minResponseTimeoutSec
+            ? minResponseTimeoutSec
+            : t;
+      }
       contextWindowOverride = prefs.getInt(_kContextWindowOverride) ?? 0;
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
@@ -5302,6 +5306,12 @@ class AppState extends ChangeNotifier {
   static const _kMcpEnvPrefix = 'ovid_mcp_env_';
   bool shareSessionMemory = false;
 
+  /// Cross-chat sharing only applies while Memory itself is on: turning
+  /// Memory off is the user saying "no saved context", so the share switch
+  /// is greyed out ("Requires Memory") and every cross-chat path follows
+  /// this getter rather than the raw preference.
+  bool get effectiveShareSessionMemory => memoryEnabled && shareSessionMemory;
+
   /// Share Studio repo/branch selections across sessions ON RESTART
   /// (persisted, default ON).
   ///
@@ -5834,7 +5844,16 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// The response timeout is a first-byte / idle limit, so anything below
+  /// this would fail every turn of a reasoning model that thinks quietly.
+  static const minResponseTimeoutSec = 30;
+  static const maxResponseTimeoutSec = 3600;
+
+  /// Below this the Settings screen warns that slow models may time out.
+  static const responseTimeoutWarnBelowSec = 60;
+
   Future<void> setResponseTimeout(int sec) async {
+    sec = sec.clamp(minResponseTimeoutSec, maxResponseTimeoutSec);
     responseTimeoutSec = sec;
     notifyListeners();
     try {

@@ -1,7 +1,7 @@
 // Smoke tests for the Wave 2 Aether reskin of SettingsScreen.
 //
 // Verifies that the premium reskin:
-//   * renders the Account / Appearance / Models / Autonomy / Studio section
+//   * renders the Account / Personalization / Data controls / Models / Studio section
 //     titles (built from AetherSectionTitle, uppercased by the primitive);
 //   * flips Aether.dark when the theme segmented control is driven;
 //   * navigates to SettingsBackupScreen when the backup row's "Backup"
@@ -48,7 +48,7 @@ void main() {
   );
 
   testWidgets(
-    'renders Account / Appearance / Models / Autonomy / Studio sections',
+    'renders Account / Personalization / Data controls / Models / Studio sections',
     (tester) async {
       // Give the screen a tall viewport so every section is laid out and
       // reachable via a single scroll pass.
@@ -64,9 +64,9 @@ void main() {
       // uppercased by the primitive, so the raw eyebrow text appears as
       // 'ACCOUNT', 'APPEARANCE', etc.
       expect(find.text('ACCOUNT'), findsOneWidget);
-      expect(find.text('APPEARANCE'), findsOneWidget);
+      expect(find.text('PERSONALIZATION'), findsOneWidget);
+      expect(find.text('DATA CONTROLS'), findsOneWidget);
       expect(find.text('MODELS'), findsOneWidget);
-      expect(find.text('AUTONOMY'), findsOneWidget);
       expect(find.text('STUDIO'), findsOneWidget);
 
       // Multiple AetherCard surfaces are composed into the list — one per
@@ -138,6 +138,12 @@ void main() {
     await tester.pumpWidget(host());
     await tester.pump();
 
+    // Device health now lives under Advanced, below the lazy-build extent.
+    await tester.scrollUntilVisible(
+      find.widgetWithText(AetherGhostButton, 'Health'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
     await tester.ensureVisible(find.widgetWithText(AetherGhostButton, 'Health'));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(AetherGhostButton, 'Health'));
