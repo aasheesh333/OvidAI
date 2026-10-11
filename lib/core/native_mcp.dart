@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'github_service.dart';
 import 'mcp_service.dart';
 import 'diag.dart';
+import 'ssrf_guard.dart';
 
 /// Interface for in-process pure-Dart MCP handlers.
 abstract class NativeMcpHandler {
@@ -825,24 +826,10 @@ class NativeFetchMcpHandler implements NativeMcpHandler {
           for (final h in allowedHosts ?? const <String>{}) h.toLowerCase(),
         };
 
-  static bool _isPrivateIpv4(InternetAddress address) {
-    final b = address.rawAddress;
-    if (b.length != 4) return false;
-    if (b[0] == 10) return true;
-    if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
-    if (b[0] == 192 && b[1] == 168) return true;
-    return false;
-  }
-
-  static bool _isBlockedAddress(InternetAddress address) {
-    if (address.isLoopback || address.isLinkLocal) return true;
-    if (address.type == InternetAddressType.IPv4) return _isPrivateIpv4(address);
-    final b = address.rawAddress;
-    if (b.length == 16 && (b[0] & 0xfe) == 0xfc) return true;
-    return false;
-  }
-
-  String? _urlPolicyError(Uri uri) {
+  /// Literal and DNS-resolved targets share one classifier (M3): private,
+  /// loopback, link-local, CGNAT `100.64/10`, IPv6 ULA/link-local and every
+  /// IPv4-embedding IPv6 form.
+  Future<String?> _urlPolicyError(Uri uri) async {
     final scheme = uri.scheme.toLowerCase();
     if (scheme != 'http' && scheme != 'https') {
       return 'Blocked URL: only http and https schemes are allowed';
@@ -857,10 +844,14 @@ class NativeFetchMcpHandler implements NativeMcpHandler {
       return 'Blocked URL: host "$host" is not allowed';
     }
     final address = InternetAddress.tryParse(host);
-    if (address != null && _isBlockedAddress(address)) {
-      return 'Blocked URL: host "$host" resolves to a non-public address';
+    if (address != null) {
+      return SsrfGuard.isNonPublicAddress(address)
+          ? 'Blocked URL: host "$host" resolves to a non-public address'
+          : null;
     }
-    return null;
+    // A NAME is resolved and refused when ANY address is non-public.
+    final reason = await SsrfGuard.nonPublicHostReason(host);
+    return reason == null ? null : 'Blocked URL: $reason';
   }
 
   static bool _isRedirect(int statusCode) {
@@ -994,7 +985,7 @@ class NativeFetchMcpHandler implements NativeMcpHandler {
       return const McpRpcResult.error('Fetch error: invalid URL');
     }
 
-    final policyError = _urlPolicyError(uri);
+    final policyError = await _urlPolicyError(uri);
     if (policyError != null) {
       return McpRpcResult.error(policyError);
     }
@@ -1014,7 +1005,7 @@ class NativeFetchMcpHandler implements NativeMcpHandler {
             return const McpRpcResult.error('Fetch error: too many redirects');
           }
           final next = current.resolve(location);
-          final redirectError = _urlPolicyError(next);
+          final redirectError = await _urlPolicyError(next);
           if (redirectError != null) {
             return McpRpcResult.error('Blocked redirect: $redirectError');
           }

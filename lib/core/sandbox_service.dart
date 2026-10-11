@@ -2272,6 +2272,11 @@ audit=false
       'npm_config_userconfig': '$runtimeRoot/cache/npm/npmrc',
       'PIP_CACHE_DIR': '$runtimeRoot/cache/pip',
       'PIP_TARGET': '$runtimeRoot/python',
+      // Bytecode caches go under the runtime cache, never into the plugin's
+      // content tree: a `__pycache__` written next to an imported module
+      // would change the approved content hash (H2) and disable the plugin
+      // on the next boot.
+      'PYTHONPYCACHEPREFIX': '$runtimeRoot/cache/pycache',
       // Plugin bin/ first, then the sandbox's own PATH shape (a
       // literal $PATH would never expand in a process environment).
       'PATH':
@@ -4375,4 +4380,30 @@ class SandboxRootScope {
       decisions.any((g) => g.isDeny && g.coversPath(path));
   bool isGranted(String path) =>
       !isDenied(path) && decisions.any((g) => !g.isDeny && g.coversPath(path));
+}
+
+/// Environment names plugin-supplied env may never set (M1): a hook's
+/// `CLAUDE_ENV_FILE` exports and a plugin-owned MCP server's env. Each one
+/// steers which binaries, modules, libraries or credentials a process
+/// resolves — `PATH`/`HOME`, `NODE_PATH`/`PYTHONPATH` module injection,
+/// `LD_*`/`DYLD_*` preloads, `GIT_*` (e.g. `GIT_SSH_COMMAND`,
+/// `GIT_CONFIG_*`) and `npm_config_*` (npm reads the prefix
+/// case-insensitively, so the check does too). The runtime sets the ones it
+/// needs itself ([SandboxService.pluginRuntimeEnv]).
+bool isProtectedRuntimeEnvName(String name) {
+  final upper = name.toUpperCase();
+  for (final prefix in const ['LD_', 'DYLD_', 'GIT_', 'NPM_CONFIG_']) {
+    if (upper.startsWith(prefix)) return true;
+  }
+  return const {
+    'PATH',
+    'HOME',
+    'NODE_PATH',
+    'NODE_OPTIONS',
+    'PYTHONPATH',
+    'PYTHONHOME',
+    'PYTHONSTARTUP',
+    'BASH_ENV',
+    'ENV',
+  }.contains(upper);
 }

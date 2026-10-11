@@ -169,7 +169,9 @@ printf '%s' '{"hookSpecificOutput":{"additionalContext":"ready"}}'
     expect(await service.fire('Notification', '${sid}_a'), 'unset');
   });
 
-  test('disable removes only owned environment contribution', () async {
+  // M1: each plugin's CLAUDE_ENV_FILE is scoped to that plugin — FIRST never
+  // reaches the second plugin's hooks, before or after the disable.
+  test('environment contributions stay within the owning plugin', () async {
     final first = await fixture('first', {'SessionStart': command(
       '''printf '%s' '{"hookSpecificOutput":{"env":{"FIRST":"one"}}}' ''')});
     await fixture('second', {
@@ -177,7 +179,7 @@ printf '%s' '{"hookSpecificOutput":{"additionalContext":"ready"}}'
       'Notification': command(r'printf "%s/%s" "${FIRST:-unset}" "${SECOND:-unset}"'),
     });
     await service.fire('session_start', sid);
-    expect(await service.fire('notification', sid), 'one/two');
+    expect(await service.fire('notification', sid), 'unset/two');
     registry.register(first, activation: PluginActivation.disabled);
     expect(await service.fire('notification', sid), 'unset/two');
     registry.unregisterPlugin('parallel-hooks/second');
@@ -609,14 +611,16 @@ printf '%s' '{"hookSpecificOutput":{"additionalContext":"ready"}}'
       await service.fire('session_start', sid, onlyPluginId: first.id);
       await service.fire('session_start', sid, onlyPluginId: second.id);
       await service.fire('session_start', sid, onlyPluginId: second.id);
-      expect(await service.fire('notification', sid), '$sid/$sid');
+      // M1: SECOND belongs to the other plugin's env file — never visible
+      // to this plugin's hooks.
+      expect(await service.fire('notification', sid), '$sid/unset');
       expect(service.sessionContextFor(sid), 'first\nsecond');
       expect(await service.fire('notification', '$sid-other'), '$sid-other/unset');
     } finally {
       release.complete('old');
       await ending;
     }
-    expect(await service.fire('notification', sid), '$sid/$sid');
+    expect(await service.fire('notification', sid), '$sid/unset');
   });
 
   for (final reentrant in [false, true]) {

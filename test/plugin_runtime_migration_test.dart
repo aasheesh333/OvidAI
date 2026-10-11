@@ -84,6 +84,7 @@ void main() {
       capabilities: capabilities ?? manifest.requestedCapabilities,
       environmentReadNames: environmentNames ?? manifest.environmentReadNames,
       approvedAt: DateTime.utc(2026, 9, 10),
+      contentTreeHash: pluginContentTreeHash(manifest.rootPath),
     ),
   );
 
@@ -274,6 +275,7 @@ void main() {
         capabilities: runtime.requestedCapabilities,
         environmentReadNames: runtime.environmentReadNames,
         approvedAt: DateTime.utc(2026, 9, 10),
+        contentTreeHash: pluginContentTreeHash(runtime.rootPath),
       );
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(

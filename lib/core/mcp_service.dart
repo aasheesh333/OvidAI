@@ -2816,8 +2816,25 @@ class McpService {
           );
         }
       }
-      // Per-server env vars (API keys etc.) from secure storage.
-      final secretEnv = await AppState.I.getMcpEnv(server.canonicalId);
+      // Per-server env vars (API keys etc.) from secure storage. A
+      // plugin-owned server's env can come from the plugin's own config, so
+      // it may not override the runtime's PATH/HOME/module/git/npm wiring
+      // (M1) — those names are dropped, never merged over the runtime env.
+      final secretEnv = {...await AppState.I.getMcpEnv(server.canonicalId)};
+      if (server.ownerPluginId != null) {
+        final dropped = [
+          for (final name in secretEnv.keys)
+            if (isProtectedRuntimeEnvName(name)) name,
+        ];
+        if (dropped.isNotEmpty) {
+          secretEnv.removeWhere((name, _) => dropped.contains(name));
+          Diag.swallow(
+            'mcp_service.env',
+            'ignored protected env for ${server.canonicalId}: '
+                '${dropped.join(', ')}',
+          );
+        }
+      }
       final runtimeRoot = _runtimeRoot(server);
       // Plugin userConfig parity: saved plugin settings reach the server as
       // CLAUDE_PLUGIN_OPTION_<KEY> and through `${user_config.<key>}`.

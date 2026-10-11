@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'secret_scrub.dart';
+
 enum StartupItemKind {
   localState,
   plugin,
@@ -708,7 +710,8 @@ class StartupCoordinator extends ChangeNotifier {
 /// Shared by the coordinator (task reasons) and by producers that write
 /// service status directly (e.g. the MCP startup connect).
 String redactStartupError(String value) {
-  var scrubbed = value
+  // URLs first (userinfo, secret query params, token path segments — M4).
+  var scrubbed = scrubSecretsInText(value)
       .replaceAllMapped(
         RegExp(
           r'(["\x27]?(?:authorization|api[_-]?key|token|password|secret)["\x27]?\s*:\s*["\x27])[^"\x27]*',

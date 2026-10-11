@@ -4,6 +4,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import 'core/cert_pinning.dart';
 import 'core/diag.dart';
 import 'core/state.dart';
 import 'core/studio_drafts.dart';
@@ -117,6 +118,8 @@ class ShareLinkOpener {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   installReleaseErrorWidget();
+  // M7: no-op unless built with OVID_CERT_PINNING=true AND pins configured.
+  installOvidCertificatePinning();
   AppState.I.registerProductionAccountFeatures();
   // Coalesce session writes in production; tests keep the zero-window default.
   AppState.enableSessionPersistDebounce();

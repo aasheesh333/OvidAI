@@ -200,6 +200,7 @@ void main() {
         manifestDigest: pluginManifestDigest(m),
         capabilities: m.requestedCapabilities,
         approvedAt: DateTime.utc(2026, 9, 10),
+        contentTreeHash: pluginContentTreeHash(m.rootPath),
       ),
     );
   }

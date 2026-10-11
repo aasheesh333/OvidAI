@@ -4,8 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-// ignore: depend_on_referenced_packages
-import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:ovid_ai/core/plugin_manifest.dart';
 import 'package:ovid_ai/core/plugin_permissions.dart';
 import 'package:ovid_ai/core/plugin_registry.dart';
@@ -13,23 +11,84 @@ import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart';
 import 'package:ovid_ai/ui/plugin_permission_sheet.dart';
 
-class _ControlledPreferences extends InMemorySharedPreferencesStore {
-  _ControlledPreferences() : super.empty();
+/// Secure storage whose grant-map writes can be held, failed, or made to
+/// mutate the backing store before reporting failure (H1: grants live in
+/// secure storage, so the commit semantics are exercised there).
+class _ControlledSecureStorage extends FlutterSecureStorage {
+  _ControlledSecureStorage() : super();
 
-  Future<bool> Function()? write;
+  static const _inner = FlutterSecureStorage();
+
+  Future<bool> Function()? gate;
   bool mutateBeforeResult = false;
 
   @override
-  Future<bool> setValue(String valueType, String key, Object value) async {
-    if (mutateBeforeResult) await super.setValue(valueType, key, value);
-    if (write != null && !await write!()) return false;
-    return super.setValue(valueType, key, value);
+  Future<void> write({
+    required String key,
+    required String? value,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (key != kPluginGrantsSecureKey) {
+      return _inner.write(key: key, value: value);
+    }
+    if (mutateBeforeResult) await _inner.write(key: key, value: value);
+    if (gate != null && !await gate!()) {
+      throw StateError('secure grant write failed');
+    }
+    await _inner.write(key: key, value: value);
+  }
+
+  @override
+  Future<String?> read({
+    required String key,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) => _inner.read(key: key);
+
+  @override
+  Future<Map<String, String>> readAll({
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) => _inner.readAll();
+
+  @override
+  Future<void> delete({
+    required String key,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (key != kPluginGrantsSecureKey) return _inner.delete(key: key);
+    if (mutateBeforeResult) await _inner.delete(key: key);
+    if (gate != null && !await gate!()) {
+      throw StateError('secure grant delete failed');
+    }
+    await _inner.delete(key: key);
   }
 }
 
+Future<String> _storedGrants() async =>
+    await const FlutterSecureStorage().read(key: kPluginGrantsSecureKey) ?? '';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  late _ControlledPreferences backend;
+  late _ControlledSecureStorage backend;
   final store = PluginPermissionStore();
   final manifest = NormalizedPluginManifest(
     id: 'test/permission',
@@ -45,16 +104,18 @@ void main() {
         capabilities: const {},
         environmentReadNames: const {},
         approvedAt: DateTime.utc(2026),
+        contentTreeHash: pluginContentTreeHash(manifest.rootPath),
       );
 
   setUp(() {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});
-    backend = _ControlledPreferences();
-    SharedPreferencesStorePlatform.instance = backend;
+    backend = _ControlledSecureStorage();
+    PluginPermissionStore.secureStorageForTest = backend;
   });
 
   tearDown(() {
+    PluginPermissionStore.secureStorageForTest = null;
     PluginContributionRegistry.I.unregisterPlugin(manifest.id);
     AppState.resetTestInstance();
   });
@@ -88,7 +149,7 @@ void main() {
       final row = activePlugin();
       await store.save(grant(manifest.id, pluginManifestDigest(manifest)));
       final pending = Completer<bool>();
-      backend.write = () => pending.future;
+      backend.gate = () => pending.future;
       final revoking = AppState.I.revokePluginGrant(row);
       final failure = expectLater(revoking, throwsStateError);
       final activeWhilePending = PluginContributionRegistry.I
@@ -115,13 +176,13 @@ void main() {
       await tester.ensureVisible(find.byTooltip('Edit permissions'));
       await tester.tap(find.byTooltip('Edit permissions'));
       await tester.pumpAndSettle();
-      backend.write = () async => false;
+      backend.gate = () async => false;
       await tester.tap(find.text('Revoke permissions'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(row.enabled, isFalse);
       expect(find.textContaining('Could not save revocation'), findsOneWidget);
-      backend.write = null;
+      backend.gate = null;
       await tester.tap(find.text('Retry'));
       await tester.pumpAndSettle();
       expect(find.byType(AlertDialog), findsNothing);
@@ -158,7 +219,7 @@ void main() {
         await store.save(grant(manifest.id, digest));
         final pending = Completer<bool>();
         backend.mutateBeforeResult = true;
-        backend.write = () => pending.future;
+        backend.gate = () => pending.future;
         final revoking = store.revoke(manifest.id);
         final failure = expectLater(revoking, throwsStateError);
         await Future<void>.delayed(Duration.zero);
@@ -169,7 +230,7 @@ void main() {
           ),
           isNull,
         );
-        backend.write = () async {
+        backend.gate = () async {
           if (throwsError) throw StateError('revoke commit failed');
           return false;
         };
@@ -182,11 +243,11 @@ void main() {
         final prefs = await SharedPreferences.getInstance();
         await prefs.reload();
         expect(await store.loadAny(manifest.id), isNull);
-        backend.write = null;
+        backend.gate = null;
         await prefs.setBool('unrelated', true);
         await store.save(grant('test/sibling', 'sibling'));
         expect(await store.load(manifest.id, digest), isNull);
-        expect(prefs.getString(kPluginGrantsPrefKey), isNot(contains(digest)));
+        expect(await _storedGrants(), isNot(contains(digest)));
         await store.revoke(manifest.id); // retry persists the tombstone
         expect(await store.loadAny(manifest.id), isNull);
         await store.save(grant(manifest.id, digest)); // explicit new approval
@@ -202,7 +263,7 @@ void main() {
         final digest = pluginManifestDigest(manifest);
         await store.save(grant(manifest.id, 'old'));
         backend.mutateBeforeResult = true;
-        backend.write = () async {
+        backend.gate = () async {
           if (throwsError) throw StateError('commit failed');
           return false;
         };
@@ -229,10 +290,10 @@ void main() {
         );
         expect((await freshStore.loadAny(manifest.id))?.manifestDigest, 'old');
         // Another preferences write must not flush a failed native-cache grant.
-        backend.write = null;
+        backend.gate = null;
         await prefs.setBool('unrelated', true);
         await prefs.reload();
-        expect(prefs.getString(kPluginGrantsPrefKey), isNot(contains(digest)));
+        expect(await _storedGrants(), isNot(contains(digest)));
         await freshStore.save(grant('test/sibling', 'sibling'));
         expect(await freshStore.load(manifest.id, digest), isNull);
         await freshStore.save(grant(manifest.id, digest));
@@ -253,7 +314,7 @@ void main() {
       final digest = pluginManifestDigest(manifest);
       final pending = Completer<bool>();
       backend.mutateBeforeResult = true;
-      backend.write = () => pending.future;
+      backend.gate = () => pending.future;
       final saving = store.save(grant(manifest.id, digest));
       // Let setValue mutate native memory while its commit is unresolved.
       await Future<void>.delayed(Duration.zero);
@@ -278,7 +339,7 @@ void main() {
       'failed write (${throwsError ? 'error' : 'false'}) never grants access',
       () async {
         await store.save(grant('test/permission', 'old'));
-        backend.write = () async {
+        backend.gate = () async {
           if (throwsError) throw StateError('storage unavailable');
           return false;
         };
@@ -290,7 +351,7 @@ void main() {
         expect((await store.loadAny('test/permission'))?.manifestDigest, 'old');
 
         // A later successful write must not commit the failed optimistic cache.
-        backend.write = null;
+        backend.gate = null;
         await store.save(grant('test/other', 'other'));
         final prefs = await SharedPreferences.getInstance();
         await prefs.reload();
@@ -304,7 +365,7 @@ void main() {
     'pending approval blocks cancel/back; failed save permits retry',
     (tester) async {
       final pending = Completer<bool>();
-      backend.write = () => pending.future;
+      backend.gate = () => pending.future;
       bool? result;
       var returned = false;
       await tester.pumpWidget(
@@ -358,7 +419,7 @@ void main() {
         await store.load(manifest.id, pluginManifestDigest(manifest)),
         isNull,
       );
-      backend.write = null;
+      backend.gate = null;
       await tester.tap(find.text('Accept'));
       await tester.pumpAndSettle();
       expect(result, isTrue);

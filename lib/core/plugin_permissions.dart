@@ -1,27 +1,29 @@
 /// Plugin capability approval and secure grant persistence
 /// (design spec §5.1).
 ///
-/// One consolidated user approval per plugin manifest digest. Grants
-/// persist by plugin id + digest in ordinary preferences — they carry
-/// only non-secret data (capability names, environment variable NAMES,
-/// approval time). Secret VALUES live exclusively in FlutterSecureStorage
-/// under owner-scoped keys and never appear in any JSON/preferences blob.
+/// One consolidated user approval per plugin manifest digest + content-tree
+/// hash. Grants carry only non-secret data (capability names, environment
+/// variable NAMES, approval time) but they AUTHORIZE execution, so they
+/// persist in hardened secure storage, not ordinary preferences (H1).
+/// Secret VALUES live in FlutterSecureStorage under owner-scoped keys and
+/// never appear in any grant JSON.
 library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'plugin_manifest.dart';
 import 'secure_store.dart';
 import 'diag.dart';
 
-/// Preferences key for the persisted grant map (plugin id → grant JSON).
-/// Deliberately separate from `ovid_plugin_state_v1` — grants own their
-/// lifecycle (Task 7 owns the plugin-state extension).
+/// LEGACY preferences key for the grant map (plugin id → grant JSON). Read
+/// once by the H1 migration into [kPluginGrantsSecureKey], then deleted.
 const String kPluginGrantsPrefKey = 'ovid_plugin_grants_v1';
 
 /// Prefix for plugin-owned secret values in secure storage
@@ -392,15 +394,90 @@ Set<PluginCapability> capabilityDelta({
   return Set.unmodifiable(requested.difference(granted.capabilities));
 }
 
+/// Root-level files the runtime itself writes into a plugin's committed
+/// content directory (`kPluginRuntimeManifestFile` /
+/// `kPluginRuntimeActivationFile` in `plugin_runtime.dart`). They are
+/// app-authored bookkeeping, not plugin content, so they are excluded from
+/// [pluginContentTreeHash] — otherwise staging (approved) and the installed
+/// directory (verified) could never hash alike.
+const Set<String> kPluginContentTreeIgnoredRootFiles = {
+  'ovid-plugin.json',
+  'ovid-activation.json',
+};
+
+/// Version tag folded into [pluginContentTreeHash]. Bump only together with
+/// a migration that re-adopts existing hashes.
+const String _kContentTreeHashVersion = 'ovid-plugin-tree-v1';
+
+/// SHA-256 over the plugin's FULL content tree rooted at [rootPath] (H2).
+///
+/// Every regular file contributes its root-relative path and the SHA-256 of
+/// its bytes; directories and symlinks (never followed) contribute their
+/// path and, for links, the link target. Entries are sorted by relative
+/// path, so the hash is location-independent (staging → installed rename)
+/// and order-independent. [kPluginContentTreeIgnoredRootFiles] are skipped.
+/// A missing or empty [rootPath] hashes as the empty tree. Unreadable files
+/// throw — callers treat that as "content does not match" (fail closed).
+String pluginContentTreeHash(String rootPath) {
+  final lines = <String>[];
+  if (rootPath.isNotEmpty) {
+    final root = Directory(rootPath);
+    if (root.existsSync()) {
+      var base = root.absolute.path.replaceAll('\\', '/');
+      while (base.length > 1 && base.endsWith('/')) {
+        base = base.substring(0, base.length - 1);
+      }
+      for (final e in root.absolute.listSync(
+        recursive: true,
+        followLinks: false,
+      )) {
+        final full = e.path.replaceAll('\\', '/');
+        if (!full.startsWith('$base/')) continue;
+        final rel = full.substring(base.length + 1);
+        if (kPluginContentTreeIgnoredRootFiles.contains(rel)) continue;
+        final String entry;
+        if (e is Link) {
+          entry = 'l:${e.targetSync()}';
+        } else if (e is File) {
+          entry = 'f:${sha256.convert(e.readAsBytesSync())}';
+        } else {
+          entry = 'd';
+        }
+        lines.add('${jsonEncode(rel)}\t$entry');
+      }
+    }
+  }
+  lines.sort();
+  final body = '$_kContentTreeHashVersion\n${lines.join('\n')}';
+  return 'sha256:${sha256.convert(utf8.encode(body))}';
+}
+
+/// Secure-storage key holding the grant map (plugin id → grant JSON) — H1.
+/// Grants moved out of SharedPreferences: a world-readable-on-root,
+/// backup-restorable preferences file must not be able to mint consent.
+const String kPluginGrantsSecureKey = 'ovid_plugin_grants_v2';
+
 /// Persistent plugin permission grants (spec §5.1).
 ///
-/// Grants are NON-SECRET and live in SharedPreferences keyed by plugin
-/// id; each record stores the approved manifest digest, so lookups are
-/// (plugin id + digest). Secret VALUES never pass through this store —
-/// they live in secure storage under `_kPluginSecretPrefix` keys and
-/// [revoke] deletes exactly the revoked plugin's owned secrets.
+/// Grants are non-secret but SECURITY-RELEVANT (they authorize execution),
+/// so they live in hardened secure storage under [kPluginGrantsSecureKey]
+/// (H1), keyed by plugin id; each record stores the approved manifest digest
+/// and content-tree hash, so lookups are (plugin id + digest + content).
+/// Pre-H1 installs kept them in SharedPreferences under
+/// [kPluginGrantsPrefKey]; the first hydration copies them over, verifies the
+/// copy by reading it back, and only then deletes the preferences copy —
+/// so a grant is never lost, and the migration is idempotent across crashes.
+/// Secret VALUES never pass through this store — they live in secure storage
+/// under `_kPluginSecretPrefix` keys and [revoke] deletes exactly the revoked
+/// plugin's owned secrets.
 class PluginPermissionStore {
-  static final _secureStorage = ovidSecureStorage();
+  static FlutterSecureStorage _secureStorage = ovidSecureStorage();
+
+  /// Swaps the secure-storage backend (null restores the real one) so tests
+  /// can inject read/write failures.
+  @visibleForTesting
+  static set secureStorageForTest(FlutterSecureStorage? storage) =>
+      _secureStorage = storage ?? ovidSecureStorage();
 
   /// Serializes every grant write (process-wide, because callers create
   /// short-lived store instances) so concurrent approvals/revokes cannot
@@ -409,42 +486,154 @@ class PluginPermissionStore {
   static Future<void>? _writeLock;
 
   // Shared across short-lived stores, tied to the preferences instance so a
-  // fresh preferences lifecycle hydrates once. Neither Dart's optimistic cache
-  // nor Android getAll() proves a commit: Android mutates memory before disk.
-  static final _confirmed = Expando<Map<String, String>>();
-  static final _revoked = Expando<Map<String, Object>>();
+  // fresh preferences lifecycle hydrates (and migrates) once. The confirmed
+  // snapshot only ever holds what was hydrated or a write actually
+  // committed.
+  static var _hydration = Expando<Future<Map<String, String>>>();
+  static var _confirmed = Expando<Map<String, String>>();
+  static var _revoked = Expando<Map<String, Object>>();
+
+  /// Drops every in-process grant cache (after "delete all data" wiped
+  /// secure storage) so the next read hydrates from storage again.
+  static void forgetCachedGrants() {
+    _hydration = Expando();
+    _confirmed = Expando();
+    _revoked = Expando();
+    _declinedByPlugin.clear();
+  }
 
   Map<String, Object> _tombstones(SharedPreferences prefs) =>
       _revoked[prefs] ??= {};
 
-  Map<String, String> _confirmedMap(SharedPreferences prefs) {
-    final map = _confirmed[prefs] ??= _readMap(prefs);
+  Future<Map<String, String>> _confirmedMap(SharedPreferences prefs) async {
+    var map = _confirmed[prefs];
+    if (map == null) {
+      // Only the IN-FLIGHT hydration is shared; once done, the result lives
+      // in [_confirmed]. A completed future must not be retained and
+      // re-awaited: its listeners run in the zone that created it (e.g. a
+      // widget test's fake-async zone), which may never be pumped again.
+      final pending = _hydration[prefs] ??= _hydrate(prefs);
+      final hydrated = await pending;
+      if (identical(_hydration[prefs], pending)) _hydration[prefs] = null;
+      map = _confirmed[prefs] ??= hydrated;
+    }
     map.removeWhere((id, _) => _tombstones(prefs).containsKey(id));
     return map;
+  }
+
+  /// Loads the grant map from secure storage, running the one-time
+  /// preferences → secure-storage migration (H1) when needed.
+  Future<Map<String, String>> _hydrate(SharedPreferences prefs) async {
+    String? raw;
+    try {
+      raw = await _secureStorage.read(key: kPluginGrantsSecureKey);
+    } catch (error) {
+      // Secure storage is unreadable right now. Keep honoring the grants
+      // that still sit in preferences (never lose one); writes go to secure
+      // storage and fail loudly, and the preferences copy stays put.
+      Diag.swallow('plugin_permissions.secure_read', error);
+      return _legacyGrants(prefs);
+    }
+    final secure = raw == null ? null : _decodeMap(raw);
+    if (secure != null) {
+      // Migration already verified on an earlier run (or nothing to
+      // migrate): secure storage is authoritative; finish any leftover
+      // preferences cleanup.
+      await _dropLegacy(prefs);
+      return secure;
+    }
+    final legacy = _legacyGrants(prefs);
+    if (legacy.isEmpty) {
+      await _dropLegacy(prefs);
+      return {};
+    }
+    final encoded = jsonEncode(legacy);
+    try {
+      await _secureStorage.write(key: kPluginGrantsSecureKey, value: encoded);
+      final readBack = await _secureStorage.read(key: kPluginGrantsSecureKey);
+      if (readBack != encoded) {
+        throw StateError('plugin grant migration did not verify');
+      }
+    } catch (error) {
+      // Not verified: leave preferences as the source of truth and remove
+      // any half-written copy so the next run migrates again from scratch.
+      Diag.swallow('plugin_permissions.migrate', error);
+      try {
+        await _secureStorage.delete(key: kPluginGrantsSecureKey);
+      } catch (e) {
+        Diag.swallow('plugin_permissions.migrate_rollback', e);
+      }
+      return legacy;
+    }
+    await _dropLegacy(prefs);
+    return legacy;
+  }
+
+  /// The pre-H1 preferences grants, each marked for the one-time
+  /// content-tree adoption (H2): they were approved before content hashing
+  /// existed, so the first runtime use records the installed tree instead
+  /// of forcing every installed plugin through re-approval on upgrade.
+  Map<String, String> _legacyGrants(SharedPreferences prefs) {
+    final raw = prefs.getString(kPluginGrantsPrefKey);
+    if (raw == null || raw.isEmpty) return {};
+    final map = _decodeMap(raw) ?? {};
+    return {
+      for (final e in map.entries) e.key: _markForContentAdoption(e.value),
+    };
+  }
+
+  static String _markForContentAdoption(String entry) {
+    try {
+      final decoded = jsonDecode(entry);
+      if (decoded is! Map) return entry;
+      final json = decoded.cast<String, dynamic>();
+      if (json['contentTreeHash'] is String) return entry;
+      json['adoptContentTreeOnFirstUse'] = true;
+      return jsonEncode(json);
+    } catch (_) {
+      // A damaged record stays damaged: load() fails closed on it.
+      return entry;
+    }
+  }
+
+  Future<void> _dropLegacy(SharedPreferences prefs) async {
+    if (!prefs.containsKey(kPluginGrantsPrefKey)) return;
+    try {
+      await prefs.remove(kPluginGrantsPrefKey);
+    } catch (error) {
+      // Harmless: secure storage is authoritative, the next run retries.
+      Diag.swallow('plugin_permissions.drop_legacy', error);
+    }
   }
 
   Future<void> _commitMap(
     SharedPreferences prefs,
     Map<String, String> next,
   ) async {
-    final previous = _confirmedMap(prefs);
+    final previous = await _confirmedMap(prefs);
     try {
-      if (!await prefs.setString(kPluginGrantsPrefKey, jsonEncode(next))) {
-        throw StateError('Could not persist plugin permission grant');
-      }
+      await _writeMap(next);
       _confirmed[prefs] = next;
     } catch (_) {
-      // Restore both caches even if disk is still failing. Never promote the
-      // attempted snapshot based on reload, or merge it into a later write.
-      // The confirmed snapshot remains authoritative if restoration also fails.
+      // Restore the last confirmed snapshot even if storage is still
+      // failing; never promote the attempted one.
       try {
-        await prefs.setString(kPluginGrantsPrefKey, jsonEncode(previous));
+        await _writeMap(previous);
       } catch (error) {
         Diag.swallow('plugin_permissions.restore', error);
       }
       rethrow;
     }
+    // A commit made while hydration fell back to preferences carries the
+    // full map, so the preferences copy is now redundant.
+    await _dropLegacy(prefs);
   }
+
+  /// An empty map deletes the key: no approvals leaves no grant residue in
+  /// secure storage (uninstall/revoke of the last plugin).
+  static Future<void> _writeMap(Map<String, String> map) => map.isEmpty
+      ? _secureStorage.delete(key: kPluginGrantsSecureKey)
+      : _secureStorage.write(key: kPluginGrantsSecureKey, value: jsonEncode(map));
 
   static Future<void> _withWriteLock(Future<void> Function() action) async {
     while (_writeLock != null) {
@@ -465,7 +654,7 @@ class PluginPermissionStore {
   Future<PluginPermissionGrant?> load(String pluginId, String digest) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final entry = _confirmedMap(prefs)[pluginId];
+      final entry = (await _confirmedMap(prefs))[pluginId];
       if (entry == null) return null;
       final grant = PluginPermissionGrant.fromJson(
         jsonDecode(entry) as Map<String, dynamic>,
@@ -487,7 +676,7 @@ class PluginPermissionStore {
   Future<PluginPermissionGrant?> loadAny(String pluginId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final entry = _confirmedMap(prefs)[pluginId];
+      final entry = (await _confirmedMap(prefs))[pluginId];
       if (entry == null) return null;
       return PluginPermissionGrant.fromJson(
         jsonDecode(entry) as Map<String, dynamic>,
@@ -541,54 +730,207 @@ class PluginPermissionStore {
     }
     if (!stored.environmentReadNames.containsAll(environmentNames)) return null;
 
-    final migrated = PluginPermissionGrant(
-      pluginId: stored.pluginId,
-      manifestDigest: current,
-      capabilities: stored.capabilities,
-      environmentReadNames: stored.environmentReadNames,
-      // Preserve the original approval time — a re-key is not a re-approval,
-      // and stamping now would misreport how long this grant has been live.
-      approvedAt: stored.approvedAt,
-      declinedCapabilities: stored.declinedCapabilities,
-      allowDependencyScripts: stored.allowDependencyScripts,
-    );
+    // Preserve the original approval time, content-tree binding and
+    // adoption marker — a re-key is not a re-approval.
+    final migrated = stored.rebound(manifestDigest: current);
     await save(migrated);
     return migrated;
   }
 
   /// The grant effective for [manifest] right now: the stored record for
   /// this plugin if and only if its digest matches (unchanged manifest →
-  /// stored grant reused; changed manifest → re-approval required), after
-  /// any pending v1 re-key.
+  /// stored grant reused; changed manifest → re-approval required) AND its
+  /// content-tree hash matches the files at `manifest.rootPath` (H2), after
+  /// any pending v1 re-key. Used by approval UIs, so it never records a
+  /// pending content adoption — only [effectiveRuntimeGrant] does.
   Future<PluginPermissionGrant?> effectiveGrant({
     required String pluginId,
     required NormalizedPluginManifest manifest,
-  }) => migrateLegacyGrant(pluginId: pluginId, manifest: manifest);
-
-  /// Runtime activation requires a complete approval, not merely a stored
-  /// row for the current digest. Raw [load] remains intentionally permissive
-  /// so approval UIs can inspect partial grants.
-  Future<PluginPermissionGrant?> effectiveRuntimeGrant({
-    required String pluginId,
-    required NormalizedPluginManifest manifest,
   }) async {
-    if (pluginId != manifest.id) return null;
     final grant = await migrateLegacyGrant(
       pluginId: pluginId,
       manifest: manifest,
     );
-    if (grant == null || grant.pluginId != pluginId) return null;
+    if (grant == null) return null;
+    return _verifyContentTree(grant, manifest, adopt: false);
+  }
+
+  /// Runtime activation requires a complete approval, not merely a stored
+  /// row for the current digest. Raw [load] remains intentionally permissive
+  /// so approval UIs can inspect partial grants.
+  ///
+  /// Also re-verifies the plugin's content tree (H2): a grant whose recorded
+  /// hash no longer matches the files at `manifest.rootPath` is not
+  /// effective — the plugin needs re-approval. [reverifyContent] forces a
+  /// full re-hash instead of trusting the per-process cache (activation
+  /// paths pass it).
+  Future<PluginPermissionGrant?> effectiveRuntimeGrant({
+    required String pluginId,
+    required NormalizedPluginManifest manifest,
+    bool reverifyContent = false,
+  }) async {
+    if (pluginId != manifest.id) return null;
+    final migrated = await migrateLegacyGrant(
+      pluginId: pluginId,
+      manifest: manifest,
+    );
+    if (migrated == null || migrated.pluginId != pluginId) return null;
     final requested = manifest.requestedCapabilities.isNotEmpty
         ? manifest.requestedCapabilities
         : inferRequestedCapabilities(manifest);
-    if (!grantCoversRequested(grant, requested)) return null;
+    if (!grantCoversRequested(migrated, requested)) return null;
     final environmentNames = <String>{...manifest.environmentReadNames};
     for (final server in manifest.mcpServers) {
       environmentNames.addAll(server.envNames);
     }
-    if (!grant.environmentReadNames.containsAll(environmentNames)) return null;
+    if (!migrated.environmentReadNames.containsAll(environmentNames)) {
+      return null;
+    }
+    final grant = await _verifyContentTree(
+      migrated,
+      manifest,
+      adopt: true,
+      reverify: reverifyContent,
+    );
+    if (grant == null) return null;
     _noteDeclined(grant);
     return grant;
+  }
+
+  /// Records the installed content tree for a pre-upgrade grant (H2
+  /// trust-on-first-use) without activating anything. Boot calls it for
+  /// every installed plugin — disabled ones included — so the window closes
+  /// on the first run of the new version rather than whenever a plugin is
+  /// next enabled.
+  Future<void> adoptPendingContentTree({
+    required String pluginId,
+    required NormalizedPluginManifest manifest,
+  }) async {
+    final grant = await load(pluginId, pluginManifestDigest(manifest));
+    if (grant == null || !grant.adoptContentTreeOnFirstUse) return;
+    await _verifyContentTree(grant, manifest, adopt: true, reverify: true);
+  }
+
+  /// Whether the stored grant for [pluginId] matches [manifest]'s digest
+  /// but NOT its content tree — i.e. the plugin's files changed after
+  /// approval. Lets status surfaces say so precisely.
+  Future<bool> contentChangedSinceApproval({
+    required String pluginId,
+    required NormalizedPluginManifest manifest,
+  }) async {
+    final grant = await load(pluginId, pluginManifestDigest(manifest));
+    if (grant == null || grant.contentTreeHash == null) return false;
+    try {
+      return contentTreeHashFor(manifest.rootPath) != grant.contentTreeHash;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Checks [grant] against the content currently at `manifest.rootPath`.
+  /// A recorded hash must match exactly. A missing hash is only acceptable
+  /// on a grant carrying the one-time upgrade marker; with [adopt] the
+  /// current tree is recorded (and the marker cleared) so every later check
+  /// enforces it. Any other hash-less grant fails closed.
+  Future<PluginPermissionGrant?> _verifyContentTree(
+    PluginPermissionGrant grant,
+    NormalizedPluginManifest manifest, {
+    required bool adopt,
+    bool reverify = false,
+  }) async {
+    if (grant.contentTreeHash == null && !grant.adoptContentTreeOnFirstUse) {
+      return null;
+    }
+    final String actual;
+    try {
+      actual = contentTreeHashFor(manifest.rootPath, reverify: reverify);
+    } catch (error) {
+      Diag.swallow('plugin_permissions.content_tree', error);
+      return null;
+    }
+    final recorded = grant.contentTreeHash;
+    if (recorded != null) return recorded == actual ? grant : null;
+    if (!adopt) return grant;
+    final bound = grant.rebound(
+      contentTreeHash: actual,
+      adoptContentTreeOnFirstUse: false,
+    );
+    try {
+      await _recordAdoption(bound);
+    } catch (error) {
+      // The adoption retries on the next use; the pre-upgrade grant keeps
+      // working meanwhile (never lose a grant over a storage hiccup).
+      Diag.swallow('plugin_permissions.adopt', error);
+      return grant;
+    }
+    return bound;
+  }
+
+  /// Writes an adopted content hash ONLY over the exact pre-upgrade record
+  /// it was computed for — never resurrecting a grant revoked or replaced
+  /// meanwhile (unlike [save], it cannot lift a revocation).
+  Future<void> _recordAdoption(PluginPermissionGrant bound) async {
+    final prefs = await SharedPreferences.getInstance();
+    return _withWriteLock(() async {
+      final map = Map<String, String>.of(await _confirmedMap(prefs));
+      final raw = map[bound.pluginId];
+      if (raw == null) return;
+      final current = PluginPermissionGrant.fromJson(
+        jsonDecode(raw) as Map<String, dynamic>,
+      );
+      if (current.manifestDigest != bound.manifestDigest ||
+          !current.adoptContentTreeOnFirstUse ||
+          current.contentTreeHash != null) {
+        return;
+      }
+      map[bound.pluginId] = jsonEncode(bound.toJson());
+      await _commitMap(prefs, map);
+    });
+  }
+
+  /// Per-process content-tree hash cache: root → (stat fingerprint, hash).
+  /// The fingerprint (paths, sizes, mtimes) is cheap to re-take, so a
+  /// cached hash is reused only while the tree still looks identical;
+  /// activation paths bypass it entirely via `reverify`.
+  static final Map<String, ({String fingerprint, String hash})>
+  _contentTreeCache = {};
+
+  /// [pluginContentTreeHash] for [rootPath], served from the per-process
+  /// cache unless the tree's stat fingerprint changed or [reverify] is set.
+  static String contentTreeHashFor(String rootPath, {bool reverify = false}) {
+    if (rootPath.isEmpty) return pluginContentTreeHash(rootPath);
+    final fingerprint = _contentTreeFingerprint(rootPath);
+    final cached = _contentTreeCache[rootPath];
+    if (!reverify && cached != null && cached.fingerprint == fingerprint) {
+      return cached.hash;
+    }
+    final hash = pluginContentTreeHash(rootPath);
+    _contentTreeCache[rootPath] = (fingerprint: fingerprint, hash: hash);
+    return hash;
+  }
+
+  /// Drops cached content hashes (one root, or all).
+  static void forgetContentTree([String? rootPath]) {
+    if (rootPath == null) {
+      _contentTreeCache.clear();
+    } else {
+      _contentTreeCache.remove(rootPath);
+    }
+  }
+
+  static String _contentTreeFingerprint(String rootPath) {
+    final root = Directory(rootPath);
+    if (!root.existsSync()) return 'missing';
+    final parts = <String>[];
+    for (final e in root.listSync(recursive: true, followLinks: false)) {
+      final stat = e.statSync();
+      parts.add(
+        '${e.path}|${stat.type}|${stat.size}|'
+        '${stat.modified.microsecondsSinceEpoch}',
+      );
+    }
+    parts.sort();
+    return sha256.convert(utf8.encode(parts.join('\n'))).toString();
   }
 
   /// Declined capabilities per plugin id, as of the last grant this process
@@ -621,7 +963,7 @@ class PluginPermissionStore {
     final prefs = await SharedPreferences.getInstance();
     final revokedAtStart = _tombstones(prefs)[grant.pluginId];
     return _withWriteLock(() async {
-      final map = Map<String, String>.of(_confirmedMap(prefs));
+      final map = Map<String, String>.of(await _confirmedMap(prefs));
       map[grant.pluginId] = jsonEncode(grant.toJson());
       await _commitMap(prefs, map);
       _noteDeclined(grant);
@@ -649,7 +991,7 @@ class PluginPermissionStore {
     }
     final prefs = await SharedPreferences.getInstance();
     return _withWriteLock(() async {
-      final map = Map<String, String>.of(_confirmedMap(prefs));
+      final map = Map<String, String>.of(await _confirmedMap(prefs));
       if (map.remove(pluginId) == null) return;
       await _commitMap(prefs, map);
       _declinedByPlugin.remove(pluginId);
@@ -663,14 +1005,15 @@ class PluginPermissionStore {
   /// untouched.
   Future<void> revoke(String pluginId) async {
     final prefs = await SharedPreferences.getInstance();
+    // Deny before waiting for any pending write: every read filters
+    // tombstoned ids after it resolves.
     _tombstones(prefs)[pluginId] = Object();
-    _confirmedMap(prefs); // deny before waiting for any pending write
     _declinedByPlugin.remove(pluginId);
     return _withWriteLock(() async {
       Object? persistenceError;
       StackTrace? persistenceStack;
       try {
-        final map = Map<String, String>.of(_confirmedMap(prefs));
+        final map = Map<String, String>.of(await _confirmedMap(prefs));
         map.remove(pluginId);
         await _commitMap(prefs, map);
       } catch (error, stack) {
@@ -694,20 +1037,19 @@ class PluginPermissionStore {
     });
   }
 
-  /// Reads the raw persisted grant map; corrupted JSON yields an empty
-  /// map (the honest "nothing approved" state).
-  Map<String, String> _readMap(SharedPreferences prefs) {
+  /// Decodes a persisted grant map; corrupted JSON yields null (the caller
+  /// treats it as "nothing approved").
+  static Map<String, String>? _decodeMap(String raw) {
     try {
-      final raw = prefs.getString(kPluginGrantsPrefKey);
-      if (raw == null || raw.isEmpty) return {};
+      if (raw.isEmpty) return null;
       final decoded = jsonDecode(raw);
-      if (decoded is! Map) return {};
+      if (decoded is! Map) return null;
       return {
         for (final e in decoded.entries)
           if (e.value is String) e.key.toString(): e.value as String,
       };
     } catch (_) {
-      return {};
+      return null;
     }
   }
 }

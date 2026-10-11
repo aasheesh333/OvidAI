@@ -70,6 +70,9 @@ const String _kPluginReapprovalReason =
     'Re-approve this plugin before it can run';
 const String _kPluginUpdatedReapprovalReason =
     'This plugin was updated — approve the changes before it can run';
+const String _kPluginContentChangedReason =
+    "This plugin's files changed since you approved it — review and approve "
+    'it again before it can run';
 const String _kLegacyReapprovalReason =
     'Re-approve this legacy plugin before it can run';
 const String _kMissingContentReason = 'Installed content is missing';
@@ -1027,10 +1030,15 @@ class PluginRuntimeManager extends ChangeNotifier {
   static String _legacyStatusId(PluginItem row, int ordinal) =>
       legacyPluginFocusId(row, ordinal);
 
+  /// [reverifyContent] re-hashes the plugin's whole content tree (H2)
+  /// instead of trusting the per-process cache — activation paths (boot,
+  /// enable, retry) pass it so tampered files are caught before anything
+  /// registers.
   Future<bool> _hasEffectiveGrant(
     String pluginId,
-    PluginInstallEntry entry,
-  ) async {
+    PluginInstallEntry entry, {
+    bool reverifyContent = false,
+  }) async {
     if (pluginId != entry.activation.pluginId ||
         pluginId != entry.manifest.id) {
       return false;
@@ -1038,6 +1046,7 @@ class PluginRuntimeManager extends ChangeNotifier {
     return await PluginPermissionStore().effectiveRuntimeGrant(
           pluginId: pluginId,
           manifest: entry.manifest,
+          reverifyContent: reverifyContent,
         ) !=
         null;
   }
@@ -1060,7 +1069,14 @@ class PluginRuntimeManager extends ChangeNotifier {
         pluginId != entry.manifest.id) {
       return _kPluginReapprovalReason;
     }
-    final stored = await PluginPermissionStore().loadAny(pluginId);
+    final store = PluginPermissionStore();
+    if (await store.contentChangedSinceApproval(
+      pluginId: pluginId,
+      manifest: entry.manifest,
+    )) {
+      return _kPluginContentChangedReason;
+    }
+    final stored = await store.loadAny(pluginId);
     return stored == null
         ? _kPluginReapprovalReason
         : _kPluginUpdatedReapprovalReason;
@@ -1675,6 +1691,28 @@ class PluginRuntimeManager extends ChangeNotifier {
         'capabilities not approved: ${missing.join(', ')}',
       );
     }
+    // H2: the approval binds the FULL content tree, not just the manifest —
+    // a hook script or server file that differs from what was approved
+    // (same manifest, different code) must not install on that consent.
+    final String stagedTree;
+    try {
+      stagedTree = PluginPermissionStore.contentTreeHashFor(
+        inspection.source.stagingDir.path,
+        reverify: true,
+      );
+    } catch (e) {
+      throw PluginRuntimeException(
+        PluginRuntimeErrorCode.digestMismatch,
+        'could not verify the plugin content: $e',
+      );
+    }
+    if (grant.contentTreeHash != stagedTree) {
+      throw const PluginRuntimeException(
+        PluginRuntimeErrorCode.digestMismatch,
+        'the plugin content differs from what was approved — '
+        're-approval required',
+      );
+    }
 
     // Dependencies into the versioned private sandbox (spec §6).
     final deps = _deps();
@@ -1834,6 +1872,8 @@ class PluginRuntimeManager extends ChangeNotifier {
         'atomic commit failed: $e',
       );
     }
+
+    PluginPermissionStore.forgetContentTree(contentDir.path);
 
     // Re-register with the INSTALLED rootPath: contributions baked with
     // the staging path must never survive the rename.
@@ -2020,9 +2060,20 @@ class PluginRuntimeManager extends ChangeNotifier {
       final runtimeRowsToPersist = <String>{};
       for (final id in entries.keys.toList()) {
         var entry = entries[id]!;
-        if (entry.disabled) continue;
+        if (entry.disabled) {
+          // H2 upgrade: record the installed content tree for a grant made
+          // before content hashing existed, even while disabled, so a later
+          // enable verifies against what was installed at upgrade time.
+          if (await _isContainedEntry(id, entry)) {
+            await PluginPermissionStore().adoptPendingContentTree(
+              pluginId: id,
+              manifest: entry.manifest,
+            );
+          }
+          continue;
+        }
         if (!await _isContainedEntry(id, entry) ||
-            !await _hasEffectiveGrant(id, entry)) {
+            !await _hasEffectiveGrant(id, entry, reverifyContent: true)) {
           await _deactivateRuntime(
             id,
             entries,
@@ -2130,7 +2181,7 @@ class PluginRuntimeManager extends ChangeNotifier {
     if (entry == null) return PluginActivation.failed;
     if (entry.disabled) return PluginActivation.disabled;
     if (!await _isContainedEntry(pluginId, entry) ||
-        !await _hasEffectiveGrant(pluginId, entry)) {
+        !await _hasEffectiveGrant(pluginId, entry, reverifyContent: true)) {
       await _deactivateRuntime(
         pluginId,
         entries,
@@ -2264,7 +2315,7 @@ class PluginRuntimeManager extends ChangeNotifier {
     final entry = entries[pluginId];
     if (entry == null) return;
     if (!await _isContainedEntry(pluginId, entry) ||
-        !await _hasEffectiveGrant(pluginId, entry)) {
+        !await _hasEffectiveGrant(pluginId, entry, reverifyContent: true)) {
       await _deactivateRuntime(
         pluginId,
         entries,

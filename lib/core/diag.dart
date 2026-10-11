@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'secret_scrub.dart';
+
 /// One entry in the diagnostics ring buffer.
 class DiagEntry {
   DiagEntry(this.context, this.error, this.stack, this.at);
@@ -27,13 +29,19 @@ class Diag {
 
   /// Record a swallowed error. [context] is a short, stable tag such as
   /// `'mcp_service.disconnect'` so callers can be grouped and searched.
+  ///
+  /// The error text is scrubbed (M4) before it is stored or printed:
+  /// exceptions routinely embed the request URL (`ClientException …,
+  /// uri=https://host/?token=…`) or a command line, and the ring buffer
+  /// feeds the health screen and diagnostic exports.
   static void swallow(String context, Object error, [StackTrace? stack]) {
-    final entry = DiagEntry(context, '$error', stack, DateTime.now());
+    final text = scrubSecretsInText('$error');
+    final entry = DiagEntry(context, text, stack, DateTime.now());
     _ring.add(entry);
     if (_ring.length > _max) {
       _ring.removeRange(0, _ring.length - _max);
     }
-    if (kDebugMode) debugPrint('[diag] $context: $error');
+    if (kDebugMode) debugPrint('[diag] $context: $text');
     try {
       onSwallow?.call(entry);
     } catch (_) {

@@ -22,6 +22,7 @@ import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
 import '../core/tool_usage_store.dart';
 import '../core/state.dart';
+import '../core/secret_scrub.dart';
 import 'github_login_sheet.dart';
 import 'mcp_oauth_sheet.dart';
 import 'mcp_server_add_form.dart';
@@ -5195,7 +5196,9 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
     final s = widget.server;
     final connecting = mcpConnecting(s);
     final app = AppState.I;
-    final configJson = _configJsonFor(s);
+    // Read-only display: inline credentials in args/url are scrubbed (M4).
+    // The editor (below) still round-trips the real values.
+    final configJson = _configJsonFor(s, scrubbed: true);
 
     return Scaffold(
       backgroundColor: Aether.bg,
@@ -5544,7 +5547,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _runRow('Process', '${s.command} ${s.args.join(' ')}'),
+                _runRow('Process', scrubCommandLine(s.command, s.args)),
                 const SizedBox(height: 6),
                 _runRow('Protocol', 'JSON-RPC over stdio'),
                 const SizedBox(height: 6),
@@ -5696,6 +5699,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
     McpServer s, {
     Iterable<String> environmentNames = const [],
     Iterable<String> headerNames = const [],
+    bool scrubbed = false,
   }) {
     final names = {
       ...environmentNames,
@@ -5712,9 +5716,9 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
       'mcpServers': {
         s.name: {
           'command': s.command,
-          'args': s.args,
+          'args': scrubbed ? scrubArgs(s.args) : s.args,
           'transport': s.transport,
-          if (s.url != null) 'url': s.url,
+          if (s.url != null) 'url': scrubbed ? scrubUrl(s.url!) : s.url,
           if (s.cwd != null) 'cwd': s.cwd,
           // Round-tripped so an edit never silently resets them.
           'startupTimeoutS': s.startupTimeoutS,

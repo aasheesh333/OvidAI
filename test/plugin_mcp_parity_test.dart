@@ -814,10 +814,7 @@ void main() {
         expect(mounted.requiredEnvNames, ['API_KEY']);
         expect(mounted.requiredHeaderNames, ['Authorization']);
         expect(mounted.headers, {'Authorization': 'Bearer secure-value'});
-        final persisted = SharedPreferences.getInstance();
-        final persistedRows = (await persisted).getStringList(
-          'ovid_custom_mcp_servers_v1',
-        );
+        final persistedRows = await AppState.persistedCustomMcpRowsForTest();
         expect(persistedRows, hasLength(1));
         expect(
           jsonDecode(persistedRows!.single),
@@ -852,7 +849,7 @@ void main() {
         expect(McpService.I.mcpOAuthConfigFor('$pluginId/$serverName'), isNull);
         expect(await app.getMcpHeaders('$pluginId/$serverName'), isEmpty);
         expect(
-          (await persisted).getStringList('ovid_custom_mcp_servers_v1'),
+          await AppState.persistedCustomMcpRowsForTest(),
           isEmpty,
         );
         expect(jsonEncode(manifest.toJson()), isNot(contains('secure-value')));
@@ -896,9 +893,8 @@ void main() {
                   .url,
               'https://old.example.com/mcp',
             );
-            final persisted = await SharedPreferences.getInstance();
             expect(
-              persisted.getStringList('ovid_custom_mcp_servers_v1')!.single,
+              (await AppState.persistedCustomMcpRowsForTest())!.single,
               contains('old.example.com'),
             );
             throw StateError('secure registration failed');
@@ -935,8 +931,7 @@ void main() {
         );
         expect(restored.url, 'https://old.example.com/mcp');
         expect(McpService.I.mcpOAuthConfigFor(canonicalId), same(previous));
-        final prefs = await SharedPreferences.getInstance();
-        final rows = prefs.getStringList('ovid_custom_mcp_servers_v1')!;
+        final rows = (await AppState.persistedCustomMcpRowsForTest())!;
         expect(rows.single, contains('old.example.com'));
         expect(rows.single, isNot(contains('new.example.com')));
       },
@@ -988,8 +983,7 @@ void main() {
           key: 'ovid_mcp_oauth_cfg_$canonicalId',
         );
         expect(secure, isNull);
-        final prefs = await SharedPreferences.getInstance();
-        expect(prefs.getStringList('ovid_custom_mcp_servers_v1'), isNull);
+        expect((await AppState.persistedCustomMcpRowsForTest()), isNull);
       },
     );
 
@@ -1035,8 +1029,7 @@ void main() {
         await app.setMcpEnv(firstId, {'FIRST_KEY': 'old-secret'});
         await app.setMcpHeaders(firstId, {'Authorization': 'Bearer old'});
         await app.mountPluginOwnedMcpServers(old, connect: false);
-        final prefs = await SharedPreferences.getInstance();
-        final before = prefs.getStringList('ovid_custom_mcp_servers_v1');
+        final before = (await AppState.persistedCustomMcpRowsForTest());
         final oldFirst = McpService.I.mcpOAuthConfigFor(firstId);
         final oldSecond = McpService.I.mcpOAuthConfigFor(secondId);
 
@@ -1095,7 +1088,7 @@ void main() {
         });
         expect(McpService.I.mcpOAuthConfigFor(firstId), same(oldFirst));
         expect(McpService.I.mcpOAuthConfigFor(secondId), same(oldSecond));
-        expect(prefs.getStringList('ovid_custom_mcp_servers_v1'), before);
+        expect((await AppState.persistedCustomMcpRowsForTest()), before);
         expect(
           (await ovidSecureStorage().read(key: 'ovid_mcp_oauth_cfg_$firstId')),
           contains('old-first'),
@@ -1565,8 +1558,7 @@ void main() {
       expect(app.mcpServers.where((s) => s.ownerPluginId == pluginId), isEmpty);
       expect(McpService.I.mcpOAuthConfigFor(id), isNull);
       expect(app.serviceStatusForTest('mcp:$id'), isNull);
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getStringList('ovid_custom_mcp_servers_v1'), isEmpty);
+      expect((await AppState.persistedCustomMcpRowsForTest()), isEmpty);
     });
 
     test(

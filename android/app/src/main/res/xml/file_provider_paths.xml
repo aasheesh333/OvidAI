@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- M2: the provider exposes ONLY the share staging directory. Every outgoing
+     file (share, transcript, open-with) is first copied into
+     cache/outgoing-shares/<random>/ by NativeShare, so no other app-private
+     path (files, databases, prefs, external app dirs) is ever addressable
+     through a content:// URI. -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <files-path name="files" path="." />
-    <cache-path name="cache" path="." />
-    <external-files-path name="external_files" path="." />
-    <external-cache-path name="external_cache" path="." />
+    <cache-path name="outgoing_shares" path="outgoing-shares/" />
 </paths>

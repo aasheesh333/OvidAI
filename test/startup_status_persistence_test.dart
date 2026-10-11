@@ -123,6 +123,7 @@ void main() {
           for (final server in m.mcpServers) ...server.envNames,
         },
         approvedAt: DateTime.utc(2026, 9, 10),
+        contentTreeHash: pluginContentTreeHash(m.rootPath),
       ),
     );
   }
