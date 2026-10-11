@@ -36,14 +36,16 @@ void main() {
     final app = AppState.createForTest();
     app.providers
       ..clear()
-      ..add(ProviderConfig(
-        id: 'gw',
-        name: 'Gateway',
-        description: 'Custom gateway',
-        baseUrl: 'https://gw.example.test/v1',
-        custom: true,
-        models: ['kept'],
-      ));
+      ..add(
+        ProviderConfig(
+          id: 'gw',
+          name: 'Gateway',
+          description: 'Custom gateway',
+          baseUrl: 'https://gw.example.test/v1',
+          custom: true,
+          models: ['kept'],
+        ),
+      );
     providerModelsHttpClientForTest = MockClient(handler);
     await tester.pumpWidget(
       MaterialApp(theme: Aether.theme(), home: const ProvidersScreen()),

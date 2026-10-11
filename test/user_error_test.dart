@@ -23,32 +23,84 @@ void main() {
 
   group('friendlyError table', () {
     final cases = <(String, Object, UserErrorKind, String)>[
-      ('SocketException', const SocketException('Failed host lookup: api.x'),
-          UserErrorKind.offline, l.errorOffline),
-      ('ClientException', http.ClientException('Connection closed'),
-          UserErrorKind.offline, l.errorOffline),
-      ('TimeoutException', TimeoutException('t', const Duration(seconds: 15)),
-          UserErrorKind.timeout, l.errorTimeout),
-      ('StateError', StateError('Resume background execution first'),
-          UserErrorKind.notNow, l.errorNotNow),
-      ('FormatException', const FormatException('Unexpected character'),
-          UserErrorKind.badResponse, l.errorBadResponse),
-      ('PlatformException', PlatformException(code: 'read_external_storage_denied'),
-          UserErrorKind.device, l.errorDevice),
-      ('FileSystemException', const FileSystemException('Cannot open', '/x'),
-          UserErrorKind.file, l.errorFile),
-      ('HTTP 401', const HttpStatusException(401), UserErrorKind.unauthorized,
-          l.errorUnauthorized),
-      ('HTTP 403', const HttpStatusException(403), UserErrorKind.forbidden,
-          l.errorForbidden),
-      ('HTTP 404', const HttpStatusException(404), UserErrorKind.notFound,
-          l.errorNotFound),
-      ('HTTP 429', const HttpStatusException(429), UserErrorKind.rateLimited,
-          l.errorRateLimited),
-      ('HTTP 500', const HttpStatusException(500), UserErrorKind.server,
-          l.errorServer),
-      ('HTTP 503 string', Exception('HTTP 503 Service Unavailable'),
-          UserErrorKind.server, l.errorServer),
+      (
+        'SocketException',
+        const SocketException('Failed host lookup: api.x'),
+        UserErrorKind.offline,
+        l.errorOffline,
+      ),
+      (
+        'ClientException',
+        http.ClientException('Connection closed'),
+        UserErrorKind.offline,
+        l.errorOffline,
+      ),
+      (
+        'TimeoutException',
+        TimeoutException('t', const Duration(seconds: 15)),
+        UserErrorKind.timeout,
+        l.errorTimeout,
+      ),
+      (
+        'StateError',
+        StateError('Resume background execution first'),
+        UserErrorKind.notNow,
+        l.errorNotNow,
+      ),
+      (
+        'FormatException',
+        const FormatException('Unexpected character'),
+        UserErrorKind.badResponse,
+        l.errorBadResponse,
+      ),
+      (
+        'PlatformException',
+        PlatformException(code: 'read_external_storage_denied'),
+        UserErrorKind.device,
+        l.errorDevice,
+      ),
+      (
+        'FileSystemException',
+        const FileSystemException('Cannot open', '/x'),
+        UserErrorKind.file,
+        l.errorFile,
+      ),
+      (
+        'HTTP 401',
+        const HttpStatusException(401),
+        UserErrorKind.unauthorized,
+        l.errorUnauthorized,
+      ),
+      (
+        'HTTP 403',
+        const HttpStatusException(403),
+        UserErrorKind.forbidden,
+        l.errorForbidden,
+      ),
+      (
+        'HTTP 404',
+        const HttpStatusException(404),
+        UserErrorKind.notFound,
+        l.errorNotFound,
+      ),
+      (
+        'HTTP 429',
+        const HttpStatusException(429),
+        UserErrorKind.rateLimited,
+        l.errorRateLimited,
+      ),
+      (
+        'HTTP 500',
+        const HttpStatusException(500),
+        UserErrorKind.server,
+        l.errorServer,
+      ),
+      (
+        'HTTP 503 string',
+        Exception('HTTP 503 Service Unavailable'),
+        UserErrorKind.server,
+        l.errorServer,
+      ),
       ('unknown', Exception('boom'), UserErrorKind.unknown, l.errorGeneric),
     ];
     for (final (name, error, kind, message) in cases) {
@@ -61,18 +113,20 @@ void main() {
       });
     }
 
-    test('type error from a JSON-array body reads as an unexpected response',
-        () {
-      Object? caught;
-      try {
-        final dynamic j = <dynamic>[];
-        // ignore: unused_local_variable
-        final Map<String, dynamic> m = j as Map<String, dynamic>;
-      } catch (e) {
-        caught = e;
-      }
-      expect(UserError.from(caught!).kind, UserErrorKind.badResponse);
-    });
+    test(
+      'type error from a JSON-array body reads as an unexpected response',
+      () {
+        Object? caught;
+        try {
+          final dynamic j = <dynamic>[];
+          // ignore: unused_local_variable
+          final Map<String, dynamic> m = j as Map<String, dynamic>;
+        } catch (e) {
+          caught = e;
+        }
+        expect(UserError.from(caught!).kind, UserErrorKind.badResponse);
+      },
+    );
 
     test('status helper covers the 5xx range only', () {
       expect(UserError.fromHttpStatus(502).kind, UserErrorKind.server);
@@ -100,18 +154,21 @@ void main() {
     expect(entry.error, contains('Bad state: raw text'));
   });
 
-  testWidgets('ErrorRetryView hides details until asked and retries',
-      (tester) async {
+  testWidgets('ErrorRetryView hides details until asked and retries', (
+    tester,
+  ) async {
     var retries = 0;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: ErrorRetryView(
-          message: 'Couldn\'t load.',
-          detail: 'socket closed',
-          onRetry: () => retries++,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ErrorRetryView(
+            message: 'Couldn\'t load.',
+            detail: 'socket closed',
+            onRetry: () => retries++,
+          ),
         ),
       ),
-    ));
+    );
     expect(find.text('socket closed'), findsNothing);
     await tester.tap(find.text(l.errorDetailsShow));
     await tester.pump();
@@ -121,8 +178,9 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('release error widget shows copy instead of framework text',
-      (tester) async {
+  testWidgets('release error widget shows copy instead of framework text', (
+    tester,
+  ) async {
     // The binding verifies the builder is restored before teardown runs.
     final previous = ErrorWidget.builder;
     late Widget widget;

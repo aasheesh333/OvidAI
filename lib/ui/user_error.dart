@@ -153,10 +153,10 @@ class UserError {
 
   /// First line of [error] without Dart type prefixes, capped for display.
   static String detailOf(Object error) {
-    var line = '$error'.split('\n').map((s) => s.trim()).firstWhere(
-          (s) => s.isNotEmpty,
-          orElse: () => '',
-        );
+    var line = '$error'
+        .split('\n')
+        .map((s) => s.trim())
+        .firstWhere((s) => s.isNotEmpty, orElse: () => '');
     for (var i = 0; i < 3; i++) {
       final stripped = line.replaceFirst(_typePrefix, '');
       if (stripped == line) break;
@@ -172,5 +172,4 @@ String friendlyError(
   AppLocalizations? l10n,
   StackTrace? stack,
   String? log,
-}) =>
-    UserError.from(error, l10n: l10n, stack: stack, log: log).message;
+}) => UserError.from(error, l10n: l10n, stack: stack, log: log).message;
