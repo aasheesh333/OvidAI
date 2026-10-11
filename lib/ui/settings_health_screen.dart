@@ -10,8 +10,11 @@ import 'widgets/aether_primitives.dart';
 /// REDESIGN (wave 2 UI): premium Aether primitives from
 /// `lib/ui/widgets/aether_primitives.dart` carry the layout. All runtime
 /// wiring — [HealthService.runChecks], [HealthService.repair], the
-/// per-check `repairable` targeting set, the cancellable repair worker,
-/// and the dispose-time `cancelRepair` guard — is preserved verbatim.
+/// per-check `repairable` targeting set and the cancellable repair worker —
+/// is preserved. Leaving the screen no longer cancels a repair mid-install
+/// (that could leave a dpkg lock or half-installed packages): a back press
+/// asks, the repair keeps running in [HealthService], and reopening the
+/// screen re-attaches its log.
 class SettingsHealthScreen extends StatefulWidget {
   final HealthService? service;
   const SettingsHealthScreen({super.key, this.service});
@@ -52,11 +55,47 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
     }
   }
 
-  @override
-  void dispose() {
-    if (_starting && _health.repairing) _health.cancelRepair();
-    super.dispose();
+  /// Back while a repair runs: keep it running (default), stop it, or stay.
+  Future<void> _confirmLeave() async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        scrollable: true,
+        title: const Text('Leave while repairing?'),
+        content: const Text(
+          'Packages are being installed. Leaving keeps the repair running in '
+          'the background; reopen Device health to see its progress. '
+          'Stopping mid-install can leave packages half-installed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, 'stop'),
+            child: Text(
+              'Stop repair and leave',
+              style: TextStyle(color: Aether.dangerC),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, 'stay'),
+            child: const Text('Stay'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, 'leave'),
+            child: const Text('Keep running'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || choice == null || choice == 'stay') return;
+    if (choice == 'stop' && _health.repairing) _health.cancelRepair();
+    _leaving = true;
+    setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop();
+    });
   }
+
+  bool _leaving = false;
 
   Future<void> _repair() async {
     if (_starting ||
@@ -117,100 +156,115 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Aether.bg,
-      appBar: AppBar(title: const Text('Device health')),
-      body: AnimatedBuilder(
-        animation: _health,
-        builder: (_, _) {
-          final report = _health.lastReport;
-          final busy = _starting || _health.repairing;
-          final checks = report?.checks ?? const <HealthCheck>[];
-          final available = checks.where((check) => check.ok).length;
-          final attention = checks
-              .where(
-                (check) =>
-                    !check.ok &&
-                    (check.status == HealthStatus.missing ||
-                        check.status == HealthStatus.missingConfiguration),
-              )
-              .length;
-          final unavailable = checks.length - available - attention;
-          final repairable = checks.where((check) => check.repairable).length;
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
-            children: [
-              // ── Overall summary ──
-              if (report != null)
-                _ScoreSummaryCard(
-                  score: report.score,
-                  color: _scoreColor(report.score),
-                  totalChecks: report.checks.length,
-                  failedChecks: report.failed.length,
-                  availableChecks: available,
-                  attentionChecks: attention,
-                  unavailableChecks: unavailable,
-                ),
-              if (_health.checking) ...[
-                const SizedBox(height: 12),
-                const LinearProgressIndicator(),
-              ],
-
-              // ── Runtime health ──
-              const SizedBox(height: 20),
-              const AetherSectionTitle(
-                eyebrow: 'Runtime health',
-                subtitle:
-                    'A passing version probe is not proof of network access or every tool operation.',
-              ),
-              const SizedBox(height: 12),
-
-              if (_health.repairWorker == null)
-                _NoWorkerCard()
-              else ...[
-                _RepairControls(
-                  busy: busy,
-                  repairing: _health.repairing,
-                  cancellationRequested: _health.cancellationRequested,
-                  canRepair: !_health.checking && _selected.isNotEmpty,
-                  selectedCount: _selected.length,
-                  repairableCount: repairable,
-                  onRepair: _repair,
-                  onCancel: _health.cancelRepair,
-                ),
-                const SizedBox(height: 12),
-              ],
-
-              if (_result != null) ...[
-                _ResultCard(message: _result!),
-                const SizedBox(height: 12),
-              ],
-
-              for (final check in report?.checks ?? <HealthCheck>[]) ...[
-                _HealthCheckCard(
-                  check: check,
-                  selectable: check.repairable && _health.repairWorker != null,
-                  selected: _selected.contains(check.id),
-                  onChanged: busy || _health.checking ? null : _toggle,
-                ),
-                const SizedBox(height: 8),
-              ],
-
-              if (_log.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                _RepairLogCard(lines: _log),
-                const SizedBox(height: 12),
-              ],
-
-              const SizedBox(height: 8),
-              SettingsActionButton(
-                label: 'Re-run checks',
-                icon: Icons.refresh,
-                onPressed: busy || _health.checking ? null : _check,
-              ),
-            ],
-          );
+    return AnimatedBuilder(
+      animation: _health,
+      builder: (context, child) => PopScope(
+        canPop: _leaving || !_health.repairing,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) _confirmLeave();
         },
+        child: child!,
+      ),
+      child: Scaffold(
+        backgroundColor: Aether.bg,
+        appBar: AppBar(title: const Text('Device health')),
+        body: AnimatedBuilder(
+          animation: _health,
+          builder: (_, _) {
+            // Re-attach to a repair started before this screen was reopened.
+            final log = _log.isEmpty && _health.repairing
+                ? _health.repairLog
+                : _log;
+            final report = _health.lastReport;
+            final busy = _starting || _health.repairing;
+            final checks = report?.checks ?? const <HealthCheck>[];
+            final available = checks.where((check) => check.ok).length;
+            final attention = checks
+                .where(
+                  (check) =>
+                      !check.ok &&
+                      (check.status == HealthStatus.missing ||
+                          check.status == HealthStatus.missingConfiguration),
+                )
+                .length;
+            final unavailable = checks.length - available - attention;
+            final repairable = checks.where((check) => check.repairable).length;
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+              children: [
+                // ── Overall summary ──
+                if (report != null)
+                  _ScoreSummaryCard(
+                    score: report.score,
+                    color: _scoreColor(report.score),
+                    totalChecks: report.checks.length,
+                    failedChecks: report.failed.length,
+                    availableChecks: available,
+                    attentionChecks: attention,
+                    unavailableChecks: unavailable,
+                  ),
+                if (_health.checking) ...[
+                  const SizedBox(height: 12),
+                  const LinearProgressIndicator(),
+                ],
+
+                // ── Runtime health ──
+                const SizedBox(height: 20),
+                const AetherSectionTitle(
+                  eyebrow: 'Runtime health',
+                  subtitle:
+                      'A passing version probe is not proof of network access or every tool operation.',
+                ),
+                const SizedBox(height: 12),
+
+                if (_health.repairWorker == null)
+                  _NoWorkerCard()
+                else ...[
+                  _RepairControls(
+                    busy: busy,
+                    repairing: _health.repairing,
+                    cancellationRequested: _health.cancellationRequested,
+                    canRepair: !_health.checking && _selected.isNotEmpty,
+                    selectedCount: _selected.length,
+                    repairableCount: repairable,
+                    onRepair: _repair,
+                    onCancel: _health.cancelRepair,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
+                if (_result != null) ...[
+                  _ResultCard(message: _result!),
+                  const SizedBox(height: 12),
+                ],
+
+                for (final check in report?.checks ?? <HealthCheck>[]) ...[
+                  _HealthCheckCard(
+                    check: check,
+                    selectable:
+                        check.repairable && _health.repairWorker != null,
+                    selected: _selected.contains(check.id),
+                    onChanged: busy || _health.checking ? null : _toggle,
+                  ),
+                  const SizedBox(height: 8),
+                ],
+
+                if (log.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  _RepairLogCard(lines: log),
+                  const SizedBox(height: 12),
+                ],
+
+                const SizedBox(height: 8),
+                SettingsActionButton(
+                  label: 'Re-run checks',
+                  icon: Icons.refresh,
+                  onPressed: busy || _health.checking ? null : _check,
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }

@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../core/agent_service.dart';
 import '../core/health_service.dart';
 import '../core/sandbox_service.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'sandbox_setup.dart';
 import 'settings_action_widgets.dart';
+import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 
 /// Device health — a 0–100 capability score with a per-item breakdown of
@@ -133,26 +135,48 @@ class _HealthScreenState extends State<HealthScreen> {
   }
 
   Future<void> _confirmHardReset() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Reset the sandbox?'),
-        content: const Text(
-          'This deletes the sandbox prefix and opens setup again. Existing app data outside the sandbox is not affected.',
+    // Running replies use the sandbox rootfs; deleting it under them breaks
+    // them mid-flight. Block until they are stopped.
+    final running = AppState.I.sessions
+        .where((s) => AgentService.I.busyFor(s.id))
+        .length;
+    if (running > 0) {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Stop running chats first'),
+          content: Text(
+            '$running chat${running == 1 ? ' is' : 's are'} still running and '
+            'using the sandbox. Stop ${running == 1 ? 'it' : 'them'}, then '
+            'reset the sandbox.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('OK'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Reset sandbox'),
-          ),
-        ],
+      );
+      return;
+    }
+    if (!mounted) return;
+    final confirmed = await showAetherConfirmDialog(
+      context,
+      title: 'Reset the sandbox?',
+      message:
+          'This deletes the whole sandbox and opens setup again. Open '
+          'terminals and local (stdio) MCP servers are stopped.',
+      extra: Text(
+        'You will lose: installed packages and runtimes, Python/Node modules '
+        'and tool caches, and the sandbox home folder (shell history, config '
+        'and anything saved outside chat workspaces). Chat workspace folders '
+        'are kept.',
+        style: AetherType.bodyMuted,
       ),
+      confirmLabel: 'Reset sandbox',
     );
-    if (confirmed == true && mounted) await _hardResetSandbox();
+    if (confirmed && mounted) await _hardResetSandbox();
   }
 
   @override
