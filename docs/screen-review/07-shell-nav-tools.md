@@ -10,7 +10,7 @@ Supporting `lib/core/` code was followed where a finding depends on it.
 (no router, back handling, deep links, state restoration), tablet/foldable layouts, chat list scale,
 search, offline indicator, WebView memory, timers.
 
-**Status:** in progress
+**Status:** complete (sections 1–8 + group summary)
 
 Known context: the per-token streaming rebuild storm is being fixed on `perf/streaming-rebuilds`;
 referenced, not re-derived, here.
@@ -391,3 +391,314 @@ expecting the omnibar text to contain `evil.example`. A perf test that sends 100
 notifications with no browser change, expecting `canGoBack` to be called 0 times.
 
 ---
+## 6. ScheduleScreen and Edit schedule sheet — `lib/ui/schedule_screen.dart`
+
+**What it is / how reached:** reached only from the sidebar footer "Schedule" row
+(`lib/ui/sidebar.dart:250-262`), which is disabled when there is no active session. It is a per-session
+list: a background-execution status card (headline, constraint notes, Stop/Resume button), then one
+`_TaskCard` per entry in `session.schedules` (status pill, prompt, recurrence, next run, an overflow menu
+with Edit / Pause / Resume / Cancel, and expandable details with raw spec). Edit opens
+`_EditScheduleSheet` (prompt, One-off / Daily / Interval chips, free-text time field, preview, retries
+stepper 0–3). Tasks can only be *created* by asking the agent. Mutations go to
+`AgentService.editSchedule` (`agent_service.dart:20873`) and `ScheduleCoordinator.cancelTask/resumeTask`
+(`schedule_coordinator.dart:360-379`).
+
+**Findings**
+- **P1 · functional/destructive · `lib/ui/schedule_screen.dart:149-158`, `lib/core/agent_notification_service.dart:100-110`**:
+  "Stop background execution" calls `AgentNotificationService.stopBackground`, which also calls
+  `AgentService.I.cancelAllRuns()`, the global panic stop. One tap on a per-chat Schedule screen therefore
+  cancels **every in-flight chat reply in every session** (plus device-control actions and voice input) and
+  pauses **every scheduled task in every session**, with no confirmation. The label suggests it only
+  affects background scheduling. *Fix:* show a confirm dialog that states the scope ("This pauses all
+  scheduled tasks in all chats and stops any running agent replies"). Better, split the actions: a
+  schedules-only stop (`AgentService.stopScheduledBackground`) here, and keep the panic stop in the
+  notification and global Stop.
+- **P1 · functional · `lib/core/schedule_coordinator.dart:346-357`, `lib/core/agent_service.dart:20867-20871`, `lib/ui/schedule_screen.dart:115-118`**:
+  Stop sets every pending or running task to `paused` with error "Background execution stopped by user".
+  Resume only clears the `stopped` flag; it never returns those tasks to `pending`. After Stop → Resume the
+  strip says "Background execution active" with a pulsing green dot while **nothing will ever run** until
+  the user finds each task, in each chat, and taps Resume. Daily reminders silently stop. *Fix:* on resume,
+  re-pend tasks whose `error == 'Background execution stopped by user'` (recomputing `fireAt` for
+  recurring ones so they do not all fire at once), or show a "Resume N paused tasks" prompt after Resume.
+- **P1 · copy/errors · `lib/ui/schedule_screen.dart:41,266,559`**: errors are shown as raw `'$e'`, so the
+  user sees "Bad state: Resume background execution first", "Bad state: Pause the task before editing",
+  "FormatException: Use YYYY-MM-DD HH:mm or ISO-8601 with offset", or platform exceptions. *Fix:* map the
+  known `StateError` / `FormatException` cases to friendly copy plus an inline action (for example a
+  "Resume background" button on the first one), log the raw error through `Diag`, and show a generic
+  "Couldn't update the schedule. Try again." otherwise.
+- **P1 · destructive UX · `lib/ui/schedule_screen.dart:524-528,542-543`**: Cancel is irreversible (Resume is
+  not offered for `cancelled`) and runs immediately from the overflow menu with no confirm and no undo. If
+  the task is running, it also kills the run (`cancelTask` → `cancel(sessionId)`). *Fix:* show a confirm
+  dialog, or a SnackBar with Undo that restores the previous status. Use the label "Cancel task" in the
+  danger colour.
+- **P1 · UX/input · `lib/ui/schedule_screen.dart:328-343,210-217`**: time is free-text only: `HH:mm` for
+  daily, **seconds** for interval, and an ISO string for one-off. A one-off is pre-filled with the stored
+  `fireAt`, which is a UTC ISO string such as `2026-10-11T04:30:00.000Z`, so a user in IST sees a time 5.5 h
+  off and must reason about `Z`. Typing ISO dates on a phone keyboard is error-prone. ChatGPT Tasks and
+  Google Calendar use pickers. *Fix:* use `showTimePicker` for Daily, `showDatePicker` + `showTimePicker`
+  for One-off (pre-filled with the **local** time), and a number + unit dropdown (minutes / hours / days,
+  minimum 5 min) for Interval. Keep the text field only as an "Advanced" option.
+- **P2 · functional · `lib/core/agent_service.dart:20873-20893`, `lib/ui/schedule_screen.dart:509-513`**:
+  Edit is enabled for `completed`, `cancelled`, `paused` and `failed` tasks, and `editSchedule` replaces
+  the task with a fresh `create()` result whose status is `pending`. Saving a paused task therefore
+  silently un-pauses it. Saving a completed one-off with its old (past) time re-runs it immediately, since
+  past times are "due immediately". The replacement also drops `lastStatus`, `finishedAt` and `attempt`,
+  so run history is lost. *Fix:* keep the previous status unless the user taps "Save and resume", reject
+  past one-off times on edit (or ask "Run now?"), and carry over the history fields.
+- **P2 · stale UI · `lib/ui/schedule_screen.dart:27-30,671-686`**: there is no ticker, so "Next in 5m"
+  stays the same until some unrelated state change happens. Left open, it can read "Next in 2m" long after
+  the task ran. Conversely, any streamed token anywhere triggers a refresh (see next item), so the timer
+  behaves inconsistently. *Fix:* add a `Timer.periodic(1 min)` that only runs while the route is current
+  and `TickerMode.of(context)` is true. Tests can disable it with an injectable clock or flag rather than
+  dropping the ticker.
+- **P2 · perf · `lib/ui/schedule_screen.dart:50-52`**: `AnimatedBuilder` listens to the whole
+  `AppState` + `AgentService`, so the full screen (every card, every `LayoutBuilder` detail row) rebuilds
+  per streamed token while any chat is streaming (see `perf/streaming-rebuilds`). *Fix:* listen to a
+  schedule-specific notifier (`agent.schedules` / `_schedulesChanged`) plus the notification-service
+  background flag only.
+- **P2 · UX/accuracy · `lib/ui/schedule_screen.dart:115-127`**: the headline shows "Background execution
+  active" with a pulsing green dot even when keep-alive or notifications are off (the notes below say
+  tasks may not run), when there are no tasks, or when every task is paused. *Fix:* use three states:
+  "Active" (green), "Limited" (amber, when keep-alive or notifications are off or a constraint exists), and
+  "Paused". Do not pulse when nothing is scheduled.
+- **P2 · l10n · `lib/ui/schedule_screen.dart:776-789,448-451`**: `_fmtInstant` hard-codes English month
+  names and 12-hour time, ignoring the device 24-hour setting (`MediaQuery.alwaysUse24HourFormat`) and
+  locale. The status pill shows raw lowercase keys (`pending`, `failed`). *Fix:* use `intl`
+  `DateFormat.yMMMd().add_jm()` / `MaterialLocalizations.formatTimeOfDay`, and map status keys to
+  display labels ("Scheduled", "Running", "Paused", "Failed", "Done", "Cancelled").
+- **P2 · data growth · `lib/ui/schedule_screen.dart:63-92`**: completed and cancelled tasks are never
+  removed (there is no delete action and no auto-prune), and the list is a non-lazy `ListView(children:)`.
+  An "every 5 min" agent experiment or many one-offs grow the list, and `session.schedules`, without limit.
+  *Fix:* add "Delete" for completed or cancelled tasks, plus "Clear finished", auto-prune finished
+  one-offs after 30 days, and use `ListView.builder`.
+- **P2 · a11y · `lib/ui/schedule_screen.dart:448-456,530-533`**: the status is conveyed by pill colour
+  plus a raw word. The overflow button tooltip is the generic "Task actions", without naming the task.
+  The card has no merged semantics, so TalkBack reads the pill, prompt, recurrence and countdown as four
+  separate stops. *Fix:* wrap the header in `Semantics(label: 'Task: $prompt, $statusLabel, $secondary')`
+  and use a tooltip such as `'Actions for $prompt'`.
+- **P2 · UX · `lib/ui/schedule_screen.dart:292-300`**: the prompt field is capped at `maxLines: 2`, so
+  editing a multi-paragraph task prompt happens in a 2-line window. Saving also stores `_prompt.text`
+  untrimmed (`:260`). *Fix:* use `minLines: 2, maxLines: 6` inside the already-scrollable sheet, and
+  trim on save.
+- **P2 · UX · `lib/ui/schedule_screen.dart:153-158`**: the Stop/Resume button has no busy state, so a
+  double tap fires two overlapping `stopBackground`/`resumeBackground` calls (the generation counter
+  absorbs it, but the user sees no feedback for the native round trip). *Fix:* disable the button and
+  show a spinner while the call is pending.
+
+**Missing features:** a create-task flow in the UI ("New task" FAB with prompt + picker; ChatGPT Tasks
+has one), "Run now", a global "All scheduled tasks" view across chats (today the user must open each chat
+to find its schedules, and the screen is unreachable without an active session), a run history per task
+with links to the produced messages, notification-on-completion toggles per task, and a
+deep link from the completion notification to the task.
+
+**Test to add:** a widget test that taps "Stop background execution" while a fake foreground run is
+active, expecting a confirm dialog and, after cancel, the run still active. A coordinator test: stop →
+resume → the formerly pending tasks are `pending` again. A test that `resumeTask` throwing
+`StateError` shows friendly copy without "Bad state". A test that editing a paused task keeps it paused.
+A golden for `_fmtInstant` with `alwaysUse24HourFormat: true`.
+
+---
+## 7. TrajectoryScreen — event ledger — `lib/ui/trajectory_screen.dart`
+
+**What it is / how reached:** the sidebar footer row "Trajectory — event ledger"
+(`lib/ui/sidebar.dart:270-281`), enabled only with an active session. It loads the session's append-only
+JSONL ledger (`SessionLedger.read` + `projection`, `lib/core/session_ledger.dart:237,351`) and shows a
+stats card (turns, tool calls, wall / LLM / tool time, top tools) followed by a `SliverList.builder` of
+event cards (timestamp, `#seq · title`, outcome, detail, "View details" → raw JSON dialog). A Reload
+action is in the AppBar. It is a power-user / debugging view.
+
+**Findings**
+- **P1 · functional/data · `lib/core/session_ledger.dart:369-371`, `lib/ui/trajectory_screen.dart:194,225`**:
+  "LLM time" is always **0s**. The projection only sums `llm` events, but no code appends an `llm` event
+  (all `SessionLedger.I.append` call sites write `turn_start`, `turn_end`, `tool_start`, `tool_end`,
+  `checkpoint`, `approval` or `note`). The real figure is in `turn_end.llmMs` (`agent_service.dart:11503`).
+  Users and support therefore get a wrong cost/latency picture. *Fix:* in `projection`, add `turn_end.llmMs`
+  (and use `turn_end.toolMs` as a cross-check), or start emitting `llm` events. Add a projection unit test.
+- **P1 · perf/memory · `lib/ui/trajectory_screen.dart:41-42`, `lib/core/session_ledger.dart:351-352`**:
+  opening the screen scans and decodes the **entire ledger twice** (`read()`, then `projection()` calls
+  `read()` again), and keeps every decoded event map in memory. The ledger is never truncated, so a
+  long-lived agent chat (thousands of tool calls, plus large `error` strings) means seconds of spinner and
+  tens of MB of maps on low-end devices. Every Reload repeats both scans. `read()` already supports
+  `offset/limit` paging, but the screen does not use it. *Fix:* compute the projection from the events
+  already read (a pure `SessionProjection.fromEvents(events)`), or have the isolate return both in one
+  pass. Page the list: load the newest 200 and fetch more on scroll.
+- **P2 · error handling · `lib/core/session_ledger.dart:259-261`, `lib/ui/trajectory_screen.dart:49-55,242-253,341-350`**:
+  `SessionLedger.read` catches **everything** and returns `[]`, so the screen's error and Retry states are
+  unreachable. A corrupt, unreadable or permission-denied ledger shows "No ledger records yet. Events are
+  recorded as you run the agent", which is false. When the error path does run, it shows raw `'$e'`.
+  *Fix:* let `read` surface I/O errors (or return a result type with `error`), show "Couldn't read this
+  chat's history" with Retry, and log the raw error to `Diag`.
+- **P2 · functional · `lib/ui/trajectory_screen.dart:152`, `lib/core/agent_service.dart:21954-21958`**:
+  recovery `note` events store their text under the key `note`, but `_detailFor` reads `text` or
+  `message`. The one note kind the app writes ("recovered N tool rows as UNKNOWN") therefore renders as a
+  bare red "Note" with no explanation. *Fix:* read `e['note'] ?? e['text'] ?? e['message']`.
+- **P2 · functional · `lib/ui/trajectory_screen.dart:78-136`**: `approval` events (7 call sites:
+  user-approved, user-denied, hook-denied and plan-mode-denied tool calls) are not mapped. They render
+  with the raw title "approval", a hollow-circle icon, faint colour, no detail, and no outcome, even
+  though these are the most security-relevant records in the ledger. *Fix:* add an `approval` case:
+  title "Approval: $tool", outcome "Approved" / "Denied by you / by plugin hook $plugin / by plan mode",
+  shield icon, danger colour when `ok == false`, and show `note`.
+- **P2 · UX · `lib/ui/trajectory_screen.dart:295`**: timestamps are the raw stored ISO-8601 UTC string
+  (`2026-10-11T04:31:22.123Z`) in 11pt faint mono. *Fix:* show local time (`HH:mm:ss`), add a date
+  divider per day, and keep the raw value in the details dialog.
+- **P2 · UX · `lib/ui/trajectory_screen.dart:193,224`, `lib/core/session_ledger.dart:376-378`**:
+  "Wall time" is `lastTurnEnd − firstTurnStart`, which includes all idle time between visits, so a chat
+  used on Monday and Friday shows "Wall time 4d" next to "LLM time 0s". *Fix:* sum per-turn durations
+  (`turn_end.t − matching turn_start.t`), and label it "Active time".
+- **P2 · UX · `lib/ui/trajectory_screen.dart:254-332`**: events are listed oldest-first with no filter,
+  search or jump-to-latest, so in a long session the user must scroll thousands of cards to reach the most
+  recent failure. The screen is also not live: it does not refresh while the agent runs. *Fix:* order
+  newest-first (or auto-scroll to the end), add filter chips (All / Failures / Tools / Approvals) and a
+  search box, and subscribe to a ledger-append notifier for the session (or auto-refresh while
+  `busyFor(sessionId)`).
+- **P2 · a11y/tap targets · `lib/ui/trajectory_screen.dart:283-322`**: only the small "View details"
+  `TextButton` is tappable, not the card. Its `Semantics(label:)` replaces the button text, so TalkBack
+  never says "View details" and the timestamp and `#seq` are read as separate stops. *Fix:* make the whole
+  card an `InkWell` with `Semantics(button: true, label: summary, hint: 'Opens details')`, and
+  `ExcludeSemantics` on the inner texts.
+- **P2 · perf/UX · `lib/ui/trajectory_screen.dart:58-76`**: the details dialog renders
+  `JsonEncoder.withIndent` of the whole event in a single `SelectableText` inside `AlertDialog(scrollable)`.
+  A very large `error` string (stack traces, HTML bodies) lays out as one huge paragraph and janks, and
+  there is no Copy button. *Fix:* cap the displayed JSON at about 20 KB with "Show all", add a "Copy JSON"
+  action, and use a full-screen dialog on phones.
+- **P2 · copy · `lib/ui/sidebar.dart:274`, `lib/ui/trajectory_screen.dart:218,141`**: "Trajectory — event
+  ledger", "Session stats (ledger projection)" and "model request · N rows" are engineering jargon shown
+  in the main sidebar to every user. *Fix:* rename to "Activity log" / "Run history" in the sidebar, use
+  "Chat stats" and "Sent N messages to the model", or move the entry under Settings → Developer.
+- **P2 · UX · `lib/ui/trajectory_screen.dart:367,378`**: the title reads `AppState.I.sessionById` once
+  in `build` without listening, so a rename does not update it, and the font size is hard-coded to 14
+  instead of the theme's AppBar style. *Fix:* use `AnimatedBuilder(AppState.I)` for the title only, and
+  drop the hard-coded size.
+
+**Missing features:** export or share the ledger (JSON or text, for support tickets), a per-turn grouping
+(collapse the tool calls under each turn), a token and cost column per turn (the ledger already records
+turns, and this is where Claude Code-style `/cost` usage tracking would surface), tap-through from an event
+to the corresponding chat message, and filters for failures and approvals.
+
+**Test to add:** a projection unit test with two `turn_end` events carrying `llmMs: 1000`, expecting LLM
+time 2 s. A widget test feeding a `note` event `{note: 'recovered 2 tool rows'}`, expecting that text. An
+`approval` event with `ok: false, deniedBy: 'hook'`, expecting "Denied" and a non-generic icon. A test
+where `SessionLedger.read` throws, expecting the "Couldn't read" state with Retry (after the fix). A test
+that opening the screen performs one ledger scan, not two.
+
+---
+## 8. SubagentScreen and subagent catalog sheet — `lib/ui/subagent_screen.dart`
+
+**What it is / how reached:** a subagent is a real child session. `SubagentScreen.open` is called from the
+subagent card in the chat transcript (`chat_screen.dart:3391`), from the lineage breadcrumb, and from the
+catalog sheet. The screen shows: an AppBar (agent label, descendants button with count badge, Stop while
+running), a horizontal lineage breadcrumb, a status strip (state pill, elapsed, "N rows", queued count,
+continuable / one-shot, lock icon with allowed tools), the reused `ChatTranscript`, a jump-to-latest
+button, and a composer. The composer is read-only for one-shot children and sends follow-ups through
+`AgentService.continueSubagent` for continuable ones. `showSubagentCatalog` is a bottom sheet listing the
+children (`_CatalogCard`: status dot, label, state pill, runtime, Stop, rows / mode / grandchildren).
+
+**Findings**
+- **P1 · perf · `lib/ui/subagent_screen.dart:122-124,148,560-561`**: the whole screen, including the
+  full `ChatTranscript`, the lineage (which walks `lineageOf`) and the status strip, is inside an
+  `AnimatedBuilder` on all of `AppState` + `AgentService`. Every build also schedules a post-frame
+  `_jumpToBottom` callback. While **any** session streams or any subagent emits, the entire child
+  transcript rebuilds and a scroll callback is queued per notification. Subagent fan-out (several children
+  streaming at once) is exactly when this screen is open. The catalog sheet has the same listener.
+  `perf/streaming-rebuilds` removes the per-token `AppState.refresh`, but `AgentService.notifyListeners`
+  still fires on every `_emit`. *Fix:* scope the builder to the session (`Selector`-style listenable for
+  `s.id`: messages length, busy, agentState, queued count), let `ChatTranscript` listen to
+  `liveBubbleTicks` itself, and call `_jumpToBottom` only when the message count or the live bubble length
+  changes.
+- **P2 · navigation · `lib/ui/subagent_screen.dart:279-282`**: tapping a *subagent* ancestor in the
+  breadcrumb **pushes** a new `SubagentScreen` instead of popping back to it. Walking Root › A › B, tap A,
+  tap into B again, and so on builds an unbounded stack (each with its own whole-app `AnimatedBuilder`),
+  and Back walks through every duplicate. *Fix:* if a route for that ancestor is already on the stack,
+  `popUntil` it (give routes `RouteSettings(name: 'subagent/$id')`). Otherwise use `pushReplacement`
+  so breadcrumbs never deepen the stack.
+- **P2 · copy/code health · `lib/ui/subagent_screen.dart:102-109`, `lib/core/agent_service.dart:21859-21905`**:
+  `continueSubagent` returns **model-facing tool strings**, and the UI both shows them verbatim in a
+  SnackBar ("queued as the next turn for sub-12", "resumed sub-12", "message is empty", the concurrency
+  refusal written for the model) and decides whether to clear the draft by matching string prefixes. A
+  wording change in core silently breaks draft clearing. *Fix:* return a typed result
+  (`enum ContinueOutcome { queued, resumed, refusedOneShot, refusedBusyCap, accountSwitching, empty }`
+  plus a detail), keep the string form for the tool layer only, and map outcomes to user copy ("Queued —
+  the agent will pick this up after its current step", "Agent resumed", "Too many agents running — stop
+  one and try again"). Also replace the raw `'Could not send follow-up: $e'` (`:113`).
+- **P2 · a11y/tap targets · `lib/ui/subagent_screen.dart:167-176,207-234,318-341,513-541`**: the AppBar
+  Stop, the descendants button and the composer Stop/Send all use `VisualDensity.compact` (40×40 dp). The
+  jump-to-latest button is about 36×28 dp. The count badge is 8.5pt white on accent and sits on top of the
+  icon. *Fix:* drop `compact` on primary actions (or wrap them in a 48×48 `SizedBox`), make the jump
+  button a `FloatingActionButton.small` (40 dp visual with a 48 dp target), use
+  `Badge.count(count: ...)` from Material 3 so the count is read as part of the button's semantics
+  ("Subagents, 3").
+- **P2 · a11y/contrast · `lib/ui/subagent_screen.dart:287-298,394,458`**: breadcrumb labels are 10.5pt in
+  `textFaint`, the status line is 11pt `textMuted`, and the read-only note is 11.5pt `textFaint`. These are
+  hard-coded sizes that do not use the type scale and are likely below 4.5:1 contrast on `Aether.bg`
+  (see `08` theme contrast notes). *Fix:* use `AetherType.caption` / `label` tokens with a minimum 12sp
+  and a contrast-checked colour.
+- **P2 · UX · `lib/ui/subagent_screen.dart:396-404`**: the subagent's allowed-tool restriction is
+  shown only as a 13 dp lock icon with a `Tooltip`, which on Android appears only on long press of a
+  non-interactive icon. Most users never see which tools the agent may use, and TalkBack does not reach
+  it. The child's original task prompt is also not shown anywhere except inside the transcript. *Fix:*
+  add a tappable "Task & permissions" chip that opens a sheet with the dispatch prompt, the allowed tools,
+  the mode and the parent.
+- **P2 · copy · `lib/ui/subagent_screen.dart:368,391,636-637`**: "N rows", raw state keys (`finished`,
+  `stopping`), "one-shot" / "continuable", and raw `session.mode` in the catalog are internal terms.
+  *Fix:* use "N messages", display labels ("Done", "Stopping…", "Failed", "Stopped"), "Single task" /
+  "Accepts follow-ups", and the mode's display name.
+- **P2 · UX/stale · `lib/ui/subagent_screen.dart:367,632-634`**: elapsed time is computed in `build` and
+  only advances when some notification happens, so a quiet running child (a long tool call) shows a
+  frozen timer. *Fix:* a 1 s ticker while `running`, scoped to the elapsed `Text` only.
+- **P2 · UI · `lib/ui/subagent_screen.dart:640-643`**: `_CatalogCard` wraps an `AetherCard` (a decorated
+  container) in an `InkWell` with no `Material` between them, so the ripple paints *under* the card's
+  opaque background and taps give no visual feedback. The card also has no `Semantics(button: true)`
+  label. *Fix:* use `Material(color: transparent)` + `Ink` decoration inside the card, or give
+  `AetherCard` an `onTap`. Add a semantics label ("$label, $state, $runtime").
+- **P2 · UX · `lib/ui/subagent_screen.dart:175,249,695`**: Stop acts immediately from three places, with
+  no "Stopping…" state on the button. A repeated tap re-invokes `stopSubagentRun`, and the pill can read
+  `running` until the run settles. *Fix:* show `stopping` optimistically, disable the Stop buttons
+  until the state changes, and add an Undo-free confirmation only for children that have run longer than
+  about 1 minute (losing work).
+- **P2 · layout · `lib/ui/subagent_screen.dart:580-602`**: the catalog is a `shrinkWrap` `ListView` with
+  eager `children`. That is fine for a few children, but a coordinator that fans out 20+ agents lays out
+  every card each notification. *Fix:* use `ListView.builder` and `DraggableScrollableSheet`.
+
+**Missing features:** "Copy result" / "Send result to parent chat", a final-result summary card pinned at
+the top for finished children, a per-child token and cost figure (Claude Code shows per-subagent usage),
+"Stop all subagents" in the catalog, a tree view of nested descendants (the catalog shows only direct
+children, and "N sub" is not tappable), and a way to open the catalog from the root chat header (today
+`showSubagentCatalog` is only reachable from inside a subagent that has children).
+
+**Test to add:** a widget test that opens Root › A › B, taps A in the breadcrumb, and asserts the navigator
+stack depth decreases (after the fix). A test that `continueSubagent` returning a refusal keeps the draft
+and shows user copy without "sub-" ids. A tap-target test (`meetsGuideline(androidTapTargetGuideline)`)
+on the screen while running. A rebuild-count test: 50 `AgentService` notifications for another session
+cause 0 rebuilds of the child `ChatTranscript`.
+
+---
+## Group summary
+
+**Totals (sections 1–8):** 2 × P0, 25 × P1, 58 × P2.
+
+**Themes.** (1) Whole-app listeners: the sidebar, browser, schedule and subagent screens all rebuild on
+every `AppState`/`AgentService` notification. (2) No router, no restoration and no deep-link targets beyond
+share. (3) Destructive actions with no confirm or undo (chat delete, schedule cancel, "Stop background",
+which is actually a global panic stop). (4) Raw exception and model-facing strings shown to users.
+(5) Data-scale limits: the SharedPreferences session blob, full ledger reads, unbounded WebViews.
+
+**Top 10 fixes, in order**
+| # | Fix | Sections | Sev | Effort |
+|---|---|---|---|---|
+| 1 | Make the sidebar list lazy (`ListView.builder`) and driven by a narrow session-summary notifier; cache `hasImage` and use a per-session busy listenable instead of per-tile `AgentService` listeners | 3 | P0 | M |
+| 2 | Narrow the listeners in Browser, Schedule, Subagent (and the catalog sheet) to screen-specific notifiers; stop history refresh from `build` and per-build `_jumpToBottom` | 5, 6, 8 | P1 | M |
+| 3 | "Stop background execution": confirm dialog plus schedules-only stop (no `cancelAllRuns`); on Resume re-pend tasks paused by Stop | 6 | P1 | S |
+| 4 | Optimistic chat delete with try/catch and "Undo" snackbar (and Archive); confirm/undo for schedule Cancel | 3, 6 | P1 | M |
+| 5 | WebView LRU pool (max 3 live), render only the active tab, cap tabs per session; `PopScope` back-in-history; omnibar shows the host, not the page title | 5 | P1 | M |
+| 6 | Add an `AppRouter` (`/c/:id`, `/s/:token`, `/schedule/:sid`, …), route notification taps and App Links through it, validate ids; set `restorationScopeId` and persist composer drafts; fix share-link dedupe and the post-frame retry | 1 | P1 | L |
+| 7 | Telemetry consent: single-show guard and non-dismissible (or dismiss = decline) | 2 | P1 | S |
+| 8 | Replace raw `'$e'` / model-facing strings with mapped user copy (Schedule, Trajectory, Subagent `continueSubagent` typed result, startup panel) | 4, 6, 7, 8 | P1 | S |
+| 9 | Trajectory correctness and scale: sum `turn_end.llmMs` for LLM time, one-pass projection, paged reads, surface read errors, render `approval` and `note` events | 7 | P1 | S |
+| 10 | Sidebar ordering and search: `updatedAt` with recency sort and date headers; debounced content search through `SessionSearch` or FTS; live connectivity re-probe with a visible offline banner | 3 | P1 | M (L with the SQLite store) |
+
+**Order rationale:** 1–2 are pure perf wins with no UX change and unblock 10M-DAU low-end devices.
+Ship them right after `perf/streaming-rebuilds`. Items 3, 7 and 8 are small, high-trust fixes and can go in
+one PR. Items 4 and 5 are medium, self-contained PRs. Item 6 (router and restoration) is the largest
+refactor and should land before more deep-link features. Item 10 depends on the SQLite history migration
+in the master plan (`00-master-plan.md`) for content search at scale. Schedule time pickers (section 6),
+the tap-target and contrast sweep (sections 4, 5, 8) and the remaining P2s can follow as a UX/a11y batch.
