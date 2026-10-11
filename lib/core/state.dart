@@ -1627,6 +1627,27 @@ ChatSession _decodePersistedSessionTail(String encoded) {
   );
 }
 
+/// Full decode of every stored row for hydration (runs in an isolate for
+/// large histories). Null marks a row that must stay opaque.
+List<ChatSession?> _decodePersistedSessions(List<String> rows) => [
+  for (final encoded in rows)
+    () {
+      try {
+        final json = jsonDecode(encoded) as Map<String, dynamic>;
+        final id = json['id'];
+        if (id is! String || id.isEmpty) return null;
+        return ChatSession.fromJson(json);
+      } catch (_) {
+        return null;
+      }
+    }(),
+];
+
+// Top-level so the isolate closure captures only [rows], never AppState.
+Future<List<ChatSession?>> _decodePersistedSessionsInIsolate(
+  List<String> rows,
+) => Isolate.run(() => _decodePersistedSessions(rows));
+
 String _sessionSourceFingerprint(String encoded) =>
     sha256.convert(utf8.encode(encoded)).toString();
 
@@ -4210,6 +4231,11 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Stored history size (UTF-16 code units) from which hydration decodes in
+  /// a background isolate. Tests lower it to exercise that path.
+  @visibleForTesting
+  static int hydrationIsolateThreshold = 512 * 1024;
+
   /// Finish only deferred history; never reload over live edits for a query.
   Future<void> loadSessionsForSearch() => _hydrateDeferredSessions();
 
@@ -4574,19 +4600,40 @@ class AppState extends ChangeNotifier {
     final raw = _deferredSessionJson;
     if (raw == null) return;
     final generation = _deferredSessionGeneration;
+    // Large histories decode off the UI isolate in one batch (F-045); small
+    // ones keep the incremental, yielding decode below.
+    List<ChatSession?>? predecoded;
+    if (raw.fold<int>(0, (n, row) => n + row.length) >=
+        hydrationIsolateThreshold) {
+      final rows = List<String>.of(raw);
+      predecoded = await _decodePersistedSessionsInIsolate(rows);
+      if (!identical(token, _sessionAccountToken) ||
+          generation != _deferredSessionGeneration) {
+        return;
+      }
+    }
     final loaded = <ChatSession>[];
     final unparsed = <String>[];
     for (var index = 0; index < raw.length; index++) {
       if (generation != _deferredSessionGeneration) return;
       final encoded = raw[index];
       try {
-        final fullJson = jsonDecode(encoded) as Map<String, dynamic>;
-        final id = fullJson['id'] as String?;
-        if (id == null || id.isEmpty) {
-          throw const FormatException('Missing session identity');
+        final ChatSession full;
+        if (predecoded != null) {
+          full =
+              predecoded[index] ??
+              (throw const FormatException('Unreadable session row'));
+          if (_deferredDeletedSessionIds.contains(full.id)) continue;
+        } else {
+          final fullJson = jsonDecode(encoded) as Map<String, dynamic>;
+          final id = fullJson['id'] as String?;
+          if (id == null || id.isEmpty) {
+            throw const FormatException('Missing session identity');
+          }
+          if (_deferredDeletedSessionIds.contains(id)) continue;
+          full = ChatSession.fromJson(fullJson);
         }
-        if (_deferredDeletedSessionIds.contains(id)) continue;
-        final full = ChatSession.fromJson(fullJson);
+        final id = full.id;
         final live = sessionById(id);
         if (live != null && id != _deferredActiveSessionId) {
           _deferredProjectionPrefix(full, live);
@@ -4596,7 +4643,7 @@ class AppState extends ChangeNotifier {
         unparsed.add(encoded);
         _startupStageRecorder?.call('local.hydrate.corrupt');
       }
-      if (index % 20 == 19) {
+      if (predecoded == null && index % 20 == 19) {
         await Future<void>.delayed(Duration.zero);
       }
     }

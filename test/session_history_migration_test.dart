@@ -128,6 +128,29 @@ void main() {
     },
   );
 
+  test(
+    'large history hydrates through the background-isolate decoder',
+    () async {
+      final previous = AppState.hydrationIsolateThreshold;
+      AppState.hydrationIsolateThreshold = 0;
+      addTearDown(() => AppState.hydrationIsolateThreshold = previous);
+      SharedPreferences.setMockInitialValues({
+        'ovid_sessions': [
+          for (var i = 0; i < 30; i++)
+            _sessionJson('h$i', [
+              for (var m = 0; m < 60; m++) 'h$i message $m',
+            ]),
+          '{"id":"",',
+        ],
+        'ovid_active_session': 'h3',
+      });
+      final app = await boot();
+      expect(app.sessions, hasLength(30));
+      expect(app.sessionById('h3')!.messages, hasLength(60));
+      expect(app.sessionById('h29')!.messages.last.content, 'h29 message 59');
+    },
+  );
+
   test('fresh install starts empty and persists new chats to SQLite', () async {
     SharedPreferences.setMockInitialValues({});
     final app = await boot();
