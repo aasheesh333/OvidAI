@@ -9921,6 +9921,39 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Remove one stored credential ([name] from the env blob, or from the
+  /// headers blob when [header]) for [server]. Strict: throws on storage
+  /// failure rather than reporting a deletion that did not happen.
+  Future<void> deleteMcpCredential(
+    McpServer server,
+    String name, {
+    required bool header,
+  }) async {
+    final id = server.canonicalId;
+    if (header) {
+      final next = {...await getMcpHeaders(id, strict: true)}..remove(name);
+      await setMcpHeaders(id, next, strict: true);
+      server.headers = next;
+    } else {
+      final next = {...await getMcpEnv(id, strict: true)}..remove(name);
+      await setMcpEnv(id, next, strict: true);
+    }
+  }
+
+  /// "Reset credentials" for [s]: disconnect, then delete its stored env,
+  /// HTTP headers and OAuth token. The server row and its OAuth client
+  /// config stay, so the user can sign in again.
+  Future<void> resetMcpServerConfig(McpServer s) async {
+    if (s.connected) await toggleMcpServer(s);
+    await McpService.I.clearMcpOAuthToken(s.canonicalId);
+    await Future.wait([
+      deleteMcpEnv(s.canonicalId),
+      deleteMcpHeaders(s.canonicalId),
+    ]);
+    s.headers = const {};
+    refresh();
+  }
+
   /// Delete a server's env var blob from secure storage (on remove/reset).
   Future<void> deleteMcpEnv(String serverName) async {
     try {

@@ -130,6 +130,7 @@ Future<bool> showDeleteConfirmationDialog(
   BuildContext context, {
   required String title,
   String content = 'This action cannot be undone.',
+  String confirmLabel = 'Delete',
 }) async {
   final confirmed = await showDialog<bool>(
     context: context,
@@ -144,7 +145,10 @@ Future<bool> showDeleteConfirmationDialog(
         ),
         TextButton(
           onPressed: () => Navigator.pop(dialogContext, true),
-          child: const Text('Delete', style: TextStyle(color: Aether.danger)),
+          child: Text(
+            confirmLabel,
+            style: const TextStyle(color: Aether.danger),
+          ),
         ),
       ],
     ),
@@ -2325,14 +2329,25 @@ class _PluginDiagnostics extends StatelessWidget {
             '${s.canonicalId} · ${s.transport} · '
             '${mcpDurableStatusText(s)}',
           ),
+          // Driven by the real credential probe, not the declaration:
+          // stored credentials read "configured", missing ones are named.
           if (s.envHint != null ||
               s.requiredEnvNames.isNotEmpty ||
               s.requiredHeaderNames.isNotEmpty)
-            _DiagRow(
-              'Needs setup: '
-              '${s.requiredEnvNames.isNotEmpty ? s.requiredEnvNames.join(', ') : s.envHint ?? s.requiredHeaderNames.join(', ')} '
-              'must be configured (secure storage)',
-              warn: true,
+            FutureBuilder<List<String>>(
+              future: McpService.I.missingCredentialsFor(s),
+              builder: (context, snap) {
+                final missing = snap.data;
+                if (missing == null) return const SizedBox.shrink();
+                if (missing.isEmpty) {
+                  return _DiagRow('${s.name}: credentials configured ✓');
+                }
+                return _DiagRow(
+                  'Needs setup: ${missing.join(', ')} '
+                  'must be configured (secure storage)',
+                  warn: true,
+                );
+              },
             ),
           if (mcpUnsupportedReason(s) != null)
             _DiagRow(
@@ -2939,10 +2954,14 @@ class _McpCredentialSheet extends StatefulWidget {
   /// Missing HTTP header names (e.g. `Authorization`) — saved through
   /// [AppState.setMcpHeaders], the only store the HTTP transport reads.
   final List<String> missingHeaders;
+  /// Edit mode (detail screen "Edit"/"Set"): blank fields keep the stored
+  /// value, the sheet pops 'saved' and never connects.
+  final bool editing;
   const _McpCredentialSheet({
     required this.server,
     this.missingEnv = const [],
     this.missingHeaders = const [],
+    this.editing = false,
   });
 
   List<String> get missing => [...missingEnv, ...missingHeaders];
@@ -2981,6 +3000,7 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
     final values = <String, String>{};
     for (final e in ctrls.entries) {
       final v = e.value.text.trim();
+      if (v.isEmpty && widget.editing) continue;
       if (v.isEmpty) {
         setState(() => _error = '${e.key} is required.');
         return null;
@@ -3020,7 +3040,7 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
       return;
     }
     if (!mounted) return;
-    Navigator.pop(context, 'connected');
+    Navigator.pop(context, widget.editing ? 'saved' : 'connected');
   }
 
   Widget _field(String name, TextEditingController controller, {
@@ -3054,6 +3074,7 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
   @override
   Widget build(BuildContext context) {
     final offerGithub =
+        !widget.editing &&
         mcpOffersGithubLoginForTest(widget.server) &&
         !GitHubService.I.isLoggedIn;
     return SafeArea(
@@ -3064,14 +3085,20 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'Connect ${widget.server.name}',
+              widget.editing
+                  ? 'Update ${widget.server.name} credentials'
+                  : 'Connect ${widget.server.name}',
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 6),
             Text(
-              '${widget.server.name} needs ${widget.missing.join(', ')} '
-              'before it can connect. Secrets stay in secure storage on '
-              'this device.',
+              widget.editing
+                  ? 'Enter a new value to replace the stored one; leave a '
+                        'field blank to keep it. Secrets stay in secure '
+                        'storage on this device.'
+                  : '${widget.server.name} needs ${widget.missing.join(', ')} '
+                        'before it can connect. Secrets stay in secure '
+                        'storage on this device.',
               style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
             ),
             if (offerGithub) ...[
@@ -3128,7 +3155,11 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
                     )
                   : const Icon(Icons.key_outlined, size: 16),
               label: Text(
-                _saving ? 'Saving…' : 'Save & connect',
+                _saving
+                    ? 'Saving…'
+                    : widget.editing
+                    ? 'Save'
+                    : 'Save & connect',
                 style: const TextStyle(fontSize: 13.5),
               ),
               onPressed: _saving ? null : _save,
@@ -3282,9 +3313,8 @@ class McpCard extends StatelessWidget {
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => McpDetailScreen(server: server)),
       ),
-      onLongPress: server.custom
-          ? () => AppState.I.removeMcpServer(server)
-          : null,
+      // No long-press removal: deleting kills the process and wipes env,
+      // headers and OAuth, so it only runs from the confirmed trash icon.
       child: Container(
         key: ValueKey('mcp-card-${server.canonicalId}'),
         width: MediaQuery.sizeOf(context).width < 600
@@ -3471,7 +3501,311 @@ class McpDetailScreen extends StatefulWidget {
   State<McpDetailScreen> createState() => _McpDetailScreenState();
 }
 
+/// Credential snapshot for the MCP detail screen: what the server still
+/// needs (per store) and which names are stored (values never loaded into
+/// the UI).
+class _McpCredState {
+  final List<String> missingEnv;
+  final List<String> missingHeaders;
+  final List<String> storedEnv;
+  final List<String> storedHeaders;
+  const _McpCredState({
+    required this.missingEnv,
+    required this.missingHeaders,
+    required this.storedEnv,
+    required this.storedHeaders,
+  });
+
+  bool get isEmpty =>
+      missingEnv.isEmpty &&
+      missingHeaders.isEmpty &&
+      storedEnv.isEmpty &&
+      storedHeaders.isEmpty;
+}
+
 class _McpDetailScreenState extends State<McpDetailScreen> {
+  late Future<_McpCredState> _credFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _credFuture = _loadCreds();
+  }
+
+  Future<_McpCredState> _loadCreds() async {
+    final s = widget.server;
+    final split = await McpService.I.missingCredentialsSplitFor(s);
+    final env = await AppState.I.getMcpEnv(s.canonicalId);
+    final headers = await AppState.I.getMcpHeaders(s.canonicalId);
+    return _McpCredState(
+      missingEnv: split.env,
+      missingHeaders: split.headers,
+      storedEnv: env.keys.toList(),
+      storedHeaders: {...headers.keys, ...s.headers.keys}.toList(),
+    );
+  }
+
+  void _reloadCreds() {
+    if (!mounted) return;
+    final next = _loadCreds();
+    setState(() {
+      _credFuture = next;
+    });
+  }
+
+  static bool _declaresCredentials(McpServer s) =>
+      s.requiredEnvNames.isNotEmpty ||
+      s.requiredHeaderNames.isNotEmpty ||
+      (s.envHint ?? '').trim().isNotEmpty;
+
+  /// Opens the credential sheet in edit mode for [env]/[headers] names;
+  /// blank fields keep the stored value.
+  Future<void> _editCredentials(
+    BuildContext context,
+    McpServer s, {
+    List<String> env = const [],
+    List<String> headers = const [],
+  }) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final res = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Aether.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
+        ),
+        child: _McpCredentialSheet(
+          server: s,
+          missingEnv: env,
+          missingHeaders: headers,
+          editing: true,
+        ),
+      ),
+    );
+    _reloadCreds();
+    if (res == 'saved') {
+      messenger.showSnackBar(
+        SnackBar(content: Text('${s.name} credentials saved')),
+      );
+    }
+  }
+
+  Widget _needsSetupBanner(
+    BuildContext context,
+    McpServer s,
+    List<String> missing,
+  ) => Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Aether.surfaceAlt,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Aether.warnLight.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.key_outlined, size: 15, color: Aether.warnLight),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Needs setup: ${missing.join(', ')} must be configured '
+                  '(secure storage) before this server can connect. '
+                  'It will not start automatically.',
+                  style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(
+              backgroundColor: Aether.accent,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            icon: const Icon(Icons.key_outlined, size: 15),
+            label: const Text(
+              'Set up & connect',
+              style: TextStyle(fontSize: 12.5),
+            ),
+            onPressed: mcpConnecting(s)
+                ? null
+                : () async {
+                    await connectMcpServer(context, s);
+                    _reloadCreds();
+                  },
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _configuredRow(
+    BuildContext context,
+    McpServer s,
+    _McpCredState creds,
+  ) => Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: Container(
+      key: ValueKey('mcp-credentials-configured-${s.canonicalId}'),
+      padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+      decoration: BoxDecoration(
+        color: Aether.surfaceAlt,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Aether.hairline),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.check_circle_outline, size: 15, color: Aether.successLight),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Credentials configured',
+              style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
+            ),
+          ),
+          TextButton(
+            onPressed: () => _editCredentials(
+              context,
+              s,
+              env: creds.storedEnv,
+              headers: creds.storedHeaders,
+            ),
+            child: const Text('Edit'),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  /// "Environment & headers": stored names with masked values (Edit /
+  /// Delete) and declared-but-missing names (Set).
+  Widget _credentialsSection(
+    BuildContext context,
+    McpServer s,
+    _McpCredState creds,
+  ) {
+    Widget row(String name, {required bool header, required bool stored}) {
+      return Padding(
+        key: ValueKey('mcp-cred-row-${header ? 'header' : 'env'}-$name'),
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 2, 2, 2),
+          decoration: BoxDecoration(
+            color: Aether.surfaceAlt,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Aether.hairline),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                header ? Icons.http : Icons.key_outlined,
+                size: 15,
+                color: stored ? Aether.textMuted : Aether.warnLight,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      header ? '$name · HTTP header' : name,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontFamily: Aether.mono,
+                      ),
+                    ),
+                    Text(
+                      stored ? '••••••••' : 'Not set',
+                      style: TextStyle(fontSize: 11, color: Aether.textFaint),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: stored ? 'Edit $name' : 'Set $name',
+                icon: Icon(
+                  stored ? Icons.edit_outlined : Icons.add,
+                  size: 17,
+                ),
+                onPressed: () => _editCredentials(
+                  context,
+                  s,
+                  env: header ? const [] : [name],
+                  headers: header ? [name] : const [],
+                ),
+              ),
+              if (stored)
+                IconButton(
+                  tooltip: 'Delete $name',
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    size: 17,
+                    color: Aether.danger,
+                  ),
+                  onPressed: () async {
+                    final ok = await showDeleteConfirmationDialog(
+                      context,
+                      title: 'Delete $name?',
+                      content:
+                          'Removes the stored value from this device. '
+                          '${s.name} may stop working until it is set again.',
+                    );
+                    if (!ok || !context.mounted) return;
+                    final messenger = ScaffoldMessenger.of(context);
+                    try {
+                      await AppState.I.deleteMcpCredential(
+                        s,
+                        name,
+                        header: header,
+                      );
+                    } catch (e) {
+                      Diag.swallow('mcp-credentials', e);
+                      messenger.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            "Couldn't update secure storage. Try again.",
+                          ),
+                        ),
+                      );
+                    }
+                    _reloadCreds();
+                  },
+                ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SectionHeader(
+          'Environment & headers',
+          subtitle: 'Stored in secure storage on this device',
+        ),
+        for (final n in creds.storedEnv) row(n, header: false, stored: true),
+        for (final n in creds.missingEnv)
+          if (!creds.storedEnv.contains(n)) row(n, header: false, stored: false),
+        for (final n in creds.storedHeaders) row(n, header: true, stored: true),
+        for (final n in creds.missingHeaders)
+          if (!creds.storedHeaders.contains(n))
+            row(n, header: true, stored: false),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Listen to AppState: the connect outcome lands asynchronously, so the
@@ -3535,7 +3869,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                   ? null
                   : (_) async {
                       await connectMcpServer(context, s);
-                      if (context.mounted) setState(() {});
+                      _reloadCreds();
                     },
             ),
           ),
@@ -3671,7 +4005,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                   ? null
                   : () async {
                       await connectMcpServer(context, s);
-                      if (context.mounted) setState(() {});
+                      _reloadCreds();
                     },
             ),
           ),
@@ -3704,98 +4038,72 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
             ),
           ],
           // Task 10 (spec §10): credential-dependent MCPs show their setup
-          // requirements and never auto-spawn until configured.
-          if (s.envHint != null && !s.connected) ...[
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Aether.surfaceAlt,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: Aether.warnLight.withValues(alpha: 0.35),
+          // requirements and never auto-spawn until configured. Driven by
+          // the real credential probe (missingCredentialsFor), not by the
+          // envHint declaration, so stored credentials read "configured".
+          FutureBuilder<_McpCredState>(
+            future: _credFuture,
+            builder: (context, snap) {
+              final creds = snap.data;
+              if (creds == null) return const SizedBox.shrink();
+              final missing = [...creds.missingEnv, ...creds.missingHeaders];
+              if (missing.isNotEmpty && !s.connected) {
+                return _needsSetupBanner(context, s, missing);
+              }
+              if (missing.isEmpty && _declaresCredentials(s)) {
+                return _configuredRow(context, s, creds);
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  key: ValueKey('mcp-reset-credentials-${s.canonicalId}'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Aether.textMuted,
+                    side: BorderSide(color: Aether.hairlineStrong),
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  icon: const Icon(Icons.settings_backup_restore, size: 15),
+                  label: const Text(
+                    'Reset credentials',
+                    style: TextStyle(fontSize: 12.5),
+                  ),
+                  onPressed: connecting
+                      ? null
+                      : () async {
+                          final ok = await showDeleteConfirmationDialog(
+                            context,
+                            title: 'Reset ${s.name} credentials?',
+                            content:
+                                'Disconnects ${s.name} and deletes its stored '
+                                'environment variables, HTTP headers and '
+                                'OAuth sign-in from this device. The server '
+                                'stays in your list.',
+                            confirmLabel: 'Reset',
+                          );
+                          if (!ok || !context.mounted) return;
+                          final messenger = ScaffoldMessenger.of(context);
+                          await app.resetMcpServerConfig(s);
+                          _reloadCreds();
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                '${s.name} disconnected · credentials deleted',
+                              ),
+                            ),
+                          );
+                        },
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.key_outlined,
-                        size: 15,
-                        color: Aether.warnLight,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          'Needs setup: ${s.envHint} must be configured '
-                          '(secure storage) before this server can connect. '
-                          'It will not start automatically.',
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Aether.accent,
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                    icon: const Icon(Icons.key_outlined, size: 15),
-                    label: const Text(
-                      'Set up & connect',
-                      style: TextStyle(fontSize: 12.5),
-                    ),
-                    onPressed: () async {
-                      await connectMcpServer(context, s);
-                      if (context.mounted) setState(() {});
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (s.connected) ...[
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Aether.textMuted,
-                      side: BorderSide(color: Aether.hairlineStrong),
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    icon: const Icon(Icons.settings_backup_restore, size: 15),
-                    label: const Text(
-                      'Reset config',
-                      style: TextStyle(fontSize: 12.5),
-                    ),
-                    onPressed: () {
-                      // Reset = disconnect + clear any custom env
-                      if (s.connected) app.toggleMcpServer(s);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('MCP server config reset'),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ],
+            ],
+          ),
           const SizedBox(height: 18),
           const SectionHeader('Overview'),
           Padding(
@@ -3805,30 +4113,16 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               style: TextStyle(fontSize: 13.5, height: 1.6, color: Aether.text),
             ),
           ),
-          if (s.envHint != null) ...[
-            const SectionHeader('Environment'),
-            Container(
-              margin: const EdgeInsets.symmetric(horizontal: 4),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Aether.surfaceAlt,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Aether.hairline),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.key_outlined, size: 15, color: Aether.warnLight),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      '${s.envHint} will be requested when connecting.',
-                      style: TextStyle(fontSize: 12.5, color: Aether.textMuted),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+          FutureBuilder<_McpCredState>(
+            future: _credFuture,
+            builder: (context, snap) {
+              final creds = snap.data;
+              if (creds == null || creds.isEmpty) {
+                return const SizedBox.shrink();
+              }
+              return _credentialsSection(context, s, creds);
+            },
+          ),
           const SectionHeader('Config (standard mcp.json)'),
           if (!mcpConfigEditable(s))
             Padding(
@@ -4031,6 +4325,7 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         ),
       ),
     );
+    _reloadCreds();
   }
 
   static const _credentialMask = '••••••••';

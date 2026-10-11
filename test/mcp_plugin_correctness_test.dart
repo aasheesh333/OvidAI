@@ -327,4 +327,108 @@ void main() {
       expect(s.connected, isFalse);
     });
   });
+
+  group('MCP destructive actions and setup status (F-082, F-085, F-086)', () {
+    testWidgets('long-press on a custom MCP card does not remove it', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final s = _server(name: 'keepme');
+      app.mcpServers.add(s);
+      await _pump(tester, Scaffold(body: McpCard(server: s)));
+      await tester.longPress(find.byKey(ValueKey('mcp-card-${s.canonicalId}')));
+      await tester.pumpAndSettle();
+      expect(app.mcpServers.contains(s), isTrue);
+    });
+
+    testWidgets('Reset credentials confirms, then deletes env and headers', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final s = _server(name: 'resetme', requiredEnvNames: ['TOKEN']);
+      app.mcpServers.add(s);
+      await app.setMcpEnv(s.canonicalId, {'TOKEN': 'v'});
+      await app.setMcpHeaders(s.canonicalId, {'X-Key': 'h'});
+      await _pump(tester, McpDetailScreen(server: s));
+      final reset = find.byKey(
+        ValueKey('mcp-reset-credentials-${s.canonicalId}'),
+      );
+      await tester.ensureVisible(reset);
+      await tester.pumpAndSettle();
+      await tester.tap(reset);
+      await tester.pumpAndSettle();
+      expect(find.text('Reset resetme credentials?'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(await app.getMcpEnv(s.canonicalId), {'TOKEN': 'v'});
+
+      await tester.tap(reset);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Reset'));
+      await tester.pumpAndSettle();
+      expect(await app.getMcpEnv(s.canonicalId), isEmpty);
+      expect(await app.getMcpHeaders(s.canonicalId), isEmpty);
+      expect(app.mcpServers.contains(s), isTrue);
+    });
+
+    testWidgets('stored credentials read configured, not "Needs setup"', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final s = _server(name: 'configured', envHint: 'API_TOKEN');
+      app.mcpServers.add(s);
+      await app.setMcpEnv(s.canonicalId, {'API_TOKEN': 'v'});
+      await _pump(tester, McpDetailScreen(server: s));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Needs setup'), findsNothing);
+      expect(
+        find.byKey(ValueKey('mcp-credentials-configured-${s.canonicalId}')),
+        findsOneWidget,
+      );
+      // Masked value row with Edit and Delete.
+      expect(
+        find.byKey(const ValueKey('mcp-cred-row-env-API_TOKEN')),
+        findsOneWidget,
+      );
+      expect(find.text('v'), findsNothing);
+    });
+
+    testWidgets('a header-only plugin server without envHint needs setup', (
+      tester,
+    ) async {
+      final s = _server(name: 'hdronly', requiredHeaderNames: ['Authorization']);
+      AppState.I.mcpServers.add(s);
+      await _pump(tester, McpDetailScreen(server: s));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Needs setup: Authorization'), findsOneWidget);
+    });
+
+    testWidgets('deleting one stored credential keeps the others', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final s = _server(name: 'delone', requiredEnvNames: ['A', 'B']);
+      app.mcpServers.add(s);
+      await app.setMcpEnv(s.canonicalId, {'A': '1', 'B': '2'});
+      await _pump(tester, McpDetailScreen(server: s));
+      await tester.pumpAndSettle();
+      final del = find.byTooltip('Delete A');
+      await tester.ensureVisible(del);
+      await tester.pumpAndSettle();
+      await tester.tap(del);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(await app.getMcpEnv(s.canonicalId), {'B': '2'});
+      // A now reads as missing ("Not set"), B stays stored.
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('mcp-cred-row-env-A')),
+          matching: find.text('Not set'),
+        ),
+        findsOneWidget,
+      );
+      expect(await McpService.I.missingCredentialsFor(s), ['A']);
+    });
+  });
 }
