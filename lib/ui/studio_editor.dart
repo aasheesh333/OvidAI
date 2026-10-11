@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
@@ -10,6 +11,7 @@ import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
 import '../core/sandbox_service.dart';
 import '../core/state.dart';
+import '../core/studio_drafts.dart';
 import '../core/workspace_files.dart';
 import '../core/theme.dart';
 import 'studio_layout.dart';
@@ -115,7 +117,13 @@ class StudioEditorTabs extends StatelessWidget {
                           scrollDirection: Axis.horizontal,
                           padding: EdgeInsets.zero,
                           children: [
-                            for (final p in tabs) _tab(p, p == active),
+                            for (final p in tabs)
+                              _tab(
+                                context,
+                                p,
+                                p == active,
+                                AgentService.I.isStudioFileDirty(p),
+                              ),
                           ],
                         ),
                 ),
@@ -134,11 +142,12 @@ class StudioEditorTabs extends StatelessWidget {
     );
   }
 
-  Widget _tab(String path, bool selected) {
+  Widget _tab(BuildContext context, String path, bool selected, bool dirty) {
     final name = path.split('/').last;
     return StudioTapTarget(
       onTap: () => AgentService.I.selectStudioFile(path),
-      label: '$name, tab${selected ? ', active' : ''}',
+      label: '$name, tab${dirty ? ', unsaved changes' : ''}'
+          '${selected ? ', active' : ''}',
       selected: selected,
       minWidth: 0,
       child: Container(
@@ -171,16 +180,107 @@ class StudioEditorTabs extends StatelessWidget {
                 color: selected ? Aether.text : Aether.textMuted,
               ),
             ),
+            if (dirty) ...[
+              const SizedBox(width: 6),
+              ExcludeSemantics(
+                child: Icon(Icons.circle, size: 7, color: Aether.warnLight),
+              ),
+            ],
             StudioIconButton(
               icon: Icons.close,
               tooltip: 'Close tab $name',
               iconSize: 14,
-              onPressed: () => AgentService.I.closeStudioFile(path),
+              onPressed: () => closeStudioTab(context, path),
             ),
           ],
         ),
       ),
     );
+  }
+}
+
+/// Choice in the unsaved-changes dialogs.
+enum StudioUnsavedChoice { save, discard, cancel }
+
+/// Asks what to do with unsaved drafts. [paths] are the files affected.
+Future<StudioUnsavedChoice> showStudioUnsavedDialog(
+  BuildContext context,
+  List<String> paths, {
+  required String title,
+  String saveLabel = 'Save',
+}) async {
+  final names = paths.map((p) => p.split('/').last).toList();
+  final shown = names.take(3).join(', ');
+  final more = names.length > 3 ? ' and ${names.length - 3} more' : '';
+  final choice = await showDialog<StudioUnsavedChoice>(
+    context: context,
+    builder: (d) => AlertDialog(
+      title: Text(title, style: const TextStyle(fontSize: 15)),
+      content: Text(
+        paths.length == 1
+            ? '$shown has changes that are not saved to the workspace.'
+            : '${paths.length} files have changes that are not saved to the '
+                'workspace: $shown$more.',
+        style: const TextStyle(fontSize: 12.5),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(d, StudioUnsavedChoice.cancel),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(d, StudioUnsavedChoice.discard),
+          child: const Text('Discard', style: TextStyle(color: Aether.danger)),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(d, StudioUnsavedChoice.save),
+          child: Text(saveLabel),
+        ),
+      ],
+    ),
+  );
+  return choice ?? StudioUnsavedChoice.cancel;
+}
+
+/// Closes a tab, asking first when it holds an unsaved draft (F-071).
+Future<void> closeStudioTab(BuildContext context, String path) async {
+  final agent = AgentService.I;
+  if (!agent.isStudioFileDirty(path)) {
+    agent.closeStudioFile(path);
+    return;
+  }
+  final choice = await showStudioUnsavedDialog(
+    context,
+    [path],
+    title: 'Close ${path.split('/').last}?',
+  );
+  switch (choice) {
+    case StudioUnsavedChoice.cancel:
+      return;
+    case StudioUnsavedChoice.discard:
+      agent.discardStudioDraft(path);
+      agent.closeStudioFile(path);
+    case StudioUnsavedChoice.save:
+      final text = agent.fileBuffer[path];
+      if (text == null || agent.studioConflictFor(path) != null) {
+        if (context.mounted) {
+          showStudioToast(
+            context,
+            'Resolve the external change before saving',
+            error: true,
+          );
+        }
+        return;
+      }
+      try {
+        await agent.saveStudioFile(path, text);
+      } catch (error) {
+        if (context.mounted) {
+          showStudioToast(context, StudioFailure.of(error).message, error: true);
+        }
+        return;
+      }
+      agent.closeStudioFile(path);
   }
 }
 
@@ -221,20 +321,36 @@ typedef _BufferKey = (Map<String, String>, String);
 class _StudioEditorState extends State<StudioEditor> {
   /// One controller per open file, so a tab switch preserves that file's text,
   /// caret and scroll position instead of re-deriving them from the buffer.
+  ///
+  /// Dirty flags, baselines and conflicts are NOT kept here: they live in the
+  /// session's Studio bucket in [AgentService] so they survive this widget
+  /// (Android back, folder-panel toggle, tree taps — F-071/F-072).
   final Map<_BufferKey, TextEditingController> _buffers = {};
-  final Map<_BufferKey, String> _baselines = {};
   final Map<_BufferKey, String?> _cacheContents = {};
-  final Map<_BufferKey, String> _conflicts = {};
-  final Set<_BufferKey> _dirtyBuffers = {};
+  final Map<_BufferKey, String?> _seenConflicts = {};
   final Map<_BufferKey, int> _edits = {};
   final Map<_BufferKey, UndoHistoryController> _undoControllers = {};
   final Map<_BufferKey, VoidCallback> _bufferListeners = {};
+
+  /// Large files the user chose to edit despite the size warning.
+  final Set<_BufferKey> _editAnyway = {};
   _BufferKey? _boundKey;
   final TextEditingController _findCtrl = TextEditingController();
-  UndoHistoryController get _undoCtrl => _undoControllers[_boundKey]!;
+  UndoHistoryController? get _undoCtrl => _undoControllers[_boundKey];
 
   String? _boundPath;
-  bool get _dirty => _dirtyBuffers.contains(_boundKey);
+  bool get _dirty {
+    final key = _boundKey;
+    return key != null &&
+        AgentService.I.isStudioFileDirty(key.$2, buffer: key.$1);
+  }
+
+  bool get _conflict {
+    final key = _boundKey;
+    return key != null &&
+        AgentService.I.studioConflictFor(key.$2, buffer: key.$1) != null;
+  }
+
   bool _applyingExternal = false;
   bool _initializing = true;
 
@@ -325,18 +441,54 @@ class _StudioEditorState extends State<StudioEditor> {
 
   void _onControllerChanged(_BufferKey key) {
     final ctrl = _buffers[key];
-    if (ctrl != null && !_applyingExternal) {
-      if (key.$1[key.$2] != ctrl.text && !_conflicts.containsKey(key)) {
-        key.$1[key.$2] = ctrl.text;
-        _dirtyBuffers.add(key);
-        _edits[key] = (_edits[key] ?? 0) + 1;
-      } else if (_conflicts.containsKey(key)) {
-        _dirtyBuffers.add(key);
-        _edits[key] = (_edits[key] ?? 0) + 1;
-      }
+    if (ctrl != null && !_applyingExternal && key.$1[key.$2] != ctrl.text) {
+      _edits[key] = (_edits[key] ?? 0) + 1;
+      AgentService.I.updateStudioDraft(key.$1, key.$2, ctrl.text);
     }
     if (_findOpen) _recomputeMatches();
     _refresh();
+  }
+
+  /// True when [key] is shown as an editable text field.
+  bool _editable(_BufferKey key) {
+    if (AgentService.I.studioGuardFor(key.$2) != null) return false;
+    final text = key.$1[key.$2] ?? '';
+    if (looksBinaryText(text)) return false;
+    return text.length <= kStudioViewerThreshold || _editAnyway.contains(key);
+  }
+
+  /// Drops controllers for files that are no longer open in the active
+  /// bucket (F-077). A closed tab that still holds a draft keeps its
+  /// controller so caret and undo come back with it.
+  void _prune() {
+    final a = AgentService.I;
+    final open = a.studioOpenFiles.toSet();
+    final stale = [
+      for (final key in _buffers.keys)
+        if (!identical(key.$1, a.fileBuffer) ||
+            !(open.contains(key.$2) || a.isStudioFileDirty(key.$2)) ||
+            a.studioGuardFor(key.$2) != null)
+          key,
+    ];
+    if (stale.isEmpty) return;
+    final retired = <ChangeNotifier>[];
+    for (final key in stale) {
+      final ctrl = _buffers.remove(key)!;
+      ctrl.removeListener(_bufferListeners.remove(key)!);
+      final undo = _undoControllers.remove(key)!..removeListener(_onUndoChanged);
+      retired..add(ctrl)..add(undo);
+      _cacheContents.remove(key);
+      _seenConflicts.remove(key);
+      _edits.remove(key);
+      _editAnyway.remove(key);
+    }
+    // The fields still reference these until the next build replaces them.
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      for (final notifier in retired) {
+        notifier.dispose();
+      }
+    });
+    SchedulerBinding.instance.ensureVisualUpdate();
   }
 
   /// Re-points the editor at [AgentService.activeFilePath].
@@ -346,7 +498,9 @@ class _StudioEditorState extends State<StudioEditor> {
   void _bind({required bool notify}) {
     final studio = AgentService.I.studioTabs.value;
     _bindInputs = _currentBindInputs(studio);
+    final a = AgentService.I;
     final path = studio.activePath;
+    _prune();
 
     if (path == null) {
       _boundPath = null;
@@ -355,13 +509,18 @@ class _StudioEditorState extends State<StudioEditor> {
       return;
     }
 
-    var content = studio.buffer[path] ?? RepoCache.I.read(path) ?? '';
     final key = (studio.buffer, path);
     final switched = _boundKey != key;
     _boundPath = path;
     _boundKey = key;
+    if (a.studioGuardFor(path) != null) {
+      if (notify) _refresh();
+      return;
+    }
 
-    final ctrl = _bufferFor(key, content);
+    final initial = a.fileBuffer[path] ?? RepoCache.I.files[path] ?? '';
+    a.ensureStudioBaseline(key.$1, path, initial);
+    final ctrl = _bufferFor(key, initial);
     final cache = RepoCache.I;
     final session = AppState.I.activeSession;
     if (cache.boundSessionId == session?.id &&
@@ -372,30 +531,31 @@ class _StudioEditorState extends State<StudioEditor> {
       if (cached != _cacheContents[key]) {
         _cacheContents[key] = cached;
         if (cached != null && cached != ctrl.text) {
-          content = cached;
-          if (!_dirtyBuffers.contains(key)) key.$1[path] = cached;
+          // Repo sync or an agent write: the bucket keeps a draft and
+          // records a conflict; a clean buffer takes the new content.
+          a.applyExternalStudioContent(key.$1, path, cached);
         }
       }
+    }
+    final conflict = a.studioConflictFor(path, buffer: key.$1);
+    if (conflict != _seenConflicts[key]) {
+      // A save admitted before this conflict must not publish.
+      _seenConflicts[key] = conflict;
+      _edits[key] = (_edits[key] ?? 0) + 1;
     }
     if (switched) {
       // A freshly opened file starts at the TOP. Caret-at-EOF made every open
       // look like the file had been scrolled to the end by someone else.
       _matchIndex = 0;
     }
-    if (ctrl.text != content && _dirtyBuffers.contains(key)) {
-      // A reopen at the known baseline is not a new external edit.
-      if (content != _baselines[key] && _conflicts[key] != content) {
-        _conflicts[key] = content;
-        _edits[key] = (_edits[key] ?? 0) + 1;
-      }
-      key.$1[path] = ctrl.text;
-    } else if (ctrl.text != content) {
-      // Something else rewrote the bound file (agent file_write, live reload).
-      // Keep the caret where the user put it, clamped into the new range.
+    final content = key.$1[path] ?? '';
+    if (ctrl.text != content) {
+      // Something else rewrote the bound buffer (agent file_write, live
+      // reload, "Use external", discard). Keep the caret where the user put
+      // it, clamped into the new range.
       final previous = ctrl.selection.isValid ? ctrl.selection.start : 0;
       _applyText(ctrl, content, math.min(previous, content.length));
       _edits[key] = (_edits[key] ?? 0) + 1;
-      _baselines[key] = content;
     }
     _recomputeMatches();
     if (notify) _refresh();
@@ -413,8 +573,9 @@ class _StudioEditorState extends State<StudioEditor> {
     _bufferListeners[key] = listener;
     _undoControllers[key] = UndoHistoryController()..addListener(_onUndoChanged);
     _buffers[key] = ctrl;
-    _baselines[key] = content;
     _cacheContents[key] = RepoCache.I.files[key.$2];
+    _seenConflicts[key] =
+        AgentService.I.studioConflictFor(key.$2, buffer: key.$1);
     return ctrl;
   }
 
@@ -515,7 +676,7 @@ class _StudioEditorState extends State<StudioEditor> {
     final path = _boundPath;
     final key = _boundKey;
     final ctrl = _ctrl;
-    if (path == null || ctrl == null || key == null || _conflicts.containsKey(key)) return;
+    if (path == null || ctrl == null || key == null || _conflict) return;
     final text = ctrl.text;
     final edit = _edits[key];
     final binding = RepoCache.I.bindingGeneration;
@@ -530,7 +691,7 @@ class _StudioEditorState extends State<StudioEditor> {
           : await SandboxService.I.workDirFor(session.sandboxId ?? session.id);
       if (!mounted || binding != RepoCache.I.bindingGeneration ||
           key != _boundKey || edit != _edits[key] ||
-          _conflicts.containsKey(key) || ctrl.text != text ||
+          _conflict || ctrl.text != text ||
           !identical(key.$1, AgentService.I.fileBuffer)) {
         return;
       }
@@ -550,7 +711,6 @@ class _StudioEditorState extends State<StudioEditor> {
         cache.write(path, text);
         cache.didSaveWorkspaceFile(path, text);
       }
-      key.$1[path] = text;
     } catch (error) {
       if (mounted) {
         showStudioToast(context, StudioFailure.of(error).message, error: true);
@@ -559,7 +719,9 @@ class _StudioEditorState extends State<StudioEditor> {
     }
     if (!mounted) return;
     if (binding != RepoCache.I.bindingGeneration || key != _boundKey || edit != _edits[key]) return;
-    setState(() { _dirtyBuffers.remove(key); _baselines[key] = text; });
+    // The bytes on disk are now [text]: that is the new baseline. A newer
+    // keystroke (edit changed) returned above and stays a draft.
+    AgentService.I.markStudioFileSaved(key.$1, path, text);
     showStudioToast(context, 'Saved ${path.split('/').last} to the workspace');
   }
 
@@ -571,16 +733,48 @@ class _StudioEditorState extends State<StudioEditor> {
     return Builder(
       builder: (context) {
         final path = _boundPath;
-        final ctrl = _ctrl;
-        if (path == null || ctrl == null) return const _NoFileView();
+        final key = _boundKey;
+        if (path == null || key == null) return const _NoFileView();
+        final editable = _editable(key);
+        final ctrl = editable ? _ctrl : null;
+        if (editable && ctrl == null) return const _NoFileView();
+        // Only editable buffers get a field; the active non-editable file
+        // (binary, too large, large read-only) gets a placeholder/viewer
+        // as an extra keyed child so the other fields keep their state.
+        final fields = [
+          for (final entry in _buffers.entries)
+            if (entry.key == key || _editable(entry.key)) entry,
+        ];
+        final children = <Widget>[
+          for (final entry in fields)
+            if (entry.key != key || editable)
+              KeyedSubtree(
+                key: ValueKey(entry.key),
+                child: _field(
+                  entry.key.$2,
+                  entry.value,
+                  _undoControllers[entry.key]!,
+                ),
+              ),
+          if (!editable)
+            KeyedSubtree(
+              key: ValueKey(('viewer', key)),
+              child: _placeholder(key),
+            ),
+        ];
+        final index = editable
+            ? fields.indexWhere((entry) => entry.key == key)
+            : children.length - 1;
         return CallbackShortcuts(
           // Escape is only bound while the find bar is open — swallowing it
           // permanently would stop it reaching dialogs and the IME.
           bindings: <ShortcutActivator, VoidCallback>{
-            const SingleActivator(LogicalKeyboardKey.keyF, control: true):
-                _openFind,
-            const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
-                _openFind,
+            if (editable) ...{
+              const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+                  _openFind,
+              const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
+                  _openFind,
+            },
             if (_findOpen)
               const SingleActivator(LogicalKeyboardKey.escape): _closeFind,
           },
@@ -593,21 +787,42 @@ class _StudioEditorState extends State<StudioEditor> {
               child: StudioPaneViewport(
                 chrome: [
                   _header(path, ctrl),
-                  if (_conflicts.containsKey(_boundKey)) _conflictBar(),
-                  if (_findOpen) _findBar(ctrl),
+                  if (_conflict) _conflictBar(),
+                  if (_findOpen && ctrl != null) _findBar(ctrl),
                 ],
-                child: IndexedStack(
-                    index: _buffers.keys.toList().indexOf(_boundKey!),
-                    children: [for (final entry in _buffers.entries)
-                      KeyedSubtree(key: ValueKey(entry.key),
-                        child: _field(entry.key.$2, entry.value, _undoControllers[entry.key]!)),
-                    ],
-                ),
+                // Only the active field is laid out (F-077): IndexedStack
+                // laid out every open file's full text on each resize.
+                child: _ActiveChildStack(index: index, children: children),
               ),
             ),
           ),
         );
       },
+    );
+  }
+
+  /// Placeholder for a file that is not edited as text.
+  Widget _placeholder(_BufferKey key) {
+    final path = key.$2;
+    final guard = AgentService.I.studioGuardFor(path);
+    final text = key.$1[path] ?? '';
+    if (guard?.kind == StudioFileGuardKind.tooLarge) {
+      return _TooLargeView(path: path, bytes: guard!.bytes);
+    }
+    if (guard != null || looksBinaryText(text)) {
+      return _BinaryFileView(path: path);
+    }
+    return _LargeFileViewer(
+      key: ValueKey(('large', key)),
+      path: path,
+      text: text,
+      onEditAnyway: text.length <= kStudioEditHardCap
+          ? () {
+              if (_findOpen) _closeFind();
+              setState(() => _editAnyway.add(key));
+              _bind(notify: true);
+            }
+          : null,
     );
   }
 
@@ -617,22 +832,26 @@ class _StudioEditorState extends State<StudioEditor> {
       TextButton(onPressed: () {
         final key = _boundKey!;
         _edits[key] = (_edits[key] ?? 0) + 1;
-        setState(() { _baselines[key] = _conflicts.remove(key)!; });
+        _seenConflicts[key] = null;
+        AgentService.I.resolveStudioConflict(key.$1, key.$2, keepDraft: true);
       }, child: const Text('Keep draft')),
       TextButton(onPressed: () {
         final key = _boundKey!;
         _edits[key] = (_edits[key] ?? 0) + 1;
-        final text = _conflicts.remove(key)!;
-        _applyText(_ctrl!, text, _ctrl!.selection.start);
-        key.$1[key.$2] = text;
-        setState(() { _baselines[key] = text; _dirtyBuffers.remove(key); });
+        _seenConflicts[key] = null;
+        // The bucket swaps the buffer; _bind applies it to the controller
+        // with the caret clamped.
+        AgentService.I.resolveStudioConflict(key.$1, key.$2, keepDraft: false);
       }, child: const Text('Use external')),
     ],
   );
 
-  Widget _header(String path, TextEditingController ctrl) {
-    final pos = _positionOf(ctrl);
-    final conflict = _conflicts.containsKey(_boundKey);
+  Widget _header(String path, TextEditingController? ctrl) {
+    final pos = ctrl == null ? null : _positionOf(ctrl);
+    final conflict = _conflict;
+    final guard = AgentService.I.studioGuardFor(path);
+    final binary = guard?.binary == true ||
+        (ctrl == null && looksBinaryText(AgentService.I.fileBuffer[path] ?? ''));
     final name = path.split('/').last;
     final dir = path.contains('/')
         ? path.substring(0, path.lastIndexOf('/'))
@@ -640,8 +859,19 @@ class _StudioEditorState extends State<StudioEditor> {
     // Mode pill reflects the editor's state of this tab: conflict > unsaved
     // draft > clean. Rendered through AetherPill so Studio's chrome shares the
     // monochrome + accent language used elsewhere in the app.
+    final undo = _undoCtrl;
     final AetherPill pill;
-    if (conflict) {
+    if (ctrl == null) {
+      pill = AetherPill(
+        label: binary
+            ? 'BINARY'
+            : guard != null
+                ? 'TOO LARGE'
+                : 'READ-ONLY',
+        icon: Icons.lock_outline,
+        color: Aether.textMuted,
+      );
+    } else if (conflict) {
       pill = AetherPill(
         label: 'CONFLICT',
         icon: Icons.sync_problem_outlined,
@@ -725,7 +955,7 @@ class _StudioEditorState extends State<StudioEditor> {
           final actions = Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (roomy) ...[
+              if (roomy && pos != null) ...[
                 Semantics(
                   liveRegion: true,
                   label:
@@ -741,19 +971,23 @@ class _StudioEditorState extends State<StudioEditor> {
                 icon: _findOpen ? Icons.search_off : Icons.search,
                 tooltip: 'Find in file',
                 iconSize: 18,
-                onPressed: _findOpen ? _closeFind : _openFind,
+                onPressed: ctrl == null
+                    ? null
+                    : _findOpen
+                        ? _closeFind
+                        : _openFind,
               ),
               StudioIconButton(
                 icon: Icons.undo,
                 tooltip: 'Undo',
                 iconSize: 18,
-                onPressed: _undoCtrl.value.canUndo ? _undoCtrl.undo : null,
+                onPressed: ctrl != null && undo!.value.canUndo ? undo.undo : null,
               ),
               StudioIconButton(
                 icon: Icons.redo,
                 tooltip: 'Redo',
                 iconSize: 18,
-                onPressed: _undoCtrl.value.canRedo ? _undoCtrl.redo : null,
+                onPressed: ctrl != null && undo!.value.canRedo ? undo.redo : null,
               ),
               StudioIconButton(
                 icon: Icons.save_outlined,
@@ -761,7 +995,7 @@ class _StudioEditorState extends State<StudioEditor> {
                 iconSize: 18,
                 color: _dirty ? Aether.accent : null,
                 onPressed:
-                    _dirty && !conflict ? _save : null,
+                    ctrl != null && _dirty && !conflict ? _save : null,
               ),
             ],
           );
@@ -1002,6 +1236,320 @@ class _NoFileView extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// An [IndexedStack] that re-lays out ONLY the displayed child.
+///
+/// Every open file is a full-text `TextField`; IndexedStack laid all of them
+/// out against the live constraints, i.e. on every resize and keyboard
+/// animation (F-077). Inactive children stay mounted (their undo history
+/// lives in the field's state) but keep frozen constraints, and are not
+/// painted, hit-tested or focusable.
+class _ActiveChildStack extends MultiChildRenderObjectWidget {
+  _ActiveChildStack({required this.index, required List<Widget> children})
+      : super(
+          children: [
+            for (var i = 0; i < children.length; i++)
+              ExcludeFocus(
+                // Keyed like the child so a closed tab never shifts state
+                // onto its neighbour.
+                key: children[i].key,
+                excluding: i != index,
+                child: children[i],
+              ),
+          ],
+        );
+
+  final int index;
+
+  @override
+  RenderIndexedStack createRenderObject(BuildContext context) =>
+      _RenderActiveChildStack(index: index);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    RenderIndexedStack renderObject,
+  ) {
+    renderObject.index = index;
+  }
+
+  @override
+  MultiChildRenderObjectElement createElement() =>
+      _ActiveChildStackElement(this);
+}
+
+class _ActiveChildStackElement extends MultiChildRenderObjectElement {
+  _ActiveChildStackElement(_ActiveChildStack super.widget);
+
+  @override
+  void debugVisitOnstageChildren(ElementVisitor visitor) {
+    final index = (widget as _ActiveChildStack).index;
+    if (index >= 0 && index < children.length) {
+      visitor(children.elementAt(index));
+    }
+  }
+}
+
+class _RenderActiveChildStack extends RenderIndexedStack {
+  _RenderActiveChildStack({super.index})
+      : super(
+          alignment: Alignment.topLeft,
+          textDirection: TextDirection.ltr,
+        );
+
+  RenderBox? get _active {
+    final index = this.index;
+    if (index == null || index < 0) return null;
+    var child = firstChild;
+    for (var i = 0; i < index && child != null; i++) {
+      child = childAfter(child);
+    }
+    return child;
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) =>
+      _active?.getMinIntrinsicWidth(height) ?? 0;
+
+  @override
+  double computeMaxIntrinsicWidth(double height) =>
+      _active?.getMaxIntrinsicWidth(height) ?? 0;
+
+  @override
+  double computeMinIntrinsicHeight(double width) =>
+      _active?.getMinIntrinsicHeight(width) ?? 0;
+
+  @override
+  double computeMaxIntrinsicHeight(double width) =>
+      _active?.getMaxIntrinsicHeight(width) ?? 0;
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final child = _active;
+    if (child == null) return constraints.smallest;
+    return constraints.constrain(child.getDryLayout(constraints.loosen()));
+  }
+
+  /// The constraints each child last had while it was displayed.
+  final Expando<BoxConstraints> _frozen = Expando();
+
+  @override
+  void performLayout() {
+    final active = _active;
+    var child = firstChild;
+    while (child != null) {
+      final parentData = child.parentData! as StackParentData;
+      parentData.offset = Offset.zero;
+      if (identical(child, active)) {
+        final loose = constraints.loosen();
+        _frozen[child] = loose;
+        child.layout(loose, parentUsesSize: true);
+      } else {
+        // Hidden children keep the constraints they were last shown with, so
+        // a resize or keyboard animation does not re-lay out their text:
+        // with unchanged constraints and no edits, layout is a no-op. They
+        // are relayout boundaries, so their own edits stay local.
+        child.layout(_frozen[child] ?? constraints.loosen());
+      }
+      child = parentData.nextSibling;
+    }
+    size = active == null
+        ? constraints.smallest
+        : constraints.constrain(active.size);
+  }
+}
+
+String _formatBytes(int bytes) {
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  if (bytes >= 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  return '$bytes bytes';
+}
+
+class _CenteredNotice extends StatelessWidget {
+  const _CenteredNotice({
+    required this.icon,
+    required this.title,
+    required this.body,
+    this.action,
+  });
+
+  final IconData icon;
+  final String title;
+  final String body;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Aether.bg,
+      alignment: Alignment.center,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 28, color: Aether.textMuted),
+            const SizedBox(height: 10),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: AetherType.title.copyWith(fontSize: 14, color: Aether.text),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              body,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12.5, height: 1.5, color: Aether.textMuted),
+            ),
+            if (action != null) ...[const SizedBox(height: 12), action!],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Binary files are never decoded into the editor (F-075): an edit + Save
+/// would commit U+FFFD soup over the real bytes.
+class _BinaryFileView extends StatelessWidget {
+  const _BinaryFileView({required this.path});
+
+  final String path;
+
+  @override
+  Widget build(BuildContext context) => _CenteredNotice(
+        icon: Icons.block_outlined,
+        title: 'Binary file — not editable',
+        body: '${path.split('/').last} is not a text file, so Studio will not '
+            'open it for editing.',
+      );
+}
+
+/// Above the on-device cap the file is never loaded (F-076).
+class _TooLargeView extends StatelessWidget {
+  const _TooLargeView({required this.path, required this.bytes});
+
+  final String path;
+  final int bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    final command = "less '${path.replaceAll("'", r"'\''")}'";
+    return _CenteredNotice(
+      icon: Icons.description_outlined,
+      title: 'Too large to open on device',
+      body: '${path.split('/').last}${bytes > 0 ? ' is ${_formatBytes(bytes)}' : ''}. '
+          'Studio edits files up to ${_formatBytes(kStudioEditHardCap)}. '
+          'Open it in the terminal instead:\n$command',
+      action: OutlinedButton.icon(
+        icon: const Icon(Icons.copy, size: 16),
+        label: const Text('Copy terminal command'),
+        onPressed: () {
+          Clipboard.setData(ClipboardData(text: command));
+          showStudioToast(context, 'Command copied');
+        },
+      ),
+    );
+  }
+}
+
+/// Read-only, virtualised viewer for large text files (F-076): one lazily
+/// built row per line instead of one paragraph for the whole file.
+class _LargeFileViewer extends StatefulWidget {
+  const _LargeFileViewer({
+    super.key,
+    required this.path,
+    required this.text,
+    required this.onEditAnyway,
+  });
+
+  final String path;
+  final String text;
+  final VoidCallback? onEditAnyway;
+
+  @override
+  State<_LargeFileViewer> createState() => _LargeFileViewerState();
+}
+
+class _LargeFileViewerState extends State<_LargeFileViewer> {
+  /// Longest slice of one line that is laid out (minified bundles are a
+  /// single multi-megabyte line).
+  static const int _maxLineChars = 2000;
+  late List<String> _lines = widget.text.split('\n');
+
+  @override
+  void didUpdateWidget(_LargeFileViewer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.text, widget.text)) {
+      _lines = widget.text.split('\n');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(
+      fontFamily: Aether.mono,
+      fontFamilyFallback: kStudioMonoFallback,
+      fontSize: kStudioEditorFontSize,
+      height: kStudioEditorLineHeight,
+      color: Aether.text,
+    );
+    return Container(
+      color: Aether.bg,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+            color: Aether.surface,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Large file (${_formatBytes(widget.text.length)}) — '
+                    'opened read-only to keep Studio responsive.',
+                    style: TextStyle(fontSize: 12, color: Aether.textMuted),
+                  ),
+                ),
+                TextButton(
+                  onPressed: widget.onEditAnyway,
+                  child: Text(
+                    widget.onEditAnyway == null ? 'Too large to edit' : 'Edit anyway',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Semantics(
+              label: 'Read-only viewer for ${widget.path}',
+              child: SelectionArea(
+                child: ListView.builder(
+                  padding: const EdgeInsets.all(12),
+                  itemCount: _lines.length,
+                  itemBuilder: (context, i) {
+                    final line = _lines[i];
+                    return Text(
+                      line.length > _maxLineChars
+                          ? '${line.substring(0, _maxLineChars)} …'
+                          : line,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.clip,
+                      style: style,
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

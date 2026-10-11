@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'diag.dart';
+import 'studio_drafts.dart';
 import 'workspace_files.dart';
 
 /// Audit 2026-09-25 §2 — what one [RepoCache.sync] actually managed to fetch.
@@ -510,8 +511,84 @@ class RepoCache extends ChangeNotifier {
   List<String> get pendingPaths => List.unmodifiable(_dirty.toList()..sort());
   int get dirtyCount => _dirty.length;
 
+  /// Uncommitted paths across the bound working copy and every stashed one
+  /// (other sessions/branches). [unbind] discards all of them.
+  int get uncommittedCount =>
+      _dirty.length +
+      _workingCopies.values.fold<int>(0, (n, copy) => n + copy.dirty.length);
+
   @override
-  void notifyListeners() => super.notifyListeners();
+  void notifyListeners() {
+    _scheduleDraftPersist(_copyKey);
+    super.notifyListeners();
+  }
+
+  // ── API-mode draft persistence (screen review 06 §1, F-074) ──────────
+  // Without a workspace folder, uncommitted edits live only in [files].
+  // Android process death (GitHub sign-in in the browser, the file picker)
+  // used to lose them. They are persisted per binding and restored on bind.
+
+  static bool _isApiModeKey(String key) {
+    try {
+      final parts = jsonDecode(key) as List;
+      return parts.length == 4 && parts[1] is String && parts[3] == null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _scheduleDraftPersist(String key) {
+    if (!StudioDraftStore.I.enabled || !_isApiModeKey(key)) return;
+    StudioDraftStore.I.schedule(
+      StudioDraftStore.recordName('repo', key),
+      () => _draftSnapshot(key),
+    );
+  }
+
+  StudioDraftSnapshot _draftSnapshot(String key) {
+    final Map<String, String> source;
+    final Set<String> dirty;
+    if (key == _copyKey) {
+      source = files;
+      dirty = _dirty;
+    } else {
+      final saved = _workingCopies[key];
+      // Binding cleared (sign-out) — leave the record for the next bind.
+      if (saved == null) return null;
+      source = saved.files;
+      dirty = saved.dirty;
+    }
+    final drafts = <String, String>{
+      for (final path in dirty)
+        if (source[path] != null) path: source[path]!,
+    };
+    if (drafts.isEmpty) return (data: null);
+    return (data: {'v': 1, 'key': key, 'files': drafts});
+  }
+
+  Future<void> _restoreDrafts(String key, int generation) async {
+    final record =
+        await StudioDraftStore.I.read(StudioDraftStore.recordName('repo', key));
+    if (record == null || record['key'] != key) return;
+    if (generation != _bindingGeneration || key != _copyKey) return;
+    final stored = record['files'];
+    if (stored is! Map) return;
+    var restored = false;
+    for (final entry in stored.entries) {
+      final path = entry.key;
+      final content = entry.value;
+      if (path is! String || content is! String) continue;
+      if (_dirty.contains(path) || _deletions.contains(path)) continue;
+      files[path] = content;
+      _edited(path);
+      if (!treePaths.contains(path)) treePaths.add(path);
+      restored = true;
+    }
+    if (restored) notifyListeners();
+  }
+
+  /// Delete every persisted API-mode draft (explicit "Discard and sign out").
+  Future<void> discardPersistedDrafts() => StudioDraftStore.I.deleteAll('repo_');
 
   // ── init ─────────────────────────────────────────────────────────────
   void bind(
@@ -523,6 +600,7 @@ class RepoCache extends ChangeNotifier {
   }) {
     final oldKey = _copyKey;
     final newKey = jsonEncode([sessionId, full.toLowerCase(), branch, workspaceFolder]);
+    final restoreDrafts = oldKey != newKey && !_workingCopies.containsKey(newKey);
     if (oldKey != newKey) {
       _workingCopies[oldKey] = (
         files: Map.of(files), dirty: Set.of(_dirty), unsaved: Set.of(_unsaved), tree: List.of(treePaths),
@@ -539,6 +617,7 @@ class RepoCache extends ChangeNotifier {
       lastSync = null;
       _lastSyncReport = null;
       _lastCommit = null;
+      _binaryPaths.clear();
     }
     _bindingGeneration++;
     _pathOperations.clear();
@@ -553,10 +632,16 @@ class RepoCache extends ChangeNotifier {
     // generation bump above still keeps any in-flight sync of the OLD
     // binding from publishing over the new one.
     notifyListeners();
+    if (restoreDrafts && StudioDraftStore.I.enabled && _isApiModeKey(newKey)) {
+      unawaited(_restoreDrafts(newKey, _bindingGeneration));
+    }
   }
 
   /// Disconnect — clear everything so Studio shows the login state again.
   void unbind() {
+    // Snapshot pending API-mode drafts before the working copy is cleared, so
+    // a sign-out (or a confirmed 401) cannot lose the last edits.
+    unawaited(StudioDraftStore.I.flush());
     _bindingGeneration++;
     _pathOperations.clear();
     _fetchOperations.clear();
@@ -566,6 +651,7 @@ class RepoCache extends ChangeNotifier {
     _boundSessionId = null;
     workspaceFolder = null;
     _workingCopies.clear();
+    _binaryPaths.clear();
     _unsaved.clear();
     _deletions.clear();
     _stagedModes.clear();
@@ -834,7 +920,18 @@ class RepoCache extends ChangeNotifier {
             if (bytes.length > 2 * 1024 * 1024) {
               failed.add(path);
             } else {
-              contents[path] = _decodeFileBytes(bytes);
+              if (looksBinaryBytes(bytes)) {
+                _binaryPaths.add(path);
+              } else {
+                _binaryPaths.remove(path);
+              }
+              try {
+                contents[path] = _decodeFileBytes(bytes);
+              } on FormatException {
+                // Not UTF-8: a binary file the editor must never re-encode.
+                _binaryPaths.add(path);
+                rethrow;
+              }
             }
           } catch (error, stack) {
             Diag.swallow('repo_cache.syncWorkspace', error, stack);
@@ -1136,6 +1233,11 @@ class RepoCache extends ChangeNotifier {
   // ── working copy ops (agent edits land here first) ───────────────────
   void write(String path, String content) {
     _validateWorkspacePath(path);
+    if (isBinaryPath(path)) {
+      // F-075: an allowMalformed decode of a binary is U+FFFD soup; writing
+      // it back would commit garbage over the real file.
+      throw StateError('Binary file — not editable: $path');
+    }
     _deletions.remove(path);
     files[path] = content;
     _edited(path);
@@ -1159,6 +1261,72 @@ class RepoCache extends ChangeNotifier {
       }
     }
     return files[path];
+  }
+
+  /// True when the working copy of [path] holds binary content (NUL bytes or
+  /// mostly U+FFFD after decoding). Such paths are never writable.
+  bool isBinaryPath(String path) {
+    if (_binaryPaths.contains(path)) return true;
+    final content = files[path];
+    return content != null && looksBinaryText(content);
+  }
+
+  /// Paths whose bytes were seen to be binary (NUL bytes, not UTF-8) by a
+  /// workspace read, even when no text content is cached for them.
+  final Set<String> _binaryPaths = {};
+
+  /// Off-UI-isolate read for the Studio editor (F-075/F-076).
+  ///
+  /// Never reads more than [maxBytes]: a larger file comes back as
+  /// `tooLarge` with no content. Binary files come back as `binary`.
+  /// `content == null` with neither flag set means "not available".
+  Future<({String? content, int size, bool binary, bool tooLarge})> readForEditor(
+    String path, {
+    int maxBytes = kStudioEditHardCap,
+  }) async {
+    ({String? content, int size, bool binary, bool tooLarge}) classify(String? text) {
+      if (text == null) return (content: null, size: 0, binary: false, tooLarge: false);
+      if (text.length > maxBytes) {
+        return (content: null, size: text.length, binary: false, tooLarge: true);
+      }
+      if (looksBinaryText(text)) {
+        return (content: null, size: text.length, binary: true, tooLarge: false);
+      }
+      return (content: text, size: text.length, binary: false, tooLarge: false);
+    }
+
+    final root = workspaceFolder;
+    if (root == null || _unsaved.contains(path)) return classify(files[path]);
+    try {
+      final safe = workspaceFilePath(Directory(root), path);
+      if (safe == null) return classify(null);
+      if (await FileSystemEntity.type(safe, followLinks: false) != FileSystemEntityType.file) {
+        return classify(null);
+      }
+      final file = File(safe);
+      final size = await file.length();
+      if (size > maxBytes) {
+        return (content: null, size: size, binary: false, tooLarge: true);
+      }
+      final bytes = await file.readAsBytes();
+      if (looksBinaryBytes(bytes)) {
+        _binaryPaths.add(path);
+        return (content: null, size: size, binary: true, tooLarge: false);
+      }
+      final String text;
+      try {
+        text = bytes.length > kStudioDecodeInIsolate
+            ? await compute(_decodeFileBytes, bytes)
+            : _decodeFileBytes(bytes);
+      } on FormatException {
+        _binaryPaths.add(path);
+        return (content: null, size: size, binary: true, tooLarge: false);
+      }
+      return classify(text);
+    } catch (error, stack) {
+      Diag.swallow('repo_cache.readForEditor', error, stack);
+      return classify(null);
+    }
   }
 
   /// A successful disk save clears draft status, not pending-commit status.

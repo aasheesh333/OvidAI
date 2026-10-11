@@ -13,6 +13,7 @@ import '../core/global_repo_registry.dart';
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
 import '../core/sandbox_service.dart';
+import '../core/studio_drafts.dart';
 import 'github_login_sheet.dart';
 // Note: sandbox_setup.dart imports this file (for StudioScreen) — the
 // reverse import here is intentional so the not-installed banner routes
@@ -161,6 +162,14 @@ class _StudioScreenState extends State<StudioScreen> {
   late final Listenable _sessionSignals =
       Listenable.merge([AppState.I, GitHubService.I, RepoCache.I]);
 
+  /// Whether the active Studio bucket holds unsaved editor drafts. Kept in
+  /// its own notifier so the guard does not rebuild the screen per token.
+  final ValueNotifier<bool> _hasDrafts = ValueNotifier(false);
+  bool _leaving = false;
+
+  void _syncDraftFlag() =>
+      _hasDrafts.value = AgentService.I.studioTabs.value.dirtyPaths.isNotEmpty;
+
   String? get _repo => AgentService.I.sessionRepoFull;
   String get _branch => AgentService.I.sessionBranch;
 
@@ -171,6 +180,8 @@ class _StudioScreenState extends State<StudioScreen> {
     _workspaceKey = '${s?.id}|${s?.repo}|${s?.branch}|${s?.workspaceFolder}';
     GitHubService.I.addListener(_handleInitialAuth);
     AppState.I.addListener(_onWorkspaceChanged);
+    AgentService.I.studioTabs.addListener(_syncDraftFlag);
+    _syncDraftFlag();
     // Opening Studio is an explicit "try again now". The automatic restore
     // backoff runs out after ~2.5 minutes and nothing re-arms it, so a
     // secure-storage hiccup longer than that left this screen signed out for the
@@ -186,7 +197,53 @@ class _StudioScreenState extends State<StudioScreen> {
   void dispose() {
     GitHubService.I.removeListener(_handleInitialAuth);
     AppState.I.removeListener(_onWorkspaceChanged);
+    AgentService.I.studioTabs.removeListener(_syncDraftFlag);
+    _hasDrafts.dispose();
+    // Leaving Studio is a good moment to make sure drafts are on disk.
+    unawaited(StudioDraftStore.I.flush());
     super.dispose();
+  }
+
+  /// Back with unsaved drafts: Save all / Discard / Cancel (F-071).
+  Future<void> _confirmLeave() async {
+    if (_leaving) return;
+    final agent = AgentService.I;
+    final dirty = agent.dirtyStudioFiles;
+    if (dirty.isEmpty) {
+      Navigator.of(context).pop();
+      return;
+    }
+    _leaving = true;
+    try {
+      final choice = await showStudioUnsavedDialog(
+        context,
+        dirty,
+        title: 'Leave Studio with unsaved changes?',
+        saveLabel: dirty.length == 1 ? 'Save' : 'Save all',
+      );
+      if (!mounted) return;
+      switch (choice) {
+        case StudioUnsavedChoice.cancel:
+          return;
+        case StudioUnsavedChoice.discard:
+          agent.discardAllStudioDrafts();
+        case StudioUnsavedChoice.save:
+          final failed = await agent.saveAllStudioDrafts();
+          if (!mounted) return;
+          if (failed.isNotEmpty) {
+            showStudioToast(
+              context,
+              'Could not save ${failed.length} file(s)',
+              detail: failed.join(', '),
+              error: true,
+            );
+            return;
+          }
+      }
+      Navigator.of(context).pop();
+    } finally {
+      _leaving = false;
+    }
   }
 
   void _onWorkspaceChanged() {
@@ -850,13 +907,20 @@ class _StudioScreenState extends State<StudioScreen> {
         // On a compact width the tree is an overlay, so Android's back gesture
         // must dismiss it before it leaves the screen.
         final treeOverlayOpen = compactActions && (_showFilesOverride ?? false);
-        return PopScope(
-          canPop: !treeOverlayOpen,
-          onPopInvokedWithResult: (didPop, _) {
-            if (!didPop && treeOverlayOpen) {
-              setState(() => _showFilesOverride = false);
-            }
-          },
+        return ValueListenableBuilder<bool>(
+          valueListenable: _hasDrafts,
+          builder: (context, hasDrafts, child) => PopScope(
+            canPop: !treeOverlayOpen && !hasDrafts,
+            onPopInvokedWithResult: (didPop, _) {
+              if (didPop) return;
+              if (treeOverlayOpen) {
+                setState(() => _showFilesOverride = false);
+              } else if (hasDrafts) {
+                _confirmLeave();
+              }
+            },
+            child: child!,
+          ),
           child: Scaffold(
           backgroundColor: Aether.bg,
           appBar: _appBar(repo, compactActions),
@@ -1030,7 +1094,10 @@ class _StudioScreenState extends State<StudioScreen> {
             ),
           ),
         // ── GitHub account chip + sign out ──
-        _AccountChip(compact: compactActions),
+        _AccountChip(
+          compact: compactActions,
+          onCommitFirst: repo != null && !_committing ? _commitPending : null,
+        ),
         const _AuthBadge(),
         const SizedBox(width: 4),
       ],
@@ -1096,42 +1163,47 @@ class _StudioScreenState extends State<StudioScreen> {
       ],
     );
 
+    final overlayTree = showTree && m.treeOverlays;
     return Column(
       children: [
         Expanded(
-          child: showTree && m.treeOverlays
-              ? Stack(
-                  children: [
-                    split,
-                    Positioned.fill(
-                      child: GestureDetector(
-                        key: studioTreeScrimKey,
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => setState(() => _showFilesOverride = false),
-                        child: const ColoredBox(color: Color(0x73000000)),
+          // Always a Stack with the split as its first child: swapping
+          // `Row` ↔ `Stack` here unmounted the editor (undo, find, scroll and
+          // the draft state) every time the compact file panel opened or
+          // closed (screen review 06 §7 / F-072).
+          child: Stack(
+            children: [
+              split,
+              if (overlayTree)
+                Positioned.fill(
+                  child: GestureDetector(
+                    key: studioTreeScrimKey,
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setState(() => _showFilesOverride = false),
+                    child: const ColoredBox(color: Color(0x73000000)),
+                  ),
+                ),
+              if (overlayTree)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: math.min(m.treeWidth, c.maxWidth),
+                  child: Material(
+                    elevation: 8,
+                    color: Aether.surface,
+                    child: Semantics(
+                      label: 'Files panel',
+                      container: true,
+                      child: SizedBox(
+                        key: studioTreePaneKey,
+                        child: const StudioFileTree(),
                       ),
                     ),
-                    Positioned(
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: math.min(m.treeWidth, c.maxWidth),
-                      child: Material(
-                        elevation: 8,
-                        color: Aether.surface,
-                        child: Semantics(
-                          label: 'Files panel',
-                          container: true,
-                          child: SizedBox(
-                            key: studioTreePaneKey,
-                            child: const StudioFileTree(),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                )
-              : split,
+                  ),
+                ),
+            ],
+          ),
         ),
         SizedBox(
           key: studioTerminalPaneKey,
@@ -1996,7 +2068,10 @@ class _AsyncPickerSheetState<T> extends State<_AsyncPickerSheet<T>> {
 
 /// ── GitHub account chip with avatar, login name, and sign-out menu ──
 class _AccountChip extends StatelessWidget {
-  const _AccountChip({required this.compact});
+  const _AccountChip({required this.compact, this.onCommitFirst});
+
+  /// Opens the commit flow; offered when sign-out would discard edits.
+  final VoidCallback? onCommitFirst;
 
   /// Below 600dp the chip drops its login text and chevron: the app bar has
   /// back + title + tree toggle + overflow + auth badge to fit as well.
@@ -2110,6 +2185,9 @@ class _AccountChip extends StatelessWidget {
   }
 
   void _confirmSignOut(BuildContext context, GitHubService gh) {
+    // Sign-out unbinds the repo cache, which drops every uncommitted edit
+    // (in API mode they exist nowhere else). Say so first (F-073).
+    final uncommitted = RepoCache.I.uncommittedCount;
     showDialog(
       context: context,
       builder: (d) => AlertDialog(
@@ -2117,19 +2195,34 @@ class _AccountChip extends StatelessWidget {
           'Sign out of GitHub?',
           style: TextStyle(fontSize: 15),
         ),
-        content: const Text(
-          'The repo connection will be cleared. Your GitHub access token is '
-          'removed from this device only.',
-          style: TextStyle(fontSize: 12.5),
+        content: Text(
+          uncommitted > 0
+              ? 'You have $uncommitted uncommitted file(s). Commit them first '
+                  'or they will be discarded. Your GitHub access token is '
+                  'removed from this device only.'
+              : 'The repo connection will be cleared. Your GitHub access token '
+                  'is removed from this device only.',
+          style: const TextStyle(fontSize: 12.5),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(d),
             child: const Text('Cancel'),
           ),
+          if (uncommitted > 0 && onCommitFirst != null)
+            TextButton(
+              onPressed: () {
+                Navigator.pop(d);
+                onCommitFirst!();
+              },
+              child: const Text('Commit first'),
+            ),
           TextButton(
             onPressed: () async {
               Navigator.pop(d);
+              if (uncommitted > 0) {
+                await RepoCache.I.discardPersistedDrafts();
+              }
               try {
                 await gh.signOut();
               } catch (e) {
@@ -2142,9 +2235,9 @@ class _AccountChip extends StatelessWidget {
                 );
               }
             },
-            child: const Text(
-              'Sign out',
-              style: TextStyle(color: Aether.danger),
+            child: Text(
+              uncommitted > 0 ? 'Discard and sign out' : 'Sign out',
+              style: const TextStyle(color: Aether.danger),
             ),
           ),
         ],

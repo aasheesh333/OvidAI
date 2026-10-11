@@ -31,6 +31,7 @@ import 'sandbox_service.dart';
 import 'webview_pool.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
+import 'studio_drafts.dart';
 import 'workspace_files.dart';
 import 'mcp_service.dart';
 import 'mcp_catalog_tools.dart';
@@ -161,6 +162,9 @@ class StudioTabsState {
     required this.activePath,
     required this.buffer,
     required this.activeContent,
+    this.dirtyPaths = const [],
+    this.conflicts = const {},
+    this.guardedPaths = const [],
   });
 
   final List<String> openFiles;
@@ -168,13 +172,24 @@ class StudioTabsState {
   final Map<String, String> buffer;
   final String? activeContent;
 
+  /// Unsaved drafts, pending external-content conflicts and placeholder
+  /// (binary / too large) paths of the bucket. Part of the snapshot so the
+  /// tab strip's dirty dots and the editor's conflict / placeholder views
+  /// refresh when only the draft state changed.
+  final List<String> dirtyPaths;
+  final Map<String, String> conflicts;
+  final List<String> guardedPaths;
+
   @override
   bool operator ==(Object other) =>
       other is StudioTabsState &&
       other.activePath == activePath &&
       identical(other.buffer, buffer) &&
       identical(other.activeContent, activeContent) &&
-      listEquals(other.openFiles, openFiles);
+      listEquals(other.openFiles, openFiles) &&
+      listEquals(other.dirtyPaths, dirtyPaths) &&
+      mapEquals(other.conflicts, conflicts) &&
+      listEquals(other.guardedPaths, guardedPaths);
 
   @override
   int get hashCode => Object.hash(
@@ -182,6 +197,9 @@ class StudioTabsState {
     identityHashCode(buffer),
     identityHashCode(activeContent),
     Object.hashAll(openFiles),
+    Object.hashAll(dirtyPaths),
+    Object.hashAll(conflicts.keys),
+    Object.hashAll(guardedPaths),
   );
 }
 
@@ -936,9 +954,31 @@ class SessionEvent {
 /// Keyed by ChatSession.sandboxId inside AgentService so each chat session
 /// has its own Studio view (Ovid-style workspace isolation).
 class _SessionStudio {
+  _SessionStudio(this.key);
+
+  /// Bucket identity (session, repo, branch, folder) — also names the
+  /// persisted draft record.
+  final String key;
   final Map<String, String> fileBuffer = {};
   final List<String> openFiles = [];
   String? activeFilePath;
+
+  /// Last content known to be saved (disk or working copy) per path. The
+  /// dirty set, baselines and pending conflicts live HERE, not in the editor
+  /// widget, so popping Studio, collapsing the file panel or tapping the
+  /// file in the tree can no longer turn an unsaved draft into "SAVED"
+  /// (screen review 06 §4 / F-071).
+  final Map<String, String> baselines = {};
+
+  /// Paths whose [fileBuffer] entry is an unsaved draft.
+  final Set<String> dirty = {};
+
+  /// External content (agent write, disk change) that arrived while the
+  /// path held a draft. The draft stays in [fileBuffer].
+  final Map<String, String> conflicts = {};
+
+  /// Paths opened as a placeholder instead of text (binary / too large).
+  final Map<String, StudioFileGuard> guards = {};
 
   /// Last mtime (ms) we synced each open file from disk — powers live
   /// follow: shell commands (sed/mv/git checkout) that change open files
@@ -5041,8 +5081,11 @@ if (!window.__ovidBlankHooked) {
   /// Studio state bucket keyed by session.sandboxId (== session.id).
   final Map<String, _SessionStudio> _studios = {};
 
-  _SessionStudio _studioFor(String key) =>
-      _studios.putIfAbsent(key, _SessionStudio.new);
+  _SessionStudio _studioFor(String key) => _studios.putIfAbsent(key, () {
+    final studio = _SessionStudio(key);
+    unawaited(_restoreStudioDrafts(studio));
+    return studio;
+  });
 
   /// Current session's studio.
   ///
@@ -5125,6 +5168,15 @@ if (!window.__ovidBlankHooked) {
       activePath: active,
       buffer: studio.fileBuffer,
       activeContent: active == null ? null : studio.fileBuffer[active],
+      dirtyPaths: List<String>.unmodifiable(
+        studio.dirty.where(studio.fileBuffer.containsKey).toList()..sort(),
+      ),
+      conflicts: studio.conflicts.isEmpty
+          ? const {}
+          : Map<String, String>.unmodifiable(studio.conflicts),
+      guardedPaths: studio.guards.isEmpty
+          ? const []
+          : List<String>.unmodifiable(studio.guards.keys.toList()..sort()),
     );
   });
 
@@ -5198,7 +5250,16 @@ if (!window.__ovidBlankHooked) {
 
   void openStudioFile(String path, String content) {
     final st = _studio;
-    st.fileBuffer[path] = content;
+    // A tree tap or an agent write must never clobber an unsaved draft: a
+    // clean path takes the new content, a dirty one keeps the draft and
+    // records a conflict when the content really differs from its baseline.
+    final guard = studioGuardForContent(content);
+    if (guard != null && !_isStudioDirty(st, path)) {
+      _setStudioPlaceholder(st, path, guard);
+    } else {
+      _applyExternalStudioContent(st, path, content);
+      st.guards.remove(path);
+    }
     if (!st.openFiles.contains(path)) st.openFiles.add(path);
     st.activeFilePath = path;
     // Track disk sync point so a later shell-edit diff sees this as
@@ -5244,6 +5305,10 @@ if (!window.__ovidBlankHooked) {
     }
     file.writeAsStringSync(content);
     st.fileBuffer[path] = content;
+    st.baselines[path] = content;
+    st.dirty.remove(path);
+    st.conflicts.remove(path);
+    _scheduleStudioDraftPersist(st);
     if (!st.openFiles.contains(path)) st.openFiles.add(path);
     // A background save must not steal selection from a newer tab choice.
     if (st.activeFilePath == active) st.activeFilePath = path;
@@ -5285,7 +5350,7 @@ if (!window.__ovidBlankHooked) {
             openStudioFile(cleanPath, await f.readAsString());
             return true;
           } catch (_) {
-            openStudioFile(cleanPath, '[Binary file]');
+            openStudioPlaceholder(cleanPath, const StudioFileGuard.binary());
             return true;
           }
         }
@@ -5296,7 +5361,10 @@ if (!window.__ovidBlankHooked) {
           openStudioFile(path.split('/').last, await direct.readAsString());
           return true;
         } catch (_) {
-          openStudioFile(path.split('/').last, '[Binary file]');
+          openStudioPlaceholder(
+            path.split('/').last,
+            const StudioFileGuard.binary(),
+          );
           return true;
         }
       }
@@ -5372,7 +5440,7 @@ if (!window.__ovidBlankHooked) {
         }
         st.syncedMtime[path] = mtime;
         if (content != st.fileBuffer[path]) {
-          st.fileBuffer[path] = content;
+          _applyExternalStudioContent(st, path, content);
           changed = true;
           _emit('file', 'live-reloaded $path (changed on disk)');
         }
@@ -5402,6 +5470,342 @@ if (!window.__ovidBlankHooked) {
   void selectStudioFile(String path) {
     if (!_studio.openFiles.contains(path)) return;
     _studio.activeFilePath = path;
+    notifyListeners();
+  }
+
+  // ── Studio drafts (screen review 06 §4, F-071/F-075/F-076) ──────────────
+
+  /// Simulates process death for Studio: every in-memory bucket is dropped,
+  /// so the next access restores from the draft store.
+  @visibleForTesting
+  void debugForgetStudioStateForTest() => _studios.clear();
+
+  /// Bring [path]'s existing buffer (e.g. an unsaved draft of a closed tab)
+  /// back as the active tab without touching its content.
+  void focusStudioFile(String path) {
+    final st = _studio;
+    if (!st.fileBuffer.containsKey(path)) return;
+    if (!st.openFiles.contains(path)) st.openFiles.add(path);
+    st.activeFilePath = path;
+    notifyListeners();
+  }
+
+  /// A placeholder guard for [content] that must not open as editable text:
+  /// binary bytes, or more than [kStudioEditHardCap] characters.
+  static StudioFileGuard? studioGuardForContent(String content) {
+    if (content.length > kStudioEditHardCap) {
+      return StudioFileGuard.tooLarge(content.length);
+    }
+    if (looksBinaryText(content)) {
+      return StudioFileGuard.binary(bytes: content.length);
+    }
+    return null;
+  }
+
+  bool _isStudioDirty(_SessionStudio st, String path) =>
+      st.dirty.contains(path) && st.fileBuffer.containsKey(path);
+
+  _SessionStudio? _studioOwning(Map<String, String> buffer) {
+    for (final st in _studios.values) {
+      if (identical(st.fileBuffer, buffer)) return st;
+    }
+    return null;
+  }
+
+  void _setStudioPlaceholder(
+    _SessionStudio st,
+    String path,
+    StudioFileGuard guard,
+  ) {
+    st.fileBuffer[path] = '';
+    st.baselines[path] = '';
+    st.dirty.remove(path);
+    st.conflicts.remove(path);
+    st.guards[path] = guard;
+  }
+
+  /// New content for [path] from outside the editor (tree open, agent write,
+  /// disk follow, repo sync). Never replaces a draft.
+  void _applyExternalStudioContent(
+    _SessionStudio st,
+    String path,
+    String content,
+  ) {
+    if (!st.fileBuffer.containsKey(path)) {
+      // A buffer that was dropped takes its draft state with it.
+      st.dirty.remove(path);
+      st.conflicts.remove(path);
+      st.baselines.remove(path);
+    }
+    if (_isStudioDirty(st, path)) {
+      if (content == st.fileBuffer[path]) {
+        // The outside world caught up with the draft: nothing is unsaved.
+        st.baselines[path] = content;
+        st.dirty.remove(path);
+        st.conflicts.remove(path);
+        _scheduleStudioDraftPersist(st);
+      } else if (content != st.baselines[path]) {
+        st.conflicts[path] = content;
+      }
+      return;
+    }
+    st.fileBuffer[path] = content;
+    st.baselines[path] = content;
+    st.conflicts.remove(path);
+  }
+
+  /// Apply repo-cache content seen by the editor for the bucket owning
+  /// [buffer]. Silent: the caller re-renders itself.
+  void applyExternalStudioContent(
+    Map<String, String> buffer,
+    String path,
+    String content,
+  ) {
+    final st = _studioOwning(buffer);
+    if (st != null) _applyExternalStudioContent(st, path, content);
+  }
+
+  /// Open [path] as a non-editable placeholder (binary, too large). An
+  /// unsaved draft for the path is kept instead.
+  void openStudioPlaceholder(String path, StudioFileGuard guard) {
+    final st = _studio;
+    if (!_isStudioDirty(st, path)) _setStudioPlaceholder(st, path, guard);
+    if (!st.openFiles.contains(path)) st.openFiles.add(path);
+    st.activeFilePath = path;
+    notifyListeners();
+  }
+
+  /// Placeholder guard for [path] in the active bucket, if any.
+  StudioFileGuard? studioGuardFor(String path) => _studio.guards[path];
+
+  /// True when [path] holds an unsaved draft in the bucket owning [buffer]
+  /// (the active bucket when omitted).
+  bool isStudioFileDirty(String path, {Map<String, String>? buffer}) {
+    final st = buffer == null ? _studio : _studioOwning(buffer);
+    return st != null && _isStudioDirty(st, path);
+  }
+
+  /// Unsaved paths of the active bucket, in tab order first.
+  List<String> get dirtyStudioFiles {
+    final st = _studio;
+    final dirty = [
+      for (final path in st.dirty)
+        if (st.fileBuffer.containsKey(path)) path,
+    ];
+    dirty.sort((a, b) {
+      final ia = st.openFiles.indexOf(a), ib = st.openFiles.indexOf(b);
+      return (ia < 0 ? 1 << 30 : ia).compareTo(ib < 0 ? 1 << 30 : ib);
+    });
+    return dirty;
+  }
+
+  /// Cheap check for listeners that run on every notification.
+  bool get hasDirtyStudioBuffers {
+    final st = _studio;
+    return st.dirty.any(st.fileBuffer.containsKey);
+  }
+
+  /// External content waiting on a draft for [path], if any.
+  String? studioConflictFor(String path, {Map<String, String>? buffer}) {
+    final st = buffer == null ? _studio : _studioOwning(buffer);
+    return st?.conflicts[path];
+  }
+
+  /// Record [content] as the saved state of [path] when nothing is known yet
+  /// (a buffer that was filled without [openStudioFile]).
+  void ensureStudioBaseline(
+    Map<String, String> buffer,
+    String path,
+    String content,
+  ) {
+    final st = _studioOwning(buffer);
+    if (st == null || st.baselines.containsKey(path)) return;
+    if (!_isStudioDirty(st, path)) st.baselines[path] = content;
+  }
+
+  /// The editor's keystroke path: [text] becomes the draft for [path] in the
+  /// bucket owning [buffer]. Notifies only when the dirty state flips.
+  void updateStudioDraft(Map<String, String> buffer, String path, String text) {
+    final st = _studioOwning(buffer);
+    if (st == null) {
+      buffer[path] = text;
+      return;
+    }
+    final was = _isStudioDirty(st, path);
+    st.fileBuffer[path] = text;
+    final baseline = st.baselines[path];
+    final dirty =
+        st.conflicts.containsKey(path) || baseline == null || baseline != text;
+    if (dirty) {
+      st.dirty.add(path);
+    } else {
+      st.dirty.remove(path);
+    }
+    _scheduleStudioDraftPersist(st);
+    if (was != dirty) notifyListeners();
+  }
+
+  /// The editor wrote [text] for [path] to disk.
+  void markStudioFileSaved(
+    Map<String, String> buffer,
+    String path,
+    String text,
+  ) {
+    final st = _studioOwning(buffer);
+    if (st == null) return;
+    st.baselines[path] = text;
+    if (st.fileBuffer[path] == text) {
+      st.dirty.remove(path);
+      st.conflicts.remove(path);
+    }
+    _scheduleStudioDraftPersist(st);
+    notifyListeners();
+  }
+
+  /// Settle a conflict: keep the draft (the external content becomes the
+  /// new baseline) or take the external content (draft discarded).
+  void resolveStudioConflict(
+    Map<String, String> buffer,
+    String path, {
+    required bool keepDraft,
+  }) {
+    final st = _studioOwning(buffer);
+    final external = st?.conflicts.remove(path);
+    if (st == null || external == null) return;
+    st.baselines[path] = external;
+    if (keepDraft) {
+      if (st.fileBuffer[path] == external) st.dirty.remove(path);
+    } else {
+      st.fileBuffer[path] = external;
+      st.dirty.remove(path);
+    }
+    _scheduleStudioDraftPersist(st);
+    notifyListeners();
+  }
+
+  /// Throw away the draft for [path] in the active bucket: the buffer goes
+  /// back to the last saved content.
+  void discardStudioDraft(String path) {
+    final st = _studio;
+    _discardStudioDraft(st, path);
+    _scheduleStudioDraftPersist(st);
+    unawaited(StudioDraftStore.I.flush());
+    notifyListeners();
+  }
+
+  void _discardStudioDraft(_SessionStudio st, String path) {
+    final baseline = st.baselines[path];
+    final external = st.conflicts.remove(path);
+    final saved = external ?? baseline;
+    if (saved != null) {
+      st.fileBuffer[path] = saved;
+      st.baselines[path] = saved;
+    }
+    st.dirty.remove(path);
+  }
+
+  /// Discard every draft of the active bucket (Studio "Discard" on leave).
+  void discardAllStudioDrafts() {
+    final st = _studio;
+    for (final path in st.dirty.toList()) {
+      _discardStudioDraft(st, path);
+    }
+    _scheduleStudioDraftPersist(st);
+    unawaited(StudioDraftStore.I.flush());
+    notifyListeners();
+  }
+
+  /// Save every draft of the active bucket to the workspace. Returns the
+  /// paths that could not be saved (conflicts, write errors).
+  Future<List<String>> saveAllStudioDrafts() async {
+    final failed = <String>[];
+    for (final path in dirtyStudioFiles) {
+      final st = _studio;
+      final text = st.fileBuffer[path];
+      if (text == null || st.conflicts.containsKey(path)) {
+        failed.add(path);
+        continue;
+      }
+      try {
+        await saveStudioFile(path, text);
+      } catch (error, stack) {
+        Diag.swallow('agent_service.saveAllStudioDrafts', error, stack);
+        failed.add(path);
+      }
+    }
+    return failed;
+  }
+
+  void _scheduleStudioDraftPersist(_SessionStudio st) {
+    StudioDraftStore.I.schedule(
+      StudioDraftStore.recordName('editor', st.key),
+      () {
+        final files = <String, Object?>{
+          for (final path in st.dirty)
+            if (st.fileBuffer.containsKey(path))
+              path: {
+                'draft': st.fileBuffer[path],
+                'baseline': st.baselines[path],
+              },
+        };
+        if (files.isEmpty) return (data: null);
+        return (
+          data: {
+            'v': 1,
+            'key': st.key,
+            'files': files,
+            'open': List<String>.of(st.openFiles),
+            'active': st.activeFilePath,
+          },
+        );
+      },
+    );
+  }
+
+  /// Bring back drafts persisted for [st] by an earlier process.
+  Future<void> _restoreStudioDrafts(_SessionStudio st) async {
+    if (!StudioDraftStore.I.enabled) return;
+    final record = await StudioDraftStore.I.read(
+      StudioDraftStore.recordName('editor', st.key),
+    );
+    if (record == null || record['key'] != st.key) return;
+    final files = record['files'];
+    if (files is! Map) return;
+    var restored = false;
+    for (final entry in files.entries) {
+      final path = entry.key;
+      final value = entry.value;
+      if (path is! String || value is! Map) continue;
+      final draft = value['draft'];
+      final baseline = value['baseline'];
+      if (draft is! String) continue;
+      if (_isStudioDirty(st, path)) continue;
+      final current = st.fileBuffer.containsKey(path)
+          ? st.baselines[path]
+          : null;
+      st.fileBuffer[path] = draft;
+      if (baseline is String) {
+        st.baselines[path] = baseline;
+        // The file changed on disk since the draft was written.
+        if (current != null && current != baseline && current != draft) {
+          st.conflicts[path] = current;
+        }
+      } else {
+        st.baselines.remove(path);
+      }
+      st.guards.remove(path);
+      st.dirty.add(path);
+      if (!st.openFiles.contains(path)) st.openFiles.add(path);
+      restored = true;
+    }
+    if (!restored) return;
+    final active = record['active'];
+    if (st.activeFilePath == null &&
+        active is String &&
+        st.openFiles.contains(active)) {
+      st.activeFilePath = active;
+    }
+    st.activeFilePath ??= st.openFiles.isEmpty ? null : st.openFiles.first;
     notifyListeners();
   }
 
@@ -6096,9 +6500,7 @@ user which one instead of assuming this one.''';
     // Picking an access mode directly ends plan mode: the picker and the
     // enforcement gate must agree, and any plan-owned read-only is released
     // as part of that exit.
-    final pinned = sessionId == null
-        ? null
-        : AppState.I.sessionById(sessionId);
+    final pinned = sessionId == null ? null : AppState.I.sessionById(sessionId);
     if (sessionId != null && pinned == null) return;
     final s = pinned ?? _runSession ?? AppState.I.activeSession;
     // FIX 4 (e): a pending entry must be cancelled even when plan mode is not
