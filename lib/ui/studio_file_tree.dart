@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
+import '../core/studio_drafts.dart';
 import '../core/theme.dart';
 import 'studio_errors.dart';
 import 'studio_layout.dart';
@@ -164,7 +165,49 @@ class _StudioFileTreeState extends State<StudioFileTree> {
     final cache = RepoCache.I;
     final generation = cache.bindingGeneration;
     final buffers = AgentService.I.fileBuffer;
-    final cached = cache.read(node.path);
+    if (AgentService.I.isStudioFileDirty(node.path)) {
+      // An unsaved draft wins over disk bytes: just bring its tab forward.
+      AgentService.I.focusStudioFile(node.path);
+      return;
+    }
+    if (cache.workspaceFolder != null) {
+      // Workspace mode reads from disk: stat + read off the UI thread with a
+      // hard cap, never `readAsBytesSync` on a tap (F-076).
+      setState(() {
+        _loading.add(node.path);
+        _failed.remove(node.path);
+      });
+      final read = await cache.readForEditor(node.path);
+      if (!mounted || generation != cache.bindingGeneration ||
+          !identical(buffers, AgentService.I.fileBuffer)) {
+        return;
+      }
+      setState(() => _loading.remove(node.path));
+      if (read.tooLarge) {
+        AgentService.I.openStudioPlaceholder(
+            node.path, StudioFileGuard.tooLarge(read.size));
+        return;
+      }
+      if (read.binary) {
+        AgentService.I.openStudioPlaceholder(
+            node.path, StudioFileGuard.binary(bytes: read.size));
+        return;
+      }
+      final content = read.content;
+      if (content == null) {
+        setState(() => _failed.add(node.path));
+        showStudioToast(
+          context,
+          'Could not open ${node.name}',
+          detail: 'The file could not be read from the working folder.',
+          error: true,
+        );
+        return;
+      }
+      AgentService.I.openStudioFile(node.path, content);
+      return;
+    }
+    final cached = cache.files[node.path];
     if (cached != null) {
       if (_failed.contains(node.path)) setState(() => _failed.remove(node.path));
       AgentService.I.openStudioFile(node.path, cached);
