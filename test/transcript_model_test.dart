@@ -186,4 +186,88 @@ void main() {
       );
     });
   });
+
+  group('Show reasoning: off (F-128)', () {
+    Iterable<Message> flatten(List<ChatItem> items) sync* {
+      for (final item in items) {
+        if (item is SingleItem) {
+          yield item.m;
+        } else {
+          yield* (item as FoldedGroup).msgs;
+        }
+      }
+    }
+
+    test('hides reasoning rows that follow a tool row', () {
+      final messages = [
+        _user('u'),
+        _tool('t1'),
+        _reason('r1'),
+        _tool('t2'),
+        _answer('done'),
+      ];
+      final items = foldMessages(messages, showReasoning: false);
+      expect(
+        flatten(items).where((m) => m.kind == MsgKind.reasoning),
+        isEmpty,
+      );
+      // The run still folds around the hidden row.
+      expect(items[1], isA<FoldedGroup>());
+      expect((items[1] as FoldedGroup).indices, [1, 3]);
+    });
+
+    test('hides a lone reasoning row after a single tool', () {
+      final messages = [_tool('t1'), _reason('r1'), _answer('done')];
+      final items = foldMessages(messages, showReasoning: false);
+      expect(flatten(items).map((m) => m.content), ['t1', 'done']);
+    });
+
+    test('keeps reasoning when the setting is on', () {
+      final messages = [_tool('t1'), _reason('r1'), _tool('t2'), _answer('x')];
+      final items = foldMessages(messages, showReasoning: true);
+      expect(
+        flatten(items).where((m) => m.kind == MsgKind.reasoning),
+        hasLength(1),
+      );
+    });
+
+    test('bounded window equals the tail of windowFor', () {
+      final messages = <Message>[];
+      for (var n = 0; n < 40; n++) {
+        messages
+          ..add(_user('u$n'))
+          ..add(_tool('a$n'))
+          ..add(_reason('r$n'))
+          ..add(_tool('b$n'))
+          ..add(_reason('s$n'))
+          ..add(_answer('done$n'));
+      }
+      for (final count in [1, 2, 3, 5, 9, 20, 77]) {
+        final full = windowFor(
+          messages,
+          pageSize: count,
+          visibleCount: count,
+          showReasoning: false,
+        );
+        final bounded = windowForBounded(
+          messages,
+          pageSize: count,
+          visibleCount: count,
+          showReasoning: false,
+        );
+        String sig(ChatItem i) => i is SingleItem
+            ? 's${i.index}'
+            : 'g${(i as FoldedGroup).indices.join(',')}';
+        expect(
+          bounded.visible.map(sig).toList(),
+          full.visible.map(sig).toList(),
+          reason: 'count=$count',
+        );
+        expect(
+          flatten(bounded.visible).where((m) => m.kind == MsgKind.reasoning),
+          isEmpty,
+        );
+      }
+    });
+  });
 }

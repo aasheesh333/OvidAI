@@ -47,26 +47,23 @@ List<ChatItem> foldMessages(
       i++;
       continue;
     }
-    final foldable =
-        compact &&
-        m.role == 'assistant' &&
-        (m.kind == MsgKind.tool || m.kind == MsgKind.reasoning) &&
-        !m.thinking;
+    final foldable = compact && _isFoldable(m);
     if (!foldable) {
       out.add(SingleItem(m, i));
       i++;
       continue;
     }
-    // Collect the foldable run.
+    // Collect the foldable run. Hidden reasoning rows inside the run are
+    // skipped (not rendered, not counted) but do not break the run, so
+    // "Show reasoning: off" applies to rows after a tool row too.
     final group = <Message>[];
     final idx = <int>[];
     while (i < messages.length &&
-        messages[i].role == 'assistant' &&
-        (messages[i].kind == MsgKind.tool ||
-            messages[i].kind == MsgKind.reasoning) &&
-        !messages[i].thinking) {
-      group.add(messages[i]);
-      idx.add(i);
+        _isRunMember(messages[i], showReasoning: showReasoning)) {
+      if (!_isHiddenReasoning(messages[i], showReasoning: showReasoning)) {
+        group.add(messages[i]);
+        idx.add(i);
+      }
       i++;
     }
     // Look ahead: if the NEXT message is a text answer, this group is
@@ -145,6 +142,16 @@ bool _isFoldable(Message m) =>
     m.role == 'assistant' &&
     (m.kind == MsgKind.tool || m.kind == MsgKind.reasoning) &&
     !m.thinking;
+
+/// A reasoning row suppressed by the "Show reasoning" setting.
+bool _isHiddenReasoning(Message m, {required bool showReasoning}) =>
+    !showReasoning && m.kind == MsgKind.reasoning;
+
+/// Whether [m] belongs to a foldable run. Hidden reasoning rows are
+/// transparent: they never render but do not split the surrounding run.
+/// Shared by [foldMessages] and the [windowForBounded] snap so both agree.
+bool _isRunMember(Message m, {required bool showReasoning}) =>
+    _isFoldable(m) || _isHiddenReasoning(m, showReasoning: showReasoning);
 
 /// Folds the entire [messages] list once and returns the newest
 /// [visibleCount] items plus the count hidden above them.
@@ -225,14 +232,15 @@ TranscriptWindow windowForBounded(
     // mid-run yields the same tail and must not drag the fold across the
     // whole run. The forward probe is bounded by the current span; the
     // backward snap only runs for a run that is genuinely folded.
-    if (candidate > 0 && _isFoldable(messages[candidate - 1])) {
+    bool member(Message m) => _isRunMember(m, showReasoning: showReasoning);
+    if (candidate > 0 && member(messages[candidate - 1])) {
       var runEnd = candidate;
-      while (runEnd < total && _isFoldable(messages[runEnd])) {
+      while (runEnd < total && member(messages[runEnd])) {
         runEnd++;
       }
       final complete = runEnd < total && messages[runEnd].kind == MsgKind.text;
       if (complete) {
-        while (candidate > 0 && _isFoldable(messages[candidate - 1])) {
+        while (candidate > 0 && member(messages[candidate - 1])) {
           candidate--;
         }
       }
