@@ -125,7 +125,7 @@ class InviteJoinTest(Base):
 
     def test_invite_bounds(self):
         token, _ = self.session()
-        for kwargs in [{'max_uses': 0}, {'max_uses': 10}, {'max_uses': True},
+        for kwargs in [{'max_uses': 0}, {'max_uses': 51}, {'max_uses': True},
                        {'ttl_seconds': 0}, {'ttl_seconds': 8 * 86400}, {'ttl_seconds': float('nan')}]:
             with self.subTest(kwargs=kwargs):
                 self.assertError('invalid_request', self.repo.create_invite, 'owner', token, **kwargs)

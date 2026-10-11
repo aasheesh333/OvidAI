@@ -8,10 +8,10 @@
         path_regexp sync ^/sync/v1/(records|changes|state|devices|devices/[^/]+)$
     }
     @chat {
-        path_regexp chat ^/chat(/[^/]+(/members(/[^/]+)?|/events|/close)?)?$
+        path_regexp chat ^/chat(/[^/]+(/members(/[^/]+)?|/invites/[^/]+|/events|/close)?)?$
     }
     @shares {
-        path_regexp shares ^/(shares(/[^/]+(/fork)?)?|s/[^/]+|\.well-known/assetlinks\.json)$
+        path_regexp shares ^/(shares(/[^/]+(/fork)?)?|s/[^/]+(/[^/]+)?|\.well-known/assetlinks\.json)$
     }
     route {
         header Cache-Control "no-store"

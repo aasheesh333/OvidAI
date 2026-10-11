@@ -1,4 +1,5 @@
 """HTTP contracts exercised against restartable SQLite authority."""
+from server.collaboration.repository import APPEND_RATE_PER_MINUTE, REPLAY_RATE_PER_MINUTE
 import base64
 import gzip
 import json
@@ -101,12 +102,12 @@ def test_durable_append_replay_rates_and_window_recovery(service):
     token = repo.create_session('owner', 'create')['sessionToken']
     http = connect()
     route = f'/chat/{token}/events'
-    for i in range(60):
+    for i in range(APPEND_RATE_PER_MINUTE):
         assert post(http, route, f'r{i}', events=[message(f'e{i}')]).status_code == 200
     limited = post(connect(), route, 'limited', events=[message('limited')])
     assert limited.status_code == 429
     assert limited.json()['code'] == 'rate_limited'
-    for _ in range(120):
+    for _ in range(REPLAY_RATE_PER_MINUTE):
         assert http.get(route, headers=headers()).status_code == 200
     assert connect().get(route, headers=headers()).status_code == 429
     clock.now += 60
@@ -216,10 +217,10 @@ def test_authorized_failed_requests_count_toward_durable_rate(service):
     http = connect()
     route = f'/chat/{token}/events'
     assert post(http, route, 'a', events=[message('a')]).status_code == 200
-    for i in range(59):
+    for i in range(APPEND_RATE_PER_MINUTE - 1):
         assert post(http, route, f'conflict{i}', events=[message('a', 'conflict')]).status_code == 409
     assert post(connect(), route, 'b', events=[message('b')]).status_code == 429
-    for _ in range(120):
+    for _ in range(REPLAY_RATE_PER_MINUTE):
         assert http.get(route, headers=headers(), params={'cursor': 'bad'}).status_code == 410
     assert connect().get(route, headers=headers()).status_code == 429
 

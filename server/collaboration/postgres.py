@@ -50,6 +50,8 @@ class PostgresCollabRepository:
     _require_active = staticmethod(CollabRepository._require_active)
     _request_key = staticmethod(CollabRepository._request_key)
     _member_dto = staticmethod(CollabRepository._member_dto)
+    _named = staticmethod(CollabRepository._named)
+    _stamp = staticmethod(CollabRepository._stamp)
     _retry_token = staticmethod(CollabRepository._retry_token)
     _fingerprint = staticmethod(CollabRepository._fingerprint)
     _authority_stamp = staticmethod(CollabRepository._authority_stamp)
@@ -198,14 +200,14 @@ class PostgresCollabRepository:
         return db.execute('UPDATE collab_sessions SET generation=generation+1 WHERE session_id=%s '
                           'RETURNING generation', (session_id,)).fetchone()['generation']
 
-    def _insert_event(self, db, session_id, sender, kind, payload, event_id, now):
+    def _insert_event(self, db, session_id, sender, kind, payload, event_id, now, sender_name=None):
         sequence = db.execute('UPDATE collab_sessions SET next_sequence=next_sequence+1 '
                               'WHERE session_id=%s RETURNING next_sequence-1 AS sequence',
                               (session_id,)).fetchone()['sequence']
-        envelope = {'schemaVersion': ev.SCHEMA_VERSION, 'eventId': event_id,
+        envelope = self._stamp({'schemaVersion': ev.SCHEMA_VERSION, 'eventId': event_id,
                     'sessionId': session_id, 'eventSequence': sequence,
                     'senderParticipantId': sender, 'kind': kind,
-                    'createdAt': _rfc3339(now), 'payload': payload}
+                    'createdAt': _rfc3339(now), 'payload': payload}, sender_name)
         ev.check_size(envelope)
         data = ev.canonical_bytes(envelope)
         if kind not in ('membership', 'system') or (kind == 'membership' and payload['action'] == 'joined'):
@@ -219,10 +221,31 @@ class PostgresCollabRepository:
                     self._fingerprint(sender, kind, payload), len(data), now))
         return envelope
 
-    def _membership_event(self, db, session_id, sender, action, participant_id, now):
+    def _membership_event(self, db, session_id, sender, action, participant_id, now, sender_name=None):
         payload = ev.validate_payload('membership', {'action': action, 'participantId': participant_id,
                                                      'role': 'participant' if action == 'joined' else None})
-        self._insert_event(db, session_id, sender, 'membership', payload, 'srv:' + secrets.token_hex(16), now)
+        self._insert_event(db, session_id, sender, 'membership', payload, 'srv:' + secrets.token_hex(16), now,
+                           sender_name)
+
+    @staticmethod
+    def _display_names(db, session_id, participant_ids):
+        names = {}
+        for pid in participant_ids:
+            row = db.execute("SELECT envelope FROM collab_events WHERE session_id=%s AND sender_participant_id=%s "
+                             "AND strpos(envelope, '\"senderDisplayName\"')>0 ORDER BY sequence DESC LIMIT 1",
+                             (session_id, pid)).fetchone()
+            if row is not None:
+                names[pid] = json.loads(row['envelope']).get('senderDisplayName')
+        return names
+
+    def head_sequence(self, token):
+        """Cheap long-poll probe; callers must already be authorized for `token`."""
+        if not isinstance(token, str) or not policy._TOKEN.fullmatch(token):
+            return None
+        with self._connection() as db:
+            row = db.execute('SELECT next_sequence, lifecycle FROM collab_sessions WHERE token_hash=%s',
+                             (_hash(token),)).fetchone()
+            return None if row is None else (row['next_sequence'] - 1, row['lifecycle'])
 
     def create_session(self, uid, request_id):
         self._identity(uid)
@@ -282,7 +305,8 @@ class PostgresCollabRepository:
                               (invite_id, session['session_id'])).fetchone():
                 raise CollabError('invite_not_found')
 
-    def join(self, uid, token, invite_code, *, idempotency_key=None, with_cursor=False):
+    def join(self, uid, token, invite_code, *, idempotency_key=None, with_cursor=False,
+             display_name=None):
         self._identity(uid)
         key = self._request_key(idempotency_key)
         if not isinstance(invite_code, str) or len(invite_code) > 512:
@@ -322,7 +346,7 @@ class PostgresCollabRepository:
                                'updated_at=%s, revoked_generation=NULL, revoked_at=NULL WHERE session_id=%s AND uid=%s',
                                (session['generation'], now, sid, uid))
                 db.execute('UPDATE collab_invites SET uses=uses+1 WHERE invite_id=%s', (invite['invite_id'],))
-                self._membership_event(db, sid, pid, 'joined', pid, now)
+                self._membership_event(db, sid, pid, 'joined', pid, now, display_name)
                 member = self._membership(db, sid, uid)
             result = {'member': self._member_dto(member), 'cursor': self._cursor(session, member, 0)}
             self._save_request(db, session, member, uid, 'join', key, fingerprint, result)
@@ -339,8 +363,11 @@ class PostgresCollabRepository:
                               (session['session_id'],)).fetchall()
             owner = db.execute("SELECT * FROM collab_memberships WHERE session_id=%s AND role='owner'",
                                (session['session_id'],)).fetchone()
-            return {'session': self._session_dto(db, session), 'member': self._member_dto(member),
-                    'members': [self._member_dto(row) for row in rows], 'initialMembers': [self._member_dto(owner)],
+            names = self._display_names(db, session['session_id'], [row['participant_id'] for row in rows])
+            return {'session': self._session_dto(db, session),
+                    'member': self._named(self._member_dto(member), names),
+                    'members': [self._named(self._member_dto(row), names) for row in rows],
+                    'initialMembers': [self._member_dto(owner)],
                     'replayThroughSequence': session['next_sequence'] - 1, 'cursor': self._cursor(session, member, 0)}
 
     def revoke_member(self, uid, token, participant_id):
@@ -383,8 +410,8 @@ class PostgresCollabRepository:
     def append(self, uid, token, raw_event):
         return self.append_batch(uid, token, [raw_event])['events'][0]
 
-    def append_batch(self, uid, token, raw_events, *, idempotency_key=None):
-        admitted = self._admit_rate(uid, token, 'append', 60)
+    def append_batch(self, uid, token, raw_events, *, idempotency_key=None, display_name=None):
+        admitted = self._admit_rate(uid, token, 'append', policy.APPEND_RATE_PER_MINUTE)
         key = self._request_key(idempotency_key)
         if type(raw_events) is not list or not 1 <= len(raw_events) <= policy.MAX_BATCH_EVENTS:
             raise CollabError('invalid_request')
@@ -412,7 +439,7 @@ class PostgresCollabRepository:
                     result.append(json.loads(old['envelope']))
                 else:
                     result.append(self._insert_event(db, session['session_id'], member['participant_id'], event['kind'],
-                                                     event['payload'], event['eventId'], self.clock()))
+                                                     event['payload'], event['eventId'], self.clock(), display_name))
             page = {'events': result, 'nextCursor': self._cursor(session, member, max(e['eventSequence'] for e in result)),
                     'hasMore': False}
             self._save_request(db, session, member, uid, 'append', key, fingerprint, page)
@@ -420,7 +447,7 @@ class PostgresCollabRepository:
 
     def replay(self, uid, token, cursor=None, *, limit=policy.MAX_REPLAY_EVENTS, max_bytes=policy.MAX_REPLAY_BYTES):
         self._identity(uid)
-        admitted = self._admit_rate(uid, token, 'replay', 120)
+        admitted = self._admit_rate(uid, token, 'replay', policy.REPLAY_RATE_PER_MINUTE)
         if (type(limit) is not int or not 1 <= limit <= policy.MAX_REPLAY_EVENTS or
                 type(max_bytes) is not int or not 1 <= max_bytes <= policy.MAX_REPLAY_BYTES):
             raise CollabError('invalid_request')

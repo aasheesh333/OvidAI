@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from server.shares.api import router
+from server.shares.api import OPEN_APP_SCRIPT, OPEN_APP_SCRIPT_HASH, router
 from server.shares.repository import ShareRepository, ShareError
 
 
@@ -51,7 +51,10 @@ class SharesTest(unittest.TestCase):
         self.assertEqual(snapshot.status_code, 200)
         self.assertEqual(snapshot.json()['session_id'], 'session-1')
         html = self.client.get('/s/' + share['id']).text
-        self.assertIn('Open in Ovid Si', html)
+        self.assertIn('Open in the Ovid app', html)
+        self.assertIn('referrer=share_token%3D' + share['id'], html)
+        self.assertIn('intent://share.example.test/s/' + share['id'] + '#Intent;scheme=https;'
+                      'package=com.dhanuk.ovidai;', html)
 
     def test_assetlinks_requires_real_configured_certificate(self):
         with patch.dict('os.environ', {}, clear=True):
@@ -61,6 +64,51 @@ class SharesTest(unittest.TestCase):
             response = self.client.get('/.well-known/assetlinks.json')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]['target']['sha256_cert_fingerprints'], [fingerprint])
+
+    def test_owner_updates_live_link_in_place(self):
+        share = self.create().json()
+        updated = self.body | {'request_id': 'update-1',
+                               'messages': self.body['messages'] + [{'role': 'user', 'content': 'More'}]}
+        response = self.client.put('/shares/' + share['id'], headers=self.headers, json=updated)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['id'], share['id'])
+        self.assertEqual(response.json()['expires_at'], share['expires_at'])
+        self.assertEqual(self.repo.public(share['id'])['messages'][-1]['content'], 'More')
+        bob = self.headers | {'Authorization': 'Bearer bob'}
+        self.assertEqual(self.client.put('/shares/' + share['id'], headers=bob, json=updated).status_code, 404)
+        other_session = updated | {'session_id': 'session-2'}
+        self.assertEqual(self.client.put('/shares/' + share['id'], headers=self.headers,
+                                         json=other_session).status_code, 404)
+        private = updated | {'messages': [{'role': 'user', 'content': '<think>x</think>'}]}
+        self.assertEqual(self.client.put('/shares/' + share['id'], headers=self.headers,
+                                         json=private).status_code, 422)
+        self.client.delete('/shares/' + share['id'], headers=self.headers)
+        self.assertEqual(self.client.put('/shares/' + share['id'], headers=self.headers,
+                                         json=updated).status_code, 404)
+        # The original create request still deduplicates to a conflict, never a republish.
+        self.assertEqual(self.create().status_code, 409)
+
+    def test_collab_invite_page_redirects_to_app_or_play_without_lookup(self):
+        token, invite = 'a' * 43, 'b' * 43
+        page = self.client.get(f'/s/{token}/{invite}')
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('Join a live Ovid session', page.text)
+        self.assertIn(f'referrer=share_token%3D{token}%26invite%3D{invite}', page.text)
+        self.assertIn(f'intent://share.example.test/s/{token}/{invite}#Intent', page.text)
+        self.assertIn('no-store', page.headers['cache-control'])
+        self.assertIn('noindex', page.headers['x-robots-tag'])
+        self.assertEqual(self.client.get(f'/s/{token}/short').status_code, 404)
+        with patch.dict('os.environ', {'OVID_ANDROID_PACKAGE_NAME': 'com.example.app'}):
+            self.assertIn('id=com.example.app', self.client.get(f'/s/{token}/{invite}').text)
+
+    def test_assetlinks_accepts_multiple_fingerprints(self):
+        first, second = 'AB:' * 31 + 'AB', 'cd:' * 31 + 'cd'
+        with patch.dict('os.environ', {'OVID_ANDROID_RELEASE_CERT_SHA256': f'{first}, {second}'}):
+            response = self.client.get('/.well-known/assetlinks.json')
+        self.assertEqual(response.json()[0]['target']['sha256_cert_fingerprints'],
+                         [first, second.upper()])
+        with patch.dict('os.environ', {'OVID_ANDROID_RELEASE_CERT_SHA256': first + ',nope'}):
+            self.assertEqual(self.client.get('/.well-known/assetlinks.json').status_code, 503)
 
     def test_public_escape_no_cache_revoke_and_restart(self):
         share = self.create().json()
@@ -72,7 +120,11 @@ class SharesTest(unittest.TestCase):
             def handle_starttag(self, tag, attrs):
                 tags.append(tag)
         Parser().feed(page.text)
-        self.assertNotIn('script', tags)
+        # Exactly one script: the constant, CSP-hashed open-in-app redirect.
+        self.assertEqual(tags.count('script'), 1)
+        self.assertIn('<script>' + OPEN_APP_SCRIPT + '</script>', page.text)
+        self.assertIn(f"script-src 'sha256-{OPEN_APP_SCRIPT_HASH}'",
+                      page.headers['content-security-policy'])
         self.assertIn('&lt;script&gt;', page.text)
         self.assertIn("default-src 'none'", page.headers['content-security-policy'])
         self.assertIn('noindex', page.headers['x-robots-tag'])

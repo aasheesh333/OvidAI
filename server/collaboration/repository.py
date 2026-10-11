@@ -29,7 +29,12 @@ from datetime import datetime, timezone
 from . import events as ev
 
 MAX_ACTIVE_MEMBERS = 10  # including the owner
-MAX_INVITE_USES = MAX_ACTIVE_MEMBERS - 1
+# Link invites are multi-use; the owner-inclusive member cap is enforced
+# separately at join time, so a link never admits an 11th active member.
+MAX_INVITE_USES = 50
+APPEND_RATE_PER_MINUTE = 120
+REPLAY_RATE_PER_MINUTE = 600
+MAX_LONG_POLL_SECONDS = 25
 MAX_INVITE_TTL_SECONDS = 7 * 86400
 DEFAULT_INVITE_TTL_SECONDS = 86400
 MAX_REPLAY_EVENTS = 100
@@ -321,6 +326,38 @@ class CollabRepository:
         return {'participantId': row['participant_id'], 'role': row['role'],
                 'status': row['status']}
 
+    @staticmethod
+    def _named(dto, names):
+        name = names.get(dto['participantId'])
+        return {**dto, 'displayName': name} if name else dto
+
+    @staticmethod
+    def _stamp(envelope, sender_name):
+        if sender_name is not None:
+            if not isinstance(sender_name, str) or not sender_name.strip() or len(sender_name) > 64:
+                raise CollabError('invalid_request')
+            envelope['senderDisplayName'] = sender_name
+        return envelope
+
+    def _display_names(self, db, session_id, participant_ids):
+        names = {}
+        for pid in participant_ids:
+            row = db.execute("SELECT envelope FROM collab_events WHERE session_id=? AND "
+                             "sender_participant_id=? AND instr(envelope, '\"senderDisplayName\"')>0 "
+                             'ORDER BY sequence DESC LIMIT 1', (session_id, pid)).fetchone()
+            if row is not None:
+                names[pid] = json.loads(row['envelope']).get('senderDisplayName')
+        return names
+
+    def head_sequence(self, token):
+        """Cheap long-poll probe; callers must already be authorized for `token`."""
+        if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+            return None
+        with self._connection() as db:
+            row = db.execute('SELECT next_sequence, lifecycle FROM collab_sessions WHERE token_hash=?',
+                             (_hash(token),)).fetchone()
+            return None if row is None else (row['next_sequence'] - 1, row['lifecycle'])
+
     def _session_dto(self, db, session):
         owner = db.execute("SELECT participant_id FROM collab_memberships "
                            "WHERE session_id=? AND role='owner'",
@@ -329,14 +366,14 @@ class CollabRepository:
                 'ownerParticipantId': owner['participant_id'],
                 'lifecycle': session['lifecycle']}
 
-    def _insert_event(self, db, session_id, sender, kind, payload, event_id, now):
+    def _insert_event(self, db, session_id, sender, kind, payload, event_id, now, sender_name=None):
         """Allocate the next sequence and append, in the caller's transaction."""
         sequence = db.execute('SELECT next_sequence FROM collab_sessions WHERE session_id=?',
                               (session_id,)).fetchone()[0]
-        envelope = {'schemaVersion': ev.SCHEMA_VERSION, 'eventId': event_id,
+        envelope = self._stamp({'schemaVersion': ev.SCHEMA_VERSION, 'eventId': event_id,
                     'sessionId': session_id, 'eventSequence': sequence,
                     'senderParticipantId': sender, 'kind': kind,
-                    'createdAt': _rfc3339(now), 'payload': payload}
+                    'createdAt': _rfc3339(now), 'payload': payload}, sender_name)
         ev.check_size(envelope)
         data = ev.canonical_bytes(envelope)
         if kind not in ('membership', 'system') or (kind == 'membership' and payload['action'] == 'joined'):
@@ -356,12 +393,13 @@ class CollabRepository:
     def _fingerprint(sender, kind, payload):
         return hashlib.sha256(ev.canonical_bytes([sender, kind, payload])).hexdigest()
 
-    def _membership_event(self, db, session_id, sender, action, participant_id, now):
+    def _membership_event(self, db, session_id, sender, action, participant_id, now,
+                          sender_name=None):
         payload = ev.validate_payload('membership', {
             'action': action, 'participantId': participant_id,
             'role': 'participant' if action == 'joined' else None})
         self._insert_event(db, session_id, sender, 'membership', payload,
-                           'srv:' + secrets.token_hex(16), now)
+                           'srv:' + secrets.token_hex(16), now, sender_name)
 
     # ------------------------------------------------------------------
     # Sessions
@@ -463,7 +501,8 @@ class CollabRepository:
                 raise CollabError('invite_not_found')
             db.execute('UPDATE collab_invites SET revoked=1 WHERE invite_id=?', (invite_id,))
 
-    def join(self, uid, token, invite_code, *, idempotency_key=None, with_cursor=False):
+    def join(self, uid, token, invite_code, *, idempotency_key=None, with_cursor=False,
+             display_name=None):
         self._identity(uid)
         key = self._request_key(idempotency_key)
         if not isinstance(invite_code, str) or len(invite_code) > 512:
@@ -504,7 +543,8 @@ class CollabRepository:
                 db.execute("UPDATE collab_memberships SET status='active', cursor_epoch = cursor_epoch + 1, generation=?, updated_at=?, revoked_generation=NULL, revoked_at=NULL WHERE session_id=? AND uid=?",
                            (session['generation'], now, session['session_id'], uid))
             db.execute('UPDATE collab_invites SET uses=uses+1 WHERE invite_id=?', (invite['invite_id'],))
-            self._membership_event(db, session['session_id'], participant_id, 'joined', participant_id, now)
+            self._membership_event(db, session['session_id'], participant_id, 'joined', participant_id, now,
+                                   display_name)
             member = self._membership(db, session['session_id'], uid)
             result = {'member': self._member_dto(member), 'cursor': self._cursor(session, member, 0)}
             self._save_request(db, session, member, uid, 'join', key, fingerprint, result)
@@ -519,9 +559,11 @@ class CollabRepository:
             rows = db.execute("SELECT * FROM collab_memberships WHERE session_id=? AND status='active' ORDER BY joined_order",
                               (session['session_id'],)).fetchall()
             member = self._membership(db, session['session_id'], uid)
+            names = self._display_names(db, session['session_id'],
+                                        [row['participant_id'] for row in rows])
             return {'session': self._session_dto(db, session),
-                    'member': self._member_dto(member),
-                    'members': [self._member_dto(row) for row in rows],
+                    'member': self._named(self._member_dto(member), names),
+                    'members': [self._named(self._member_dto(row), names) for row in rows],
                     'initialMembers': [self._member_dto(db.execute(
                         "SELECT * FROM collab_memberships WHERE session_id=? AND role='owner'",
                         (session['session_id'],)).fetchone())],
@@ -571,8 +613,8 @@ class CollabRepository:
     def append(self, uid, token, raw_event):
         return self.append_batch(uid, token, [raw_event])['events'][0]
 
-    def append_batch(self, uid, token, raw_events, *, idempotency_key=None):
-        admitted = self._admit_rate(uid, token, 'append', 60)
+    def append_batch(self, uid, token, raw_events, *, idempotency_key=None, display_name=None):
+        admitted = self._admit_rate(uid, token, 'append', APPEND_RATE_PER_MINUTE)
         key = self._request_key(idempotency_key)
         if type(raw_events) is not list or not 1 <= len(raw_events) <= MAX_BATCH_EVENTS:
             raise CollabError('invalid_request')
@@ -601,7 +643,8 @@ class CollabRepository:
                     result.append(json.loads(old['envelope']))
                 else:
                     result.append(self._insert_event(db, session['session_id'], member['participant_id'],
-                                                     event['kind'], event['payload'], event['eventId'], self.clock()))
+                                                     event['kind'], event['payload'], event['eventId'], self.clock(),
+                                                     display_name))
             page = {'events': result, 'nextCursor': self._cursor(session, member, max(
                 event['eventSequence'] for event in result)), 'hasMore': False}
             self._save_request(db, session, member, uid, 'append', key, fingerprint, page)
@@ -609,7 +652,7 @@ class CollabRepository:
 
     def replay(self, uid, token, cursor=None, *, limit=MAX_REPLAY_EVENTS, max_bytes=MAX_REPLAY_BYTES):
         self._identity(uid)
-        admitted = self._admit_rate(uid, token, 'replay', 120)
+        admitted = self._admit_rate(uid, token, 'replay', REPLAY_RATE_PER_MINUTE)
         if type(limit) is not int or not 1 <= limit <= MAX_REPLAY_EVENTS or type(max_bytes) is not int or not 1 <= max_bytes <= MAX_REPLAY_BYTES:
             raise CollabError('invalid_request')
         with self._connection() as db:
