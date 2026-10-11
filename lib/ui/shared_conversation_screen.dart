@@ -8,8 +8,15 @@ import 'auth_screen.dart';
 import 'widgets/aether_primitives.dart';
 
 class SharedConversationScreen extends StatefulWidget {
-  const SharedConversationScreen({super.key, required this.token});
+  const SharedConversationScreen({
+    super.key,
+    required this.token,
+    @visibleForTesting this.loadSnapshot,
+  });
   final String token;
+
+  /// Overrides the public snapshot fetch (tests).
+  final Future<ConversationSnapshot> Function(String token)? loadSnapshot;
 
   @override
   State<SharedConversationScreen> createState() => _SharedConversationScreenState();
@@ -22,6 +29,8 @@ class _SharedConversationScreenState extends State<SharedConversationScreen> {
   String? _error;
 
   Future<ConversationSnapshot> _load() async {
+    final load = widget.loadSnapshot;
+    if (load != null) return load(widget.token);
     return ConversationShareService.production().publicSnapshot(widget.token);
   }
 
@@ -85,19 +94,40 @@ class _SharedConversationScreenState extends State<SharedConversationScreen> {
         if (state.hasError) return const Center(child: Text('This link is unavailable or expired.'));
         if (!state.hasData) return const Center(child: CircularProgressIndicator());
         final snapshot = state.data!;
-        return ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            Text('Read-only snapshot', style: AetherType.h2),
-            const SizedBox(height: 8),
-            for (final message in snapshot.messages) Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: AetherCard(child: Text(message.content)),
+        final messages = snapshot.messages;
+        // Up to 500 × 20k-char messages: build only the visible cards.
+        return CustomScrollView(
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+              sliver: SliverList.list(
+                children: [
+                  Text('Read-only snapshot', style: AetherType.h2),
+                  const SizedBox(height: 8),
+                ],
+              ),
             ),
-            if (_error != null) Text(_error!, style: TextStyle(color: Aether.dangerC)),
-            AetherPrimaryButton(
-              label: _busy ? 'Continuing…' : 'Continue in Ovid Si',
-              onPressed: _busy ? null : _continue,
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              sliver: SliverList.builder(
+                itemCount: messages.length,
+                itemBuilder: (context, i) => Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: AetherCard(child: Text(messages[i].content)),
+                ),
+              ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+              sliver: SliverList.list(
+                children: [
+                  if (_error != null) Text(_error!, style: TextStyle(color: Aether.dangerC)),
+                  AetherPrimaryButton(
+                    label: _busy ? 'Continuing…' : 'Continue in Ovid Si',
+                    onPressed: _busy ? null : _continue,
+                  ),
+                ],
+              ),
             ),
           ],
         );
