@@ -9026,8 +9026,14 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void toggleMcpServer(McpServer s) {
+  /// Flip [s] between connected and disconnected. The flag flips (and the
+  /// `connecting` status publishes) synchronously; the returned future
+  /// completes with the real connect outcome — `ok` plus the connect detail
+  /// — so the UI can report it. A disconnect completes immediately with
+  /// `ok: true, detail: null`.
+  Future<({bool ok, String? detail})> toggleMcpServer(McpServer s) {
     s.connected = !s.connected;
+    final Future<({bool ok, String? detail})> outcome;
     if (s.connected) {
       // Spawn the real MCP server process in the sandbox.
       updateServiceStatus(
@@ -9035,40 +9041,48 @@ class AppState extends ChangeNotifier {
         ServiceHealth.connecting,
         detail: 'connecting…',
       );
-      unawaited(
-        McpService.I
-            .connect(s)
-            .then((msg) async {
-              final isOk = McpService.I.isConnected(s.canonicalId);
-              s.connected = isOk;
-              updateServiceStatus(
-                'mcp:${s.canonicalId}',
-                isOk ? ServiceHealth.working : ServiceHealth.failed,
-                detail: msg,
-              );
-              await _recordMcpConnectDurable(s, isOk: isOk, detail: msg);
-              refresh();
-            })
-            .catchError((e) async {
-              s.connected = false;
-              updateServiceStatus(
-                'mcp:${s.canonicalId}',
-                ServiceHealth.failed,
-                detail: '$e',
-              );
-              await _recordMcpFailed(s, '$e');
-              refresh();
-            }),
-      );
+      outcome = _connectAndRecord(s);
     } else {
       serviceStatus.remove('mcp:${s.canonicalId}');
       unawaited(McpService.I.disconnect(s.canonicalId));
       unawaited(_recordMcpDisabled(s));
+      outcome = Future.value((ok: true, detail: null));
     }
     _persistMcpConnectedIntent(
       removed: s.connected ? const [] : [s.canonicalId],
     );
     refresh();
+    return outcome;
+  }
+
+  Future<({bool ok, String? detail})> _connectAndRecord(McpServer s) async {
+    try {
+      final msg = await McpService.I.connect(s);
+      final isOk = McpService.I.isConnected(s.canonicalId);
+      s.connected = isOk;
+      updateServiceStatus(
+        'mcp:${s.canonicalId}',
+        isOk ? ServiceHealth.working : ServiceHealth.failed,
+        detail: msg,
+      );
+      await _recordMcpConnectDurable(s, isOk: isOk, detail: msg);
+      refresh();
+      return (ok: isOk, detail: msg);
+    } catch (e) {
+      s.connected = false;
+      updateServiceStatus(
+        'mcp:${s.canonicalId}',
+        ServiceHealth.failed,
+        detail: '$e',
+      );
+      try {
+        await _recordMcpFailed(s, '$e');
+      } catch (err) {
+        Diag.swallow('state', err);
+      }
+      refresh();
+      return (ok: false, detail: '$e');
+    }
   }
 
   // ── MCP auto-reconnect (the MCP supervisor tier-2 lifecycle parity) ──

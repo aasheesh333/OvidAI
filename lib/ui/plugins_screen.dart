@@ -2752,7 +2752,7 @@ String? Function(McpServer server)? mcpSupportGateForTest;
 Future<void> connectMcpServer(BuildContext context, McpServer server) async {
   final app = AppState.I;
   if (server.connected) {
-    app.toggleMcpServer(server);
+    await app.toggleMcpServer(server);
     return;
   }
   // Sandbox gate first: stdio servers spawn inside it — attempting the
@@ -2845,8 +2845,86 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
     );
     if (installed != true || !context.mounted) return;
   }
-  app.toggleMcpServer(server);
+  // Await the real outcome and say what happened — the switch flipping back
+  // silently on failure was the only signal before.
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final outcome = await app.toggleMcpServer(server);
+  _showMcpConnectOutcome(messenger, server, outcome.ok, outcome.detail);
 }
+
+/// User-facing copy for a finished connect: "Connected · 12 tools",
+/// "Needs sign-in", "Timed out", … with the raw detail only as a suffix.
+@visibleForTesting
+String mcpConnectOutcomeMessage(McpServer server, bool ok, String? detail) {
+  if (ok) {
+    final n = McpService.I.connectedTools[server.canonicalId]?.length;
+    if (n == null) return '${server.name}: Connected';
+    return '${server.name}: Connected · $n tool${n == 1 ? '' : 's'}';
+  }
+  final d = (detail ?? '').trim();
+  final lower = d.toLowerCase();
+  if (lower.contains('timed out') || lower.contains('timeout')) {
+    return '${server.name}: Timed out while connecting';
+  }
+  if (lower.contains('401') ||
+      lower.contains('unauthorized') ||
+      lower.contains('sign in') ||
+      lower.contains('log in')) {
+    return '${server.name}: Needs sign-in';
+  }
+  if (lower.contains('needs configuration')) {
+    return '${server.name}: Needs setup — add its credentials';
+  }
+  if (lower.contains('needs runtime')) {
+    return '${server.name}: Needs a runtime — install it, then retry';
+  }
+  if (d.isEmpty) return "${server.name}: Couldn't connect";
+  final short = d.length > 140 ? '${d.substring(0, 140)}…' : d;
+  return "${server.name}: Couldn't connect · $short";
+}
+
+void _showMcpConnectOutcome(
+  ScaffoldMessengerState? messenger,
+  McpServer server,
+  bool ok,
+  String? detail,
+) {
+  if (messenger == null || !messenger.mounted) return;
+  final lower = (detail ?? '').toLowerCase();
+  // Setup/runtime failures need the credential or runtime sheet, not a
+  // blind reconnect — Retry is offered only for transient failures.
+  final retryable =
+      !ok &&
+      !lower.contains('needs configuration') &&
+      !lower.contains('needs runtime');
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(mcpConnectOutcomeMessage(server, ok, detail)),
+      behavior: SnackBarBehavior.floating,
+      action: !retryable
+          ? null
+          : SnackBarAction(
+              label: 'Retry',
+              onPressed: () async {
+                if (server.connected) return;
+                final again = await AppState.I.toggleMcpServer(server);
+                _showMcpConnectOutcome(
+                  messenger,
+                  server,
+                  again.ok,
+                  again.detail,
+                );
+              },
+            ),
+    ),
+  );
+}
+
+/// True while [server]'s connect attempt is in flight (busy UI state).
+bool mcpConnecting(McpServer server) =>
+    AppState.I.serviceStatus['mcp:${server.canonicalId}']?.health ==
+    ServiceHealth.connecting;
 
 /// Credential sheet for an MCP server with missing credentials: secure
 /// token fields, plus the GitHub login as the first-class path for
@@ -3269,7 +3347,10 @@ class McpCard extends StatelessWidget {
                     value: server.connected,
                     activeTrackColor: Aether.accent,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    onChanged: (_) => connectMcpServer(context, server),
+                    // Busy while a connect is in flight (no double toggle).
+                    onChanged: mcpConnecting(server)
+                        ? null
+                        : (_) => connectMcpServer(context, server),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -3393,7 +3474,17 @@ class McpDetailScreen extends StatefulWidget {
 class _McpDetailScreenState extends State<McpDetailScreen> {
   @override
   Widget build(BuildContext context) {
+    // Listen to AppState: the connect outcome lands asynchronously, so the
+    // real ready/failed state must repaint without leaving the screen.
+    return AnimatedBuilder(
+      animation: AppState.I,
+      builder: (context, _) => _buildDetail(context),
+    );
+  }
+
+  Widget _buildDetail(BuildContext context) {
     final s = widget.server;
+    final connecting = mcpConnecting(s);
     final app = AppState.I;
     final configJson = _configJsonFor(s);
 
@@ -3440,10 +3531,12 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
               value: s.connected,
               activeTrackColor: Aether.accent,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              onChanged: (_) async {
-                await connectMcpServer(context, s);
-                if (context.mounted) setState(() {});
-              },
+              onChanged: connecting
+                  ? null
+                  : (_) async {
+                      await connectMcpServer(context, s);
+                      if (context.mounted) setState(() {});
+                    },
             ),
           ),
           const SizedBox(width: 4),
@@ -3556,18 +3649,30 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
                   color: s.connected ? Aether.hairline : Colors.transparent,
                 ),
               ),
-              icon: Icon(
-                s.connected ? Icons.link_off : Icons.power_settings_new,
-                size: 16,
-              ),
+              icon: connecting
+                  ? const SizedBox(
+                      width: 15,
+                      height: 15,
+                      child: CircularProgressIndicator(strokeWidth: 1.6),
+                    )
+                  : Icon(
+                      s.connected ? Icons.link_off : Icons.power_settings_new,
+                      size: 16,
+                    ),
               label: Text(
-                s.connected ? 'Disconnect' : 'Connect server',
+                connecting
+                    ? 'Connecting…'
+                    : s.connected
+                    ? 'Disconnect'
+                    : 'Connect server',
                 style: const TextStyle(fontSize: 13.5),
               ),
-              onPressed: () async {
-                await connectMcpServer(context, s);
-                if (context.mounted) setState(() {});
-              },
+              onPressed: connecting
+                  ? null
+                  : () async {
+                      await connectMcpServer(context, s);
+                      if (context.mounted) setState(() {});
+                    },
             ),
           ),
           // Task 10 (spec §10): Android-incompatible desktop servers show

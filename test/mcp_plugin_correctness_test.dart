@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ovid_ai/core/mcp_service.dart';
+import 'package:ovid_ai/core/startup_coordinator.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart';
@@ -248,6 +249,82 @@ void main() {
       await _pump(tester, McpDetailScreen(server: seed));
       expect(find.byTooltip('Edit config'), findsNothing);
       expect(find.textContaining('Built-in server'), findsOneWidget);
+    });
+  });
+
+  group('connect feedback (F-091)', () {
+    testWidgets('the detail screen repaints the real outcome in place', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final s = _server(name: 'live', command: 'node');
+      app.mcpServers.add(s);
+      await _pump(tester, McpDetailScreen(server: s));
+      expect(find.text('Not started'), findsOneWidget);
+      await tester.runAsync(
+        () => app.recordStartupStatus(
+          StartupItemStatus(
+            id: s.canonicalId,
+            kind: StartupItemKind.mcp,
+            label: 'Connect live',
+            state: StartupItemState.ready,
+            reason: 'connected',
+          ),
+          ownerId: s.canonicalId,
+        ),
+      );
+      app.refresh();
+      await tester.pump();
+      expect(find.text('Ready · connected'), findsOneWidget);
+    });
+
+    testWidgets('busy while connecting: no double toggle', (tester) async {
+      final app = AppState.I;
+      final s = _server(name: 'busy', command: 'node');
+      app.mcpServers.add(s);
+      app.updateServiceStatus(
+        'mcp:${s.canonicalId}',
+        ServiceHealth.connecting,
+        detail: 'connecting…',
+      );
+      await _pump(tester, McpDetailScreen(server: s));
+      expect(find.text('Connecting…'), findsOneWidget);
+      final sw = tester.widget<Switch>(
+        find.byKey(ValueKey('mcp-detail-switch-${s.canonicalId}')),
+      );
+      expect(sw.onChanged, isNull);
+    });
+
+    test('outcome copy is mapped, not raw', () {
+      final s = _server(name: 'X');
+      expect(mcpConnectOutcomeMessage(s, true, 'ok'), startsWith('X: Connected'));
+      expect(
+        mcpConnectOutcomeMessage(s, false, 'MCP handshake timed out'),
+        'X: Timed out while connecting',
+      );
+      expect(
+        mcpConnectOutcomeMessage(s, false, 'HTTP 401 Unauthorized'),
+        'X: Needs sign-in',
+      );
+      expect(
+        mcpConnectOutcomeMessage(
+          s,
+          false,
+          '"X" degraded: needs configuration (TOKEN)',
+        ),
+        contains('Needs setup'),
+      );
+    });
+
+    test('toggleMcpServer completes with the real outcome', () async {
+      final app = AppState.I;
+      // An unsupported transport fails fast without any process/network.
+      final s = _server(name: 'bad', transport: 'websocket');
+      app.mcpServers.add(s);
+      final outcome = await app.toggleMcpServer(s);
+      expect(outcome.ok, isFalse);
+      expect(outcome.detail, contains('Unsupported transport'));
+      expect(s.connected, isFalse);
     });
   });
 }
