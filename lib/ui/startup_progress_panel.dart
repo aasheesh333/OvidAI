@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/startup_coordinator.dart';
 import '../core/theme.dart';
@@ -37,13 +38,16 @@ bool startupItemOpensPlugins(StartupItemState state) =>
     state == StartupItemState.needsSetup ||
     state == StartupItemState.migrationRequired;
 
-/// States that need no attention: success, user-disabled, or informationally
-/// skipped (not installed / cooled down). Anything else keeps the bar
+/// States that need no attention: success, user-disabled, informationally
+/// skipped (not installed / cooled down), or unsupported on this device
+/// (nothing the user can do; it is listed in Device health instead of
+/// keeping a red dot on every launch). Anything else keeps the bar
 /// visible; when every item is benign-terminal the whole bar is gone.
 bool _isBenignTerminal(StartupItemState state) =>
     state == StartupItemState.ready ||
     state == StartupItemState.disabled ||
-    state == StartupItemState.skipped;
+    state == StartupItemState.skipped ||
+    state == StartupItemState.unsupported;
 
 bool _isProblem(StartupItemState state) => !_isBenignTerminal(state) &&
     state != StartupItemState.queued &&
@@ -52,7 +56,7 @@ bool _isProblem(StartupItemState state) => !_isBenignTerminal(state) &&
 Color _stateColor(StartupItemState state) => switch (state) {
   StartupItemState.ready => Aether.successLight,
   StartupItemState.failed => Aether.dangerC,
-  StartupItemState.unsupported => Aether.dangerC,
+  StartupItemState.unsupported => Aether.textFaint,
   StartupItemState.disabled => Aether.textFaint,
   StartupItemState.skipped => Aether.textFaint,
   StartupItemState.queued || StartupItemState.running => Aether.accent,
@@ -71,6 +75,17 @@ IconData _stateIcon(StartupItemState state) => switch (state) {
   StartupItemState.queued || StartupItemState.running =>
     Icons.hourglass_empty,
 };
+
+/// Stable identity of the problems in [snapshot]: the sorted `id:state`
+/// pairs of every item that needs attention. "Dismiss until next change"
+/// stores this, so the strip only returns when the set of problems changes.
+String startupProblemFingerprint(StartupSnapshot snapshot) {
+  final parts = [
+    for (final item in snapshot.items)
+      if (_isProblem(item.state)) '${item.id}:${item.state.name}',
+  ]..sort();
+  return parts.join('|');
+}
 
 /// Non-blocking startup readiness dashboard (spec §6.1).
 ///
@@ -113,8 +128,13 @@ class StartupProgressPanel extends StatefulWidget {
 }
 
 class _StartupProgressPanelState extends State<StartupProgressPanel> {
+  static const dismissedFingerprintKey = 'ovid_startup_panel_dismissed';
+
   late bool _expanded;
   bool _wasIncomplete = false;
+
+  /// Problem fingerprint the user dismissed (persisted across launches).
+  String? _dismissedFingerprint;
 
   StartupCoordinator get _coordinator =>
       widget.coordinator ?? StartupCoordinator.I;
@@ -123,6 +143,31 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
   void initState() {
     super.initState();
     _expanded = false;
+    _loadDismissed();
+  }
+
+  Future<void> _loadDismissed() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final value = prefs.getString(dismissedFingerprintKey);
+      if (!mounted || value == null) return;
+      setState(() => _dismissedFingerprint = value);
+    } catch (_) {
+      // Preferences unavailable: the strip simply stays dismissible per run.
+    }
+  }
+
+  Future<void> _dismiss(String fingerprint) async {
+    setState(() {
+      _dismissedFingerprint = fingerprint;
+      _expanded = false;
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(dismissedFingerprintKey, fingerprint);
+    } catch (_) {
+      // Best effort; the in-memory dismissal still applies this session.
+    }
   }
 
   @override
@@ -173,6 +218,13 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
         // an empty "Finishing setup" shell.
         if (allTerminal && !anyProblem) {
           _wasIncomplete = false;
+          return const SizedBox.shrink();
+        }
+
+        // The user dismissed exactly this set of problems: stay hidden until
+        // something changes (a new problem, or one is fixed and returns).
+        final fingerprint = startupProblemFingerprint(snapshot);
+        if (allTerminal && fingerprint == _dismissedFingerprint) {
           return const SizedBox.shrink();
         }
 
@@ -299,6 +351,20 @@ class _StartupProgressPanelState extends State<StartupProgressPanel> {
                           // so say so instead of accepting a tap that
                           // silently does nothing.
                           busy: _coordinator.isItemRunning(item.id),
+                        ),
+                      // Kept out of the header row (which is one big expand
+                      // target) so it is never hit by accident.
+                      if (allTerminal && anyProblem)
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton(
+                            key: const ValueKey('startup-panel-dismiss'),
+                            onPressed: () => _dismiss(fingerprint),
+                            child: const Text(
+                              'Dismiss until something changes',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
                         ),
                     ],
                   ),
