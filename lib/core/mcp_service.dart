@@ -1016,8 +1016,18 @@ class McpService {
   /// Side-effect-free credential probe used by health checks: returns the
   /// declared env/header names that have no stored value. Never dials or
   /// spawns a process.
-  Future<List<String>> missingCredentialsFor(McpServer server) =>
-      _missingCredentials(server);
+  Future<List<String>> missingCredentialsFor(McpServer server) async {
+    final split = await missingCredentialsSplitFor(server);
+    return [...split.env, ...split.headers];
+  }
+
+  /// [missingCredentialsFor] split by storage: env var names (saved with
+  /// [AppState.setMcpEnv]) and HTTP header names (saved with
+  /// [AppState.setMcpHeaders]). Callers that collect values must route each
+  /// group to its own setter — a header written as env never reaches the
+  /// HTTP transport.
+  Future<({List<String> env, List<String> headers})>
+  missingCredentialsSplitFor(McpServer server) => _missingCredentials(server);
 
   /// Test seam: overrides the runtime probe in connect paths so tests
   /// never touch the real sandbox. Null in production.
@@ -1871,14 +1881,17 @@ class McpService {
     }
   }
 
-  Future<List<String>> _missingCredentials(McpServer server) async {
+  Future<({List<String> env, List<String> headers})> _missingCredentials(
+    McpServer server,
+  ) async {
+    const none = (env: <String>[], headers: <String>[]);
     // For native GitHub MCP, credentials can be fulfilled by GitHubService.I.token.
     if (server.transport == 'native' &&
         (server.name.toLowerCase() == 'github' ||
             server.canonicalId.toLowerCase() == 'github')) {
       final token = GitHubService.I.token;
       if (token != null && token.trim().isNotEmpty) {
-        return const [];
+        return none;
       }
     }
     // Task 10 fix round 1 (finding 2): the credential gate covers BOTH
@@ -1897,15 +1910,19 @@ class McpService {
     // envHint is env-only; headers come through requiredHeaderNames
     // exclusively (ownerless HTTP auth headers are set at add time).
     final declaredHeaders = server.requiredHeaderNames;
-    if (declaredEnv.isEmpty && declaredHeaders.isEmpty) return const [];
+    if (declaredEnv.isEmpty && declaredHeaders.isEmpty) return none;
     final env = await AppState.I.getMcpEnv(server.canonicalId);
     final headers = await AppState.I.getMcpHeaders(server.canonicalId);
-    return [
-      for (final name in declaredEnv)
-        if ((env[name] ?? '').isEmpty) name,
-      for (final name in declaredHeaders)
-        if ((headers[name] ?? '').isEmpty) name,
-    ];
+    return (
+      env: [
+        for (final name in declaredEnv)
+          if ((env[name] ?? '').isEmpty) name,
+      ],
+      headers: [
+        for (final name in declaredHeaders)
+          if ((headers[name] ?? '').isEmpty) name,
+      ],
+    );
   }
 
   /// envHint is a display hint that doubles as a credential declaration

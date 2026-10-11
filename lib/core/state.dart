@@ -9836,6 +9836,32 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Save credentials collected for [server] (the MCP credential sheet).
+  ///
+  /// Env values go to the env blob and header values to the headers blob —
+  /// the HTTP transport reads only the latter. Each group is MERGED into
+  /// what is already stored (the sheet only asks for the missing names, and
+  /// both setters replace the whole blob). Strict: a secure-storage failure
+  /// throws instead of reporting a save that never happened.
+  Future<void> saveMcpCredentials(
+    McpServer server, {
+    Map<String, String> env = const {},
+    Map<String, String> headers = const {},
+  }) async {
+    final id = server.canonicalId;
+    if (env.isNotEmpty) {
+      final merged = {...await getMcpEnv(id, strict: true), ...env};
+      await setMcpEnv(id, merged, strict: true);
+    }
+    if (headers.isNotEmpty) {
+      final merged = {...await getMcpHeaders(id, strict: true), ...headers};
+      await setMcpHeaders(id, merged, strict: true);
+      // Ownerless HTTP servers send their in-memory headers; plugin-owned
+      // rows reload them from secure storage at connect.
+      server.headers = merged;
+    }
+  }
+
   /// Delete a server's env var blob from secure storage (on remove/reset).
   Future<void> deleteMcpEnv(String serverName) async {
     try {
@@ -9850,8 +9876,9 @@ class AppState extends ChangeNotifier {
   // SharedPreferences plaintext. They live alongside env in secure storage.
   Future<void> setMcpHeaders(
     String serverName,
-    Map<String, String> headers,
-  ) async {
+    Map<String, String> headers, {
+    bool strict = false,
+  }) async {
     try {
       if (headers.isEmpty) {
         await _secureStorage.delete(key: '$_kMcpHeadersPrefix$serverName');
@@ -9862,11 +9889,15 @@ class AppState extends ChangeNotifier {
         );
       }
     } catch (e) {
+      if (strict) rethrow;
       Diag.swallow('state', e);
     }
   }
 
-  Future<Map<String, String>> getMcpHeaders(String serverName) async {
+  Future<Map<String, String>> getMcpHeaders(
+    String serverName, {
+    bool strict = false,
+  }) async {
     try {
       final raw = await _secureStorage.read(
         key: '$_kMcpHeadersPrefix$serverName',
@@ -9875,6 +9906,7 @@ class AppState extends ChangeNotifier {
       final m = jsonDecode(raw) as Map<String, dynamic>;
       return m.map((k, v) => MapEntry(k, v.toString()));
     } catch (_) {
+      if (strict) rethrow;
       return {};
     }
   }

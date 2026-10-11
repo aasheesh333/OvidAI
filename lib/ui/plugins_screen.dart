@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../core/agent_service.dart';
+import '../core/diag.dart';
 import 'widgets/aether_primitives.dart';
 import '../core/github_service.dart';
 import '../core/hook_service.dart';
@@ -2789,7 +2790,8 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
     if (go == true && context.mounted) openStudio(context);
     return;
   }
-  final missing = await McpService.I.missingCredentialsFor(server);
+  final split = await McpService.I.missingCredentialsSplitFor(server);
+  final missing = [...split.env, ...split.headers];
   if (!context.mounted) return;
   if (mcpCredentialAskForTest(missing: missing) !=
       McpCredentialAsk.connectDirectly) {
@@ -2804,7 +2806,11 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
         padding: EdgeInsets.only(
           bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
         ),
-        child: _McpCredentialSheet(server: server, missing: missing),
+        child: _McpCredentialSheet(
+          server: server,
+          missingEnv: split.env,
+          missingHeaders: split.headers,
+        ),
       ),
     );
     if (!context.mounted) return;
@@ -2848,55 +2854,89 @@ Future<void> connectMcpServer(BuildContext context, McpServer server) async {
 /// or 'github-login' (caller opens the GitHub login sheet).
 class _McpCredentialSheet extends StatefulWidget {
   final McpServer server;
-  final List<String> missing;
-  const _McpCredentialSheet({required this.server, required this.missing});
+
+  /// Missing env var names — saved through [AppState.setMcpEnv].
+  final List<String> missingEnv;
+
+  /// Missing HTTP header names (e.g. `Authorization`) — saved through
+  /// [AppState.setMcpHeaders], the only store the HTTP transport reads.
+  final List<String> missingHeaders;
+  const _McpCredentialSheet({
+    required this.server,
+    this.missingEnv = const [],
+    this.missingHeaders = const [],
+  });
+
+  List<String> get missing => [...missingEnv, ...missingHeaders];
 
   @override
   State<_McpCredentialSheet> createState() => _McpCredentialSheetState();
 }
 
 class _McpCredentialSheetState extends State<_McpCredentialSheet> {
-  late final Map<String, TextEditingController> _controllers;
+  late final Map<String, TextEditingController> _envControllers;
+  late final Map<String, TextEditingController> _headerControllers;
   bool _saving = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _controllers = {for (final k in widget.missing) k: TextEditingController()};
+    _envControllers = {
+      for (final k in widget.missingEnv) k: TextEditingController(),
+    };
+    _headerControllers = {
+      for (final k in widget.missingHeaders) k: TextEditingController(),
+    };
   }
 
   @override
   void dispose() {
-    for (final c in _controllers.values) {
+    for (final c in [..._envControllers.values, ..._headerControllers.values]) {
       c.dispose();
     }
     super.dispose();
   }
 
-  Future<void> _save() async {
+  /// Collects trimmed values; null (with [_error] set) when one is empty.
+  Map<String, String>? _collect(Map<String, TextEditingController> ctrls) {
     final values = <String, String>{};
-    for (final e in _controllers.entries) {
+    for (final e in ctrls.entries) {
       final v = e.value.text.trim();
       if (v.isEmpty) {
         setState(() => _error = '${e.key} is required.');
-        return;
+        return null;
       }
       values[e.key] = v;
     }
+    return values;
+  }
+
+  Future<void> _save() async {
+    final env = _collect(_envControllers);
+    if (env == null) return;
+    final headers = _collect(_headerControllers);
+    if (headers == null) return;
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
-      await AppState.I.setMcpEnv(widget.server.canonicalId, values);
+      // Merged into what is already stored, strict (a storage failure must
+      // not pop "connected"), env and headers each to their own store.
+      await AppState.I.saveMcpCredentials(
+        widget.server,
+        env: env,
+        headers: headers,
+      );
     } catch (e) {
+      Diag.swallow('mcp-credentials', e);
       // Reset the spinner and surface the failure instead of stranding
       // the sheet on a disabled Save button.
       if (mounted) {
         setState(() {
           _saving = false;
-          _error = 'Could not save credentials: $e';
+          _error = "Couldn't save to secure storage. Try again.";
         });
       }
       return;
@@ -2904,6 +2944,34 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
     if (!mounted) return;
     Navigator.pop(context, 'connected');
   }
+
+  Widget _field(String name, TextEditingController controller, {
+    required bool header,
+  }) => Padding(
+    padding: const EdgeInsets.only(bottom: 10),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(header ? '$name (HTTP header)' : name, style: AetherType.label),
+        const SizedBox(height: 6),
+        TextField(
+          key: ValueKey('mcp-cred-${header ? 'header' : 'env'}-$name'),
+          controller: controller,
+          enabled: !_saving,
+          obscureText: true,
+          enableSuggestions: false,
+          autocorrect: false,
+          style: const TextStyle(fontSize: 13),
+          decoration: InputDecoration(
+            labelText: name,
+            helperText: header ? 'Sent as an HTTP header' : null,
+            border: const OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -2954,30 +3022,10 @@ class _McpCredentialSheetState extends State<_McpCredentialSheet> {
               ),
             ],
             const SizedBox(height: 10),
-            for (final name in widget.missing)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(name, style: AetherType.label),
-                    const SizedBox(height: 6),
-                    TextField(
-                  controller: _controllers[name],
-                  enabled: !_saving,
-                  obscureText: true,
-                  enableSuggestions: false,
-                  autocorrect: false,
-                  style: const TextStyle(fontSize: 13),
-                  decoration: InputDecoration(
-                    labelText: name,
-                    border: const OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                ),
-                  ],
-                ),
-              ),
+            for (final e in _envControllers.entries)
+              _field(e.key, e.value, header: false),
+            for (final e in _headerControllers.entries)
+              _field(e.key, e.value, header: true),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
