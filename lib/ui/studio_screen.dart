@@ -58,8 +58,9 @@ studioListBranchesOverrideForTest;
 
 /// Test seam: overrides the repo re-sync so host widget tests can exercise
 /// the binding flow without network. Production is null (RepoCache.sync).
+/// Returning a [SyncReport] lets a test drive the partial-sync banner.
 @visibleForTesting
-Future<void> Function()? studioRepoSyncOverrideForTest;
+Future<Object?> Function()? studioRepoSyncOverrideForTest;
 
 @visibleForTesting
 GlobalRepoRegistry? studioRegistryOverrideForTest;
@@ -69,7 +70,7 @@ GlobalRepoRegistry? studioRegistryOverrideForTest;
 /// `onLine` callback instead of dropping it. The plain override wins when both
 /// are set, which keeps every existing test working untouched.
 @visibleForTesting
-Future<void> Function(void Function(String line) onLine)?
+Future<Object?> Function(void Function(String line) onLine)?
 studioRepoSyncProgressOverrideForTest;
 
 /// Branch to bind when a repo is picked: the repo's `default_branch`, else
@@ -144,6 +145,10 @@ class _StudioScreenState extends State<StudioScreen> {
   /// Human message for a failed sync; [_syncErrorDetail] keeps the raw text.
   String? _syncError;
   String? _syncErrorDetail;
+
+  /// The last sync's report when it was PARTIAL (file cap, truncated tree,
+  /// failed fetches, deadline). A partial copy must never look complete.
+  SyncReport? _partialReport;
   String? _cloneStatus;
   String? _workspaceKey;
 
@@ -315,11 +320,17 @@ class _StudioScreenState extends State<StudioScreen> {
   /// The one sync path. Production wires [RepoCache.sync]'s `onLine` progress
   /// callback, which Studio used to drop — a serial fetch of up to 400 files
   /// could run for minutes behind an 11px spinner.
-  Future<void> _runSync(void Function(String) onLine) {
+  Future<SyncReport?> _runSync(void Function(String) onLine) async {
     final legacy = studioRepoSyncOverrideForTest;
-    if (legacy != null) return legacy();
+    if (legacy != null) {
+      final r = await legacy();
+      return r is SyncReport ? r : null;
+    }
     final progress = studioRepoSyncProgressOverrideForTest;
-    if (progress != null) return progress(onLine);
+    if (progress != null) {
+      final r = await progress(onLine);
+      return r is SyncReport ? r : null;
+    }
     return RepoCache.I.sync(onLine: onLine);
   }
 
@@ -347,10 +358,12 @@ class _StudioScreenState extends State<StudioScreen> {
       _syncing = true;
       _syncError = null;
       _syncErrorDetail = null;
+      _partialReport = null;
       _syncProgress = 'Syncing…';
       _syncFraction = null;
     });
     StudioFailure? failure;
+    SyncReport? report;
     int? binding;
     int? syncOperation;
     final workspaceKey = _workspaceKey;
@@ -370,7 +383,7 @@ class _StudioScreenState extends State<StudioScreen> {
         }
       });
       syncOperation = RepoCache.I.syncOperation;
-      await syncing;
+      report = await syncing;
     } catch (e) {
       failure = StudioFailure.of(e);
     }
@@ -382,6 +395,11 @@ class _StudioScreenState extends State<StudioScreen> {
       _syncFraction = null;
     });
     if (failure != null) succeeded = false;
+    if (failure == null && report != null && report.partial &&
+        binding == RepoCache.I.bindingGeneration &&
+        workspaceKey == _workspaceKey) {
+      setState(() => _partialReport = report);
+    }
     if (failure != null && binding == RepoCache.I.bindingGeneration &&
         syncOperation == RepoCache.I.syncOperation && workspaceKey == _workspaceKey) {
       // A missing branch/ref must surface, not be swallowed — and the previous
@@ -988,6 +1006,12 @@ class _StudioScreenState extends State<StudioScreen> {
                       _syncError = null;
                       _syncErrorDetail = null;
                     }),
+                  ),
+                if (_partialReport != null && _syncError == null)
+                  _SyncPartialBanner(
+                    report: _partialReport!,
+                    onRetry: _syncing ? null : _autoSync,
+                    onDismiss: () => setState(() => _partialReport = null),
                   ),
                 if (_cloneStatus != null) _StatusBanner(_cloneStatus!),
                 if (_syncing)
@@ -1684,6 +1708,92 @@ class _SyncErrorBanner extends StatelessWidget {
                         ),
                       ),
                   ],
+                ),
+              ),
+            ),
+            StudioIconButton(
+              icon: Icons.refresh,
+              tooltip: 'Retry sync',
+              iconSize: 18,
+              onPressed: onRetry,
+            ),
+            StudioIconButton(
+              icon: Icons.close,
+              tooltip: 'Dismiss',
+              iconSize: 16,
+              onPressed: onDismiss,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Files the last sync could not load, counted from a [SyncReport].
+@visibleForTesting
+int syncReportMissingCount(SyncReport r) =>
+    r.droppedByCap + r.failedPaths.length + r.unattemptedPaths.length;
+
+/// Amber "N files not loaded — Retry" banner for a PARTIAL sync: the
+/// working copy is not the whole repository and must not look like it.
+class _SyncPartialBanner extends StatelessWidget {
+  const _SyncPartialBanner({
+    required this.report,
+    required this.onRetry,
+    required this.onDismiss,
+  });
+
+  final SyncReport report;
+  final VoidCallback? onRetry;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final missing = syncReportMissingCount(report);
+    final message = missing > 0
+        ? '$missing file${missing == 1 ? '' : 's'} not loaded'
+        : 'Some files were not loaded';
+    final detail = report.issues.join(' · ');
+    return Semantics(
+      liveRegion: true,
+      container: true,
+      label: 'Sync incomplete. $message. $detail',
+      child: Container(
+        width: double.infinity,
+        color: Aether.warnLight.withValues(alpha: 0.12),
+        padding: const EdgeInsets.only(left: 12, right: 2, top: 2, bottom: 2),
+        child: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, size: 16, color: Aether.warnLight),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ExcludeSemantics(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        message,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: Aether.warnLight,
+                        ),
+                      ),
+                      if (detail.isNotEmpty)
+                        Text(
+                          detail,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: kStudioMinFontSize,
+                            color: Aether.textFaint,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
