@@ -2274,7 +2274,7 @@ class _ApprovalBanner extends StatelessWidget {
                       child: Scrollbar(
                         child: SingleChildScrollView(
                           key: ObjectKey(a),
-                          child: SelectableText(
+                          child: Text(
                             a.detail,
                             style: TextStyle(
                               fontFamily: Aether.mono,
