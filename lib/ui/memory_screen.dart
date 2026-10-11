@@ -9,7 +9,9 @@ import '../core/state.dart';
 import '../core/theme.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Plain-text Markdown memory editor, rebuilt on the Aether primitives.
+/// Memory screen: a readable list of what Ovid remembers (MEMORY.md split
+/// into bullet/paragraph entries, each deletable), with the raw Markdown
+/// editor behind "Edit as Markdown". Rebuilt on the Aether primitives.
 ///
 /// Memory content is treated as untrusted plain text: nothing here renders
 /// Markdown as HTML or executes any uploaded script. Imports create a new file
@@ -46,9 +48,21 @@ class _MemoryScreenState extends State<MemoryScreen> {
   List<String> _files = ['MEMORY.md'];
   bool _busy = false;
 
+  /// Raw Markdown editor vs the readable entry list. Empty files open in
+  /// the editor (there is nothing to list yet); others open as entries.
+  bool _rawMode = true;
+  String? _modeFile;
+  DateTime? _modified;
+
+  /// When this app last saved each file from this screen, so a newer write
+  /// can be attributed to Ovid ("Last updated by Ovid").
+  static final Map<String, DateTime> _uiSaves = {};
+  String get _saveKey => '${_owner ?? 'global'}/$_file';
+
   bool get _dirty => _content.text != _loaded;
   bool get _enabled => _store != null && !_busy;
-  String get _scopeCaption => _owner == null ? 'Global memory' : 'Session memory';
+  String get _scopeCaption =>
+      _owner == null ? 'Global memory' : 'Session memory';
 
   @override
   void initState() {
@@ -83,7 +97,84 @@ class _MemoryScreenState extends State<MemoryScreen> {
       _revision = doc.revision;
       _loaded = doc.content;
       _content.text = doc.content;
+      _modified = _lastModified();
+      final key = _saveKey;
+      if (_modeFile != key) {
+        _modeFile = key;
+        _rawMode = doc.content.trim().isEmpty;
+      }
       setState(() => _error = null);
+    } catch (e) {
+      setState(() => _error = '$e');
+    }
+  }
+
+  DateTime? _lastModified() {
+    try {
+      return _store!.lastModified(_owner, _file);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _recordUiSave() {
+    _modified = _lastModified();
+    if (_modified != null) _uiSaves[_saveKey] = _modified!;
+  }
+
+  /// Remove one readable entry and save through the normal revision-checked
+  /// path, after a confirmation.
+  Future<void> _deleteEntry(MemoryEntry entry) async {
+    if (_dirty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Save or reload your Markdown edits first.'),
+        ),
+      );
+      return;
+    }
+    final excerpt = entry.text.length > 160
+        ? '${entry.text.substring(0, 160)}…'
+        : entry.text;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: const Text('Delete this memory?'),
+        content: Text(
+          '"$excerpt"\n\nOvid will no longer see it in future chats.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Delete', style: TextStyle(color: Aether.dangerC)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      _checkOwner();
+      final doc = _store!.save(
+        _owner,
+        _file,
+        removeMemoryEntry(_loaded, entry),
+        mode: 'replace',
+        revision: _revision,
+      );
+      _revision = doc.revision;
+      _loaded = doc.content;
+      _content.text = doc.content;
+      _recordUiSave();
+      AppState.I.refresh();
+      setState(() => _error = null);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Memory deleted')));
     } catch (e) {
       setState(() => _error = '$e');
     }
@@ -121,6 +212,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
       );
       _revision = doc.revision;
       _loaded = doc.content;
+      _recordUiSave();
       AppState.I.refresh();
       setState(() => _error = null);
       ScaffoldMessenger.of(
@@ -210,7 +302,8 @@ class _MemoryScreenState extends State<MemoryScreen> {
     } catch (_) {
       if (mounted) {
         setState(
-          () => _error = 'Could not import the selected file. '
+          () => _error =
+              'Could not import the selected file. '
               'Choose a readable .md file and try again.',
         );
       }
@@ -229,9 +322,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
   Future<void> _switchScope(String value) async {
     if (!await _discard() || !mounted) return;
     try {
-      _owner = value == 'session'
-          ? AppState.I.memoryOwner(_sessionId!)
-          : null;
+      _owner = value == 'session' ? AppState.I.memoryOwner(_sessionId!) : null;
       _file = 'MEMORY.md';
       _load();
     } catch (e) {
@@ -300,77 +391,83 @@ class _MemoryScreenState extends State<MemoryScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-            const AetherSectionTitle(
-              eyebrow: 'Memories',
-              subtitle:
-                  'Global memory is shared across your chats. Session memory '
-                  'belongs to this chat and its child agents. 32 files per '
-                  'scope · 32 KiB per file.',
-            ),
-            const SizedBox(height: AetherSpacing.space4),
-            if (showSessionOption) ...[
+              const AetherSectionTitle(
+                eyebrow: 'Memories',
+                subtitle:
+                    'Global memory is shared across your chats. Session memory '
+                    'belongs to this chat and its child agents. 32 files per '
+                    'scope · 32 KiB per file.',
+              ),
+              const SizedBox(height: AetherSpacing.space4),
+              if (showSessionOption) ...[
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      ChoiceChip(
+                        label: const Text('Global'),
+                        avatar: const Icon(Icons.public, size: 16),
+                        selected: scopeValue == 'global',
+                        onSelected: _enabled
+                            ? (_) => _switchScope('global')
+                            : null,
+                      ),
+                      ChoiceChip(
+                        label: const Text('Session'),
+                        avatar: const Icon(Icons.chat_bubble_outline, size: 16),
+                        selected: scopeValue == 'session',
+                        onSelected: _enabled
+                            ? (_) => _switchScope('session')
+                            : null,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: AetherSpacing.space4),
+              ],
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: AetherSpacing.space3),
+                  child: Text(_error!, style: TextStyle(color: Aether.dangerC)),
+                ),
+              if (_store == null && _error == null)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: AetherSpacing.space3),
+                  child: LinearProgressIndicator(),
+                ),
+              if (_store == null && _error != null)
+                AetherSecondaryButton(label: 'Retry', onPressed: _initialize),
+              if (_busy)
+                const LinearProgressIndicator(
+                  semanticsLabel: 'Importing memory',
+                ),
               Align(
                 alignment: Alignment.centerLeft,
                 child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
+                  spacing: AetherSpacing.space2,
+                  runSpacing: AetherSpacing.space2,
                   children: [
-                    ChoiceChip(
-                      label: const Text('Global'),
-                      avatar: const Icon(Icons.public, size: 16),
-                      selected: scopeValue == 'global',
-                      onSelected: _enabled ? (_) => _switchScope('global') : null,
+                    AetherSecondaryButton(
+                      label: 'Add file',
+                      icon: Icons.note_add_outlined,
+                      onPressed: _enabled ? () => _add() : null,
                     ),
-                    ChoiceChip(
-                      label: const Text('Session'),
-                      avatar: const Icon(Icons.chat_bubble_outline, size: 16),
-                      selected: scopeValue == 'session',
-                      onSelected: _enabled ? (_) => _switchScope('session') : null,
+                    AetherSecondaryButton(
+                      label: 'Import .md',
+                      icon: Icons.file_upload_outlined,
+                      onPressed: _enabled ? _import : null,
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: AetherSpacing.space4),
-            ],
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: AetherSpacing.space3),
-                child: Text(_error!, style: TextStyle(color: Aether.dangerC)),
-              ),
-            if (_store == null && _error == null)
-              const Padding(
-                padding: EdgeInsets.only(bottom: AetherSpacing.space3),
-                child: LinearProgressIndicator(),
-              ),
-            if (_store == null && _error != null)
-              AetherSecondaryButton(label: 'Retry', onPressed: _initialize),
-            if (_busy)
-              const LinearProgressIndicator(semanticsLabel: 'Importing memory'),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Wrap(
-                spacing: AetherSpacing.space2,
-                runSpacing: AetherSpacing.space2,
-                children: [
-                  AetherSecondaryButton(
-                    label: 'Add file',
-                    icon: Icons.note_add_outlined,
-                    onPressed: _enabled ? () => _add() : null,
-                  ),
-                  AetherSecondaryButton(
-                    label: 'Import .md',
-                    icon: Icons.file_upload_outlined,
-                    onPressed: _enabled ? _import : null,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: AetherSpacing.space3),
-            _buildFileList(),
-            if (_files.isNotEmpty) ...[
-              const SizedBox(height: AetherSpacing.space4),
-              _buildEditorCard(),
-            ],
+              const SizedBox(height: AetherSpacing.space3),
+              _buildFileList(),
+              if (_files.isNotEmpty) ...[
+                const SizedBox(height: AetherSpacing.space4),
+                _buildEditorCard(),
+              ],
             ],
           ),
         ),
@@ -382,12 +479,13 @@ class _MemoryScreenState extends State<MemoryScreen> {
                     AetherSpacing.space4,
                     AetherSpacing.space2,
                     AetherSpacing.space4,
-                    AetherSpacing.space3 + MediaQuery.viewInsetsOf(context).bottom,
+                    AetherSpacing.space3 +
+                        MediaQuery.viewInsetsOf(context).bottom,
                   ),
-                   child: Wrap(
-                     spacing: AetherSpacing.space2,
-                     runSpacing: AetherSpacing.space2,
-                     children: [
+                  child: Wrap(
+                    spacing: AetherSpacing.space2,
+                    runSpacing: AetherSpacing.space2,
+                    children: [
                       AetherPrimaryButton(
                         label: 'Save',
                         icon: Icons.check,
@@ -459,6 +557,91 @@ class _MemoryScreenState extends State<MemoryScreen> {
     );
   }
 
+  String? get _modifiedCaption {
+    final modified = _modified;
+    if (modified == null) return null;
+    final uiSave = _uiSaves[_saveKey];
+    final byOvid = uiSave == null || modified.isAfter(uiSave);
+    // Without a record of saving it here, the newest write may still be
+    // the user's from an earlier launch; only claim Ovid after a UI save.
+    final who = byOvid && uiSave != null ? ' by Ovid' : '';
+    return 'Last updated$who · ${_formatWhen(modified)}';
+  }
+
+  static String _formatWhen(DateTime t) {
+    final diff = DateTime.now().difference(t);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inHours < 1) return '${diff.inMinutes} min ago';
+    if (diff.inDays < 1) return '${diff.inHours} h ago';
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)} '
+        '${two(t.hour)}:${two(t.minute)}';
+  }
+
+  Widget _buildEntries() {
+    final entries = splitMemoryEntries(_loaded);
+    if (entries.isEmpty) {
+      return Text(
+        'No memories in this file yet. Use Edit as Markdown to write one.',
+        style: AetherType.bodyMuted,
+      );
+    }
+    final children = <Widget>[];
+    String? heading;
+    for (var i = 0; i < entries.length; i++) {
+      final entry = entries[i];
+      if (entry.heading != heading || (i == 0 && entry.heading != null)) {
+        heading = entry.heading;
+        if (heading != null) {
+          children.add(
+            Padding(
+              padding: EdgeInsets.only(
+                top: i == 0 ? 0 : AetherSpacing.space3,
+                bottom: AetherSpacing.space1,
+              ),
+              child: Text(heading, style: AetherType.label),
+            ),
+          );
+        }
+      }
+      children.add(
+        Padding(
+          key: ValueKey('memory-entry-$i'),
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 9, right: 8),
+                child: Icon(Icons.circle, size: 5, color: Aether.textMuted),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(entry.text, style: AetherType.body),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Delete memory',
+                icon: Icon(
+                  Icons.delete_outline,
+                  size: 18,
+                  color: Aether.textMuted,
+                ),
+                onPressed: _enabled ? () => _deleteEntry(entry) : null,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: children,
+    );
+  }
+
   Widget _buildEditorCard() {
     // Let the filename and editor grow with text scale inside the page scroll.
     return Container(
@@ -488,12 +671,25 @@ class _MemoryScreenState extends State<MemoryScreen> {
                 color: Aether.textMuted,
                 filled: false,
               ),
+              AetherGhostButton(
+                label: _rawMode ? 'Show entries' : 'Edit as Markdown',
+                onPressed: _store == null
+                    ? null
+                    : () => setState(() => _rawMode = !_rawMode),
+              ),
             ],
           ),
+          if (_modifiedCaption != null) ...[
+            const SizedBox(height: 4),
+            Text(_modifiedCaption!, style: AetherType.caption),
+          ],
           const SizedBox(height: AetherSpacing.space3),
           Divider(height: 1, thickness: 1, color: Aether.hairline),
           const SizedBox(height: AetherSpacing.space3),
-          TextField(
+          if (!_rawMode)
+            _buildEntries()
+          else
+            TextField(
               key: const Key('memory-content'),
               controller: _content,
               enabled: _enabled,
@@ -509,7 +705,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
                 hintText: 'Markdown memory',
                 hintStyle: TextStyle(color: Aether.textFaint, fontSize: 14),
               ),
-          ),
+            ),
         ],
       ),
     );
@@ -576,10 +772,7 @@ class _MemoryFileRow extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 2),
-                  Text(
-                    sourceCaption,
-                    style: AetherType.caption,
-                  ),
+                  Text(sourceCaption, style: AetherType.caption),
                 ],
               ),
             ),
@@ -644,78 +837,78 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: SingleChildScrollView(
         child: AetherSheet(
-      title: 'Add memory file',
-      actions: [
-        AetherGhostButton(
-          label: 'Cancel',
-          onPressed: () => Navigator.pop(context),
-        ),
-        AetherPrimaryButton(
-          label: 'Add',
-          onPressed: () {
-            try {
-              widget.create(_name.text);
-              Navigator.pop(context, _name.text);
-            } catch (e) {
-              setState(() => _error = '$e');
-            }
-          },
-        ),
-      ],
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text('Filename', style: AetherType.label),
-          const SizedBox(height: 6),
-          TextField(
-            key: const Key('memory-filename'),
-            controller: _name,
-            autofocus: true,
-            style: AetherType.body,
-            decoration: InputDecoration(
-              filled: true,
-              fillColor: Aether.surfaceAlt,
-              hintText: 'notes.md',
-              hintStyle: TextStyle(color: Aether.textFaint, fontSize: 14),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 12,
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(AetherRadius.rMd),
-                borderSide: BorderSide(
-                  color: _error != null ? Aether.danger : Aether.hairline,
-                ),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(AetherRadius.rMd),
-                borderSide: BorderSide(
-                  color: _error != null ? Aether.danger : Aether.accent,
-                  width: 1.2,
-                ),
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(AetherRadius.rMd),
-                borderSide: BorderSide(
-                  color: _error != null ? Aether.danger : Aether.hairline,
-                ),
-              ),
+          title: 'Add memory file',
+          actions: [
+            AetherGhostButton(
+              label: 'Cancel',
+              onPressed: () => Navigator.pop(context),
             ),
+            AetherPrimaryButton(
+              label: 'Add',
+              onPressed: () {
+                try {
+                  widget.create(_name.text);
+                  Navigator.pop(context, _name.text);
+                } catch (e) {
+                  setState(() => _error = '$e');
+                }
+              },
+            ),
+          ],
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('Filename', style: AetherType.label),
+              const SizedBox(height: 6),
+              TextField(
+                key: const Key('memory-filename'),
+                controller: _name,
+                autofocus: true,
+                style: AetherType.body,
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Aether.surfaceAlt,
+                  hintText: 'notes.md',
+                  hintStyle: TextStyle(color: Aether.textFaint, fontSize: 14),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                    borderSide: BorderSide(
+                      color: _error != null ? Aether.danger : Aether.hairline,
+                    ),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                    borderSide: BorderSide(
+                      color: _error != null ? Aether.danger : Aether.accent,
+                      width: 1.2,
+                    ),
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                    borderSide: BorderSide(
+                      color: _error != null ? Aether.danger : Aether.hairline,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              if (_error != null)
+                Text(
+                  _error!,
+                  style: TextStyle(fontSize: 12, color: Aether.dangerC),
+                )
+              else
+                Text(
+                  'Plain .md name; MEMORY.md is the fixed entrypoint.',
+                  style: AetherType.caption,
+                ),
+            ],
           ),
-          const SizedBox(height: 6),
-          if (_error != null)
-            Text(
-              _error!,
-              style: TextStyle(fontSize: 12, color: Aether.dangerC),
-            )
-          else
-            Text(
-              'Plain .md name; MEMORY.md is the fixed entrypoint.',
-              style: AetherType.caption,
-            ),
-        ],
-      ),
         ),
       ),
     );

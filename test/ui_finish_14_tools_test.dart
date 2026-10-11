@@ -103,6 +103,10 @@ void main() {
       await tester.ensureVisible(find.text(_longName));
       await tester.tap(find.text(_longName));
       await _brief(tester);
+      // Non-empty files open as readable entries; the raw editor is one tap.
+      await tester.ensureVisible(find.text('Edit as Markdown'));
+      await tester.tap(find.text('Edit as Markdown'));
+      await _brief(tester);
       final editor = find.byKey(const Key('memory-content'));
       await tester.ensureVisible(editor);
       await tester.enterText(editor, 'A long plain Markdown note.\n' * 24);

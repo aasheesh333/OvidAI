@@ -222,6 +222,14 @@ class MemoryStore {
     return hits;
   }
 
+  /// When [name] was last written (by the agent or the UI), or null if the
+  /// file does not exist yet.
+  DateTime? lastModified(String? owner, String name) {
+    final file = _file(_scope(owner), name);
+    if (!file.existsSync()) return null;
+    return file.lastModifiedSync();
+  }
+
   void deleteSession(String owner) {
     final dir = _scope(owner);
     dir.deleteSync(recursive: true);
@@ -231,4 +239,130 @@ class MemoryStore {
     _directory(root);
     root.deleteSync(recursive: true);
   }
+}
+
+/// One readable memory item from a Markdown memory file: a top-level bullet
+/// (with its continuation lines), or a plain paragraph. Headings are not
+/// entries; they label the entries below them.
+class MemoryEntry {
+  /// Nearest heading above this entry, if any.
+  final String? heading;
+
+  /// Display text with the list marker removed.
+  final String text;
+
+  /// Source line range `[startLine, endLine)` in the file.
+  final int startLine;
+  final int endLine;
+  const MemoryEntry({
+    required this.heading,
+    required this.text,
+    required this.startLine,
+    required this.endLine,
+  });
+}
+
+final _memHeading = RegExp(r'^ {0,3}#{1,6}\s+(.*?)\s*#*\s*$');
+final _memBullet = RegExp(r'^( {0,3})(?:[-*+]|\d{1,9}[.)])\s+(.*)$');
+final _memFence = RegExp(r'^ {0,3}(```|~~~)');
+
+/// Split [markdown] into readable entries (see [MemoryEntry]). Fenced code
+/// blocks stay whole inside one entry. Pure; never throws.
+List<MemoryEntry> splitMemoryEntries(String markdown) {
+  final lines = markdown.split('\n');
+  final out = <MemoryEntry>[];
+  String? heading;
+  var i = 0;
+  while (i < lines.length) {
+    final line = lines[i];
+    if (line.trim().isEmpty) {
+      i++;
+      continue;
+    }
+    final h = _memHeading.firstMatch(line);
+    if (h != null) {
+      final title = h.group(1)!.trim();
+      heading = title.isEmpty ? null : title;
+      i++;
+      continue;
+    }
+    final start = i;
+    final bullet = _memBullet.firstMatch(line);
+    final text = <String>[];
+    var inFence = false;
+    void take(String l) {
+      if (_memFence.hasMatch(l)) inFence = !inFence;
+      text.add(l);
+    }
+
+    if (bullet != null) {
+      final indent = bullet.group(1)!.length;
+      take(bullet.group(2)!);
+      i++;
+      // Continuation: indented lines (incl. nested bullets) until a blank
+      // line, heading or the next bullet at this entry's level or above.
+      while (i < lines.length) {
+        final next = lines[i];
+        if (inFence) {
+          take(next);
+          i++;
+          continue;
+        }
+        final sibling = _memBullet.firstMatch(next);
+        if (next.trim().isEmpty ||
+            _memHeading.hasMatch(next) ||
+            (sibling != null && sibling.group(1)!.length <= indent)) {
+          break;
+        }
+        take(next.trim());
+        i++;
+      }
+    } else {
+      take(line);
+      i++;
+      while (i < lines.length) {
+        final next = lines[i];
+        if (inFence) {
+          take(next);
+          i++;
+          continue;
+        }
+        if (next.trim().isEmpty ||
+            _memHeading.hasMatch(next) ||
+            _memBullet.hasMatch(next)) {
+          break;
+        }
+        take(next);
+        i++;
+      }
+    }
+    final joined = text.join('\n').trim();
+    if (joined.isNotEmpty) {
+      out.add(
+        MemoryEntry(
+          heading: heading,
+          text: joined,
+          startLine: start,
+          endLine: i,
+        ),
+      );
+    }
+  }
+  return out;
+}
+
+/// [markdown] without [entry]'s lines; collapses the blank lines left
+/// behind so the file does not accumulate gaps.
+String removeMemoryEntry(String markdown, MemoryEntry entry) {
+  final lines = markdown.split('\n');
+  if (entry.startLine < 0 ||
+      entry.endLine > lines.length ||
+      entry.startLine >= entry.endLine) {
+    return markdown;
+  }
+  lines.removeRange(entry.startLine, entry.endLine);
+  var result = lines.join('\n').replaceAll(RegExp(r'\n{3,}'), '\n\n');
+  if (result.trim().isEmpty) return '';
+  result = result.replaceFirst(RegExp(r'^\n+'), '');
+  return result;
 }
