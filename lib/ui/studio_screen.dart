@@ -1200,7 +1200,10 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
     }
     if (_approval == null) { _invalidate(); return; }
     try {
-      RepoCache.I.validateApproval(_approval!);
+      // In-memory revision check only: re-reading every approved file on each
+      // RepoCache notify blocked the UI isolate while the agent wrote files.
+      // Byte-level validation runs again in commitApproved before publishing.
+      RepoCache.I.validateApprovalRevision(_approval!);
     } catch (e) {
       _invalidate();
       setState(() => _error = '$e');

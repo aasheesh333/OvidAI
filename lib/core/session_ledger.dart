@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -41,6 +42,10 @@ class SessionLedger {
   /// buffered line). Reset by [close].
   @visibleForTesting
   final Map<String, int> sinkOpensForTest = {};
+
+  /// Number of full ledger-file scans started (test hook).
+  @visibleForTesting
+  static int scansForTest = 0;
 
   /// Test seam: fixed ledger root (no path_provider channel). Without a
   /// usable root, best-effort writes are dropped and reads return no records.
@@ -264,6 +269,61 @@ class SessionLedger {
     });
   }
 
+  /// One-pass read for the trajectory view: the stats projection over the
+  /// whole ledger plus only the newest [limit] events (file order), decoded in
+  /// a worker isolate with at most [limit] maps retained. Older events are
+  /// paged with [read] using `offset` < [LedgerTail.firstOffset].
+  Future<LedgerTail> readTail(String sessionId, {int limit = 200}) {
+    RangeError.checkNotNegative(limit, 'limit');
+    return _enqueue(sessionId, () async {
+      try {
+        await _flush(sessionId);
+        final f = await _fileFor(sessionId);
+        if (await _deletionMarker(f).exists()) return LedgerTail.empty;
+        final path = f.path;
+        return await _scanTailInIsolate(path, limit);
+      } on LedgerProjectionException {
+        // Like [projection], a malformed record surfaces to the caller
+        // instead of masquerading as an empty ledger.
+        rethrow;
+      } catch (_) {
+        return LedgerTail.empty;
+      }
+    });
+  }
+
+  // Static for the same reason as [_scanInIsolate]: the closure must not
+  // capture the queue scope.
+  static Future<LedgerTail> _scanTailInIsolate(String path, int limit) {
+    scansForTest++;
+    return Isolate.run(() => _scanTail(path, limit));
+  }
+
+  static Future<LedgerTail> _scanTail(String path, int limit) async {
+    final tail = ListQueue<Map<String, dynamic>>();
+    final projection = SessionProjectionBuilder();
+    var total = 0;
+    await _scanFile(
+      path,
+      onEvent: (event) {
+        total++;
+        try {
+          projection.add(event);
+        } catch (e) {
+          throw LedgerProjectionException('$e');
+        }
+        if (limit == 0) return;
+        if (tail.length == limit) tail.removeFirst();
+        tail.add(event);
+      },
+    );
+    return LedgerTail(
+      events: tail.toList(),
+      total: total,
+      projection: projection.build(),
+    );
+  }
+
   // Keep the isolate closure out of instance/queue scopes: those contexts can
   // capture unsendable pending futures or open handles in addition to the path.
   static Future<
@@ -274,9 +334,12 @@ class SessionLedger {
     bool collect = false,
     int offset = 0,
     int? limit,
-  }) => Isolate.run(
-    () => _scanFile(path, collect: collect, offset: offset, limit: limit),
-  );
+  }) {
+    scansForTest++;
+    return Isolate.run(
+      () => _scanFile(path, collect: collect, offset: offset, limit: limit),
+    );
+  }
 
   // Runs in a worker isolate. Recovery holds only one record plus an input
   // chunk, and returns scalar metadata rather than a full decoded-event list.
@@ -289,6 +352,7 @@ class SessionLedger {
     bool collect = false,
     int offset = 0,
     int? limit,
+    void Function(Map<String, dynamic> event)? onEvent,
   }) async {
     final events = collect ? <Map<String, dynamic>>[] : null;
     var skipped = 0;
@@ -300,10 +364,11 @@ class SessionLedger {
     }
     final record = BytesBuilder(copy: false);
     void decodeRecord() {
+      Map<String, dynamic>? decoded;
       try {
         final line = utf8.decode(record.takeBytes());
         if (line.trim().isNotEmpty) {
-          final event = jsonDecode(line) as Map<String, dynamic>;
+          final event = decoded = jsonDecode(line) as Map<String, dynamic>;
           final savedSeq = event['seq'];
           if (savedSeq is int && savedSeq > seq) seq = savedSeq;
           if (events != null) {
@@ -316,7 +381,10 @@ class SessionLedger {
         }
       } catch (_) {
         // Skip damaged records independently, including a partial UTF-8 tail.
+        decoded = null;
       }
+      // Outside the damage guard: consumer errors must propagate.
+      if (decoded != null) onEvent?.call(decoded);
     }
 
     await for (final chunk in file.openRead()) {
@@ -348,39 +416,8 @@ class SessionLedger {
   }
 
   /// Wall-clock/turn/step projection over the ledger (stats parity).
-  Future<SessionProjection> projection(String sessionId) async {
-    final events = await read(sessionId);
-    var turns = 0, steps = 0, toolMs = 0, llmMs = 0;
-    DateTime? firstStart, lastEnd;
-    final toolCounts = <String, int>{};
-    for (final e in events) {
-      switch (e['kind'] as String?) {
-        case 'turn_start':
-          turns++;
-          firstStart ??= DateTime.tryParse(e['t'] as String? ?? '');
-        case 'turn_end':
-          lastEnd = DateTime.tryParse(e['t'] as String? ?? '');
-        case 'tool_start':
-          steps++;
-          final n = e['tool'] as String?;
-          if (n != null) toolCounts[n] = (toolCounts[n] ?? 0) + 1;
-        case 'tool_end':
-          toolMs += (e['ms'] as num?)?.toInt() ?? 0;
-        case 'llm':
-          llmMs += (e['ms'] as num?)?.toInt() ?? 0;
-      }
-    }
-    return SessionProjection(
-      turns: turns,
-      steps: steps,
-      toolMs: toolMs,
-      llmMs: llmMs,
-      wallMs: (firstStart != null && lastEnd != null)
-          ? lastEnd.difference(firstStart).inMilliseconds
-          : 0,
-      toolCounts: toolCounts,
-    );
-  }
+  Future<SessionProjection> projection(String sessionId) async =>
+      SessionProjection.fromEvents(await read(sessionId));
 
   /// Permanently delete this session ID's lifetime in this storage root.
   /// Queued/later appends are ignored, including after a process restart. A
@@ -498,4 +535,92 @@ class SessionProjection {
     required this.wallMs,
     required this.toolCounts,
   });
+
+  /// Pure projection over already-decoded events (no ledger I/O).
+  factory SessionProjection.fromEvents(
+    Iterable<Map<String, dynamic>> events,
+  ) {
+    final builder = SessionProjectionBuilder();
+    events.forEach(builder.add);
+    return builder.build();
+  }
+}
+
+/// Incremental [SessionProjection] accumulator, so a single streaming scan can
+/// project the whole ledger without retaining every event.
+class SessionProjectionBuilder {
+  var _turns = 0, _steps = 0, _toolMs = 0, _llmMs = 0;
+  DateTime? _firstStart, _lastEnd;
+  final _toolCounts = <String, int>{};
+
+  void add(Map<String, dynamic> e) {
+    switch (e['kind'] as String?) {
+      case 'turn_start':
+        _turns++;
+        _firstStart ??= DateTime.tryParse(e['t'] as String? ?? '');
+      case 'turn_end':
+        _lastEnd = DateTime.tryParse(e['t'] as String? ?? '');
+      case 'tool_start':
+        _steps++;
+        final n = e['tool'] as String?;
+        if (n != null) _toolCounts[n] = (_toolCounts[n] ?? 0) + 1;
+      case 'tool_end':
+        _toolMs += (e['ms'] as num?)?.toInt() ?? 0;
+      case 'llm':
+        _llmMs += (e['ms'] as num?)?.toInt() ?? 0;
+    }
+  }
+
+  SessionProjection build() {
+    final first = _firstStart, last = _lastEnd;
+    return SessionProjection(
+      turns: _turns,
+      steps: _steps,
+      toolMs: _toolMs,
+      llmMs: _llmMs,
+      wallMs: (first != null && last != null)
+          ? last.difference(first).inMilliseconds
+          : 0,
+      toolCounts: Map.of(_toolCounts),
+    );
+  }
+}
+
+/// A ledger record could not be projected (e.g. a malformed legacy field).
+class LedgerProjectionException implements Exception {
+  final String message;
+  const LedgerProjectionException(this.message);
+  @override
+  String toString() => message;
+}
+
+/// Result of [SessionLedger.readTail]: the newest events plus a projection
+/// over the full ledger, from one scan.
+class LedgerTail {
+  final List<Map<String, dynamic>> events;
+
+  /// Valid records in the whole ledger.
+  final int total;
+  final SessionProjection projection;
+  const LedgerTail({
+    required this.events,
+    required this.total,
+    required this.projection,
+  });
+
+  /// Record offset (as used by [SessionLedger.read]) of `events.first`.
+  int get firstOffset => total - events.length;
+
+  static const empty = LedgerTail(
+    events: [],
+    total: 0,
+    projection: SessionProjection(
+      turns: 0,
+      steps: 0,
+      toolMs: 0,
+      llmMs: 0,
+      wallMs: 0,
+      toolCounts: {},
+    ),
+  );
 }

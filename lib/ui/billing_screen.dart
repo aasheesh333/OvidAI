@@ -117,7 +117,6 @@ class _BillingScreenState extends State<BillingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final app = AppState.I;
     return Scaffold(
       backgroundColor: Aether.bg,
       appBar: AppBar(
@@ -126,11 +125,13 @@ class _BillingScreenState extends State<BillingScreen> {
         title: const Text('Plans & Billing'),
       ),
       body: AnimatedBuilder(
+        // Only the tier is read here: it changes through OvidCloudService
+        // (which notifies) and the usage store — not on every AppState
+        // notification such as streamed tokens of a background run.
         animation: Listenable.merge([
-          app,
+          OvidCloudService.I,
           FirebaseService.I,
           _store,
-          OvidCloudService.I,
         ]),
         builder: (_, _) {
           final canPurchase =

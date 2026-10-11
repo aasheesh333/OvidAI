@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -1221,8 +1222,29 @@ class _ThemeToggle extends StatelessWidget {
   }
 }
 
-class _TimeoutScreen extends StatelessWidget {
+class _TimeoutScreen extends StatefulWidget {
   const _TimeoutScreen();
+
+  @override
+  State<_TimeoutScreen> createState() => _TimeoutScreenState();
+}
+
+class _TimeoutScreenState extends State<_TimeoutScreen> {
+  /// Slider position while dragging. Persisting (SharedPreferences write,
+  /// readback and a whole-[AppState] notify) happens once on release, not on
+  /// every drag frame.
+  double? _draft;
+
+  Future<void> _commitDraft(double v) async {
+    final sec = v.round();
+    await _savePreference(
+      context,
+      'ovid_response_timeout_sec',
+      sec,
+      () => AppState.I.setResponseTimeout(sec),
+    );
+    if (mounted) setState(() => _draft = null);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1302,19 +1324,15 @@ class _TimeoutScreen extends StatelessWidget {
                 ),
               ),
               Slider(
-                value: cur.toDouble().clamp(5.0, 3600.0),
+                value: (_draft ?? cur.toDouble()).clamp(5.0, 3600.0),
                 min: 5,
                 max: 3600,
                 divisions: 71,
                 activeColor: Aether.accent,
                 inactiveColor: Aether.surfaceAlt,
-                label: '${cur}s',
-                onChanged: (v) => _savePreference(
-                  context,
-                  'ovid_response_timeout_sec',
-                  v.round(),
-                  () => AppState.I.setResponseTimeout(v.round()),
-                ),
+                label: '${(_draft ?? cur.toDouble()).round()}s',
+                onChanged: (v) => setState(() => _draft = v),
+                onChangeEnd: _commitDraft,
               ),
             ],
           );
@@ -1471,6 +1489,30 @@ class _ContextModelScreen extends StatelessWidget {
   }
 }
 
+/// Writes the chat export off the UI isolate. Encoding every session (tool
+/// output, compacted summaries) used to freeze the UI for seconds and build
+/// one giant indented string; here each session is encoded separately inside
+/// [Isolate.run] and streamed to disk, so peak memory is one session.
+@visibleForTesting
+Future<void> writeSessionsExport(
+  String path, {
+  required String exportedAt,
+  required List<Map<String, dynamic>> sessions,
+}) => Isolate.run(() async {
+  final sink = File(path).openWrite();
+  try {
+    sink.write('{"exportedAt":${jsonEncode(exportedAt)},"sessions":[');
+    for (var i = 0; i < sessions.length; i++) {
+      if (i > 0) sink.write(',');
+      sink.write(jsonEncode(sessions[i]));
+    }
+    sink.write(']}');
+    await sink.flush();
+  } finally {
+    await sink.close();
+  }
+});
+
 class _ExportChatsScreen extends StatefulWidget {
   const _ExportChatsScreen();
   @override
@@ -1518,12 +1560,10 @@ class _ExportChatsScreenState extends State<_ExportChatsScreen> {
         '${temp.path}/ovid-chat-export-$stamp',
       ).create(recursive: true);
       final file = File('${staging.path}/ovid-sessions-$stamp.json');
-      final payload = {
-        'exportedAt': DateTime.now().toIso8601String(),
-        'sessions': AppState.I.sessions.map((s) => s.toJson()).toList(),
-      };
-      await file.writeAsString(
-        const JsonEncoder.withIndent('  ').convert(payload),
+      await writeSessionsExport(
+        file.path,
+        exportedAt: DateTime.now().toIso8601String(),
+        sessions: AppState.I.sessions.map((s) => s.toJson()).toList(),
       );
       if (!mounted) return;
       // The native share path copies the file into its own short-lived share

@@ -16,12 +16,20 @@ class TrajectoryScreen extends StatefulWidget {
   final String sessionId;
   const TrajectoryScreen({super.key, required this.sessionId});
 
+  /// Events decoded per page; the ledger is never truncated, so only the
+  /// newest page is loaded up front and older ones on request.
+  static const pageSize = 200;
+
   @override
   State<TrajectoryScreen> createState() => _TrajectoryScreenState();
 }
 
 class _TrajectoryScreenState extends State<TrajectoryScreen> {
   List<Map<String, dynamic>> _events = [];
+
+  /// Ledger record offset of `_events.first`; > 0 means earlier events exist.
+  int _firstOffset = 0;
+  bool _loadingEarlier = false;
   SessionProjection? _proj;
   bool _loading = true;
   String? _error;
@@ -38,12 +46,16 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
       _error = null;
     });
     try {
-      final events = await SessionLedger.I.read(widget.sessionId);
-      final proj = await SessionLedger.I.projection(widget.sessionId);
+      // One isolate scan: projection over the whole ledger + newest page.
+      final tail = await SessionLedger.I.readTail(
+        widget.sessionId,
+        limit: TrajectoryScreen.pageSize,
+      );
       if (!mounted) return;
       setState(() {
-        _events = events;
-        _proj = proj;
+        _events = tail.events;
+        _firstOffset = tail.firstOffset;
+        _proj = tail.projection;
         _loading = false;
       });
     } catch (e) {
@@ -52,6 +64,29 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
         _error = '$e';
         _loading = false;
       });
+    }
+  }
+
+  Future<void> _loadEarlier() async {
+    if (_loadingEarlier || _firstOffset <= 0) return;
+    setState(() => _loadingEarlier = true);
+    final offset = (_firstOffset - TrajectoryScreen.pageSize).clamp(0, _firstOffset);
+    final earlier = await SessionLedger.I.read(
+      widget.sessionId,
+      offset: offset,
+      limit: _firstOffset - offset,
+    );
+    if (!mounted) return;
+    setState(() {
+      _loadingEarlier = false;
+      if (earlier.isEmpty) return;
+      _events = [...earlier, ..._events];
+      _firstOffset = offset;
+    });
+    if (earlier.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Couldn't load earlier events.")),
+      );
     }
   }
 
@@ -262,9 +297,9 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(14, 4, 14, 16),
               sliver: SliverList.builder(
-                itemCount: _events.length + 1,
-                itemBuilder: (_, i) {
-                  if (i == 0) {
+                itemCount: _events.length + (_firstOffset > 0 ? 2 : 1),
+                itemBuilder: (_, row) {
+                  if (row == 0) {
                     return const Padding(
                       padding: EdgeInsets.fromLTRB(2, 4, 2, 10),
                       child: AetherSectionTitle(
@@ -273,7 +308,23 @@ class _TrajectoryScreenState extends State<TrajectoryScreen> {
                       ),
                     );
                   }
-                  final e = _events[i - 1];
+                  if (_firstOffset > 0 && row == 1) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: AetherSecondaryButton(
+                        key: const ValueKey('trajectory-load-earlier'),
+                        label: _loadingEarlier
+                            ? 'Loading…'
+                            : 'Show $_firstOffset earlier '
+                                  'event${_firstOffset == 1 ? '' : 's'}',
+                        onPressed: _loadingEarlier ? null : _loadEarlier,
+                      ),
+                    );
+                  }
+                  final index = row - (_firstOffset > 0 ? 2 : 1);
+                  // Ledger-wide position, used when a record has no seq.
+                  final i = _firstOffset + index + 1;
+                  final e = _events[index];
                   final detail = _detailFor(e);
                   final kind = e['kind'] as String?;
                   final color = _colorFor(kind, failed: _isFailed(e));

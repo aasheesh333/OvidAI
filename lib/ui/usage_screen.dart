@@ -10,6 +10,7 @@ import 'package:ovid_ai/core/usage_attempt.dart';
 import 'package:ovid_ai/ui/cloud_usage_status.dart';
 import 'package:ovid_ai/ui/image_receipt_panel.dart';
 import 'package:ovid_ai/ui/widgets/aether_primitives.dart';
+import 'package:ovid_ai/ui/widgets/memo_listenable_builder.dart';
 
 /// ═══════════════════════════════════════════════════════════════════
 /// PROVIDER-WISE usage tracking — "kisne kitna khaya" view.
@@ -135,15 +136,118 @@ class UsageModelUsage {
   final Set<UsageProvenance> provenances = {};
 }
 
+/// Everything the Usage screens derive from the attempt journal, computed in
+/// one pass and memoised by [UsageSnapshot.keyFor] so streamed tokens and
+/// unrelated [AppState] notifications never re-aggregate the journal.
+@visibleForTesting
+class UsageSnapshot {
+  UsageSnapshot._({
+    required this.providers,
+    required this.todayTokens,
+    required this.todayHasUnknown,
+    required this.todayAlternate,
+    required this.daily,
+  });
+
+  /// Per-provider aggregate, most-requested first.
+  final List<ProviderUsage> providers;
+  final int todayTokens;
+  final bool todayHasUnknown;
+  final Map<UsageProvenance, int> todayAlternate;
+
+  /// Provider id → 14 calendar-day buckets of provider-reported totals,
+  /// oldest first (index 13 is today).
+  final Map<String, List<int>> daily;
+
+  int get tokensIn => providers.fold<int>(0, (s, p) => s + p.tokensIn);
+  int get tokensOut => providers.fold<int>(0, (s, p) => s + p.tokensOut);
+
+  static Object? _key;
+  static UsageSnapshot? _cached;
+
+  /// Number of full journal aggregations performed (test hook).
+  @visibleForTesting
+  static int debugAggregations = 0;
+
+  @visibleForTesting
+  static void debugReset() {
+    _key = null;
+    _cached = null;
+    debugAggregations = 0;
+  }
+
+  /// Memo key: journal identity + revision, provider display config and the
+  /// local calendar day (the "today" figures roll over at midnight). Cheap to
+  /// compute — no journal copy.
+  static Object keyFor(AppState app) {
+    final now = DateTime.now();
+    return (
+      app.usageMemoKey,
+      Object.hashAll([
+        for (final p in app.providers) Object.hash(p.id, p.name, p.isFree),
+      ]),
+      DateTime(now.year, now.month, now.day),
+    );
+  }
+
+  static UsageSnapshot of(AppState app) {
+    final key = keyFor(app);
+    final cached = _cached;
+    if (cached != null && _key == key) return cached;
+    final next = const UsageScreen()._aggregate(app);
+    _key = key;
+    _cached = next;
+    return next;
+  }
+}
+
 class UsageScreen extends StatelessWidget {
   const UsageScreen({super.key});
 
   /// Aggregate the retained attempt journal into observed per-provider history.
   /// The Ovid Cloud card is deliberately separate from the server allowance:
   /// this is what the device observed, not a billing projection.
-  List<ProviderUsage> _aggregate(AppState app) {
+  UsageSnapshot _aggregate(AppState app) {
+    UsageSnapshot.debugAggregations++;
     final byId = <String, ProviderUsage>{};
+    // Per-provider model index: O(1) lookup instead of a linear scan of
+    // `p.models` per journal record.
+    final modelsByProvider = <String, Map<String, UsageModelUsage>>{};
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    var todayTokens = 0;
+    var todayHasUnknown = false;
+    final todayAlternate = <UsageProvenance, int>{};
+    final daily = <String, List<int>>{};
     for (final e in app.usageAttempts) {
+      final local = e.startedAt.toLocal();
+      final date = DateTime(local.year, local.month, local.day);
+      final dayTotal = e.totalTokens;
+      if (date == today) {
+        if (dayTotal == null || dayTotal.value == null) {
+          todayHasUnknown = true;
+        } else if (dayTotal.provenance == UsageProvenance.providerReported) {
+          todayTokens += dayTotal.value!;
+        } else {
+          todayAlternate.update(
+            dayTotal.provenance,
+            (value) => value + dayTotal.value!,
+            ifAbsent: () => dayTotal.value!,
+          );
+        }
+      }
+      if (!e.startedAt.isAfter(now)) {
+        final age = today.difference(date).inDays;
+        if (age >= 0 &&
+            age < 14 &&
+            dayTotal?.provenance == UsageProvenance.providerReported &&
+            dayTotal?.value != null &&
+            dayTotal!.value! > 0) {
+          daily.putIfAbsent(e.provider, () => List<int>.filled(14, 0))[13 -
+                  age] +=
+              dayTotal.value!;
+        }
+      }
       final config = app.providerById(e.provider);
       final providerName = e.provider == AppState.ovidCloudProviderId
           ? 'Ovid Cloud'
@@ -228,9 +332,16 @@ class UsageScreen extends StatelessWidget {
             ..hasPricedModel = true;
         }
       }
-      final m = p.models.where((m) => m.model == model).firstOrNull;
+      final modelIndex = modelsByProvider.putIfAbsent(
+        e.provider,
+        () => <String, UsageModelUsage>{},
+      );
+      final m = modelIndex[model];
       final modelUsage = m ?? UsageModelUsage(model);
-      if (m == null) p.models.add(modelUsage);
+      if (m == null) {
+        modelIndex[model] = modelUsage;
+        p.models.add(modelUsage);
+      }
       modelUsage.requests++;
       if (total?.provenance == UsageProvenance.providerReported &&
           total?.value != null) {
@@ -250,8 +361,14 @@ class UsageScreen extends StatelessWidget {
         modelUsage.provenances.add(total.provenance);
       }
     }
-    return byId.values.toList()
-      ..sort((a, b) => b.requests.compareTo(a.requests));
+    return UsageSnapshot._(
+      providers: byId.values.toList()
+        ..sort((a, b) => b.requests.compareTo(a.requests)),
+      todayTokens: todayTokens,
+      todayHasUnknown: todayHasUnknown,
+      todayAlternate: todayAlternate,
+      daily: daily,
+    );
   }
 
   IconData _iconFor(String name) {
@@ -305,45 +422,19 @@ class UsageScreen extends StatelessWidget {
           ),
         ],
       ),
-      body: AnimatedBuilder(
-        animation: app,
-        builder: (_, _) {
-          // Aggregate INSIDE the builder: the outer build runs once, so
-          // capturing here would freeze token/cost stats at first open.
-          final providers = _aggregate(app);
-          final tokensIn = providers.fold<int>(0, (s, p) => s + p.tokensIn);
-          final tokensOut = providers.fold<int>(0, (s, p) => s + p.tokensOut);
-          final todayEntries = app.usageAttempts.where((e) {
-            final d = e.startedAt.toLocal();
-            final now = DateTime.now();
-            return d.year == now.year &&
-                d.month == now.month &&
-                d.day == now.day;
-          }).toList();
-          final todayMeasured = todayEntries.where(
-            (e) =>
-                e.totalTokens?.provenance == UsageProvenance.providerReported,
-          );
-          final todayTokens = todayMeasured.fold<int>(
-            0,
-            (s, e) => s + e.totalTokens!.value!,
-          );
-          final todayHasUnknown = todayEntries.any(
-            (e) => e.totalTokens == null || e.totalTokens!.value == null,
-          );
-          final todayAlternate = <UsageProvenance, int>{};
-          for (final e in todayEntries) {
-            final total = e.totalTokens;
-            if (total != null &&
-                total.value != null &&
-                total.provenance != UsageProvenance.providerReported) {
-              todayAlternate.update(
-                total.provenance,
-                (value) => value + total.value!,
-                ifAbsent: () => total.value!,
-              );
-            }
-          }
+      body: MemoListenableBuilder(
+        listenable: app,
+        memoKey: () => UsageSnapshot.keyFor(app),
+        builder: (_) {
+          // Aggregate INSIDE the builder (memoised by journal revision): the
+          // outer build runs once, so capturing here would freeze stats.
+          final usage = UsageSnapshot.of(app);
+          final providers = usage.providers;
+          final tokensIn = usage.tokensIn;
+          final tokensOut = usage.tokensOut;
+          final todayTokens = usage.todayTokens;
+          final todayHasUnknown = usage.todayHasUnknown;
+          final todayAlternate = usage.todayAlternate;
           return ListView(
             padding: const EdgeInsets.only(bottom: 40),
             children: [
@@ -1044,16 +1135,20 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: Listenable.merge([AppState.I, OvidCloudService.I]),
-      builder: (context, _) => _buildDetail(context),
+    return MemoListenableBuilder(
+      listenable: Listenable.merge([AppState.I, OvidCloudService.I]),
+      memoKey: () => (
+        UsageSnapshot.keyFor(AppState.I),
+        OvidCloudService.I.accountIdentity,
+      ),
+      builder: _buildDetail,
     );
   }
 
   Widget _buildDetail(BuildContext context) {
+    final usage = UsageSnapshot.of(AppState.I);
     final p =
-        const UsageScreen()
-            ._aggregate(AppState.I)
+        usage.providers
             .where((p) => p.providerId == provider.providerId)
             .firstOrNull ??
         ((_initialRevision ==
@@ -1074,28 +1169,12 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                 tokensOut: 0,
                 models: [],
               ));
-    // Calendar-day buckets come from the attempt journal only. Legacy rows are
-    // already migrated into that journal, so reading usageLog here would count
-    // them a second time.
+    // Calendar-day buckets come from the attempt journal only (memoised in
+    // [UsageSnapshot]). Legacy rows are already migrated into that journal, so
+    // reading usageLog here would count them a second time.
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final daily = List<int>.filled(14, 0);
-    for (final entry in AppState.I.usageAttempts) {
-      if (entry.provider != p.providerId || entry.startedAt.isAfter(now)) {
-        continue;
-      }
-      final local = entry.startedAt.toLocal();
-      final date = DateTime(local.year, local.month, local.day);
-      final age = today.difference(date).inDays;
-      final total = entry.totalTokens;
-      if (age >= 0 &&
-          age < 14 &&
-          total?.provenance == UsageProvenance.providerReported &&
-          total?.value != null &&
-          total!.value! > 0) {
-        daily[13 - age] += total.value!;
-      }
-    }
+    final daily = usage.daily[p.providerId] ?? List<int>.filled(14, 0);
     final hasTrend = daily.where((tokens) => tokens > 0).length >= 2;
     final maxTokens = daily.reduce((a, b) => a > b ? a : b);
     return Scaffold(
