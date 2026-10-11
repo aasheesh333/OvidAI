@@ -308,4 +308,4 @@ jobs:
         run: python -m unittest -v tool.deployment_config_test
 
       - name: Test server account, sync, and collaboration
-        run: pytest server/account/tests server/sync server/collaboration server/images server/shares
+        run: pytest server/account/tests server/sync server/collaboration server/images server/shares server/reports

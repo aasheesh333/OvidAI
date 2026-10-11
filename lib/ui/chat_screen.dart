@@ -13,6 +13,8 @@ import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/theme.dart';
+import '../core/distribution.dart';
+import 'content_report_sheet.dart';
 import '../core/format.dart';
 import '../core/voice_input_service.dart';
 import '../core/state.dart';
@@ -4680,6 +4682,12 @@ class _MessageView extends StatelessWidget {
         }
       });
     }
+    // Play AI-Generated Content policy: flag offensive AI output in-app.
+    if (!isUser && isReportableAiMessage(m)) {
+      add(Icons.flag_outlined, 'Report', () {
+        unawaited(reportAiMessage(context, m, model: session.model));
+      });
+    }
     final canEdit =
         input != null &&
         !session.isSubagent &&
@@ -8128,6 +8136,12 @@ class _ModeChip extends StatelessWidget {
 }
 
 Future<void> _enableControlMode(BuildContext context) async {
+  if (!Distribution.controlModeAvailable) {
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(content: Text(Distribution.controlUnavailableMessage)),
+    );
+    return;
+  }
   final app = AppState.I;
   // Show the disclosure only once. After acceptance, switching to Control
   // must not re-prompt.
