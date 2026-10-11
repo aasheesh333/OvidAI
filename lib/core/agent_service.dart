@@ -936,6 +936,7 @@ class AgentService extends ChangeNotifier {
     AppState.I.onSessionDeleted = (sessionId) {
       dropSessionRun(sessionId);
       _busyNotifiers.remove(sessionId);
+      _liveTicksBySession.remove(sessionId);
       SkillService.I.dropSession(sessionId);
       // Drop the session's browser bucket AND its native profile (cookie jar +
       // web storage). Without this, deleting a chat would leave a logged-in
@@ -13027,6 +13028,21 @@ ${await _agentsMdBlock()}
   /// rebuilds every widget listening to [AppState]. The end-of-turn flush
   /// still calls `AppState.I.refresh()` so everything else settles once.
   final ValueNotifier<int> liveBubbleTicks = ValueNotifier<int>(0);
+
+  /// [liveBubbleTicks] scoped to one session, for views of a single
+  /// transcript (subagent screen) that must ignore other sessions' streams.
+  final Map<String, ValueNotifier<int>> _liveTicksBySession = {};
+
+  ValueListenable<int> liveBubbleTicksFor(String sessionId) =>
+      _liveTicksBySession.putIfAbsent(sessionId, () => ValueNotifier<int>(0));
+
+  /// Test seam: publish one live-bubble tick for [sessionId].
+  @visibleForTesting
+  void debugTickLiveBubbleForTest(String sessionId) {
+    liveBubbleTicks.value++;
+    _liveTicksBySession[sessionId]?.value++;
+  }
+
   int _streamPublicationCount = 0;
   static const _streamRefreshInterval = Duration(milliseconds: 16);
 
@@ -13062,6 +13078,7 @@ ${await _agentsMdBlock()}
         session.messages.isNotEmpty &&
         identical(session.messages.last, message)) {
       liveBubbleTicks.value++;
+      _liveTicksBySession[session.id]?.value++;
     } else {
       AppState.I.refresh();
     }

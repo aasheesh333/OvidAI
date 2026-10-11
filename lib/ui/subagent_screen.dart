@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/format.dart';
@@ -40,18 +43,52 @@ class _SubagentScreenState extends State<SubagentScreen> {
   bool _firstJumpDone = false;
   bool _showJumpFab = false;
 
+  /// Message count at the last follow-tip jump: rebuilds that do not add a
+  /// row no longer queue a scroll callback.
+  int? _jumpedAtCount;
+  late final ValueListenable<int> _liveTicks;
+
   @override
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+    // Streamed text grows the tail row without rebuilding this screen; keep
+    // following the tip from the session's own ticks.
+    _liveTicks = AgentService.I.liveBubbleTicksFor(widget.sessionId);
+    _liveTicks.addListener(_jumpToBottom);
   }
 
   @override
   void dispose() {
+    _liveTicks.removeListener(_jumpToBottom);
     _scroll.removeListener(_onScroll);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// Everything this screen's chrome shows. The screen rebuilds only when
+  /// this changes, not on every AppState/AgentService notification; the
+  /// transcript has its own narrower listeners.
+  List<Object?> _select() {
+    final app = AppState.I;
+    final s = app.sessionById(widget.sessionId);
+    if (s == null) return const [null];
+    final agent = AgentService.I;
+    final sub = agent.subagentForSession(s.id);
+    return [
+      s,
+      s.messages.length,
+      agent.busyFor(s.id),
+      s.agentState,
+      s.agentLabel,
+      s.title,
+      s.agentContinuable,
+      s.agentAllowedTools.length,
+      sub,
+      sub?.messages.length,
+      app.childrenOf(s.id).length,
+    ];
   }
 
   void _onScroll() {
@@ -119,13 +156,10 @@ class _SubagentScreenState extends State<SubagentScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: Listenable.merge([
-        AppState.I,
-        AgentService.I,
-        AgentService.I.liveBubbleTicks,
-      ]),
-      builder: (_, _) {
+    return _SelectorBuilder(
+      listenable: Listenable.merge([AppState.I, AgentService.I]),
+      select: _select,
+      builder: (_) {
         final app = AppState.I;
         final s = app.sessionById(widget.sessionId);
         if (s == null) {
@@ -149,7 +183,10 @@ class _SubagentScreenState extends State<SubagentScreen> {
         final children = app.childrenOf(s.id);
         final state = running ? 'running' : (s.agentState ?? 'finished');
         final continuable = s.agentContinuable;
-        _jumpToBottom();
+        if (_jumpedAtCount != s.messages.length) {
+          _jumpedAtCount = s.messages.length;
+          _jumpToBottom();
+        }
 
         return Scaffold(
           backgroundColor: Aether.bg,
@@ -352,7 +389,7 @@ class _DescendantsButton extends StatelessWidget {
   }
 }
 
-class _StatusStrip extends StatelessWidget {
+class _StatusStrip extends StatefulWidget {
   final ChatSession session;
   final String state;
   final SubagentInfo? sub;
@@ -363,7 +400,49 @@ class _StatusStrip extends StatelessWidget {
   });
 
   @override
+  State<_StatusStrip> createState() => _StatusStripState();
+}
+
+class _StatusStripState extends State<_StatusStrip> {
+  // The screen no longer rebuilds per notification, so the elapsed time
+  // ticks here (only while running) instead of riding streamed tokens.
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(_StatusStrip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncTicker();
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _syncTicker() {
+    final running = widget.state == 'running' && widget.sub != null;
+    if (running && _ticker == null) {
+      _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!running && _ticker != null) {
+      _ticker!.cancel();
+      _ticker = null;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final session = widget.session;
+    final state = widget.state;
+    final sub = widget.sub;
     final color = switch (state) {
       'running' => Aether.accent,
       'stopped' || 'stopping' => Aether.warnLight,
@@ -371,10 +450,10 @@ class _StatusStrip extends StatelessWidget {
       _ => Aether.successLight,
     };
     final bits = <String>[
-      if (sub != null) formatCompactDuration(sub!.elapsed),
+      if (sub != null) formatCompactDuration(sub.elapsed),
       '${session.messages.length} rows',
-      if (sub != null && sub!.messages.isNotEmpty)
-        '${sub!.messages.length} queued',
+      if (sub != null && sub.messages.isNotEmpty)
+        '${sub.messages.length} queued',
       session.agentContinuable ? 'continuable' : 'one-shot',
     ];
     return Container(
@@ -564,9 +643,30 @@ Future<void> showSubagentCatalog(BuildContext context, String sessionId) async {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
     ),
-    builder: (sheetCtx) => AnimatedBuilder(
-      animation: Listenable.merge([AppState.I, AgentService.I]),
-      builder: (_, _) {
+    builder: (sheetCtx) => _SelectorBuilder(
+      listenable: Listenable.merge([AppState.I, AgentService.I]),
+      select: () {
+        final app = AppState.I;
+        final agent = AgentService.I;
+        return [
+          for (final child in app.childrenOf(sessionId)) ...[
+            child,
+            child.messages.length,
+            child.agentState,
+            child.agentLabel,
+            child.title,
+            child.mode,
+            agent.busyFor(child.id),
+            agent.subagentForSession(child.id),
+            app.childrenOf(child.id).length,
+          ],
+        ];
+      },
+      // Running children show a live runtime.
+      ticking: () => AppState.I
+          .childrenOf(sessionId)
+          .any((child) => AgentService.I.busyFor(child.id)),
+      builder: (_) {
         final app = AppState.I;
         final children = app.childrenOf(sessionId);
         return SafeArea(
@@ -709,4 +809,78 @@ class _CatalogCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Rebuilds [builder] only when [select] returns a different value list
+/// after [listenable] notifies. While [ticking] is true it also rebuilds once
+/// a second (live elapsed times).
+class _SelectorBuilder extends StatefulWidget {
+  const _SelectorBuilder({
+    required this.listenable,
+    required this.select,
+    required this.builder,
+    this.ticking,
+  });
+
+  final Listenable listenable;
+  final List<Object?> Function() select;
+  final WidgetBuilder builder;
+  final bool Function()? ticking;
+
+  @override
+  State<_SelectorBuilder> createState() => _SelectorBuilderState();
+}
+
+class _SelectorBuilderState extends State<_SelectorBuilder> {
+  late List<Object?> _selected;
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = widget.select();
+    widget.listenable.addListener(_onChanged);
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(_SelectorBuilder oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.listenable != widget.listenable) {
+      oldWidget.listenable.removeListener(_onChanged);
+      widget.listenable.addListener(_onChanged);
+    }
+    _selected = widget.select();
+    _syncTicker();
+  }
+
+  @override
+  void dispose() {
+    widget.listenable.removeListener(_onChanged);
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (!mounted) return;
+    final next = widget.select();
+    _syncTicker();
+    if (listEquals(next, _selected)) return;
+    setState(() => _selected = next);
+  }
+
+  void _syncTicker() {
+    final tick = widget.ticking?.call() ?? false;
+    if (tick && _ticker == null) {
+      _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!tick && _ticker != null) {
+      _ticker!.cancel();
+      _ticker = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context);
 }

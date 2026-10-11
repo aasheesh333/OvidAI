@@ -96,15 +96,26 @@ class ChatTranscript extends StatelessWidget {
     this.typing = false,
   });
 
+  /// Transcript build counter for rebuild-scope tests (debug builds only).
+  @visibleForTesting
+  static int debugBuildCount = 0;
+
   @override
   Widget build(BuildContext context) {
+    // Structural changes and tool output arrive through AppState; streamed
+    // text through this session's own live ticks. Agent-wide notifications
+    // and other sessions' streams no longer rebuild the transcript (busy and
+    // typing come from the parent).
     return AnimatedBuilder(
       animation: Listenable.merge([
         AppState.I,
-        AgentService.I,
-        AgentService.I.liveBubbleTicks,
+        AgentService.I.liveBubbleTicksFor(session.id),
       ]),
       builder: (_, _) {
+        assert(() {
+          debugBuildCount++;
+          return true;
+        }());
         final layout = ChatLayout(
           viewportWidth: MediaQuery.of(context).size.width,
         );
