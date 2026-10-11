@@ -355,7 +355,8 @@ void main() {
     await tester.tap(find.text('Fetch models'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    await reveal(tester, find.textContaining('Fetch failed:'));
+    await reveal(tester, find.text('Unexpected response from provider. Check the base URL.'));
+    expect(find.textContaining('FormatException'), findsNothing);
     fetchProviderModelsForTest = (_) async => null;
     await reveal(tester, find.text('Fetch models'));
     await tester.tap(find.text('Fetch models'));
