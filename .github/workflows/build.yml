@@ -4,7 +4,7 @@ on:
   push:
     # hoplite/** — agent thread branches: push builds a device-testable
     # debug APK before review, so fixes can be tested without merging.
-    branches: [main, ci/verified-android-build-20260827, 'hoplite/**']
+    branches: [main, ci/verified-android-build-20260827, 'hoplite/**', 'harness/**']
   pull_request:
     branches: [main, ci/verified-android-build-20260827]
   workflow_dispatch:
