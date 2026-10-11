@@ -1,6 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../core/health_service.dart';
+import '../core/sandbox_service.dart';
+import '../core/state.dart';
 import '../core/theme.dart';
+import 'providers_screen.dart';
+import 'sandbox_setup.dart';
 import 'settings_action_widgets.dart';
 import 'widgets/aether_primitives.dart';
 
@@ -12,9 +18,24 @@ import 'widgets/aether_primitives.dart';
 /// wiring — [HealthService.runChecks], [HealthService.repair], the
 /// per-check `repairable` targeting set, the cancellable repair worker,
 /// and the dispose-time `cancelRepair` guard — is preserved verbatim.
+///
+/// This is the only Device health screen: the Services (MCP & plugins)
+/// section and the sandbox Hard reset were ported here from the retired
+/// legacy `HealthScreen`. Without a sandbox the per-runtime checks collapse
+/// into one "Install sandbox" card instead of 16 identical failures.
 class SettingsHealthScreen extends StatefulWidget {
   final HealthService? service;
-  const SettingsHealthScreen({super.key, this.service});
+
+  /// Overrides for the two CTAs (tests). Defaults open sandbox setup and the
+  /// Providers screen respectively.
+  final VoidCallback? onInstallSandbox;
+  final VoidCallback? onOpenProviders;
+  const SettingsHealthScreen({
+    super.key,
+    this.service,
+    this.onInstallSandbox,
+    this.onOpenProviders,
+  });
   @override
   State<SettingsHealthScreen> createState() => _SettingsHealthScreenState();
 }
@@ -24,7 +45,12 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
   final List<String> _log = [];
   final Set<String> _selected = {};
   bool _starting = false;
+  bool _resetting = false;
   String? _result;
+
+  /// Wall-clock start of the running repair, for the elapsed-time readout.
+  DateTime? _repairStartedAt;
+  Timer? _elapsedTicker;
 
   @override
   void initState() {
@@ -54,8 +80,84 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
 
   @override
   void dispose() {
+    _elapsedTicker?.cancel();
     if (_starting && _health.repairing) _health.cancelRepair();
     super.dispose();
+  }
+
+  Future<void> _installSandbox() async {
+    final override = widget.onInstallSandbox;
+    if (override != null) return override();
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const SandboxSetupScreen()));
+    if (mounted) await _check();
+  }
+
+  void _openProviders() {
+    final override = widget.onOpenProviders;
+    if (override != null) return override();
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const ProvidersScreen()));
+  }
+
+  /// PR47/K6: hard reset — delete the whole sandbox prefix + reinstall from
+  /// the bundled bootstrap in the SHELL (SandboxSetupScreen drives its own
+  /// progress). Points the user at a healthy state even when self-heal
+  /// saturates on older/corrupt installs. Ported from the legacy screen.
+  Future<void> _hardResetSandbox() async {
+    if (_resetting || _starting || _health.repairing || _health.checking) {
+      return;
+    }
+    setState(() {
+      _resetting = true;
+      _result = null;
+      _log
+        ..clear()
+        ..add('ovid: deleting sandbox prefix…');
+    });
+    try {
+      await SandboxService.I.uninstall();
+      if (!mounted) return;
+      setState(() => _log.add('ovid: deleted — reopening setup gate…'));
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => const SandboxSetupScreen(gateMode: true),
+        ),
+      );
+      // Back from the gate — the sandbox should be installed again. Skip
+      // re-probing if this screen has been disposed while the gate was up.
+      if (!mounted) return;
+      await _health.runChecks();
+    } catch (e) {
+      if (mounted) setState(() => _log.add('ovid: reset failed: $e'));
+    } finally {
+      if (mounted) setState(() => _resetting = false);
+    }
+  }
+
+  Future<void> _confirmHardReset() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset the sandbox?'),
+        content: const Text(
+          'This deletes the sandbox prefix and opens setup again. Existing app data outside the sandbox is not affected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Reset sandbox'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) await _hardResetSandbox();
   }
 
   Future<void> _repair() async {
@@ -69,6 +171,11 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
       _starting = true;
       _result = null;
       _log.clear();
+      _repairStartedAt = DateTime.now();
+    });
+    _elapsedTicker?.cancel();
+    _elapsedTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
     });
     try {
       await _health.repair((line) {
@@ -93,8 +200,20 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
         setState(() => _result = message);
       }
     } finally {
-      if (mounted) setState(() => _starting = false);
+      _elapsedTicker?.cancel();
+      _elapsedTicker = null;
+      if (mounted) {
+        setState(() {
+          _starting = false;
+          _repairStartedAt = null;
+        });
+      }
     }
+  }
+
+  Duration? get _elapsed {
+    final started = _repairStartedAt;
+    return started == null ? null : DateTime.now().difference(started);
   }
 
   void _toggle(String id, bool value) {
@@ -121,10 +240,10 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
       backgroundColor: Aether.bg,
       appBar: AppBar(title: const Text('Device health')),
       body: AnimatedBuilder(
-        animation: _health,
+        animation: Listenable.merge([_health, AppState.I]),
         builder: (_, _) {
           final report = _health.lastReport;
-          final busy = _starting || _health.repairing;
+          final busy = _starting || _resetting || _health.repairing;
           final checks = report?.checks ?? const <HealthCheck>[];
           final available = checks.where((check) => check.ok).length;
           final attention = checks
@@ -137,6 +256,19 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
               .length;
           final unavailable = checks.length - available - attention;
           final repairable = checks.where((check) => check.repairable).length;
+          // No sandbox: every runtime and storage check fails for the same
+          // reason, so they collapse into one actionable card.
+          final sandbox = checks.where((c) => c.id == 'sandbox').firstOrNull;
+          final noSandbox = sandbox != null && !sandbox.ok;
+          final dependent = noSandbox
+              ? checks
+                    .where((c) => c.id != 'sandbox' && c.id != 'provider')
+                    .toList()
+              : const <HealthCheck>[];
+          final visibleChecks = noSandbox
+              ? checks.where((c) => c.id == 'provider').toList()
+              : checks;
+          final services = AppState.I.serviceStatus;
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
             children: [
@@ -153,7 +285,16 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
                 ),
               if (_health.checking) ...[
                 const SizedBox(height: 12),
-                const LinearProgressIndicator(),
+                const LinearProgressIndicator(
+                  semanticsLabel: 'Checking device health',
+                ),
+              ],
+
+              // A failed check run has no report to show: put its outcome at
+              // the top. Repair outcomes sit next to the repair controls.
+              if (_result != null && report == null) ...[
+                const SizedBox(height: 12),
+                _ResultCard(message: _result!),
               ],
 
               // ── Runtime health ──
@@ -165,7 +306,18 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
               ),
               const SizedBox(height: 12),
 
-              if (_health.repairWorker == null)
+              if (noSandbox) ...[
+                _NoSandboxCard(
+                  // "Missing" is what the card already says; any other failure
+                  // (a probe error) is worth showing verbatim.
+                  detail: sandbox.status == HealthStatus.missing
+                      ? null
+                      : sandbox.detail,
+                  hiddenChecks: dependent.length,
+                  onInstall: busy || _health.checking ? null : _installSandbox,
+                ),
+                const SizedBox(height: 12),
+              ] else if (_health.repairWorker == null)
                 _NoWorkerCard()
               else ...[
                 _RepairControls(
@@ -175,23 +327,27 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
                   canRepair: !_health.checking && _selected.isNotEmpty,
                   selectedCount: _selected.length,
                   repairableCount: repairable,
+                  elapsed: _elapsed,
                   onRepair: _repair,
                   onCancel: _health.cancelRepair,
                 ),
                 const SizedBox(height: 12),
               ],
 
-              if (_result != null) ...[
+              if (_result != null && report != null) ...[
                 _ResultCard(message: _result!),
                 const SizedBox(height: 12),
               ],
 
-              for (final check in report?.checks ?? <HealthCheck>[]) ...[
+              for (final check in visibleChecks) ...[
                 _HealthCheckCard(
                   check: check,
                   selectable: check.repairable && _health.repairWorker != null,
                   selected: _selected.contains(check.id),
                   onChanged: busy || _health.checking ? null : _toggle,
+                  onOpenProviders: check.id == 'provider' && !check.ok
+                      ? _openProviders
+                      : null,
                 ),
                 const SizedBox(height: 8),
               ],
@@ -202,11 +358,31 @@ class _SettingsHealthScreenState extends State<SettingsHealthScreen> {
                 const SizedBox(height: 12),
               ],
 
-              const SizedBox(height: 8),
-              SettingsActionButton(
-                label: 'Re-run checks',
-                icon: Icons.refresh,
-                onPressed: busy || _health.checking ? null : _check,
+              // ── Services (MCP & plugins) ──
+              if (services.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                AetherSectionTitle(
+                  eyebrow: 'Services',
+                  subtitle:
+                      '${services.values.where((s) => s.health == ServiceHealth.working).length} of ${services.length} working',
+                ),
+                const SizedBox(height: 12),
+                for (final entry in services.entries) ...[
+                  _ServiceCard(
+                    name: entry.key,
+                    status: entry.value,
+                    onRetry: busy || _health.checking ? null : _check,
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ],
+
+              // ── Diagnostics: re-run + hard reset ──
+              const SizedBox(height: 12),
+              _DangerActionsCard(
+                resetting: _resetting,
+                onReset: busy || _health.checking ? null : _confirmHardReset,
+                onReRun: busy || _health.checking ? null : _check,
               ),
             ],
           );
@@ -336,6 +512,9 @@ class _RepairControls extends StatelessWidget {
   final bool canRepair;
   final int selectedCount;
   final int repairableCount;
+
+  /// Time since the running repair started (null when idle).
+  final Duration? elapsed;
   final VoidCallback onRepair;
   final VoidCallback onCancel;
   const _RepairControls({
@@ -345,6 +524,7 @@ class _RepairControls extends StatelessWidget {
     required this.canRepair,
     required this.selectedCount,
     required this.repairableCount,
+    this.elapsed,
     required this.onRepair,
     required this.onCancel,
   });
@@ -382,6 +562,20 @@ class _RepairControls extends StatelessWidget {
             '$selectedCount selected · $repairableCount repairable',
             style: AetherType.caption,
           ),
+          if (repairing) ...[
+            const SizedBox(height: 12),
+            // A signed install can take minutes; an indeterminate bar and a
+            // ticking clock show it is still working.
+            const LinearProgressIndicator(
+              semanticsLabel: 'Runtime repair in progress',
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Installing signed packages · elapsed ${_formatElapsed(elapsed ?? Duration.zero)}'
+              ' · this can take several minutes',
+              style: AetherType.caption,
+            ),
+          ],
           const SizedBox(height: 12),
           if (repairing)
             SettingsActionButton(
@@ -397,6 +591,71 @@ class _RepairControls extends StatelessWidget {
               primary: true,
               onPressed: busy || !canRepair ? null : onRepair,
             ),
+        ],
+      ),
+    );
+  }
+}
+
+String _formatElapsed(Duration d) {
+  final m = d.inMinutes;
+  final s = (d.inSeconds % 60).toString().padLeft(2, '0');
+  return '$m:$s';
+}
+
+/// Shown instead of every runtime/storage check when the sandbox is missing:
+/// one reason, one action.
+class _NoSandboxCard extends StatelessWidget {
+  final String? detail;
+  final int hiddenChecks;
+  final VoidCallback? onInstall;
+  const _NoSandboxCard({
+    required this.detail,
+    required this.hiddenChecks,
+    required this.onInstall,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AetherCard(
+      key: const ValueKey('health-no-sandbox'),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: AetherStatusDot(color: Aether.warn, size: 10),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Sandbox not installed', style: AetherType.title),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Python, Node.js, git, shell tools and workspace '
+                      'storage ($hiddenChecks checks) need the on-device '
+                      'Linux sandbox.${detail == null ? '' : ' $detail'}',
+                      style: AetherType.caption,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SettingsActionButton(
+            label: 'Install sandbox',
+            icon: Icons.download_outlined,
+            primary: true,
+            onPressed: onInstall,
+          ),
         ],
       ),
     );
@@ -463,12 +722,25 @@ class _HealthCheckCard extends StatelessWidget {
   final bool selectable;
   final bool selected;
   final void Function(String id, bool value)? onChanged;
+
+  /// Set for the provider check when it fails: an "Open Providers" button.
+  final VoidCallback? onOpenProviders;
   const _HealthCheckCard({
     required this.check,
     required this.selectable,
     required this.selected,
     required this.onChanged,
+    this.onOpenProviders,
   });
+
+  String get _statusWord => switch (check.status) {
+    HealthStatus.available => 'Available',
+    HealthStatus.missingConfiguration => 'Missing configuration',
+    HealthStatus.missing => 'Missing',
+    HealthStatus.denied => 'Permission denied',
+    HealthStatus.unsupported => 'Unsupported',
+    HealthStatus.failed => 'Failed',
+  };
 
   Color get _dotColor {
     if (check.ok) return Aether.success;
@@ -503,8 +775,25 @@ class _HealthCheckCard extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(check.name, style: AetherType.title),
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
+                // The status word carries the meaning the dot colour alone
+                // cannot (colour-blind users, screen readers).
+                Text(
+                  _statusWord,
+                  style: AetherType.caption.copyWith(color: _dotColor),
+                ),
+                const SizedBox(height: 2),
                 Text(check.detail, style: AetherType.caption),
+                if (onOpenProviders != null) ...[
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: AetherGhostButton(
+                      label: 'Open Providers',
+                      onPressed: onOpenProviders,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -520,6 +809,132 @@ class _HealthCheckCard extends StatelessWidget {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ServiceCard extends StatelessWidget {
+  final String name;
+  final ServiceStatus status;
+  final VoidCallback? onRetry;
+  const _ServiceCard({
+    required this.name,
+    required this.status,
+    required this.onRetry,
+  });
+
+  Color get _dotColor {
+    switch (status.health) {
+      case ServiceHealth.working:
+        return Aether.success;
+      case ServiceHealth.connecting:
+        return Aether.warn;
+      case ServiceHealth.failed:
+        return Aether.danger;
+    }
+  }
+
+  String get _lastCheckCaption {
+    final detail = status.detail.trim();
+    final t = status.updatedAt;
+    final hh = t.hour.toString().padLeft(2, '0');
+    final mm = t.minute.toString().padLeft(2, '0');
+    final time = 'last check $hh:$mm';
+    if (detail.isEmpty) return time;
+    return '$time · $detail';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final connecting = status.health == ServiceHealth.connecting;
+    return AetherCard(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: connecting
+                ? const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Aether.accent,
+                    ),
+                  )
+                : AetherStatusDot(
+                    color: _dotColor,
+                    size: 10,
+                    // A pulsing dot keeps a ticker alive forever; the red
+                    // tint + Retry carry the "needs attention" affordance.
+                    pulsing: false,
+                  ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(name, style: AetherType.title),
+                Text(switch (status.health) {
+                  ServiceHealth.working => 'Working',
+                  ServiceHealth.connecting => 'Connecting',
+                  ServiceHealth.failed => 'Failed',
+                }, style: AetherType.caption.copyWith(color: _dotColor)),
+                const SizedBox(height: 2),
+                Text(_lastCheckCaption, style: AetherType.caption),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          AetherGhostButton(
+            label: 'Retry',
+            onPressed: connecting ? null : onRetry,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DangerActionsCard extends StatelessWidget {
+  final bool resetting;
+  final VoidCallback? onReset;
+  final VoidCallback? onReRun;
+  const _DangerActionsCard({
+    required this.resetting,
+    required this.onReset,
+    required this.onReRun,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // PR47/K6: Hard reset — a broken sandbox (bad clone, stuck stale state,
+    // orphaned apt processes) wants a full wipe and re-extraction. Deleting
+    // the whole prefix and re-running the setup gate is the only honest way
+    // to prove the ground.
+    return AetherCard(
+      title: const Text('Diagnostics'),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SettingsActionButton(
+            label: 'Re-run checks',
+            icon: Icons.refresh,
+            onPressed: onReRun,
+          ),
+          const SizedBox(height: 10),
+          SettingsActionButton(
+            label: resetting ? 'Resetting sandbox…' : 'Hard reset the sandbox',
+            icon: Icons.delete_sweep_outlined,
+            danger: true,
+            onPressed: onReset,
+          ),
         ],
       ),
     );

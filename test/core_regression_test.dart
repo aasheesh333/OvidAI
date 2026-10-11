@@ -40,7 +40,7 @@ import 'package:ovid_ai/core/health_service.dart';
 import 'package:ovid_ai/core/skills.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
-import 'package:ovid_ai/ui/health_screen.dart';
+import 'package:ovid_ai/ui/settings_health_screen.dart';
 import 'package:ovid_ai/ui/plugin_permission_sheet.dart';
 import 'package:ovid_ai/ui/plugins_screen.dart'
     show
@@ -10620,8 +10620,9 @@ url = "https://api.example.com/mcp"
       },
     );
 
-    test('K6: HealthScreen offers hard reset sandbox action', () {
-      final src = File('lib/ui/health_screen.dart').readAsStringSync();
+    test('K6: Device health offers hard reset sandbox action', () {
+      // Ported from the retired legacy HealthScreen (F-154).
+      final src = File('lib/ui/settings_health_screen.dart').readAsStringSync();
       expect(src, contains('Future<void> _hardResetSandbox()'));
       expect(src, contains('SandboxService.I.uninstall()'));
       expect(src, contains('SandboxSetupScreen(gateMode: true)'));
@@ -12697,7 +12698,7 @@ You are an expert security auditor reviewing code for vulnerabilities.
           },
         );
 
-        testWidgets('HEALTH4: HealthScreen surfaces services health section', (
+        testWidgets('HEALTH4: Device health surfaces services health section', (
           tester,
         ) async {
           AppState.I.updateServiceStatus(
@@ -12724,7 +12725,10 @@ You are an expert security auditor reviewing code for vulnerabilities.
           HealthService.I.checking = false;
 
           await tester.pumpWidget(
-            MaterialApp(theme: Aether.theme(), home: const HealthScreen()),
+            MaterialApp(
+              theme: Aether.theme(),
+              home: const SettingsHealthScreen(),
+            ),
           );
           await tester.pump();
 

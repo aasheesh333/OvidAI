@@ -3140,15 +3140,25 @@ audit=false
   /// exitCode != 0 even when the command printed something on stderr
   /// (e.g. the dynamic linker's "CANNOT LINK EXECUTABLE" errors, which
   /// used to make sanity checks false-positive).
+  ///
+  /// [onLine] receives stdout/stderr lines as they are produced (the full
+  /// output is still returned), so long installs can show live progress.
   Future<(int, String)> execChecked(
     List<String> args, {
     String? cwd,
     Directory? hostWorkDir,
     Map<String, String>? env,
+    void Function(String line)? onLine,
   }) async {
     if (Zone.current[_processScopeKey] == null) {
       return withProcessScope(
-        () => execChecked(args, cwd: cwd, hostWorkDir: hostWorkDir, env: env),
+        () => execChecked(
+          args,
+          cwd: cwd,
+          hostWorkDir: hostWorkDir,
+          env: env,
+          onLine: onLine,
+        ),
       );
     }
     checkCancellation();
@@ -3179,6 +3189,7 @@ audit=false
           cwd ??
           (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
       environment: merged,
+      onLine: onLine,
     );
     return (result.exitCode, '${result.stdout}${result.stderr}');
   }

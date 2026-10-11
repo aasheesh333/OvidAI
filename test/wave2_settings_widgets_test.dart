@@ -28,7 +28,13 @@ void main() {
       MaterialApp(home: SettingsHealthScreen(service: health)),
     );
     await tester.pumpAndSettle();
-    final firstCheckbox = find.byType(Checkbox, skipOffstage: false).first;
+    // Cards carry a status word now, so the first repairable runtime can sit
+    // below the fold of a lazily built list: scroll it in.
+    for (var i = 0; i < 20 && find.byType(Checkbox).evaluate().isEmpty; i++) {
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
+      await tester.pump();
+    }
+    final firstCheckbox = find.byType(Checkbox).first;
     await tester.ensureVisible(firstCheckbox);
     await tester.pumpAndSettle();
     await tester.tap(firstCheckbox);
@@ -41,9 +47,13 @@ void main() {
     );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Repair selected runtimes'));
-    await tester.pumpAndSettle();
+    // While the repair runs an indeterminate bar and the elapsed clock keep
+    // animating, so pump bounded frames instead of settling.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
     await tester.tap(find.text('Cancel repair'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
     expect(find.text('Waiting for worker to stop…'), findsOneWidget);
     stopped.complete();
     await tester.pumpAndSettle();
@@ -203,7 +213,8 @@ void main() {
         find.text('AI provider configuration'),
         500,
       );
-      expect(find.textContaining('Missing configuration'), findsOneWidget);
+      // The status word; the detail line also mentions it.
+      expect(find.text('Missing configuration'), findsOneWidget);
     },
   );
 }

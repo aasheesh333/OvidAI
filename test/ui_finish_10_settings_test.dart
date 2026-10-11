@@ -16,7 +16,6 @@ import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/settings_backup_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
-import 'package:ovid_ai/ui/health_screen.dart';
 import 'package:ovid_ai/ui/settings_action_widgets.dart';
 import 'package:ovid_ai/ui/settings_backup_screen.dart';
 import 'package:ovid_ai/ui/settings_health_screen.dart';
@@ -342,7 +341,7 @@ void main() {
     final health = HealthService(installed: () async => true,
       exec: (_) async => (0, 'version'), workspace: () async {},
       providerConfigured: () => throw StateError('configuration unavailable'));
-    await tester.pumpWidget(host(HealthScreen(service: health), scale: 2));
+    await tester.pumpWidget(host(SettingsHealthScreen(service: health), scale: 2));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.textContaining('Health checks failed'), findsOneWidget);
@@ -359,7 +358,7 @@ void main() {
       final health = HealthService(installed: () async => true,
         exec: (_) async => (127, 'missing'), workspace: () async {},
         providerConfigured: () => false);
-      await tester.pumpWidget(host(HealthScreen(service: health), scale: size.width == 360 ? 2 : 1));
+      await tester.pumpWidget(host(SettingsHealthScreen(service: health), scale: size.width == 360 ? 2 : 1));
       await tester.pumpAndSettle();
       expect(find.text('Overall health'), findsOneWidget);
       expect(tester.takeException(), isNull);
