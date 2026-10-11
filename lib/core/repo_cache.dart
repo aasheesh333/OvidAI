@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -8,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'diag.dart';
 import 'github_http_error.dart';
+import 'line_diff.dart';
 import 'studio_drafts.dart';
 import 'workspace_files.dart';
 
@@ -182,39 +184,122 @@ class CommitApproval {
   final Map<String, String?> _stagedModes, _revisions;
   List<String> get paths => List.unmodifiable(contents.keys);
 
-  /// Full-file unified hunks avoid a misleading truncated/summary-only diff.
-  /// Missing trailing newlines are explicit, including for empty files.
-  String get diff {
-    final out = StringBuffer();
-    List<String> lines(String? text) {
-      if (text == null || text.isEmpty) return [];
-      final parts = text.split('\n');
-      if (parts.last.isEmpty) parts.removeLast();
-      return parts;
+  final _DiffCache _diffCache = _DiffCache();
+
+  List<FileDiffInput> _diffInput() => [
+    for (final path in paths)
+      (
+        path: path,
+        before: originals[path],
+        after: contents[path],
+        oldMode: originalModes[path],
+        newMode: modes[path],
+      ),
+  ];
+
+  /// Per-file unified diff (real line diff, 3 lines of context), computed
+  /// once and cached on the approval. Missing trailing newlines are explicit.
+  List<FileDiff> get fileDiffs =>
+      _diffCache.files ??= List.unmodifiable(buildFileDiffs(_diffInput()));
+
+  /// Same as [fileDiffs], but large inputs are diffed off the UI isolate.
+  Future<List<FileDiff>> fileDiffsAsync() async {
+    final cached = _diffCache.files;
+    if (cached != null) return cached;
+    final input = _diffInput();
+    var size = 0;
+    for (final f in input) {
+      size += (f.before?.length ?? 0) + (f.after?.length ?? 0);
     }
-    void body(String? text, String prefix) {
-      for (final line in lines(text)) { out.writeln('$prefix$line'); }
-      if (text != null && text.isNotEmpty && !text.endsWith('\n')) {
-        out.writeln(r'\ No newline at end of file');
+    if (size < _isolateDiffThreshold) return fileDiffs;
+    final result = await Isolate.run(() => buildFileDiffs(input));
+    return _diffCache.files ??= List.unmodifiable(result);
+  }
+
+  static const int _isolateDiffThreshold = 256 * 1024;
+
+  /// The whole review as unified-diff text (agent approval prompt, tests).
+  String get diff => _diffCache.text ??= fileDiffs
+      .expand((f) => [...f.header, ...f.lines])
+      .map((l) => '$l\n')
+      .join();
+}
+
+/// What [buildFileDiffs] diffs for one approved path.
+typedef FileDiffInput = ({
+  String path,
+  String? before,
+  String? after,
+  String? oldMode,
+  String? newMode,
+});
+
+class _DiffCache {
+  List<FileDiff>? files;
+  String? text;
+}
+
+/// One file's section of a commit review.
+@immutable
+class FileDiff {
+  const FileDiff({
+    required this.path,
+    required this.header,
+    required this.lines,
+    required this.added,
+    required this.removed,
+  });
+
+  final String path;
+
+  /// `diff --git`, mode and `---`/`+++` lines.
+  final List<String> header;
+
+  /// Hunk headers and bodies (`@@ …`, ` ctx`, `-old`, `+new`, `\ No newline…`).
+  final List<String> lines;
+  final int added, removed;
+}
+
+/// Builds per-file diffs. Top-level so it can run in `Isolate.run`.
+List<FileDiff> buildFileDiffs(List<FileDiffInput> input) {
+  final out = <FileDiff>[];
+  for (final f in input) {
+    final quoted = jsonEncode(f.path);
+    final header = <String>['diff --git $quoted $quoted'];
+    if (f.before == null) {
+      header.add('new file mode ${f.newMode}');
+    } else if (f.after == null) {
+      header.add('deleted file mode ${f.oldMode}');
+    } else if (f.oldMode != f.newMode) {
+      header..add('old mode ${f.oldMode}')..add('new mode ${f.newMode}');
+    } else {
+      header.add('file mode ${f.newMode} (unchanged)');
+    }
+    if (f.before == f.after) {
+      out.add(FileDiff(path: f.path, header: header, lines: const [],
+          added: 0, removed: 0));
+      continue;
+    }
+    header
+      ..add('--- ${f.before == null ? '/dev/null' : 'a/$quoted'}')
+      ..add('+++ ${f.after == null ? '/dev/null' : 'b/$quoted'}');
+    final hunks = unifiedHunks(f.before, f.after);
+    var added = 0, removed = 0;
+    for (final h in hunks) {
+      for (final l in h.lines) {
+        if (l.kind == '+') added++;
+        if (l.kind == '-') removed++;
       }
     }
-    for (final path in paths) {
-      final before = originals[path], after = contents[path];
-      final quoted = jsonEncode(path);
-      out.writeln('diff --git $quoted $quoted');
-      out.writeln(before == null ? 'new file mode ${modes[path]}' :
-          after == null ? 'deleted file mode ${originalModes[path]}' :
-          originalModes[path] != modes[path] ? 'old mode ${originalModes[path]}\nnew mode ${modes[path]}' :
-          'file mode ${modes[path]} (unchanged)');
-      if (before == after) continue;
-      out.writeln('--- ${before == null ? '/dev/null' : 'a/$quoted'}');
-      out.writeln('+++ ${after == null ? '/dev/null' : 'b/$quoted'}');
-      out.writeln('@@ -${lines(before).isEmpty ? 0 : 1},${lines(before).length} +${lines(after).isEmpty ? 0 : 1},${lines(after).length} @@');
-      body(before, '-');
-      body(after, '+');
-    }
-    return out.toString();
+    out.add(FileDiff(
+      path: f.path,
+      header: List.unmodifiable(header),
+      lines: List.unmodifiable(renderHunks(hunks)),
+      added: added,
+      removed: removed,
+    ));
   }
+  return out;
 }
 
 /// What the last successful [RepoCache.commitAll] actually did.

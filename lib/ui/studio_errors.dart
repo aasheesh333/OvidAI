@@ -100,6 +100,15 @@ class StudioFailure {
 
   /// Copy for a failed commit, by [CommitFailure.kind].
   static String commitMessage(CommitFailure f) => switch (f.kind) {
+    CommitFailureKind.staleApproval
+        when f.message.contains('message is empty') =>
+      'Write a commit message first.',
+    CommitFailureKind.staleApproval when f.message.contains('Select pending') =>
+      'Select at least one file to commit.',
+    CommitFailureKind.staleApproval
+        when f.message.contains('absent upstream') =>
+      'A file you are deleting no longer exists on GitHub. Sync, then review '
+          'again.',
     CommitFailureKind.staleApproval =>
       'Your files changed after you reviewed them. Review the changes again '
           'before committing.',

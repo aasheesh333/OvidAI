@@ -930,10 +930,13 @@ class _StudioScreenState extends State<StudioScreen> {
     if (_committing) return;
     setState(() => _committing = true);
     try {
-      final count = await showDialog<int>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const StudioCommitDialog(),
+      // Full-screen route, not an AlertDialog: a review of many files (or a
+      // lockfile) needs the whole screen, a lazy list and room for the IME.
+      final count = await Navigator.of(context).push<int>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => const StudioCommitDialog(),
+        ),
       );
       if (!mounted || count == null) return;
       final mode = RepoCache.I.lastCommit?.mode == CommitMode.atomic
@@ -1302,9 +1305,25 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
   late final List<String> _paths = RepoCache.I.pendingPaths.toList();
   late final Set<String> _selected = _paths.toSet();
   CommitApproval? _approval;
+  List<FileDiff>? _diffs;
   String? _error;
+  String? _errorDetail;
+
+  /// Set when GitHub did not confirm a publication: the intended commit SHA
+  /// the user can copy and check (CommitFailureKind.unknown).
+  String? _unknownSha;
   bool _busy = false;
   int _revision = 0;
+  final Set<String> _collapsed = {};
+  final Set<String> _showFull = {};
+  bool _showErrorDetail = false;
+
+  /// Rendered diff lines per file before "Show full diff" (large lockfiles
+  /// and minified bundles must not lay out megabytes of text).
+  static const int maxRenderedLinesPerFile = 400;
+
+  /// A single rendered diff line is clipped to this many characters.
+  static const int maxRenderedLineChars = 400;
 
   @override
   void initState() {
@@ -1315,7 +1334,39 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
 
   void _invalidate() {
     if (!mounted) return;
-    setState(() { _revision++; _approval = null; });
+    setState(() { _revision++; _approval = null; _diffs = null; });
+  }
+
+  void _setError(Object e) {
+    final f = StudioFailure.of(e);
+    _error = e is StateError && '$e'.contains('No unresolved commit intent')
+        ? 'There is no interrupted commit to check.'
+        : f.message;
+    _errorDetail = f.detail == _error ? null : f.detail;
+    _showErrorDetail = false;
+    _unknownSha = e is CommitFailure && e.kind == CommitFailureKind.unknown
+        ? e.intendedSha
+        : _unknownSha;
+  }
+
+  void _clearError() {
+    _error = null;
+    _errorDetail = null;
+  }
+
+  void _setApproval(CommitApproval approval) {
+    _approval = approval;
+    _diffs = null;
+    final revision = _revision;
+    approval.fileDiffsAsync().then((diffs) {
+      if (mounted && identical(_approval, approval) && revision == _revision) {
+        setState(() => _diffs = diffs);
+      }
+    }, onError: (Object e) {
+      if (mounted && identical(_approval, approval)) {
+        setState(() => _setError(e));
+      }
+    });
   }
 
   void _cacheChanged() {
@@ -1335,19 +1386,19 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
       RepoCache.I.validateApproval(_approval!);
     } catch (e) {
       _invalidate();
-      setState(() => _error = '$e');
+      setState(() => _setError(e));
     }
   }
 
   Future<void> _review() async {
     final revision = _revision;
-    setState(() { _busy = true; _error = null; _approval = null; });
+    setState(() { _busy = true; _clearError(); _approval = null; _diffs = null; });
     try {
       final approval = await RepoCache.I.prepareCommit(_message.text,
           paths: _selected, client: widget.client);
-      if (mounted && revision == _revision) setState(() => _approval = approval);
+      if (mounted && revision == _revision) setState(() => _setApproval(approval));
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _setError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1356,29 +1407,32 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
   Future<void> _publish() async {
     final approval = _approval;
     if (approval == null) return;
-    setState(() { _busy = true; _error = null; });
+    setState(() { _busy = true; _clearError(); });
     try {
       final count = await RepoCache.I.commitApproved(approval, client: widget.client);
       if (mounted) Navigator.of(context).pop(count);
     } catch (e) {
-      if (mounted) setState(() { _error = '$e'; _approval = null; });
+      if (mounted) setState(() { _setError(e); _approval = null; _diffs = null; });
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   Future<void> _reconcile() async {
-    setState(() { _busy = true; _error = null; });
+    setState(() { _busy = true; _clearError(); });
     try {
       final count = await RepoCache.I.reconcilePending(client: widget.client);
       if (!mounted) return;
       if (count != null) {
         Navigator.of(context).pop(count);
       } else {
-        setState(() => _error = 'No unresolved commit intent');
+        setState(() {
+          _unknownSha = null;
+          _error = 'There is no interrupted commit to check.';
+        });
       }
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _setError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -1424,52 +1478,207 @@ class _StudioCommitDialogState extends State<StudioCommitDialog> {
     super.dispose();
   }
 
+  Color _diffColor(String line) {
+    if (line.startsWith('@@')) return Aether.accent;
+    if (line.startsWith('+')) return Aether.successLight;
+    if (line.startsWith('-')) return Aether.danger;
+    return Aether.textMuted;
+  }
+
+  Widget _diffLine(String line) {
+    final shown = line.length > maxRenderedLineChars
+        ? '${line.substring(0, maxRenderedLineChars)}… (${line.length - maxRenderedLineChars} more characters)'
+        : line;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Text(
+        shown,
+        softWrap: true,
+        style: TextStyle(
+          fontFamily: Aether.mono,
+          fontFamilyFallback: kStudioMonoFallback,
+          fontSize: kStudioMinFontSize,
+          height: 1.45,
+          color: _diffColor(line),
+        ),
+      ),
+    );
+  }
+
+  /// The review body as lazily-built rows: only what is on screen is laid
+  /// out, so a large diff cannot jank or exhaust memory.
+  List<WidgetBuilder> _rows(CommitApproval? approval) {
+    final rows = <WidgetBuilder>[
+      (_) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Text('${RepoCache.I.repoFull} · ${RepoCache.I.defaultBranch}',
+            style: AetherType.bodyMuted),
+      ),
+      for (final path in _paths)
+        (_) => CheckboxListTile(
+          title: Text(path), value: _selected.contains(path),
+          subtitle: Text(RepoCache.I.isStagedDeletion(path)
+              ? 'Staged deletion · disk unchanged'
+              : RepoCache.I.stagedMode(path) == null
+              ? 'Content · review exact diff'
+              : 'Staged Git mode ${RepoCache.I.stagedMode(path)}'),
+          secondary: StudioStagingMenu(path: path, enabled: !_busy),
+          onChanged: _busy ? null : (value) {
+            _invalidate();
+            setState(() { if (value == true) { _selected.add(path); } else { _selected.remove(path); } });
+          },
+        ),
+      if (RepoCache.I.workspaceFolder != null)
+        (_) => Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(onPressed: _busy ? null : _stageMissingDeletion,
+              child: const Text('Stage missing file deletion')),
+        ),
+      (_) => const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: Text('Staging does not change disk files or permissions.'),
+      ),
+    ];
+    if (approval != null) {
+      final base = approval.baseCommit;
+      rows.add((_) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+        child: SelectableText(
+          'Repository: ${approval.repo}\nBranch: ${approval.branch}\n'
+          'Base: ${base.length > 7 ? base.substring(0, 7) : base}\n'
+          'Message: ${approval.message}\n'
+          'Selected paths:\n${approval.paths.map((p) => '  $p').join('\n')}',
+        ),
+      ));
+      final diffs = _diffs;
+      if (diffs == null) {
+        rows.add((_) => const Padding(
+          padding: EdgeInsets.all(16),
+          child: Text('Preparing diff…'),
+        ));
+      } else {
+        for (final f in diffs) {
+          final collapsed = _collapsed.contains(f.path);
+          rows.add((_) => InkWell(
+            onTap: () => setState(() {
+              if (!_collapsed.remove(f.path)) _collapsed.add(f.path);
+            }),
+            child: Container(
+              color: Aether.surfaceAlt,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(children: [
+                Icon(collapsed ? Icons.chevron_right : Icons.expand_more, size: 18),
+                const SizedBox(width: 6),
+                Expanded(child: Text(f.path, style: const TextStyle(fontWeight: FontWeight.w600))),
+                Text('+${f.added} −${f.removed}', style: AetherType.caption),
+              ]),
+            ),
+          ));
+          if (collapsed) continue;
+          final body = [...f.header.skip(1), ...f.lines];
+          final full = _showFull.contains(f.path);
+          final shown = full || body.length <= maxRenderedLinesPerFile
+              ? body.length
+              : maxRenderedLinesPerFile;
+          for (var i = 0; i < shown; i++) {
+            final line = body[i];
+            rows.add((_) => _diffLine(line));
+          }
+          if (shown < body.length) {
+            rows.add((_) => Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () => setState(() => _showFull.add(f.path)),
+                child: Text('Show full diff (${body.length - shown} more lines)'),
+              ),
+            ));
+          }
+        }
+      }
+    }
+    if (_error != null) {
+      rows.add((context) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+          if (_unknownSha != null) ...[
+            const SizedBox(height: 6),
+            SelectableText('Intended commit: $_unknownSha',
+                style: TextStyle(fontFamily: Aether.mono,
+                    fontFamilyFallback: kStudioMonoFallback, fontSize: 12)),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _busy ? null : _reconcile,
+                icon: const Icon(Icons.fact_check_outlined, size: 18),
+                label: const Text('Check status'),
+              ),
+            ),
+          ],
+          if (_errorDetail != null && _errorDetail!.isNotEmpty) ...[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () => setState(() => _showErrorDetail = !_showErrorDetail),
+                child: Text(_showErrorDetail ? 'Hide details' : 'Details'),
+              ),
+            ),
+            if (_showErrorDetail)
+              Text(_errorDetail!, style: TextStyle(fontSize: kStudioMinFontSize,
+                  color: Aether.textFaint)),
+          ],
+        ]),
+      ));
+    }
+    return rows;
+  }
+
   @override
   Widget build(BuildContext context) {
     final approval = _approval;
-    return PopScope(canPop: !_busy, child: AlertDialog(
-      scrollable: true,
-      title: const Text('Review commit'),
-      content: SizedBox(width: 640, child: SingleChildScrollView(child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('${RepoCache.I.repoFull} · ${RepoCache.I.defaultBranch}'),
-          TextField(controller: _message, enabled: !_busy,
-              decoration: const InputDecoration(labelText: 'Commit message')),
-          for (final path in _paths) CheckboxListTile(
-            title: Text(path), value: _selected.contains(path),
-            subtitle: Text(RepoCache.I.isStagedDeletion(path)
-                ? 'Staged deletion · disk unchanged'
-                : RepoCache.I.stagedMode(path) == null
-                ? 'Content · review exact diff'
-                : 'Staged Git mode ${RepoCache.I.stagedMode(path)}'),
-            secondary: StudioStagingMenu(path: path, enabled: !_busy),
-            onChanged: _busy ? null : (value) {
-              _invalidate();
-              setState(() { if (value == true) { _selected.add(path); } else { _selected.remove(path); } });
-            },
+    final rows = _rows(approval);
+    return PopScope(canPop: !_busy, child: Scaffold(
+      appBar: AppBar(
+        automaticallyImplyLeading: false,
+        title: const Text('Review commit'),
+      ),
+      body: SelectionArea(
+        child: ListView.builder(
+          itemCount: rows.length,
+          itemBuilder: (context, i) => rows[i](context),
+        ),
+      ),
+      // The message and the primary action stay pinned above the keyboard.
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.viewInsetsOf(context).bottom,
           ),
-          if (RepoCache.I.workspaceFolder != null)
-            TextButton(onPressed: _busy ? null : _stageMissingDeletion,
-                child: const Text('Stage missing file deletion')),
-          const Text('Staging does not change disk files or permissions.'),
-          if (approval != null) ...[
-            Text('Repository: ${approval.repo}\nBranch: ${approval.branch}\nBase: ${approval.baseCommit}\nMessage: ${approval.message}\nSelected paths: ${approval.paths.join(', ')}'),
-            SelectableText(approval.diff, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
-          ],
-          if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-          if (_busy) const LinearProgressIndicator(),
-        ],
-      ))),
-      actions: [
-        TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        TextButton(onPressed: _busy ? null : _reconcile, child: const Text('Reconcile pending commit')),
-        if (approval == null)
-          FilledButton(onPressed: _busy || _selected.isEmpty ? null : _review, child: const Text('Review changes'))
-        else
-          FilledButton(onPressed: _busy ? null : _publish, child: const Text('Approve and commit')),
-      ],
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            if (_busy) const LinearProgressIndicator(minHeight: 2),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: TextField(controller: _message, enabled: !_busy,
+                  decoration: const InputDecoration(labelText: 'Commit message')),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 4,
+                children: [
+                  TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
+                  TextButton(onPressed: _busy ? null : _reconcile, child: const Text('Reconcile pending commit')),
+                  if (approval == null)
+                    FilledButton(onPressed: _busy || _selected.isEmpty || _message.text.trim().isEmpty ? null : _review, child: const Text('Review changes'))
+                  else
+                    FilledButton(onPressed: _busy ? null : _publish, child: const Text('Approve and commit')),
+                ],
+              ),
+            ),
+          ]),
+        ),
+      ),
     ));
   }
 }
