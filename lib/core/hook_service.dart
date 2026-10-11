@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'claude_code_tools.dart';
 import 'plugin_adapters.dart';
 import 'hook_execution_scope.dart';
 import 'hook_context_store.dart';
@@ -223,6 +224,17 @@ class HookFireResult {
   /// can retry without replaying already-successful hooks.
   final bool retryableFailure;
 
+  /// Each successful synchronous command hook's (publication-safe) stdout, in
+  /// firing order. Unlike [output] (a newline join) every entry is one hook's
+  /// whole stdout, so a JSON decision envelope can be parsed reliably even
+  /// when several hooks matched.
+  final List<String> hookOutputs;
+
+  /// stderr (or stdout) of command hooks that exited 2 on an event where exit
+  /// 2 is FEEDBACK rather than failure (`post_tool`: "shows stderr to Claude;
+  /// the tool already ran").
+  final List<String> exit2Feedback;
+
   const HookFireResult({
     required this.output,
     this.systemMessages = const [],
@@ -230,7 +242,92 @@ class HookFireResult {
     this.promptBlockReason,
     this.blockedReason,
     this.retryableFailure = false,
+    this.hookOutputs = const [],
+    this.exit2Feedback = const [],
   });
+}
+
+/// Claude Code PostToolUse outcome ([HookService.firePostTool]).
+///
+/// The tool has already run; a hook can only shape what the model sees next:
+/// `decision:"block"` + `reason` adds the reason next to the result, exit 2
+/// shows stderr to the model, `hookSpecificOutput.additionalContext` adds
+/// context, and `updatedToolOutput` (or the MCP-only `updatedMCPToolOutput`)
+/// replaces the result the model sees.
+class PostToolHookResult {
+  const PostToolHookResult({
+    this.blockReasons = const [],
+    this.feedback = const [],
+    this.additionalContext = const [],
+    this.updatedToolOutput,
+  });
+
+  static const none = PostToolHookResult();
+
+  final List<String> blockReasons;
+  final List<String> feedback;
+  final List<String> additionalContext;
+  final String? updatedToolOutput;
+
+  bool get isEmpty =>
+      blockReasons.isEmpty &&
+      feedback.isEmpty &&
+      additionalContext.isEmpty &&
+      updatedToolOutput == null;
+
+  /// The tool result the model should see after applying this outcome.
+  String apply(String result) {
+    if (isEmpty) return result;
+    final b = StringBuffer(updatedToolOutput ?? result);
+    for (final r in blockReasons) {
+      b.write('\n\n[PostToolUse hook blocked: $r]');
+    }
+    for (final f in feedback) {
+      b.write('\n\n[PostToolUse hook feedback: $f]');
+    }
+    for (final c in additionalContext) {
+      b.write('\n\n[PostToolUse hook context: $c]');
+    }
+    return b.toString();
+  }
+
+  /// Parse the per-hook outputs and exit-2 feedback of a post_tool fire.
+  static PostToolHookResult fromFire(HookFireResult fire) {
+    final blocks = <String>[];
+    final contexts = <String>[];
+    String? updated;
+    for (final out in fire.hookOutputs) {
+      final contract = HookOutputContract.parse(out);
+      if (contract.decision == 'block') {
+        blocks.add(contract.reason ?? 'blocked by a PostToolUse hook');
+      }
+      if (contract.additionalContext != null) {
+        contexts.add(contract.additionalContext!);
+      }
+      final t = out.trim();
+      if (t.startsWith('{') && t.endsWith('}')) {
+        try {
+          final j = jsonDecode(t);
+          final hso = j is Map ? j['hookSpecificOutput'] : null;
+          final replaced = hso is Map
+              ? (hso['updatedToolOutput'] ?? hso['updatedMCPToolOutput'])
+              : null;
+          if (replaced != null) {
+            updated = replaced is String ? replaced : jsonEncode(replaced);
+          }
+        } catch (_) {
+          // Not a JSON envelope — plain stdout is never a decision.
+        }
+      }
+    }
+    if (fire.promptBlockReason != null) blocks.add(fire.promptBlockReason!);
+    return PostToolHookResult(
+      blockReasons: blocks,
+      feedback: List.unmodifiable(fire.exit2Feedback),
+      additionalContext: contexts,
+      updatedToolOutput: updated,
+    );
+  }
 }
 
 /// The JSON output contract a hook's stdout may carry (Claude Code shape).
@@ -1036,6 +1133,15 @@ class HookService extends ChangeNotifier {
     // This event has no matcher vocabulary in Claude Code, so a declared
     // matcher must not turn the hook permanently dead.
     if (subject == _kSubjectMatchesEverything) return true;
+    // Claude Code: a plugin-scoped agent matcher contains a colon and is
+    // evaluated as an UNANCHORED regex (anchor it with ^ and $ yourself).
+    if (_isSubagentEvent(canonicalEvent) && matcher.contains(':')) {
+      try {
+        return RegExp(matcher).hasMatch(subject);
+      } catch (_) {
+        return false;
+      }
+    }
     // FULL-STRING match (audit 2026-09-25): a Claude Code matcher like `Edit`
     // must match the tool `Edit` only, NOT `MultiEdit`/`NotebookEdit`. The old
     // unanchored `hasMatch` did a substring match, so `Edit` fired on every
@@ -1066,37 +1172,89 @@ class HookService extends ChangeNotifier {
     return false;
   }
 
+  static bool _isSubagentEvent(String canonicalEvent) =>
+      canonicalEvent == 'subagent_start' || canonicalEvent == 'subagent_end';
+
   /// True for the events whose matcher subject is a tool name.
   static bool _isToolEvent(String canonicalEvent) =>
       canonicalEvent == 'pre_tool' || canonicalEvent == 'post_tool';
 
   /// Compatibility aliases apply only to manifests inspected by the [CC]
-  /// adapter. The native name stays available to matchers and on stdin.
-  Map<String, dynamic>? _ccAliasPayload(
+  /// adapter: the Claude Code tool name(s) for the native tool in [payload]
+  /// (`run_shell` → `Bash`, `fs_glob` → `Glob`, `dispatch_agent` →
+  /// `Agent`/`Task`, ...; see [ClaudeCodeTools]). Returns one alias payload
+  /// per Claude Code name, empty when the plugin is not [CC] or the tool has
+  /// no Claude Code equivalent.
+  List<Map<String, dynamic>> _ccAliasPayloads(
     String pluginId,
     Map<String, dynamic> payload,
   ) {
-    if (PluginContributionRegistry.I.manifestFor(pluginId)?.format !=
-        PluginFormat.claudeCode) {
+    if (!_isCcPlugin(pluginId)) return const [];
+    final tool = (payload['tool'] ?? payload['tool_name'])?.toString();
+    if (tool == null) return const [];
+    final input = payload['tool_input'] ?? payload['args'] ?? payload['input'];
+    final names = ClaudeCodeTools.ccMatcherNames(
+      tool,
+      input is Map ? input.cast<String, dynamic>() : null,
+    );
+    return [
+      for (final alias in names) {...payload, 'tool': alias, 'tool_name': alias},
+    ];
+  }
+
+  bool _isCcPlugin(String pluginId) =>
+      PluginContributionRegistry.I.manifestFor(pluginId)?.format ==
+      PluginFormat.claudeCode;
+
+  /// The payload a [CC] plugin's hook receives on stdin for a tool event: the
+  /// Claude Code tool name (native name kept as `ovid_tool_name`) and a
+  /// `tool_input` that carries the Claude Code keys alongside the native ones
+  /// (`file_path`, `old_string`, `new_string`, ...). Null when no aliasing
+  /// applies — the native payload is used unchanged.
+  static Map<String, dynamic>? ccStdinPayload(
+    String canonicalEvent,
+    Map<String, dynamic> payload,
+  ) {
+    if (!_isToolEvent(canonicalEvent) &&
+        canonicalEvent != 'permission_request') {
       return null;
     }
-    final tool = payload['tool'] ?? payload['tool_name'];
-    final input = payload['tool_input'] ?? payload['args'] ?? payload['input'];
-    final operation = input is Map ? input['command'] : null;
-    final alias = switch (tool) {
-      'run_shell' => 'Bash',
-      'file_read' => 'Read',
-      'file_write' => 'Write',
-      'fs_edit' => switch (operation) {
-        'view' => 'Read',
-        'create' => 'Write',
-        _ => 'Edit',
-      },
-      _ => null,
-    };
-    return alias == null
-        ? null
-        : {...payload, 'tool': alias, 'tool_name': alias};
+    final tool = (payload['tool'] ?? payload['tool_name'])?.toString();
+    if (tool == null) return null;
+    final rawInput =
+        payload['tool_input'] ?? payload['args'] ?? payload['input'];
+    final input = rawInput is Map
+        ? rawInput.cast<String, dynamic>()
+        : const <String, dynamic>{};
+    final cc = ClaudeCodeTools.ccToolName(tool, input);
+    if (cc == null) return null;
+    return {
+      ...payload,
+      'tool': cc,
+      'tool_name': cc,
+      'ovid_tool_name': tool,
+      'tool_input': ClaudeCodeTools.ccToolInput(tool, input),
+    }..remove('args');
+  }
+
+  /// A [CC] hook's `updatedInput` is Claude Code shaped; translate it back to
+  /// the native tool's argument names before it is merged over the args.
+  Map<String, dynamic> _nativeUpdatedInput(
+    String pluginId,
+    Map<String, dynamic> payload,
+    Map<String, dynamic> updated,
+  ) {
+    if (!_isCcPlugin(pluginId)) return updated;
+    final tool = (payload['tool'] ?? payload['tool_name'])?.toString();
+    if (tool == null || ClaudeCodeTools.ccToolName(tool) == null) {
+      return updated;
+    }
+    final rawInput =
+        payload['tool_input'] ?? payload['args'] ?? payload['input'];
+    final original = rawInput is Map
+        ? rawInput.cast<String, dynamic>()
+        : const <String, dynamic>{};
+    return ClaudeCodeTools.nativeToolInput(tool, original, updated);
   }
 
   bool _hookMatches(
@@ -1113,24 +1271,22 @@ class HookService extends ChangeNotifier {
           payload['error'] != null;
       if ((source == 'PostToolUseFailure') != failure) return false;
     }
-    final alias = _ccAliasPayload(pluginId, payload);
     final toolEvent = _isToolEvent(event) || event == 'permission_request';
-    final isCc =
-        PluginContributionRegistry.I.manifestFor(pluginId)?.format ==
-        PluginFormat.claudeCode;
+    final aliases = toolEvent
+        ? _ccAliasPayloads(pluginId, payload)
+        : const <Map<String, dynamic>>[];
+    final isCc = _isCcPlugin(pluginId);
     final matchEvent = event == 'permission_request' && isCc
         ? 'pre_tool'
         : event;
     if (!_matcherApplies(matchEvent, hook.matcher, payload) &&
-        !(toolEvent &&
-            alias != null &&
-            _matcherApplies(matchEvent, hook.matcher, alias))) {
+        !aliases.any((a) => _matcherApplies(matchEvent, hook.matcher, a))) {
       return false;
     }
     final predicate = _hookIfPredicate(hook);
     return predicate == null ||
         ifPredicateMatches(predicate, payload) ||
-        (toolEvent && alias != null && ifPredicateMatches(predicate, alias));
+        aliases.any((a) => ifPredicateMatches(predicate, a));
   }
 
   static bool _hasRegexMeta(String s) =>
@@ -1162,6 +1318,12 @@ class HookService extends ChangeNotifier {
     }
     if (_isToolEvent(canonicalEvent)) {
       return (payload['tool'] ?? payload['tool_name'])?.toString() ?? '';
+    }
+    // SubagentStart / SubagentStop match on the agent type (definition name,
+    // or the plugin-scoped `plugin:agent`).
+    if (_isSubagentEvent(canonicalEvent)) {
+      final type = payload['agent_type']?.toString() ?? '';
+      return type.isEmpty ? _kSubjectMatchesEverything : type;
     }
     // No matcher vocabulary exists for this event.
     return _kSubjectMatchesEverything;
@@ -2368,7 +2530,7 @@ class HookService extends ChangeNotifier {
     final payloadJson = jsonEncode({
       'event': canonical,
       'session': sessionId,
-      ...redactHookPayload(payload),
+      ...redactHookPayload(_envSizedPayload(payload)),
     });
     final cwd = await _sessionWorkDir(sessionId);
     // The FULL JSON payload every hook child receives on stdin (item 1).
@@ -2379,9 +2541,24 @@ class HookService extends ChangeNotifier {
       cwd: cwd?.path ?? '',
       transcriptPath: _transcriptPathFrom(payload),
     );
+    // [CC] command hooks read Claude Code tool names/keys from stdin.
+    final ccPayload = ccStdinPayload(canonical, payload);
+    String? ccStdinJson;
+    String stdinFor(String pluginId) {
+      if (ccPayload == null || !_isCcPlugin(pluginId)) return stdinJson;
+      return ccStdinJson ??= buildHookStdinJson(
+        canonicalEvent: canonical,
+        sessionId: sessionId,
+        payload: ccPayload,
+        cwd: cwd?.path ?? '',
+        transcriptPath: _transcriptPathFrom(payload),
+      );
+    }
     final collected = <(String, PluginHook, String)>[];
     final systemMessages = <(String, PluginHook, String)>[];
     final promptBlocks = <(String, PluginHook, String)>[];
+    final hookOutputs = <(String, PluginHook, String)>[];
+    final exit2Feedback = <(String, PluginHook, String)>[];
     var halted = false;
     var retryableFailure = false;
     String? blockedReason;
@@ -2501,7 +2678,7 @@ class HookService extends ChangeNotifier {
         // same way the sync path does, instead of recording every
         // completed process as a success.
         unawaited(
-          _exec(hook, env, cwd, stdinPayload: stdinJson)
+          _exec(hook, env, cwd, stdinPayload: stdinFor(pluginId))
               .then((result) async {
                 if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) {
                   _removeEnvFile(env['CLAUDE_ENV_FILE'] ?? '');
@@ -2551,7 +2728,7 @@ class HookService extends ChangeNotifier {
           hook,
           env,
           cwd,
-          stdinPayload: stdinJson,
+          stdinPayload: stdinFor(pluginId),
         );
         if (!_hookCurrent(sessionId, pluginId, hook, contextEpoch)) {
           _removeEnvFile(env['CLAUDE_ENV_FILE'] ?? '');
@@ -2594,6 +2771,28 @@ class HookService extends ChangeNotifier {
               Diag.swallow('hook_service', e);
             }
             break;
+          }
+          // CLAUDE CODE PARITY (Phase 2.1): PostToolUse exit 2 "shows stderr
+          // to Claude; the tool already ran" — feedback for the model, not a
+          // hook failure, and later hooks still run.
+          if (code == 2 && canonical == 'post_tool') {
+            final diagnostic = (err.isNotEmpty ? err : out).trim();
+            if (diagnostic.isNotEmpty) {
+              exit2Feedback.add((pluginId, hook, diagnostic));
+            }
+            _recordSuccess(pluginId, sessionId);
+            try {
+              await _ledger(sessionId, 'hook/result', {
+                ...record,
+                'ok': true,
+                'exit': code,
+                'decision': 'feedback',
+                'stderrChars': err.length,
+              });
+            } catch (e) {
+              Diag.swallow('hook_service', e);
+            }
+            continue;
           }
           _countFailed(pluginId, error: 'hook exited with code $code');
           retryableFailure = true;
@@ -2667,6 +2866,7 @@ class HookService extends ChangeNotifier {
             completedStartHooks?.add('halt:$receipt');
           }
         }
+        if (trimmed.isNotEmpty) hookOutputs.add((pluginId, hook, out));
         if (trimmed.isNotEmpty && !contract.suppressOutput) {
           final isContextEvent =
               canonical == 'pre_request' || canonical == 'user_prompt_submit';
@@ -2737,7 +2937,48 @@ class HookService extends ChangeNotifier {
       promptBlockReason: activeText(promptBlocks).firstOrNull,
       blockedReason: blockedReason,
       retryableFailure: retryableFailure,
+      hookOutputs: activeText(hookOutputs),
+      exit2Feedback: activeText(exit2Feedback),
     );
+  }
+
+  /// Claude Code PostToolUse (master plan Phase 2.1): AWAITED, with the full
+  /// `tool_input` and the untruncated `tool_response` on stdin, returning the
+  /// decision contract the caller applies to the tool result. Never throws —
+  /// a broken hook must never fail a tool call that already succeeded.
+  Future<PostToolHookResult> firePostTool(
+    String sessionId, {
+    required Map<String, dynamic> payload,
+    String? model,
+  }) async {
+    if (!hasHookListeners('post_tool', sessionId: sessionId)) {
+      return PostToolHookResult.none;
+    }
+    try {
+      final fire = await fireDetailed(
+        'post_tool',
+        sessionId,
+        payload: payload,
+        model: model,
+      );
+      return PostToolHookResult.fromFire(fire);
+    } catch (e) {
+      Diag.swallow('hook_service.postTool', e);
+      return PostToolHookResult.none;
+    }
+  }
+
+  /// The untruncated `tool_response` belongs on stdin only: an environment
+  /// variable has a hard size limit (E2BIG), so the `PLUGIN_PAYLOAD` env copy
+  /// carries a bounded preview.
+  static const int _envToolResponseChars = 4000;
+  static Map<String, dynamic> _envSizedPayload(Map<String, dynamic> payload) {
+    final r = payload['tool_response'];
+    if (r is! String || r.length <= _envToolResponseChars) return payload;
+    return {
+      ...payload,
+      'tool_response': '${r.substring(0, _envToolResponseChars)}…',
+    };
   }
 
   /// Compact + strip newlines so env vars stay one-line.
@@ -2787,6 +3028,12 @@ class HookService extends ChangeNotifier {
     'permission_request': 'PermissionRequest',
   };
 
+  /// Resolves the subagent identity for a hook fired in [sessionId] (null for
+  /// a main-conversation session). Wired by AgentService; keys:
+  /// `agent_id`, `agent_type`, `root_session_id`, `root_transcript_path`.
+  static Map<String, dynamic>? Function(String sessionId)?
+  agentIdentityResolver;
+
   /// Transcript path for hook stdin: the caller (AgentService) may
   /// supply `transcript_path` in the event payload; HookService has no
   /// other source for it. Empty when absent.
@@ -2831,6 +3078,9 @@ class HookService extends ChangeNotifier {
     };
     final tool = redacted['tool'] ?? redacted['tool_name'];
     if (tool != null) m['tool_name'] = tool.toString();
+    if (redacted['ovid_tool_name'] != null) {
+      m['ovid_tool_name'] = redacted['ovid_tool_name'];
+    }
     final toolInput =
         redacted['tool_input'] ?? redacted['args'] ?? redacted['input'];
     if (toolInput != null) m['tool_input'] = toolInput;
@@ -2839,6 +3089,43 @@ class HookService extends ChangeNotifier {
         redacted['tool_response'] ??
         redacted['result'];
     if (toolResult != null) m['tool_response'] = toolResult;
+    for (final k in const [
+      'tool_use_id',
+      'duration_ms',
+      'stop_hook_active',
+      'last_assistant_message',
+    ]) {
+      if (redacted[k] != null) m[k] = redacted[k];
+    }
+    // Subagent identity (Claude Code common input fields): inside a subagent
+    // `agent_id` / `agent_type` identify it, `session_id` and
+    // `transcript_path` are the MAIN conversation's, and the subagent's own
+    // transcript is `agent_transcript_path`. Ovid's child session id stays
+    // available as `ovid_session_id`.
+    final identity = <String, dynamic>{
+      ...?agentIdentityResolver?.call(sessionId),
+      for (final k in const [
+        'agent_id',
+        'agent_type',
+        'agent_transcript_path',
+        'root_session_id',
+        'root_transcript_path',
+      ])
+        if (redacted[k] != null) k: redacted[k],
+    };
+    if (identity['agent_id'] != null) {
+      m['agent_id'] = identity['agent_id'];
+      if (identity['agent_type'] != null) {
+        m['agent_type'] = identity['agent_type'];
+      }
+      m['ovid_session_id'] = sessionId;
+      final root = identity['root_session_id'];
+      if (root is String && root.isNotEmpty) m['session_id'] = root;
+      final own = m['transcript_path'];
+      m['agent_transcript_path'] = identity['agent_transcript_path'] ?? own;
+      final rootTranscript = identity['root_transcript_path'];
+      if (rootTranscript is String) m['transcript_path'] = rootTranscript;
+    }
     final prompt = redacted['prompt'] ?? redacted['user_prompt'];
     if (prompt != null) m['prompt'] = prompt;
     final reason = redacted['reason'];
@@ -3172,6 +3459,19 @@ class HookService extends ChangeNotifier {
       cwd: cwd?.path ?? '',
       transcriptPath: _transcriptPathFrom(payload),
     );
+    // [CC] command hooks read Claude Code tool names/keys from stdin.
+    final ccPayload = ccStdinPayload(canonical, payload);
+    String? ccStdinJson;
+    String stdinFor(String pluginId) {
+      if (ccPayload == null || !_isCcPlugin(pluginId)) return stdinJson;
+      return ccStdinJson ??= buildHookStdinJson(
+        canonicalEvent: canonical,
+        sessionId: sessionId,
+        payload: ccPayload,
+        cwd: cwd?.path ?? '',
+        transcriptPath: _transcriptPathFrom(payload),
+      );
+    }
     Map<String, dynamic>? updatedInput;
     final rewrites = <(String, PluginHook, Map<String, dynamic>)>[];
     final allows = <(String, PluginHook)>[];
@@ -3289,7 +3589,7 @@ class HookService extends ChangeNotifier {
           env,
           cwd,
           gate: true,
-          stdinPayload: stdinJson,
+          stdinPayload: stdinFor(pluginId),
         );
         if (!_hookCurrent(sessionId, pluginId, hook, epoch)) continue;
         final known = <String, dynamic>{
@@ -3327,7 +3627,11 @@ class HookService extends ChangeNotifier {
         // Rewritten tool args (item 5) — collected even from hooks that
         // allow, so the caller can apply them pre-execution.
         if (contract.updatedInput != null) {
-          rewrites.add((pluginId, hook, contract.updatedInput!));
+          rewrites.add((
+            pluginId,
+            hook,
+            _nativeUpdatedInput(pluginId, payload, contract.updatedInput!),
+          ));
         }
         reconcileContributions();
         final rawBlockReason = jsonBlockReason(rawOut);
