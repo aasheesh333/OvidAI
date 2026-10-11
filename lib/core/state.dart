@@ -1323,6 +1323,25 @@ class ChatSession {
   final List<Message> messages;
   final DateTime createdAt;
 
+  /// Last user-visible activity (F-046): touched on send and on reply
+  /// completion. Null for sessions persisted before it existed; see
+  /// [lastActivityAt] for the derived value the sidebar sorts by.
+  DateTime? updatedAt;
+
+  /// Most recent of [updatedAt], the newest message time and [createdAt].
+  DateTime get lastActivityAt {
+    var latest = createdAt;
+    final touched = updatedAt;
+    if (touched != null && touched.isAfter(latest)) latest = touched;
+    if (messages.isNotEmpty && messages.last.time.isAfter(latest)) {
+      latest = messages.last.time;
+    }
+    return latest;
+  }
+
+  /// Mark new activity now (send / reply complete).
+  void touch([DateTime? at]) => updatedAt = at ?? DateTime.now();
+
   /// The assembled system prompt sent on this session's most recent turn.
   /// Surfaced as a collapsible "System prompt" disclosure so the user can
   /// see exactly what the model was told (context visibility parity).
@@ -1374,6 +1393,7 @@ class ChatSession {
     List<Map<String, String>>? todos,
     List<Map<String, dynamic>>? schedules,
     DateTime? createdAt,
+    this.updatedAt,
     SessionAnalytics? analytics,
     this.titleGenerated = false,
     Iterable<String> referencedSessionIds = const [],
@@ -1446,6 +1466,9 @@ class ChatSession {
     createdAt: j['createdAt'] != null
         ? DateTime.tryParse(j['createdAt'] as String) ?? DateTime.now()
         : DateTime.now(),
+    updatedAt: j['updatedAt'] is String
+        ? DateTime.tryParse(j['updatedAt'] as String)
+        : null,
     analytics: SessionAnalytics.fromJson(
       j['analytics'] is Map
           ? Map<String, dynamic>.from(j['analytics'] as Map)
@@ -1495,6 +1518,7 @@ class ChatSession {
     'todos': todos,
     'messages': messages.map((m) => m.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
+    if (updatedAt != null) 'updatedAt': updatedAt!.toIso8601String(),
     'analytics': analytics.toJson(),
     if (titleGenerated) 'titleGenerated': true,
     if (referencedSessionIds.isNotEmpty)
@@ -4769,6 +4793,7 @@ class AppState extends ChangeNotifier {
       session.sandboxId,
       session.systemPromptSnapshot,
       session.titleGenerated,
+      session.updatedAt,
       _sessionNestedSignature(session.analytics.toJson()),
       _sessionNestedSignature(session.goal),
       _sessionNestedSignature(session.todos),
@@ -6549,6 +6574,7 @@ class AppState extends ChangeNotifier {
   void sendMessage(String text) {
     final s = _ensureActiveSession();
     s.messages.add(Message(role: 'user', content: text));
+    s.touch();
     // Auto-name session from first message (smart: strip markdown/prompt fluff)
     if (s.title == 'New chat' || s.title.isEmpty) {
       s.title = _autoTitle(text);
