@@ -348,11 +348,22 @@ class SessionLedger {
   }
 
   /// Wall-clock/turn/step projection over the ledger (stats parity).
+  ///
+  /// LLM time comes from `turn_end.llmMs` (nothing emits standalone `llm`
+  /// events today; any that do appear are still summed, and a turn that
+  /// had them does not add its `turn_end` figure on top). The agent writes
+  /// the run bucket's running totals into `turn_end`, so consecutive ends of
+  /// the same in-memory bucket (its cumulative `turns` count rises) add only
+  /// the delta; a falling/missing count means a fresh bucket (app restart,
+  /// dropped run) and the whole value is added.
   Future<SessionProjection> projection(String sessionId) async {
     final events = await read(sessionId);
     var turns = 0, steps = 0, toolMs = 0, llmMs = 0;
     DateTime? firstStart, lastEnd;
     final toolCounts = <String, int>{};
+    int? prevEndTurns;
+    var prevEndLlm = 0;
+    var llmEventsThisTurn = false;
     for (final e in events) {
       switch (e['kind'] as String?) {
         case 'turn_start':
@@ -360,6 +371,18 @@ class SessionLedger {
           firstStart ??= DateTime.tryParse(e['t'] as String? ?? '');
         case 'turn_end':
           lastEnd = DateTime.tryParse(e['t'] as String? ?? '');
+          final reported = (e['llmMs'] as num?)?.toInt() ?? 0;
+          final endTurns = (e['turns'] as num?)?.toInt();
+          final sameBucket =
+              endTurns != null &&
+              prevEndTurns != null &&
+              endTurns > prevEndTurns &&
+              reported >= prevEndLlm;
+          final delta = sameBucket ? reported - prevEndLlm : reported;
+          if (!llmEventsThisTurn && delta > 0) llmMs += delta;
+          prevEndTurns = endTurns;
+          prevEndLlm = reported;
+          llmEventsThisTurn = false;
         case 'tool_start':
           steps++;
           final n = e['tool'] as String?;
@@ -368,6 +391,7 @@ class SessionLedger {
           toolMs += (e['ms'] as num?)?.toInt() ?? 0;
         case 'llm':
           llmMs += (e['ms'] as num?)?.toInt() ?? 0;
+          llmEventsThisTurn = true;
       }
     }
     return SessionProjection(
