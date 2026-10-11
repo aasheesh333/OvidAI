@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'github_http_error.dart';
@@ -560,11 +561,19 @@ class GitHubService extends ChangeNotifier {
     http.Client? client,
     void Function(int attempt)? onAttempt,
     bool Function()? isCancelled,
+    Future<void> Function(Duration interval)? waitForNextPoll,
   }) async {
     final c = client ?? http.Client();
     final ownsClient = client == null;
     final deadline = DateTime.now().add(maxWait);
     var interval = Duration(seconds: intervalSec.clamp(1, 60));
+    // Transport trouble (no network while the app is backgrounded during
+    // browser approval, a 5xx, a captive-portal HTML page) must not abandon a
+    // still-valid device code: it is treated like `authorization_pending`
+    // with a growing backoff on top of the protocol interval, until the
+    // code's own expiry.
+    var transientBackoff = Duration.zero;
+    final wait = waitForNextPoll ?? (d) => Future<void>.delayed(d);
     var attempt = 0;
     final generation = ++_authGeneration;
 
@@ -581,33 +590,62 @@ class GitHubService extends ChangeNotifier {
       while (DateTime.now().isBefore(deadline)) {
         ensureCurrent();
         final remaining = deadline.difference(DateTime.now());
-        if (remaining <= Duration.zero || interval > remaining) break;
-        await Future<void>.delayed(interval);
+        if (remaining <= Duration.zero) break;
+        var delay = interval + transientBackoff;
+        if (delay > remaining) {
+          // A backoff never skips the last chance to poll before expiry.
+          if (transientBackoff == Duration.zero) break;
+          delay = remaining - const Duration(milliseconds: 1);
+          if (delay < interval) break;
+        }
+        await wait(delay);
         ensureCurrent();
         if (!DateTime.now().isBefore(deadline)) break;
         attempt++;
         onAttempt?.call(attempt);
 
-        final res = await c
-            .post(
-              Uri.parse(_tokenUrl),
-              headers: {'Accept': 'application/json'},
-              body: {
-                'client_id': clientId,
-                'device_code': deviceCode,
-                'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
-              },
-            )
-            .timeout(const Duration(seconds: 20));
-        ensureCurrent();
-
-        if (res.statusCode != 200) {
-          throw GitHubAuthException(
-            'token_request_failed',
-            'GitHub sign-in failed (${res.statusCode}).',
-          );
+        final http.Response res;
+        final Map<String, dynamic> j;
+        try {
+          res = await c
+              .post(
+                Uri.parse(_tokenUrl),
+                headers: {'Accept': 'application/json'},
+                body: {
+                  'client_id': clientId,
+                  'device_code': deviceCode,
+                  'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+                },
+              )
+              .timeout(const Duration(seconds: 20));
+          ensureCurrent();
+          if (res.statusCode >= 500 || res.statusCode == 429) {
+            throw http.ClientException('token poll HTTP ${res.statusCode}');
+          }
+          if (res.statusCode != 200) {
+            throw GitHubAuthException(
+              'token_request_failed',
+              'GitHub sign-in failed (${res.statusCode}).',
+            );
+          }
+          final decoded = jsonDecode(res.body);
+          if (decoded is! Map<String, dynamic>) {
+            throw const FormatException('token poll returned non-object');
+          }
+          j = decoded;
+        } on GitHubAuthException {
+          rethrow;
+        } catch (e) {
+          if (!_isTransientPollError(e)) rethrow;
+          final next = transientBackoff == Duration.zero
+              ? const Duration(seconds: 2)
+              : transientBackoff * 2;
+          transientBackoff = next > const Duration(seconds: 60)
+              ? const Duration(seconds: 60)
+              : next;
+          continue;
         }
-        final j = jsonDecode(res.body) as Map<String, dynamic>;
+        transientBackoff = Duration.zero;
 
         final accessToken = j['access_token'];
         if (accessToken is String && accessToken.isNotEmpty) {
@@ -658,6 +696,13 @@ class GitHubService extends ChangeNotifier {
       if (ownsClient) c.close();
     }
   }
+
+  static bool _isTransientPollError(Object e) =>
+      e is TimeoutException ||
+      e is http.ClientException ||
+      e is FormatException ||
+      e is SocketException ||
+      e is HandshakeException;
 
   /// -------------------------------------------------------------------------
   /// STEP 3 — authenticated user profile.

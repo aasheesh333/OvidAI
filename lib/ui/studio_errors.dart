@@ -74,6 +74,10 @@ class StudioFailure {
       return switch (error.code) {
         'invalid_token' || 'not_authenticated' =>
           'GitHub rejected your sign-in. Please sign in to GitHub again.',
+        'device_request_failed' =>
+          'GitHub sign-in could not start. Try again in a moment.',
+        'token_request_failed' =>
+          'GitHub sign-in could not be completed. Try again.',
         _ => error.message.endsWith('.') ? error.message : '${error.message}.',
       };
     }
