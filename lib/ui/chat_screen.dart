@@ -7676,7 +7676,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: Aether.hairline),
+          borderSide: BorderSide(color: Aether.inputBorder),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),

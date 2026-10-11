@@ -273,7 +273,7 @@ class _SettingsField extends StatelessWidget {
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
-              borderSide: BorderSide(color: Aether.hairline),
+              borderSide: BorderSide(color: Aether.inputBorder),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
@@ -281,7 +281,7 @@ class _SettingsField extends StatelessWidget {
             ),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AetherRadius.rMd),
-              borderSide: BorderSide(color: Aether.hairline),
+              borderSide: BorderSide(color: Aether.inputBorder),
             ),
           ),
         ),

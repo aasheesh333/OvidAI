@@ -3968,7 +3968,7 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
               fillColor: Aether.surfaceAlt,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide(color: Aether.hairline),
+                borderSide: BorderSide(color: Aether.inputBorder),
               ),
             ),
             onChanged: (_) => _validate(),

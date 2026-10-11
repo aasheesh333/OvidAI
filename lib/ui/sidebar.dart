@@ -123,13 +123,13 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                             borderRadius: BorderRadius.circular(
                               AetherRadius.rMd,
                             ),
-                            borderSide: BorderSide(color: Aether.hairline),
+                            borderSide: BorderSide(color: Aether.inputBorder),
                           ),
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(
                               AetherRadius.rMd,
                             ),
-                            borderSide: BorderSide(color: Aether.hairline),
+                            borderSide: BorderSide(color: Aether.inputBorder),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(

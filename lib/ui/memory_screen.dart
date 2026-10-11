@@ -685,7 +685,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(AetherRadius.rMd),
                 borderSide: BorderSide(
-                  color: _error != null ? Aether.danger : Aether.hairline,
+                  color: _error != null ? Aether.danger : Aether.inputBorder,
                 ),
               ),
               focusedBorder: OutlineInputBorder(
@@ -698,7 +698,7 @@ class _MemoryFileSheetState extends State<_MemoryFileSheet> {
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(AetherRadius.rMd),
                 borderSide: BorderSide(
-                  color: _error != null ? Aether.danger : Aether.hairline,
+                  color: _error != null ? Aether.danger : Aether.inputBorder,
                 ),
               ),
             ),
