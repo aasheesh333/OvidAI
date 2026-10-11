@@ -620,8 +620,7 @@ class _StudioScreenState extends State<StudioScreen> {
   }
 
   /// The one folder-pick path: device picker (or the test seam), existence
-  /// check, writability probe, and the All-Files-Access retry with its
-  /// explanatory toast. This was copy-pasted verbatim into
+  /// check, and writability probe with an explanatory toast. This was copy-pasted verbatim into
   /// `_cloneIntoPickedFolder` and `_pickAndPinFolder`.
   ///
   /// Returns null when the user cancelled or the folder is unusable — in the
@@ -640,16 +639,14 @@ class _StudioScreenState extends State<StudioScreen> {
       _toast('That folder is not accessible.');
       return null;
     }
-    var writable = _probeWritable(path);
-    if (!writable) {
-      final granted = await AgentService.I.requestAllFilesAccess();
-      if (granted) writable = _probeWritable(path);
-    }
+    // No All Files Access (MANAGE_EXTERNAL_STORAGE) escalation: Play allows
+    // it only for file-manager/backup/antivirus apps.
+    final writable = _probeWritable(path);
     if (!mounted) return null;
     if (!writable) {
       _toast(
-        'That folder is read-only for Ovid Si — grant All Files Access or pick '
-        'another folder.',
+        'Ovid can\'t write to that folder. Pick a folder inside Ovid\'s '
+        'storage, or clone into the session sandbox.',
       );
       return null;
     }

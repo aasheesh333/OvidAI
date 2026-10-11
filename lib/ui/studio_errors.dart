@@ -69,8 +69,8 @@ class StudioFailure {
           'try again.';
     }
     if (has('permission denied') || has('read-only') || has('readonly')) {
-      return 'Ovid is not allowed to write there. Grant All Files Access or '
-          'pick another folder.';
+      return 'Ovid is not allowed to write there. Pick a folder inside '
+          'Ovid\'s storage or use the session sandbox.';
     }
     if (has('sandbox not installed') || has('linux sandbox')) {
       return 'The Linux sandbox is not installed. Open Studio once to install '

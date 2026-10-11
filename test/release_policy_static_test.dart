@@ -19,4 +19,12 @@ void main() {
     }
     expect(offenders, isEmpty);
   });
+
+  test('working-folder flows never request All Files Access', () {
+    for (final path in ['lib/ui/chat_screen.dart', 'lib/ui/studio_screen.dart']) {
+      final source = File(path).readAsStringSync();
+      expect(source, isNot(contains('requestAllFilesAccess')), reason: path);
+      expect(source, isNot(contains('manageExternalStorage')), reason: path);
+    }
+  });
 }

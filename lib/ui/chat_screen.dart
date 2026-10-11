@@ -7948,21 +7948,18 @@ class _StudioFolderChip extends StatelessWidget {
       }
     }
 
+    // No All Files Access (MANAGE_EXTERNAL_STORAGE) escalation: Play allows
+    // it only for file-manager/backup/antivirus apps. A folder Android does
+    // not let the app write is reported instead.
     writable = probeWritable();
-
-    if (!writable) {
-      final granted = await AgentService.I.requestAllFilesAccess();
-      if (granted) {
-        writable = probeWritable();
-      }
-    }
 
     if (!context.mounted) return;
     if (!writable) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'That folder is read-only for Ovid Si — grant All Files Access or pick another folder.',
+            'Ovid can\'t write to that folder. Pick a folder inside Ovid\'s '
+            'storage, or keep working in the session sandbox.',
           ),
           behavior: SnackBarBehavior.floating,
         ),
