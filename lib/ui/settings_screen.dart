@@ -21,11 +21,6 @@ import '../core/settings_actions.dart';
 import 'settings_action_widgets.dart';
 import 'settings_backup_screen.dart';
 import 'settings_health_screen.dart';
-import 'private_sync_settings_screen.dart';
-import 'collaboration_screen.dart';
-import '../core/collaboration/production.dart';
-export 'private_sync_settings_screen.dart'
-    show PrivateSyncSettingsScreen, PrivateSyncSettingsController;
 import '../core/theme.dart';
 import 'auth_screen.dart';
 import 'profile_avatar.dart';
@@ -48,14 +43,7 @@ import 'widgets/ovid_mark.dart';
 /// nothing was added to [AppState] or [SettingsActions]; the AetherCard
 /// wrappers only change presentation.
 class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({
-    super.key,
-    this.privateSyncController,
-    this.collaborationController,
-  });
-
-  final PrivateSyncSettingsController? privateSyncController;
-  final CollaborationProduction? collaborationController;
+  const SettingsScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -77,22 +65,6 @@ class SettingsScreen extends StatelessWidget {
             child: Column(
               children: [
                 _accountHeader(context),
-                _hairline(),
-                _navTile(
-                  context,
-                  Icons.sync_lock_outlined,
-                  'Private sync',
-                  'Private transcript storage over HTTPS, with your consent',
-                  PrivateSyncSettingsScreen(controller: privateSyncController),
-                ),
-                _hairline(),
-                _navTile(
-                  context,
-                  Icons.group_outlined,
-                  'Collaboration',
-                  'Shared messages and read-only activity',
-                  CollaborationScreen(controller: collaborationController),
-                ),
               ],
             ),
           ),
