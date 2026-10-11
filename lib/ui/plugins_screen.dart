@@ -3425,11 +3425,14 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
             },
           ),
           // Pencil — edit the mcp.json config in place (user request).
-          IconButton(
-            tooltip: 'Edit config',
-            icon: const Icon(Icons.edit_outlined, size: 19),
-            onPressed: () => _editConfigJson(context, s),
-          ),
+          // Only user-added servers: plugin-owned rows are managed by their
+          // manifest and built-in seeds would not persist the edit.
+          if (mcpConfigEditable(s))
+            IconButton(
+              tooltip: 'Edit config',
+              icon: const Icon(Icons.edit_outlined, size: 19),
+              onPressed: () => _editConfigJson(context, s),
+            ),
           SizedBox(
             height: 28,
             child: Switch(
@@ -3722,6 +3725,20 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
             ),
           ],
           const SectionHeader('Config (standard mcp.json)'),
+          if (!mcpConfigEditable(s))
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+              child: Text(
+                switch (mcpManagingPlugin(s)) {
+                  final owner? =>
+                    'Managed by plugin $owner — read-only here. Update or '
+                        'reconfigure the plugin to change it.',
+                  null => 'Built-in server — config is read-only.',
+                },
+                key: ValueKey('mcp-config-readonly-${s.canonicalId}'),
+                style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+              ),
+            ),
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 4),
             clipBehavior: Clip.antiAlias,
@@ -3805,8 +3822,10 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
   Future<void> _editConfigJson(BuildContext context, McpServer s) async {
     final app = AppState.I;
     Map<String, String> existingEnv;
+    Map<String, String> existingHeaders;
     try {
       existingEnv = await app.getMcpEnv(s.canonicalId, strict: true);
+      existingHeaders = await app.getMcpHeaders(s.canonicalId, strict: true);
     } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3819,7 +3838,11 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
     }
     if (!context.mounted) return;
     final ctrl = TextEditingController(
-      text: _configJsonFor(s, environmentNames: existingEnv.keys),
+      text: _configJsonFor(
+        s,
+        environmentNames: existingEnv.keys,
+        headerNames: existingHeaders.keys,
+      ),
     );
     await showModalBottomSheet<void>(
       context: context,
@@ -3838,33 +3861,61 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
         child: SingleChildScrollView(
           child: _McpJsonEditorSheet(
             controller: ctrl,
-            onSave: (command, args, env, url, transport, headers, cwd) async {
+            onSave: (edit) async {
               // The mask means preserve, never a credential value. Read again
               // at save so a credential updated while editing is not reverted.
               final currentEnv = await app.getMcpEnv(
                 s.canonicalId,
                 strict: true,
               );
-              final mergedEnv = <String, String>{
-                for (final entry in env.entries)
+              final currentHeaders = {
+                ...s.headers,
+                ...await app.getMcpHeaders(s.canonicalId, strict: true),
+              };
+              Map<String, String> unmask(
+                Map<String, String> edited,
+                Map<String, String> current,
+              ) => {
+                for (final entry in edited.entries)
                   if (entry.value != _credentialMask)
                     entry.key: entry.value
-                  else if (currentEnv[entry.key] case final value?
+                  else if (current[entry.key] case final value?
                       when value != _credentialMask)
                     entry.key: value,
               };
+              final mergedEnv = unmask(edit.env, currentEnv);
+              final mergedHeaders = unmask(edit.headers, currentHeaders);
+              // Validate before any write so a rejected edit changes nothing.
+              final rejected = app.customMcpEditRejection(
+                s,
+                command: edit.command,
+                args: edit.args,
+                url: edit.url,
+                transport: edit.transport,
+              );
+              if (rejected != null) throw _McpEditRejected(rejected);
               // Omitted keys are explicit removals; all existing names were
               // included in the editor, including ones absent from envHint.
               await app.setMcpEnv(s.canonicalId, mergedEnv, strict: true);
-              app.updateCustomMcpServer(
-                s,
-                command: command,
-                args: args,
-                url: url,
-                transport: transport,
-                headers: headers,
-                cwd: cwd,
+              // Always written: an empty map deletes stored headers, so a
+              // header removed in the editor is really gone.
+              await app.setMcpHeaders(
+                s.canonicalId,
+                mergedHeaders,
+                strict: true,
               );
+              final reason = app.updateCustomMcpServer(
+                s,
+                command: edit.command,
+                args: edit.args,
+                url: edit.url,
+                transport: edit.transport,
+                headers: mergedHeaders,
+                cwd: edit.cwd,
+                startupTimeoutS: edit.startupTimeoutS,
+                toolTimeoutS: edit.toolTimeoutS,
+              );
+              if (reason != null) throw _McpEditRejected(reason);
               if (!ctx.mounted || !context.mounted) return;
               Navigator.pop(ctx);
               ScaffoldMessenger.of(
@@ -3882,12 +3933,18 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
   String _configJsonFor(
     McpServer s, {
     Iterable<String> environmentNames = const [],
+    Iterable<String> headerNames = const [],
   }) {
     final names = {
       ...environmentNames,
       ...s.requiredEnvNames,
       for (final name in (s.envHint ?? '').split(','))
         if (name.trim().isNotEmpty) name.trim(),
+    };
+    final headers = {
+      ...headerNames,
+      ...s.headers.keys,
+      ...s.requiredHeaderNames,
     };
     return jsonEncode({
       'mcpServers': {
@@ -3897,29 +3954,61 @@ class _McpDetailScreenState extends State<McpDetailScreen> {
           'transport': s.transport,
           if (s.url != null) 'url': s.url,
           if (s.cwd != null) 'cwd': s.cwd,
+          // Round-tripped so an edit never silently resets them.
+          'startupTimeoutS': s.startupTimeoutS,
+          'toolTimeoutS': s.toolTimeoutS,
           if (names.isNotEmpty)
             'env': {for (final name in names) name: _credentialMask},
+          // Masked like env: values stay in secure storage; keep the mask to
+          // preserve, replace to rotate, remove the key to delete.
+          if (headers.isNotEmpty)
+            'headers': {for (final name in headers) name: _credentialMask},
         },
       },
     });
   }
 }
 
+/// A config edit rejected by validation — its message is shown verbatim in
+/// the editor (it is already user-facing copy).
+class _McpEditRejected implements Exception {
+  final String message;
+  const _McpEditRejected(this.message);
+}
+
+/// Owning plugin label when [s] is managed by a plugin (its config comes
+/// from the plugin manifest and is not editable here), else null.
+String? mcpManagingPlugin(McpServer s) {
+  final owner = s.ownerPluginId;
+  if (owner != null && owner.isNotEmpty) return owner;
+  if (s.source.startsWith('plugin:')) return s.source.substring(7);
+  return null;
+}
+
+/// Whether the config editor may edit [s]: only user-added (custom) rows
+/// that no plugin manages. Built-in seeds and plugin rows would persist the
+/// change inconsistently (only custom rows are persisted).
+bool mcpConfigEditable(McpServer s) => s.custom && mcpManagingPlugin(s) == null;
+
+/// One parsed config edit from the mcp.json editor.
+typedef McpConfigEdit = ({
+  String command,
+  List<String> args,
+  Map<String, String> env,
+  String? url,
+  String? transport,
+  Map<String, String> headers,
+  String? cwd,
+  int? startupTimeoutS,
+  int? toolTimeoutS,
+});
+
 /// Bottom-sheet mcp.json editor: multiline TextField + live validation.
 /// Save parses the mcpServers.{name} entry and returns command + args +
 /// env (values stored in secure storage, passed to the server process).
 class _McpJsonEditorSheet extends StatefulWidget {
   final TextEditingController controller;
-  final Future<void> Function(
-    String command,
-    List<String> args,
-    Map<String, String> env,
-    String? url,
-    String? transport,
-    Map<String, String> headers,
-    String? cwd,
-  )
-  onSave;
+  final Future<void> Function(McpConfigEdit edit) onSave;
   const _McpJsonEditorSheet({required this.controller, required this.onSave});
 
   @override
@@ -3938,16 +4027,7 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
     });
   }
 
-  ({
-    String command,
-    List<String> args,
-    Map<String, String> env,
-    String? url,
-    String? transport,
-    Map<String, String> headers,
-    String? cwd,
-  })?
-  _parse(String raw) {
+  McpConfigEdit? _parse(String raw) {
     try {
       final j = jsonDecode(raw) as Map<String, dynamic>;
       final servers = j['mcpServers'] as Map<String, dynamic>?;
@@ -3973,6 +4053,14 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
             (k, v) => MapEntry(k, v.toString()),
           ) ??
           <String, String>{};
+      int? timeout(String key) {
+        final v = entry[key];
+        if (v == null) return null;
+        final n = v is num ? v.toInt() : int.tryParse(v.toString());
+        if (n == null || n <= 0) throw const FormatException('timeout');
+        return n;
+      }
+
       return (
         command: (command ?? '').trim(),
         args: args,
@@ -3981,6 +4069,8 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
         transport: transport ?? (isHttp ? 'http' : 'stdio'),
         headers: headers,
         cwd: (entry['cwd'] as String?)?.trim(),
+        startupTimeoutS: timeout('startupTimeoutS'),
+        toolTimeoutS: timeout('toolTimeoutS'),
       );
     } catch (_) {
       return null;
@@ -4010,8 +4100,9 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
         ),
         const SizedBox(height: 4),
         Text(
-          'Edit command, args, or env. Keep masked values to preserve credentials; '
-          'replace a value to update it, or remove its key to delete it.',
+          'Edit command, args, env, headers or timeouts. Keep masked values '
+          'to preserve credentials; replace a value to update it, or remove '
+          'its key to delete it.',
           style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
         ),
         const SizedBox(height: 12),
@@ -4062,15 +4153,9 @@ class _McpJsonEditorSheetState extends State<_McpJsonEditorSheet> {
                   }
                   setState(() => _saving = true);
                   try {
-                    await widget.onSave(
-                      parsed.command,
-                      parsed.args,
-                      parsed.env,
-                      parsed.url,
-                      parsed.transport,
-                      parsed.headers,
-                      parsed.cwd,
-                    );
+                    await widget.onSave(parsed);
+                  } on _McpEditRejected catch (e) {
+                    if (mounted) setState(() => _error = e.message);
                   } catch (_) {
                     if (mounted) {
                       setState(

@@ -9354,10 +9354,45 @@ class AppState extends ChangeNotifier {
     refresh();
   }
 
+  /// Why an edit of [s] to this command/args/url/transport cannot run, or
+  /// null when it can: the [addCustomMcpServer] transport gate plus a url
+  /// check for http/sse.
+  String? customMcpEditRejection(
+    McpServer s, {
+    required String command,
+    required List<String> args,
+    String? url,
+    String? transport,
+  }) {
+    final nextUrl = url != null && url.isNotEmpty ? url : null;
+    final nextTransport = transport ?? (nextUrl != null ? 'http' : 'stdio');
+    final probe = McpServer(
+      name: s.name,
+      author: s.author,
+      description: s.description,
+      category: s.category,
+      command: command.trim(),
+      args: args,
+      transport: nextTransport,
+      url: nextUrl,
+    );
+    final unsupported = McpService.I.unsupportedTransportReason(probe);
+    if (unsupported != null) return unsupported;
+    if ((nextTransport == 'http' || nextTransport == 'sse') &&
+        nextUrl == null) {
+      return '"$nextTransport" transport needs a url';
+    }
+    return null;
+  }
+
   /// Update an existing custom MCP server from an edited config — round-trips
   /// command/args/url/transport/headers/cwd/startup timeout. HTTP auth
   /// headers go to secure storage (never plaintext prefs).
-  void updateCustomMcpServer(
+  ///
+  /// Returns null on success, or the actionable reason when the edited
+  /// transport cannot run (same gate as [addCustomMcpServer]); a rejected
+  /// edit leaves the server untouched.
+  String? updateCustomMcpServer(
     McpServer s, {
     required String command,
     required List<String> args,
@@ -9368,11 +9403,20 @@ class AppState extends ChangeNotifier {
     int? startupTimeoutS,
     int? toolTimeoutS,
   }) {
+    final rejected = customMcpEditRejection(
+      s,
+      command: command,
+      args: args,
+      url: url,
+      transport: transport,
+    );
+    if (rejected != null) return rejected;
+    final nextUrl = url != null && url.isNotEmpty ? url : null;
+    final nextTransport = transport ?? (nextUrl != null ? 'http' : 'stdio');
     s.command = command.trim();
     s.args = args;
-    s.url = url != null && url.isNotEmpty ? url : null;
-    s.transport =
-        transport ?? (s.url != null && s.url!.isNotEmpty ? 'http' : 'stdio');
+    s.url = nextUrl;
+    s.transport = nextTransport;
     s.headers = headers;
     s.cwd = cwd;
     if (startupTimeoutS != null) s.startupTimeoutS = startupTimeoutS;
@@ -9382,6 +9426,7 @@ class AppState extends ChangeNotifier {
     }
     _persistCustomMcpServers();
     refresh();
+    return null;
   }
 
   // ── Custom MCP server + plugin persistence ─────────────────────────

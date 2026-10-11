@@ -1,4 +1,6 @@
 // PR-4a — MCP/plugin correctness and destructive safety (F-078…F-091).
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -127,6 +129,125 @@ void main() {
         'Authorization': 'Bearer t',
       });
       expect(await McpService.I.missingCredentialsFor(s), isEmpty);
+    });
+  });
+
+  group('mcp.json editor (F-083, F-084)', () {
+    Future<Map<String, dynamic>> openEditor(
+      WidgetTester tester,
+      McpServer s,
+    ) async {
+      await _pump(tester, McpDetailScreen(server: s));
+      await tester.tap(find.byTooltip('Edit config'));
+      await tester.pumpAndSettle();
+      final text = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!
+          .text;
+      return jsonDecode(text) as Map<String, dynamic>;
+    }
+
+    Future<void> save(WidgetTester tester, Map<String, dynamic> cfg) async {
+      await tester.enterText(find.byType(TextField), jsonEncode(cfg));
+      await tester.tap(find.text('Save config'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('editing a custom HTTP server keeps its auth header', (
+      tester,
+    ) async {
+      final app = AppState.I;
+      final s = _server(
+        name: 'remote',
+        transport: 'http',
+        command: '',
+        url: 'https://example.test/mcp',
+      )..headers = {'Authorization': 'Bearer secret'};
+      app.mcpServers.add(s);
+      await app.setMcpHeaders(s.canonicalId, {'Authorization': 'Bearer secret'});
+      final cfg = await openEditor(tester, s);
+      final entry = (cfg['mcpServers'] as Map).values.single as Map;
+      expect(entry['headers'], {'Authorization': '••••••••'});
+      expect(jsonEncode(cfg).contains('Bearer secret'), isFalse);
+      entry['url'] = 'https://example.test/v2';
+      await save(tester, cfg);
+      expect(s.url, 'https://example.test/v2');
+      expect(s.headers, {'Authorization': 'Bearer secret'});
+      expect(await app.getMcpHeaders(s.canonicalId), {
+        'Authorization': 'Bearer secret',
+      });
+    });
+
+    testWidgets('removing a header in the editor deletes it', (tester) async {
+      final app = AppState.I;
+      final s = _server(
+        name: 'remote2',
+        transport: 'http',
+        command: '',
+        url: 'https://example.test/mcp',
+      )..headers = {'Authorization': 'Bearer old'};
+      app.mcpServers.add(s);
+      await app.setMcpHeaders(s.canonicalId, {'Authorization': 'Bearer old'});
+      final cfg = await openEditor(tester, s);
+      ((cfg['mcpServers'] as Map).values.single as Map).remove('headers');
+      await save(tester, cfg);
+      expect(s.headers, isEmpty);
+      expect(await app.getMcpHeaders(s.canonicalId), isEmpty);
+    });
+
+    testWidgets('timeouts round-trip through the editor', (tester) async {
+      final s = _server(name: 'timeouts', command: 'node')
+        ..startupTimeoutS = 90
+        ..toolTimeoutS = 300;
+      AppState.I.mcpServers.add(s);
+      final cfg = await openEditor(tester, s);
+      final entry = (cfg['mcpServers'] as Map).values.single as Map;
+      expect(entry['startupTimeoutS'], 90);
+      expect(entry['toolTimeoutS'], 300);
+      entry['args'] = ['--x'];
+      await save(tester, cfg);
+      expect(s.args, ['--x']);
+      expect(s.startupTimeoutS, 90);
+      expect(s.toolTimeoutS, 300);
+      final again = await openEditor(tester, s);
+      ((again['mcpServers'] as Map).values.single as Map)['toolTimeoutS'] =
+          120;
+      await save(tester, again);
+      expect(s.toolTimeoutS, 120);
+    });
+
+    testWidgets('an unsupported transport is rejected and nothing changes', (
+      tester,
+    ) async {
+      final s = _server(name: 'badtransport', command: 'node');
+      AppState.I.mcpServers.add(s);
+      final cfg = await openEditor(tester, s);
+      ((cfg['mcpServers'] as Map).values.single as Map)['transport'] =
+          'websocket';
+      await save(tester, cfg);
+      expect(find.textContaining('Unsupported transport'), findsOneWidget);
+      expect(s.transport, 'stdio');
+    });
+
+    testWidgets('plugin-owned and built-in servers are read-only', (
+      tester,
+    ) async {
+      final owned = McpServer(
+        name: 'owned',
+        author: 'p',
+        description: '',
+        category: 'Custom',
+        command: 'node',
+        custom: true,
+        ownerPluginId: 'acme/kit',
+      );
+      await _pump(tester, McpDetailScreen(server: owned));
+      expect(find.byTooltip('Edit config'), findsNothing);
+      expect(find.textContaining('Managed by plugin acme/kit'), findsOneWidget);
+      final seed = _server(name: 'seed', custom: false);
+      await _pump(tester, McpDetailScreen(server: seed));
+      expect(find.byTooltip('Edit config'), findsNothing);
+      expect(find.textContaining('Built-in server'), findsOneWidget);
     });
   });
 }
