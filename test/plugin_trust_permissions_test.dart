@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -496,6 +497,63 @@ void main() {
         await store.readAll(pluginName: 'acme/foo-bar', fields: fields),
         isEmpty,
       );
+    });
+  });
+
+  group('catalog_add_mcp stdio approval (security M5)', () {
+    late ChatSession session;
+    setUp(() {
+      session = ChatSession(
+        id: 'pr5-m5',
+        title: 'Full access chat',
+        model: 'm',
+        mode: 'drive',
+      );
+      AppState.I.sessions.insert(0, session);
+      AppState.I.activeSessionId = session.id;
+      AgentService.setRunSessionForTest(session.id);
+      AgentService.I.debugPauseScheduleTimerForTest(true);
+    });
+    tearDown(() {
+      AgentService.I.approve(false);
+      AgentService.I.dropSessionRun(session.id);
+      AgentService.setRunSessionForTest('');
+      AgentService.I.debugPauseScheduleTimerForTest(false);
+    });
+
+    for (final allow in [false, true]) {
+      test('a stdio server asks even in Full Access (${allow ? 'approve' : 'deny'})', () async {
+        final prompted = Completer<void>();
+        void listener() {
+          if (AgentService.I.pendingApproval != null && !prompted.isCompleted) {
+            prompted.complete();
+          }
+        }
+
+        AgentService.I.addListener(listener);
+        addTearDown(() => AgentService.I.removeListener(listener));
+        final result = AgentService.I.dispatchForTest('catalog_add_mcp', {
+          'name': 'pr5-local',
+          'command': 'node',
+          'args': ['server.js'],
+        });
+        await prompted.future.timeout(const Duration(seconds: 3));
+        expect(AgentService.I.pendingApproval!.detail, contains('node server.js'));
+        AgentService.I.approve(allow);
+        final out = await result;
+        final added = AppState.I.mcpServers.any((m) => m.name == 'pr5-local');
+        expect(added, allow);
+        if (!allow) expect(out, contains('DENIED'));
+      });
+    }
+
+    test('an http server in Full Access adds without a prompt', () async {
+      final out = await AgentService.I.dispatchForTest('catalog_add_mcp', {
+        'name': 'pr5-remote',
+        'url': 'https://mcp.example.com/mcp',
+      });
+      expect(out, contains('added'));
+      expect(AgentService.I.pendingApproval, isNull);
     });
   });
 

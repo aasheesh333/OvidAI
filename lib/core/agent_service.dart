@@ -15194,6 +15194,27 @@ ${await _agentsMdBlock()}
               (k, v) => MapEntry(k.toString(), v.toString()),
             ) ??
             const <String, String>{};
+        // A stdio server is a program the app will run on this device every
+        // time it connects. The model must never register one on its own —
+        // the user approves it, in every mode (security M5).
+        final isStdio = url == null || url.isEmpty;
+        if (isStdio) {
+          final program = [
+            command.isEmpty ? 'npx' : command,
+            ...mArgs,
+          ].join(' ');
+          final approved = await _askUser(
+            'catalog_add_mcp',
+            'Add local MCP server "$name"',
+            'This MCP server runs a program on this device whenever it '
+                'connects:\n\$ $program',
+            alwaysAsk: true,
+          );
+          if (!approved) {
+            return 'DENIED: the user did not approve adding the local MCP '
+                'server "$name". Nothing was added.';
+          }
+        }
         _emit('think', 'adding MCP server: $name');
         AppState.I.addCustomMcpServer(
           name: name,
@@ -17880,10 +17901,16 @@ ${await _agentsMdBlock()}
     Map<String, bool> pathTargets = const {},
     List<String> hostTargets = const [],
     String? approvalKey,
+    bool alwaysAsk = false,
   }) async {
     // This bypass concerns app-level approval only. Callers still enforce
     // read-only/plan policy, hook denials, sandbox policy and Android grants.
-    if (mode == AgentMode.drive && planBody == null && t != 'exit_plan_mode') {
+    // [alwaysAsk] actions (registering a program to run on the device) are
+    // never pre-approved, not even in Full Access.
+    if (!alwaysAsk &&
+        mode == AgentMode.drive &&
+        planBody == null &&
+        t != 'exit_plan_mode') {
       return true;
     }
     final session = _runSession ?? AppState.I.activeSession;
