@@ -22,6 +22,14 @@ idempotency — **without** hardcoding any provider.
   private image models; only chat models appear in the app picker. The agent
   uses the image models through the `ovid-image` alias.
 
+## Capability cards
+
+Image model abilities are discovered automatically (static metadata + background
+probes) and routing is capability based; see `docs/image-capabilities/README.md`
+for the pipeline, env vars (`OVID_PROBE_KEY`, ...) and admin endpoints. Vendor
+the whole `server/images` package (new modules: `capabilities`, `extraction`,
+`probes`, `cardstore`, `cardmanager`, `routing`, `admin`).
+
 ## Files
 
 - `images_gateway.py` — the mount module (provider-agnostic; imports `mint`).
