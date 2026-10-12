@@ -7,6 +7,7 @@ import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/ui/chat_screen.dart';
+import 'package:ovid_ai/ui/widgets/attachment_tiles.dart';
 import 'package:ovid_ai/ui/transcript_model.dart';
 
 Message _msg(
@@ -376,9 +377,15 @@ void main() {
       );
       await tester.pump();
       expect(tester.takeException(), isNull);
-      final text = tester.widget<Text>(find.text(longName));
-      expect(text.overflow, TextOverflow.ellipsis);
+      // One line, shortened in the middle so the extension stays visible.
+      expect(find.text(longName), findsNothing);
+      final text = tester.widget<Text>(find.textContaining('\u2026'));
+      expect(text.data, endsWith('.pdf'));
       expect(text.maxLines, 1);
+      expect(
+        tester.getSize(find.byType(AttachmentFileCard)).width,
+        lessThanOrEqualTo(180),
+      );
     });
 
     testWidgets('ChatTranscript Load earlier reaches the first message', (

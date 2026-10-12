@@ -49,6 +49,7 @@ import '../core/firebase_service.dart';
 import '../core/ovid_cloud_service.dart';
 import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
+import 'widgets/attachment_tiles.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -4836,7 +4837,8 @@ class _MessageView extends StatelessWidget {
                   _ => _text(isUser),
                 },
                 // Attachment chips under the user bubble (in-chat display).
-                if (isUser && m.attachments.isNotEmpty) _attachmentChips(),
+                if (isUser && m.attachments.isNotEmpty)
+                  _attachmentTiles(context),
               ],
             ),
           ),
@@ -5442,102 +5444,19 @@ class _MessageView extends StatelessWidget {
     );
   }
 
-  /// Attachment chips under a user message (paperclip + name + size).
-  /// Long names ellipsize inside a width cap so they never overflow the
-  /// bubble.
-  Widget _attachmentChips() => Padding(
-    padding: const EdgeInsets.only(top: 4),
-    child: LayoutBuilder(
-      builder: (context, constraints) {
-        final cap = constraints.maxWidth.isFinite
-            ? math.min(constraints.maxWidth, 280.0)
-            : 280.0;
-        return Wrap(
-          spacing: 6,
-          runSpacing: 4,
-          alignment: WrapAlignment.end,
-          children: [
-            for (final a in m.attachments)
-              ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: cap),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 9,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Aether.surfaceRaised,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Aether.hairline),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(_attachIcon(a.name), size: 13, color: Aether.accent),
-                      const SizedBox(width: 5),
-                      Flexible(
-                        child: Tooltip(
-                          message: a.name,
-                          child: Text(
-                            a.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w600,
-                              color: Aether.text,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        _fmtSize(a.size),
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          color: Aether.textFaint,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
+  /// Compact attachment tiles under a user message: a thumbnail grid for
+  /// images (opening the fullscreen viewer) and fixed-width file cards whose
+  /// names ellipsize in the middle, so long names never wrap or overflow.
+  Widget _attachmentTiles(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 6),
+    child: TranscriptAttachments(
+      items: [
+        for (final a in m.attachments)
+          AttachmentTileData(name: a.name, size: a.size, path: a.path),
+      ],
+      onOpenImage: (path) => _showFullscreenImage(context, File(path)),
     ),
   );
-
-  IconData _attachIcon(String name) {
-    final ext = name.split('.').last.toLowerCase();
-    return switch (ext) {
-      'png' || 'jpg' || 'jpeg' || 'gif' || 'webp' || 'bmp' => Icons.image,
-      'mp4' || 'mov' || 'avi' || 'mkv' || 'webm' => Icons.videocam,
-      'mp3' || 'wav' || 'ogg' || 'm4a' || 'flac' => Icons.audio_file,
-      'pdf' => Icons.picture_as_pdf,
-      'zip' || 'tar' || 'gz' || 'rar' || '7z' => Icons.folder_zip,
-      'dart' ||
-      'py' ||
-      'js' ||
-      'ts' ||
-      'json' ||
-      'yaml' ||
-      'yml' ||
-      'md' ||
-      'txt' ||
-      'csv' ||
-      'html' ||
-      'css' ||
-      'sh' => Icons.code,
-      _ => Icons.insert_drive_file,
-    };
-  }
-
-  String _fmtSize(int b) => b >= 1048576
-      ? '${(b / 1048576).toStringAsFixed(1)} MB'
-      : b >= 1024
-      ? '${(b / 1024).toStringAsFixed(0)} KB'
-      : '$b B';
 
   /// ToolRow parity — collapsed 24px row (icon + title · summary)
   /// expanding to a Terminal/Diff/plain detail block.
@@ -5681,40 +5600,8 @@ class _MessageView extends StatelessWidget {
         ),
       );
 
-  void _showFullscreenImage(BuildContext context, File file) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        fullscreenDialog: true,
-        builder: (ctx) => Scaffold(
-          backgroundColor: Colors.black,
-          appBar: AppBar(
-            backgroundColor: Colors.black,
-            elevation: 0,
-            iconTheme: const IconThemeData(color: Colors.white),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.share_outlined, color: Colors.white),
-                tooltip: 'Share',
-                onPressed: () => _shareLocalFile(ctx, file.path),
-              ),
-            ],
-          ),
-          body: Center(
-            child: InteractiveViewer(
-              panEnabled: true,
-              boundaryMargin: const EdgeInsets.all(20),
-              minScale: 0.5,
-              maxScale: 5.0,
-              child: Image.file(
-                file,
-                cacheWidth: Aether.imageCacheWidth(context),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  void _showFullscreenImage(BuildContext context, File file) =>
+      _openFullscreenImage(context, file);
 
   Future<void> _shareLocalFile(BuildContext context, String path) async {
     await showNativeShare(context, () => NativeShare.file(path));
@@ -5777,134 +5664,80 @@ class _SlashSuggestion {
   });
 }
 
-/// Staged-attachment preview chips shown above the composer text field.
-/// Each chip shows file icon + name + size with an ✕ to remove. Hidden
-/// when nothing is staged.
+/// Staged attachments above the composer text field: one horizontal row of
+/// compact tiles (image thumbnails, file cards) with a 48dp × each, plus a
+/// placeholder while picked files are still being copied. Hidden when empty.
 class _AttachmentChip extends StatelessWidget {
   const _AttachmentChip();
-
-  IconData _iconFor(String name) {
-    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
-    const img = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic'};
-    const vid = {'mp4', 'mov', 'mkv', 'webm', '3gp'};
-    const aud = {'mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'};
-    if (img.contains(ext)) return Icons.image_outlined;
-    if (vid.contains(ext)) return Icons.videocam_outlined;
-    if (aud.contains(ext)) return Icons.audiotrack_outlined;
-    if (ext == 'pdf') return Icons.picture_as_pdf_outlined;
-    return Icons.insert_drive_file_outlined;
-  }
-
-  String _fmtSize(int b) => b >= 1048576
-      ? '${(b / 1048576).toStringAsFixed(1)} MB'
-      : b >= 1024
-      ? '${(b / 1024).toStringAsFixed(0)} KB'
-      : '$b B';
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: Listenable.merge([AgentService.I, AppState.I]),
-      builder: (_, _) {
+      builder: (context, _) {
         final atts = AgentService.I.pendingAttachments;
+        final staging = AgentService.I.stagingAttachmentCount;
         final sessionId = AppState.I.activeSessionId;
-        if (atts.isEmpty) return const SizedBox.shrink();
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(left: 8, top: 4),
-              child: Text(
-                '${atts.length}/${AgentService.maxAttachments} files',
-                style: TextStyle(fontSize: 11, color: Aether.textMuted),
-              ),
-            ),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 132),
-              child: SingleChildScrollView(
-                key: const ValueKey('composer-attachments-scroll'),
-                primary: false,
-                child: Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final att in atts)
-                      Container(
-                        constraints: const BoxConstraints(maxWidth: 300),
-                        margin: const EdgeInsets.only(top: 6),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 9,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Aether.surface,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: Aether.accent.withValues(alpha: 0.4),
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              _iconFor(att.name),
-                              size: 16,
-                              color: Aether.accent,
-                            ),
-                            const SizedBox(width: 7),
-                            Flexible(
-                              child: Tooltip(
-                                message: att.name,
-                                child: Text(
-                                  att.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              _fmtSize(att.size),
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Aether.textFaint,
-                              ),
-                            ),
-                            const SizedBox(width: 4),
-                            IconButton(
-                              tooltip: 'Remove attachment ${att.name}',
-                              constraints: const BoxConstraints(
-                                minWidth: 48,
-                                minHeight: 48,
-                              ),
-                              onPressed: () {
-                                if (AppState.I.activeSessionId == sessionId) {
-                                  AgentService.I.removeAttachment(att.path);
-                                }
-                              },
-                              icon: Icon(
-                                Icons.close,
-                                size: 15,
-                                color: Aether.textMuted,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+        if (atts.isEmpty && staging == 0) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: ComposerAttachmentRow(
+            scrollKey: const ValueKey('composer-attachments-scroll'),
+            items: [
+              for (final a in atts)
+                AttachmentTileData(name: a.name, size: a.size, path: a.path),
+            ],
+            staging: staging,
+            max: AgentService.maxAttachments,
+            onOpenImage: (path) => _openFullscreenImage(context, File(path)),
+            onRemove: (a) {
+              if (AppState.I.activeSessionId == sessionId && a.path != null) {
+                AgentService.I.removeAttachment(a.path!);
+              }
+            },
+          ),
         );
       },
     );
   }
+}
+
+/// Fullscreen, zoomable image viewer with a Share action (generated images
+/// and image attachments in the composer and transcript).
+void _openFullscreenImage(BuildContext context, File file) {
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (ctx) => Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          elevation: 0,
+          iconTheme: const IconThemeData(color: Colors.white),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.share_outlined, color: Colors.white),
+              tooltip: 'Share',
+              onPressed: () =>
+                  showNativeShare(ctx, () => NativeShare.file(file.path)),
+            ),
+          ],
+        ),
+        body: Center(
+          child: InteractiveViewer(
+            panEnabled: true,
+            boundaryMargin: const EdgeInsets.all(20),
+            minScale: 0.5,
+            maxScale: 5.0,
+            child: Image.file(
+              file,
+              cacheWidth: Aether.imageCacheWidth(context),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// Voice-input mic (press-to-talk): toggles on-device speech recognition,

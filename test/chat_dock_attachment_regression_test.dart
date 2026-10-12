@@ -290,7 +290,14 @@ void main() {
             (name: names[i], path: '/workspace/$i.txt', size: 20000),
         ]);
         await pumpChat(tester, size: size);
-        final firstName = find.text(names.first);
+        // The name is shortened in the middle and keeps its extension.
+        final firstName = find
+            .descendant(
+              of: find.byKey(const ValueKey('composer-attachments-scroll')),
+              matching: find.textContaining('\u2026'),
+            )
+            .first;
+        expect(tester.widget<Text>(firstName).data, endsWith('0.txt'));
         final remove = find.byTooltip('Remove attachment ${names.first}');
         // File identity is bounded independently of the width of the chat pane.
         expect(tester.getSize(firstName).width, lessThanOrEqualTo(200));
@@ -299,7 +306,7 @@ void main() {
         final scroll = find.byKey(
           const ValueKey('composer-attachments-scroll'),
         );
-        expect(tester.getSize(scroll).height, lessThanOrEqualTo(132));
+        expect(tester.getSize(scroll).height, lessThanOrEqualTo(72));
         final scrollable = find.descendant(
           of: scroll,
           matching: find.byType(Scrollable),
@@ -309,6 +316,7 @@ void main() {
           100,
           scrollable: scrollable,
         );
+        await tester.pumpAndSettle();
         await tester.tap(find.byTooltip('Remove attachment ${names.last}'));
         await tester.pump();
         expect(AgentService.I.pendingAttachments, hasLength(19));

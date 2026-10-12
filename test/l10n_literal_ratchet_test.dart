@@ -18,6 +18,7 @@ const _baseline = <String, int>{
   'lib/l10n/l10n.dart': 0,
   'lib/ui/user_error.dart': 0,
   'lib/ui/widgets/error_views.dart': 0,
+  'lib/ui/widgets/attachment_tiles.dart': 0,
   'lib/ui/schedule_screen.dart': 24,
   'lib/ui/providers_screen.dart': 53,
   'lib/ui/settings_screen.dart': 114,
