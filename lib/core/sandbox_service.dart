@@ -392,6 +392,16 @@ class SandboxService {
   static ({String? folder})? Function(String sandboxId)?
   sessionWorkspaceProvider;
 
+  /// The app-owned default workspace of [sessionSandboxId]
+  /// (`<appSupport>/workspaces/ws_<id>`), regardless of any pinned folder or
+  /// repo binding. Not created. Chat attachments staged while no folder was
+  /// pinned live under it, so the agent path gates treat it (and only it) as
+  /// the session's readable slice of app-private storage.
+  Future<String> defaultWorkDirPathFor(String sessionSandboxId) async {
+    final root = await _ensureFilesRoot();
+    return '${root.path}/workspaces/ws_$sessionSandboxId';
+  }
+
   Future<Directory> workDirFor(String sessionSandboxId) async {
     final session = sessionWorkspaceProvider?.call(sessionSandboxId);
     final pinned = session?.folder;
@@ -558,8 +568,18 @@ class SandboxService {
   }
 
   // ── Files root ─────────────────────────────────────────────────────
+  /// Test seam: stands in for `getApplicationSupportDirectory()` so tests can
+  /// lay out a fake Android install root (`…/data/user/0/<pkg>/files`).
+  @visibleForTesting
+  static Directory? filesRootOverrideForTest;
+
   Future<Directory> _ensureFilesRoot() async {
     Directory base;
+    final override = filesRootOverrideForTest;
+    if (override != null) {
+      if (!override.existsSync()) override.createSync(recursive: true);
+      return override;
+    }
     try {
       base = await getApplicationSupportDirectory();
     } catch (_) {

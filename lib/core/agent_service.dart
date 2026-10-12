@@ -6505,10 +6505,21 @@ user which one instead of assuming this one.''';
     notifyListeners();
   }
 
+  @visibleForTesting
+  List<({String name, String path, int size})> pendingAttachmentsForTest(
+    String sessionId,
+  ) => List.of(_attachmentsFor(sessionId));
+
+  @visibleForTesting
+  String attachmentContextForTest(Iterable<MessageAttachment> attachments) =>
+      _attachmentContext(attachments);
+
   String _attachmentContext(Iterable<MessageAttachment> attachments) =>
       '[User attachments in this session workspace:\n'
       '${attachments.map((a) => '${jsonEncode(a.name)} (${_fmtSize(a.size)}): ${jsonEncode(a.path ?? a.name)}').join('\n')}\n'
-      'Use these exact paths for file operations and image editing. '
+      'Use these exact paths for file operations and image editing '
+      '(edit_image path / reference_paths / mask_path, resize_image, '
+      'crop_image); they stay readable for this chat. '
       'Use read_image for images (vision-capable models), read_attachment '
       'for text, or run_shell for file processing.]';
 
@@ -14954,8 +14965,11 @@ ${await _agentsMdBlock()}
     // is enforced by [_planModeShellBlock] below (not left to the prompt):
     // `run_shell` is allowlisted so the plan agent can inspect the repo, but
     // only commands [isReadOnlyCommand] accepts actually run.
-    final selfSourceBlock = _selfSourceBlock(name, args);
-    if (selfSourceBlock != null) return selfSourceBlock;
+    final selfSourceTargets = _selfSourceTargets(name, args);
+    if (selfSourceTargets.isNotEmpty) {
+      final selfSourceBlock = await _selfSourceBlockAsync(selfSourceTargets);
+      if (selfSourceBlock != null) return selfSourceBlock;
+    }
     if (planMode && !_isPlanModeAllowedTool(name)) {
       return 'PLAN MODE ACTIVE: "$name" is a mutating tool. Plan mode is the '
           'research phase — read, search and inspect with the allowlisted '
@@ -18216,6 +18230,7 @@ ${await _agentsMdBlock()}
   Future<String?> _resolveGrantedPath(
     String rel, {
     required String tool,
+    void Function(String refusal)? onRefusal,
   }) async {
     final rs = _runSession;
     final sid = rs?.id ?? AppState.I.activeSession?.id;
@@ -18241,6 +18256,17 @@ ${await _agentsMdBlock()}
     final canonicalRoot = await _canonicalFsPath(root);
     final abs = normalizeGrantPath(rel, base: canonicalRoot);
     final canonicalAbs = await _canonicalFsPath(abs);
+    // App-private storage and other chats' attachments are refused in EVERY
+    // mode and never prompt — checked on the canonical target, so a symlink
+    // inside the workspace (or the attachment folder) cannot reach them.
+    final privateRefusal = await _resolverPrivateRefusal(
+      canonicalAbs,
+      canonicalRoot,
+    );
+    if (privateRefusal != null) {
+      onRefusal?.call(privateRefusal);
+      return null;
+    }
     if (m == AgentMode.drive) {
       // Full Access is the ONLY unconfinable mode: the user explicitly opted
       // out of prompts. Control is no longer exempt (see the root above).
@@ -18266,6 +18292,26 @@ ${await _agentsMdBlock()}
       pathTargets: {canonicalAbs: await Directory(canonicalAbs).exists()},
     );
     return ok ? canonicalAbs : null;
+  }
+
+  /// Refusal for a canonical grant target that is another chat's attachment
+  /// or app-private storage outside both the jail [canonicalRoot] and the
+  /// current chat's own workspace slice; null when the normal grant rules
+  /// apply.
+  Future<String?> _resolverPrivateRefusal(
+    String canonicalAbs,
+    String canonicalRoot,
+  ) async {
+    final own = await _ownAppPrivateRoots();
+    if (_foreignAttachmentPath(canonicalAbs, [canonicalRoot, ...own])) {
+      return _foreignAttachmentMessage(canonicalAbs);
+    }
+    if (!isOvidSelfSourcePath(canonicalAbs)) return null;
+    if (canonicalRoot.isNotEmpty &&
+        containedPath(Directory(canonicalRoot), canonicalAbs) != null) {
+      return null;
+    }
+    return _appPrivateRefusal(canonicalAbs);
   }
 
   /// Best-effort symlink canonicalization of an absolute path: resolves the
@@ -18318,6 +18364,9 @@ ${await _agentsMdBlock()}
     for (final rel in rels) {
       final abs = normalizeGrantPath(rel, base: canonicalRoot);
       final canonicalAbs = await _canonicalFsPath(abs);
+      if (await _resolverPrivateRefusal(canonicalAbs, canonicalRoot) != null) {
+        return null;
+      }
       if (m != AgentMode.drive &&
           store.isPathDenied(sid, canonicalAbs, mode: m.name)) {
         return null;
@@ -19820,7 +19869,12 @@ ${await _agentsMdBlock()}
     // Absolute host path: resolve only when it exists; agent tools route
     // through the grant gate, everything else keeps the existence check.
     if (rel.startsWith('/')) {
-      if (isOvidSelfSourcePath(rel)) return (path: null, denied: true);
+      // App-private storage stays refused, except the current chat's own
+      // workspace slice (its attachments and saved image outputs).
+      if (isOvidSelfSourcePath(rel) &&
+          await _appPrivateRefusal(await _canonicalToolPath(rel)) != null) {
+        return (path: null, denied: true);
+      }
       final direct = File(rel);
       if (!direct.existsSync()) return (path: null, denied: false);
       if (gateTool == null) return (path: direct.path, denied: false);
@@ -21763,15 +21817,25 @@ ${await _agentsMdBlock()}
     '/pubspec.yaml',
   ];
 
+  /// Android install roots of this app (`/data/data/<pkg>` and its
+  /// `/data/user/0` alias). Everything under them is app-private.
+  static List<String> get _installRoots =>
+      installRootsOverrideForTest ??
+      const [
+        '/data/data/$selfSourcePackage',
+        '/data/user/0/$selfSourcePackage',
+      ];
+
+  /// Test seam: fake install roots so host tests can lay out a private
+  /// storage tree (shared_prefs, databases, files/workspaces, …) in a temp dir.
+  @visibleForTesting
+  static List<String>? installRootsOverrideForTest;
+
   @visibleForTesting
   static bool isOvidSelfSourcePath(String raw) {
     final path = normalizeGrantPath(raw);
     if (path.isEmpty) return false;
-    const installRoots = [
-      '/data/data/$selfSourcePackage',
-      '/data/user/0/$selfSourcePackage',
-    ];
-    for (final root in installRoots) {
+    for (final root in _installRoots.map(normalizeGrantPath)) {
       if (path == root || path.startsWith('$root/')) {
         final rest = path == root ? '' : path.substring(root.length + 1);
         if (!rest.startsWith('files/sessions/') &&
@@ -21787,30 +21851,129 @@ ${await _agentsMdBlock()}
     return hits >= 2;
   }
 
-  String? _selfSourceBlock(String name, Map<String, dynamic> args) {
+  /// Path-ish targets of a tool call that the self-source gate inspects.
+  List<String> _selfSourceTargets(String name, Map<String, dynamic> args) {
     final targets = <String>[
       for (final key in [
         'path',
         'file_path',
         'notebook_path',
         'file',
+        'mask_path',
         'command',
         'cmd',
         'code',
       ])
         if (args[key] is String) args[key] as String,
+      if (args['reference_paths'] is List)
+        ...(args['reference_paths'] as List).whereType<String>(),
     ];
     if (name == 'run_shell' || name == 'job_start' || name == 'run_code') {
       final cmd = args['command'] as String? ?? args['code'] as String? ?? '';
       targets.addAll(extractShellPathTokens(cmd));
       targets.addAll(_jailPathCandidates(cmd));
     }
-    final blocked = targets.where(isOvidSelfSourcePath).toSet();
-    if (blocked.isEmpty) return null;
-    return 'ACCESS_DENIED: Ovid cannot read or modify its own application '
-        'source, package data, or installation files. This restriction applies '
-        'in every mode and for every selected model. Ask the user to work in a '
-        'separate project instead.';
+    return targets.where(isOvidSelfSourcePath).toList();
+  }
+
+  /// The only slices of app-private storage the CURRENT run's chat may read:
+  /// its own default workspace (`<appSupport>/workspaces/ws_<sandboxId>`,
+  /// where chat attachments and image outputs are written) — canonicalized,
+  /// so a symlink that resolves elsewhere never matches. Empty without a run
+  /// session. Other chats' attachment folders inside a shared workspace are
+  /// carved back out by [_foreignAttachmentPath].
+  Future<List<String>> _ownAppPrivateRoots() async {
+    final s = _runSession;
+    if (s == null) return const [];
+    final raw = await SandboxService.I.defaultWorkDirPathFor(
+      s.sandboxId ?? s.id,
+    );
+    final canonical = await _canonicalFsPath(normalizeGrantPath(raw));
+    // A workspace dir that resolves to an install root itself (or above it)
+    // would exempt everything — never honor that.
+    if (_installRoots.map(normalizeGrantPath).any(
+      (r) => r == canonical || r.startsWith('$canonical/'),
+    )) {
+      return const [];
+    }
+    return [canonical];
+  }
+
+  /// True when [canonicalAbs] is inside `<root>/.attachments/<other>` for one
+  /// of [roots] and `<other>` is not the current run chat's attachment folder.
+  /// Chats can share a workspace; their uploads must not leak across chats.
+  bool _foreignAttachmentPath(String canonicalAbs, Iterable<String> roots) {
+    final s = _runSession;
+    final own = s == null ? null : Uri.encodeComponent(s.id);
+    for (final root in roots) {
+      if (root.isEmpty) continue;
+      final base = '${normalizeGrantPath(root)}/.attachments/';
+      if (!canonicalAbs.startsWith(base)) continue;
+      final owner = canonicalAbs.substring(base.length).split('/').first;
+      if (owner.isEmpty) continue; // the .attachments dir itself
+      if (owner != own) return true;
+    }
+    return false;
+  }
+
+  /// Canonical form of a tool path argument: relative paths resolve against
+  /// the session workspace, then symlinks are resolved.
+  Future<String> _canonicalToolPath(String raw) async {
+    final base = await _canonicalFsPath((await _sessionWorkDir()).path);
+    return _canonicalFsPath(normalizeGrantPath(raw, base: base));
+  }
+
+  /// Returns the refusal for an app-private [canonicalAbs], or null when it
+  /// lies inside the current chat's own workspace/attachment slice.
+  Future<String?> _appPrivateRefusal(String canonicalAbs) async {
+    final roots = await _ownAppPrivateRoots();
+    if (_foreignAttachmentPath(canonicalAbs, roots)) {
+      return _foreignAttachmentMessage(canonicalAbs);
+    }
+    for (final root in roots) {
+      if (canonicalAbs == root || canonicalAbs.startsWith('$root/')) {
+        return null;
+      }
+    }
+    return _appPrivateMessage(canonicalAbs);
+  }
+
+  static String _appPrivateMessage(String target) =>
+      'ACCESS_DENIED: $target is in Ovid\'s private app storage. Ovid cannot '
+      'read or modify its own application source, package data, or '
+      'installation files (settings, databases, credentials, other chats). '
+      'This restriction applies in every mode and for every selected model. '
+      'Files the user attached to THIS chat are NOT affected: they are '
+      'readable at the exact paths listed in the "[User attachments …]" note '
+      '(pass them unchanged as path / reference_paths / mask_path), and so are '
+      'images earlier tool calls saved in this chat. Do not ask the user to '
+      're-upload or move an attachment.';
+
+  static String _foreignAttachmentMessage(String target) =>
+      'ACCESS_DENIED: $target is an attachment of a different chat. Each chat '
+      'can only read its own attachments. Use the exact paths from this '
+      'chat\'s "[User attachments …]" note instead; do not retry this path.';
+
+  /// Dispatch-time self-source gate. Stays SYNC (no await) unless a target
+  /// actually points into app-private storage — see the timing note at the
+  /// call site. Flagged targets are re-checked canonically against the
+  /// current chat's own workspace slice, so the chat's attachments and image
+  /// outputs (absolute paths under `files/workspaces/ws_<id>`) pass while a
+  /// symlink from there to shared_prefs or another chat's upload does not.
+  Future<String?> _selfSourceBlockAsync(List<String> flagged) async {
+    for (final raw in flagged) {
+      // Source-tree markers are refused regardless of location.
+      var markers = 0;
+      final lexical = normalizeGrantPath(raw);
+      for (final marker in _selfSourceMarkers) {
+        if (lexical.contains(marker)) markers++;
+      }
+      if (markers >= 2) return _appPrivateMessage(raw);
+      final canonical = await _canonicalToolPath(raw);
+      final refusal = await _appPrivateRefusal(canonical);
+      if (refusal != null) return refusal;
+    }
+    return null;
   }
 
   /// Absolute paths in [cmd] that escape [root] — the plan-mode workspace jail.
@@ -25123,9 +25286,14 @@ ${await _agentsMdBlock()}
         }
         // Always use the canonical standard grant resolver, including relative
         // paths and symlinks. Do not basename-match attachments.
-        final resolved = await _resolveGrantedPath(path, tool: tool);
+        String? refusal;
+        final resolved = await _resolveGrantedPath(
+          path,
+          tool: tool,
+          onRefusal: (r) => refusal = r,
+        );
         if (!current()) return 'Cancelled: image run or account changed.';
-        if (resolved == null) return _accessDeniedMessage([path]);
+        if (resolved == null) return refusal ?? _accessDeniedMessage([path]);
         input = await ImageStudio.readInput(File(resolved));
         if (!current()) return 'Cancelled: image run or account changed.';
       }
@@ -25139,9 +25307,16 @@ ${await _agentsMdBlock()}
             ...(args['reference_paths'] as List).whereType<String>(),
         ];
         for (final extra in extras) {
-          final resolvedExtra = await _resolveGrantedPath(extra, tool: tool);
+          String? refusal;
+          final resolvedExtra = await _resolveGrantedPath(
+            extra,
+            tool: tool,
+            onRefusal: (r) => refusal = r,
+          );
           if (!current()) return 'Cancelled: image run or account changed.';
-          if (resolvedExtra == null) return _accessDeniedMessage([extra]);
+          if (resolvedExtra == null) {
+            return refusal ?? _accessDeniedMessage([extra]);
+          }
           final bytesExtra = await ImageStudio.readInput(File(resolvedExtra));
           if (!current()) return 'Cancelled: image run or account changed.';
           if (extra == args['mask_path']) {
