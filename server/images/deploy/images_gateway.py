@@ -547,7 +547,7 @@ def mount():
     mint.app.state.ovid_images_mounted = True
     print(f"Ovid images mounted: alias={ALIAS} image_models={[b.model for b in service.backends]} "
           f"probes={'on' if PROBE_KEY else 'off (static cards only)'} "
-          f"direct_edit={'on' if DIRECT_EDIT.has_key else 'off (INFERHUB_API_KEY unset: edits unsupported)'}")
+          f"direct_edit={'on' if DIRECT_EDIT.has_key else 'off (edits use LiteLLM, or the edit adapter for JSON-only providers)'}")
 
 
 try:
