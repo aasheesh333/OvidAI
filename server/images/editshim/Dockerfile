@@ -1,0 +1,14 @@
+# Build from the repo root:
+#   docker build -f server/images/editshim/Dockerfile -t img-edit-shim .
+FROM python:3.12-slim
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY server/images/editshim/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY server/images/adapters.py /app/adapters.py
+COPY server/images/editshim/shim.py /app/shim.py
+RUN useradd --system --uid 10001 --no-create-home shim
+USER 10001
+EXPOSE 8099
+# Internal network only: never publish this port.
+CMD ["uvicorn", "shim:app", "--host", "0.0.0.0", "--port", "8099", "--no-access-log"]

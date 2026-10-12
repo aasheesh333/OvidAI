@@ -1,0 +1,29 @@
+# Merge into the gateway compose file. Do NOT add `ports:`; the shim must only be
+# reachable from the internal network shared with LiteLLM.
+services:
+  img-edit-shim:
+    build:
+      context: /root/OvidAI            # repo root
+      dockerfile: server/images/editshim/Dockerfile
+    image: img-edit-shim:latest
+    restart: unless-stopped
+    environment:
+      SHIM_ALLOWED_HOSTS: "api.inferhub.dev"
+      SHIM_JSON_EDIT_HOSTS: "api.inferhub.dev"
+    networks: [internal]               # same network as litellm; rename as needed
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8099/healthz', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+networks:
+  internal:
+    external: true
