@@ -10,6 +10,9 @@ services:
     environment:
       SHIM_ALLOWED_HOSTS: "api.inferhub.dev"
       SHIM_JSON_EDIT_HOSTS: "api.inferhub.dev"
+      SHIM_PROVIDERS_FILE: "/providers/providers.json"   # optional, hot-reloaded
+    volumes:
+      - /opt/ovid-gateway/shim-providers:/providers:ro   # mount the DIRECTORY (atomic replace)
     networks: [internal]               # same network as litellm; rename as needed
     read_only: true
     tmpfs: [/tmp]

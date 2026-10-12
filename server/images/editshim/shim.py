@@ -21,8 +21,10 @@ from fastapi.responses import JSONResponse, Response
 
 try:
     from server.images.adapters import EDIT_PATH, request_shape
-except ImportError:  # container layout: adapters.py next to shim.py
+    from server.images.editshim.profiles import Registry
+except ImportError:  # container layout: adapters.py/profiles.py next to shim.py
     from adapters import EDIT_PATH, request_shape
+    from profiles import Registry
 
 log = logging.getLogger('img-edit-shim')
 
@@ -43,10 +45,11 @@ def _csv(name, default):
 
 class Config:
     def __init__(self, allowed_hosts=None, json_edit_hosts=None, max_request_bytes=None,
-                 max_response_bytes=None, timeout=None, max_concurrent=None):
+                 max_response_bytes=None, timeout=None, max_concurrent=None, providers_file=None):
         env = os.environ.get
         self.allowed_hosts = frozenset(allowed_hosts) if allowed_hosts is not None else _csv('SHIM_ALLOWED_HOSTS', 'api.inferhub.dev')
         self.json_edit_hosts = frozenset(json_edit_hosts) if json_edit_hosts is not None else _csv('SHIM_JSON_EDIT_HOSTS', 'api.inferhub.dev')
+        self.providers_file = providers_file if providers_file is not None else (env('SHIM_PROVIDERS_FILE') or None)
         self.max_request_bytes = int(max_request_bytes if max_request_bytes is not None else env('SHIM_MAX_REQUEST_BYTES', 25 * 1024 * 1024))
         self.max_response_bytes = int(max_response_bytes if max_response_bytes is not None else env('SHIM_MAX_RESPONSE_BYTES', 25 * 1024 * 1024))
         self.timeout = float(timeout if timeout is not None else env('SHIM_UPSTREAM_TIMEOUT', 120))
@@ -157,6 +160,83 @@ def multipart_to_json_edit(content_type, body):
     return out, None
 
 
+def _encode(data, mime, fmt):
+    b64 = base64.b64encode(data).decode('ascii')
+    return f'data:{mime};base64,' + b64 if fmt == 'data_url' else b64
+
+
+def unsupported(message):
+    return JSONResponse({'error': {'code': 'unsupported_modality', 'type': 'invalid_request',
+                                   'message': message}}, status_code=400)
+
+
+def profile_edit_body(content_type, body, profile):
+    """Convert a LiteLLM multipart edit into the JSON body described by ``profile``.
+
+    Returns (json_body, None) or (None, error_response). With the default profile the
+    result is byte-identical to multipart_to_json_edit().
+    """
+    parts = parse_multipart(content_type, body)
+    if parts is None:
+        return None, error(400, 'invalid_request', 'Malformed multipart body')
+    fields, images, mask = {}, [], None
+    for name, filename, ctype, data in parts:
+        if name in ('mask', 'mask[]'):
+            mask = (ctype, data)
+        elif name in ('image', 'image[]'):
+            images.append((filename, ctype, data))
+        elif filename is None:
+            fields.setdefault(name, data.decode('utf-8', 'replace'))
+    if profile['image_format'] == 'url_not_supported':
+        return None, unsupported("This provider's edit endpoint only accepts image URLs, which the gateway does not support")
+    if mask is not None and not profile['mask_field']:
+        return None, unsupported("This provider's edit endpoint takes no mask")
+    if len(images) > profile['max_images']:
+        n = profile['max_images']
+        return None, unsupported("This provider's edit endpoint takes %s" % ('one image' if n == 1 else f'at most {n} images')
+                                 + ('' if profile['mask_field'] else ' and no mask'))
+    if not images or not images[0][2]:
+        return None, error(400, 'invalid_request', 'An image part is required')
+    try:
+        n = int(fields.get('n') or 1)
+    except ValueError:
+        return None, error(400, 'invalid_request', 'n must be an integer')
+    if not fields.get('model') or fields.get('prompt') is None:
+        return None, error(400, 'invalid_request', 'model and prompt are required')
+
+    def enc(ctype, data):
+        mime = sniff_mime(data) or (ctype if ctype and ctype.startswith('image/') else 'image/png')
+        return _encode(data, mime, profile['image_format'])
+    encoded = [enc(c, d) for _, c, d in images]
+    out = {profile['model_field']: fields['model'], profile['prompt_field']: fields['prompt']}
+    if fields.get('size'):
+        out['size'] = fields['size']
+    out['n'] = n
+    rf = fields.get('response_format') or profile['response_format_default']
+    if rf:
+        out['response_format'] = rf
+    out[profile['image_field']] = encoded if profile['image_array'] else encoded[0]
+    if mask is not None:
+        out[profile['mask_field']] = enc(*mask)
+    for name in profile['extra_fields_passthrough']:
+        if fields.get(name) and name not in out:
+            out[name] = fields[name]
+    for name in profile['drop_fields']:
+        out.pop(name, None)
+    return out, None
+
+
+def profile_edit_adapter(profile):
+    import json
+
+    def adapter(headers, content_type, body):
+        converted, err = profile_edit_body(content_type, body, profile)
+        if err is not None:
+            return err
+        return {'content-type': 'application/json'}, json.dumps(converted, separators=(',', ':')).encode()
+    return adapter
+
+
 def inferhub_edit_adapter(headers, content_type, body):
     """EDIT_ADAPTERS callable: multipart -> (extra_headers, json_bytes) or error response."""
     import json
@@ -215,7 +295,9 @@ def create_app(config=None, transport=None):
         await client.aclose()
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    registry = Registry(cfg.allowed_hosts, cfg.json_edit_hosts, cfg.providers_file, valid_host)
     state = {'inflight': 0}
+    app.state.registry = registry
     app.state.client = client
     app.state.config = cfg
 
@@ -241,7 +323,7 @@ def create_app(config=None, transport=None):
         host = upstream_host.lower()
         status = 0
         try:
-            if host != upstream_host or host not in cfg.allowed_hosts or not valid_host(host) or not safe_path(path):
+            if host != upstream_host or not registry.lookup(host)[0] or not valid_host(host) or not safe_path(path):
                 status = 403
                 return error(403, 'forbidden_host', 'Upstream host is not allowed')
             if state['inflight'] >= cfg.max_concurrent:
@@ -265,9 +347,10 @@ def create_app(config=None, transport=None):
         headers = forward_headers(request.headers)
         ctype = request.headers.get('content-type', '')
         converted = False
-        if (request.method == 'POST' and '/' + path == EDIT_PATH and host in cfg.json_edit_hosts
+        if (request.method == 'POST' and '/' + path == EDIT_PATH and registry.lookup(host)[1]
                 and ctype.lower().startswith('multipart/form-data')):
-            adapter = EDIT_ADAPTERS.get(host, DEFAULT_EDIT_ADAPTER)
+            profile = registry.lookup(host)[2]
+            adapter = profile_edit_adapter(profile) if profile else EDIT_ADAPTERS.get(host, DEFAULT_EDIT_ADAPTER)
             result = adapter(request.headers, ctype, body)
             if isinstance(result, Response):
                 return result
