@@ -109,14 +109,15 @@ void main() {
       await tester.pump();
       final scroll = find.byKey(const ValueKey('composer-attachments-scroll'));
       expect(scroll, findsOneWidget);
-      expect(tester.getSize(scroll).height, lessThanOrEqualTo(132));
+      // One compact horizontal row, never a wrapping block.
+      expect(tester.getSize(scroll).height, lessThanOrEqualTo(72));
       expect(find.text('20/20 files'), findsOneWidget);
       expect(tester.takeException(), isNull);
       final scrollable = tester.state<ScrollableState>(
         find.descendant(of: scroll, matching: find.byType(Scrollable)),
       );
       expect(scrollable.position.maxScrollExtent, greaterThan(0));
-      await tester.drag(scroll, const Offset(0, -1000));
+      await tester.drag(scroll, const Offset(-1000, 0));
       await tester.pumpAndSettle();
       expect(scrollable.position.pixels, greaterThan(0));
       AgentService.I.clearAttachment();
