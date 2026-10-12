@@ -244,14 +244,16 @@ jobs:
           flutter build apk --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
           flutter build appbundle --release --obfuscate --split-debug-info=build/symbols --dart-define=OVID_BUILD=${{ github.sha }} --dart-define=OVID_ACCOUNT_ENABLED="$OVID_ACCOUNT_ENABLED" $play_define
 
-      # Manual production_release enforces the API 36 Play floor.
+      # Manual production_release enforces the API 36 Play floor and the Play
+      # profile (OVID_PLAY_BUILD=true: no sandbox bootstrap payload allowed).
+      # The release-candidate build keeps the sideload profile (bootstrap required).
       - name: Gate release artifacts
         if: env.release_signing == 'true'
         run: |
-          if [ "${{ inputs.production_release }}" = "true" ]; then mode=production; target=36; else mode=release; target=28; fi
+          if [ "${{ inputs.production_release }}" = "true" ]; then mode=production; target=36; profile=play; else mode=release; target=28; profile=sideload; fi
           status=0
-          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-release.apk --mode "$mode" --expected-target "$target" --output build/release-inventory/release-apk.json || status=1
-          python3 tool/release_inventory.py build/app/outputs/bundle/release/app-release.aab --mode "$mode" --expected-target "$target" --output build/release-inventory/release-aab.json || status=1
+          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-release.apk --mode "$mode" --expected-target "$target" --profile "$profile" --output build/release-inventory/release-apk.json || status=1
+          python3 tool/release_inventory.py build/app/outputs/bundle/release/app-release.aab --mode "$mode" --expected-target "$target" --profile "$profile" --output build/release-inventory/release-aab.json || status=1
           exit "$status"
 
       - name: Upload release APK

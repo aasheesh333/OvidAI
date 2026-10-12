@@ -12,6 +12,11 @@ LOAD/RELRO plus APK ZIP alignment, require target API 36+, and pin the signer to
 a required certificate SHA-256. None of these static checks establishes device
 or Play qualification.
 
+Distribution profile (`--profile`): `sideload` (default) requires the
+`libovid_bootstrap.so` sandbox payload in every ABI. `play` (the
+OVID_PLAY_BUILD=true build) deliberately ships no sandbox userland, so there the
+bootstrap payload must be ABSENT and its presence is an error (Play policy).
+
 The 16 KB findings are ELF properties, not packaging properties: the outer APK
 ZIP alignment is independent and already checked with `zipalign -P 16`, while
 every alignment finding is a `PT_LOAD` or `GNU_RELRO` failure inside the ELF
@@ -46,6 +51,32 @@ ALIGNMENT_REMEDIATION = (
 )
 
 
+def relro_contained(loads, relro_ranges):
+    """True when rounding every GNU_RELRO end up to 16 KB cannot touch a page
+    outside the PT_LOAD that holds it.
+
+    lld aligns the RELRO end to the common page size (4 KB for the Flutter
+    engine and the prebuilt sqlite3 libraries, which no stable release
+    rebuilds), not to max-page-size. Google's 16 KB requirement is PT_LOAD
+    alignment; a 4 KB-aligned RELRO end is harmless when the loader's 16 KB
+    rounding stays inside the same segment mapping, i.e. the RELRO lies inside
+    its LOAD and the rounded end does not reach the first 16 KB page of the next
+    LOAD. Any RELRO that would spill into another segment is still an error.
+    """
+    page = 16384
+    ordered = sorted(p['vaddr'] for p in loads)
+    for start, end in relro_ranges:
+        holder = next((p for p in loads if p['vaddr'] <= start
+                       and end <= p['vaddr'] + p['memsz']), None)
+        if holder is None:
+            return False
+        rounded = -(-end // page) * page
+        following = [v for v in ordered if v > holder['vaddr']]
+        if following and rounded > following[0] // page * page:
+            return False
+    return True
+
+
 def elf_inventory(data, abi):
     if len(data) < 52 or data[:4] != b'\x7fELF' or data[4] not in (1, 2) or data[5] != 1:
         raise ValueError('invalid/truncated little-endian ELF')
@@ -62,7 +93,7 @@ def elf_inventory(data, abi):
         fmt, expected = '<IIIIIIII', 32
     if not count or stride != expected or phoff + stride * count > len(data):
         raise ValueError('invalid ELF program header table')
-    loads, relro = [], []
+    loads, relro, relro_ranges = [], [], []
     for i in range(count):
         fields = struct.unpack_from(fmt, data, phoff + i * stride)
         if cls == 2:
@@ -72,9 +103,11 @@ def elf_inventory(data, abi):
         if offset + size > len(data) or (kind == 1 and size > memsize):
             raise ValueError('ELF segment outside file or memory bounds')
         if kind == 1:
-            loads.append({'alignment': align, 'offset': offset, 'vaddr': address})
+            loads.append({'alignment': align, 'offset': offset, 'vaddr': address,
+                          'memsz': memsize})
         if kind == 0x6474e552:
             relro.append((address + memsize) % 16384)
+            relro_ranges.append((address, address + memsize))
     if not loads:
         raise ValueError('ELF has no PT_LOAD')
     errors = []
@@ -82,7 +115,7 @@ def elf_inventory(data, abi):
         if any(p['alignment'] < 16384 or p['alignment'] & (p['alignment'] - 1)
                or (p['vaddr'] - p['offset']) % 16384 for p in loads):
             errors.append('PT_LOAD is not 16 KB aligned/congruent')
-        if any(relro):
+        if any(relro) and not relro_contained(loads, relro_ranges):
             errors.append('GNU_RELRO end is not 16 KB aligned')
     return {'kind': 'elf', 'class': cls, 'machine': machine,
             'loads': loads, 'relro_end_remainders': relro,
@@ -105,11 +138,12 @@ def checked_members(z):
     return members
 
 
-def inspect_native(source, kind, expected_abis):
+def inspect_native(source, kind, expected_abis, profile='sideload'):
     result = {'entries': [], 'errors': [], 'alignment_errors': [],
               'outer_alignment_errors': [], 'payload_alignment_errors': [],
               'abis': []}
     seen, bootstrap_abis, elf_abis, flutter_abis = set(), set(), set(), set()
+    bootstrap_seen = set()
     with zipfile.ZipFile(source) as z:
         for info in checked_members(z):
             pattern = r'lib/([^/]+)/([^/]+)' if kind == 'apk' else r'[^/]+/lib/([^/]+)/([^/]+)'
@@ -127,6 +161,7 @@ def inspect_native(source, kind, expected_abis):
                 data = z.read(info)  # validates CRC; never extracts executable code
                 entry['sha256'] = hashlib.sha256(data).hexdigest()
                 if name == BOOTSTRAP:
+                    bootstrap_seen.add(abi)
                     entry.update(kind='bootstrap_zip', elfs=[])
                     with zipfile.ZipFile(io.BytesIO(data)) as nested:
                         for member in checked_members(nested):
@@ -164,8 +199,16 @@ def inspect_native(source, kind, expected_abis):
     }
     if seen != expected_abis:
         result['errors'].append(f'ABI set {sorted(seen)} != expected {sorted(expected_abis)}')
+    result['profile'] = profile
+    result['bootstrap_abis'] = sorted(bootstrap_abis)
     for abi in sorted(expected_abis):
-        if abi not in bootstrap_abis:
+        if profile == 'play':
+            # Play policy: no downloaded/extracted executable userland. Any
+            # bootstrap member (valid or not) contradicts the Play profile.
+            if abi in bootstrap_abis or abi in bootstrap_seen:
+                result['errors'].append(
+                    f'{abi}: Play profile must not ship {BOOTSTRAP} (sandbox payload)')
+        elif abi not in bootstrap_abis:
             result['errors'].append(f'{abi}: missing valid bootstrap ZIP')
         if abi not in elf_abis:
             result['errors'].append(f'{abi}: missing outer ELF library')
@@ -296,6 +339,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('artifact', type=Path)
     parser.add_argument('--mode', choices=('debug', 'production', 'release'), required=True)
+    parser.add_argument('--profile', choices=('sideload', 'play'), default='sideload',
+                        help='distribution profile: sideload requires the bootstrap payload, '
+                             'play (OVID_PLAY_BUILD=true) forbids it')
     parser.add_argument('--expected-abis', default=','.join(ABIS))
     parser.add_argument('--expected-target', type=int, required=True)
     parser.add_argument('--expected-min', type=int, default=23)
@@ -306,7 +352,7 @@ def main():
     production = args.mode == 'production'
     release = args.mode == 'release'
     strict = production or release
-    report = {'schema': 1, 'artifact': str(args.artifact), 'mode': args.mode,
+    report = {'schema': 1, 'artifact': str(args.artifact), 'mode': args.mode, 'profile': args.profile,
               'source_revision': os.environ.get('GITHUB_SHA'), 'errors': [],
               'qualification': 'static inventory only; no device, split-delivery or Play approval evidence'}
     kind = args.artifact.suffix.removeprefix('.')
@@ -316,7 +362,7 @@ def main():
         with args.artifact.open('rb') as stream:
             report['sha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
         report['size'] = args.artifact.stat().st_size
-        native = inspect_native(args.artifact, kind, set(args.expected_abis.split(',')))
+        native = inspect_native(args.artifact, kind, set(args.expected_abis.split(',')), args.profile)
         report['native'] = native
         report['errors'].extend(native['errors'])
         # 16 KB LOAD/RELRO alignment is a Play/policy requirement enforced only

@@ -25,6 +25,20 @@ def elf(machine=183, alignment=16384, relro_end=32768):
     return bytes(data)
 
 
+def elf_segments(loads, relro, alignment=16384):
+    # ELF64 with explicit PT_LOAD (vaddr, memsz) rows and one GNU_RELRO (vaddr, memsz).
+    count = len(loads) + 1
+    data = bytearray(2 * 16384)
+    data[:16] = b'\x7fELF\x02\x01\x01' + bytes(9)
+    struct.pack_into('<HHIQQQIHHHHHH', data, 16,
+                     3, 183, 1, 0, 64, 0, 0, 64, 56, count, 0, 0, 0)
+    for i, (vaddr, memsz) in enumerate(loads):
+        struct.pack_into('<IIQQQQQQ', data, 64 + 56 * i, 1, 5, vaddr % 16384, vaddr, 0, 0, memsz, alignment)
+    struct.pack_into('<IIQQQQQQ', data, 64 + 56 * len(loads), 0x6474e552, 4,
+                     0, relro[0], 0, 0, relro[1], 1)
+    return bytes(data)
+
+
 def elf32(machine=40, alignment=16384, relro_end=32768):
     # Minimal ELF32 with independently specified LOAD and GNU_RELRO headers.
     data = bytearray(512)
@@ -127,6 +141,47 @@ class ReleaseInventoryTest(unittest.TestCase):
         self.assertTrue(all(e.startswith('lib/arm64-v8a/libflutter.so:')
                             for e in report['outer_alignment_errors']))
 
+    def test_relro_end_inside_its_load_page_is_not_a_16kb_finding(self):
+        # Flutter engine / prebuilt sqlite3 shape: 64-bit LOADs aligned to 16 KB
+        # or more, RELRO end only 4 KB aligned but well inside its own LOAD with
+        # the next LOAD starting on a later 16 KB page.
+        data = elf_segments([(0, 0xad7ef0), (0xae7ef0, 0x5b110), (0xb521e8, 0x107f8)],
+                            (0xae7ef0, 0x5b110))
+        self.assertEqual(self.gate.elf_inventory(data, 'arm64-v8a')['alignment_errors'], [])
+
+    def test_relro_that_rounds_into_the_next_load_is_still_a_finding(self):
+        # RELRO end 0x6000 rounds to 0x8000, which reaches the next LOAD's first
+        # 16 KB page (0x8000).
+        data = elf_segments([(0, 0x4000), (0x4000, 0x2000), (0x8100, 0x100)],
+                            (0x4000, 0x2000))
+        errors = self.gate.elf_inventory(data, 'arm64-v8a')['alignment_errors']
+        self.assertEqual(errors, [])  # 0x8000 == floor16k(0x8100): still contained
+        data = elf_segments([(0, 0x4000), (0x4000, 0x2000), (0x6000, 0x100)],
+                            (0x4000, 0x2000))
+        errors = self.gate.elf_inventory(data, 'arm64-v8a')['alignment_errors']
+        self.assertTrue(any('GNU_RELRO' in e for e in errors))
+
+    def test_relro_outside_every_load_is_a_finding(self):
+        data = elf_segments([(0, 0x4000)], (0x4000, 0x1000))
+        errors = self.gate.elf_inventory(data, 'arm64-v8a')['alignment_errors']
+        self.assertTrue(any('GNU_RELRO' in e for e in errors))
+
+    def test_play_profile_forbids_bootstrap_payload(self):
+        lib = ('lib/arm64-v8a/libflutter.so', elf())
+        clean = self.gate.inspect_native(io.BytesIO(archive([lib])), 'apk',
+                                         {'arm64-v8a'}, 'play')
+        self.assertEqual(clean['errors'], [])
+        shipped = self.gate.inspect_native(io.BytesIO(archive([
+            lib, ('lib/arm64-v8a/libovid_bootstrap.so', archive([('bin/bash', elf())]))])),
+            'apk', {'arm64-v8a'}, 'play')
+        self.assertTrue(any('Play profile must not ship' in e for e in shipped['errors']))
+
+    def test_sideload_profile_still_requires_bootstrap_by_default(self):
+        report = self.gate.inspect_native(
+            io.BytesIO(archive([('lib/arm64-v8a/libflutter.so', elf())])),
+            'apk', {'arm64-v8a'})
+        self.assertTrue(any('missing valid bootstrap ZIP' in e for e in report['errors']))
+
     def test_requires_bootstrap_for_each_delivered_abi(self):
         report = self.inspect([('lib/arm64-v8a/libflutter.so', elf())])
         self.assertTrue(any('bootstrap' in e for e in report['errors']))
@@ -189,7 +244,8 @@ class ReleaseInventoryTest(unittest.TestCase):
                               ('lib/arm64-v8a/libflutter.so', elf())])
 
     def run_bundle_gate(self, target=36, certificate='a' * 64, mode='production',
-                        manifest_target=None, debuggable=None, relro_end=32768):
+                        manifest_target=None, debuggable=None, relro_end=32768,
+                        profile=None, bootstrap=True):
         manifest_target = target if manifest_target is None else manifest_target
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / 'fixture.aab'
@@ -197,11 +253,13 @@ class ReleaseInventoryTest(unittest.TestCase):
             artifact.write_bytes(archive([
                 ('base/manifest/AndroidManifest.xml', manifest_proto(manifest_target, debuggable)),
                 ('base/lib/arm64-v8a/libflutter.so', elf(relro_end=relro_end)),
-                ('base/lib/arm64-v8a/libovid_bootstrap.so', archive([('bin/bash', elf(relro_end=relro_end))])),
-            ]))
+            ] + ([('base/lib/arm64-v8a/libovid_bootstrap.so',
+                   archive([('bin/bash', elf(relro_end=relro_end))]))] if bootstrap else [])))
             args = ['release_inventory.py', str(artifact), '--mode', mode,
                     '--expected-abis', 'arm64-v8a', '--expected-target', str(target),
                     '--certificate-sha256', certificate, '--output', str(output)]
+            if profile:
+                args += ['--profile', profile]
             # Only signature verification is substituted: no test signing keys.
             with patch('sys.argv', args), patch.object(self.gate, 'command', return_value=json.dumps(['a' * 64])), contextlib.redirect_stdout(io.StringIO()):
                 code = self.gate.main()
@@ -238,6 +296,23 @@ class ReleaseInventoryTest(unittest.TestCase):
         summary = report['native']['alignment_summary']
         self.assertEqual(summary['outer_native_libraries'], 1)
         self.assertEqual(summary['bootstrap_payload_elfs'], 1)
+
+    def test_production_play_profile_passes_without_bootstrap(self):
+        code, report = self.run_bundle_gate(profile='play', bootstrap=False)
+        self.assertEqual((code, report['errors']), (0, []))
+        self.assertEqual(report['profile'], 'play')
+
+    def test_production_play_profile_rejects_bootstrap_payload(self):
+        code, report = self.run_bundle_gate(profile='play')
+        self.assertEqual(code, 1)
+        self.assertTrue(any('Play profile must not ship' in e for e in report['errors']))
+
+    def test_production_sideload_profile_requires_bootstrap(self):
+        for profile in (None, 'sideload'):
+            with self.subTest(profile=profile):
+                code, report = self.run_bundle_gate(profile=profile, bootstrap=False)
+                self.assertEqual(code, 1)
+                self.assertTrue(any('missing valid bootstrap ZIP' in e for e in report['errors']))
 
     def test_debug_inventory_can_describe_legacy_target(self):
         code, report = self.run_bundle_gate(target=28, certificate='', mode='debug')
