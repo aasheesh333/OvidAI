@@ -65,7 +65,7 @@ def test_authorization_forwarded_exact_and_response_unchanged():
     c, calls = make(lambda r: httpx.Response(200, content=body, headers={'content-type': 'application/json', 'x-up': '1'}))
     r = edit(c)
     assert calls[0].headers['authorization'] == f'Bearer {KEY}'
-    assert r.content == body and r.headers['x-up'] == '1' and r.headers['content-type'] == 'application/json'
+    assert r.json()['data'] == [{'url': 'x'}] and r.headers['x-up'] == '1' and r.headers['content-type'] == 'application/json'
 
 
 def test_provider_error_passthrough_on_edit():
@@ -256,3 +256,39 @@ def test_missing_image_400():
     c, calls = make(ok)
     r = edit(c, files=[('other', ('a.txt', b'x', 'text/plain'))])
     assert r.status_code == 400 and calls == []
+
+
+def test_edit_response_gets_openai_usage_fields_and_keeps_provider_cost():
+    provider = {'data': [{'b64_json': 'AAAA'}], 'usage': {'cost': 0.0005863455, 'input_tokens': 12, 'output_tokens': 30,
+                                                          'total_tokens': 2589}}
+    c, _ = make(lambda r: httpx.Response(200, json=provider))
+    usage = edit(c).json()['usage']
+    assert usage['cost'] == 0.0005863455 and usage['total_tokens'] == 2589
+    assert usage['input_tokens'] == 12 and usage['output_tokens'] == 30
+    assert usage['input_tokens_details'] == {'text_tokens': 0, 'image_tokens': 0}
+
+
+def test_edit_response_without_usage_is_completed():
+    c, _ = make(ok)
+    body = edit(c).json()
+    assert body['data'] == [{'b64_json': 'AAAA'}]
+    assert body['usage'] == {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0,
+                             'input_tokens_details': {'text_tokens': 0, 'image_tokens': 0}}
+
+
+def test_existing_usage_details_are_preserved():
+    provider = {'data': [{'b64_json': 'AAAA'}], 'usage': {'input_tokens': 5, 'output_tokens': 7, 'total_tokens': 12,
+                                                          'input_tokens_details': {'text_tokens': 3, 'image_tokens': 2}}}
+    c, _ = make(lambda r: httpx.Response(200, json=provider))
+    assert edit(c).json()['usage']['input_tokens_details'] == {'text_tokens': 3, 'image_tokens': 2}
+
+
+def test_generations_and_non_json_and_errors_are_not_touched():
+    gen = b'{"data":[{"b64_json":"AAAA"}]}'
+    c, _ = make(lambda r: httpx.Response(200, content=gen, headers={'content-type': 'application/json'}))
+    assert c.post(f'/{HOST}/v1/images/generations', json={'model': 'm', 'prompt': 'p'}, headers=AUTH).content == gen
+    c, _ = make(lambda r: httpx.Response(200, content=b'not json', headers={'content-type': 'application/json'}))
+    assert edit(c).content == b'not json'
+    err = b'{"error":{"code":"no_capacity"}}'
+    c, _ = make(lambda r: httpx.Response(503, content=err, headers={'content-type': 'application/json'}))
+    assert edit(c).content == err

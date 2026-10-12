@@ -166,6 +166,36 @@ def inferhub_edit_adapter(headers, content_type, body):
     return {'content-type': 'application/json'}, json.dumps(converted, separators=(',', ':')).encode()
 
 
+def normalize_edit_response(body):
+    """Fill the OpenAI-schema usage fields LiteLLM validates on image responses.
+
+    Some providers return edits without usage.input_tokens_details (or without usage at all);
+    LiteLLM then rejects a successful, already-billed provider response with a 500. Only missing
+    fields are added; provider values such as usage.cost are kept untouched.
+    """
+    import json
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return body
+    if not isinstance(data, dict) or not isinstance(data.get('data'), list):
+        return body
+
+    def whole(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    usage = data.get('usage') if isinstance(data.get('usage'), dict) else {}
+    usage['input_tokens'] = whole(usage.get('input_tokens'))
+    usage['output_tokens'] = whole(usage.get('output_tokens'))
+    usage['total_tokens'] = whole(usage.get('total_tokens')) or usage['input_tokens'] + usage['output_tokens']
+    details = usage.get('input_tokens_details') if isinstance(usage.get('input_tokens_details'), dict) else {}
+    details['text_tokens'] = whole(details.get('text_tokens'))
+    details['image_tokens'] = whole(details.get('image_tokens'))
+    usage['input_tokens_details'] = details
+    data['usage'] = usage
+    return json.dumps(data, separators=(',', ':')).encode()
+
+
 # Registry: host -> adapter. A host listed in SHIM_JSON_EDIT_HOSTS uses
 # EDIT_ADAPTERS.get(host, DEFAULT_EDIT_ADAPTER). Add a JSON-only provider with a
 # function (same signature) here plus its host in SHIM_JSON_EDIT_HOSTS and
@@ -234,6 +264,7 @@ def create_app(config=None, transport=None):
             return error(413, 'request_too_large', 'Request body too large')
         headers = forward_headers(request.headers)
         ctype = request.headers.get('content-type', '')
+        converted = False
         if (request.method == 'POST' and '/' + path == EDIT_PATH and host in cfg.json_edit_hosts
                 and ctype.lower().startswith('multipart/form-data')):
             adapter = EDIT_ADAPTERS.get(host, DEFAULT_EDIT_ADAPTER)
@@ -241,6 +272,7 @@ def create_app(config=None, transport=None):
             if isinstance(result, Response):
                 return result
             extra, body = result
+            converted = True
             headers = {k: v for k, v in headers.items() if k.lower() != 'content-type'}
             headers.update(extra)
         url = f'https://{host}/{path}'
@@ -267,7 +299,10 @@ def create_app(config=None, transport=None):
                 return error(502, 'upstream_error', 'Upstream request failed')
         finally:
             await up.aclose()
-        return Response(content=b''.join(chunks), status_code=up.status_code, headers=response_headers(up.headers))
+        content = b''.join(chunks)
+        if converted and up.status_code == 200 and 'json' in up.headers.get('content-type', '').lower():
+            content = normalize_edit_response(content)
+        return Response(content=content, status_code=up.status_code, headers=response_headers(up.headers))
 
     return app
 
