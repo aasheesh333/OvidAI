@@ -183,6 +183,28 @@ void main() {
       expect(toolNamed(s, 'resize_image')['description'], contains('never a cloud model'));
     });
 
+    test('edit tool hides mask_path/reference_paths when no model supports them', () async {
+      final p = payload();
+      p['models'] = <dynamic>[
+        card(
+          pro,
+          ops: {'generate': {}, 'edit': {}},
+          sizes: ['1024x1024'],
+          extra: {
+            'input': {'max_images': 1, 'formats': ['png']},
+          },
+        ),
+      ];
+      final s = studio((_) async => http.Response(jsonEncode(p), 200));
+      await s.refresh(headers);
+      final edit = toolNamed(s, 'edit_image');
+      final props = (edit['parameters'] as Map)['properties'] as Map;
+      expect(props.containsKey('mask_path'), isFalse);
+      expect(props.containsKey('reference_paths'), isFalse);
+      final reqProps = (props['requirements'] as Map)['properties'] as Map;
+      expect((reqProps['operation'] as Map)['enum'], ['edit']);
+    });
+
     test('ETag cache: 304 reuses cards and ensureFresh skips the network', () async {
       var gets = 0;
       final conditional = <String?>[];
