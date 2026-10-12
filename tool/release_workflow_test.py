@@ -73,6 +73,14 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertRegex(text, r"target=28; profile=sideload")
         self.assertEqual(text.count('--profile "$profile"'), 2)
 
+    def test_push_builds_signed_full_release(self):
+        # Every push builds the signed full-feature (sideload) release APK + AAB when the
+        # signing secret exists; the Play profile only applies to production_release.
+        detect = next(step for step in _steps() if step.get("name") == "Detect release signing availability")
+        self.assertIn('"${{ github.event_name }}" = "push"', detect["run"])
+        build = next(step for step in _steps() if step.get("name") == "Build signed release APK + AAB")
+        self.assertIn('if [ "${{ inputs.production_release }}" = "true" ]; then play_define=', build["run"])
+
     def test_no_production_only_gate_on_push_release(self):
         # The push release path must not require inputs.production_release.
         for step in _steps():

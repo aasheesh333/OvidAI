@@ -177,7 +177,9 @@ jobs:
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          if [ -n "$KEYSTORE_B64" ] && { [ "${{ inputs.production_release }}" = "true" ] || [ "${{ inputs.release_candidate }}" = "true" ]; }; then
+          # Signed full-feature release APK + AAB on every push (sideload profile), and on the
+          # manual release_candidate / production_release dispatches.
+          if [ -n "$KEYSTORE_B64" ] && { [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.production_release }}" = "true" ] || [ "${{ inputs.release_candidate }}" = "true" ]; }; then
             echo "release_signing=true" >> "$GITHUB_ENV"
           fi
 
