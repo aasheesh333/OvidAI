@@ -6408,6 +6408,11 @@ user which one instead of assuming this one.''';
   List<({String name, String path, int size})> get pendingAttachments =>
       _attachmentsFor(AppState.I.activeSessionId ?? '');
 
+  /// Files in the active chat still being copied into the workspace; the
+  /// composer shows a placeholder tile for each.
+  int get stagingAttachmentCount =>
+      _attachmentCopies[AppState.I.activeSessionId ?? ''] ?? 0;
+
   /// Back-compat alias for the first staged file (single-attach UI).
   ({String name, String path, int size})? get pendingAttachment =>
       pendingAttachments.isEmpty ? null : pendingAttachments.first;
@@ -6428,6 +6433,7 @@ user which one instead of assuming this one.''';
       return 'You can attach up to 20 files per message. Remove a file first.';
     }
     _attachmentCopies[s.id] = (_attachmentCopies[s.id] ?? 0) + 1;
+    notifyListeners();
     Directory? upload;
     try {
       if (fileName.isEmpty ||
@@ -6473,6 +6479,7 @@ user which one instead of assuming this one.''';
       return 'attach failed: $e';
     } finally {
       _attachmentCopies[s.id] = (_attachmentCopies[s.id] ?? 1) - 1;
+      notifyListeners();
       if (upload != null && upload.existsSync()) {
         try {
           upload.deleteSync(recursive: true);
