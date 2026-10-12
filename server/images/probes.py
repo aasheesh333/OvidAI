@@ -17,6 +17,7 @@ import httpx
 from PIL import Image
 
 from .capabilities import (DEFAULT_SIZE, cap, clone, finalize, merge_facts, ratio_of)
+from . import costing
 from .extraction import default_probe_sizes
 
 UNSUPPORTED, TRANSIENT, AUTH, BUDGET, INCONCLUSIVE = 'unsupported', 'transient', 'auth', 'budget', 'inconclusive'
@@ -95,6 +96,16 @@ class LiteLLMProbeTransport:
         self.timeout, self.spend_wait = timeout, spend_wait
         self.client_factory = client_factory or (lambda **kw: httpx.Client(**kw))
 
+    def _prices(self, client, model):
+        def fetch():
+            r = client.get('/model/info', headers={'Authorization': f'Bearer {self.master_key or self.key}'})
+            if r.status_code != 200:
+                raise RuntimeError('model/info unavailable')
+            return costing.parse_model_info(r.json())
+        book = self.__dict__.setdefault('_pricebook', costing.PriceBook(fetch, ttl=300.0))
+        book._fetch = fetch   # the pooled client is per-call; keep the cache, rebind the fetcher
+        return book.get(model)
+
     def _spend(self, client):
         try:
             r = client.get('/key/info', params={'key': self.key},
@@ -159,22 +170,15 @@ class LiteLLMProbeTransport:
             latency = int((time.monotonic() - started) * 1000)
             if r.status_code != 200:
                 return ProbeOutcome(False, classify_error(r.status_code, r.text[:2000]), latency)
-            cost = None
-            header = r.headers.get('x-litellm-response-cost')
             try:
-                cost = float(header) if header else None
-            except ValueError:
-                cost = None
-            if cost is None and before is not None:
-                deadline = time.monotonic() + self.spend_wait
-                while True:
-                    after = self._spend(client)
-                    if after is not None and after > before:
-                        cost = after - before
-                        break
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.5)
+                usage = r.json().get('usage')
+            except Exception:  # noqa: BLE001
+                usage = None
+            cost, _source = costing.determine_cost(
+                headers=r.headers, usage=usage, prices=lambda: self._prices(client, model),
+                spend_before=before, spend_read=lambda: self._spend(client),
+                spend_wait=self.spend_wait, spend_poll=0.5)
+            cost = float(cost) if cost is not None else None
             try:
                 rows = r.json().get('data') or []
                 images = tuple(base64.b64decode(row['b64_json']) for row in rows)

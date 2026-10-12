@@ -233,6 +233,19 @@ class HttpTransportTest(unittest.TestCase):
         out = self.transport(handler).call('m', 'generate', {'prompt': 'p', 'size': '1024x1024'})
         self.assertAlmostEqual(out.cost_usd, 0.07)
 
+    def test_gemini_style_usage_tokens_give_measured_cost(self):
+        def handler(request):
+            if request.url.path == '/key/info':
+                return httpx.Response(200, json={'info': {'spend': 0}})
+            if request.url.path == '/model/info':
+                return httpx.Response(200, json={'data': [{'model_name': 'cb/g', 'model_info': {
+                    'input_cost_per_token': 9e-08, 'output_cost_per_token': 9e-06}}]})
+            return httpx.Response(200, json={'usage': {'input_tokens': 6, 'output_tokens': 1290},
+                                             'data': [{'b64_json': base64.b64encode(png_bytes()).decode()}]})
+        out = self.transport(handler).call('cb/g', 'generate', {'prompt': 'p', 'size': '1024x1024'})
+        self.assertTrue(out.ok)
+        self.assertAlmostEqual(out.cost_usd, 0.01161054)
+
 
 class ManagerTest(unittest.TestCase):
     def setUp(self):
