@@ -1,5 +1,6 @@
 // ignore: unused_import
 import 'package:intl/intl.dart' as intl;
+
 import 'app_localizations.dart';
 
 // ignore_for_file: type=lint
@@ -328,4 +329,73 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get promptCacheProviderHelp =>
       'Auto sends cache markers only where the endpoint is known to accept them. On forces markers for Anthropic-compatible proxies; Off never sends them.';
+
+  @override
+  String attachmentRemove(String name) {
+    return 'Remove attachment $name';
+  }
+
+  @override
+  String attachmentCount(int count, int max) {
+    return '$count/$max files';
+  }
+
+  @override
+  String attachmentSemantics(String name, String type, String size) {
+    return '$name, $type, $size';
+  }
+
+  @override
+  String get attachmentPreviewHint => 'Preview';
+
+  @override
+  String get attachmentStaging => 'Adding file…';
+
+  @override
+  String get attachmentPreviewError => 'Preview unavailable';
+
+  @override
+  String get attachmentOpen => 'Open';
+
+  @override
+  String get attachmentShare => 'Share';
+
+  @override
+  String attachmentNoApp(String name) {
+    return 'No app can open $name';
+  }
+
+  @override
+  String get attachmentMissing =>
+      'This file is no longer available on this device.';
+
+  @override
+  String get attachmentTypeImage => 'Image';
+
+  @override
+  String get attachmentTypePdf => 'PDF document';
+
+  @override
+  String get attachmentTypeDoc => 'Document';
+
+  @override
+  String get attachmentTypeSheet => 'Spreadsheet';
+
+  @override
+  String get attachmentTypeCsv => 'CSV table';
+
+  @override
+  String get attachmentTypeArchive => 'Archive';
+
+  @override
+  String get attachmentTypeCode => 'Code or text file';
+
+  @override
+  String get attachmentTypeAudio => 'Audio';
+
+  @override
+  String get attachmentTypeVideo => 'Video';
+
+  @override
+  String get attachmentTypeOther => 'File';
 }

@@ -603,6 +603,126 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Auto sends cache markers only where the endpoint is known to accept them. On forces markers for Anthropic-compatible proxies; Off never sends them.'**
   String get promptCacheProviderHelp;
+
+  /// Tooltip and screen-reader label of the small x button that removes a staged attachment from the composer.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove attachment {name}'**
+  String attachmentRemove(String name);
+
+  /// Hint above the composer attachment row when the per-message attachment limit is near.
+  ///
+  /// In en, this message translates to:
+  /// **'{count}/{max} files'**
+  String attachmentCount(int count, int max);
+
+  /// Screen-reader label of an attachment tile: full file name, file type and file size.
+  ///
+  /// In en, this message translates to:
+  /// **'{name}, {type}, {size}'**
+  String attachmentSemantics(String name, String type, String size);
+
+  /// Screen-reader hint: tapping an attachment tile opens its preview.
+  ///
+  /// In en, this message translates to:
+  /// **'Preview'**
+  String get attachmentPreviewHint;
+
+  /// Label of the placeholder tile shown while a picked file is being copied into the chat.
+  ///
+  /// In en, this message translates to:
+  /// **'Adding file…'**
+  String get attachmentStaging;
+
+  /// Shown on an image attachment tile whose thumbnail could not be loaded.
+  ///
+  /// In en, this message translates to:
+  /// **'Preview unavailable'**
+  String get attachmentPreviewError;
+
+  /// Button in the attachment info sheet: open the file in another app.
+  ///
+  /// In en, this message translates to:
+  /// **'Open'**
+  String get attachmentOpen;
+
+  /// Button in the attachment info sheet: share the file through the system share sheet.
+  ///
+  /// In en, this message translates to:
+  /// **'Share'**
+  String get attachmentShare;
+
+  /// Snackbar when no installed app can open an attachment.
+  ///
+  /// In en, this message translates to:
+  /// **'No app can open {name}'**
+  String attachmentNoApp(String name);
+
+  /// Shown in the attachment info sheet when the file path of an older message is unknown.
+  ///
+  /// In en, this message translates to:
+  /// **'This file is no longer available on this device.'**
+  String get attachmentMissing;
+
+  /// Attachment type name for screen readers: an image file.
+  ///
+  /// In en, this message translates to:
+  /// **'Image'**
+  String get attachmentTypeImage;
+
+  /// Attachment type name for screen readers: a PDF file.
+  ///
+  /// In en, this message translates to:
+  /// **'PDF document'**
+  String get attachmentTypePdf;
+
+  /// Attachment type name for screen readers: a word-processor or rich-text document.
+  ///
+  /// In en, this message translates to:
+  /// **'Document'**
+  String get attachmentTypeDoc;
+
+  /// Attachment type name for screen readers: a spreadsheet such as XLS or XLSX.
+  ///
+  /// In en, this message translates to:
+  /// **'Spreadsheet'**
+  String get attachmentTypeSheet;
+
+  /// Attachment type name for screen readers: a comma-separated values file.
+  ///
+  /// In en, this message translates to:
+  /// **'CSV table'**
+  String get attachmentTypeCsv;
+
+  /// Attachment type name for screen readers: a ZIP or other compressed archive.
+  ///
+  /// In en, this message translates to:
+  /// **'Archive'**
+  String get attachmentTypeArchive;
+
+  /// Attachment type name for screen readers: source code or plain text.
+  ///
+  /// In en, this message translates to:
+  /// **'Code or text file'**
+  String get attachmentTypeCode;
+
+  /// Attachment type name for screen readers: an audio recording or music file.
+  ///
+  /// In en, this message translates to:
+  /// **'Audio'**
+  String get attachmentTypeAudio;
+
+  /// Attachment type name for screen readers: a video file.
+  ///
+  /// In en, this message translates to:
+  /// **'Video'**
+  String get attachmentTypeVideo;
+
+  /// Attachment type name for screen readers: any other kind of file.
+  ///
+  /// In en, this message translates to:
+  /// **'File'**
+  String get attachmentTypeOther;
 }
 
 class _AppLocalizationsDelegate

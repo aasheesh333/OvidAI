@@ -244,5 +244,72 @@
   "@promptCacheExtendedSubtitle": {"description": "Explains the one-hour cache trade-off."},
 
   "promptCacheProviderHelp": "Auto sends cache markers only where the endpoint is known to accept them. On forces markers for Anthropic-compatible proxies; Off never sends them.",
-  "@promptCacheProviderHelp": {"description": "Help text under the per-provider prompt caching choice (Auto / On / Off)."}
+  "@promptCacheProviderHelp": {"description": "Help text under the per-provider prompt caching choice (Auto / On / Off)."},
+
+  "attachmentRemove": "Remove attachment {name}",
+  "@attachmentRemove": {
+    "description": "Tooltip and screen-reader label of the small x button that removes a staged attachment from the composer.",
+    "placeholders": {"name": {"type": "String", "example": "report.pdf"}}
+  },
+
+  "attachmentCount": "{count}/{max} files",
+  "@attachmentCount": {
+    "description": "Hint above the composer attachment row when the per-message attachment limit is near.",
+    "placeholders": {"count": {"type": "int", "example": "18"}, "max": {"type": "int", "example": "20"}}
+  },
+
+  "attachmentSemantics": "{name}, {type}, {size}",
+  "@attachmentSemantics": {
+    "description": "Screen-reader label of an attachment tile: full file name, file type and file size.",
+    "placeholders": {
+      "name": {"type": "String", "example": "report.pdf"},
+      "type": {"type": "String", "example": "PDF document"},
+      "size": {"type": "String", "example": "1.2 MB"}
+    }
+  },
+
+  "attachmentPreviewHint": "Preview",
+  "@attachmentPreviewHint": {"description": "Screen-reader hint: tapping an attachment tile opens its preview."},
+
+  "attachmentStaging": "Adding file…",
+  "@attachmentStaging": {"description": "Label of the placeholder tile shown while a picked file is being copied into the chat."},
+
+  "attachmentPreviewError": "Preview unavailable",
+  "@attachmentPreviewError": {"description": "Shown on an image attachment tile whose thumbnail could not be loaded."},
+
+  "attachmentOpen": "Open",
+  "@attachmentOpen": {"description": "Button in the attachment info sheet: open the file in another app."},
+
+  "attachmentShare": "Share",
+  "@attachmentShare": {"description": "Button in the attachment info sheet: share the file through the system share sheet."},
+
+  "attachmentNoApp": "No app can open {name}",
+  "@attachmentNoApp": {
+    "description": "Snackbar when no installed app can open an attachment.",
+    "placeholders": {"name": {"type": "String", "example": "report.pdf"}}
+  },
+
+  "attachmentMissing": "This file is no longer available on this device.",
+  "@attachmentMissing": {"description": "Shown in the attachment info sheet when the file path of an older message is unknown."},
+
+  "attachmentTypeImage": "Image",
+  "@attachmentTypeImage": {"description": "Attachment type name for screen readers: an image file."},
+  "attachmentTypePdf": "PDF document",
+  "@attachmentTypePdf": {"description": "Attachment type name for screen readers: a PDF file."},
+  "attachmentTypeDoc": "Document",
+  "@attachmentTypeDoc": {"description": "Attachment type name for screen readers: a word-processor or rich-text document."},
+  "attachmentTypeSheet": "Spreadsheet",
+  "@attachmentTypeSheet": {"description": "Attachment type name for screen readers: a spreadsheet such as XLS or XLSX."},
+  "attachmentTypeCsv": "CSV table",
+  "@attachmentTypeCsv": {"description": "Attachment type name for screen readers: a comma-separated values file."},
+  "attachmentTypeArchive": "Archive",
+  "@attachmentTypeArchive": {"description": "Attachment type name for screen readers: a ZIP or other compressed archive."},
+  "attachmentTypeCode": "Code or text file",
+  "@attachmentTypeCode": {"description": "Attachment type name for screen readers: source code or plain text."},
+  "attachmentTypeAudio": "Audio",
+  "@attachmentTypeAudio": {"description": "Attachment type name for screen readers: an audio recording or music file."},
+  "attachmentTypeVideo": "Video",
+  "@attachmentTypeVideo": {"description": "Attachment type name for screen readers: a video file."},
+  "attachmentTypeOther": "File",
+  "@attachmentTypeOther": {"description": "Attachment type name for screen readers: any other kind of file."}
 }
