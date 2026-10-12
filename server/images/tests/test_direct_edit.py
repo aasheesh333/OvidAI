@@ -41,7 +41,7 @@ def png_b64(color='red'):
 
 
 def model_info(name=MODEL, base=BASE):
-    return {'data': [{'model_name': name, 'model_info': {'mode': 'image_generation'},
+    return {'data': [{'model_name': name, 'model_info': {'mode': 'image_generation', 'output_cost_per_image': 0.04},
                       'litellm_params': {'model': f'openai/{name}', 'api_base': base,
                                          'api_key': 'sk-LITELLM-PROVIDER-KEY'}}]}
 

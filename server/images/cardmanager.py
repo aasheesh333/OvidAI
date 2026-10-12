@@ -8,6 +8,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from . import costing
 from .capabilities import (assign_cost_tiers, clone, default_card, finalize, fingerprint, merge_facts)
 from .extraction import provider_models_entry, static_extract
 from .probes import ProbeBusy
@@ -25,13 +26,15 @@ class Discovered:
 
 class CardManager:
     def __init__(self, store, runner=None, *, fetch_json=None, cost_map=None, ttl=WEEK,
-                 clock=time.time, backoff_base=300, backoff_max=6 * 3600):
+                 clock=time.time, backoff_base=300, backoff_max=6 * 3600, probe_gap=0):
         self.store, self.runner = store, runner
         self.fetch_json = fetch_json          # callable(url) -> parsed json | None (background only)
         self.cost_map = cost_map              # dict or callable() -> dict
         self.ttl, self.clock = ttl, clock
         self.backoff_base, self.backoff_max = backoff_base, backoff_max
         self._known = {}
+        self._warned = set()
+        self.probe_gap, self._last_probe = float(probe_gap), None
         self._forced = set()
         self._lock = threading.RLock()
         self._cache = {c['model']: c for c in store.all()}
@@ -44,13 +47,32 @@ class CardManager:
     def observe(self, discovered):
         with self._lock:
             self._known = {d.name: d for d in discovered}
+        for d in discovered:
+            self._warn_unpriced(d.name)
+
+    def _status(self, name, card):
+        item = self._known.get(name)
+        return costing.price_status(item.info if item else {}, bool((card or {}).get('cost_header_seen')))
+
+    def _warn_unpriced(self, name):
+        priced = self._status(name, self._cache.get(name))[0]
+        if priced:
+            self._warned.discard(name)
+        elif name not in self._warned:
+            self._warned.add(name)
+            log.warning('unpriced image model %r discovered: %s (user traffic is skipped until priced)',
+                        name, costing.UNPRICED_WARNING)
 
     def card(self, name, params=None):
         fp = fingerprint(name, params if params is not None else (self._known[name].params if name in self._known else {}))
         stored = self._cache.get(name)
-        if stored and stored['fingerprint'] == fp:
-            return stored
-        return default_card(name, fp)    # conservative until re-extracted
+        card = stored if stored and stored['fingerprint'] == fp else default_card(name, fp)  # conservative until re-extracted
+        # Price state is live (LiteLLM owns prices): evaluated on every read, never persisted.
+        priced, source, warns = self._status(name, card)
+        card = dict(card)
+        card.update(priced=priced, cost_source=source,
+                    warnings=list(card.get('probe_warnings') or []) + warns)
+        return card
 
     def cards(self, names=None):
         with self._lock:
@@ -98,6 +120,11 @@ class CardManager:
         name = self.due()
         if name is None:
             return None
+        with self._lock:
+            forced = name in self._forced
+        if (not forced and self.runner is not None and self.probe_gap and self._last_probe is not None
+                and self.clock() - self._last_probe < self.probe_gap):
+            return None    # stagger: one probe run per probe_gap seconds, never a burst
         try:
             self.refresh(name)
         except ProbeBusy:
@@ -112,6 +139,10 @@ class CardManager:
         card = default_card(name, fp)
         card['state'] = 'inferred'
         card['edit_transport'] = item.params.get('edit_transport')
+        prev = self._cache.get(name)
+        if prev and prev['fingerprint'] == fp and prev.get('cost_header_seen'):
+            card['cost_header_seen'] = True
+        self._warn_unpriced(name)
         facts, meta = static_extract(name, item.params, item.info, self._cost_map(), self._provider_entry(item))
         merge_facts(card, facts)
         card['static'] = meta
@@ -120,6 +151,8 @@ class CardManager:
         if self.runner is None:
             return card
         probed, summary = self.runner.run(card, facts)
+        self._last_probe = self.clock()
+        self._warn_unpriced(name)
         probed['static'] = meta
         self._save(probed)
         state = self.store.probe_state(name)

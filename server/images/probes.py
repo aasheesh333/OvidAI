@@ -21,7 +21,20 @@ from . import costing
 from .extraction import default_probe_sizes
 
 UNSUPPORTED, TRANSIENT, AUTH, BUDGET, INCONCLUSIVE = 'unsupported', 'transient', 'auth', 'budget', 'inconclusive'
+URL_RESPONSE = 'url_response'   # provider ignored response_format=b64_json and returned URLs
+WARNINGS = {
+    URL_RESPONSE: 'returns_urls: provider ignores response_format=b64_json and returns image URLs; the gateway never '
+                  'fetches URLs, so this model is unusable until it supports b64_json',
+    AUTH: 'probe_auth: the provider rejected the credential; check the model api_key in LiteLLM',
+    BUDGET: 'probe_budget: provider or LiteLLM budget exhausted; top up, then POST /images/admin/reprobe',
+    'daily_budget': 'probe_daily_budget: OVID_PROBE_DAILY_USD reached; probes resume when the 24h window frees up',
+    'per_probe_cap': 'probe_per_probe_cap: a probe cost more than OVID_PROBE_MAX_USD; raise it or lower the model price',
+    'estimate_exceeds_cap': 'probe_skipped: estimated probe cost exceeds OVID_PROBE_MAX_USD; raise it to probe this model',
+}
 _INCONCLUSIVE_WORDS = ('too small', 'at least', 'minimum', 'dimension', 'resolution too', 'must be larger')
+_BUDGET_WORDS = ('insufficient_quota', 'insufficient quota', 'insufficient credit', 'insufficient funds',
+                 'billing', 'exceeded your current quota', 'out of credits', 'payment required')
+_POLICY_WORDS = ('content policy', 'content_policy', 'safety system', 'moderation', 'safety filter')
 _UNSUPPORTED_WORDS = ('not support', 'unsupported', 'not available for', 'invalid size', 'unknown parameter',
                       'unrecognized', 'not a valid', 'does not allow', 'only supports')
 
@@ -33,10 +46,39 @@ class ProbeOutcome:
     latency_ms: int | None = None
     cost_usd: float | None = None
     images: tuple = ()          # decoded output image bytes
+    cost_source: str | None = None
 
 
 class ProbeBusy(Exception):
     pass
+
+
+def sniff_format(raw):
+    if raw.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'png'
+    if raw.startswith(b'\xff\xd8\xff'):
+        return 'jpeg'
+    if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+        return 'webp'
+    return None
+
+
+def decode_rows(rows):
+    """Reply rows -> (images, error_class). URL replies and non-image payloads never become cards facts."""
+    images = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            return (), TRANSIENT
+        if not row.get('b64_json'):
+            return (), (URL_RESPONSE if row.get('url') else TRANSIENT)
+        try:
+            raw = base64.b64decode(row['b64_json'], validate=True)
+        except Exception:  # noqa: BLE001
+            return (), INCONCLUSIVE
+        if sniff_format(raw) is None:
+            return (), INCONCLUSIVE
+        images.append(raw)
+    return tuple(images), None
 
 
 def synthetic_png(size=64, alpha=False):
@@ -56,8 +98,10 @@ def classify_error(status, text=''):
     lowered = (text or '').lower()
     if status in (401, 403):
         return AUTH
-    if status == 402 or 'budget' in lowered or 'max_budget' in lowered:
+    if status == 402 or 'budget' in lowered or 'max_budget' in lowered or any(w in lowered for w in _BUDGET_WORDS):
         return BUDGET
+    if any(w in lowered for w in _POLICY_WORDS) and status in (400, 422):
+        return INCONCLUSIVE   # the probe prompt was refused, says nothing about capability
     if any(w in lowered for w in _INCONCLUSIVE_WORDS) and status in (400, 422):
         return INCONCLUSIVE
     if status in (400, 404, 405, 415, 422, 501):
@@ -135,9 +179,11 @@ class LiteLLMProbeTransport:
             return ProbeOutcome(False, classify_direct_error(r.status_code, r), latency, 0.0)
         try:
             body = r.json()
-            images = tuple(base64.b64decode(row['b64_json']) for row in body.get('data') or [])
+            images, bad = decode_rows(body.get('data') or [])
         except Exception:  # noqa: BLE001
             return ProbeOutcome(False, TRANSIENT, latency, float(self.direct.edit_cost or 0))
+        if bad:
+            return ProbeOutcome(False, bad, latency, float(self.direct.edit_cost or 0))
         cost = float(self.direct.settlement_cost(body, self.direct.edit_cost))
         if not images:
             return ProbeOutcome(False, TRANSIENT, latency, cost)
@@ -174,19 +220,18 @@ class LiteLLMProbeTransport:
                 usage = r.json().get('usage')
             except Exception:  # noqa: BLE001
                 usage = None
-            cost, _source = costing.determine_cost(
+            cost, source = costing.determine_cost(
                 headers=r.headers, usage=usage, prices=lambda: self._prices(client, model),
                 spend_before=before, spend_read=lambda: self._spend(client),
                 spend_wait=self.spend_wait, spend_poll=0.5)
             cost = float(cost) if cost is not None else None
             try:
-                rows = r.json().get('data') or []
-                images = tuple(base64.b64decode(row['b64_json']) for row in rows)
+                images, bad = decode_rows(r.json().get('data') or [])
             except Exception:  # noqa: BLE001
-                return ProbeOutcome(False, TRANSIENT, latency, cost)
-            if not images:
-                return ProbeOutcome(False, TRANSIENT, latency, cost)
-            return ProbeOutcome(True, None, latency, cost, images)
+                return ProbeOutcome(False, TRANSIENT, latency, cost, cost_source=source)
+            if bad or not images:
+                return ProbeOutcome(False, bad or TRANSIENT, latency, cost, cost_source=source)
+            return ProbeOutcome(True, None, latency, cost, images, cost_source=source)
 
 
 def _has_alpha(raw):
@@ -222,8 +267,17 @@ class ProbeRunner:
     def _run(self, card, facts):
         model = card['model']
         card = clone(card)
-        ctx = {'spent': 0.0, 'stop': None, 'results': [], 'latencies': [], 'costs': []}
-        est = facts.get('measured_cost_usd') or card.get('measured_cost_usd') or self.estimated_cost
+        ctx = {'spent': 0.0, 'stop': None, 'results': [], 'latencies': [], 'costs': [], 'warnings': [],
+               'header_seen': False, 'formats': []}
+        known_cost = facts.get('measured_cost_usd') or card.get('measured_cost_usd')
+        est = known_cost or self.estimated_cost
+        if known_cost and known_cost > self.per_probe_cap:
+            # LiteLLM already says a single call costs more than the per-probe cap: do not even try.
+            card['probe_warnings'] = [WARNINGS['estimate_exceeds_cap']]
+            card['probed_at'] = int(self.clock())
+            card['probe_stop'] = 'estimate_exceeds_cap'
+            finalize(card)
+            return card, {'spent': 0.0, 'stop': 'estimate_exceeds_cap', 'incomplete': True, 'transient': False}
         day_start = self.clock() - 24 * 3600
 
         def attempt(name, kind, **params):
@@ -250,6 +304,10 @@ class ProbeRunner:
                 ctx['stop'] = 'per_probe_cap'
             if out.error_class in (AUTH, BUDGET):
                 ctx['stop'] = out.error_class
+            if out.error_class == URL_RESPONSE:
+                ctx['warnings'].append(WARNINGS[URL_RESPONSE])
+            if getattr(out, 'cost_source', None) == costing.HEADER:
+                ctx['header_seen'] = True
             return out
 
         def verdict(out):
@@ -267,6 +325,7 @@ class ProbeRunner:
             out = attempt(f'generate:{size}', 'generate', prompt='a small red circle on white', size=size)
             gen_verdicts.append(verdict(out))
             if out is not None and out.ok:
+                ctx['formats'].extend(f for f in (sniff_format(i) for i in out.images) if f)
                 passed_sizes.append(size)
                 ctx['latencies'].append(out.latency_ms)
                 if out.cost_usd:
@@ -335,6 +394,12 @@ class ProbeRunner:
             attempt('text', 'generate', prompt='A poster with the exact word "OVID" in large letters', size=size)
 
         new = {'operations': ops}
+        formats = []
+        for r_ in ctx['formats']:
+            if r_ not in formats:
+                formats.append(r_)
+        if formats:
+            new['output_formats'] = formats
         if sizes_fact:
             new['sizes'] = sizes_fact
         if ctx['latencies']:
@@ -357,6 +422,11 @@ class ProbeRunner:
         card['probed_at'] = int(self.clock())
         card['state'] = 'inferred' if incomplete or generate_ok is False else 'probed'
         card['probe_stop'] = ctx['stop']
+        if ctx['header_seen']:
+            card['cost_header_seen'] = True
+        if ctx['stop'] in WARNINGS:
+            ctx['warnings'].append(WARNINGS[ctx['stop']])
+        card['probe_warnings'] = list(dict.fromkeys(ctx['warnings']))
         finalize(card)
         summary = {'spent': ctx['spent'], 'stop': ctx['stop'], 'incomplete': incomplete,
                    'transient': any(r['error_class'] == TRANSIENT for r in ctx['results'])}

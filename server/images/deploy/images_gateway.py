@@ -62,6 +62,7 @@ PROBE_PER_CALL_USD = float(os.environ.get("OVID_PROBE_MAX_USD", "0.50"))
 PROBE_DAILY_USD = float(os.environ.get("OVID_PROBE_DAILY_USD", "5.00"))
 PROBE_MAX_SIZES = int(os.environ.get("OVID_PROBE_MAX_SIZES", "4"))
 PROBE_TTL = float(os.environ.get("OVID_PROBE_TTL_SECONDS", str(7 * 24 * 3600)))
+PROBE_STAGGER = float(os.environ.get("OVID_PROBE_STAGGER_SECONDS", "30"))   # min gap between probe runs
 PROBE_INTERVAL = float(os.environ.get("OVID_PROBE_INTERVAL_SECONDS", "60"))
 # Edits bypass LiteLLM (it can only send multipart; the provider accepts JSON only).
 # Needs INFERHUB_API_KEY; see server/images/deploy/README.md. Never logged/returned.
@@ -316,7 +317,12 @@ class LiteLLMImageService:
         else:
             ranked = pick_backends(task, cards)
             if not ranked:
-                raise ImageError(422, "unsupported_image_operation", detail={"alternatives": []})
+                unpriced = [c for c in cards if c.get("priced") is False and missing(c, task) == ["unpriced"]]
+                if unpriced:
+                    _LOG.warning("image request has no priced capable model; unpriced: %s",
+                                 [c["model"] for c in unpriced])
+                raise ImageError(422, "unsupported_image_operation",
+                                 detail={"alternatives": [], **({"reason": "no_priced_model"} if unpriced else {})})
         by_model = {b.model: b for b in self.backends}
         candidates = [by_model[c["model"]] for c in ranked if c["model"] in by_model]
         slugs = {c["model"]: c["slug"] for c in ranked}
@@ -518,7 +524,8 @@ def build_card_manager(params_for=None):
             LiteLLMProbeTransport(LITELLM_BASE, PROBE_KEY, master_key=LITELLM_MASTER_KEY,
                                   direct=DIRECT_EDIT, params_for=params_for),
             store, per_probe_cap=PROBE_PER_CALL_USD, daily_cap=PROBE_DAILY_USD, max_sizes=PROBE_MAX_SIZES)
-    return CardManager(store, runner, fetch_json=_fetch_json, cost_map=_cost_map, ttl=PROBE_TTL)
+    return CardManager(store, runner, fetch_json=_fetch_json, cost_map=_cost_map, ttl=PROBE_TTL,
+                       probe_gap=PROBE_STAGGER)
 
 
 def mount():
@@ -530,7 +537,11 @@ def mount():
     discovery.manager = manager
     service = LiteLLMImageService(discovery, Ledger(DB_PATH))
     mount_images(mint, service, admission=admission, auth=VerifierAuth(mint))
-    mount_admin(mint.app, manager, LITELLM_MASTER_KEY, wake=manager.wake)
+    def refresh_prices():
+        _PRICES.refresh()
+        discovery.discovered(force=True)   # re-reads model_info; priced flags are live per card read
+        manager.wake()
+    mount_admin(mint.app, manager, LITELLM_MASTER_KEY, wake=manager.wake, refresh_prices=refresh_prices)
     # Extraction and probes run here, never on a user request.
     manager.start(lambda: discovery.discovered(force=True), interval=PROBE_INTERVAL)
     mint.app.state.ovid_images_mounted = True
