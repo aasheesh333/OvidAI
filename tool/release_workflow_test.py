@@ -67,6 +67,11 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("--mode \"$mode\" --expected-target \"$target\"", text)
         self.assertRegex(text, r"target=36")
         self.assertRegex(text, r"target=28")
+        # Production builds with OVID_PLAY_BUILD=true, which ships no bootstrap:
+        # the gate must run in the matching profile in both directions.
+        self.assertRegex(text, r"target=36; profile=play")
+        self.assertRegex(text, r"target=28; profile=sideload")
+        self.assertEqual(text.count('--profile "$profile"'), 2)
 
     def test_no_production_only_gate_on_push_release(self):
         # The push release path must not require inputs.production_release.
