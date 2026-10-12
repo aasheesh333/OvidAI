@@ -211,18 +211,22 @@ class SsrfGuardTest(unittest.TestCase):
 class WithoutKeyTest(DirectFixture):
     key = ''
 
-    def test_cards_say_edit_unsupported_and_edit_is_a_clean_422(self):
+    def test_without_a_direct_key_the_model_is_untagged_and_edit_is_not_forced_off(self):
+        # No direct key: the edit path is LiteLLM (multipart, or JSON through the edit adapter).
+        # The model must NOT be tagged "none" (that would force "edit unsupported" even where the
+        # adapter makes edits work); hints and real probes decide.
         card = self.service.cards()[0]
-        self.assertEqual(card['edit_transport'], 'none')
-        self.assertFalse(supports(card, 'edit'))
-        self.assertNotIn('edit', self.service.catalog()['models'][0]['operations'])
-        self.assertEqual(self.service.catalog()['operations']['edit'], [])
-        with self.transport(), self.assertRaises(ImageError) as caught:
-            self.edit()
-        self.assertEqual((caught.exception.status, caught.exception.code), (422, 'unsupported_image_operation'))
-        self.assertEqual(caught.exception.detail['alternatives'], [])
+        self.assertIsNone(card.get('edit_transport'))
+        self.assertIsNone((card.get('static') or {}).get('edit_transport'))
+        self.assertNotEqual((card['operations'].get('edit') or {}).get('source'), 'declared')
+
+    def test_direct_provider_is_never_called_without_a_key(self):
+        with self.transport():
+            try:
+                self.edit()
+            except ImageError:
+                pass
         self.assertEqual(self.provider, [])
-        self.assertEqual(self.spent(), Decimal('0'))
 
     def test_generation_still_works(self):
         self.reply = lambda r: httpx.Response(200, json={'data': [{'b64_json': png_b64()}]})
@@ -243,13 +247,17 @@ class WithoutKeyTest(DirectFixture):
 
 
 class WrongHostTest(DirectFixture):
-    def test_non_allowlisted_api_base_disables_edit(self):
+    def test_non_allowlisted_api_base_never_uses_the_direct_path(self):
         self.catalog = model_info(base='https://other.example/v1')
         self.build()
-        self.assertFalse(supports(self.service.cards()[0], 'edit'))
-        with self.transport(), self.assertRaises(ImageError) as caught:
-            self.edit()
-        self.assertEqual(caught.exception.status, 422)
+        # Not allowlisted => the direct JSON path is not used and the model stays untagged
+        # (edits go through LiteLLM; hints and probes decide the card).
+        self.assertIsNone(self.service.cards()[0].get('edit_transport'))
+        with self.transport():
+            try:
+                self.edit()
+            except ImageError:
+                pass
         self.assertEqual(self.provider, [])
 
 

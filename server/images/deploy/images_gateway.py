@@ -158,7 +158,11 @@ class _Discovery:
                     identity = {k: params.get(k) for k in
                                 ("model", "api_base", "custom_llm_provider") if params.get(k)}
                     direct = self.direct_edit or DIRECT_EDIT
-                    identity["edit_transport"] = "direct" if direct.enabled_for(identity) else "none"
+                    # Only tag models that really use the direct JSON edit path. Without it the edit
+                    # path is LiteLLM (multipart, or JSON via the edit adapter): leave the model untagged
+                    # so hints + real probes decide, instead of forcing "edit unsupported".
+                    if direct.enabled_for(identity):
+                        identity["edit_transport"] = "direct"
                     found.append(Discovered(name, identity, info))
         except Exception as error:  # noqa: BLE001
             print(f"image discovery: model/info error: {error}")
