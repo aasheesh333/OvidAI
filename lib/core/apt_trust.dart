@@ -257,7 +257,9 @@ class AptTrust {
     } catch (e) {
       try {
         if (tmp.existsSync()) tmp.deleteSync();
-      } catch (_) {}
+      } catch (cleanupError) {
+        Diag.swallow('apt_trust', cleanupError);
+      }
       rethrow;
     }
   }
@@ -266,7 +268,9 @@ class AptTrust {
     for (final bin in const ['chmod', '/system/bin/chmod']) {
       try {
         if (Process.runSync(bin, [mode, path]).exitCode == 0) return;
-      } catch (_) {}
+      } catch (e) {
+        Diag.swallow('apt_trust', e);
+      }
     }
   }
 }
