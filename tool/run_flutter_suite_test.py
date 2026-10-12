@@ -193,6 +193,43 @@ class FlutterSuiteRunnerTest(unittest.TestCase):
         self.assertEqual(summary["counts"]["inventory"], 0)
         self.assertTrue(summary["errors"])
 
+    def test_shards_run_disjoint_round_robin_slices_covering_inventory(self):
+        names = ["a_test.dart", "b_test.dart", "c_test.dart", "nested/d_test.dart", "z_test.dart"]
+        self.files(*names)
+        seen = []
+        for index in range(3):
+            output = self.root / f"logs-{index}"
+            command = self.command("--shard-index", str(index), "--shard-count", "3")
+            command[command.index("--output") + 1] = str(output)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertEqual(summary["shard"], {"index": index, "count": 3})
+            self.assertEqual(summary["added_test_files"], [])
+            self.assertEqual(summary["passed_files"], summary["inventory"])
+            seen.extend(summary["inventory"])
+        expected = sorted("test/" + name for name in names)
+        self.assertEqual(sorted(seen), expected)
+        self.assertEqual(len(seen), len(set(seen)))
+        # Round-robin: shard 0 takes sorted entries 0 and 3.
+        self.assertEqual(json.loads((self.root / "logs-0/inventory.json").read_text()),
+                         [expected[0], expected[3]])
+
+    def test_empty_shard_is_not_green(self):
+        self.files("a_test.dart")
+        result, summary = self.run_suite("--shard-index", "1", "--shard-count", "2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(summary["counts"]["inventory"], 0)
+
+    def test_invalid_shard_is_rejected(self):
+        self.files("a_test.dart")
+        for extra in (("--shard-index", "3", "--shard-count", "3"),
+                      ("--shard-index", "-1", "--shard-count", "3"),
+                      ("--shard-count", "0")):
+            result = subprocess.run(self.command(*extra), capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 2, extra)
+            self.assertFalse((self.root / "logs").exists())
+
     def test_lock_wait_does_not_spend_batch_execution_timeout(self):
         self.files("a_test.dart")
         with (self.root / "sdk.lock").open("a") as lock:
