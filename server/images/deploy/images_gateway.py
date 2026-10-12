@@ -38,6 +38,14 @@ from server.images.service import (
     capacity_retry_seconds,
 )
 from server.images.adapters import PRE_PROVIDER_REFUSAL_CODES, structured_error_code
+from server.images.admin import mount_admin
+from server.images.capabilities import (
+    PUBLIC_SCHEMA, catalog_hash, default_card, legacy_card, public_card,
+)
+from server.images.cardmanager import CardManager, Discovered
+from server.images.cardstore import CardStore
+from server.images.probes import LiteLLMProbeTransport, ProbeRunner
+from server.images.routing import alternatives, parse_model, pick_backends, task_from_request, missing
 from server.images.verifier import VerifierAuth, mount_images
 
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://litellm:4000")
@@ -45,6 +53,15 @@ LITELLM_MASTER_KEY = os.environ["LITELLM_MASTER_KEY"]
 DB_PATH = os.environ.get("OVID_IMAGE_DB", "/data/ovid-images.sqlite")
 MAX_UPSTREAM_USD = Decimal(os.environ.get("OVID_IMAGE_MAX_UPSTREAM_USD", "1.00"))
 HTTP_TIMEOUT = float(os.environ.get("OVID_IMAGE_TIMEOUT", "120"))
+# Capability cards (background extraction + probes; see docs/image-capabilities).
+CARDS_DB = os.environ.get("OVID_IMAGE_CARDS_DB", os.path.join(os.path.dirname(DB_PATH), "ovid-image-cards.sqlite"))
+PROBE_KEY = os.environ.get("OVID_PROBE_KEY", "")          # dedicated internal key; empty = static cards only
+PROBE_PER_CALL_USD = float(os.environ.get("OVID_PROBE_MAX_USD", "0.50"))
+PROBE_DAILY_USD = float(os.environ.get("OVID_PROBE_DAILY_USD", "5.00"))
+PROBE_MAX_SIZES = int(os.environ.get("OVID_PROBE_MAX_SIZES", "4"))
+PROBE_TTL = float(os.environ.get("OVID_PROBE_TTL_SECONDS", str(7 * 24 * 3600)))
+PROBE_INTERVAL = float(os.environ.get("OVID_PROBE_INTERVAL_SECONDS", "60"))
+COSTMAP_URL = os.environ.get("OVID_IMAGE_COSTMAP_URL", "")  # optional raw LiteLLM cost-map JSON
 _CATALOG_TTL = 30.0
 _MAX_COOLDOWNS = 256
 _LOG = logging.getLogger(__name__)
@@ -80,23 +97,42 @@ def _capacity_rejected(response, model):
 
 
 class _Backend:
-    """A discovered image model; carries no provider identity."""
-    __slots__ = ("model", "sizes", "edit")
+    """A discovered image model; carries no provider identity.
 
-    def __init__(self, model, sizes, edit):
+    `card` is the capability card (None for legacy callers: a card is then
+    synthesized from the declared sizes/edit flag)."""
+    __slots__ = ("model", "sizes", "edit", "card")
+
+    def __init__(self, model, sizes, edit, card=None):
         self.model, self.sizes, self.edit = model, tuple(sizes), edit
+        self.card = card
+
+
+def _backend_card(backend):
+    return getattr(backend, "card", None) or legacy_card(backend.model, backend.sizes, backend.edit)
+
+
+def _backend_from_card(card):
+    from server.images.capabilities import supports
+    sizes = tuple((card.get("sizes") or {}).get("native") or ("1024x1024",))
+    return _Backend(card["model"], sizes, supports(card, "edit"), card)
 
 
 class _Discovery:
-    """Image-capable models from the LiteLLM dashboard catalog (cached)."""
+    """Image-capable models from the LiteLLM dashboard catalog (cached).
 
-    def __init__(self):
+    Discovery only LISTS models. Capabilities come from cards the background
+    CardManager fills; until a model has a card it is generate-only/1024x1024.
+    """
+
+    def __init__(self, manager=None):
         self._at = 0.0
-        self._backends = []
+        self._found = []
+        self.manager = manager
 
-    def backends(self):
-        if time.time() - self._at < _CATALOG_TTL and self._backends:
-            return self._backends
+    def discovered(self, force=False):
+        if not force and time.time() - self._at < _CATALOG_TTL and self._found:
+            return self._found
         found = []
         try:
             headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
@@ -110,13 +146,25 @@ class _Discovery:
                     modality = info.get("output_modality")
                     if not name or (mode != "image_generation" and modality != "image"):
                         continue
-                    # Dashboard models do not declare sizes reliably; advertise
-                    # the documented contract sizes and let the upstream reject.
-                    found.append(_Backend(name, SIZES, True))
+                    params = row.get("litellm_params", {}) or {}
+                    # Keep only identity fields; credentials are never stored.
+                    found.append(Discovered(name, {k: params.get(k) for k in
+                                                   ("model", "api_base", "custom_llm_provider") if params.get(k)},
+                                            info))
         except Exception as error:  # noqa: BLE001
             print(f"image discovery: model/info error: {error}")
-        self._at, self._backends = time.time(), found
+            if self._found:
+                return self._found
+        self._at, self._found = time.time(), found
+        if self.manager is not None:
+            self.manager.observe(found)
         return found
+
+    def backends(self):
+        found = self.discovered()
+        if self.manager is None:
+            return [_Backend(d.name, ("1024x1024",), False, default_card(d.name)) for d in found]
+        return [_backend_from_card(self.manager.card(d.name, d.params)) for d in found]
 
 
 def _user_key(uid):
@@ -148,15 +196,27 @@ class LiteLLMImageService:
     def backends(self):
         return self.discovery.backends()
 
+    def cards(self):
+        from server.images.capabilities import assign_cost_tiers, clone, finalize
+        cards = [clone(_backend_card(b)) for b in self.backends]
+        assign_cost_tiers(cards)
+        for card in cards:
+            finalize(card)
+        return cards
+
     def catalog(self):
         backends = self.backends
         delays = [self._retry_after(b.model) for b in backends]
         if delays and all(delays):
             raise ImageError(503, 'image_capacity_unavailable', retry_after_seconds=min(delays))
-        operations = {op: sorted({size for b in backends if op == 'generate' or b.edit for size in b.sizes})
+        cards = self.cards()
+        public = [public_card(c) for c in cards]
+        # Legacy field kept for app builds that predate model cards.
+        operations = {op: sorted({size for c in public if op in c['operations'] for size in c['sizes']})
                       for op in ('generate', 'edit')}
         # Static routing support is not proof of usable provider capacity.
-        return {"model": ALIAS, "operations": operations, "availability": "unknown"}
+        return {"model": ALIAS, "operations": operations, "availability": "unknown",
+                "schema": PUBLIC_SCHEMA, "catalog_hash": catalog_hash(public), "models": public}
 
     def _retry_after(self, model):
         with self._cooldown_lock:
@@ -180,20 +240,49 @@ class LiteLLMImageService:
             raise ImageError(400, "invalid_request_id")
         if operation not in ("generate", "edit") or not isinstance(body, dict):
             raise ImageError(400, "invalid_image_request")
-        allowed = {"model", "prompt", "size"} | ({"image"} if operation == "edit" else set())
-        if set(body) - allowed or body.get("model") != ALIAS:
+        allowed = {"model", "prompt", "size", "requirements", "preference"} | \
+            ({"image", "mask", "images"} if operation == "edit" else set())
+        if set(body) - allowed:
             raise ImageError(400, "invalid_image_request")
+        try:
+            slug = parse_model(body.get("model"))
+            task = task_from_request(operation, body)
+        except ValueError:
+            raise ImageError(400, "invalid_image_request") from None
         prompt, size = body.get("prompt"), body.get("size", "1024x1024")
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 8000 or size not in SIZES:
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 8000 or \
+                (body.get("size") is not None and size not in SIZES and not (slug or task.size)):
             raise ImageError(400, "invalid_image_request")
-        image_b64 = image_mime = None
+        image_b64 = image_mime = mask_raw = None
+        extra_images = []
         if operation == "edit":
-            match = re.fullmatch(r"data:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)", body.get("image") or "")
-            if not match:
-                raise ImageError(400, "invalid_image")
-            image_mime, image_b64 = match[1], match[2]
+            image_b64, image_mime = _data_url(body.get("image"))
             validate_image(image_b64, image_mime)
-        candidates = self.backends
+            if body.get("mask") is not None:
+                m_b64, m_mime = _data_url(body["mask"])
+                validate_image(m_b64, m_mime)
+                mask_raw = base64.b64decode(m_b64)
+            for extra in (body.get("images") or []):
+                e_b64, e_mime = _data_url(extra)
+                validate_image(e_b64, e_mime)
+                extra_images.append((base64.b64decode(e_b64), e_mime))
+        cards = self.cards()
+        chosen = None
+        if slug is not None:
+            chosen = next((c for c in cards if c["slug"] == slug), None)
+            if chosen is None or missing(chosen, task):
+                # Nothing was admitted or charged yet: a clear, actionable 422.
+                raise ImageError(422, "unsupported_image_operation", detail={
+                    "model": slug, "alternatives": alternatives(task, cards),
+                    **({"unsupported": missing(chosen, task)} if chosen else {"reason": "unknown_model"})})
+            ranked = [chosen]
+        else:
+            ranked = pick_backends(task, cards)
+            if not ranked:
+                raise ImageError(422, "unsupported_image_operation", detail={"alternatives": []})
+        by_model = {b.model: b for b in self.backends}
+        candidates = [by_model[c["model"]] for c in ranked if c["model"] in by_model]
+        slugs = {c["model"]: c["slug"] for c in ranked}
         if not candidates:
             raise ImageError(503, "image_unavailable")
         fingerprint = hashlib.sha256(
@@ -215,7 +304,12 @@ class LiteLLMImageService:
                 continue
             before = _key_spend(key_id) if key_id else None
             try:
-                result = self._forward(key, backend, operation, prompt, size, image_b64, image_mime)
+                card = next(c for c in ranked if c["model"] == backend.model)
+                req_size = task.size or (card["sizes"]["native"] or ["1024x1024"])[0]
+                result = self._forward(key, backend, operation, prompt, req_size, image_b64, image_mime,
+                                       mask=mask_raw, extra=extra_images,
+                                       transparent=task.transparent or task.operation == "remove_background")
+                result["model_slug"] = slugs[backend.model]
             except _NotServed as error:
                 last_status = error.status
                 if error.reason == 'no_capacity':
@@ -235,7 +329,7 @@ class LiteLLMImageService:
                 # for reconciliation rather than fabricating a charge.
                 raise self._unknown(account, request, fingerprint)
             try:
-                return self.ledger.settle(account, request, actual, result)
+                return self.ledger.settle(account, request, actual, result, served_model=slugs[backend.model])
             except ImageError:
                 raise
             except Exception:
@@ -249,21 +343,28 @@ class LiteLLMImageService:
         raise ImageError(503 if last_status == 503 or last_status is None else 502, "image_unavailable",
                          receipt=self.ledger.receipt(account, request))
 
-    def _forward(self, key, backend, operation, prompt, size, image_b64, image_mime):
+    def _forward(self, key, backend, operation, prompt, size, image_b64, image_mime, *,
+                 mask=None, extra=(), transparent=False):
         headers = {"Authorization": f"Bearer {key}"}
         with httpx.Client(base_url=LITELLM_BASE, timeout=HTTP_TIMEOUT, follow_redirects=False) as client:
             if operation == "generate":
-                response = client.post("/v1/images/generations", headers=headers, json={
-                    "model": backend.model, "prompt": prompt, "size": size,
-                    "n": 1, "response_format": "b64_json",
-                })
+                body = {"model": backend.model, "prompt": prompt, "size": size,
+                        "n": 1, "response_format": "b64_json"}
+                if transparent:
+                    body["background"] = "transparent"
+                response = client.post("/v1/images/generations", headers=headers, json=body)
             else:
                 raw = base64.b64decode(image_b64)
-                response = client.post(
-                    "/v1/images/edits", headers=headers,
-                    data={"model": backend.model, "prompt": prompt, "size": size, "n": "1"},
-                    files={"image": ("image.png", raw, image_mime)},
-                )
+                data = {"model": backend.model, "prompt": prompt, "size": size, "n": "1"}
+                if transparent:
+                    data["background"] = "transparent"
+                inputs = [raw] + [e[0] for e in extra]
+                mimes = [image_mime] + [e[1] for e in extra]
+                name = "image[]" if len(inputs) > 1 else "image"
+                files = [(name, ("image.png" if i == 0 else f"image{i}.png", blob, mime)) for i, (blob, mime) in enumerate(zip(inputs, mimes))]
+                if mask:
+                    files.append(("mask", ("mask.png", mask, "image/png")))
+                response = client.post("/v1/images/edits", headers=headers, data=data, files=files)
         if _capacity_rejected(response, backend.model):
             raise _NotServed(response.status_code, 'no_capacity',
                              capacity_retry_seconds(response.headers.get('Retry-After')))
@@ -295,6 +396,14 @@ class LiteLLMImageService:
         return ImageError(409, "image_request_pending", receipt=receipt)
 
 
+def _data_url(value):
+    match = re.fullmatch(r"data:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)", value) \
+        if isinstance(value, str) else None
+    if not match:
+        raise ImageError(400, "invalid_image")
+    return match[2], match[1]
+
+
 class _NotServed(Exception):
     def __init__(self, status, reason, retry_after_seconds=None):
         self.status, self.reason = status, reason
@@ -317,14 +426,48 @@ def admission(identity):
     yield (f"{uid}:{window}", Decimal(str(remaining)))
 
 
+def _fetch_json(url):
+    """Background-only helper: provider models listing / cost map. Short, bounded."""
+    with httpx.Client(timeout=15, follow_redirects=False) as client:
+        response = client.get(url)
+    if response.status_code != 200 or len(response.content) > 8 * 1024 * 1024:
+        return None
+    return response.json()
+
+
+def _cost_map():
+    if not COSTMAP_URL:
+        return None
+    try:
+        return _fetch_json(COSTMAP_URL)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def build_card_manager():
+    store = CardStore(CARDS_DB)
+    runner = None
+    if PROBE_KEY:
+        runner = ProbeRunner(
+            LiteLLMProbeTransport(LITELLM_BASE, PROBE_KEY, master_key=LITELLM_MASTER_KEY),
+            store, per_probe_cap=PROBE_PER_CALL_USD, daily_cap=PROBE_DAILY_USD, max_sizes=PROBE_MAX_SIZES)
+    return CardManager(store, runner, fetch_json=_fetch_json, cost_map=_cost_map, ttl=PROBE_TTL)
+
+
 def mount():
     if getattr(mint.app.state, "ovid_images_mounted", False):
         return
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    service = LiteLLMImageService(_Discovery(), Ledger(DB_PATH))
+    manager = build_card_manager()
+    discovery = _Discovery(manager)
+    service = LiteLLMImageService(discovery, Ledger(DB_PATH))
     mount_images(mint, service, admission=admission, auth=VerifierAuth(mint))
+    mount_admin(mint.app, manager, LITELLM_MASTER_KEY, wake=manager.wake)
+    # Extraction and probes run here, never on a user request.
+    manager.start(lambda: discovery.discovered(force=True), interval=PROBE_INTERVAL)
     mint.app.state.ovid_images_mounted = True
-    print(f"Ovid images mounted: alias={ALIAS} image_models={[b.model for b in service.backends]}")
+    print(f"Ovid images mounted: alias={ALIAS} image_models={[b.model for b in service.backends]} "
+          f"probes={'on' if PROBE_KEY else 'off (static cards only)'}")
 
 
 try:

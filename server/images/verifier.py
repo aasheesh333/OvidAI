@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from .service import ALIAS, ImageError, MAX_BYTES
@@ -176,7 +176,15 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
             if request.method == 'GET':
                 result = await run_in_threadpool(read, identity, request.path_params.get('request_id'),
                                                 request.url.path.endswith('/result'))
-                return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+                headers = {'Cache-Control': 'no-store'}
+                digest = result.get('catalog_hash') if isinstance(result, dict) else None
+                if digest:
+                    etag = f'"{digest}"'
+                    headers['ETag'] = etag
+                    sent = [t.strip().removeprefix('W/') for t in request.headers.get('if-none-match', '').split(',')]
+                    if etag in sent:
+                        return Response(status_code=304, headers=headers)
+                return JSONResponse(result, headers=headers)
             if request.headers.get('content-type', '').split(';')[0].strip() != 'application/json':
                 raise ImageError(415, 'invalid_image_request')
             raw = bytearray()
@@ -197,6 +205,8 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
             if error.retry_after_seconds is not None:
                 body['error']['retryAfterSeconds'] = error.retry_after_seconds
                 headers['Retry-After'] = str(error.retry_after_seconds)
+            if error.detail:
+                body['error'].update(error.detail)
             if error.receipt is not None:
                 body['receipt'] = error.receipt
             return JSONResponse(body, status_code=error.status, headers=headers)
