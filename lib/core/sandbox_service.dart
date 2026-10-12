@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'distribution.dart';
+import 'apt_trust.dart';
 import 'sandbox_pkg.dart';
 import 'global_repo_registry.dart';
 import 'pty_service.dart' show OwnedProcessTree;
@@ -74,6 +75,16 @@ decodeAndExtractPayload(({Uint8List bytes, String stagingPath}) args) {
 class SandboxUnsupportedException implements Exception {
   final String message;
   const SandboxUnsupportedException(this.message);
+  @override
+  String toString() => message;
+}
+
+/// Runtime package setup stopped with an actionable, user-facing reason
+/// (no reachable mirror, signatures still failing after a key repair, time
+/// budget exhausted). [message] is shown verbatim.
+class RuntimeSetupException implements Exception {
+  final String message;
+  const RuntimeSetupException(this.message);
   @override
   String toString() => message;
 }
@@ -1046,7 +1057,7 @@ class SandboxService {
       _checked = true;
       if (previous.existsSync()) previous.deleteSync(recursive: true);
       if (_installNeedsRuntimes) {
-        onPhase(7, 0.0, r'$ apt update && apt install runtimes');
+        onPhase(7, 0.0, r'$ apt-get update && apt-get install runtimes');
         await _installRuntimesWithRetry(onPhase);
         checkCancellation();
         if (!await runtimesVerified()) {
@@ -1119,7 +1130,10 @@ class SandboxService {
   }
 
   static String _runtimeError(String output) {
-    final lines = output.trim().split('\n').where((line) => line.trim().isNotEmpty).toList();
+    // A success summary inside a failure tail reads as success; drop it.
+    final lines = output.trim().split('\n')
+        .where((line) => line.trim().isNotEmpty && !_aptSuccessSummary.hasMatch(line.trim()))
+        .toList();
     return lines.isEmpty ? 'no output' : lines.skip((lines.length - 6).clamp(0, lines.length)).join('\n');
   }
 
@@ -1177,13 +1191,62 @@ class SandboxService {
 
   List<String> get _orderedAptMirrors => [
     ..._aptMirrors.skip(_mirrorIdx), ..._aptMirrors.take(_mirrorIdx),
-  ];
+  ].where((m) => m == _aptMirrors[_mirrorIdx] || !_deadMirrors.contains(m)).toList();
+
+  /// Upper bound for one runtime install run (all groups, all retries).
+  /// The on-device failure looped for over an hour; past this budget the
+  /// run stops with an actionable message instead.
+  @visibleForTesting
+  static Duration runtimeInstallBudget = const Duration(minutes: 20);
+
+  /// User-facing text when package signatures still fail after the bundled
+  /// keys were repaired.
+  static const signatureFailureAdvice =
+      'Package signature check still fails after repairing the bundled '
+      'Termux signing keys. Check that the device date and time are set '
+      'automatically, then tap Retry. If it keeps failing, use Health → '
+      'Reset sandbox.';
+
+  /// User-facing text when no package mirror is reachable.
+  static const noMirrorAdvice =
+      'No package mirror is reachable. Check the internet connection, '
+      'Private DNS / VPN settings, then tap Retry.';
+
+  static bool _looksLikeSignatureFailure(String out) {
+    final l = out.toLowerCase();
+    return l.contains('no_pubkey') ||
+        l.contains('is not signed') ||
+        l.contains('unsupported filetype') ||
+        l.contains('signatures couldn\'t be verified') ||
+        l.contains('(signature:') ||
+        l.contains('no usable trusted keyring');
+  }
 
   Future<void> _installRuntimeGroups(
     Map<String, List<String>> essential, {
     Map<String, List<String>> optional = const {},
     void Function(String)? onLine,
   }) async {
+    final clock = Stopwatch()..start();
+    // Every run (first setup, Retry, Repair, lazy ensure) starts from a
+    // clean mirror verdict and re-asserts the trust roots (step 1).
+    _deadMirrors.clear();
+    final prefix0 = _prefix;
+    if (prefix0 != null) {
+      final report = await _ensureBundledAptKeyring(prefix0, onLine: onLine);
+      checkCancellation();
+      if (report != null) {
+        onLine?.call(report.ok
+            ? '[keys] ${report.verified} bundled signing keys verified readable'
+            : '[keys] signing key repair incomplete: ${report.failures.join('; ')}');
+      }
+      final healthy = await _selectHealthyMirror(onLine);
+      checkCancellation();
+      if (healthy == false) {
+        onLine?.call('[runtime] FAILED: $noMirrorAdvice');
+        throw const RuntimeSetupException(noMirrorAdvice);
+      }
+    }
     await _recoverPendingPackageTransaction(onLine);
     try {
       await _repairBundledPrerequisites(onLine);
@@ -1194,6 +1257,12 @@ class SandboxService {
     }
     var aptReady = false;
     var signedReady = false;
+    // Native apt is skipped for the rest of the run once its index fails
+    // twice: every further group would only repeat the same 3-minute failure.
+    var aptFailures = 0;
+    var keysRepaired = false;
+    var essentialMissing = false;
+    String? fatal;
     Future<bool> verify(List<String> bins) async {
       var ok = true;
       for (final bin in bins) {
@@ -1206,42 +1275,69 @@ class SandboxService {
       return ok;
     }
 
+    Future<void> onSignatureFailure() async {
+      if (keysRepaired) {
+        fatal = signatureFailureAdvice;
+        return;
+      }
+      keysRepaired = true;
+      onLine?.call('Package signature check failed — repairing keys…');
+      final prefix = _prefix;
+      if (prefix != null) {
+        final report = await _ensureBundledAptKeyring(prefix, onLine: onLine);
+        if (report != null && report.ok && !report.changed) {
+          onLine?.call('[keys] bundled keys were already intact (${report.verified} verified)');
+        }
+      }
+    }
+
     for (final group in {...essential, ...optional}.entries) {
       final required = essential.containsKey(group.key);
       final attempts = required ? 3 : 1;
       var installed = false;
-      for (var attempt = 1; attempt <= attempts && !installed; attempt++) {
+      for (var attempt = 1; attempt <= attempts && !installed && fatal == null; attempt++) {
         checkCancellation();
-        onLine?.call('[runtime] ${required ? "essential" : "optional"} ${group.key} ($attempt/$attempts)');
-        try {
-          if (!aptReady) {
-            final (code, output) = await _aptChecked('update 2>&1',
-                timeout: const Duration(minutes: 3), onLine: onLine);
-            checkCancellation();
-            if (code != 0) throw StateError('apt update exit $code: ${_runtimeError(output)}');
-            aptReady = true;
-          }
-          // Recommends can pull in optional runtimes or a compiler. Only the
-          // dependency closure belongs in an essential transaction.
-          final (code, output) = await _aptChecked(
-              'install -y --no-install-recommends ${group.key} 2>&1',
-              timeout: const Duration(minutes: 8), onLine: onLine);
-          checkCancellation();
-          if (code != 0) throw StateError('apt install exit $code: ${_runtimeError(output)}');
-          await _repairRuntimeEntryPoints();
-          installed = await verify(group.value);
-        } on SandboxCancelledException {
-          rethrow;
-        } on _PackageRecoveryException {
-          rethrow;
-        } catch (e) {
-          onLine?.call('[runtime] ${group.key}: $e');
+        if (clock.elapsed > runtimeInstallBudget) {
+          fatal = 'Runtime setup stopped after ${runtimeInstallBudget.inMinutes} min '
+              'without a working package mirror. $noMirrorAdvice';
+          break;
         }
-        if (installed) break;
+        onLine?.call('[runtime] ${required ? "essential" : "optional"} ${group.key} ($attempt/$attempts)');
+        if (aptFailures < 2) {
+          try {
+            if (!aptReady) {
+              final (code, output) = await _aptChecked('update 2>&1',
+                  timeout: const Duration(minutes: 3), onLine: onLine);
+              checkCancellation();
+              if (code != 0) {
+                aptFailures++;
+                if (_looksLikeSignatureFailure(output)) await onSignatureFailure();
+                throw StateError('apt-get update exit $code: ${_runtimeError(output)}');
+              }
+              aptReady = true;
+            }
+            // Recommends can pull in optional runtimes or a compiler. Only the
+            // dependency closure belongs in an essential transaction.
+            final (code, output) = await _aptChecked(
+                'install -y --no-install-recommends ${group.key} 2>&1',
+                timeout: const Duration(minutes: 8), onLine: onLine);
+            checkCancellation();
+            if (code != 0) throw StateError('apt-get install exit $code: ${_runtimeError(output)}');
+            await _repairRuntimeEntryPoints();
+            installed = await verify(group.value);
+          } on SandboxCancelledException {
+            rethrow;
+          } on _PackageRecoveryException {
+            rethrow;
+          } catch (e) {
+            onLine?.call('[runtime] ${group.key}: $e');
+          }
+          if (installed) break;
+        }
         try {
           final prefix = _prefix;
           if (prefix == null) throw StateError('Sandbox prefix unavailable');
-          await _ensureBundledAptKeyring(prefix);
+          await _ensureBundledAptKeyring(prefix, onLine: onLine);
           checkCancellation();
           OvidPkgInstaller.writeAll(prefix,
               arch: aptArchFor(_payloadAbi, _deviceArch), mirrors: _orderedAptMirrors);
@@ -1256,7 +1352,10 @@ class SandboxService {
             final (code, output) = await _checkedCommand(
                 ['bash', '-c', 'ovid-pkg update 2>&1'], timeout: const Duration(minutes: 6), onLine: onLine);
             checkCancellation();
-            if (code != 0) throw StateError('signed update exit $code: ${_runtimeError(output)}');
+            if (code != 0) {
+              if (_looksLikeSignatureFailure(output)) await onSignatureFailure();
+              throw StateError('signed update exit $code: ${_runtimeError(output)}');
+            }
             signedReady = true;
           }
           final (code, output) = await _checkedCommand(
@@ -1271,14 +1370,20 @@ class SandboxService {
           rethrow;
         } catch (e) {
           onLine?.call('[runtime] ${group.key}: $e');
+          final hard = _isHardMirrorFailure('$e');
           signedReady = false;
-          _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
-          final prefix = _prefix;
-          if (prefix != null) _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
           aptReady = false;
+          if (!_advanceMirror(markDead: hard, onLine: onLine)) {
+            fatal = noMirrorAdvice;
+          }
         }
       }
       onLine?.call('[runtime] ${group.key}: ${installed ? "verified ✓" : required ? "FAILED" : "optional unavailable"}');
+      if (required && !installed) essentialMissing = true;
+    }
+    if (fatal != null) {
+      onLine?.call('[runtime] FAILED: $fatal');
+      if (essentialMissing) throw RuntimeSetupException(fatal!);
     }
   }
 
@@ -1886,54 +1991,71 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
     'thunder-coding.gpg',
   ];
 
-  /// Copy [bundledKeys] (filename → bytes) into [trustedDir] whenever the
-  /// file is missing or empty. Idempotent; never overwrites a non-empty key
-  /// (a payload-linked or previously seeded key always wins). Returns the
-  /// number of keys written.
+  /// Test seam: bundled key bytes (filename → bytes) instead of rootBundle.
   @visibleForTesting
-  static int seedAptKeyring(
-    Directory trustedDir,
-    Map<String, List<int>> bundledKeys,
-  ) {
-    var written = 0;
-    try {
-      trustedDir.createSync(recursive: true);
-      for (final e in bundledKeys.entries) {
-        try {
-          final f = File('${trustedDir.path}/${e.key}');
-          if (f.existsSync() && f.lengthSync() > 0) continue;
-          f.writeAsBytesSync(e.value, flush: true);
-          written++;
-        } catch (e) {
-          Diag.swallow('sandbox_service', e);
-        }
+  static Map<String, List<int>>? bundledAptKeysOverrideForTest;
+  Map<String, List<int>>? _bundledAptKeys;
+
+  Future<Map<String, List<int>>> _loadBundledAptKeys() async {
+    final override = bundledAptKeysOverrideForTest;
+    if (override != null) return override;
+    final cached = _bundledAptKeys;
+    if (cached != null) return cached;
+    final bundled = <String, List<int>>{};
+    for (final name in aptKeyringAssetNames) {
+      try {
+        final data = await rootBundle.load('assets/termux-keyring/$name');
+        bundled[name] = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+      } catch (e) {
+        Diag.swallow('sandbox_service', e);
       }
-    } catch (e) {
-      Diag.swallow('sandbox_service', e);
     }
-    return written;
+    if (bundled.length == aptKeyringAssetNames.length) _bundledAptKeys = bundled;
+    return bundled;
   }
 
-  /// Load the bundled keyring assets and seed `$prefix/etc/apt/trusted.gpg.d`.
-  /// Best-effort; runs on boot so devices whose payload lacks
-  /// `share/termux-keyring` (armeabi-v7a, x86_64) still verify apt.
-  Future<void> _ensureBundledAptKeyring(Directory prefix) async {
+  /// Step 1 of every apt / ovid-pkg operation (boot, setup, Retry, Repair):
+  /// create the directories apt expects, install the `cmp` apt-key needs,
+  /// and make trusted.gpg.d hold every bundled key as a readable regular
+  /// file with the exact bundled bytes (see [AptTrust]). Repairs are
+  /// reported to [onLine]. Never throws.
+  Future<AptTrustReport?> _ensureBundledAptKeyring(
+    Directory prefix, {
+    void Function(String line)? onLine,
+  }) async {
     try {
-      final trusted = Directory('${prefix.path}/etc/apt/trusted.gpg.d');
-      final bundled = <String, List<int>>{};
-      for (final name in aptKeyringAssetNames) {
-        try {
-          final data = await rootBundle.load('assets/termux-keyring/$name');
-          bundled[name] = data.buffer.asUint8List();
-        } catch (e) {
-          Diag.swallow('sandbox_service', e);
-        }
+      for (final line in AptTrust.ensureAptDirectories(prefix)) {
+        onLine?.call(line);
       }
-      if (bundled.isNotEmpty) seedAptKeyring(trusted, bundled);
+      OvidPkgInstaller.writeCmpShim(prefix);
+      final bundled = await _loadBundledAptKeys();
+      if (bundled.isEmpty) {
+        onLine?.call('[keys] bundled signing keys could not be loaded');
+        return null;
+      }
+      final report = AptTrust.reconcileKeyring(
+        Directory('${prefix.path}/etc/apt/trusted.gpg.d'),
+        bundled,
+        payloadKeyring: Directory('${prefix.path}/share/termux-keyring'),
+      );
+      for (final line in report.repairs) {
+        onLine?.call(line);
+      }
+      for (final failure in report.failures) {
+        onLine?.call('[keys] could not repair $failure');
+      }
+      return report;
     } catch (e) {
       Diag.swallow('sandbox_service', e);
+      return null;
     }
   }
+
+  /// Test seam for [_ensureBundledAptKeyring].
+  @visibleForTesting
+  Future<AptTrustReport?> ensureAptTrustForTest(Directory prefix,
+          {void Function(String line)? onLine}) =>
+      _ensureBundledAptKeyring(prefix, onLine: onLine);
 
   void _writeAptConfig(Directory prefix) {
     final p = prefix.path;
@@ -1950,35 +2072,10 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
     } catch (e) {
       Diag.swallow('sandbox_service', e);
     }
-    // apt needs the Termux signing keys to verify packages. They ship under
-    // share/termux-keyring/*.gpg — link them into trusted.gpg.d so apt's
-    // GPGV verification succeeds (otherwise every install is rejected).
-    try {
-      final keyring = Directory('$p/share/termux-keyring');
-      final trusted = Directory('$p/etc/apt/trusted.gpg.d')
-        ..createSync(recursive: true);
-      if (keyring.existsSync()) {
-        for (final k in keyring.listSync()) {
-          if (k.path.endsWith('.gpg')) {
-            final name = k.path.split('/').last;
-            final dest = '${trusted.path}/$name';
-            if (!File(dest).existsSync()) {
-              try {
-                Link(dest).createSync(k.path);
-              } catch (_) {
-                try {
-                  File(k.path).copySync(dest);
-                } catch (e) {
-                  Diag.swallow('sandbox_service', e);
-                }
-              }
-            }
-          }
-        }
-      }
-    } catch (e) {
-      Diag.swallow('sandbox_service', e);
-    }
+    // Trust roots are NOT linked from share/termux-keyring any more: the
+    // payload keyring may be absent (armeabi-v7a/x86_64 ship dangling
+    // trusted.gpg.d links), stale or replaced by a repair. The bundled keys
+    // are copied as regular files by _ensureBundledAptKeyring instead.
     // dpkg needs an admindir + a status file to consider packages installed.
     try {
       Directory('$p/var/lib/dpkg').createSync(recursive: true);
@@ -2063,6 +2160,203 @@ audit=false
   ];
   int _mirrorIdx = 0;
 
+  /// Mirrors that failed hard (5xx/522, TLS even over IPv4, timeout, bad
+  /// signature) during the current runtime install run. Skipped until the
+  /// next run (Retry) clears the set.
+  final Set<String> _deadMirrors = {};
+
+  @visibleForTesting
+  Set<String> get deadMirrorsForTest => _deadMirrors;
+
+  /// Transport-level failures that make a mirror useless for this run:
+  /// HTTP 5xx (incl. Cloudflare 522), TLS handshake (after the IPv4 retry),
+  /// DNS/connect/timeouts, or a Release signature that does not verify.
+  static bool _isHardMirrorFailure(String out) {
+    final l = out.toLowerCase();
+    return RegExp(r'(error:?|http) ?5\d\d\b').hasMatch(l) ||
+        RegExp(r'curl: \((6|7|28|35|56)\)').hasMatch(l) ||
+        l.contains('could not handshake') ||
+        l.contains('pull function') ||
+        l.contains('connection timed out') ||
+        l.contains('could not connect') ||
+        l.contains('connection refused') ||
+        l.contains('could not resolve') ||
+        l.contains('temporary failure resolving') ||
+        l.contains('network is unreachable') ||
+        l.contains('unreachable or http error') ||
+        l.contains('(signature:');
+  }
+
+  /// Move to the next mirror that is not dead (optionally marking the
+  /// current one dead first). Returns false when no live mirror remains.
+  bool _advanceMirror({bool markDead = false, void Function(String)? onLine}) {
+    final current = _aptMirrors[_mirrorIdx];
+    if (markDead && _deadMirrors.add(current)) {
+      onLine?.call('[mirror] dropping $current for this setup run');
+    }
+    for (var step = 1; step <= _aptMirrors.length; step++) {
+      final idx = (_mirrorIdx + step) % _aptMirrors.length;
+      if (_deadMirrors.contains(_aptMirrors[idx])) continue;
+      _mirrorIdx = idx;
+      final prefix = _prefix;
+      if (prefix != null) _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
+      return true;
+    }
+    return false;
+  }
+
+  /// Shell probe: fetch every mirror's InRelease in parallel (5 s connect,
+  /// 8 s total), retry over IPv4 on connect/TLS failures, verify it with the
+  /// seeded trust roots (gpgv, VALIDSIG) and report the Release date.
+  /// One `OVIDMIRROR|index|status|ms|releasedEpoch|ipv4` line per mirror.
+  @visibleForTesting
+  static String mirrorProbeScript(List<String> mirrors) {
+    final quoted = mirrors.map((m) => "'${m.replaceAll("'", "")}'").join(' ');
+    return _mirrorProbeTemplate.replaceFirst('@MIRRORS@', quoted);
+  }
+
+  static const _mirrorProbeTemplate = r'''
+set -u
+work="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/ovid-mirror-probe.XXXXXX")" || exit 3
+trap 'rm -rf "$work"' EXIT
+set --
+for k in "$PREFIX/etc/apt/trusted.gpg.d/"*.gpg; do
+  [ -f "$k" ] && [ -r "$k" ] && [ -s "$k" ] || continue
+  case "$(od -An -tx1 -N1 -- "$k" 2>/dev/null | tr -d ' \n')" in 98|99|c6) set -- "$@" --keyring "$k";; esac
+done
+_ms() { date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)); }
+probe() {
+  i="$1"; url="$2"; shift 2
+  d="$work/$i"; mkdir -p "$d/gnupg"; chmod 700 "$d/gnupg"
+  v4=0; t0="$(_ms)"
+  curl -fsS --proto '=https' --connect-timeout 5 --max-time 8 --max-filesize 1048576 \
+    -o "$d/InRelease" "$url/dists/stable/InRelease" 2>"$d/err"; rc=$?
+  case "$rc" in 7|28|35|56)
+    v4=1; t0="$(_ms)"
+    curl -4 -fsS --proto '=https' --connect-timeout 5 --max-time 8 --max-filesize 1048576 \
+      -o "$d/InRelease" "$url/dists/stable/InRelease" 2>"$d/err"; rc=$?;;
+  esac
+  ms=$(($(_ms) - t0))
+  case "$rc" in
+    0) status=ok;;
+    22) status="http$(grep -o 'error: [0-9]*' "$d/err" | tr -dc 0-9)";;
+    6) status=dns;; 7) status=connect;; 28) status=timeout;; 35) status=tls;;
+    *) status="curl$rc";;
+  esac
+  released=0
+  if [ "$status" = ok ]; then
+    if [ "$#" -eq 0 ]; then status=nokeys
+    elif gpgv --homedir "$d/gnupg" "$@" --status-fd 3 --output "$d/Release" "$d/InRelease" \
+        3>"$d/status" 2>/dev/null && grep -q 'VALIDSIG' "$d/status"; then
+      released="$(LC_ALL=C date -u -d "$(sed -n 's/^Date: //p' "$d/Release" | head -n 1)" +%s 2>/dev/null || echo 0)"
+    else status=signature; fi
+  fi
+  printf 'OVIDMIRROR|%s|%s|%s|%s|%s\n' "$i" "$status" "$ms" "$released" "$v4" > "$d/result"
+}
+i=0
+for m in @MIRRORS@; do probe "$i" "$m" "$@" & i=$((i + 1)); done
+wait
+for r in "$work"/*/result; do [ -f "$r" ] && cat "$r"; done
+exit 0
+''';
+
+  /// Parse [mirrorProbeScript] output and rank: healthy first — freshest
+  /// Release first (a lagging mirror is rejected by ovid-pkg's anti-rollback
+  /// floor), the official packages-cf / packages.termux.dev preferred among
+  /// equally fresh ones, then the fastest — followed by unhealthy probes.
+  @visibleForTesting
+  static List<MirrorProbe> rankMirrorProbe(String out, List<String> mirrors) {
+    final probes = <MirrorProbe>[];
+    for (final line in out.split('\n')) {
+      final f = line.trim().split('|');
+      if (f.length != 6 || f[0] != 'OVIDMIRROR') continue;
+      final i = int.tryParse(f[1]);
+      if (i == null || i < 0 || i >= mirrors.length) continue;
+      probes.add(MirrorProbe(
+        mirror: mirrors[i],
+        preference: _aptMirrors.contains(mirrors[i]) ? _aptMirrors.indexOf(mirrors[i]) : i,
+        status: f[2],
+        millis: int.tryParse(f[3]) ?? 1 << 30,
+        released: int.tryParse(f[4]) ?? 0,
+        ipv4Only: f[5] == '1',
+      ));
+    }
+    final healthy = probes.where((p) => p.healthy).toList();
+    final newest = healthy.fold<int>(0, (m, p) => p.released > m ? p.released : m);
+    int rank(MirrorProbe a, MirrorProbe b) {
+      final fa = a.released == newest ? 0 : 1, fb = b.released == newest ? 0 : 1;
+      if (fa != fb) return fa - fb;
+      if (fa == 1 && a.released != b.released) return b.released - a.released;
+      final oa = a.preference < 2 ? 0 : 1, ob = b.preference < 2 ? 0 : 1;
+      if (oa != ob) return oa - ob;
+      if (a.millis != b.millis) return a.millis - b.millis;
+      return a.preference - b.preference;
+    }
+    healthy.sort(rank);
+    return [...healthy, ...probes.where((p) => !p.healthy)];
+  }
+
+  /// Probe all live mirrors and switch to the best healthy one. Returns true
+  /// when a mirror was selected, false when the probe ran and NO mirror is
+  /// usable, null when the probe could not run (keep the current order).
+  Future<bool?> _selectHealthyMirror(void Function(String)? onLine) async {
+    final prefix = _prefix;
+    if (prefix == null) return null;
+    final candidates = _aptMirrors.where((m) => !_deadMirrors.contains(m)).toList();
+    if (candidates.isEmpty) return false;
+    onLine?.call('[mirror] checking ${candidates.length} package mirrors…');
+    String out;
+    try {
+      (_, out) = await _checkedCommand(
+          ['bash', '-c', mirrorProbeScript(candidates)],
+          timeout: const Duration(seconds: 40));
+    } on SandboxCancelledException {
+      rethrow;
+    } catch (e) {
+      onLine?.call('[mirror] health check unavailable: $e');
+      return null;
+    }
+    final ranked = rankMirrorProbe(out, candidates);
+    if (ranked.isEmpty) {
+      onLine?.call('[mirror] health check produced no result; keeping mirror order');
+      return null;
+    }
+    for (final p in ranked) {
+      onLine?.call('[mirror] ${p.mirror}: '
+          '${p.healthy ? 'ok ${p.millis} ms${p.ipv4Only ? ' (IPv4 only)' : ''}' : p.status}');
+      if (!p.healthy) _deadMirrors.add(p.mirror);
+    }
+    final best = ranked.first;
+    if (!best.healthy) return false;
+    _mirrorIdx = _aptMirrors.indexOf(best.mirror);
+    _setForceIpv4(prefix, best.ipv4Only);
+    _writeSourcesList(prefix, best.mirror,
+        order: [for (final p in ranked) if (p.healthy) p.mirror]);
+    onLine?.call('[mirror] using ${best.mirror}');
+    return true;
+  }
+
+  @visibleForTesting
+  Future<bool?> selectHealthyMirrorForTest(void Function(String)? onLine) =>
+      _selectHealthyMirror(onLine);
+
+  void _setForceIpv4(Directory prefix, bool on) {
+    final conf = File('${prefix.path}/etc/apt/apt.conf.d/50ovid-ipv4.conf');
+    final flag = File('${prefix.path}/etc/apt/ovid-force-ipv4');
+    try {
+      if (on) {
+        conf.parent.createSync(recursive: true);
+        conf.writeAsStringSync('Acquire::ForceIPv4 "true";\n');
+        flag.writeAsStringSync('1\n');
+      } else {
+        if (conf.existsSync()) conf.deleteSync();
+        if (flag.existsSync()) flag.deleteSync();
+      }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
+  }
+
   /// Rewrites `#!/data/data/com.termux/files/...` shebangs in extracted
   /// Termux packages to point at OUR sandbox prefix. Runs after BOTH install
   /// paths (apt AND direct-deb) so npm/npx/uvx never hit the cross-app
@@ -2142,7 +2436,7 @@ audit=false
   }
 
   /// Writes `$prefix/etc/apt/sources.list` for one mirror (idempotent).
-  void _writeSourcesList(Directory prefix, String mirror) {
+  void _writeSourcesList(Directory prefix, String mirror, {List<String>? order}) {
     try {
       final dir = Directory('${prefix.path}/etc/apt')
         ..createSync(recursive: true);
@@ -2156,7 +2450,7 @@ audit=false
       // The signed helper reads this file first. Rotating only sources.list
       // used to leave it pinned to the failed mirror indefinitely.
       File('${dir.path}/ovid-mirrors').writeAsStringSync(
-        '${[mirror, ..._aptMirrors.where((candidate) => candidate != mirror)].join('\n')}\n',
+        '${{mirror, ...?order, ..._aptMirrors.where((c) => !_deadMirrors.contains(c))}.join('\n')}\n',
       );
     } catch (e) {
       Diag.swallow('sandbox_service', e);
@@ -2196,10 +2490,9 @@ audit=false
         l.contains('could not connect') ||
         l.contains('connection refused');
     if (!dead) return false;
-    _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
-    final prefix = _prefix;
-    if (prefix != null) _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
-    return true;
+    // Only a runtime install run marks mirrors dead (and clears the verdicts
+    // when it starts); ad-hoc apt calls just rotate.
+    return _advanceMirror();
   }
 
   /// Guarantee `$prefix/etc/tls/cert.pem` exists and is non-empty.
@@ -3431,7 +3724,14 @@ audit=false
       // `_prefix!` and would null-crash in a unit test. A real prefix still
       // contributes its env, merged under the caller-supplied map, so the
       // override observes exactly what the production spawn would receive.
-      return override(args, {if (_prefix != null) ..._sandboxEnv(), ...?env});
+      final result = await override(args, {if (_prefix != null) ..._sandboxEnv(), ...?env});
+      // Mirror the real spawn, which streams every output line to [onLine].
+      if (onLine != null) {
+        for (final line in result.$2.split('\n')) {
+          if (line.trim().isNotEmpty) onLine(line);
+        }
+      }
+      return result;
     }
     if (_prefix == null) {
       final ok = await checkExisting();
@@ -3478,19 +3778,39 @@ audit=false
     required Duration timeout,
     void Function(String line)? onLine,
   }) async {
-    Future<(int, String)> run() => _checkedCommand(
-      ['bash', '-c', 'apt $sub'], timeout: timeout, onLine: onLine);
-    var (code, out) = await run();
+    // Step 1 before every apt run: dirs, cmp, regular-file trust roots.
+    final prefix0 = _prefix;
+    if (prefix0 != null) await _ensureBundledAptKeyring(prefix0, onLine: onLine);
+    // apt-get, not apt: no "unstable CLI" warning, and no "All packages are
+    // up to date." summary that reads as success when the index failed.
+    // Success summaries are held back until the exit code confirms them.
+    Future<(int, String)> run(String args) async {
+      final held = <String>[];
+      final (code, out) = await _checkedCommand(
+          ['bash', '-c', 'apt-get $args'], timeout: timeout,
+          onLine: onLine == null
+              ? null
+              : (line) => _aptSuccessSummary.hasMatch(line) ? held.add(line) : onLine(line));
+      if (code == 0 && !out.contains('\nE: ') && !out.startsWith('E: ')) {
+        held.forEach(onLine ?? (_) {});
+      }
+      return (code, out);
+    }
+
+    var (code, out) = await run(sub);
+    // IPv6 TLS handshake failures ("Could not handshake: Error in the pull
+    // function [IP: 2a10:…]") — retry the same mirror over IPv4 first.
+    if (code != 0 && _looksLikeIpv6Handshake(out)) {
+      onLine?.call('[apt] TLS handshake failed over IPv6 — retrying over IPv4');
+      (code, out) = await run('-o Acquire::ForceIPv4=true $sub');
+    }
     var rotated = false;
     if (code != 0 && _looksLikeAptTls(out)) {
       onLine?.call(
         '[apt] cert/TLS error — sandbox CA bundle may be broken; rotating '
         'mirror (HTTPS verification stays enabled)',
       );
-      _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
-      final prefix = _prefix;
-      if (prefix != null) _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
-      rotated = true;
+      rotated = _advanceMirror();
     }
     if (code != 0 && !rotated && _rotateMirror(out)) {
       onLine?.call(
@@ -3499,20 +3819,33 @@ audit=false
       rotated = true;
     }
     if (rotated) {
-      final (uCode, uOut) = await _checkedCommand([
-        'bash',
-        '-c',
-        'apt update 2>&1',
-      ], timeout: const Duration(minutes: 3));
+      final (uCode, uOut) = await run('update 2>&1');
       if (sub.startsWith('update')) {
         (code, out) = (uCode, uOut);
       } else if (uCode != 0) {
-        return (uCode, uOut);
+        (code, out) = (uCode, uOut);
       } else {
-        (code, out) = await run();
+        (code, out) = await run(sub);
       }
     }
+    if (code != 0) {
+      onLine?.call('[apt] apt-get ${sub.split(' ').first} FAILED (exit $code)'
+          '${_looksLikeSignatureFailure(out) ? ' — package signature check failed' : ''}');
+    }
     return (code, out);
+  }
+
+  @visibleForTesting
+  Future<(int, String)> aptCheckedForTest(String sub, {void Function(String)? onLine}) =>
+      _aptChecked(sub, timeout: const Duration(minutes: 1), onLine: onLine);
+
+  static final _aptSuccessSummary = RegExp(
+      r'^(All packages are up to date\.|\d+ packages? can be upgraded.*)$');
+
+  static bool _looksLikeIpv6Handshake(String out) {
+    final l = out.toLowerCase();
+    return (l.contains('could not handshake') || l.contains('pull function')) &&
+        RegExp(r'\[ip: [0-9a-f]*:[0-9a-f:]*').hasMatch(l);
   }
 
   int _commandSequence = 0;
@@ -3559,7 +3892,7 @@ audit=false
     // Recovery is exempt so this guard cannot recursively recover itself.
     final command = args.length >= 3 && args[1] == '-c'
         ? args[2] : args.join(' ');
-    if (RegExp(r'^(?:apt|apt-get|ovid-pkg)\s+(?:update|install|upgrade|full-upgrade)\b')
+    if (RegExp(r'^(?:apt|apt-get|ovid-pkg)(?:\s+-o\s+\S+)*\s+(?:update|install|upgrade|full-upgrade)\b')
         .hasMatch(command)) {
       await _recoverPendingPackageTransaction(onLine);
     }
@@ -4013,8 +4346,8 @@ echo INSTALLED
 set -u
 command -v proot >/dev/null || {
   echo "[proot] installing proot…"
-  apt update 2>&1 | tail -1
-  apt install -y proot 2>&1 | tail -2 || exit 20
+  apt-get update 2>&1 | tail -1
+  apt-get install -y proot 2>&1 | tail -2 || exit 20
 }
 command -v proot >/dev/null || { echo "no proot"; exit 20; }
 # proot builds its glue rootfs in a temp dir. Android has no writable /tmp and
@@ -4672,4 +5005,27 @@ bool isProtectedRuntimeEnvName(String name) {
     'BASH_ENV',
     'ENV',
   }.contains(upper);
+}
+
+/// One mirror health-check result (see SandboxService.mirrorProbeScript).
+class MirrorProbe {
+  final String mirror;
+  final int preference;
+  final String status;
+  final int millis;
+  final int released;
+  final bool ipv4Only;
+  const MirrorProbe({
+    required this.mirror,
+    required this.preference,
+    required this.status,
+    required this.millis,
+    required this.released,
+    required this.ipv4Only,
+  });
+
+  bool get healthy => status == 'ok' && released > 0;
+
+  @override
+  String toString() => 'MirrorProbe($mirror, $status, ${millis}ms, $released, v4=$ipv4Only)';
 }
