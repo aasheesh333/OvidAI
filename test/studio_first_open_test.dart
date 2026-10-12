@@ -319,10 +319,18 @@ void main() {
       expect(await SandboxService.I.checkExisting(), isTrue);
 
       final seen = <String>[];
+      var installRan = false;
       SandboxService.execCheckedOverrideForTest = (args, env) async {
         final cmd = args.join(' ');
         seen.add(cmd);
-        if (cmd.contains('command -v')) return (1, ''); // runtimes missing
+        // Runtime verification now EXECUTES `<bin> --version` (presence via
+        // `command -v` missed broken binaries), so model "runtimes missing"
+        // as failing version probes until an apt install has run. apt/apt-get
+        // themselves stay healthy so bundled-prerequisite repair is a no-op.
+        if (cmd.contains('apt install')) installRan = true;
+        final isVersionProbe = cmd.contains('--version') &&
+            !cmd.startsWith('bash -c apt');
+        if (isVersionProbe && !installRan) return (1, '');
         return (0, ''); // apt update / install succeed
       };
 

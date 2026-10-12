@@ -7758,23 +7758,24 @@ block</pre>
       expect(SandboxService.mirrorCountForTest, greaterThanOrEqualTo(7));
     });
 
-    test('runtime lists carry zlib (deb) and make/binutils (apt)', () {
+    test('runtime lists carry make/binutils (apt + signed fallback)', () {
       final src = File('lib/core/sandbox_service.dart').readAsStringSync();
-      // apt list (PR22+PR30; PR38 appended more CLI tools on a new line,
-      // so this now matches the still-intact first half of the literal).
-      expect(
-        src,
-        contains(
-          "'nodejs npm python python-pip uv git curl zlib "
-          "make binutils '",
-        ),
-      );
-      // deb fallback wanted list (PR30): wave2 replaced the curl/.deb
-      // direct fetch with the signed ovid-pkg package graph, which
-      // installs the SAME pkgs list — so zlib still rides the fallback.
-      expect(src, contains('ovid-pkg install \$pkgs'));
-      // Force-rotate after each failed update attempt.
-      expect(src, contains('[apt] rotated to'));
+      // a1720e5 replaced the single space-joined `pkgs` string with
+      // independently-installed essential/optional groups, so one missing
+      // optional package can no longer fail the whole install. make/binutils
+      // (node-gyp toolchain) are optional groups; zlib is no longer listed
+      // because it is a declared dependency of nodejs/python, resolved by the
+      // apt / ovid-pkg dependency closure.
+      expect(src, contains("'make': ['make'],"));
+      expect(src, contains("'binutils': ['ld'],"));
+      // Both transports install the SAME group key: apt first, then the
+      // signed ovid-pkg graph.
+      expect(src, contains('install -y --no-install-recommends \${group.key}'));
+      expect(src, contains('ovid-pkg install \${group.key}'));
+      // Mirror rotation after a failed attempt (apt TLS/dead mirror, and the
+      // signed-fallback catch path).
+      expect(src, contains('[apt] mirror dead/stale — rotated to'));
+      expect(src, contains('_mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;'));
     });
   });
 
@@ -8922,22 +8923,24 @@ block</pre>
   });
 
   group('PR38: native Linux CLI parity — packages + lazy compiler', () {
-    test('eager apt list carries the real-Linux CLI set', () {
+    test('eager install carries the real-Linux CLI set', () {
       final src = File('lib/core/sandbox_service.dart').readAsStringSync();
-      // Eager apt install — small, always-needed tools ride with node/
-      // python/git so they're present from first launch. `gh` (GitHub CLI)
-      // rides the same list so Studio agents are GitHub-native from day one.
-      expect(
-        src,
-        contains(
-          "'nodejs npm python python-pip uv git curl zlib make binutils '\n"
-          "        'ripgrep openssh rsync jq unzip tmux gh'",
-        ),
-      );
-      // Signed ovid-pkg fallback (wave2 package graph — replaced the old
-      // deb-direct fetch on apt-https-broken devices) installs the SAME
-      // pkgs list, so the CLI set rides the fallback path too.
-      expect(src, contains('ovid-pkg install \$pkgs'));
+      // The eager install is now essential + optional groups (a1720e5): the
+      // always-needed runtimes are required, the small CLI tools (PR38) are
+      // optional so an unavailable one never blocks node/python/git/curl.
+      final start = src.indexOf('_installRuntimesWithRetry(');
+      final body = src.substring(start, src.indexOf('onLine: (line)', start));
+      for (final group in [
+        "'nodejs npm'", "'python'", "'python-pip'", "'uv'", "'git'", "'curl'",
+        "'make'", "'binutils'", "'ripgrep'", "'openssh'", "'rsync'", "'jq'",
+        "'unzip'", "'tmux'", "'gh'",
+      ]) {
+        expect(body, contains(group));
+      }
+      expect(body.indexOf('optional:'), greaterThan(body.indexOf("'curl'")));
+      expect(body.indexOf("'make'"), greaterThan(body.indexOf('optional:')));
+      // Signed ovid-pkg fallback installs the SAME group key.
+      expect(src, contains('ovid-pkg install \${group.key}'));
     });
 
     test('clang is deliberately NOT in the eager install (too big)', () {
@@ -8946,11 +8949,10 @@ block</pre>
       // compiler in it, so a regression can't silently double the
       // first-launch download size.
       final src = File('lib/core/sandbox_service.dart').readAsStringSync();
-      final eagerListMatch = RegExp(
-        r"const pkgs =\s*\n\s*'([^']*)'\s*\n\s*'([^']*)';",
-      ).firstMatch(src);
-      expect(eagerListMatch, isNotNull, reason: 'eager pkgs string moved?');
-      final eagerList = '${eagerListMatch!.group(1)}${eagerListMatch.group(2)}';
+      final start = src.indexOf('_installRuntimesWithRetry(');
+      expect(start, greaterThan(0), reason: 'eager install moved?');
+      final eagerList = src.substring(start, src.indexOf('onLine: (line)', start));
+      expect(eagerList, contains("'nodejs npm'"), reason: 'eager groups moved?');
       expect(eagerList, isNot(contains('clang')));
     });
 
