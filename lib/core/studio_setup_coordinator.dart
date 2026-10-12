@@ -13,6 +13,10 @@ typedef SetupPhaseCallback =
 
 enum StudioSetupStatus { idle, running, ready, partial, failed, unsupported }
 
+enum StudioRuntime { node, python, git, curl }
+
+enum RuntimeVerification { unknown, verified, unavailable }
+
 class _SetupPersistenceException implements Exception {
   const _SetupPersistenceException(this.cause);
   final Object cause;
@@ -48,19 +52,63 @@ class StudioSetupCoordinator extends ChangeNotifier {
        _installRuntimes =
            installRuntimes ?? SandboxService.I.installCoreRuntimes,
        _verifyCore = verifyCore ?? (() => _runs('bash --version')),
-       _verifyRuntimes =
-           verifyRuntimes ??
-           (() => _runs(
-             'node --version && npm --version && npx --version && '
-             'python --version && pip --version && uv --version && '
-             'uvx --version && git --version && curl --version',
-           ));
+       // Preserve the public named injection with private storage.
+       // ignore: prefer_initializing_formals
+       _verifyRuntimes = verifyRuntimes;
 
   final Future<bool> Function() _checkExisting;
   final Future<void> Function(SetupPhaseCallback, bool) _install;
   final Future<bool> Function(SetupPhaseCallback) _installRuntimes;
   final Future<bool> Function() _verifyCore;
-  final Future<bool> Function() _verifyRuntimes;
+  final Future<bool> Function()? _verifyRuntimes;
+
+  final _runtimeVerification = <StudioRuntime, RuntimeVerification>{};
+  RuntimeVerification runtimeVerification(StudioRuntime runtime) =>
+      _runtimeVerification[runtime] ?? RuntimeVerification.unknown;
+
+  Future<bool> _checkRuntimes() async {
+    bool transactionReady() {
+      if (SandboxService.I.packageTransactionReady) return true;
+      // A pending overlay invalidates certification, but does not identify a
+      // broken runtime. Retain unavailable evidence and clear stale successes.
+      _runtimeVerification.removeWhere((_, value) => value == RuntimeVerification.verified);
+      return false;
+    }
+    if (!transactionReady()) return false;
+    final injected = _verifyRuntimes;
+    if (injected != null) {
+      final verified = await injected();
+      if (!transactionReady()) return false;
+      // Keep aggregate fake injection compatible. A negative aggregate result
+      // cannot identify which runtime failed; retain only observed evidence.
+      for (final runtime in StudioRuntime.values) {
+        if (verified) {
+          _runtimeVerification[runtime] = RuntimeVerification.verified;
+        } else if (runtimeVerification(runtime) == RuntimeVerification.verified) {
+          _runtimeVerification.remove(runtime);
+        }
+      }
+      return verified;
+    }
+    const commands = {
+      StudioRuntime.node: 'node --version && npm --version && npx --version',
+      StudioRuntime.python:
+          'python --version && pip --version && uv --version && uvx --version',
+      StudioRuntime.git: 'git --version',
+      StudioRuntime.curl: 'curl --version',
+    };
+    // Run every group: a missing Node must not short-circuit Python/Git checks.
+    for (final entry in commands.entries) {
+      _runtimeVerification[entry.key] = await _runs(entry.value)
+          ? RuntimeVerification.verified
+          : RuntimeVerification.unavailable;
+      _publish();
+    }
+    if (!transactionReady()) return false;
+    return StudioRuntime.values.every(
+      (runtime) => runtimeVerification(runtime) == RuntimeVerification.verified,
+    );
+  }
 
   static Future<bool> _runs(String command) async {
     try {
@@ -175,6 +223,7 @@ class StudioSetupCoordinator extends ChangeNotifier {
     _phase = 0;
     _phaseProgress = 0;
     _log.clear();
+    _runtimeVerification.clear();
     _startedAt = DateTime.now();
     _finishedAt = null;
     _publish();
@@ -195,12 +244,23 @@ class StudioSetupCoordinator extends ChangeNotifier {
     _error = null;
     _errorDetail = null;
     _log.clear();
+    _runtimeVerification.clear();
     notifyListeners();
   }
 
   void _onPhase(int phase, double progress, String line) {
     _phase = phase;
     _phaseProgress = progress.clamp(0.0, 1.0);
+    // These are the service's runtime result lines, not arbitrary apt output
+    // or phase numbers. Success is certified by the execution checks above.
+    final warning = RegExp(
+      r'^(node|python|git(?: exec-path)?|curl)\s+\.+\s+⚠',
+    ).firstMatch(line);
+    if (warning != null) {
+      final name = warning.group(1)!.split(' ').first;
+      final runtime = StudioRuntime.values.byName(name);
+      _runtimeVerification[runtime] = RuntimeVerification.unavailable;
+    }
     _log.add(line);
     if (_log.length > 1000) _log.removeAt(0);
     _publish();
@@ -262,13 +322,13 @@ class StudioSetupCoordinator extends ChangeNotifier {
       if (_coreOnly) {
         _status = StudioSetupStatus.ready;
       } else {
-        if (existing && !await _verifyRuntimes()) {
+        if (existing && !await _checkRuntimes()) {
           _onPhase(7, 0, 'Keeping existing core; installing missing runtimes…');
           await _installRuntimes(_onPhase);
         }
         // The installer deliberately swallows runtime failures. Verify actual
         // execution, including npx/uvx, before calling the whole setup ready.
-        final verified = await _verifyRuntimes();
+        final verified = await _checkRuntimes();
         if (verified) {
           await _saveCompletion(true);
           _status = StudioSetupStatus.ready;

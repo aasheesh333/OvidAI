@@ -28,12 +28,27 @@ MAX_PIXELS = 4096 * 4096
 REPLAY_RETENTION = 24 * 60 * 60
 RECEIPT_RETENTION = 90 * 24 * 60 * 60
 SIZES = ('1024x1024', '1536x1024', '1024x1536', '2048x2048')
+CAPACITY_RETRY_DEFAULT = 30
+CAPACITY_RETRY_MAX = 120
+
+
+def capacity_retry_seconds(value=None):
+    """Public delay: bounded delta-seconds only, never provider text/dates."""
+    if isinstance(value, str) and re.fullmatch(r'[0-9]+', value):
+        digits = value.lstrip('0') or '0'
+        value = CAPACITY_RETRY_MAX if len(digits) > 3 else int(digits)
+    if type(value) is not int or value < 0:
+        return CAPACITY_RETRY_DEFAULT
+    return max(1, min(CAPACITY_RETRY_MAX, value))
 
 
 class ImageError(Exception):
-    def __init__(self, status=503, code='image_unavailable', *, receipt=None):
+    def __init__(self, status=503, code='image_unavailable', *, receipt=None,
+                 retry_after_seconds=None):
         self.status, self.code = status, code
         self.receipt = receipt
+        self.retry_after_seconds = (capacity_retry_seconds(retry_after_seconds)
+                                    if status == 503 and code == 'image_capacity_unavailable' else None)
         super().__init__(code)
 
 

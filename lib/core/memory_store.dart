@@ -45,6 +45,10 @@ class MemoryStore {
   void _directory(Directory dir) {
     final type = FileSystemEntity.typeSync(dir.path, followLinks: false);
     if (type == FileSystemEntityType.notFound) {
+      // A fresh signed-in account has a nested root below personal-memory.
+      // Create missing parents one at a time so a symlink/file parent still
+      // fails the same validation instead of being followed by recursive mkdir.
+      _directory(dir.parent);
       dir.createSync();
     } else if (type != FileSystemEntityType.directory) {
       throw FileSystemException(

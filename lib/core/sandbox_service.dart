@@ -3,8 +3,10 @@ import 'diag.dart';
 import 'grant_store.dart';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show ByteData, Endian;
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -35,12 +37,12 @@ typedef SandboxPolicy = ({
 ///   → create symlinks from SYMLINKS.txt (sh→dash, ls→coreutils, …)
 ///   → rename staging → `<files>/sandbox`  (the $PREFIX)
 ///
-/// Exec runs `$PREFIX/bin/bash -lc <cmd>` with the Termux environment:
+/// Exec runs `$PREFIX/bin/bash -c <cmd>` with the Termux environment:
 ///   PREFIX, HOME, TMPDIR, PATH, LD_LIBRARY_PATH, TERM, and
 ///   LD_PRELOAD=$PREFIX/lib/libtermux-exec-direct-ld-preload.so
-/// The LD_PRELOAD shim (termux-exec) reads TERMUX__PREFIX and redirects
-/// the hardcoded /data/data/com.termux paths baked into the binaries to
-/// OUR prefix — so no binary patching is ever needed.
+/// The termux-exec preload handles executable/interpreter paths; it is not
+/// a general filesystem relocator. Linker search paths and each runtime's
+/// configuration must point at our prefix, and readiness requires execution.
 ///
 /// Compatibility: native sandbox needs Android 7+ (API 24) like current
 /// Termux.  On API 23 (Android 6) the phone-terminal tier (toybox) is
@@ -80,6 +82,10 @@ class SandboxCancelledException implements Exception {
   const SandboxCancelledException();
   @override
   String toString() => 'Sandbox operation cancelled';
+}
+
+class _PackageRecoveryException extends StateError {
+  _PackageRecoveryException(super.message);
 }
 
 /// Pure preflight decision — device facts in, permanent-blocker out.
@@ -1053,243 +1059,457 @@ class SandboxService {
     }
   }
 
-  /// Install + verify node/npm/npx/pnpm and python/pip/uv, retrying the
-  /// apt steps. Reports progress via [onPhase]. Never throws — on total
-  /// failure it logs a clear ⚠ line and leaves the lazy ensureRuntime()
-  /// fallback to retry on first use (so the app still opens offline).
+  /// Install essentials independently: an unavailable optional package must
+  /// never prevent Node, Python, git or curl from being installed.
   Future<void> _installRuntimesWithRetry(
     void Function(int phase, double progress, String line) onPhase,
   ) async {
-    Future<bool> binRuns(String bin, [String args = '--version']) async {
-      try {
-        final (code, _) = await _checkedCommand([
-          'bash',
-          '-c',
-          '$bin $args 2>&1',
-        ], timeout: const Duration(seconds: 15));
-        checkCancellation();
-        return code == 0;
-      } on SandboxCancelledException { rethrow; }
-      catch (_) {
-        return false;
-      }
-    }
-
-    // Up to 3 attempts of (apt update && apt install runtimes).
-    // git + curl included so the agent has VCS + HTTP tooling out of the box.
-    // Every attempt CHECKS the update exit code AND prints its last lines
-    // into the log — an empty/failed index used to produce the silent
-    // "Unable to locate package git" install failure.
-    // zlib: node's dynamic-link dependency — the bootstrap ships the lib
-    // but npm/apt-installed node overlays may reference it fresh; keeping
-    // the package asserted also guarantees libz.so.1 so-version links.
-    // PR30: make + binutils — node-gyp native builds (the reported
-    // "node-gyp: Permission denied" class also needs the toolchain
-    // present once exec bits are right).
-    // PR38: ripgrep/openssh/rsync/jq/unzip/tmux — real Linux CLI parity.
-    // All six are small (each well under 1 MB installed), so they ride the
-    // eager install; the C/C++ compiler (clang+libllvm, ~60 MB) is NOT
-    // eager — it's installed lazily on first need via ensureCompiler() so
-    // a slow/metered connection isn't forced to download it every time.
-    const pkgs =
-        'nodejs npm python python-pip uv git curl zlib make binutils '
-        'ripgrep openssh rsync jq unzip tmux gh';
-    var installed = false;
-    for (var attempt = 1; attempt <= 3 && !installed; attempt++) {
-      checkCancellation();
-      final tag = attempt == 1
-          ? r'$ apt update'
-          : 'retry $attempt/3 · apt update';
-      try {
-        onPhase(7, 0.05, tag);
-        final (uCode, uOut) = await _aptChecked(
-          'update 2>&1',
-          timeout: const Duration(minutes: 3),
-          onLine: (l) => onPhase(7, 0.05, l),
-        );
-        checkCancellation();
-        if (uCode != 0) {
-          final tail = uOut.trim().split('\n').where((l) => l.isNotEmpty);
-          onPhase(
-            7,
-            0.05,
-            'apt update failed ($uCode): ${tail.isEmpty ? "no output" : tail.last}',
-          );
-          // PR30: a failed update means THIS mirror is unusable from
-          // this device — rotate NOW so the next attempt (of 3) tries a
-          // different mirror instead of burning every retry on the same
-          // dead host (the reported 3× "no Release file" on packages-cf).
-          _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
-          final prefix0 = _prefix;
-          if (prefix0 != null) {
-            _writeSourcesList(prefix0, _aptMirrors[_mirrorIdx]);
-          }
-          onPhase(
-            7,
-            0.05,
-            '[apt] rotated to ${_aptMirrors[_mirrorIdx].split('/')[2]}',
-          );
-          continue;
-        }
-        onPhase(7, 0.3, 'apt update ......... ✓');
-        onPhase(7, 0.4, '\$ apt install -y $pkgs');
-        final (code, out) = await _aptChecked(
-          'install -y $pkgs 2>&1',
-          timeout: const Duration(minutes: 8),
-          onLine: (l) => onPhase(7, 0.4, l),
-        );
-        checkCancellation();
-        installed = code == 0;
-        if (installed) {
-          // apt path also needs the shebang fix: the debs it installed
-          // still contain #!/data/data/com.termux/files/... scripts.
-          final prefix = _prefix;
-          if (prefix != null) await _patchExtractedShebangs(prefix);
-        }
-        if (!installed) {
-          final lines = out
-              .trim()
-              .split('\n')
-              .where((l) => l.trim().isNotEmpty)
-              .toList();
-          onPhase(
-            7,
-            0.4,
-            'apt exit $code — ${lines.isEmpty ? "" : lines.last}',
-          );
-        }
-      } catch (e) {
-        if (e is SandboxCancelledException) rethrow;
-        onPhase(
-          7,
-          0.4,
-          'attempt $attempt failed: '
-          '${e.toString().split('\n').first}',
-        );
-      }
-    }
-
-    // Apt transport failure is not permission to use an unsigned Packages
-    // index. The bundled ovid-pkg helper verifies signed Release metadata,
-    // the Packages digest and each archive before touching the prefix.
-    checkCancellation();
-    if (!installed) {
-      onPhase(7, 0.45, '[pkg] apt unavailable — verifying signed repository…');
-      try {
-        final prefix = _prefix;
-        if (prefix == null) throw StateError('Sandbox prefix unavailable');
-        await _ensureBundledAptKeyring(prefix);
-        final trusted = Directory('${prefix.path}/etc/apt/trusted.gpg.d');
-        if (!trusted.existsSync() ||
-            !trusted.listSync().whereType<File>().any((f) => f.path.endsWith('.gpg'))) {
-          throw StateError('No app-bundled package signing keys available');
-        }
-        OvidPkgInstaller.writeAll(
-          prefix,
-          arch: aptArchFor(_payloadAbi, _deviceArch),
-          mirrors: _aptMirrors,
-        );
-        checkCancellation();
-        final (updateCode, updateOut) = await _checkedCommand([
-          'bash',
-          '-c',
-          'ovid-pkg update 2>&1',
-        ], timeout: const Duration(minutes: 6));
-        checkCancellation();
-        if (updateCode != 0) {
-          throw StateError(
-            'signed update failed ($updateCode): ${updateOut.trim()}',
-          );
-        }
-        final (installCode, installOut) = await _checkedCommand([
-          'bash',
-          '-c',
-          'ovid-pkg install $pkgs 2>&1',
-        ], timeout: const Duration(minutes: 12));
-        checkCancellation();
-        if (installCode != 0) {
-          throw StateError(
-            'signed install failed ($installCode): ${installOut.trim()}',
-          );
-        }
-        installed = true;
-        await _patchExtractedShebangs(prefix);
-      } catch (e) {
-        if (e is SandboxCancelledException) rethrow;
-        onPhase(
-          7,
-          0.45,
-          '[pkg] signed install failed: ${e.toString().split('\n').first}',
-        );
-      }
-    }
-
-    // ── Post-install config (env-injection targets) ──
-    final prefix = _prefix;
-    if (prefix != null) {
-      _ensureTlsConfig(prefix);
-      _ensurePipConfig(prefix);
-      _probePythonPath();
-      // After apt or the signed package helper, write runtime
-      // wrappers — npm/npx (no Termux-env dependency), ovid-pkg + apt/pkg
-      // wrappers. Without this a fresh install on a broken device can't
-      // ever get started whatever path got the bits in place.
-      OvidPkgInstaller.writeAll(
-        prefix,
-        arch: aptArchFor(_payloadAbi, _deviceArch),
-        mirrors: _aptMirrors,
-      );
-    }
-
-    // Verify node + npm/npx.
-    checkCancellation();
-    if (await binRuns('node')) {
-      final nodeOk = await binRuns('node');
-      final npmOk = await binRuns('npm');
-      final npxOk = await binRuns('npx');
-      if (nodeOk && npmOk && npxOk) {
-        // pnpm via corepack (bundled with node) — enable + prepare, non-fatal.
-        var pnpmNote = 'pnpm ✗';
-        try {
-          await execChecked([
-            'bash',
-            '-c',
-            'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1',
-          ]).timeout(const Duration(minutes: 2));
-          pnpmNote = await binRuns('pnpm') ? 'pnpm ✓' : 'pnpm ✗';
-        } catch (e) {
-          Diag.swallow('sandbox_service', e);
-        }
-        onPhase(7, 0.7, 'node ................ ✓ node · npm · npx · $pnpmNote');
-      } else {
-        onPhase(7, 0.7, 'node ................ ⚠ node ok but npm/npx missing');
-      }
-    } else {
-      onPhase(
-        7,
-        0.7,
-        'node ................ ⚠ not installed (offline?) — '
-        'will retry on first MCP connect',
-      );
-    }
-
-    // Verify python + pip + uvx.
-    final pyOk = await binRuns('python');
-    final pipOk = await binRuns('pip');
-    final uvxOk = await binRuns('uvx');
-    onPhase(
-      8,
-      1.0,
-      pyOk && uvxOk
-          ? 'python .............. ✓ python · ${pipOk ? "pip" : "pip✗"} · uvx ✓'
-          : 'python .............. ⚠ ${pyOk ? "partial (uv missing)" : "not installed"} — will retry on first uvx MCP connect',
+    await _installRuntimeGroups(
+      const {
+        'nodejs npm': ['node', 'npm', 'npx'],
+        'python': ['python'],
+        'python-pip': ['pip'],
+        'uv': ['uv', 'uvx'],
+        'git': ['git'],
+        'curl': ['curl'],
+      },
+      optional: const {
+        'make': ['make'],
+        'binutils': ['ld'],
+        'ripgrep': ['rg'],
+        'openssh': ['ssh'],
+        'rsync': ['rsync'],
+        'jq': ['jq'],
+        'unzip': ['unzip'],
+        'tmux': ['tmux'],
+        'gh': ['gh'],
+      },
+      onLine: (line) => onPhase(7, 0.4, line),
     );
-
-    // ── Bootstrap self-test (self-test) — EXECUTE, never just probe ──
-    // git/curl were previously only `command -v`-probed; a broken exec-path
-    // or missing libexec went unnoticed until a real clone failed mid-task.
-    await selfTest(onPhase);
+    if (await _runtimeKindVerified('node')) {
+      await _preparePnpm((line) => onPhase(7, 0.7, line));
+    }
+    for (final bin in ['node', 'npm', 'npx', 'python', 'git', 'curl', 'pip', 'uvx']) {
+      final (code, output) = await _runtimeProbe(bin);
+      onPhase(8, 1.0, code == 0
+          ? '$bin ................ ✓'
+          : '$bin ................ ⚠ exit $code: ${_runtimeError(output)}');
+    }
     checkCancellation();
+  }
+
+  static String _runtimeError(String output) {
+    final lines = output.trim().split('\n').where((line) => line.trim().isNotEmpty).toList();
+    return lines.isEmpty ? 'no output' : lines.skip((lines.length - 6).clamp(0, lines.length)).join('\n');
+  }
+
+  Future<void> _preparePnpm(void Function(String)? onLine) async {
+    try {
+      final (code, output) = await _checkedCommand([
+        'bash', '-c',
+        'corepack enable 2>&1 && corepack prepare pnpm@latest --activate 2>&1',
+      ], timeout: const Duration(minutes: 2));
+      checkCancellation();
+      onLine?.call(code == 0 && await hasRuntime('pnpm')
+          ? '[runtime] pnpm verified ✓'
+          : '[runtime] optional pnpm unavailable: ${_runtimeError(output)}');
+    } on SandboxCancelledException {
+      rethrow;
+    } catch (e) {
+      onLine?.call('[runtime] optional pnpm unavailable: $e');
+    }
+  }
+
+  Future<(int, String)> _runtimeProbe(String bin) async {
+    if (!RegExp(r'^[a-zA-Z0-9_+.-]+$').hasMatch(bin)) {
+      throw ArgumentError.value(bin, 'bin', 'Expected a runtime command name');
+    }
+    final flag = switch (bin) {
+      'ssh' => '-V',
+      'unzip' => '-v',
+      'tmux' => '-V',
+      _ => '--version',
+    };
+    try {
+      final result = await _checkedCommand(['bash', '-c', '$bin $flag 2>&1'],
+          timeout: const Duration(seconds: 20));
+      checkCancellation();
+      return result;
+    } on SandboxCancelledException {
+      rethrow;
+    } catch (e) {
+      return (1, e.toString());
+    }
+  }
+
+  Future<void> _repairRuntimeEntryPoints() async {
+    final prefix = _prefix;
+    if (prefix == null) throw StateError('Sandbox prefix unavailable');
+    await _patchExtractedShebangs(prefix);
+    checkCancellation();
+    _ensureTlsConfig(prefix);
+    _ensurePipConfig(prefix);
+    _pythonSitePackages = null;
+    _probePythonPath();
+    OvidPkgInstaller.writeAll(prefix,
+        arch: aptArchFor(_payloadAbi, _deviceArch), mirrors: _orderedAptMirrors);
+  }
+
+  List<String> get _orderedAptMirrors => [
+    ..._aptMirrors.skip(_mirrorIdx), ..._aptMirrors.take(_mirrorIdx),
+  ];
+
+  Future<void> _installRuntimeGroups(
+    Map<String, List<String>> essential, {
+    Map<String, List<String>> optional = const {},
+    void Function(String)? onLine,
+  }) async {
+    await _recoverPendingPackageTransaction(onLine);
+    try {
+      await _repairBundledPrerequisites(onLine);
+    } on SandboxCancelledException {
+      rethrow;
+    } catch (e) {
+      onLine?.call('[pkg] bundled prerequisite repair failed: $e');
+    }
+    var aptReady = false;
+    var signedReady = false;
+    Future<bool> verify(List<String> bins) async {
+      var ok = true;
+      for (final bin in bins) {
+        final (code, output) = await _runtimeProbe(bin);
+        if (code != 0) {
+          ok = false;
+          onLine?.call('[runtime] $bin exit $code: ${_runtimeError(output)}');
+        }
+      }
+      return ok;
+    }
+
+    for (final group in {...essential, ...optional}.entries) {
+      final required = essential.containsKey(group.key);
+      final attempts = required ? 3 : 1;
+      var installed = false;
+      for (var attempt = 1; attempt <= attempts && !installed; attempt++) {
+        checkCancellation();
+        onLine?.call('[runtime] ${required ? "essential" : "optional"} ${group.key} ($attempt/$attempts)');
+        try {
+          if (!aptReady) {
+            final (code, output) = await _aptChecked('update 2>&1',
+                timeout: const Duration(minutes: 3), onLine: onLine);
+            checkCancellation();
+            if (code != 0) throw StateError('apt update exit $code: ${_runtimeError(output)}');
+            aptReady = true;
+          }
+          // Recommends can pull in optional runtimes or a compiler. Only the
+          // dependency closure belongs in an essential transaction.
+          final (code, output) = await _aptChecked(
+              'install -y --no-install-recommends ${group.key} 2>&1',
+              timeout: const Duration(minutes: 8), onLine: onLine);
+          checkCancellation();
+          if (code != 0) throw StateError('apt install exit $code: ${_runtimeError(output)}');
+          await _repairRuntimeEntryPoints();
+          installed = await verify(group.value);
+        } on SandboxCancelledException {
+          rethrow;
+        } on _PackageRecoveryException {
+          rethrow;
+        } catch (e) {
+          onLine?.call('[runtime] ${group.key}: $e');
+        }
+        if (installed) break;
+        try {
+          final prefix = _prefix;
+          if (prefix == null) throw StateError('Sandbox prefix unavailable');
+          await _ensureBundledAptKeyring(prefix);
+          checkCancellation();
+          OvidPkgInstaller.writeAll(prefix,
+              arch: aptArchFor(_payloadAbi, _deviceArch), mirrors: _orderedAptMirrors);
+          if (!signedReady) {
+            final (awkCode, awkOutput) = await _checkedCommand(
+                ['bash', '-c', "awk 'BEGIN { exit 0 }' </dev/null 2>&1"],
+                timeout: const Duration(seconds: 15));
+            checkCancellation();
+            if (awkCode != 0) {
+              throw StateError('bootstrap prerequisite awk cannot execute; verified bundled repair required: ${_runtimeError(awkOutput)}');
+            }
+            final (code, output) = await _checkedCommand(
+                ['bash', '-c', 'ovid-pkg update 2>&1'], timeout: const Duration(minutes: 6), onLine: onLine);
+            checkCancellation();
+            if (code != 0) throw StateError('signed update exit $code: ${_runtimeError(output)}');
+            signedReady = true;
+          }
+          final (code, output) = await _checkedCommand(
+              ['bash', '-c', 'ovid-pkg install ${group.key} 2>&1'], timeout: const Duration(minutes: 12), onLine: onLine);
+          checkCancellation();
+          if (code != 0) throw StateError('signed install exit $code: ${_runtimeError(output)}');
+          await _repairRuntimeEntryPoints();
+          installed = await verify(group.value);
+        } on SandboxCancelledException {
+          rethrow;
+        } on _PackageRecoveryException {
+          rethrow;
+        } catch (e) {
+          onLine?.call('[runtime] ${group.key}: $e');
+          signedReady = false;
+          _mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;
+          final prefix = _prefix;
+          if (prefix != null) _writeSourcesList(prefix, _aptMirrors[_mirrorIdx]);
+          aptReady = false;
+        }
+      }
+      onLine?.call('[runtime] ${group.key}: ${installed ? "verified ✓" : required ? "FAILED" : "optional unavailable"}');
+    }
+  }
+
+  /// Recover only broken package prerequisites from the installed, signed APK.
+  /// No network, writable-cache fallback, dpkg database replacement or reset.
+  Future<void> _repairBundledPrerequisites(void Function(String)? onLine) async {
+    final prefix = _prefix;
+    if (prefix == null) return;
+    final requested = <String>[];
+    final (awkCode, _) = await _checkedCommand(
+        ['bash', '-c', "awk 'BEGIN { exit 0 }' </dev/null 2>&1"],
+        timeout: const Duration(seconds: 15));
+    if (awkCode != 0) requested.add('bin/gawk');
+    for (final bin in ['apt', 'apt-get']) {
+      if ((await _runtimeProbe(bin)).$1 != 0) requested.add('bin/$bin');
+    }
+    checkCancellation();
+    if (requested.isEmpty) return;
+    // Deliberately do not use _readBootstrapPayload's legacy unverified file
+    // fallback. Android supplies this ZIP from its installed base/split APK.
+    final result = await _nativeChannel.invokeMethod<dynamic>('readBootstrapPayload');
+    final processAbi = await _nativeChannel.invokeMethod<String>('getProcessAbi');
+    checkCancellation();
+    if (result is! Map || result['bytes'] is! Uint8List ||
+        result['abi'] != processAbi || !['arm64-v8a', 'armeabi-v7a', 'x86_64'].contains(processAbi)) {
+      throw StateError('No ABI-matched installed bootstrap for prerequisite repair');
+    }
+    final bytes = result['bytes'] as Uint8List;
+    if (bytes.length > 64 * 1024 * 1024) throw StateError('Bootstrap ZIP size limit');
+    final archive = ZipDecoder().decodeBytes(bytes, verify: true);
+    if (archive.length > 100000 || archive.fold<int>(0, (sum, f) => sum + f.size) > 512 * 1024 * 1024) {
+      throw StateError('Bootstrap expanded size limit');
+    }
+    final files = <String, ArchiveFile>{};
+    for (final file in archive) {
+      if (files.containsKey(file.name)) throw StateError('Duplicate bootstrap member');
+      files[file.name] = file;
+    }
+    final metadata = files['.ovid-bootstrap-manifest.json'];
+    if (metadata == null || metadata.size > 4 * 1024 * 1024) {
+      throw StateError('App update with a verified prerequisite manifest required');
+    }
+    final manifest = jsonDecode(utf8.decode(metadata.content));
+    if (manifest is! Map || manifest['schema'] != 1 || manifest['androidAbi'] != processAbi || manifest['entries'] is! List) {
+      throw StateError('Invalid bootstrap prerequisite manifest');
+    }
+    final entries = <String, Map>{};
+    for (final entry in manifest['entries'] as List) {
+      if (entry is! Map || entry['path'] is! String || entries.containsKey(entry['path'])) {
+        throw StateError('Invalid or duplicate manifest entry');
+      }
+      entries[entry['path'] as String] = entry;
+    }
+    Uint8List verified(String name) {
+      final file = files[name];
+      final entry = entries[name];
+      if (file == null || !file.isFile || file.isSymbolicLink || entry == null ||
+          file.size > 32 * 1024 * 1024 || file.size != entry['size']) {
+        throw StateError('Missing or invalid bundled prerequisite: $name');
+      }
+      final data = Uint8List.fromList(file.content);
+      if (sha256.convert(data).toString() != entry['sha256']) throw StateError('Bootstrap SHA256 mismatch: $name');
+      return data;
+    }
+    // Alias targets are taken only from the hash-verified bundle metadata.
+    final aliasArchive = Archive()..addFile(ArchiveFile.bytes('SYMLINKS.txt', verified('SYMLINKS.txt')));
+    final aliases = <String, String>{};
+    for (final link in parseSymlinks(aliasArchive)) {
+      aliases[link.linkPath.replaceFirst(RegExp(r'^\./'), '')] = link.target;
+    }
+    final root = prefix.resolveSymbolicLinksSync();
+    String destination(String name) {
+      if (!RegExp(r'^(bin|lib)/[A-Za-z0-9_+.-]+$').hasMatch(name)) throw StateError('Unsafe repair member: $name');
+      final parent = Directory('$root/${name.split('/').first}');
+      if (FileSystemEntity.typeSync(parent.path, followLinks: false) != FileSystemEntityType.directory) {
+        throw StateError('Repair parent must be a real directory: ${parent.path}');
+      }
+      return '$root/$name';
+    }
+    final replacements = <String, Uint8List>{};
+    final links = <String, String>{};
+    final visiting = <String>{};
+    void include(String name) {
+      destination(name);
+      if (name.startsWith('lib/') && File(destination(name)).existsSync()) return;
+      if (replacements.containsKey(name) || links.containsKey(name)) return;
+      if (!visiting.add(name)) throw StateError('Bootstrap dependency alias cycle');
+      if (!files.containsKey(name) && aliases.containsKey(name)) {
+        final target = aliases[name]!;
+        if (!RegExp(r'^[A-Za-z0-9_+.-]+$').hasMatch(target) || target == '..' || target == '.') {
+          throw StateError('Unsafe bootstrap library alias: $name');
+        }
+        include('${name.split('/').first}/$target');
+        links[name] = target;
+      } else {
+        final data = verified(name);
+        final dependencies = _bootstrapElfDependencies(data, processAbi!);
+        replacements[name] = data;
+        for (final dep in dependencies) {
+          final rel = 'lib/$dep';
+          // Android platform libraries are not in the bundle. Existing upgraded
+          // libraries are preserved; candidate execution detects incompatibility.
+          if (!File(destination(rel)).existsSync() && (files.containsKey(rel) || aliases.containsKey(rel))) include(rel);
+        }
+      }
+      visiting.remove(name);
+      if (replacements.length + links.length > 128) throw StateError('Repair closure limit');
+    }
+    for (final name in requested) {
+      // A broken awk alias alone must not downgrade a working upgraded gawk.
+      if (name == 'bin/gawk' && await hasRuntime('gawk')) continue;
+      include(name);
+    }
+    if (awkCode != 0) {
+      if (aliases['bin/awk'] != 'gawk') throw StateError('Missing verified awk alias');
+      links['bin/awk'] = 'gawk';
+      destination('bin/awk');
+    }
+    checkCancellation();
+    final stage = prefix.createTempSync('.ovid-prerequisite-');
+    final published = <String>[];
+    final saved = <String>{};
+    var committed = false;
+    try {
+      for (final e in replacements.entries) {
+        final file = File('${stage.path}/${e.key}');
+        file.parent.createSync(recursive: true);
+        file.writeAsBytesSync(e.value, flush: true);
+        final chmod = await _trackedRun(Platform.isAndroid ? '/system/bin/chmod' : '/bin/chmod', ['0755', file.path]);
+        if (chmod.exitCode != 0) throw StateError('Prerequisite chmod failed: ${chmod.stderr}');
+      }
+      for (final e in links.entries) {
+        final link = Link('${stage.path}/${e.key}');
+        link.parent.createSync(recursive: true);
+        link.createSync(e.value);
+        final relativeTarget = '${e.key.split('/').first}/${e.value}';
+        if (!replacements.containsKey(relativeTarget) && !links.containsKey(relativeTarget) &&
+            File(destination(relativeTarget)).existsSync()) {
+          final stagedTarget = Link('${stage.path}/$relativeTarget');
+          if (FileSystemEntity.typeSync(stagedTarget.path, followLinks: false) == FileSystemEntityType.notFound) {
+            // Candidate-only link to a preserved upgraded dependency. It is
+            // never published into PREFIX.
+            stagedTarget.createSync(destination(relativeTarget));
+          }
+        }
+      }
+      // Validate the complete candidate set before replacing even one leaf.
+      for (final name in requested.where(replacements.containsKey)) {
+        final args = name == 'bin/gawk' ? ['BEGIN { exit 0 }'] : ['--version'];
+        final (code, output) = await _checkedCommand(['${stage.path}/$name', ...args],
+            env: {'LD_LIBRARY_PATH': '$root/lib:${stage.path}/lib'}, timeout: const Duration(seconds: 15));
+        checkCancellation();
+        if (code != 0) throw StateError('Bundled $name cannot execute: $output');
+      }
+      // Publish library targets before aliases and executables. All existing
+      // dependencies remain in place; only missing closure members are added.
+      final publication = [...replacements.keys, ...links.keys]
+        ..sort((a, b) => (a.startsWith('lib/') ? 0 : 1).compareTo(b.startsWith('lib/') ? 0 : 1));
+      for (final name in publication) {
+        checkCancellation();
+        final target = destination(name);
+        final type = FileSystemEntity.typeSync(target, followLinks: false);
+        if (type == FileSystemEntityType.directory) throw StateError('Refusing to replace directory: $name');
+        if (type != FileSystemEntityType.notFound) {
+          final backup = '${stage.path}/saved/$name';
+          Directory(File(backup).parent.path).createSync(recursive: true);
+          if (type == FileSystemEntityType.link) { Link(target).renameSync(backup); }
+          else { File(target).renameSync(backup); }
+          saved.add(name);
+        }
+        published.add(name);
+        if (links.containsKey(name)) { Link('${stage.path}/$name').renameSync(target); }
+        else { File('${stage.path}/$name').renameSync(target); }
+      }
+      for (final name in requested) {
+        final bin = name == 'bin/gawk' ? 'awk' : name.substring(4);
+        final (code, output) = await _checkedCommand(['bash', '-c',
+          bin == 'awk' ? "awk 'BEGIN { exit 0 }' </dev/null 2>&1" : '$bin --version 2>&1'],
+          timeout: const Duration(seconds: 15));
+        checkCancellation();
+        if (code != 0) throw StateError('Restored $bin execution failed: $output');
+      }
+      committed = true;
+      onLine?.call('[pkg] restored verified bundled prerequisites: ${published.join(', ')}');
+    } finally {
+      if (!committed) {
+        for (final name in published.reversed) {
+          final path = destination(name);
+          final type = FileSystemEntity.typeSync(path, followLinks: false);
+          if (type == FileSystemEntityType.link) { Link(path).deleteSync(); }
+          else if (type == FileSystemEntityType.file) { File(path).deleteSync(); }
+          if (saved.contains(name)) {
+            final backup = '${stage.path}/saved/$name';
+            if (FileSystemEntity.isLinkSync(backup)) { Link(backup).renameSync(path); }
+            else { File(backup).renameSync(path); }
+          }
+        }
+      }
+      stage.deleteSync(recursive: true);
+    }
+  }
+
+  /// Read DT_NEEDED without executing unverified bytes or needing readelf in
+  /// the damaged prefix. Program headers map the dynamic string table to bytes.
+  static List<String> _bootstrapElfDependencies(Uint8List bytes, String abi) {
+    final wide = abi != 'armeabi-v7a';
+    final machine = abi == 'arm64-v8a' ? 183 : wide ? 62 : 40;
+    final data = ByteData.sublistView(bytes);
+    if (bytes.length < (wide ? 64 : 52) || bytes[0] != 127 || bytes[1] != 69 || bytes[2] != 76 || bytes[3] != 70 ||
+        bytes[4] != (wide ? 2 : 1) || bytes[5] != 1 || data.getUint16(18, Endian.little) != machine) {
+      throw StateError('Bootstrap ELF ABI mismatch');
+    }
+    int word(int offset) => wide ? data.getUint64(offset, Endian.little) : data.getUint32(offset, Endian.little);
+    final ph = word(wide ? 32 : 28);
+    final stride = data.getUint16(wide ? 54 : 42, Endian.little);
+    final count = data.getUint16(wide ? 56 : 44, Endian.little);
+    if (count > 1024 || stride != (wide ? 56 : 32) || ph + count * stride > bytes.length) throw StateError('Invalid ELF program headers');
+    final loads = <(int, int, int)>[];
+    var dynamic = 0; var dynamicSize = 0;
+    for (var i = 0; i < count; i++) {
+      final h = ph + i * stride;
+      final type = data.getUint32(h, Endian.little);
+      final offset = word(h + (wide ? 8 : 4));
+      final address = word(h + (wide ? 16 : 8));
+      final size = word(h + (wide ? 32 : 16));
+      if (offset + size > bytes.length) throw StateError('Invalid ELF segment');
+      if (type == 1) loads.add((address, offset, size));
+      if (type == 2) { dynamic = offset; dynamicSize = size; }
+    }
+    final needed = <int>[];
+    var strings = 0; var stringsSize = 0;
+    final w = wide ? 8 : 4;
+    for (var offset = dynamic; offset + 2 * w <= dynamic + dynamicSize; offset += 2 * w) {
+      final tag = word(offset); final value = word(offset + w);
+      if (tag == 0) break;
+      if (tag == 1) needed.add(value);
+      if (tag == 5) strings = value;
+      if (tag == 10) stringsSize = value;
+    }
+    if (needed.isEmpty) return [];
+    final segment = loads.where((s) => strings >= s.$1 && strings + stringsSize <= s.$1 + s.$3).firstOrNull;
+    if (segment == null || stringsSize == 0 || needed.length > 128) throw StateError('Invalid ELF string table');
+    final base = segment.$2 + strings - segment.$1;
+    return needed.map((index) {
+      if (index >= stringsSize) throw StateError('Invalid ELF dependency offset');
+      final end = bytes.indexOf(0, base + index);
+      if (end < 0 || end >= base + stringsSize) throw StateError('Unterminated ELF dependency');
+      final name = utf8.decode(bytes.sublist(base + index, end));
+      if (!RegExp(r'^[A-Za-z0-9_+.-]+$').hasMatch(name) || name == '..' || name == '.') throw StateError('Unsafe ELF dependency');
+      return name;
+    }).toList();
   }
 
   /// runtime self-test: run each critical runtime and CHECK its
@@ -1853,7 +2073,7 @@ audit=false
     final sedExpr =
         's|/data/data/com.termux/files/usr/|$p/|g; '
         's|/data/data/com.termux/files|$p|g';
-    await execChecked([
+    await _checkedCommand([
       'bash',
       '-c',
       // bin/ first (fast path), then npm's nested lib/node_modules scripts.
@@ -1875,13 +2095,14 @@ audit=false
           '-exec find {} -type f -exec chmod +x {} \\; + 2>/dev/null; '
           'find "\$PREFIX/lib/node_modules" -name "*.sh" '
           '-type f -exec chmod +x {} + 2>/dev/null',
-    ]).timeout(const Duration(minutes: 2));
+    ], timeout: const Duration(minutes: 2));
+    checkCancellation();
     // Verification (PR31): grep SHEBANG LINES ONLY (head -1) for any
     // remaining Termux app path. Content-level strings are legitimate
     // (configs, docs) and must not trip this. A residual shebang means
     // the patcher failed — report loudly so Health surfaces it (the
     // next self-heal boot re-runs this whole pass).
-    final (_, verifyOut) = await execChecked([
+    final (_, verifyOut) = await _checkedCommand([
       'bash',
       '-c',
       'cd "\$PREFIX" && '
@@ -1889,7 +2110,8 @@ audit=false
           '[ -f "\$f" ] || continue; '
           'head -1 "\$f" 2>/dev/null | grep -q '
           '"data/data/com.termux" && echo "SHEBANG_STALE: \$f"; done | head -5',
-    ]).timeout(const Duration(seconds: 30));
+    ], timeout: const Duration(seconds: 30));
+    checkCancellation();
     if (verifyOut.contains('SHEBANG_STALE')) {
       // ignore: avoid_print
       print(
@@ -1910,6 +2132,11 @@ audit=false
       File('${dir.path}/sources.list').writeAsStringSync(
         '# Ovid sandbox apt mirror (auto-managed)\n'
         'deb $mirror stable main\n',
+      );
+      // The signed helper reads this file first. Rotating only sources.list
+      // used to leave it pinned to the failed mirror indefinitely.
+      File('${dir.path}/ovid-mirrors').writeAsStringSync(
+        '${[mirror, ..._aptMirrors.where((candidate) => candidate != mirror)].join('\n')}\n',
       );
     } catch (e) {
       Diag.swallow('sandbox_service', e);
@@ -2376,7 +2603,7 @@ audit=false
       OvidPkgInstaller.writeAll(
         prefix,
         arch: aptArchFor(_payloadAbi, _deviceArch),
-        mirrors: _aptMirrors,
+        mirrors: _orderedAptMirrors,
       );
     } catch (_) {
       // Self-heal must never break the boot.
@@ -3232,7 +3459,7 @@ audit=false
     void Function(String line)? onLine,
   }) async {
     Future<(int, String)> run() => _checkedCommand(
-      ['bash', '-c', 'apt $sub'], timeout: timeout);
+      ['bash', '-c', 'apt $sub'], timeout: timeout, onLine: onLine);
     var (code, out) = await run();
     var rotated = false;
     if (code != 0 && _looksLikeAptTls(out)) {
@@ -3270,6 +3497,32 @@ audit=false
 
   int _commandSequence = 0;
 
+  /// Version output cannot certify a prefix with an unfinished package overlay.
+  /// A missing prefix has no transaction; runtime/core probes establish presence.
+  bool get packageTransactionReady => _prefix == null ||
+      FileSystemEntity.typeSync('${_prefix!.path}/var/cache/ovid-pkg/transaction',
+          followLinks: false) == FileSystemEntityType.notFound;
+
+  Future<void> _recoverPendingPackageTransaction(void Function(String)? onLine) async {
+    checkCancellation();
+    if (packageTransactionReady) return;
+    try {
+      final (code, output) = await _checkedCommand(
+          ['bash', '-c', 'ovid-pkg recover 2>&1'],
+          timeout: const Duration(minutes: 2), onLine: onLine);
+      checkCancellation();
+      if (code != 0 || !packageTransactionReady) {
+        throw _PackageRecoveryException('Pending package rollback failed: $output');
+      }
+    } on SandboxCancelledException {
+      rethrow;
+    } on _PackageRecoveryException {
+      rethrow;
+    } catch (e) {
+      throw _PackageRecoveryException('Pending package rollback failed: $e');
+    }
+  }
+
   @visibleForTesting
   Future<(int, String)> checkedCommandForTest(List<String> args, {
     required Duration timeout,
@@ -3279,10 +3532,23 @@ audit=false
   /// cancelled and await its exit before returning control to a retry path.
   Future<(int, String)> _checkedCommand(List<String> args, {
     required Duration timeout,
+    Map<String, String>? env,
+    void Function(String)? onLine,
   }) async {
+    // Includes _aptChecked's mirror retries and every subsequent runtime group.
+    // Recovery is exempt so this guard cannot recursively recover itself.
+    final command = args.length >= 3 && args[1] == '-c'
+        ? args[2] : args.join(' ');
+    if (RegExp(r'^(?:apt|apt-get|ovid-pkg)\s+(?:update|install|upgrade|full-upgrade)\b')
+        .hasMatch(command)) {
+      await _recoverPendingPackageTransaction(onLine);
+    }
     final key = 'sandbox-command-${++_commandSequence}';
+    final token = '$pid-${DateTime.now().microsecondsSinceEpoch}-$key';
+    final prefix = _prefix;
     return withProcessScope(() async {
-      final pending = execChecked(args);
+      final pending = execChecked(args,
+          env: {...?env, 'OVID_PKG_OPERATION': token}, onLine: onLine);
       try {
         return await pending.timeout(timeout);
       } on TimeoutException {
@@ -3291,6 +3557,24 @@ audit=false
           await pending;
         } catch (_) { /* reaped after cancellation */ }
         rethrow;
+      } finally {
+        // SIGKILL cannot run the helper's EXIT trap. Only recover a lock
+        // belonging to THIS completed/reaped invocation, never an unknown
+        // terminal command or a concurrent package operation.
+        if (prefix != null) {
+          final lock = Directory('${prefix.path}/var/cache/ovid-pkg/lock');
+          final owner = File('${lock.path}/owner');
+          try {
+            if (FileSystemEntity.typeSync(lock.path, followLinks: false) == FileSystemEntityType.directory &&
+                FileSystemEntity.typeSync(owner.path, followLinks: false) == FileSystemEntityType.file &&
+                owner.readAsStringSync() == token) {
+              owner.deleteSync();
+              lock.deleteSync();
+            }
+          } catch (e) {
+            Diag.swallow('sandbox_pkg_lock', e);
+          }
+        }
       }
     }, callKey: key);
   }
@@ -3331,14 +3615,14 @@ audit=false
       _installNeedsRuntimes = true;
       return install.then((_) {
         checkCancellation();
-        return hasRuntime(kind == 'node' ? 'node' : 'python');
+        return _runtimeKindVerified(kind);
       });
     }
     final core = _coreRuntimeJob;
     if (core != null) {
       return core.then((_) {
         checkCancellation();
-        return hasRuntime(kind == 'node' ? 'node' : 'python');
+        return _runtimeKindVerified(kind);
       });
     }
     final otherRuntime = _runtimeJobs.values.firstOrNull;
@@ -3367,76 +3651,38 @@ audit=false
 
   final Map<String, Future<bool>> _runtimeJobs = {};
 
+  Future<bool> _runtimeKindVerified(String kind) async {
+    if (_prefix != null && Directory('${_prefix!.path}/var/cache/ovid-pkg/transaction').existsSync()) return false;
+    final bins = kind == 'node' ? ['node', 'npm', 'npx'] : ['python', 'pip', 'uv', 'uvx'];
+    for (final bin in bins) {
+      if (!await hasRuntime(bin)) return false;
+    }
+    return true;
+  }
+
   Future<bool> _ensureRuntimeImpl(
     String kind, {
     void Function(String line)? onLine,
   }) async {
-    final bin = kind == 'node' ? 'node' : 'python';
-    if (_runtimeEnsured[kind] == true &&
-        _filePresent(kind == 'node' ? 'bin/node' : 'bin/python')) {
-      return true;
-    }
     _runtimeEnsured[kind] = false;
     // A genuine request — the boot maintenance task uses this to tell
     // "runtimes not needed yet" apart from "runtimes needed but broken".
     _runtimesRequested = true;
-    // Fast path: check if already present (exit-code based —
-    // `command -v` prints nothing and exits 1 when missing).
-    try {
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v $bin',
-      ]).timeout(const Duration(seconds: 10));
-      checkCancellation();
-      if (code == 0) {
-        _runtimeEnsured[kind] = true;
-        return true;
-      }
-    } on SandboxCancelledException {
-      rethrow;
-    } catch (e) {
-      Diag.swallow('sandbox_service', e);
+    if (await _runtimeKindVerified(kind)) {
+      _runtimeEnsured[kind] = true;
+      return true;
     }
     onLine?.call(
-      '[runtime] installing ${kind == 'node' ? 'nodejs + npm + pnpm' : 'python + pip + uv'}…',
+      '[runtime] installing ${kind == 'node' ? 'nodejs + npm' : 'python + pip + uv'}…',
     );
     try {
-      final (updateCode, _) = await _aptChecked(
-        'update 2>&1',
-        timeout: const Duration(minutes: 3),
-      );
+      await _installRuntimeGroups(kind == 'node'
+          ? const {'nodejs npm': ['node', 'npm', 'npx']}
+          : const {'python': ['python'], 'python-pip': ['pip'], 'uv': ['uv', 'uvx']},
+          onLine: onLine);
       checkCancellation();
-      if (updateCode != 0) throw StateError('apt update failed ($updateCode)');
-      final pkgs = kind == 'node' ? 'nodejs npm' : 'python python-pip uv';
-      final (installCode, _) = await _aptChecked(
-        'install -y $pkgs 2>&1',
-        timeout: const Duration(minutes: 8),
-      );
-      checkCancellation();
-      if (installCode != 0) {
-        throw StateError('apt install failed ($installCode)');
-      }
-      if (kind == 'node') {
-        // Enable pnpm via corepack (best-effort, non-fatal).
-        try {
-          await _checkedCommand([
-            'bash',
-            '-c',
-            'corepack enable 2>&1; corepack prepare pnpm@latest --activate 2>&1',
-          ], timeout: const Duration(minutes: 2));
-        } on SandboxCancelledException { rethrow; }
-        catch (e) {
-          Diag.swallow('sandbox_service', e);
-        }
-      }
-      final (vCode, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v $bin',
-      ]).timeout(const Duration(seconds: 10));
-      checkCancellation();
-      final ok = vCode == 0;
+      final ok = await _runtimeKindVerified(kind);
+      if (ok && kind == 'node') await _preparePnpm(onLine);
       if (ok) _runtimeEnsured[kind] = true;
       onLine?.call(
         '[runtime] ${kind == 'node' ? 'node' : 'python'} '
@@ -3450,19 +3696,8 @@ audit=false
     }
   }
 
-  /// Whether a runtime binary exists right now (no install attempted).
-  Future<bool> hasRuntime(String bin) async {
-    try {
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v $bin',
-      ]).timeout(const Duration(seconds: 10));
-      return code == 0;
-    } catch (_) {
-      return false;
-    }
-  }
+  /// Whether a runtime executes right now (no install attempted).
+  Future<bool> hasRuntime(String bin) async => (await _runtimeProbe(bin)).$1 == 0;
 
   /// PR38: lazy C/C++ compiler install — `clang` (+ its `libllvm`
   /// dependency) is ~60 MB, far bigger than every other eagerly-installed
@@ -4054,14 +4289,18 @@ echo INSTALLED
   /// present? Used by the deferred background runtime install to skip
   /// without spawning any processes — [runtimesVerified] costs a bash
   /// spawn with a 15 s timeout, too heavy to run on every shell open.
-  /// Same REQUIRED set as [runtimesVerified] (node+npm+python+curl+git).
+  /// Same REQUIRED set as [runtimesVerified] (node+npm+npx+python+curl+git).
   bool runtimesPresentOnDisk() {
     final prefix = _prefix;
     if (prefix == null || !_installed) return false;
     const required = [
       'bin/node',
       'bin/npm',
+      'bin/npx',
       'bin/python',
+      'bin/pip',
+      'bin/uv',
+      'bin/uvx',
       'bin/git',
       'bin/curl',
     ];
@@ -4071,22 +4310,14 @@ echo INSTALLED
     return true;
   }
 
-  /// Fast check: every runtime the app treats as REQUIRED is present.
-  /// (bash + node + npm + python + git + curl — the full Linux toolchain
-  /// the agent and MCP servers need.  Stored flag avoided: real probe.)
+  /// Every required runtime must execute. Presence alone misses broken ELF
+  /// dependencies, stale interpreters, and damaged npm CLI targets.
   Future<bool> runtimesVerified() async {
-    try {
-      final (code, _) = await execChecked([
-        'bash',
-        '-c',
-        'command -v node >/dev/null && command -v npm >/dev/null && '
-            'command -v python >/dev/null && command -v curl >/dev/null && '
-            'command -v git >/dev/null',
-      ]).timeout(const Duration(seconds: 15));
-      return code == 0;
-    } catch (_) {
-      return false;
+    if (_prefix != null && Directory('${_prefix!.path}/var/cache/ovid-pkg/transaction').existsSync()) return false;
+    for (final bin in ['node', 'npm', 'npx', 'python', 'pip', 'uv', 'uvx', 'git', 'curl']) {
+      if (!await hasRuntime(bin)) return false;
     }
+    return true;
   }
 
   /// Which runtime binaries are missing right now (for the Health screen
@@ -4111,11 +4342,14 @@ echo INSTALLED
     final result = <String, bool>{for (final b in bins) b: false};
     if (!_installed) return result;
     try {
-      final (code, out) = await execChecked([
+      final (code, out) = await _checkedCommand([
         'bash',
         '-c',
-        'for b in ${bins.join(' ')}; do command -v \$b >/dev/null && echo "OK \$b" || echo "MISS \$b"; done',
-      ]).timeout(const Duration(seconds: 15));
+        'for b in ${bins.join(' ')}; do '
+            'case "\$b" in ssh|tmux) flag=-V;; unzip) flag=-v;; *) flag=--version;; esac; '
+            '"\$b" "\$flag" >/dev/null 2>&1 && echo "OK \$b" || echo "MISS \$b"; done',
+      ], timeout: const Duration(seconds: 30));
+      checkCancellation();
       if (code == 0 || out.isNotEmpty) {
         for (final l in out.split('\n')) {
           final t = l.trim();
@@ -4123,14 +4357,16 @@ echo INSTALLED
           if (t.startsWith('MISS ')) result[t.substring(5)] = false;
         }
       }
+    } on SandboxCancelledException {
+      rethrow;
     } catch (e) {
       Diag.swallow('sandbox_service', e);
     }
     return result;
   }
 
-  /// Install/repair the runtime toolchain (node+npm+pnpm, python+pip+uv,
-  /// git, curl) with retries + apt TLS self-heal.  Called by the
+  /// Install/repair essential runtimes plus independent optional CLI tools
+  /// with authenticated retries. Called by the
   /// first-launch gate (repair mode) and the Health screen's Repair button.
   Future<bool> installCoreRuntimes(
     void Function(int phase, double progress, String line) onPhase,

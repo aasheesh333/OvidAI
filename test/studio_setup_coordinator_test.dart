@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
@@ -16,6 +17,75 @@ void main() {
     SandboxService.execCheckedOverrideForTest = null;
     AppState.resetTestInstance();
   });
+
+  for (final aggregate in [false, true]) {
+    for (final repaired in [false, true]) {
+      test('transaction fence requires repair despite version success (aggregate=$aggregate repaired=$repaired)', () async {
+        final root = Directory.systemTemp.createTempSync('coordinator-transaction-');
+        final transaction = Directory('${root.path}/var/cache/ovid-pkg/transaction')..createSync(recursive: true);
+        File('${transaction.path}/active').writeAsStringSync('');
+        SandboxService.I.sandboxPrefixForTest = root;
+        addTearDown(() {
+          SandboxService.I.sandboxPrefixForTest = null;
+          root.deleteSync(recursive: true);
+        });
+        SandboxService.execCheckedOverrideForTest = (_, _) async => (0, 'working version');
+        var repairs = 0;
+        final coordinator = StudioSetupCoordinator(
+          checkExisting: () async => true,
+          verifyCore: () async => true,
+          verifyRuntimes: aggregate ? () async => true : null,
+          installRuntimes: (_) async {
+            repairs++;
+            if (repaired) transaction.deleteSync(recursive: true);
+            return true;
+          },
+        );
+        addTearDown(coordinator.dispose);
+        await coordinator.start();
+        expect(repairs, 1);
+        expect(coordinator.status, repaired ? StudioSetupStatus.ready : StudioSetupStatus.partial);
+        expect(AppState.I.studioFirstOpenDone, repaired);
+        if (!repaired) {
+          for (final runtime in StudioRuntime.values) {
+            expect(coordinator.runtimeVerification(runtime), isNot(RuntimeVerification.verified));
+          }
+        }
+      });
+    }
+  }
+
+  for (final aggregate in [false, true]) {
+    test('transaction appearing during verification revokes success (aggregate=$aggregate)', () async {
+      final root = Directory.systemTemp.createTempSync('coordinator-late-transaction-');
+      final transaction = Directory('${root.path}/var/cache/ovid-pkg/transaction');
+      SandboxService.I.sandboxPrefixForTest = root;
+      addTearDown(() {
+        SandboxService.I.sandboxPrefixForTest = null;
+        root.deleteSync(recursive: true);
+      });
+      SandboxService.execCheckedOverrideForTest = (_, _) async {
+        transaction.createSync(recursive: true);
+        return (0, 'working version');
+      };
+      final coordinator = StudioSetupCoordinator(
+        checkExisting: () async => false,
+        install: (_, _) async {},
+        verifyCore: () async => true,
+        verifyRuntimes: aggregate ? () async {
+          transaction.createSync(recursive: true);
+          return true;
+        } : null,
+      );
+      addTearDown(coordinator.dispose);
+      await coordinator.start();
+      expect(coordinator.status, StudioSetupStatus.partial);
+      expect(AppState.I.studioFirstOpenDone, isFalse);
+      for (final runtime in StudioRuntime.values) {
+        expect(coordinator.runtimeVerification(runtime), isNot(RuntimeVerification.verified));
+      }
+    });
+  }
 
   test(
     'concurrent approval joins one job through completion bookkeeping',
@@ -186,13 +256,106 @@ void main() {
       expect(AppState.I.studioFirstOpenDone, isFalse);
       expect(commands, contains('bash --version'));
       expect(
-        commands.any(
-          (c) => c.contains('npx --version') && c.contains('uvx --version'),
-        ),
+        commands.any((c) => c.contains('npx --version')),
+        isTrue,
+      );
+      expect(
+        commands.any((c) => c.contains('uvx --version')),
         isTrue,
       );
     },
   );
+
+  test('runtime failures are independent evidence and retry restores flags', () async {
+    var recovered = false;
+    var existing = false;
+    SandboxService.execCheckedOverrideForTest = (args, env) async {
+      final command = args.last;
+      if (!recovered &&
+          (command.contains('node --version') ||
+              command.contains('python --version') ||
+              command.contains('git --version'))) {
+        return (127, 'not installed');
+      }
+      return (0, 'version');
+    };
+    final coordinator = StudioSetupCoordinator(
+      checkExisting: () async => existing,
+      install: (onPhase, _) async {
+        existing = true;
+        onPhase(8, 1, 'Runtime setup finished');
+      },
+      installRuntimes: (_) async {
+        recovered = true;
+        return true;
+      },
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.start();
+    expect(coordinator.status, StudioSetupStatus.partial);
+    expect(coordinator.coreReady, isTrue);
+    for (final runtime in [
+      StudioRuntime.node,
+      StudioRuntime.python,
+      StudioRuntime.git,
+    ]) {
+      expect(
+        coordinator.runtimeVerification(runtime),
+        RuntimeVerification.unavailable,
+      );
+    }
+    expect(
+      coordinator.runtimeVerification(StudioRuntime.curl),
+      RuntimeVerification.verified,
+    );
+    expect(AppState.I.sandboxInstalled, isTrue);
+    expect(AppState.I.runtimeInstallState, RuntimeInstallState.failed);
+    expect(AppState.I.studioFirstOpenDone, isFalse);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool('studio_first_open_done'), isFalse);
+
+    final retry = coordinator.retryFromRuntimeBanner();
+    expect(
+      coordinator.runtimeVerification(StudioRuntime.node),
+      RuntimeVerification.unknown,
+    );
+    await retry;
+    expect(coordinator.status, StudioSetupStatus.ready);
+    for (final runtime in StudioRuntime.values) {
+      expect(
+        coordinator.runtimeVerification(runtime),
+        RuntimeVerification.verified,
+      );
+    }
+    expect(AppState.I.runtimeInstallState, RuntimeInstallState.done);
+    expect(AppState.I.studioFirstOpenDone, isTrue);
+    expect(prefs.getBool('studio_first_open_done'), isTrue);
+    coordinator.forgetCompleted();
+    expect(
+      coordinator.runtimeVerification(StudioRuntime.node),
+      RuntimeVerification.unknown,
+    );
+  });
+
+  test('aggregate failure without evidence does not accuse individual runtimes', () async {
+    final coordinator = StudioSetupCoordinator(
+      checkExisting: () async => false,
+      install: (onPhase, _) async {
+        onPhase(8, 1, 'npm registry ......  ⚠ ping failed/timeout');
+      },
+      verifyCore: () async => true,
+      verifyRuntimes: () async => false,
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.start();
+    expect(coordinator.status, StudioSetupStatus.partial);
+    for (final runtime in StudioRuntime.values) {
+      expect(
+        coordinator.runtimeVerification(runtime),
+        RuntimeVerification.unknown,
+      );
+    }
+  });
 
   test('Health core-only setup does not claim runtime completion', () async {
     await AppState.I.setStudioFirstOpenDone(true);

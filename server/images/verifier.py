@@ -193,9 +193,13 @@ def mount_images(mint, service=None, *, admission=None, auth=None, private_backe
             return JSONResponse(result, headers={'Cache-Control': 'no-store'})
         except ImageError as error:
             body = {'error': {'code': error.code}}
+            headers = {'Cache-Control': 'no-store'}
+            if error.retry_after_seconds is not None:
+                body['error']['retryAfterSeconds'] = error.retry_after_seconds
+                headers['Retry-After'] = str(error.retry_after_seconds)
             if error.receipt is not None:
                 body['receipt'] = error.receipt
-            return JSONResponse(body, status_code=error.status, headers={'Cache-Control': 'no-store'})
+            return JSONResponse(body, status_code=error.status, headers=headers)
         except Exception as error:
             # Never echo JWT, HTTP, database or provider errors.
             status = getattr(error, 'status_code', 503)

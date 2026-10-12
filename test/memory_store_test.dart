@@ -11,6 +11,36 @@ void main() {
   });
   tearDown(() => dir.deleteSync(recursive: true));
 
+  test('fresh account creates missing personal-memory parent before its scope', () {
+    final accountRoot = Directory('${dir.path}/personal-memory/account-fresh');
+    final account = MemoryStore(accountRoot);
+    expect(account.read(null, 'MEMORY.md').content, isEmpty);
+    account.save(null, 'MEMORY.md', 'Remember my preference', mode: 'append');
+    expect(MemoryStore(accountRoot).read(null, 'MEMORY.md').content,
+        'Remember my preference');
+    expect(MemoryStore(Directory('${dir.path}/personal-memory/account-other'))
+        .read(null, 'MEMORY.md').content, isEmpty);
+  });
+
+  test('missing parent creation refuses symlink and file parents', () {
+    final outside = Directory.systemTemp.createTempSync('memory-parent-outside-');
+    try {
+      Link('${dir.path}/linked').createSync(outside.path);
+      File('${dir.path}/file-parent').writeAsStringSync('unchanged');
+      for (final parent in ['linked', 'file-parent']) {
+        expect(
+          () => MemoryStore(Directory('${dir.path}/$parent/new-account'))
+              .read(null, 'MEMORY.md'),
+          throwsA(isA<FileSystemException>()),
+        );
+      }
+      expect(outside.listSync(), isEmpty);
+      expect(File('${dir.path}/file-parent').readAsStringSync(), 'unchanged');
+    } finally {
+      outside.deleteSync(recursive: true);
+    }
+  });
+
   test('Markdown survives restart; global shared and session isolated', () {
     store.save(null, 'MEMORY.md', 'Prefer concise answers', mode: 'append');
     store.save('chat-a', 'MEMORY.md', 'Private project', mode: 'append');

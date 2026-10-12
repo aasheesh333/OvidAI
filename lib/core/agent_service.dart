@@ -856,6 +856,9 @@ class AgentRun {
   ({String name, String canonArgs})? repeatKey;
   int repeatStreak = 0;
   int consecutiveErrors = 0;
+  /// Capacity refusal stops paid image attempts until a fresh human turn.
+  /// Independent of the bounded, account-wide ImageStudio cooldown.
+  ImageStudioError? imageCapacityFailure;
   Message? activeToolMsg;
   DateTime? runStart;
   int? lastRunElapsedMs;
@@ -11549,6 +11552,7 @@ can drive there yourself with the device_* tools):
     _runResolved.produced.clear(); // "Produced" panel resets per run
     _runResolved.pendingVisionMessages.clear();
     _runResolved.toolCallCounts.clear(); // repeat-tool reminder is per turn
+    if (freshTurn) _runResolved.imageCapacityFailure = null;
     // A skill's tool restriction is scoped to the run that loaded it.
     _runResolved.activeSkillTools = null;
     _runResolved.activeSkillName = null;
@@ -25031,6 +25035,13 @@ ${await _agentsMdBlock()}
       }
       Uint8List bytes;
       if (inference) {
+        final capacity =
+            _runResolved.imageCapacityFailure ?? ImageStudio.I.capacityError;
+        if (capacity != null) {
+          _runResolved.imageCapacityFailure = capacity;
+          return 'Error: ${capacity.code} (HTTP ${capacity.statusCode}). '
+              '${capacity.message} No new image request was submitted.';
+        }
         final headers = await OvidCloudService.I.imageHeaders();
         if (!current()) return 'Cancelled: image run or account changed.';
         if (headers.isEmpty) {
@@ -25047,14 +25058,22 @@ ${await _agentsMdBlock()}
           sessionId: session.id,
         );
         if (!current()) return 'Cancelled: image run or account changed.';
+        if (result.error?.isCapacity == true) {
+          _runResolved.imageCapacityFailure = result.error;
+        }
         accounting =
             'Request `${result.record.requestId}`: ${result.record.state}; '
             'exact charge ${result.receipt?.charged ?? 'unconfirmed'}; '
-            'receipt ${result.receiptPersisted ? 'saved' : 'not saved'}. '
+            '${result.receipt == null ? 'receipt unavailable; request' : 'receipt'} '
+            '${result.receiptPersisted ? 'saved' : 'not saved'}. '
             '${result.notice ?? ''}';
+        if (result.error != null) {
+          accounting += ' HTTP ${result.error!.statusCode}'
+              '${result.error!.code == null ? '' : ' ${result.error!.code}'}.';
+        }
         if (result.bytes == null) {
           final prefix = accounting.isEmpty ? '' : '$accounting ';
-          return '${prefix}Image bytes unavailable; no image was saved.';
+          return 'Error: ${prefix}Image bytes unavailable; no image was saved.';
         }
         bytes = result.bytes!;
       } else {
@@ -25090,11 +25109,14 @@ ${await _agentsMdBlock()}
           'Displayed in chat. ${bytes.length} bytes.'
           '${AppState.I.lastSessionPersistFailed ? ' Chat history persistence failed; the image file is saved.' : ''}';
     } on ImageStudioError catch (error) {
+      if (error.isCapacity) _runResolved.imageCapacityFailure = error;
       final prefix = accounting.isEmpty ? '' : '$accounting ';
-      return '${prefix}Error: $error';
+      return 'Error: $prefix$error'
+          '${error.statusCode == null ? '' : ' HTTP ${error.statusCode}'}'
+          '${error.code == null ? '' : ' ${error.code}'}';
     } catch (_) {
       final prefix = accounting.isEmpty ? '' : '$accounting ';
-      return '${prefix}Error: image operation failed. Check arguments and the exact source path. '
+      return 'Error: ${prefix}image operation failed. Check arguments and the exact source path. '
           'For cloud retries reuse the same request_id.';
     }
   }

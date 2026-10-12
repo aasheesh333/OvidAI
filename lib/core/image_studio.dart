@@ -15,10 +15,93 @@ export 'image_receipt_store.dart'
     show ImageReceipt, ImageRequestRecord, imageChargeSummary;
 
 class ImageStudioError implements Exception {
-  const ImageStudioError(this.message);
+  const ImageStudioError(
+    this.message, {
+    this.statusCode,
+    this.code,
+    this.retryAfter,
+  });
   final String message;
+  final int? statusCode;
+  final String? code;
+  final Duration? retryAfter;
+  bool get isCapacity => code == 'image_capacity_unavailable';
+
+  // These exact public pairs are emitted before provider dispatch by the
+  // images API. Never infer nonacceptance from status alone, a GET, an unknown
+  // code, or an ambiguous image_unavailable response.
+  bool get _preDispatchRejection => switch ((statusCode, code)) {
+    (401, 'sign_in_required') ||
+    (403, 'image_access_denied') ||
+    (402, 'image_limit_reached') ||
+    (400, 'invalid_request_id' || 'invalid_image_request' || 'invalid_image') ||
+    (413, 'image_too_large') ||
+    (415, 'invalid_image_request') ||
+    (422, 'unsupported_image_operation') => true,
+    _ => false,
+  };
   @override
   String toString() => message;
+
+  static const _codes = {
+    'image_capacity_unavailable',
+    'image_unavailable',
+    'sign_in_required',
+    'image_access_denied',
+    'image_limit_reached',
+    'invalid_request_id',
+    'invalid_image_request',
+    'invalid_image',
+    'image_too_large',
+    'unsupported_image_operation',
+    'idempotency_conflict',
+    'image_request_pending',
+    'image_request_failed',
+    'image_request_not_found',
+    'image_receipt_expired',
+    'image_replay_expired',
+    'image_account_deleted',
+    'invalid_image_response',
+  };
+
+  static ImageStudioError? _fromResponse(_ImageHttpResponse? response) {
+    if (response == null || response.status == 200) return null;
+    final value = response.body['error'];
+    final rawCode = value is Map ? value['code'] : null;
+    final code = rawCode is String && _codes.contains(rawCode) ? rawCode : null;
+    final rawRetry = value is Map ? value['retryAfterSeconds'] : null;
+    final seconds =
+        (rawRetry is int ? rawRetry : int.tryParse('$rawRetry')) ??
+        int.tryParse(response.retryAfter ?? '');
+    final retry = code == 'image_capacity_unavailable'
+        ? Duration(
+            seconds: (seconds == null || seconds < 0 ? 30 : seconds).clamp(1, 120),
+          )
+        : null;
+    final message = switch (code) {
+      'image_capacity_unavailable' =>
+        'Image service capacity is temporarily unavailable. Stop image attempts in this run. '
+        'You may manually try later after ${retry!.inSeconds} seconds. '
+        'Report this capacity error; do not infer an allowance problem.',
+      'image_limit_reached' =>
+        'The server reports the image allowance limit was reached.',
+      'sign_in_required' => 'Sign in to Ovid Cloud again to access images.',
+      'image_access_denied' => 'The server denied image access for this account.',
+      'invalid_request_id' ||
+      'invalid_image_request' ||
+      'invalid_image' ||
+      'image_too_large' ||
+      'unsupported_image_operation' =>
+        'The server rejected the image arguments or requested operation.',
+      _ => 'The image service could not complete this request.',
+    };
+    return ImageStudioError(
+      message,
+      statusCode: response.status,
+      code: code,
+      retryAfter: retry,
+    );
+  }
 }
 
 /// Exact accounting and actual output are independent. Result recovery only
@@ -29,30 +112,56 @@ class ImageStudioResult {
     required this.receiptPersisted,
     this.bytes,
     this.notice,
+    this.error,
   });
   final ImageRequestRecord record;
   final bool receiptPersisted;
   final Uint8List? bytes;
   final String? notice;
+  final ImageStudioError? error;
   ImageReceipt? get receipt => record.receipt;
   bool get imageAvailable => bytes != null;
 }
 
 class _ImageHttpResponse {
-  const _ImageHttpResponse(this.status, this.body);
+  const _ImageHttpResponse(this.status, this.body, {this.retryAfter});
   final int status;
   final Map<String, dynamic> body;
+  final String? retryAfter;
 }
 
 /// The only image inference contract exposed to the app is Ovid's public alias.
 /// Local operations use Flutter's image codec/canvas and require no cloud key.
 class ImageStudio extends ChangeNotifier {
-  ImageStudio({http.Client? client, ImageReceiptStore? receiptStore})
-    : _client = client, // ignore: prefer_initializing_formals
+  ImageStudio({
+    http.Client? client,
+    ImageReceiptStore? receiptStore,
+    DateTime Function()? clock,
+  }) : _client = client, // ignore: prefer_initializing_formals
+      _clock = clock ?? DateTime.now,
       _store = receiptStore ?? ImageReceiptStore();
   static final I = ImageStudio();
   final http.Client? _client;
   final ImageReceiptStore _store;
+  final DateTime Function() _clock;
+  final Map<String, ({DateTime until, ImageStudioError error})> _capacity = {};
+  ImageStudioError? _capabilityError;
+
+  ImageStudioError? get capacityError {
+    final entry = _capacity[_accountId];
+    return entry != null && _clock().isBefore(entry.until) ? entry.error : null;
+  }
+
+  void _rememberCapacity(ImageStudioError? error) {
+    if (error?.isCapacity == true && _accountId != null) {
+      _capacity.removeWhere((_, entry) => !_clock().isBefore(entry.until));
+      _capacity[_accountId!] = (
+        until: _clock().add(error!.retryAfter!),
+        error: error,
+      );
+    }
+  }
+
   String? _accountId;
   int _generation = 0;
   int _capabilityGeneration = 0;
@@ -147,6 +256,7 @@ class ImageStudio extends ChangeNotifier {
     _capabilityGeneration++;
     _operations = {};
     _refreshed = null;
+    _capabilityError = null;
   }
 
   Future<void> refresh(Map<String, String> headers) async {
@@ -168,7 +278,11 @@ class ImageStudio extends ChangeNotifier {
         return;
       }
       final body = response.body;
-      if (response.status != 200) return;
+      if (response.status != 200) {
+        _capabilityError = ImageStudioError._fromResponse(response);
+        _rememberCapacity(_capabilityError);
+        return;
+      }
       if (body['model'] != alias || body['operations'] is! Map) return;
       for (final op in ['generate', 'edit']) {
         final values = (body['operations'] as Map)[op];
@@ -216,9 +330,20 @@ class ImageStudio extends ChangeNotifier {
           }
           bytes.add(chunk);
         }
-        final decoded = jsonDecode(utf8.decode(bytes.takeBytes()));
-        if (decoded is! Map<String, dynamic>) throw const FormatException();
-        return _ImageHttpResponse(response.statusCode, decoded);
+        Map<String, dynamic> responseBody = const {};
+        try {
+          final decoded = jsonDecode(utf8.decode(bytes.takeBytes()));
+          if (decoded is Map<String, dynamic>) responseBody = decoded;
+        } catch (_) {
+          // Keep the HTTP status, never expose proxy HTML or provider text.
+        }
+        return _ImageHttpResponse(
+          response.statusCode,
+          responseBody,
+          retryAfter: response.headers.entries
+              .where((entry) => entry.key.toLowerCase() == 'retry-after')
+              .firstOrNull?.value,
+        );
       })().timeout(
         method == 'GET'
             ? const Duration(seconds: 15)
@@ -253,6 +378,9 @@ class ImageStudio extends ChangeNotifier {
     throw ImageStudioError(
       result.notice ??
           'Image bytes are unavailable. Check the existing receipt; do not submit another paid job.',
+      statusCode: result.error?.statusCode,
+      code: result.error?.code,
+      retryAfter: result.error?.retryAfter,
     );
   }
 
@@ -311,10 +439,15 @@ class ImageStudio extends ChangeNotifier {
       admission = await _store.reserve(
         candidate,
         isCurrent: () => _current(account, generation),
-        canSubmit: () => supportedSizes(operation).contains(size),
+        canSubmit: () =>
+            capacityError == null && supportedSizes(operation).contains(size),
       );
     } on ImageAdmissionError catch (error) {
       _checkCurrent(account, generation);
+      if (error.reason == ImageAdmissionReason.capabilityUnavailable) {
+        final failure = capacityError ?? _capabilityError;
+        if (failure != null) throw failure;
+      }
       throw ImageStudioError(switch (error.reason) {
         ImageAdmissionReason.accountUnavailable =>
           'Image access is unavailable for this account. Sign in to an active Ovid Cloud account.',
@@ -354,7 +487,13 @@ class ImageStudio extends ChangeNotifier {
       // Durable admission already protects retries even if updating unknown fails.
     }
     _checkCurrent(account, generation);
-    return _finish(admission.record, response, generation, allowImage: true);
+    return _finish(
+      admission.record,
+      response,
+      generation,
+      allowImage: true,
+      initialSubmission: true,
+    );
   }
 
   /// Quota-independent status recovery. No capability refresh or POST needed.
@@ -451,6 +590,7 @@ class ImageStudio extends ChangeNotifier {
     return ImageStudioResult(
       record: status.record,
       receiptPersisted: status.receiptPersisted,
+      error: ImageStudioError._fromResponse(replay),
       notice: switch (replay?.status) {
         410 =>
           'Image result expired. Saved exact accounting is retained; no replacement job was submitted.',
@@ -478,8 +618,11 @@ class ImageStudio extends ChangeNotifier {
     _ImageHttpResponse? response,
     int generation, {
     required bool allowImage,
+    bool initialSubmission = false,
   }) async {
     var record = original.unknown;
+    final error = ImageStudioError._fromResponse(response);
+    _rememberCapacity(error);
     Uint8List? bytes;
     ImageReceipt? returnedReceipt;
     String? notice;
@@ -492,6 +635,16 @@ class ImageStudio extends ChangeNotifier {
     } catch (_) {
       notice =
           'The returned receipt did not match the saved request. Check the existing receipt; do not resubmit.';
+    }
+    if (initialSubmission &&
+        response?.body['receipt'] == null &&
+        error?._preDispatchRejection == true) {
+      // Resolve the local admission fence, but do not invent a server receipt
+      // or a zero charge. Reusing this identity remains GET-only forever.
+      record = original.rejectedBeforeDispatch;
+      notice =
+          'The server rejected this submission before image execution. '
+          'No charge receipt was returned. A later manual request may use a new ID.';
     }
     if (allowImage &&
         response?.status == 200 &&
@@ -538,13 +691,15 @@ class ImageStudio extends ChangeNotifier {
     notice ??= switch (response?.status) {
       410 =>
         'Server image replay or receipt retention expired. Saved accounting is retained; image bytes are unavailable.',
-      404 =>
+      404 when record.unresolved =>
         'The server did not find this request. Its outcome remains uncertain; no new paid submission is allowed.',
+      404 =>
+        'The server did not find this request. Saved terminal status is retained.',
       401 || 403 =>
         'Sign in to the original account with current image permission to check this receipt.',
       _ when record.state == 'failed' =>
         'Image request failed (${imageChargeSummary(record.state, record.receipt?.charged).toLowerCase()}). '
-            'This receipt is resolved. You may start a new image request when image service is available.',
+            'This receipt is resolved. ${error?.isCapacity == true ? 'No automatic retry will be submitted.' : 'You may start a new image request when image service is available.'}',
       _ =>
         bytes != null
             ? null
@@ -552,11 +707,13 @@ class ImageStudio extends ChangeNotifier {
             ? 'Charge confirmed. Image bytes are unavailable from receipt recovery.'
             : 'Image outcome ${record.state}. Check this receipt; do not submit a replacement paid job.',
     };
+    if (error != null) notice = '${error.message} ${notice ?? ''}'.trim();
     return ImageStudioResult(
       record: record,
       receiptPersisted: persisted,
       bytes: bytes,
       notice: notice,
+      error: error,
     );
   }
 

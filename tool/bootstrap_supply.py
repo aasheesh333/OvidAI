@@ -29,7 +29,7 @@ ABI_MAP = {'aarch64': 'arm64-v8a', 'arm': 'armeabi-v7a', 'x86_64': 'x86_64'}
 BINS = set('''bash dash coreutils apt apt-get apt-cache apt-mark apt-config apt-key
 dpkg dpkg-deb dpkg-query dpkg-trigger dpkg-divert dpkg-split dpkg-realpath
 tar gzip gunzip zcat bzip2 bunzip2 xz unxz zstd unzstd curl wget gpgv
-grep sed awk find xargs which less head tail cat ls cp mv rm mkdir rmdir touch
+grep sed awk gawk find xargs which less head tail cat ls cp mv rm mkdir rmdir touch
 chmod chown ln uname whoami id env printenv ps top kill pkill date sleep true
 false test sha256sum md5sum base64 cut sort uniq wc tr tee
 termux-exec-ld-preload-lib termux-exec-system-linker-exec'''.split())
@@ -109,12 +109,25 @@ def build(asset, output, abi, pin):
         raise ValueError('missing keyring')
     if not any(n.startswith('share/terminfo/') for n in contents):
         raise ValueError('missing terminfo')
-    for required in ('SYMLINKS.txt', 'bin/bash', 'bin/gpgv', 'var/lib/dpkg/status'):
+    for required in ('SYMLINKS.txt', 'bin/bash', 'bin/gpgv', 'bin/gawk', 'var/lib/dpkg/status'):
         if required not in contents:
             raise ValueError(f'missing required payload: {required}')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.bootstrap-', dir=output.parent) as tmp:
         staged = Path(tmp) / 'payload.zip'
+        # Inside the signed APK payload so runtime repair can verify a bounded
+        # subset. The external manifest still binds the complete ZIP digest;
+        # embedding that digest would create a circular hash dependency.
+        repair_manifest = {
+            'schema': 1, 'androidAbi': ABI_MAP[abi],
+            'upstream': {'url': f'{BASE}/bootstrap-{abi}.zip', **pin},
+            'entries': sorted(entries, key=lambda e: e['path']),
+        }
+        contents['.ovid-bootstrap-manifest.json'] = (
+            (json.dumps(repair_manifest, sort_keys=True) + '\n').encode(), 0o644)
+        repair_bytes = contents['.ovid-bootstrap-manifest.json'][0]
+        entries.append({'path': '.ovid-bootstrap-manifest.json', 'size': len(repair_bytes),
+                        'mode': '0644', 'sha256': hashlib.sha256(repair_bytes).hexdigest()})
         with zipfile.ZipFile(staged, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as dest:
             for name, (data, mode) in sorted(contents.items()):
                 info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))

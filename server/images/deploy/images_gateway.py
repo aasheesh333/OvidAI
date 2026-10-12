@@ -18,11 +18,14 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from decimal import Decimal
+from threading import Lock
 
 import httpx
 from fastapi import Request
@@ -32,7 +35,9 @@ from starlette.concurrency import run_in_threadpool
 import mint
 from server.images.service import (
     ALIAS, MAX_BYTES, ImageError, Ledger, SIZES, discounted, money, validate_image,
+    capacity_retry_seconds,
 )
+from server.images.adapters import PRE_PROVIDER_REFUSAL_CODES, structured_error_code
 from server.images.verifier import VerifierAuth, mount_images
 
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://litellm:4000")
@@ -41,6 +46,7 @@ DB_PATH = os.environ.get("OVID_IMAGE_DB", "/data/ovid-images.sqlite")
 MAX_UPSTREAM_USD = Decimal(os.environ.get("OVID_IMAGE_MAX_UPSTREAM_USD", "1.00"))
 HTTP_TIMEOUT = float(os.environ.get("OVID_IMAGE_TIMEOUT", "120"))
 _CATALOG_TTL = 30.0
+_MAX_COOLDOWNS = 256
 _LOG = logging.getLogger(__name__)
 
 
@@ -130,17 +136,44 @@ def _key_spend(key_id):
 
 
 class LiteLLMImageService:
-    def __init__(self, discovery, ledger):
+    def __init__(self, discovery, ledger, *, clock=time.monotonic):
         self.discovery, self.ledger = discovery, ledger
+        self.clock = clock
+        # Process-local, bounded negative readiness cache. Catalog refreshes do
+        # not prove recovery. Only explicit no_capacity populates this cache.
+        self._cooldowns = OrderedDict()
+        self._cooldown_lock = Lock()
 
     @property
     def backends(self):
         return self.discovery.backends()
 
     def catalog(self):
-        available = bool(self.backends)
-        operations = {"generate": list(SIZES), "edit": list(SIZES)} if available else {"generate": [], "edit": []}
-        return {"model": ALIAS, "operations": operations}
+        backends = self.backends
+        delays = [self._retry_after(b.model) for b in backends]
+        if delays and all(delays):
+            raise ImageError(503, 'image_capacity_unavailable', retry_after_seconds=min(delays))
+        operations = {op: sorted({size for b in backends if op == 'generate' or b.edit for size in b.sizes})
+                      for op in ('generate', 'edit')}
+        # Static routing support is not proof of usable provider capacity.
+        return {"model": ALIAS, "operations": operations, "availability": "unknown"}
+
+    def _retry_after(self, model):
+        with self._cooldown_lock:
+            now = self.clock()
+            for key, until in list(self._cooldowns.items()):
+                if until <= now:
+                    del self._cooldowns[key]
+            until = self._cooldowns.get(model)
+            return max(1, math.ceil(until - now)) if until is not None else 0
+
+    def _capacity_refused(self, model, seconds):
+        with self._cooldown_lock:
+            until = self.clock() + capacity_retry_seconds(seconds)
+            self._cooldowns[model] = max(until, self._cooldowns.get(model, until))
+            self._cooldowns.move_to_end(model)
+            while len(self._cooldowns) > _MAX_COOLDOWNS:
+                self._cooldowns.popitem(last=False)
 
     def execute(self, account, request, operation, body, budget, *, budget_window="default"):
         if not isinstance(request, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,128}", request):
@@ -175,15 +208,22 @@ class LiteLLMImageService:
             raise ImageError(401, "sign_in_required")
         key_id = mint.rds.get(f"user:{account}:keyid")
         last_status = None
+        all_capacity = True
         for backend in candidates:
             self.ledger.receipt(account, request)
+            if self._retry_after(backend.model):
+                continue
             before = _key_spend(key_id) if key_id else None
             try:
                 result = self._forward(key, backend, operation, prompt, size, image_b64, image_mime)
             except _NotServed as error:
                 last_status = error.status
-                _LOG.info('image_attempt_rejected status=%s', error.status)
-                continue  # model not served / not found: nothing was billed
+                if error.reason == 'no_capacity':
+                    self._capacity_refused(backend.model, error.retry_after_seconds)
+                else:
+                    all_capacity = False
+                _LOG.info('image_attempt_rejected status=%s reason=%s', error.status, error.reason)
+                continue  # Explicit, allowlisted pre-dispatch refusal only.
             except Exception:
                 raise self._unknown(account, request, fingerprint) from None
             after = _key_spend(key_id) if key_id else None
@@ -201,6 +241,11 @@ class LiteLLMImageService:
             except Exception:
                 raise self._unknown(account, request, fingerprint) from None
         self.ledger.fail(account, request)
+        if all_capacity:
+            delays = [self._retry_after(b.model) for b in candidates]
+            raise ImageError(503, 'image_capacity_unavailable',
+                             retry_after_seconds=max(1, min(delays)),
+                             receipt=self.ledger.receipt(account, request))
         raise ImageError(503 if last_status == 503 or last_status is None else 502, "image_unavailable",
                          receipt=self.ledger.receipt(account, request))
 
@@ -219,8 +264,16 @@ class LiteLLMImageService:
                     data={"model": backend.model, "prompt": prompt, "size": size, "n": "1"},
                     files={"image": ("image.png", raw, image_mime)},
                 )
-        if response.status_code in (400, 404) or _capacity_rejected(response, backend.model):
-            raise _NotServed(response.status_code)
+        if _capacity_rejected(response, backend.model):
+            raise _NotServed(response.status_code, 'no_capacity',
+                             capacity_retry_seconds(response.headers.get('Retry-After')))
+        if response.status_code == 400:
+            try:
+                code = structured_error_code(response.json())
+            except ValueError:
+                code = None
+            if code in PRE_PROVIDER_REFUSAL_CODES:
+                raise _NotServed(response.status_code, code)
         if response.status_code != 200:
             raise ImageError(502, "image_unavailable")
         data = response.json()
@@ -243,8 +296,9 @@ class LiteLLMImageService:
 
 
 class _NotServed(Exception):
-    def __init__(self, status):
-        self.status = status
+    def __init__(self, status, reason, retry_after_seconds=None):
+        self.status, self.reason = status, reason
+        self.retry_after_seconds = retry_after_seconds
 
 
 @contextmanager

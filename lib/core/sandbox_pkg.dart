@@ -13,10 +13,10 @@ library;
 import 'dart:io';
 import 'diag.dart';
 
-/// Write `$PREFIX/bin/ovid-pkg`, `$PREFIX/bin/apt`, `bin/apt-get`,
+/// Write `$PREFIX/bin/ovid-pkg`, missing apt compatibility commands,
 /// `bin/pkg`, plus `$PREFIX/bin/npm` and `$PREFIX/bin/npx`. All shell
 /// scripts hardcode the sandbox prefix (via a #! shebang on the sandbox
-/// bash/sh binary) so they work without LD_PRELOAD/glibc tricks.
+/// bash/sh binary). Native binaries still need the sandbox linker environment.
 class OvidPkgInstaller {
   /// [arch] is the apt repo arch from the Dart ABI map
   /// (`aptArchFor`); when null the script falls back to `uname -m` and
@@ -38,45 +38,56 @@ class OvidPkgInstaller {
       _writeText('$p/etc/apt/ovid-mirrors', '${mirrors.join('\n')}\n');
     }
     for (final b in ['apt', 'apt-get', 'pkg']) {
-      _write('$p/bin/$b', _pkgWrapper(p, b));
+      // Keep native apt available for authenticated installs and bootstrap
+      // prerequisite repair. Older Ovid wrappers can still use ovid-pkg.
+      if (!File('$p/bin/$b').existsSync()) {
+        _write('$p/bin/$b', _pkgWrapper(p, b));
+      }
     }
     _write('$p/bin/npm', _npmCliWrapper(p, 'npm'));
     _write('$p/bin/npx', _npmCliWrapper(p, 'npx'));
   }
 
   static void _writeText(String path, String content) {
-    try {
-      final f = File(path);
-      f.parent.createSync(recursive: true);
-      f.writeAsStringSync(content, flush: true);
-    } catch (e) {
-      Diag.swallow('sandbox_pkg', e);
-    }
+    _publish(path, content, executable: false);
   }
 
   static void _write(String path, String content) {
+    _publish(path, content, executable: true);
+  }
+
+  static void _publish(String path, String content, {required bool executable}) {
+    Directory? stage;
     try {
       final f = File(path);
       f.parent.createSync(recursive: true);
-      f.writeAsStringSync(content, flush: true);
-      try {
-        Process.runSync('chmod', ['0755', path]);
-      } catch (_) {
+      stage = f.parent.createTempSync('.ovid-wrapper-');
+      final candidate = File('${stage.path}/content');
+      candidate.writeAsStringSync(content, flush: true);
+      if (executable) {
         try {
-          Process.runSync('/system/bin/chmod', ['0755', path]);
-        } catch (e) {
-          Diag.swallow('sandbox_pkg', e);
+          final result = Process.runSync('chmod', ['0755', candidate.path]);
+          if (result.exitCode != 0) throw StateError('${result.stderr}');
+        } catch (_) {
+          final result = Process.runSync('/system/bin/chmod', ['0755', candidate.path]);
+          if (result.exitCode != 0) throw StateError('${result.stderr}');
         }
       }
+      // Rename replaces the directory entry, never the target of npm/npx's
+      // package-owned symlinks (or hardlinks). Writing through them corrupts
+      // npm-cli.js and makes node execute a shell wrapper as JavaScript.
+      candidate.renameSync(path);
     } catch (e) {
       Diag.swallow('sandbox_pkg', e);
+      rethrow;
+    } finally {
+      stage?.deleteSync(recursive: true);
     }
   }
 
   static String _pkgWrapper(String p, String tool) =>
       """#!$p/bin/sh
-# Ovid-wrapped $tool — package ops always work even when apt can't reach
-# a mirror (Transport HTTPS broken → see ovid-pkg).
+# Ovid compatibility $tool — authenticated package operations via ovid-pkg.
 exec "$p/bin/ovid-pkg" "\$@"
 """;
 
@@ -109,9 +120,17 @@ extension on String {
 
 const _ovidPkg = r'''
 #!/bin/sh
-# ovid-pkg − curl+dpkg installer; apt's https method is broken on this device.
+# ovid-pkg − signed curl+dpkg installer, independent of apt's transport.
 set -u
 if [ -z "${PREFIX:-}" ]; then echo "missing PREFIX env" >&2; exit 1; fi
+# Check the parser before using it even to select a mirror. Some older
+# bootstraps kept awk -> gawk but discarded gawk itself. Fail with the actual
+# execution error, not a misleading signature or connectivity diagnosis.
+awk 'BEGIN { exit 0 }' </dev/null || { echo '[ovid-pkg] prerequisite failed: awk (bootstrap must include gawk)' >&2; exit 1; }
+gpgv --version >/dev/null || { echo '[ovid-pkg] prerequisite failed: gpgv' >&2; exit 1; }
+for tool in curl dpkg dpkg-deb tar sha256sum realpath readlink mktemp date gzip xz sed grep sync; do
+  command -v "$tool" >/dev/null || { echo "[ovid-pkg] prerequisite missing: $tool" >&2; exit 1; }
+done
 PKG_IDX="$PREFIX/var/cache/ovid-pkg"
 mkdir -p "$PKG_IDX/archives"
 ARCH="$(uname -m 2>/dev/null || echo aarch64)"
@@ -136,9 +155,64 @@ fi
 # A killed process may leave a lock: fail closed; the caller must reap its old
 # process before removing that lock. Never guess ownership from a recycled PID.
 mkdir "$PKG_IDX/lock" 2>/dev/null || { echo '[ovid-pkg] cache busy; recovery requires reaped owner' >&2; exit 1; }
-operation="$(mktemp -d "$PKG_IDX/operation.XXXXXX")" || { rmdir "$PKG_IDX/lock"; exit 1; }
-trap 'rm -rf "$operation"; rmdir "$PKG_IDX/lock"' EXIT
+# The app passes a unique invocation token and may remove only that token's
+# lock after it has reaped the command. Standalone callers remain fail-closed.
+printf '%s' "${OVID_PKG_OPERATION:-unmanaged-$$}" > "$PKG_IDX/lock/owner" || { rmdir "$PKG_IDX/lock"; exit 1; }
+_unlock() { rm -f "$PKG_IDX/lock/owner"; rmdir "$PKG_IDX/lock"; }
+operation="$(mktemp -d "$PKG_IDX/operation.XXXXXX")" || { _unlock; exit 1; }
+transaction="$PKG_IDX/transaction"
+_discard_transaction() {
+  # Interrupted cleanup must not leave an active journal whose backups have
+  # already been partially removed.
+  mv -- "$transaction" "$operation/completed-transaction" || return 1
+  rm -rf "$operation/completed-transaction"
+}
+_recover() {
+  [ -d "$transaction" ] || return 0
+  if [ -f "$transaction/committed" ] || [ ! -f "$transaction/active" ]; then
+    _discard_transaction; return $?
+  fi
+  # Journal entries contain canonical parent paths; never follow a replaced
+  # leaf symlink. Backups are retained until the entire rollback succeeds so
+  # interruption of recovery is itself restartable.
+  while IFS='|' read -r id destination state; do
+    case "$destination" in "$PREFIX"/*) ;; *) return 1;; esac
+    parent="${destination%/*}"
+    resolved="$(realpath -m -- "$parent")" || return 1
+    [ "$resolved" = "$parent" ] || return 1
+    case "$state" in
+      old)
+        rm -f -- "$transaction/restore" &&
+          cp -a -- "$transaction/backup/$id" "$transaction/restore" &&
+          mv -fT -- "$transaction/restore" "$destination" || return 1;;
+      new) [ ! -d "$destination" ] || [ -L "$destination" ] || return 1
+        rm -f -- "$destination" || return 1;;
+      *) return 1;;
+    esac
+  done < "$transaction/journal"
+  # Only remove newly-created, still-empty directories, deepest first.
+  LC_ALL=C sort -r "$transaction/directories" > "$transaction/reverse" || return 1
+  while IFS= read -r directory; do
+    case "$directory" in "$PREFIX"/*) rmdir -- "$directory" 2>/dev/null || :;; *) return 1;; esac
+  done < "$transaction/reverse"
+  sync || return 1
+  _discard_transaction
+}
+_finish() {
+  result=$?
+  trap - EXIT HUP INT TERM
+  if ! _recover; then
+    echo '[ovid-pkg] rollback incomplete; retry recover after reaping owner' >&2
+    result=1
+  fi
+  [ -z "${work:-}" ] || rm -rf "$work"
+  rm -rf "$operation"
+  _unlock
+  exit "$result"
+}
+trap '_finish' EXIT
 trap 'exit 1' HUP INT TERM
+_recover || { echo '[ovid-pkg] pending transaction recovery failed' >&2; exit 1; }
 INDEX=""
 _error() { echo "[ovid-pkg] signed index verification failed: $*" >&2; return 1; }
 _bounded_fetch() {
@@ -266,6 +340,7 @@ _fetch_index() {
 
 cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
+  recover) echo '[ovid-pkg] pending transaction recovered';;
   update)
     _fetch_index && _index_ok || { _error 'fetch, signature, hash, expiry or stale generation'; exit 1; }
     echo "[ovid-pkg] index ready ($generation; Release SHA256=$release_hash; expires=$expires)"
@@ -282,7 +357,7 @@ case "$cmd" in
     _names=""
     for _a in "$@"; do
       case "$_a" in
-        -y|--yes|-q|--quiet) ;;
+        -y|--yes|-q|--quiet|--no-install-recommends|--reinstall) ;;
         *) _names="$_names $_a" ;;
       esac
     done
@@ -294,8 +369,6 @@ case "$cmd" in
     # Resolve the entire closure before transport or extraction. An owned
     # temporary directory prevents archive-name collisions between versions.
     work="$(mktemp -d "$PKG_IDX/archives/install.XXXXXX")" || exit 1
-    trap 'rm -rf "$work" "$operation"; rmdir "$PKG_IDX/lock"' EXIT
-    trap 'exit 1' HUP INT TERM
     [ "$(wc -c < "$INDEX")" -le 33554432 ] || {
       echo '[ovid-pkg] dependency index size limit exceeded' >&2; exit 1;
     }
@@ -383,72 +456,51 @@ case "$cmd" in
         exit "$status"
       fi
     done
-    # Only after every archive extracted successfully may repaired leaves be
-    # unlinked. cp must never write through an existing file symlink.
+    # Plan publication directly at relocated destinations. Never copy the
+    # Termux container tree into PREFIX or merge unrelated existing files.
+    mkdir -p "$transaction/backup" "$transaction/candidate" || exit 1
+    : > "$transaction/journal"; : > "$transaction/directories"
+    : > "$transaction/plan"
+    id=0; backup_bytes=0
     while IFS='|' read -r kind entry target; do
-      [ "$kind" = d ] && continue
-      for relative in "$entry" "${entry#data/data/com.termux/files/usr/}"; do
-        destination="$PREFIX/$relative"
-        _contained "$destination" || exit 1
-        if [ -L "$destination" ]; then rm -- "$destination" || exit 1; fi
-      done
+      relative="${entry#data/data/com.termux/files/usr/}"
+      case "$entry" in data|data/data|data/data/com.termux|data/data/com.termux/files|data/data/com.termux/files/usr) continue;; esac
+      parent="$(realpath -m -- "$PREFIX/${relative%/*}")" || exit 1
+      [ "$relative" != "${relative%/*}" ] || parent="$PREFIX"
+      case "$parent" in "$PREFIX"|"$PREFIX"/*) ;; *) exit 1;; esac
+      destination="$parent/${relative##*/}"
+      # Package content must never overwrite its recovery state or scripts.
+      case "$destination" in "$PKG_IDX"|"$PKG_IDX"/*|"$PREFIX/bin/ovid-pkg"|"$PREFIX/libexec/ovid-pkg-"*) exit 1;; esac
+      if [ "$kind" = d ]; then
+        [ -d "$destination" ] && continue
+        [ ! -e "$destination" ] && [ ! -L "$destination" ] || exit 1
+        printf '%s\n' "$destination" >> "$transaction/directories"
+        continue
+      fi
+      [ ! -d "$destination" ] || [ -L "$destination" ] || exit 1
+      id=$((id+1)); [ "$id" -le 100000 ] || exit 1
+      if [ -e "$destination" ] || [ -L "$destination" ]; then
+        if [ ! -L "$destination" ]; then
+          size="$(wc -c < "$destination")" || exit 1
+          backup_bytes=$((backup_bytes+size)); [ "$backup_bytes" -le 1073741824 ] || exit 1
+        fi
+        cp -a -- "$destination" "$transaction/backup/$id" || exit 1
+        state=old
+      else state=new; fi
+      printf '%s|%s|%s\n' "$id" "$destination" "$state" >> "$transaction/journal" || exit 1
+      cp -a -- "$work/stage/$entry" "$transaction/candidate/$id" || exit 1
+      printf '%s|%s\n' "$id" "$destination" >> "$transaction/plan" || exit 1
     done < "$work/paths"
-    # cp -a refuses a directory over an existing directory symlink. Merge
-    # these already containment-checked aliases explicitly, deepest first,
-    # and exclude their consumed stage trees from the ordinary bulk copy.
-    awk -F '|' '$1=="d" { print $2 }' "$work/paths" | LC_ALL=C sort -r > "$work/directories"
-    while IFS= read -r entry; do
-      for relative in "$entry" "${entry#data/data/com.termux/files/usr/}"; do
-        source="$work/stage/$entry"; destination="$PREFIX/$relative"
-        if [ -d "$source" ] && [ -L "$destination" ]; then
-          _contained "$destination" || exit 1
-          mkdir -p -- "$_resolved" || exit 1
-          cp -a "$source/." "$_resolved/" && rm -rf -- "$source" || {
-            echo '[ovid-pkg] staged archive alias publication failed' >&2; exit 1;
-          }
-        fi
-      done
-    done < "$work/directories"
-    cp -a "$work/stage/." "$PREFIX/" || {
-      echo '[ovid-pkg] staged archive publication failed' >&2; exit 1;
-    }
-    tail -4 "$_dlog" 2>/dev/null
-    # Termux .deb payloads are rooted at /data/data/com.termux/files/usr, so
-    # `dpkg-deb -x … $PREFIX` lands every file under
-    # $PREFIX/data/data/com.termux/files/usr/… — off PATH, off the linker
-    # search path, and invisible to every readiness probe that checks
-    # `$PREFIX/bin/<tool>`. The install then "succeeded" while the binary did
-    # not exist where anything looks for it: that is how proot (Flutter),
-    # openjdk (Kotlin) and clang installs passed and still failed. Relocate
-    # the payload into $PREFIX now, merging into directories that already
-    # exist from the bootstrap.
-    _tp="$PREFIX/data/data/com.termux/files/usr"
-    if [ -d "$_tp" ]; then
-      _moved=0
-      _relocation_failed=0
-      for _e in "$_tp"/*; do
-        [ -e "$_e" ] || continue
-        _b="$(basename "$_e")"
-        if [ -d "$_e" ] && [ -d "$PREFIX/$_b" ]; then
-          if cp -a "$_e/." "$PREFIX/$_b/" && rm -rf "$_e"; then
-            _moved=$((_moved+1))
-          else
-            echo "[ovid-pkg] could not relocate $_b (copy or cleanup failed)" >&2
-            _relocation_failed=1
-          fi
-        elif mv "$_e" "$PREFIX/$_b"; then
-          _moved=$((_moved+1))
-        elif cp -a "$_e" "$PREFIX/" && rm -rf "$_e"; then
-          _moved=$((_moved+1))
-        else
-          echo "[ovid-pkg] could not relocate $_b (move, copy or cleanup failed)" >&2
-          _relocation_failed=1
-        fi
-      done
-      rmdir -p "$_tp" 2>/dev/null
-      [ "$_moved" -gt 0 ] && echo "[ovid-pkg] relocated $_moved path(s) into \$PREFIX"
-      [ "$_relocation_failed" -ne 0 ] && exit 1
-    fi
+    # No live leaf has changed until every backup and candidate is complete.
+    sync || exit 1
+    : > "$transaction/active"; sync || exit 1
+    LC_ALL=C sort -u "$transaction/directories" > "$transaction/ordered" || exit 1
+    while IFS= read -r directory; do mkdir -p -- "$directory" || exit 1; done < "$transaction/ordered"
+    while IFS='|' read -r id destination; do
+      mv -fT -- "$transaction/candidate/$id" "$destination" || exit 1
+    done < "$transaction/plan"
+    sync || exit 1
+    : > "$transaction/committed"; sync || exit 1
     echo "[ovid-pkg] extracted $(echo $targets | wc -w) package(s)"
     exit 0
     ;;

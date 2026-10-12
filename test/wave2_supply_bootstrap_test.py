@@ -19,7 +19,7 @@ class BootstrapSupplyTest(unittest.TestCase):
         self.asset = self.root / 'upstream.zip'
         with zipfile.ZipFile(self.asset, 'w') as z:
             for name, data in {
-                'bin/bash': b'shell', 'bin/gpgv': b'verifier',
+                'bin/bash': b'shell', 'bin/gpgv': b'verifier', 'bin/gawk': b'awk',
                 'bin/unwanted': b'omit', 'lib/libfixture.so': b'library',
                 'share/termux-keyring/fixture.gpg': b'public key',
                 'share/terminfo/x/xterm': b'terminal',

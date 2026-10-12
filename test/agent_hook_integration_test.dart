@@ -88,6 +88,58 @@ void main() {
     await root.delete(recursive: true);
   });
 
+  test('capacity tool failure is an error and fresh IDs cannot repeat submission', () async {
+    ImageStudio.I.bindAccount('capacity-account');
+    final run = AgentRun();
+    AgentService.I.setRunCtxForTest(run, session, 0);
+    var posts = 0;
+    final client = MockClient((request) async {
+      if (request.url.path.endsWith('/capabilities')) {
+        return http.Response(
+          '{"model":"ovid-image","operations":{"generate":["1024x1024"]}}', 200);
+      }
+      posts++;
+      final record = (await ImageReceiptStore().list('capacity-account')).last;
+      return http.Response(jsonEncode({
+        'error': {'code': 'image_capacity_unavailable', 'retryAfterSeconds': 1},
+        'receipt': {
+          'account_id': record.accountId, 'request_id': record.requestId,
+          'fingerprint': record.fingerprint, 'state': 'failed', 'charged': '0',
+        },
+      }), 503);
+    });
+    addTearDown(client.close);
+    await http.runWithClient(() async {
+      for (final id in ['capacity-job-1234', 'capacity-job-1234', 'new-job-1234']) {
+        final result = await AgentService.I.dispatchForTest('generate_image', {
+          'prompt': 'cat', 'size': '1024x1024', 'request_id': id,
+        });
+        expect(result, startsWith('Error:'));
+        expect(result, contains('image_capacity_unavailable'));
+        expect(result, isNot(contains('credits')));
+      }
+      expect(posts, 1);
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      expect(ImageStudio.I.capacityError, isNull);
+      final blocked = await AgentService.I.dispatchForTest('generate_image', {
+        'prompt': 'cat', 'size': '1024x1024', 'request_id': 'expired-same-run',
+      });
+      expect(blocked, startsWith('Error:'));
+      expect(posts, 1, reason: 'Cooldown expiry must not restart the same run');
+      AgentService.I.setRunCtxForTest(AgentRun(), session, 0);
+      await AgentService.I.dispatchForTest('generate_image', {
+        'prompt': 'cat', 'size': '1024x1024', 'request_id': 'later-manual-job',
+      });
+      expect(posts, 2, reason: 'A later human run may submit after cooldown');
+      final events = await SessionLedger.I.read(session.id);
+      final ends = events.where((event) => event['kind'] == 'tool_end').toList();
+      expect(ends, hasLength(5));
+      for (final event in ends) {
+        expect(event['ok'], isFalse);
+      }
+    }, () => client);
+  });
+
   // Catches loss of a confirmed receipt when local save throws after inference.
   // The cloud boundary is fake; admission, receipt parsing/storage, tool policy,
   // image decoding, filesystem failure and the tool result are production code.

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/studio_setup_coordinator.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -34,6 +35,7 @@ void main() {
   });
 
   tearDown(() {
+    SandboxService.execCheckedOverrideForTest = null;
     StudioSetupCoordinator.overrideForTest = null;
     coordinator.dispose();
     AppState.resetTestInstance();
@@ -250,6 +252,135 @@ void main() {
       expect(installs, 2);
       await tester.pumpAndSettle();
       expect(find.text('Sandbox ready'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'runtime phase advancement never verifies failed Node and partial stops activity',
+    (tester) async {
+      tallViewport(tester);
+      final barrier = Completer<void>();
+      useCoordinator(
+        install: (onPhase, _) async {
+          onPhase(7, .7, 'node ................ ⚠ not installed (offline?)');
+          onPhase(8, 1, 'python .............. ⚠ not installed');
+          onPhase(8, 1, 'git ...............  ⚠ exec failed');
+          await barrier.future;
+        },
+        verifyRuntimes: () async => false,
+      );
+      await tester.pumpWidget(host());
+      await tester.tap(find.text('Install sandbox'));
+      await tester.pump();
+      Finder step(String name) => find.ancestor(
+        of: find.text(name),
+        matching: find.byType(AetherCard),
+      ).first;
+      expect(
+        find.descendant(
+          of: step('Installing Node.js runtime'),
+          matching: find.text('Needs attention'),
+        ),
+        findsOneWidget,
+      );
+      barrier.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Sandbox core ready'), findsOneWidget);
+      for (final name in [
+        'Installing Node.js runtime',
+        'Installing Python runtime',
+        'Git',
+      ]) {
+        expect(
+          find.descendant(of: step(name), matching: find.text('Needs attention')),
+          findsOneWidget,
+        );
+      }
+      expect(find.text('In progress'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(
+        tester
+            .widgetList<AetherStatusDot>(find.byType(AetherStatusDot))
+            .every((dot) => !dot.pulsing),
+        isTrue,
+      );
+      expect(AppState.I.sandboxInstalled, isTrue);
+      expect(AppState.I.studioFirstOpenDone, isFalse);
+      expect(AppState.I.runtimeInstallState, RuntimeInstallState.failed);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'Git failure at Python phase does not fail verified Python or native core',
+    (tester) async {
+      tallViewport(tester);
+      SandboxService.execCheckedOverrideForTest = (args, env) async =>
+          args.last == 'git --version' ? (127, 'not installed') : (0, 'version');
+      coordinator = StudioSetupCoordinator(
+        checkExisting: () async => false,
+        install: (onPhase, _) async {
+          onPhase(8, 1, 'git ...............  ⚠ exec failed');
+        },
+      );
+      StudioSetupCoordinator.overrideForTest = coordinator;
+      await tester.pumpWidget(host());
+      await tester.tap(find.text('Install sandbox'));
+      await tester.pumpAndSettle();
+      for (final name in [
+        'Installing Node.js runtime',
+        'Installing Python runtime',
+        'Verifying native exec',
+      ]) {
+        final card = find.ancestor(
+          of: find.text(name),
+          matching: find.byType(AetherCard),
+        ).first;
+        expect(
+          find.descendant(of: card, matching: find.text('Verified')),
+          findsOneWidget,
+        );
+      }
+      expect(find.text('Needs attention'), findsOneWidget);
+      expect(find.text('In progress'), findsNothing);
+      expect(find.text('SANDBOX SETUP LOG — LIVE'), findsNothing);
+      expect(find.text('SANDBOX SETUP LOG'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'phase completion without runtime evidence remains unverified',
+    (tester) async {
+      tallViewport(tester);
+      final barrier = Completer<void>();
+      useCoordinator(
+        install: (onPhase, _) async {
+          onPhase(8, 1, 'Runtime install returned');
+          await barrier.future;
+        },
+        verifyRuntimes: () async => false,
+      );
+      await tester.pumpWidget(host());
+      await tester.tap(find.text('Install sandbox'));
+      await tester.pump();
+      final nodeCard = find.ancestor(
+        of: find.text('Installing Node.js runtime'),
+        matching: find.byType(AetherCard),
+      ).first;
+      expect(
+        find.descendant(of: nodeCard, matching: find.text('Not verified')),
+        findsOneWidget,
+      );
+      barrier.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Not verified'), findsNWidgets(4));
+      expect(find.text('Needs attention'), findsNothing);
+      expect(find.text('In progress'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     },

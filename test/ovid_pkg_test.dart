@@ -43,6 +43,32 @@ void main() {
       expect(content, contains('ARCH="aarch64"'));
     });
 
+    test('wrapper refresh preserves npm CLI targets behind package symlinks', () {
+      for (final name in ['npm', 'npx']) {
+        final cli = File('${tmp.path}/lib/node_modules/npm/bin/$name-cli.js');
+        cli.parent.createSync(recursive: true);
+        cli.writeAsStringSync('console.log("$name fixture");\n');
+        File('${tmp.path}/bin/$name').deleteSync();
+        Link('${tmp.path}/bin/$name').createSync('../lib/node_modules/npm/bin/$name-cli.js');
+      }
+      OvidPkgInstaller.writeAll(tmp);
+      for (final name in ['npm', 'npx']) {
+        expect(File('${tmp.path}/lib/node_modules/npm/bin/$name-cli.js').readAsStringSync(),
+            'console.log("$name fixture");\n');
+        expect(FileSystemEntity.isLinkSync('${tmp.path}/bin/$name'), isFalse);
+      }
+    });
+
+    test('wrapper refresh preserves existing native apt executables', () {
+      for (final name in ['apt', 'apt-get']) {
+        File('${tmp.path}/bin/$name').writeAsBytesSync([127, 69, 76, 70, 1, 2, 3]);
+      }
+      OvidPkgInstaller.writeAll(tmp);
+      for (final name in ['apt', 'apt-get']) {
+        expect(File('${tmp.path}/bin/$name').readAsBytesSync(), [127, 69, 76, 70, 1, 2, 3]);
+      }
+    });
+
     test('falls back to uname with armv7l/armv8l mapped to arm', () {
       final fallback = Directory.systemTemp.createTempSync('ovid-pkg-fallback');
       addTearDown(() => fallback.deleteSync(recursive: true));
@@ -250,6 +276,14 @@ exec /usr/bin/dpkg-deb "$@"
       expect(res.stdout, contains('[ovid-pkg] extracted 1 package(s)'));
     });
 
+    test('broken awk reports the bootstrap prerequisite before acquiring a lock', () async {
+      writeStub(Directory('${tmp.path}/stubs'), 'awk', 'echo "CANNOT LINK EXECUTABLE awk" >&2; exit 127');
+      final res = await install(['app']);
+      expect(res.exitCode, isNot(0));
+      expect('${res.stdout}${res.stderr}', contains('prerequisite failed: awk'));
+      expect(Directory('${tmp.path}/var/cache/ovid-pkg/lock').existsSync(), isFalse);
+    });
+
     test('strips -y/--yes/-q/--quiet before resolving packages', () async {
       seedIndex({'app': '', 'other': ''});
       successfulInstallStubs();
@@ -261,6 +295,8 @@ exec /usr/bin/dpkg-deb "$@"
         '-q',
         'other',
         '--quiet',
+        '--no-install-recommends',
+        '--reinstall',
       ]);
 
       expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
@@ -271,24 +307,64 @@ exec /usr/bin/dpkg-deb "$@"
       expect(File('${tmp.path}/bin/other').readAsStringSync(), 'other_1.deb\n');
     });
 
-    for (final branch in ['merge', 'move']) {
-      for (final failingCommand in ['cp', 'rm']) {
+    for (final signal in ['TERM', 'KILL', 'KILL-recovery']) {
+      test('interrupted overlay $signal restores affected leaves and preserves user files', () async {
+        seedIndex({'app': '', 'other': '', 'new-tool': ''});
+        successfulInstallStubs();
+        File('${tmp.path}/bin/user-target').writeAsStringSync('user data');
+        Link('${tmp.path}/bin/app').createSync('user-target');
+        File('${tmp.path}/bin/other').writeAsStringSync('old other');
+        final stubs = Directory('${tmp.path}/stubs');
+        writeStub(stubs, 'mv', '''
+/bin/mv "\$@" || exit \$?
+case "\$*" in *transaction/candidate*)
+  if [ ! -f "\$PREFIX/interrupted" ]; then
+    : > "\$PREFIX/interrupted"
+    kill -${signal == 'TERM' ? 'TERM' : 'KILL'} "\$PPID"
+  fi;;
+esac
+''');
+        final res = await install(['app', 'other', 'new-tool']);
+        expect(res.exitCode, isNot(0));
+        File('${stubs.path}/mv').deleteSync();
+        if (signal.startsWith('KILL')) {
+          // The owner is now reaped, as in SandboxService._checkedCommand.
+          final lock = Directory('${tmp.path}/var/cache/ovid-pkg/lock');
+          if (lock.existsSync()) lock.deleteSync(recursive: true);
+          if (signal == 'KILL-recovery') {
+            writeStub(stubs, 'mv', r'''
+/bin/mv "$@" || exit $?
+case "$*" in *transaction/restore*) kill -KILL "$PPID";; esac
+''');
+            final interruptedRecovery = await Process.run('/bin/sh', [script, 'recover'], environment: env);
+            expect(interruptedRecovery.exitCode, isNot(0));
+            expect(Directory('${tmp.path}/var/cache/ovid-pkg/transaction/backup').existsSync(), isTrue);
+            File('${stubs.path}/mv').deleteSync();
+            if (lock.existsSync()) lock.deleteSync(recursive: true);
+          }
+          final recovered = await Process.run('/bin/sh', [script, 'recover'], environment: env);
+          expect(recovered.exitCode, 0, reason: '${recovered.stdout}${recovered.stderr}');
+        }
+        expect(FileSystemEntity.isLinkSync('${tmp.path}/bin/app'), isTrue);
+        expect(Link('${tmp.path}/bin/app').targetSync(), 'user-target');
+        expect(File('${tmp.path}/bin/user-target').readAsStringSync(), 'user data');
+        expect(File('${tmp.path}/bin/other').readAsStringSync(), 'old other');
+        expect(File('${tmp.path}/bin/new-tool').existsSync(), isFalse);
+        expect((await install(['app', 'other'])).exitCode, 0);
+      });
+    }
+
+    for (final failingCommand in ['cp', 'mv']) {
         test(
-          'relocation $branch $failingCommand failure exits non-zero',
+          'transaction $failingCommand failure preserves live payload',
           () async {
             seedIndex({'app': ''}, share: true);
             successfulInstallStubs();
             final stubs = Directory('${tmp.path}/stubs');
-            final nested = '${tmp.path}/data/data/com.termux/files/usr';
-            // bin exercises the merge branch; share exercises move/copy fallback.
-            // A successful sibling must not erase the failed relocation status.
-            final directory = branch == 'merge' ? 'bin' : 'share';
-            if (branch == 'move') {
-              writeStub(stubs, 'mv', 'exit 7');
-            }
+            File('${tmp.path}/bin/app').writeAsStringSync('original');
             writeStub(stubs, failingCommand, '''
-case "\$2" in
-  "\$PREFIX/data/data/com.termux/files/usr/$directory"|"\$PREFIX/data/data/com.termux/files/usr/$directory/.") exit 8;;
+case "\$*" in
+  *transaction/candidate*) exit 8;;
 esac
 exec /bin/$failingCommand "\$@"
 ''');
@@ -296,33 +372,23 @@ exec /bin/$failingCommand "\$@"
             final res = await install(['app']);
 
             expect(recorded('extractions'), ['app']);
-            final relative = branch == 'merge' ? 'bin/app' : 'share/fixture';
-            expect(File('$nested/$relative').existsSync(), isTrue);
-            expect(
-              File('${tmp.path}/$relative').existsSync(),
-              failingCommand == 'rm',
-            );
+            expect(File('${tmp.path}/bin/app').readAsStringSync(), 'original');
+            expect(File('${tmp.path}/share/fixture').existsSync(), isFalse);
             expect(
               res.exitCode,
               isNot(0),
               reason: '${res.stdout}${res.stderr}',
             );
-            expect(res.stderr, contains('could not relocate $directory'));
             expect(res.stdout, isNot(contains('[ovid-pkg] extracted')));
-            final sibling = branch == 'merge' ? 'share/fixture' : 'bin/app';
-            expect(File('${tmp.path}/$sibling').existsSync(), isTrue);
-            expect(File('$nested/$sibling').existsSync(), isFalse);
           },
         );
-      }
     }
 
     test(
-      'relocation move failure with successful copy fallback exits zero',
+      'successful transaction publishes directly without a nested Termux tree',
       () async {
         seedIndex({'app': ''}, share: true);
         successfulInstallStubs();
-        writeStub(Directory('${tmp.path}/stubs'), 'mv', 'exit 7');
 
         final res = await install(['app']);
 

@@ -150,6 +150,12 @@ class ImageRequestRecord {
   ImageRequestRecord get unknown =>
       unresolved ? _copy(state: 'unknown', receipt: receipt) : this;
 
+  /// A contract-verified rejection resolves local admission, not accounting.
+  /// No synthetic receipt or numeric zero is created. The identity stays saved
+  /// so an old request can never be resubmitted as paid work.
+  ImageRequestRecord get rejectedBeforeDispatch =>
+      unresolved ? _copy(state: 'failed') : this;
+
   Map<String, Object?> toJson() => {
     'account_id': accountId,
     'request_id': requestId,

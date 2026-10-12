@@ -1,5 +1,6 @@
 """Behavioral regressions for release gates; no signing/Firebase fixtures."""
 import importlib.util
+import hashlib
 import contextlib
 import io
 import json
@@ -298,6 +299,52 @@ class BootstrapSupplyAlignmentTest(unittest.TestCase):
 
     def setUp(self):
         self.assertTrue(hasattr(self, 'supply'), 'bootstrap supply tool is not implemented')
+
+    def fixture_build(self, root, *, gawk=True):
+        source = root / 'upstream.zip'
+        entries = {
+            'bin/bash': elf(), 'bin/gpgv': elf(), 'bin/apt': elf(),
+            'bin/apt-get': elf(),
+            'SYMLINKS.txt': 'gawk←./bin/awk\nbash←./bin/sh\n'.encode(),
+            'var/lib/dpkg/status': b'Package: gawk\nStatus: install ok installed\n',
+            'share/termux-keyring/fixture.gpg': b'fixture',
+            'share/terminfo/x/xterm': b'fixture',
+        }
+        if gawk:
+            entries['bin/gawk'] = elf()
+        with zipfile.ZipFile(source, 'w') as z:
+            for name, data in entries.items():
+                info = zipfile.ZipInfo(name)
+                info.external_attr = (0o100755 if name.startswith('bin/') else 0o100644) << 16
+                z.writestr(info, data)
+        pin = {'size': source.stat().st_size,
+               'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}
+        output = root / 'derived.zip'
+        self.supply.build(source, output, 'aarch64', pin)
+        return output
+
+    def test_derived_bootstrap_retains_awk_symlink_target_and_repair_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.fixture_build(Path(directory))
+            with zipfile.ZipFile(output) as z:
+                self.assertIn('gawk←./bin/awk', z.read('SYMLINKS.txt').decode())
+                self.assertIn('bin/gawk', z.namelist())
+                self.assertEqual(z.read('bin/gawk'), elf())
+                self.assertEqual((z.getinfo('bin/gawk').external_attr >> 16) & 0o777, 0o755)
+                manifest = json.loads(z.read('.ovid-bootstrap-manifest.json'))
+                self.assertEqual(manifest['androidAbi'], 'arm64-v8a')
+                for name in ('bin/gawk', 'bin/apt', 'bin/apt-get', 'SYMLINKS.txt'):
+                    entry = next(e for e in manifest['entries'] if e['path'] == name)
+                    self.assertEqual(entry['sha256'], hashlib.sha256(z.read(name)).hexdigest())
+                    self.assertEqual(entry['size'], len(z.read(name)))
+
+    def test_missing_gawk_fails_before_derived_output_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'derived.zip').write_bytes(b'previous good payload')
+            with self.assertRaisesRegex(ValueError, 'bin/gawk'):
+                self.fixture_build(root, gawk=False)
+            self.assertEqual((root / 'derived.zip').read_bytes(), b'previous good payload')
 
     def test_aligned_payload_has_no_findings(self):
         contents = {'bin/bash': (elf(), 0o755), 'lib/libc.so': (elf(), 0o644)}

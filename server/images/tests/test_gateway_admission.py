@@ -13,11 +13,15 @@ from threading import Event
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
+from contextlib import contextmanager
 
 import httpx
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from PIL import Image
 
 from server.images.service import ImageError, Ledger
+from server.images.verifier import Identity, mount_images
 
 
 def load_gateway():
@@ -90,7 +94,8 @@ class GatewayAdmissionTest(unittest.TestCase):
             with self.assertRaises(ImageError) as caught:
                 self.execute()
         self.assertEqual(self.calls, ['image-a', 'image-b'])
-        self.assertEqual(caught.exception.code, 'image_unavailable')
+        self.assertEqual(caught.exception.code, 'image_capacity_unavailable')
+        self.assertEqual(caught.exception.retry_after_seconds, 30)
         self.assertEqual(caught.exception.receipt['state'], 'failed')
         self.assertEqual(caught.exception.receipt['charged'], '0')
         self.assertEqual(self.ledger.spent('owner', include_pending=True), Decimal('0'))
@@ -102,19 +107,26 @@ class GatewayAdmissionTest(unittest.TestCase):
     def test_structured_no_capacity_allows_fallback(self):
         with self.transport([
             httpx.Response(503, json={'error': {'type': 'no_capacity', 'message': 'Unavailable'}}),
-            httpx.Response(404, json={'error': {'code': 'model_not_found'}}),
+            httpx.Response(400, json={'error': {'code': 'unsupported_modality'}}),
         ]), self.assertRaises(ImageError) as caught:
             self.execute()
         self.assertEqual(self.calls, ['image-a', 'image-b'])
         self.assertEqual(caught.exception.receipt['state'], 'failed')
+        self.assertEqual(caught.exception.code, 'image_unavailable')
+        self.assertIsNone(caught.exception.retry_after_seconds)
 
     def test_ambiguous_failure_never_falls_back_or_releases_reservation(self):
         cases = [
+            httpx.Response(400, json={'error': {'code': 'validation_error'}}),
+            httpx.Response(404, json={'error': {'code': 'model_not_found'}}),
+            httpx.Response(400, text='Bad request'),
+            httpx.Response(404, text='Not found'),
             httpx.Response(503, json={'error': {'message': 'upstream disconnected'}}),
             httpx.Response(503, text='<html>gateway unavailable</html>'),
             httpx.Response(503, json={'error': {'message': 'no_capacity'}}),
             self.no_capacity('another-model'),
             httpx.Response(500, json={'error': {'type': 'no_capacity'}}),
+            httpx.Response(503, json={'error': {'code': 'unrecognized', 'accepted': False}}),
             httpx.ReadTimeout('lost response'),
         ]
         for index, response in enumerate(cases):
@@ -125,6 +137,8 @@ class GatewayAdmissionTest(unittest.TestCase):
                 self.assertEqual(self.calls, ['image-a'])
                 self.assertEqual(caught.exception.receipt['state'], 'unknown')
                 self.assertIsNone(caught.exception.receipt['charged'])
+                self.assertEqual(caught.exception.code, 'image_request_pending')
+                self.assertIsNone(caught.exception.retry_after_seconds)
 
     def test_non_capacity_failure_after_fallback_remains_unknown(self):
         with self.transport([self.no_capacity('image-a'), httpx.Response(502)]):
@@ -132,6 +146,171 @@ class GatewayAdmissionTest(unittest.TestCase):
                 self.execute()
         self.assertEqual(self.calls, ['image-a', 'image-b'])
         self.assertEqual(caught.exception.receipt['state'], 'unknown')
+
+    def test_capacity_cooldown_blocks_new_ids_but_expires_without_paid_probe(self):
+        now = [100.0]
+        self.service.clock = lambda: now[0]
+        self.assertEqual(self.service.catalog()['availability'], 'unknown')
+        with self.transport([self.no_capacity('image-a'), self.no_capacity('image-b')]):
+            with self.assertRaises(ImageError):
+                self.execute()
+        now[0] += 7
+        with self.transport([]):
+            for request in ('new-request-1', 'new-request-2'):
+                with self.assertRaises(ImageError) as caught:
+                    self.execute(request)
+                self.assertEqual(caught.exception.code, 'image_capacity_unavailable')
+                self.assertEqual(caught.exception.retry_after_seconds, 23)
+                self.assertEqual(caught.exception.receipt['charged'], '0')
+            with self.assertRaises(ImageError) as capability:
+                self.service.catalog()
+            self.assertEqual(capability.exception.code, 'image_capacity_unavailable')
+            self.assertIsNone(capability.exception.receipt)
+        self.assertEqual(self.calls, ['image-a', 'image-b'])
+        now[0] += 24
+        self.assertEqual(self.service.catalog()['availability'], 'unknown')
+        with self.transport([httpx.Response(503)]), self.assertRaises(ImageError) as unknown:
+            self.execute('after-cooldown')
+        self.assertEqual(unknown.exception.receipt['state'], 'unknown')
+        self.assertEqual(self.calls, ['image-a', 'image-b', 'image-a'])
+
+    def test_retry_hint_is_bounded_and_never_copied_from_unknown_response(self):
+        for index, (raw, expected) in enumerate([
+                ('999999999999999999999999', 120), ('0', 1), ('-1', 30),
+                ('12', 12), ('nan', 30), ('1.5', 30), ('private detail', 30)]):
+            with self.subTest(raw=raw):
+                self.service = self.gateway.LiteLLMImageService(self.service.discovery, self.ledger)
+                replies = [httpx.Response(503, headers={'Retry-After': raw},
+                           json={'error': {'code': 'no_capacity', 'message': 'secret'}}) for _ in range(2)]
+                with self.transport(replies), self.assertRaises(ImageError) as caught:
+                    self.execute(f'bounded-{index}')
+                self.assertEqual(caught.exception.retry_after_seconds, expected)
+
+    def test_http_capacity_contract_and_receipt_recovery(self):
+        app = FastAPI()
+        host = types.SimpleNamespace(app=app)
+
+        @contextmanager
+        def admission(identity):
+            yield 'window', Decimal('10')
+
+        mount_images(host, self.service, admission=admission,
+                     auth=lambda headers: Identity('owner', 'key-id', 'free'))
+        body = {'model': 'ovid-image', 'prompt': 'private prompt', 'size': '1024x1024'}
+        with TestClient(app) as client, self.transport([
+                self.no_capacity('image-a'), self.no_capacity('image-b')]):
+            response = client.post('/v1/images/generations', json=body,
+                                   headers={'Idempotency-Key': 'http-request-1'})
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()['error'], {
+                'code': 'image_capacity_unavailable', 'retryAfterSeconds': 30})
+            self.assertEqual(response.headers['retry-after'], '30')
+            self.assertEqual(response.headers['cache-control'], 'no-store')
+            receipt = response.json()['receipt']
+            self.assertEqual(set(receipt), {'account_id', 'request_id', 'fingerprint', 'state', 'charged'})
+            self.assertEqual((receipt['state'], receipt['charged']), ('failed', '0'))
+            for secret in ('image-a', 'image-b', 'private prompt', 'no_capacity'):
+                self.assertNotIn(secret, response.text)
+            recovered = client.get('/v1/images/requests/http-request-1')
+            self.assertEqual(recovered.json()['receipt'], receipt)
+            replay = client.post('/v1/images/generations', json=body,
+                                 headers={'Idempotency-Key': 'http-request-1'})
+            self.assertEqual(replay.status_code, 409)
+            self.assertEqual(replay.json()['error'], {'code': 'image_request_failed'})
+            self.assertNotIn('retry-after', replay.headers)
+            capabilities = client.get('/v1/images/capabilities')
+            self.assertEqual(capabilities.status_code, 503)
+            self.assertEqual(capabilities.json()['error']['code'], 'image_capacity_unavailable')
+            self.assertNotIn('receipt', capabilities.json())
+        self.assertEqual(self.calls, ['image-a', 'image-b'])
+
+    def test_three_model_pool_and_new_catalog_objects_keep_observed_cooldowns(self):
+        self.service.discovery = types.SimpleNamespace(backends=lambda: [
+            self.gateway._Backend(name, ['1024x1024'], False)
+            for name in ('image-a', 'image-b', 'image-c')])
+        with self.transport([self.no_capacity(name) for name in ('image-a', 'image-b', 'image-c')]):
+            with self.assertRaises(ImageError) as caught:
+                self.execute()
+        self.assertEqual(caught.exception.code, 'image_capacity_unavailable')
+        with self.transport([]), ThreadPoolExecutor(4) as pool:
+            futures = [pool.submit(self.execute, f'new-parallel-{index}') for index in range(4)]
+            for future in futures:
+                with self.assertRaises(ImageError) as blocked:
+                    future.result(timeout=5)
+                self.assertEqual(blocked.exception.code, 'image_capacity_unavailable')
+                self.assertEqual(blocked.exception.receipt['charged'], '0')
+        self.assertEqual(self.calls, ['image-a', 'image-b', 'image-c'])
+        self.assertEqual(self.ledger.spent('owner', include_pending=True), Decimal('0'))
+
+    def test_partial_cooldown_does_not_hide_unknown_or_block_other_candidate(self):
+        with self.transport([self.no_capacity('image-a'), httpx.Response(503)]):
+            with self.assertRaises(ImageError) as caught:
+                self.execute()
+        self.assertEqual(caught.exception.code, 'image_request_pending')
+        self.assertEqual(self.service.catalog()['availability'], 'unknown')
+        with self.transport([httpx.Response(400, json={'error': {'code': 'unsupported_n'}})]):
+            with self.assertRaises(ImageError) as second:
+                self.execute('partial-next')
+        self.assertEqual(self.calls, ['image-a', 'image-b', 'image-b'])
+        self.assertEqual(second.exception.code, 'image_unavailable')
+        self.assertEqual(second.exception.receipt['charged'], '0')
+        self.assertEqual(self.ledger.receipt('owner', 'request-1234')['state'], 'unknown')
+        self.assertEqual(self.ledger.spent('owner', include_pending=True), Decimal('0.30'))
+
+    def test_edit_adapter_refusal_stays_edit_and_ambiguous_400_stops(self):
+        out = io.BytesIO()
+        Image.new('RGB', (2, 2), 'red').save(out, 'PNG')
+        encoded = base64.b64encode(out.getvalue()).decode()
+        seen = []
+
+        def handle(request):
+            if request.url.path == '/key/info':
+                return httpx.Response(200, json={'info': {'spend': 0}})
+            seen.append(request)
+            if len(seen) == 1:
+                return self.no_capacity('image-a')
+            return httpx.Response(400, json={'error': {'code': 'validation_error'}})
+
+        client = httpx.Client
+        with patch.object(self.gateway.httpx, 'Client', side_effect=lambda **kwargs: client(
+                **kwargs, transport=httpx.MockTransport(handle))), self.assertRaises(ImageError) as caught:
+            self.service.execute('owner', 'edit-request-1', 'edit', {
+                'model': 'ovid-image', 'prompt': 'red', 'size': '1024x1024',
+                'image': 'data:image/png;base64,' + encoded}, Decimal('10'))
+        self.assertEqual(caught.exception.code, 'image_request_pending')
+        self.assertIsNone(caught.exception.receipt['charged'])
+        self.assertEqual(len(seen), 2)
+        for request in seen:
+            self.assertEqual(request.url.path, '/v1/images/edits')
+            self.assertTrue(request.headers['content-type'].startswith('multipart/form-data;'))
+            self.assertIn(out.getvalue(), request.content)
+            self.assertIn(b'name="image"; filename="image.png"', request.content)
+
+    def test_http_unknown_has_no_capacity_hint_and_retains_reservation(self):
+        app = FastAPI()
+
+        @contextmanager
+        def admission(identity):
+            yield 'window', Decimal('10')
+
+        mount_images(types.SimpleNamespace(app=app), self.service, admission=admission,
+                     auth=lambda headers: Identity('owner', 'key-id', 'free'))
+        with TestClient(app) as client, self.transport([httpx.Response(
+                404, headers={'Retry-After': '120'}, json={'error': {'code': 'model_not_found'}})]):
+            response = client.post('/v1/images/generations', json={
+                'model': 'ovid-image', 'prompt': 'red', 'size': '1024x1024'},
+                headers={'Idempotency-Key': 'unknown-http-1'})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['error'], {'code': 'image_request_pending'})
+        self.assertNotIn('retry-after', response.headers)
+        self.assertIsNone(response.json()['receipt']['charged'])
+        self.assertEqual(self.calls, ['image-a'])
+        restarted = self.gateway.LiteLLMImageService(self.service.discovery, Ledger(self.ledger.path))
+        with self.transport([]), self.assertRaises(ImageError) as replay:
+            restarted.execute('owner', 'unknown-http-1', 'generate', {
+                'model': 'ovid-image', 'prompt': 'red', 'size': '1024x1024'}, Decimal('10'))
+        self.assertEqual(replay.exception.code, 'image_request_pending')
+        self.assertEqual(self.ledger.spent('owner', include_pending=True), Decimal('0.30'))
 
     def test_successful_fallback_has_one_receipt_and_replays_without_paid_call(self):
         out = io.BytesIO()

@@ -142,7 +142,7 @@ void main() {
     'failed runtime verification cannot publish full setup success',
     () async {
       SandboxService.execCheckedOverrideForTest = (args, env) async {
-        if (args.length > 2 && args[2].contains('command -v node')) {
+        if (args.length > 2 && args[2].contains('node --version')) {
           return (1, 'node missing');
         }
         return (0, 'fixture');
@@ -163,7 +163,7 @@ void main() {
     payloadGate = Completer<void>();
     payloadEntered = Completer<void>();
     SandboxService.execCheckedOverrideForTest = (args, env) async {
-      if (args.length > 2 && args[2].contains('command -v node')) return (1, 'missing');
+      if (args.length > 2 && args[2].contains('node --version')) return (1, 'missing');
       return (0, 'fixture');
     };
     final install = sandbox.install(includeRuntimes: false, onPhase: (_, _, _) {});

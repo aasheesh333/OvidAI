@@ -53,17 +53,12 @@ void openStudio(BuildContext context) {
 // Every line shown is a real log line emitted by SandboxService.install;
 // the progress bar tracks the real download/install phase progress.
 //
-// REDESIGN (wave 2 UI): the premium Aether primitives from
-// `lib/ui/widgets/aether_primitives.dart` carry the layout — an
-// AetherCard overall-progress header with a linear bar, one AetherCard per
-// setup step (AetherStatusDot + step name + AetherGhostButton 'Repair') and
-// AetherCard-framed approval/error/done panels. The install flow, kernel
-// checks, approval/permission gates, gate-mode hand-off and every copy
-// string are preserved verbatim (no new logic, no coordinator changes).
+// Runtime badges use coordinator-owned execution evidence. The service's
+// phase pointer is only an activity signal, never proof of runtime readiness.
 // ---------------------------------------------------------------------------
 
-/// Per-step visual state derived from the coordinator's phase/status.
-enum _StepState { done, active, failed, pending }
+/// Runtime completion requires execution evidence, not phase advancement.
+enum _StepState { done, active, failed, pending, unverified }
 
 class SandboxSetupScreen extends StatefulWidget {
   /// Health-screen hard reset has already been approved: start a core-only
@@ -194,18 +189,30 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
     return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')} min';
   }
 
-  /// Step cards reflect the coordinator's coarse phase pointer: completed
-  /// phases, the phase the installer is currently inside (or the phase that
-  /// was active when it failed), then everything still queued.
+  _StepState _runtimeState(StudioRuntime runtime, {int? phase}) {
+    return switch (_setup.runtimeVerification(runtime)) {
+      RuntimeVerification.verified => _StepState.done,
+      RuntimeVerification.unavailable => _StepState.failed,
+      RuntimeVerification.unknown =>
+        _setup.running && phase == _phase
+            ? _StepState.active
+            : _setup.running && phase != null && _phase < phase
+            ? _StepState.pending
+            : _StepState.unverified,
+    };
+  }
+
   _StepState _stepState(int index) {
-    if (_verified) return _StepState.done;
+    if (index == 7) return _runtimeState(StudioRuntime.node, phase: 7);
+    if (index == 8) return _runtimeState(StudioRuntime.python, phase: 8);
+    if (_setup.coreReady) return _StepState.done;
     if (_error != null) {
       if (index < _phase) return _StepState.done;
       if (index == _phase) return _StepState.failed;
       return _StepState.pending;
     }
     if (index < _phase) return _StepState.done;
-    if (index == _phase) return _StepState.active;
+    if (index == _phase && _setup.running) return _StepState.active;
     return _StepState.pending;
   }
 
@@ -214,6 +221,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
     _StepState.active => 'In progress',
     _StepState.failed => 'Needs attention',
     _StepState.pending => 'Queued',
+    _StepState.unverified => 'Not verified',
   };
 
   @override
@@ -262,18 +270,22 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
   /// remediation entry point the coordinator exposes, so it stays disabled
   /// while a job is running and becomes available on failure.
   Widget _stepCard(int index) {
-    final state = _stepState(index);
+    return _statusCard(_phaseNames[index], _stepState(index));
+  }
+
+  Widget _statusCard(String name, _StepState state) {
     final statusLabel = _stepStatusLabel(state);
     final (color, pulsing) = switch (state) {
       _StepState.done => (Aether.success, false),
       _StepState.active => (Aether.accent, true),
       _StepState.failed => (Aether.danger, false),
       _StepState.pending => (Aether.textFaint, false),
+      _StepState.unverified => (Aether.textMuted, false),
     };
     return Semantics(
       container: true,
       liveRegion: state == _StepState.active || state == _StepState.failed,
-      label: '${_phaseNames[index]}: $statusLabel',
+      label: '$name: $statusLabel',
       child: Padding(
         padding: const EdgeInsets.only(bottom: 8),
         child: AetherCard(
@@ -287,7 +299,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      _phaseNames[index],
+                      name,
                       style: AetherType.title.copyWith(
                         color: state == _StepState.pending
                             ? Aether.textMuted
@@ -314,6 +326,14 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
 
   List<Widget> _stepCards() => [
     for (var i = 0; i < _phaseNames.length; i++) _stepCard(i),
+    if (!_setup.coreOnly)
+      for (final runtime in [StudioRuntime.git, StudioRuntime.curl])
+        if (_partial ||
+            _setup.runtimeVerification(runtime) != RuntimeVerification.unknown)
+          _statusCard(
+            runtime == StudioRuntime.git ? 'Git' : 'curl',
+            _runtimeState(runtime),
+          ),
   ];
 
   // ── Views ───────────────────────────────────────────────────────────────
@@ -481,7 +501,9 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                 SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'SANDBOX SETUP LOG — LIVE',
+                    _setup.running
+                        ? 'SANDBOX SETUP LOG — LIVE'
+                        : 'SANDBOX SETUP LOG',
                     style: TextStyle(
                       fontSize: 10.5,
                       fontWeight: FontWeight.w700,
@@ -800,6 +822,14 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                     label: 'Back to chat',
                     onPressed: () => Navigator.pop(context),
                   ),
+                ],
+                if (_partial) ...[
+                  const SizedBox(height: 12),
+                  ..._stepCards(),
+                  if (_log.isNotEmpty) ...[
+                    SizedBox(height: 200, child: _terminal()),
+                    AetherGhostButton(label: 'Copy log', onPressed: _copyLog),
+                  ],
                 ],
               ],
             ),
