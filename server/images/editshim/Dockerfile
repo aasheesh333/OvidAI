@@ -6,6 +6,7 @@ WORKDIR /app
 COPY server/images/editshim/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server/images/adapters.py /app/adapters.py
+COPY server/images/editshim/profiles.py /app/profiles.py
 COPY server/images/editshim/shim.py /app/shim.py
 RUN useradd --system --uid 10001 --no-create-home shim
 USER 10001

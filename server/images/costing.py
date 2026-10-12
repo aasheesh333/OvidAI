@@ -69,6 +69,33 @@ def normalize_prices(info):
     return out
 
 
+UNPRICED_WARNING = ("unpriced: set the model's price in LiteLLM "
+                    "(input/output cost per token, or output cost per image)")
+PRICE_FIELDS = ('input_cost_per_token', 'output_cost_per_token', 'input_cost_per_image', 'output_cost_per_image')
+
+
+def price_status(info, header_seen=False):
+    """-> (priced, cost_source, warnings). Prices are owned by LiteLLM only.
+
+    priced iff LiteLLM model_info carries a usable price, or a probe saw LiteLLM return
+    the x-litellm-response-cost header for this model. Never a gateway-side override.
+    """
+    prices = normalize_prices(info)
+    if 'input_cost_per_token' in prices or 'output_cost_per_token' in prices:
+        return True, 'tokens', []
+    if 'input_cost_per_image' in prices or 'output_cost_per_image' in prices:
+        return True, 'per_image', []
+    if header_seen:
+        return True, 'header', []
+    return False, None, [UNPRICED_WARNING]
+
+
+def missing_price_fields(info):
+    """LiteLLM model_info fields that are absent/unusable (for operator guidance)."""
+    have = normalize_prices(info)
+    return [f for f in PRICE_FIELDS if f not in have]
+
+
 def _tokens(usage, *names):
     for name in names:
         raw = usage.get(name)
@@ -167,6 +194,10 @@ class PriceBook:
             self._refresh()
         finally:
             self._refreshing = False
+
+    def refresh(self):
+        """Force a re-read now (admin POST /images/admin/refresh-prices)."""
+        self._refresh()
 
     def get(self, model):
         now = self._clock()

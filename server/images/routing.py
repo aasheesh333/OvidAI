@@ -48,6 +48,8 @@ class Task:
 def missing(card, task):
     """Why `card` cannot serve `task` (empty list = it can)."""
     reasons = [op for op in task.needs() if not supports(card, op)]
+    if card.get('priced') is False:   # no LiteLLM price: the job could never be settled
+        reasons.append('unpriced')
     if task.operation != 'generate' and task.transparent and card.get('edit_transport') == 'direct' \
             and 'transparent_output' not in reasons:
         reasons.append('transparent_output')   # the provider's edit contract has no background control
