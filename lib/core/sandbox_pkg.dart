@@ -460,8 +460,11 @@ case "$cmd" in
     # Termux container tree into PREFIX or merge unrelated existing files.
     mkdir -p "$transaction/backup" "$transaction/candidate" || exit 1
     : > "$transaction/journal"; : > "$transaction/directories"
-    : > "$transaction/plan"
+    : > "$transaction/plan"; : > "$transaction/ids"
     id=0; backup_bytes=0
+    # Hard links must be published as hard links: plan their targets first and
+    # link the candidate to the target's candidate instead of copying content.
+    { awk -F '|' '$1!="h"' "$work/paths"; awk -F '|' '$1=="h"' "$work/paths"; } > "$work/ordered_paths" || exit 1
     while IFS='|' read -r kind entry target; do
       relative="${entry#data/data/com.termux/files/usr/}"
       case "$entry" in data|data/data|data/data/com.termux|data/data/com.termux/files|data/data/com.termux/files/usr) continue;; esac
@@ -488,9 +491,20 @@ case "$cmd" in
         state=old
       else state=new; fi
       printf '%s|%s|%s\n' "$id" "$destination" "$state" >> "$transaction/journal" || exit 1
-      cp -a -- "$work/stage/$entry" "$transaction/candidate/$id" || exit 1
+      if [ "$kind" = h ]; then
+        linked="$(awk -F '|' -v t="$target" '$1==t { print $2; exit }' "$transaction/ids")" || exit 1
+        [ -n "$linked" ] || exit 1
+        ln -- "$transaction/candidate/$linked" "$transaction/candidate/$id" || {
+          echo "[ovid-pkg] could not stage hard link: $relative" >&2; exit 1;
+        }
+      else
+        cp -a -- "$work/stage/$entry" "$transaction/candidate/$id" || {
+          echo "[ovid-pkg] could not relocate $relative (stage copy failed)" >&2; exit 1;
+        }
+      fi
+      printf '%s|%s\n' "$entry" "$id" >> "$transaction/ids" || exit 1
       printf '%s|%s\n' "$id" "$destination" >> "$transaction/plan" || exit 1
-    done < "$work/paths"
+    done < "$work/ordered_paths"
     # No live leaf has changed until every backup and candidate is complete.
     sync || exit 1
     : > "$transaction/active"; sync || exit 1

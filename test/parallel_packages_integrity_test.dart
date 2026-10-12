@@ -195,7 +195,9 @@ exec /usr/bin/dpkg-deb "$@"
     f.add('app', termux: true);
     Directory('${f.prefix}/share').createSync();
     f.stub('cp', r'''
-case "$2" in */data/data/com.termux/files/usr/share/.) exit 8;; esac
+# Publication now copies each planned leaf (cp -a -- SRC DST) into the
+# transaction's candidate area; fail the Termux-rooted payload leaf.
+case "$3" in */stage/data/data/com.termux/files/usr/share/app) exit 8;; esac
 exec /bin/cp "$@"
 ''');
     final result = await f.install(['app']);
