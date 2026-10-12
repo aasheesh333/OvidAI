@@ -64,6 +64,7 @@ import 'compaction/compaction_ledger.dart';
 import 'compaction/compaction_policy.dart';
 import 'device_control_service.dart';
 import 'model_limits.dart';
+import 'prompt_cache.dart';
 import 'diag.dart';
 import 'secret_scrub.dart';
 import 'ssrf_guard.dart';
@@ -10475,8 +10476,11 @@ user which one instead of assuming this one.''';
   static double? estimatedCostForModel(
     String model,
     int inputTokens,
-    int outputTokens,
-  ) {
+    int outputTokens, {
+    int cacheReadTokens = 0,
+    int cacheWriteTokens = 0,
+    bool cacheTtl1h = false,
+  }) {
     final m = model.split('·').first.trim().toLowerCase();
     const prices = <String, (double, double)>{
       'claude-opus': (15, 75),
@@ -10498,7 +10502,17 @@ user which one instead of assuming this one.''';
     };
     for (final entry in prices.entries) {
       if (m.contains(entry.key)) {
-        return inputTokens / 1e6 * entry.value.$1 +
+        // [inputTokens] is the total prompt; cache reads/writes are billed
+        // at provider multipliers (local ESTIMATE; server spend is
+        // authoritative).
+        return PromptCache.inputCost(
+              model: m,
+              pricePerMTok: entry.value.$1,
+              inputTokens: inputTokens,
+              cacheRead: cacheReadTokens,
+              cacheWrite: cacheWriteTokens,
+              ttl1h: cacheTtl1h,
+            ) +
             outputTokens / 1e6 * entry.value.$2;
       }
     }
@@ -10662,9 +10676,13 @@ user which one instead of assuming this one.''';
           'content': _attachmentContext(_attachmentMetadata(atts)),
         },
       ..._replayHistory(s, fullTextMessages: fullTextMessages),
-      if (memory.isNotEmpty) {'role': 'user', 'content': memory},
+      if (memory.isNotEmpty)
+        PromptCache.markVolatile({'role': 'user', 'content': memory}),
       if (volatile.trim().isNotEmpty)
-        {'role': 'system', 'content': volatile.trim()},
+        PromptCache.markVolatile({
+          'role': 'system',
+          'content': volatile.trim(),
+        }),
     ];
   }
 
@@ -12080,13 +12098,9 @@ ${await _agentsMdBlock()}
           // Cache accounting: OpenAI-compatible providers report
           // prompt_tokens_details.{cached_tokens} (DeepSeek-style
           // cache_read/cache_write also parsed).
-          final details = u?['prompt_tokens_details'] as Map<String, dynamic>?;
-          _runResolved.cacheReadTokens +=
-              (details?['cached_tokens'] as num?)?.toInt() ??
-              (u?['cache_read_tokens'] as num?)?.toInt() ??
-              0;
-          _runResolved.cacheWriteTokens +=
-              (u?['cache_write_tokens'] as num?)?.toInt() ?? 0;
+          final cacheUse = PromptCache.parseUsage(u);
+          _runResolved.cacheReadTokens += cacheUse.read;
+          _runResolved.cacheWriteTokens += cacheUse.write;
           // Context breakdown heuristic (system/tools/messages).
           var sysTok = 0;
           var toolTok = 0;
@@ -12117,6 +12131,9 @@ ${await _agentsMdBlock()}
             _baseModelOf(attributionModel),
             pt,
             ct,
+            cacheReadTokens: cacheUse.read,
+            cacheWriteTokens: cacheUse.write,
+            cacheTtl1h: AppState.I.promptCacheTtl1h,
           );
           s.recordAnalytics(
             inputTokens: pt,
@@ -12128,11 +12145,8 @@ ${await _agentsMdBlock()}
             ttftMs: ttft,
             ttftSamples: ttft > 0 ? 1 : 0,
             decodeTokens: ct,
-            cacheReadTokens:
-                (details?['cached_tokens'] as num?)?.toInt() ??
-                (u?['cache_read_tokens'] as num?)?.toInt() ??
-                0,
-            cacheWriteTokens: (u?['cache_write_tokens'] as num?)?.toInt() ?? 0,
+            cacheReadTokens: cacheUse.read,
+            cacheWriteTokens: cacheUse.write,
             contextTokens: pt,
             contextLimit: contextWindowForSession(s),
             contextSystemTokens: sysTok,
@@ -13640,7 +13654,17 @@ ${await _agentsMdBlock()}
         // never send token counts, leaving the Usage screen at zero.
         'stream_options': {'include_usage': true},
       };
-      final toolList = includeTools ? _tools : const <Map<String, dynamic>>[];
+      var toolList = includeTools ? _tools : const <Map<String, dynamic>>[];
+      if (includeTools) {
+        final shaped = PromptCache.applyOpenAi(
+          caps: _promptCacheCaps(p, modelId),
+          messages: msgs,
+          tools: toolList,
+          ttl1h: AppState.I.promptCacheTtl1h,
+        );
+        toolList = shaped.tools;
+        body['messages'] = shaped.messages;
+      }
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort != null && !dropReasoningEffort) {
         body['reasoning_effort'] = effort;
@@ -14176,22 +14200,55 @@ ${await _agentsMdBlock()}
   /// assistant turn with tool_calls becomes `tool_use` blocks.
   @visibleForTesting
   ({String system, List<Map<String, dynamic>> messages})
-  anthropicRequestMessagesForTest(List<Map<String, dynamic>> msgs) =>
-      _anthropicRequestMessages(msgs);
+  anthropicRequestMessagesForTest(
+    List<Map<String, dynamic>> msgs, {
+    bool volatileAsUser = false,
+    List<int>? sourceToOut,
+  }) => _anthropicRequestMessages(
+    msgs,
+    volatileAsUser: volatileAsUser,
+    sourceToOut: sourceToOut,
+  );
 
   ({String system, List<Map<String, dynamic>> messages})
-  _anthropicRequestMessages(List<Map<String, dynamic>> msgs) {
+  _anthropicRequestMessages(
+    List<Map<String, dynamic>> msgs, {
+    bool volatileAsUser = false,
+    List<int>? sourceToOut,
+  }) {
     final system = StringBuffer();
     final out = <Map<String, dynamic>>[];
     for (final m in msgs) {
+      // Maps each source row to the converted row that carries it (-1 for
+      // rows hoisted into `system`). Recorded when the iteration ends.
+      sourceToOut?.add(-1);
+      final slot = (sourceToOut?.length ?? 0) - 1;
+      final kept = _convertAnthropicRow(m, system, out, volatileAsUser);
+      if (sourceToOut != null && kept) sourceToOut[slot] = out.length - 1;
+    }
+    // Anthropic rejects `_toolResults` helper keys — strip them now.
+    for (final m in out) {
+      m.remove('_toolResults');
+    }
+    return (system: system.toString(), messages: out);
+  }
+
+  /// Returns true when the row contributed to [out].
+  bool _convertAnthropicRow(
+    Map<String, dynamic> m,
+    StringBuffer system,
+    List<Map<String, dynamic>> out,
+    bool volatileAsUser,
+  ) {
+    {
       final role = m['role'];
-      if (role == 'system') {
+      if (role == 'system' && !(volatileAsUser && PromptCache.isVolatile(m))) {
         final c = m['content'];
         if (c is String && c.trim().isNotEmpty) {
           if (system.isNotEmpty) system.write('\n\n');
           system.write(c);
         }
-        continue;
+        return false;
       }
       if (role == 'tool') {
         // Anthropic expects tool_result blocks inside a user turn.
@@ -14212,7 +14269,7 @@ ${await _agentsMdBlock()}
             '_toolResults': true,
           });
         }
-        continue;
+        return true;
       }
       if (role == 'assistant') {
         final tcs = m['tool_calls'] as List?;
@@ -14243,9 +14300,9 @@ ${await _agentsMdBlock()}
             });
           }
         }
-        if (blocks.isEmpty) continue;
+        if (blocks.isEmpty) return false;
         out.add({'role': 'assistant', 'content': blocks});
-        continue;
+        return true;
       }
       // user (and anything else) — pass text through.
       final content = m['content'];
@@ -14253,12 +14310,8 @@ ${await _agentsMdBlock()}
         'role': 'user',
         'content': content is String ? content : (content ?? '').toString(),
       });
+      return true;
     }
-    // Anthropic rejects `_toolResults` helper keys — strip them now.
-    for (final m in out) {
-      m.remove('_toolResults');
-    }
-    return (system: system.toString(), messages: out);
   }
 
   /// Convert the OpenAI function-calling tool roster into Anthropic tools.
@@ -14266,6 +14319,17 @@ ${await _agentsMdBlock()}
   List<Map<String, dynamic>> anthropicToolsForTest(
     List<Map<String, dynamic>> tools,
   ) => _anthropicTools(tools);
+
+  /// Prompt-cache capability for [p] serving [modelId] (see [PromptCache]).
+  PromptCacheCaps _promptCacheCaps(ProviderConfig p, String modelId) =>
+      PromptCache.resolve(
+        globalEnabled: AppState.I.promptCachingEnabled,
+        override: p.promptCache,
+        format: p.effectiveApiFormat,
+        model: modelId,
+        baseUrl: p.baseUrl,
+        isOvidCloud: p.id == AppState.ovidCloudProviderId,
+      );
 
   List<Map<String, dynamic>> _anthropicTools(List<Map<String, dynamic>> tools) {
     final out = <Map<String, dynamic>>[];
@@ -14327,7 +14391,15 @@ ${await _agentsMdBlock()}
           : raw;
       final effort = effMatch?.group(1)?.toLowerCase();
 
-      final converted = _anthropicRequestMessages(msgs);
+      final caps = includeTools
+          ? _promptCacheCaps(p, modelId)
+          : const PromptCacheCaps(PromptCacheMode.none);
+      final sourceToOut = <int>[];
+      final converted = _anthropicRequestMessages(
+        msgs,
+        volatileAsUser: caps.marks,
+        sourceToOut: sourceToOut,
+      );
       final maxOut = AppState.I.maxOutputTokens;
       final body = <String, dynamic>{
         'model': modelId,
@@ -14338,9 +14410,25 @@ ${await _agentsMdBlock()}
         if (converted.system.isNotEmpty) 'system': converted.system,
         'messages': converted.messages,
       };
-      final toolList = includeTools
-          ? _anthropicTools(_tools)
+      var toolList = includeTools
+          ? _anthropicTools(
+              caps.stable ? PromptCache.canonicalTools(_tools) : _tools,
+            )
           : const <Map<String, dynamic>>[];
+      if (caps.marks) {
+        final shaped = PromptCache.applyAnthropic(
+          caps: caps,
+          system: converted.system,
+          source: msgs,
+          converted: converted.messages,
+          sourceToOut: sourceToOut,
+          tools: toolList,
+          ttl1h: AppState.I.promptCacheTtl1h,
+        );
+        toolList = shaped.tools;
+        body['messages'] = shaped.messages;
+        if (shaped.system != null) body['system'] = shaped.system;
+      }
       if (toolList.isNotEmpty) body['tools'] = toolList;
       if (effort == 'high') {
         body['thinking'] = {'type': 'enabled', 'budget_tokens': 4096};

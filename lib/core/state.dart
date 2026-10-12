@@ -27,6 +27,7 @@ import 'image_studio.dart';
 import 'mcp_config_parse.dart';
 import 'mcp_service.dart';
 import 'model_limits.dart';
+import 'prompt_cache.dart';
 import 'composer_drafts.dart';
 import 'studio_drafts.dart';
 import 'memory_store.dart';
@@ -307,6 +308,11 @@ class ProviderConfig {
   ApiFormat apiFormat;
   bool _hasExplicitApiFormat;
 
+  /// Prompt-cache override for this provider: auto = capability detection
+  /// (BYOK custom endpoints get no markers), on = force cache_control
+  /// markers, off = never send them.
+  PromptCacheOverride promptCache = PromptCacheOverride.auto;
+
   /// Per-model vision override. `true` = force vision-capable, `false` =
   /// force text-only, absent = auto-detect. Lets a user enable a model whose
   /// id the allowlist cannot parse (custom/aggregator endpoints) without
@@ -352,6 +358,7 @@ class ProviderConfig {
           ? normalizeOvidCloudBaseUrl(persistedBaseUrl)
           : persistedBaseUrl;
     }
+    promptCache = PromptCacheOverride.parse(entry['promptCache']);
     final fmt = entry['apiFormat'];
     if (fmt is String && fmt.isNotEmpty) {
       apiFormat = ApiFormat.parse(fmt);
@@ -443,6 +450,7 @@ class ProviderConfig {
     'models': models,
     'requiresApiKey': requiresApiKey,
     'apiFormat': apiFormat.wire,
+    if (promptCache != PromptCacheOverride.auto) 'promptCache': promptCache.name,
     if (_visionOverrides.isNotEmpty)
       'visionOverrides': Map<String, bool>.from(_visionOverrides),
     if (fetchedModels.isNotEmpty) 'fetchedModels': fetchedModels.toList(),
@@ -1272,6 +1280,9 @@ class SessionAnalytics {
   int get averageTtftMs => ttftSamples == 0 ? 0 : ttftMs ~/ ttftSamples;
   double get decodeTokensPerSecond =>
       llmMs <= 0 ? 0 : decodeTokens / (llmMs / 1000);
+  /// Share of input tokens served from the provider prompt cache (0..100).
+  double get cachedPercent =>
+      inputTokens <= 0 ? 0 : (cacheReadTokens / inputTokens * 100).clamp(0, 100);
   double get contextFraction =>
       contextLimit <= 0 ? 0 : (contextTokens / contextLimit).clamp(0.0, 1.0);
 
@@ -4169,6 +4180,8 @@ class AppState extends ChangeNotifier {
       }
       contextWindowOverride = prefs.getInt(_kContextWindowOverride) ?? 0;
       maxOutputTokens = prefs.getInt(_kMaxOutputTokens) ?? 0;
+      promptCachingEnabled = prefs.getBool(_kPromptCaching) ?? true;
+      promptCacheTtl1h = prefs.getBool(_kPromptCacheTtl1h) ?? false;
       shareSessionMemory = prefs.getBool(_kShareMemory) ?? false;
       shareStudioOnRestart = prefs.getBool(_kShareStudioOnRestart) ?? true;
       shareBrowserOnRestart = prefs.getBool(_kShareBrowserOnRestart) ?? true;
@@ -6293,6 +6306,38 @@ class AppState extends ChangeNotifier {
   static const _kMaxOutputTokens = 'ovid_max_output_tokens';
   int maxOutputTokens = 0;
 
+  /// Prompt caching (provider-aware cache_control markers + stable prefix).
+  /// ON by default; markers still only go to providers that accept them.
+  static const _kPromptCaching = 'ovid_prompt_caching';
+  static const _kPromptCacheTtl1h = 'ovid_prompt_cache_ttl_1h';
+  bool promptCachingEnabled = true;
+
+  /// Extended 1h cache TTL for long-running sessions. Cache writes cost 2x
+  /// base input (vs 1.25x for the default 5 minutes); reads stay 0.1x.
+  bool promptCacheTtl1h = false;
+
+  Future<void> setPromptCaching(bool v) async {
+    promptCachingEnabled = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kPromptCaching, v);
+    } catch (e) {
+      Diag.swallow('state', e);
+    }
+  }
+
+  Future<void> setPromptCacheTtl1h(bool v) async {
+    promptCacheTtl1h = v;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kPromptCacheTtl1h, v);
+    } catch (e) {
+      Diag.swallow('state', e);
+    }
+  }
+
   Future<void> setContextWindowOverride(int tokens) async {
     contextWindowOverride = tokens;
     notifyListeners();
@@ -7524,6 +7569,15 @@ class AppState extends ChangeNotifier {
     refresh();
     await persistProviderState();
     return null;
+  }
+
+  Future<void> updateProviderPromptCache(
+    ProviderConfig provider,
+    PromptCacheOverride value,
+  ) async {
+    provider.promptCache = value;
+    refresh();
+    await persistProviderState();
   }
 
   /// Replace the fetched model ids of [provider] with [ids] from a fresh

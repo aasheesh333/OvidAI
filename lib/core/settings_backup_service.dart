@@ -123,6 +123,8 @@ class SettingsBackupService {
     'ovid_response_timeout_sec': int,
     'ovid_context_window_override': int,
     'ovid_max_output_tokens': int,
+    'ovid_prompt_caching': bool,
+    'ovid_prompt_cache_ttl_1h': bool,
     'ovid_sandbox_skipped': bool,
     'ovid_share_session_memory': bool,
     'ovid_share_studio_on_restart': bool,
