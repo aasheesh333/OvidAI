@@ -118,10 +118,66 @@ keys), before admission, so nothing is reserved or charged.
 | `OVID_PROBE_INTERVAL_SECONDS` | 60 | worker poll interval |
 | `OVID_IMAGE_CARDS_DB` | `<dir of OVID_IMAGE_DB>/ovid-image-cards.sqlite` | card store |
 | `OVID_IMAGE_COSTMAP_URL` | empty | optional raw LiteLLM cost-map JSON |
+| `INFERHUB_API_KEY` | empty | provider key for DIRECT edits; empty = edits unsupported (see below) |
+| `OVID_IMAGE_DIRECT_EDIT_HOSTS` | `api.inferhub.dev` | comma list of hosts direct edits may call (https only; must equal the discovered `api_base` host) |
+| `OVID_IMAGE_EDIT_COST_USD` | `OVID_IMAGE_MAX_UPSTREAM_USD` (1.00) | flat upstream price a direct edit settles at (clamped to the bound) |
 
 Probe key: create a LiteLLM team `ovid-image-probe` with `max_budget` (e.g. 20),
 and a key in that team allowed only the image models, with its own `max_budget`
 and `budget_duration`; export it as `OVID_PROBE_KEY`.
+
+## Edits go directly to the provider (JSON), not through LiteLLM
+
+InferHub documents `POST /v1/images/edits` as `application/json` only (`model,
+prompt, image` = one `data:` URL, `size, n, quality, response_format`). LiteLLM
+can only forward edits as multipart/form-data, which InferHub rejects with
+`400 body must be JSON`. So for edits the gateway calls
+`<litellm_params.api_base>/images/edits` itself with `Authorization: Bearer
+$INFERHUB_API_KEY` and body (built by `adapters.request_shape`)
+
+```json
+{"model": "cb/gpt-image-2", "prompt": "...", "size": "1024x1024", "n": 1,
+ "response_format": "b64_json", "image": "data:image/png;base64,..."}
+```
+
+The provider model id is `litellm_params.model` without a leading `openai/`.
+Generations still go through LiteLLM. Guards: https only, host must be in
+`OVID_IMAGE_DIRECT_EDIT_HOSTS` and come from the discovered `api_base`, no
+redirects, no userinfo/ports/query. Provider errors map exactly like
+generation (capacity cooldown on `no_capacity`, pre-provider refusal codes,
+everything else ambiguous -> request stays `unknown`, never resubmitted).
+
+**Cards.** Discovery tags each model `edit_transport = direct | none`
+(part of the card fingerprint, so toggling the key re-extracts and re-probes).
+
+* `direct`: `edit` supported (declared, later probed); `inpaint`, `multi_image`,
+  `outpaint`, `reference_style`, `remove_background` are false (provider
+  contract); transparent edits are refused. Masks / extra images / transparent
+  edits get `422 unsupported_image_operation` with alternatives BEFORE
+  admission and charging, so the app stops offering `mask_path` /
+  `reference_paths`.
+* `none` (no key, host not allowlisted, bad `api_base`): `edit` is false for
+  the model; edit requests are a clean 422 and the key-gap is logged once.
+
+**Probe.** The edit probe uses the same direct path with a 64x64 synthetic PNG,
+one call, skipped if the flat edit price exceeds `OVID_PROBE_MAX_USD`. Any HTTP
+400 that is not the structured `unsupported_modality` / `not_an_image_model`
+code (and any 404/422/other) is `inconclusive`, never `unsupported`, so a
+malformed probe cannot mark edit absent. No mask / multi-image probes in this
+mode. Without the key the edit probe is not run.
+
+**Billing.** LiteLLM never sees direct calls, so key-spend deltas cannot settle
+them. A direct edit settles upstream at `OVID_IMAGE_EDIT_COST_USD` (default: the
+owner-enforced `OVID_IMAGE_MAX_UPSTREAM_USD` bound, so users are never
+under-charged and never over the bound). If the provider response carries a
+usable `usage.cost`, that is used instead, capped at the bound. The user is
+debited `0.30 x` that amount through the normal ledger.
+
+**Dedicated key.** In the InferHub dashboard create a separate API key just for
+Ovid edits with a low spend limit (e.g. a few USD/day), no other scopes, and
+rotate it by changing the env var. The key is only read from the environment,
+only sent in the Authorization header to the allowlisted host, and never logged,
+stored in cards or returned.
 
 ## Failure modes
 
