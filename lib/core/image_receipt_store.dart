@@ -14,14 +14,19 @@ class ImageReceipt {
     this.requestId,
     this.fingerprint,
     this.state,
-    this.charged,
-  );
+    this.charged, [
+    this.modelSlug,
+  ]);
 
   final String accountId;
   final String requestId;
   final String fingerprint;
   final String state;
   final String? charged;
+
+  /// Public model slug that served the job (`ovid-image:img-…`), when the
+  /// gateway reports it. Never a provider model name.
+  final String? modelSlug;
 
   factory ImageReceipt.parse(Object? value) {
     if (value is! Map) throw const FormatException('Invalid image receipt');
@@ -30,6 +35,7 @@ class ImageReceipt {
     final fingerprint = value['fingerprint'];
     final state = value['state'];
     final charged = value['charged'];
+    final slug = value['model'];
     if (account is! String ||
         account.isEmpty ||
         account.length > 128 ||
@@ -50,6 +56,9 @@ class ImageReceipt {
       fingerprint,
       state as String,
       charged as String?,
+      slug is String && RegExp(r'^ovid-image:[A-Za-z0-9_-]{3,40}$').hasMatch(slug)
+          ? slug
+          : null,
     );
   }
 
@@ -72,6 +81,7 @@ class ImageReceipt {
     'fingerprint': fingerprint,
     'state': state,
     'charged': charged,
+    if (modelSlug != null) 'model': modelSlug,
   };
 }
 
