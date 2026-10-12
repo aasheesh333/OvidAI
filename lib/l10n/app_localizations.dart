@@ -567,6 +567,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Export-ready archive'**
   String get backupExportReadyTitle;
+
+  /// Section title for the prompt caching settings and the per-provider caching option.
+  ///
+  /// In en, this message translates to:
+  /// **'Prompt caching'**
+  String get promptCachingTitle;
+
+  /// Switch title: reuse the system prompt, tools and history between turns.
+  ///
+  /// In en, this message translates to:
+  /// **'Cache the prompt prefix'**
+  String get promptCachePrefixTitle;
+
+  /// Explains what prompt prefix caching does and its cost effect.
+  ///
+  /// In en, this message translates to:
+  /// **'Reuses system prompt, tools and history between turns on providers that support it (Claude, and automatic caches). Cache reads cost about 0.1x input.'**
+  String get promptCachePrefixSubtitle;
+
+  /// Switch title: keep the prompt cache for one hour instead of five minutes.
+  ///
+  /// In en, this message translates to:
+  /// **'Extended 1-hour cache'**
+  String get promptCacheExtendedTitle;
+
+  /// Explains the one-hour cache trade-off.
+  ///
+  /// In en, this message translates to:
+  /// **'For long 24/7 sessions with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.'**
+  String get promptCacheExtendedSubtitle;
+
+  /// Help text under the per-provider prompt caching choice (Auto / On / Off).
+  ///
+  /// In en, this message translates to:
+  /// **'Auto sends cache markers only where the endpoint is known to accept them. On forces markers for Anthropic-compatible proxies; Off never sends them.'**
+  String get promptCacheProviderHelp;
 }
 
 class _AppLocalizationsDelegate

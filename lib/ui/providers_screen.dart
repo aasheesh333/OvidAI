@@ -1103,12 +1103,10 @@ class _EditProviderSheetState extends State<_EditProviderSheet> {
                 ],
               ),
               const SizedBox(height: 16),
-              Text('Prompt caching', style: AetherType.label),
+              Text(context.l10n.promptCachingTitle, style: AetherType.label),
               const SizedBox(height: 2),
               Text(
-                'Auto sends cache markers only where the endpoint is known '
-                'to accept them. On forces markers for Anthropic-compatible '
-                'proxies; Off never sends them.',
+                context.l10n.promptCacheProviderHelp,
                 style: AetherType.caption,
               ),
               const SizedBox(height: 6),

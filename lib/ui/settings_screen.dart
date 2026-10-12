@@ -1697,17 +1697,15 @@ class _ContextModelScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              const SectionHeader('Prompt caching'),
+              SectionHeader(context.l10n.promptCachingTitle),
               SwitchListTile(
                 dense: true,
-                title: const Text(
-                  'Cache the prompt prefix',
-                  style: TextStyle(fontSize: 14),
+                title: Text(
+                  context.l10n.promptCachePrefixTitle,
+                  style: const TextStyle(fontSize: 14),
                 ),
                 subtitle: Text(
-                  'Reuses system prompt, tools and history between turns on '
-                  'providers that support it (Claude, and automatic caches). '
-                  'Cache reads cost about 0.1x input.',
+                  context.l10n.promptCachePrefixSubtitle,
                   style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                 ),
                 value: app.promptCachingEnabled,
@@ -1721,14 +1719,12 @@ class _ContextModelScreen extends StatelessWidget {
               ),
               SwitchListTile(
                 dense: true,
-                title: const Text(
-                  'Extended 1-hour cache',
-                  style: TextStyle(fontSize: 14),
+                title: Text(
+                  context.l10n.promptCacheExtendedTitle,
+                  style: const TextStyle(fontSize: 14),
                 ),
                 subtitle: Text(
-                  'For long 24/7 sessions with pauses over 5 minutes. Cache '
-                  'writes cost 2x input instead of 1.25x; reads stay 0.1x. '
-                  'Claude only.',
+                  context.l10n.promptCacheExtendedSubtitle,
                   style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
                 ),
                 value: app.promptCacheTtl1h,

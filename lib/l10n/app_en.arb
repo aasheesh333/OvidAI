@@ -226,5 +226,23 @@
   "@backupJsonExport": {"description": "Button: export chats as JSON for other tools (not restorable)."},
 
   "backupExportReadyTitle": "Export-ready archive",
-  "@backupExportReadyTitle": {"description": "Card title for the portable backup archive format."}
+  "@backupExportReadyTitle": {"description": "Card title for the portable backup archive format."},
+
+  "promptCachingTitle": "Prompt caching",
+  "@promptCachingTitle": {"description": "Section title for the prompt caching settings and the per-provider caching option."},
+
+  "promptCachePrefixTitle": "Cache the prompt prefix",
+  "@promptCachePrefixTitle": {"description": "Switch title: reuse the system prompt, tools and history between turns."},
+
+  "promptCachePrefixSubtitle": "Reuses system prompt, tools and history between turns on providers that support it (Claude, and automatic caches). Cache reads cost about 0.1x input.",
+  "@promptCachePrefixSubtitle": {"description": "Explains what prompt prefix caching does and its cost effect."},
+
+  "promptCacheExtendedTitle": "Extended 1-hour cache",
+  "@promptCacheExtendedTitle": {"description": "Switch title: keep the prompt cache for one hour instead of five minutes."},
+
+  "promptCacheExtendedSubtitle": "For long 24/7 sessions with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.",
+  "@promptCacheExtendedSubtitle": {"description": "Explains the one-hour cache trade-off."},
+
+  "promptCacheProviderHelp": "Auto sends cache markers only where the endpoint is known to accept them. On forces markers for Anthropic-compatible proxies; Off never sends them.",
+  "@promptCacheProviderHelp": {"description": "Help text under the per-provider prompt caching choice (Auto / On / Off)."}
 }

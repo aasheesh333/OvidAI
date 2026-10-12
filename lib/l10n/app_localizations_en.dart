@@ -307,4 +307,25 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get backupExportReadyTitle => 'Export-ready archive';
+
+  @override
+  String get promptCachingTitle => 'Prompt caching';
+
+  @override
+  String get promptCachePrefixTitle => 'Cache the prompt prefix';
+
+  @override
+  String get promptCachePrefixSubtitle =>
+      'Reuses system prompt, tools and history between turns on providers that support it (Claude, and automatic caches). Cache reads cost about 0.1x input.';
+
+  @override
+  String get promptCacheExtendedTitle => 'Extended 1-hour cache';
+
+  @override
+  String get promptCacheExtendedSubtitle =>
+      'For long 24/7 sessions with pauses over 5 minutes. Cache writes cost 2x input instead of 1.25x; reads stay 0.1x. Claude only.';
+
+  @override
+  String get promptCacheProviderHelp =>
+      'Auto sends cache markers only where the endpoint is known to accept them. On forces markers for Anthropic-compatible proxies; Off never sends them.';
 }
