@@ -1,5 +1,46 @@
 # Image model capability cards and capability-based routing
 
+## Add a new image provider (runbook, no code change)
+
+1. Add the model, base URL and key in LiteLLM (`mode: image_generation`). Keys live ONLY in LiteLLM.
+2. Set the price in LiteLLM `model_info` (see "Pricing gate"). Without it the model is never served to users.
+3. `python ops/image-edit-shim/check_provider.py <model_name>`: readiness report with next steps.
+4. If edits need JSON: `python ops/image-edit-shim/onboard_provider.py --host H --json-edit --apply`
+   (see docs/image-edit-shim/README.md).
+5. Verify the card (`GET /images/admin/cards`, or the script output): `state: probed`, `priced: true`.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| "body must be JSON" on edit | JSON-only edit provider reached via multipart | step 4 |
+| Image request ends `pending` / 409 `image_request_pending` | cost could not be determined (unpriced model, no cost header, no spend delta) | set price in LiteLLM, `POST /images/admin/refresh-prices`; pending jobs reconcile manually |
+| 422 `no_priced_model` (`reason`) | every capable model is unpriced | price at least one model |
+| Card `priced: false`, warning `unpriced: ...` | no usable price in model_info | set input/output cost per token or output cost per image |
+| Card stuck `inferred` | probe key missing (`OVID_PROBE_KEY`), probe transient/inconclusive, auth/budget error, or probe skipped (`probe_skipped:` warning) | `check_provider.py`; fix; `POST /images/admin/reprobe` |
+| Warning `returns_urls:` | provider ignores `response_format=b64_json` and returns URLs | unsupported by design (the gateway never fetches URLs); ask provider / use another |
+| "probe budget exhausted" (`probe_daily_budget` warning) | `OVID_PROBE_DAILY_USD` spent in 24h (`probe_budget` in admin cards) | raise cap or wait |
+| `no_capacity` / 503 `image_capacity_unavailable` | provider refused before dispatch; model in cooldown | transient; fallback to other models automatic |
+| Wrong ops/sizes on a new family | name hints are guesses | probes override; reprobe |
+
+## Pricing gate
+
+LiteLLM owns every price; the gateway has no price override. A model is `priced` iff
+LiteLLM `model_info` has a usable price (`input_cost_per_token` and/or `output_cost_per_token`,
+or `input_cost_per_image` / `output_cost_per_image`), OR a probe observed LiteLLM returning
+`x-litellm-response-cost` for it. Cost settlement order stays: header > token prices >
+per-image prices > key-spend delta.
+
+* Routing hard-skips unpriced models for user traffic (auto and explicit slug; an explicit
+  slug gets 422 with `unsupported: ["unpriced"]`; if no priced model can serve the task the
+  422 carries `reason: no_priced_model`). Probes still run on unpriced models.
+* Admin cards carry `priced`, `cost_source` (`tokens|per_image|header|null`) and `warnings`
+  (exactly `unpriced: set the model's price in LiteLLM (input/output cost per token, or output cost per image)`
+  plus probe warnings). One WARNING log line per model when an unpriced model is discovered.
+* `priced` is re-evaluated on every card read from the latest discovered `model_info`
+  (discovery cache 30 s, background tick 60 s) and the user-traffic PriceBook refreshes on
+  its 5-minute TTL. `POST /images/admin/refresh-prices` (master key) refreshes both now.
+* Admin `GET /images/admin/cards` also returns `probe_budget`
+  `{probe_spend_24h_usd, probe_daily_cap_usd, probe_daily_left_usd, probe_per_call_cap_usd}`.
+
 The owner adds any image model to LiteLLM (model name + base URL/params).
 Nothing else is configured by hand: the gateway builds a capability **card**
 for the model in the background, publishes a public projection to the app, and
@@ -42,6 +83,18 @@ absent, `source: probed`), `transient` (timeout, 429, 5xx, no_capacity: **no
 verdict**, previous value kept, card not promoted to `probed`, retry with
 exponential backoff 5 min .. 6 h) or `inconclusive` (e.g. "image too small":
 treated like transient). Auth/budget errors abort the run.
+
+Probe safety for many providers: before probing, a LiteLLM per-image price above
+`OVID_PROBE_MAX_USD` skips the whole run (warning `probe_skipped:`); new-model probes are
+staggered (`OVID_PROBE_STAGGER_SECONDS`, default 30, between probe runs; a forced
+reprobe bypasses it). Replies are classified: `url_response` (provider returned URLs
+instead of b64_json: generate/edit marked unsupported with warning `returns_urls`; the
+gateway never fetches URLs), non-image payloads are `inconclusive`, jpeg/webp outputs are
+accepted and recorded in `output_formats`, 401/403 `auth`, 402/quota/billing `budget`,
+content-policy refusals `inconclusive`, 429/5xx `transient`, other 4xx `unsupported`.
+A provider whose `/models` listing has another schema is ignored; a model with no name
+hint and no metadata gets the conservative card (generate only, 1024x1024) and probes
+establish the truth.
 
 Probe budget: concurrency 1 (process-wide lock), per-probe cap
 (`OVID_PROBE_MAX_USD`, default 0.50; a probe above it stops the run), daily cap
@@ -102,7 +155,7 @@ keys), before admission, so nothing is reserved or charged.
   also take `mask` and `images` (extra references) as data URLs. The response
   has `model_slug`; the receipt has `model` (public slug of the model that
   served it).
-* `GET /images/admin/cards`, `POST /images/admin/reprobe {"model": name|slug}`:
+* `GET /images/admin/cards`, `POST /images/admin/reprobe {"model": name|slug}`, `POST /images/admin/refresh-prices`:
   `Authorization: Bearer <LITELLM_MASTER_KEY>`; full cards incl. internal names,
   probe results, history and 24 h probe spend.
 
@@ -116,6 +169,7 @@ keys), before admission, so nothing is reserved or charged.
 | `OVID_PROBE_MAX_SIZES` | 4 | sizes tried per model |
 | `OVID_PROBE_TTL_SECONDS` | 604800 | periodic re-probe |
 | `OVID_PROBE_INTERVAL_SECONDS` | 60 | worker poll interval |
+| `OVID_PROBE_STAGGER_SECONDS` | 30 | minimum gap between probe runs of different models |
 | `OVID_IMAGE_CARDS_DB` | `<dir of OVID_IMAGE_DB>/ovid-image-cards.sqlite` | card store |
 | `OVID_IMAGE_COSTMAP_URL` | empty | optional raw LiteLLM cost-map JSON |
 | `INFERHUB_API_KEY` | empty | provider key for DIRECT edits; empty = edits unsupported (see below) |
