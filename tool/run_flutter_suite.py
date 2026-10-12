@@ -34,6 +34,17 @@ def discover(root):
                   for p in (root / "test").rglob("*_test.dart") if p.is_file())
 
 
+def shard(inventory, index, count):
+    """Deterministic round-robin slice of the sorted inventory.
+
+    Across indices 0..count-1 every file lands in exactly one shard, and
+    neighbouring (similarly expensive) files are spread over the shards.
+    """
+    if count < 1 or not 0 <= index < count:
+        raise ValueError(f"invalid shard {index}/{count}")
+    return sorted(inventory)[index::count]
+
+
 def tree_snapshot(root):
     def git(*args):
         result = subprocess.run(["git", *args], cwd=root, capture_output=True, timeout=30)
@@ -184,10 +195,15 @@ def run(args):
     started = time.monotonic()
     start_tree = tree_snapshot(args.root)
     write_json(args.output / "tree-start.json", start_tree)
-    inventory = discover(args.root)
+    full_inventory = discover(args.root)
+    inventory = shard(full_inventory, args.shard_index, args.shard_count)
     write_json(args.output / "inventory.json", inventory)
+    write_json(args.output / "shard.json", {"index": args.shard_index, "count": args.shard_count,
+                                            "files": len(inventory),
+                                            "full_inventory": len(full_inventory)})
     (args.output / "inventory.txt").write_text("\n".join(inventory) + "\n")
     summary = {"started_at": now(), "finished_at": None, "inventory": inventory,
+               "shard": {"index": args.shard_index, "count": args.shard_count},
                "attempts": [], "errors": [], "files": {}, "ok": False}
     failed, recovered = set(), set()
 
@@ -226,7 +242,8 @@ def run(args):
 
     checkpoint()
     queue = deque(inventory[i:i + args.batch_size] for i in range(0, len(inventory), args.batch_size))
-    print(f"Discovered {len(inventory)} files; {len(queue)} batches; logs={args.output}", flush=True)
+    print(f"Discovered {len(full_inventory)} files; shard {args.shard_index + 1}/{args.shard_count} "
+          f"runs {len(inventory)} in {len(queue)} batches; logs={args.output}", flush=True)
     try:
         if not inventory:
             summary["errors"].append({"message": "No Flutter tests found"})
@@ -258,8 +275,10 @@ def run(args):
         before, after = start_tree["sha256"], end_tree["sha256"]
         summary["tree_changes"] = sorted(name for name in before.keys() | after.keys()
                                          if before.get(name) != after.get(name))
-        summary["added_test_files"] = sorted(set(end_tree["inventory"]) - set(inventory))
-        summary["removed_test_files"] = sorted(set(inventory) - set(end_tree["inventory"]))
+        # Compare whole inventories: a file added anywhere invalidates every
+        # shard's partition, not only the shard it would have landed in.
+        summary["added_test_files"] = sorted(set(end_tree["inventory"]) - set(full_inventory))
+        summary["removed_test_files"] = sorted(set(full_inventory) - set(end_tree["inventory"]))
         if summary["added_test_files"]:
             summary["errors"].append({"message": "New tests appeared after inventory capture",
                                       "files": summary["added_test_files"]})
@@ -279,9 +298,14 @@ def main():
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--batch-timeout", type=float, default=300)
     parser.add_argument("--lock-timeout", type=float, default=900)
+    parser.add_argument("--shard-index", type=int, default=0,
+                        help="zero-based shard to run (round-robin over the sorted inventory)")
+    parser.add_argument("--shard-count", type=int, default=1, help="total number of shards")
     args = parser.parse_args()
     if args.batch_size < 1 or args.batch_timeout <= 0 or args.lock_timeout <= 0:
         parser.error("batch size and timeouts must be positive")
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        parser.error("shard index must satisfy 0 <= index < count")
     args.root, args.output, args.lock = args.root.resolve(), args.output.resolve(), args.lock.resolve()
     if not args.output.parent.is_dir() or not args.lock.parent.is_dir():
         parser.error("output and lock parent directories must exist")
