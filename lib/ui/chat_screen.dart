@@ -439,7 +439,7 @@ class _StatsLine extends StatelessWidget {
                       if (analytics.decodeTokensPerSecond > 0)
                         '${analytics.decodeTokensPerSecond.toStringAsFixed(1)} tok/s',
                       if (analytics.cacheReadTokens > 0)
-                        'cache ${_fmtTok(analytics.cacheReadTokens)} tok',
+                        'cached ${analytics.cachedPercent.toStringAsFixed(0)}%',
                       if (analytics.averageTtftMs > 0)
                         'ttft ~${analytics.averageTtftMs} ms',
                       if (analytics.estimatedCostUsd > 0)
@@ -539,6 +539,12 @@ class _StatsLine extends StatelessWidget {
                   _analyticsMetric(
                     'Context',
                     '${_fmtTok(a.contextTokens)} / ${_fmtTok(a.contextLimit)}',
+                  ),
+                  _analyticsMetric(
+                    'Cached',
+                    a.cacheReadTokens > 0 || a.cacheWriteTokens > 0
+                        ? '${a.cachedPercent.toStringAsFixed(0)}% of input tokens'
+                        : '—',
                   ),
                   _analyticsMetric('Turns', '${a.turns}'),
                   _analyticsMetric(

@@ -1697,6 +1697,51 @@ class _ContextModelScreen extends StatelessWidget {
                   ],
                 ),
               ),
+              const SectionHeader('Prompt caching'),
+              SwitchListTile(
+                dense: true,
+                title: const Text(
+                  'Cache the prompt prefix',
+                  style: TextStyle(fontSize: 14),
+                ),
+                subtitle: Text(
+                  'Reuses system prompt, tools and history between turns on '
+                  'providers that support it (Claude, and automatic caches). '
+                  'Cache reads cost about 0.1x input.',
+                  style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                ),
+                value: app.promptCachingEnabled,
+                activeTrackColor: Aether.accent,
+                onChanged: (v) => _savePreference(
+                  context,
+                  'ovid_prompt_caching',
+                  v,
+                  () => AppState.I.setPromptCaching(v),
+                ),
+              ),
+              SwitchListTile(
+                dense: true,
+                title: const Text(
+                  'Extended 1-hour cache',
+                  style: TextStyle(fontSize: 14),
+                ),
+                subtitle: Text(
+                  'For long 24/7 sessions with pauses over 5 minutes. Cache '
+                  'writes cost 2x input instead of 1.25x; reads stay 0.1x. '
+                  'Claude only.',
+                  style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
+                ),
+                value: app.promptCacheTtl1h,
+                activeTrackColor: Aether.accent,
+                onChanged: app.promptCachingEnabled
+                    ? (v) => _savePreference(
+                        context,
+                        'ovid_prompt_cache_ttl_1h',
+                        v,
+                        () => AppState.I.setPromptCacheTtl1h(v),
+                      )
+                    : null,
+              ),
               const SectionHeader('Max output tokens'),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 18),

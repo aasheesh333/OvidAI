@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+
+import '../core/prompt_cache.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/diag.dart';
@@ -1097,6 +1099,34 @@ class _EditProviderSheetState extends State<_EditProviderSheet> {
                           messenger.showSnackBar(SnackBar(content: Text(err)));
                         }
                       },
+                    ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Text('Prompt caching', style: AetherType.label),
+              const SizedBox(height: 2),
+              Text(
+                'Auto sends cache markers only where the endpoint is known '
+                'to accept them. On forces markers for Anthropic-compatible '
+                'proxies; Off never sends them.',
+                style: AetherType.caption,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final option in PromptCacheOverride.values)
+                    ChoiceChip(
+                      label: Text(
+                        option.name[0].toUpperCase() + option.name.substring(1),
+                      ),
+                      selected: provider.promptCache == option,
+                      materialTapTargetSize: MaterialTapTargetSize.padded,
+                      onSelected: (_) => AppState.I.updateProviderPromptCache(
+                        provider,
+                        option,
+                      ),
                     ),
                 ],
               ),

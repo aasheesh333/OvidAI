@@ -1,0 +1,43 @@
+# Server-side prompt-cache injection for the Ovid gateway (LiteLLM).
+# NOT APPLIED. Review, then add to each Claude model's litellm_params.
+#
+# Note: /opt/ovid-gateway/litellm/config.yaml has no model_list; models live in
+# Postgres (store_model_in_db) and are edited in the LiteLLM admin UI. Put the
+# `cache_control_injection_points` block below into each Claude model's
+# "LiteLLM Params" (UI -> Models -> Edit -> Advanced), or POST it via
+# /model/update. The same YAML works if you ever move models into the file.
+#
+# Effect: LiteLLM adds {"cache_control": {"type": "ephemeral"}} server-side, so
+# clients that send no markers (the future web app, curl, other SDKs) still
+# get Anthropic/Bedrock/Vertex prompt caching. The Ovid app also sends its own
+# markers on the system message and the last message: injection targets the
+# same two positions, so they coincide instead of adding breakpoints (the
+# Anthropic limit is 4 per request; the app uses at most 4 itself).
+#
+# Cost: cache write 1.25x base input (5m) or 2x (1h), read 0.1x. A prefix that
+# is not reused within the TTL costs 25% more once; it pays back from the
+# second hit.
+
+model_list:
+  - model_name: claude-sonnet-4.6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6     # or bedrock/... / vertex_ai/...
+      api_key: os.environ/ANTHROPIC_API_KEY
+      cache_control_injection_points:
+        # System prompt (also covers the tool schemas that precede it).
+        - location: message
+          role: system
+        # Rolling breakpoint: the last message each turn extends the cached
+        # prefix. index -1 = last message.
+        - location: message
+          index: -1
+  # Repeat for every Claude route (opus / haiku / bedrock aliases ...).
+
+# Optional 1h TTL (long-pause 24/7 sessions): LiteLLM forwards a client-sent
+# {"type":"ephemeral","ttl":"1h"}; injection points use the default 5m, so
+# prefer client markers when 1h is wanted (Ovid app: Settings -> Prompt caching
+# -> Extended 1-hour cache).
+
+# Non-Claude models need nothing: OpenAI, Gemini 2.5+, DeepSeek, Kimi, GLM and
+# Grok cache a stable prefix automatically. Their cached tokens appear in
+# usage.prompt_tokens_details.cached_tokens.
