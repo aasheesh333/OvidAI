@@ -109,7 +109,7 @@ void main() {
         return native('$prefix/bin/${command.split(' ').first}') ? (0, 'apt 3') : (2, 'usage: ovid-pkg');
       }
       // Stop immediately after prerequisite repair, before any network install.
-      if (command.startsWith('apt update')) throw SandboxCancelledException();
+      if (command.startsWith('apt-get update')) throw SandboxCancelledException();
       return (1, 'runtime absent');
     };
   });

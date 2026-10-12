@@ -327,7 +327,7 @@ void main() {
         // `command -v` missed broken binaries), so model "runtimes missing"
         // as failing version probes until an apt install has run. apt/apt-get
         // themselves stay healthy so bundled-prerequisite repair is a no-op.
-        if (cmd.contains('apt install')) installRan = true;
+        if (cmd.contains('apt-get install')) installRan = true;
         final isVersionProbe = cmd.contains('--version') &&
             !cmd.startsWith('bash -c apt');
         if (isVersionProbe && !installRan) return (1, '');
@@ -340,11 +340,11 @@ void main() {
       await app.retryBackgroundRuntimeInstall();
 
       expect(
-        seen.any((c) => c.contains('apt update')),
+        seen.any((c) => c.contains('apt-get update')),
         isTrue,
         reason: 'explicit retry must reach the apt path',
       );
-      expect(seen.any((c) => c.contains('apt install')), isTrue);
+      expect(seen.any((c) => c.contains('apt-get install')), isTrue);
       expect(SandboxService.I.runtimesRequested, isTrue);
     });
   });

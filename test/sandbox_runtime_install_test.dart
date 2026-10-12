@@ -31,8 +31,8 @@ void main() {
       final command = args.last;
       commands.add(command);
       if (command.startsWith('awk ')) return (0, '');
-      if (command.startsWith('apt update') || command.startsWith('ovid-pkg update')) return (0, 'signed index ready');
-      if (command.startsWith('apt install') || command.startsWith('ovid-pkg install')) {
+      if (command.startsWith('apt-get update') || command.startsWith('ovid-pkg update')) return (0, 'signed index ready');
+      if (command.startsWith('apt-get install') || command.startsWith('ovid-pkg install')) {
         if (failOptional && RegExp(r'\b(gh|tmux)\b').hasMatch(command)) return (100, 'Unable to locate package gh');
         if (command.contains('nodejs')) ready.addAll(['node', 'npm', 'npx']);
         if (RegExp(r'\bpython\b').hasMatch(command)) ready.add('python');
@@ -91,7 +91,7 @@ void main() {
   test('cancelled signed command releases its owned lock before retry', () async {
     final normal = SandboxService.execCheckedOverrideForTest!;
     SandboxService.execCheckedOverrideForTest = (args, env) async {
-      if (args.last.startsWith('apt ')) return (1, 'apt transport failed');
+      if (args.last.startsWith('apt-get ')) return (1, 'apt transport failed');
       if (args.last.startsWith('ovid-pkg update')) {
         final lock = Directory('${prefix.path}/var/cache/ovid-pkg/lock')..createSync(recursive: true);
         File('${lock.path}/owner').writeAsStringSync(env['OVID_PKG_OPERATION'] ?? 'unowned');
@@ -109,7 +109,7 @@ void main() {
   test('signed retries select a different mirror after failed metadata fetch', () async {
     final mirrors = <String>[];
     SandboxService.execCheckedOverrideForTest = (args, env) async {
-      if (args.last.startsWith('apt ')) return (1, 'apt transport failed');
+      if (args.last.startsWith('apt-get ')) return (1, 'apt transport failed');
       if (args.last.startsWith('awk ')) return (0, '');
       if (args.last.startsWith('ovid-pkg update')) {
         mirrors.add(File('${prefix.path}/etc/apt/ovid-mirrors').readAsLinesSync().first);
@@ -130,7 +130,7 @@ void main() {
     File('${prefix.path}/bin/node').writeAsStringSync('broken executable');
     ready.remove('node');
     expect(await sandbox.ensureRuntime('node'), isTrue);
-    expect(commands.where((c) => c.startsWith('apt install')), isNotEmpty);
+    expect(commands.where((c) => c.startsWith('apt-get install')), isNotEmpty);
   });
 
   test('broken bootstrap awk never attempts a nested native apt repair', () async {
@@ -140,11 +140,11 @@ void main() {
     SandboxService.execCheckedOverrideForTest = (args, env) async {
       final command = args.last;
       if (command.startsWith('awk ')) return awkWorks ? (0, '') : (127, 'awk: gawk not found');
-      if (command.startsWith('apt install') && command.contains('gawk')) {
+      if (command.startsWith('apt-get install') && command.contains('gawk')) {
         awkWorks = true;
         return (0, 'gawk restored');
       }
-      if (command.startsWith('apt install')) return (1, 'dpkg prefix failure');
+      if (command.startsWith('apt-get install')) return (1, 'dpkg prefix failure');
       if (command.startsWith('ovid-pkg update')) {
         signedAttempted = true;
         expect(awkWorks, isTrue, reason: 'signed metadata and resolver both require a working awk');
@@ -176,7 +176,7 @@ void main() {
         transaction.deleteSync(recursive: true);
         return (0, 'recovered');
       }
-      if (args.last.startsWith('apt update') || args.last.startsWith('apt install')) {
+      if (args.last.startsWith('apt-get update') || args.last.startsWith('apt-get install')) {
         expect(recovered, isTrue);
       }
       return normal(args, env);
@@ -203,11 +203,11 @@ void main() {
           transaction.deleteSync(recursive: true);
           return (0, 'rollback complete');
         }
-        if (command.startsWith('apt update') || command.startsWith('apt install') ||
+        if (command.startsWith('apt-get update') || command.startsWith('apt-get install') ||
             command.startsWith('ovid-pkg update') || command.startsWith('ovid-pkg install')) {
           expect(transaction.existsSync(), isFalse, reason: 'recovery must precede $command');
         }
-        if (!interrupted && command.startsWith('apt install')) return (1, 'native install failed');
+        if (!interrupted && command.startsWith('apt-get install')) return (1, 'native install failed');
         if (!interrupted && command.startsWith('ovid-pkg install')) {
           interrupted = true;
           transaction.createSync(recursive: true);
@@ -244,7 +244,7 @@ void main() {
         transaction.deleteSync(recursive: true);
         return (0, 'recovered');
       }
-      if (command.startsWith('apt update')) {
+      if (command.startsWith('apt-get update')) {
         if (!failed) {
           failed = true;
           transaction.createSync(recursive: true);

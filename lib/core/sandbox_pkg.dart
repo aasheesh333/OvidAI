@@ -46,7 +46,42 @@ class OvidPkgInstaller {
     }
     _write('$p/bin/npm', _npmCliWrapper(p, 'npm'));
     _write('$p/bin/npx', _npmCliWrapper(p, 'npx'));
+    writeCmpShim(prefix);
   }
+
+  /// Marker identifying the app-written `bin/cmp` (safe to refresh).
+  static const cmpShimMarker = '# ovid-cmp-shim';
+
+  /// apt-key's `is_supported_keyring` runs `printf '\231' | cmp -s -n 1 - KEY`
+  /// for every trusted.gpg.d keyring. The bootstrap payloads ship NO `cmp`
+  /// (diffutils), so it resolves to Android's /system/bin/cmp (toybox),
+  /// which lacks `-n` on older releases — the check fails and apt-key drops
+  /// EVERY valid key as "unsupported filetype" → NO_PUBKEY → "repository is
+  /// not signed". Install a minimal cmp unless a real one (e.g. diffutils)
+  /// already exists; an earlier shim or a broken link is refreshed.
+  static void writeCmpShim(Directory prefix) {
+    final path = '${prefix.path}/bin/cmp';
+    try {
+      final type = FileSystemEntity.typeSync(path, followLinks: false);
+      if (type == FileSystemEntityType.link) {
+        if (FileSystemEntity.typeSync(path) != FileSystemEntityType.notFound) return;
+      } else if (type == FileSystemEntityType.file) {
+        final head = File(path).openSync();
+        final bytes = head.readSync(256);
+        head.closeSync();
+        if (!String.fromCharCodes(bytes).contains(cmpShimMarker)) return;
+      } else if (type != FileSystemEntityType.notFound) {
+        return;
+      }
+      _write(path, cmpShimFor(prefix.path));
+    } catch (e) {
+      Diag.swallow('sandbox_pkg', e);
+    }
+  }
+
+  /// Byte-exact POSIX-subset cmp: `[-s] [-n LIMIT] FILE1 [FILE2]`, `-` = stdin.
+  /// Exit 0 identical, 1 different, 2 trouble — what apt-key relies on.
+  static String cmpShimFor(String p) => _cmpShim.lstripNewline.replaceFirst('#!/bin/sh', '#!$p/bin/sh');
 
   static void _writeText(String path, String content) {
     _publish(path, content, executable: false);
@@ -118,6 +153,37 @@ extension on String {
   String get lstripNewline => startsWith('\n') ? substring(1) : this;
 }
 
+const _cmpShim = r'''
+#!/bin/sh
+# ovid-cmp-shim: minimal cmp for apt-key (payloads ship no diffutils).
+silent=0; limit=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -s|--silent|--quiet) silent=1; shift;;
+    -n) [ "$#" -ge 2 ] || exit 2; limit="$2"; shift 2;;
+    -n*) limit="${1#-n}"; shift;;
+    --bytes=*) limit="${1#--bytes=}"; shift;;
+    --) shift; break;;
+    -?*) echo "cmp: unsupported option $1" >&2; exit 2;;
+    *) break;;
+  esac
+done
+case "$limit" in ''|*[!0-9]*) [ -z "$limit" ] || { echo "cmp: invalid limit $limit" >&2; exit 2; };; esac
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo 'usage: cmp [-s] [-n LIMIT] FILE1 [FILE2]' >&2; exit 2; }
+a="$1"; b="${2:--}"
+for f in "$a" "$b"; do
+  [ "$f" = - ] || [ -r "$f" ] || { [ "$silent" = 1 ] || echo "cmp: $f: cannot read" >&2; exit 2; }
+done
+_digest() {
+  if [ -n "$limit" ]; then head -c "$limit" -- "$1"; else cat -- "$1"; fi | sha256sum
+}
+da="$(_digest "$a")" || exit 2
+db="$(_digest "$b")" || exit 2
+[ "$da" = "$db" ] && exit 0
+[ "$silent" = 1 ] || echo "$a $b differ"
+exit 1
+''';
+
 const _ovidPkg = r'''
 #!/bin/sh
 # ovid-pkg − signed curl+dpkg installer, independent of apt's transport.
@@ -128,7 +194,7 @@ if [ -z "${PREFIX:-}" ]; then echo "missing PREFIX env" >&2; exit 1; fi
 # execution error, not a misleading signature or connectivity diagnosis.
 awk 'BEGIN { exit 0 }' </dev/null || { echo '[ovid-pkg] prerequisite failed: awk (bootstrap must include gawk)' >&2; exit 1; }
 gpgv --version >/dev/null || { echo '[ovid-pkg] prerequisite failed: gpgv' >&2; exit 1; }
-for tool in curl dpkg dpkg-deb tar sha256sum realpath readlink mktemp date gzip xz sed grep sync; do
+for tool in curl dpkg dpkg-deb tar sha256sum realpath readlink mktemp date gzip xz sed grep sync od tr; do
   command -v "$tool" >/dev/null || { echo "[ovid-pkg] prerequisite missing: $tool" >&2; exit 1; }
 done
 PKG_IDX="$PREFIX/var/cache/ovid-pkg"
@@ -214,15 +280,44 @@ trap '_finish' EXIT
 trap 'exit 1' HUP INT TERM
 _recover || { echo '[ovid-pkg] pending transaction recovery failed' >&2; exit 1; }
 INDEX=""
-_error() { echo "[ovid-pkg] signed index verification failed: $*" >&2; return 1; }
+_why=''
+_error() { echo "[ovid-pkg] signed index verification failed: $*${_why:+ ($_why)}" >&2; return 1; }
+_keyring_ok() {
+  if [ -L "$1" ] && [ ! -e "$1" ]; then _skip='dangling symlink'
+  elif [ ! -f "$1" ]; then _skip='not a regular file'
+  elif [ ! -r "$1" ]; then _skip='not readable'
+  elif [ ! -s "$1" ]; then _skip='empty'
+  else
+    _tag="$(od -An -tx1 -N1 -- "$1" 2>/dev/null | tr -d ' \n')"
+    case "$_tag" in 98|99|c6) return 0;; esac
+    _skip="unsupported format (first byte 0x${_tag:-??})"
+  fi
+  echo "[ovid-pkg] skipped keyring ${1##*/}: $_skip" >&2
+  return 1
+}
+# IPv6/TLS handshake failures: the app sets ovid-force-ipv4 for mirrors that
+# only work over IPv4; any TLS/connect failure is also retried once with -4.
+_curl_v4=''
+[ -e "$PREFIX/etc/apt/ovid-force-ipv4" ] && _curl_v4='-4'
 _bounded_fetch() {
   # ulimit enforces a disk bound even for chunked responses/older curl builds.
   # 1024-byte units on supported shells, at most 1 MiB extra rounding.
   # Allow one allocation block of headroom (some transports preallocate).
   # The actual byte count is still checked against the exact signed size.
   (ulimit -f "$((($3 + 4095) / 512))" &&
-    curl -fsSL --proto '=https' --proto-redir '=https' --retry 1 \
-      --connect-timeout 15 --max-time 60 --max-filesize "$3" "$1" -o "$2") || return $?
+    curl -fsSL $_curl_v4 --proto '=https' --proto-redir '=https' --retry 1 \
+      --connect-timeout 15 --max-time 60 --max-filesize "$3" "$1" -o "$2")
+  _rc=$?
+  case "$_rc" in
+    7|28|35|56)
+      [ -z "$_curl_v4" ] || return "$_rc"
+      echo "[ovid-pkg] connect/TLS failure (curl $_rc); retrying over IPv4" >&2
+      (ulimit -f "$((($3 + 4095) / 512))" &&
+        curl -fsSL -4 --proto '=https' --proto-redir '=https' --retry 1 \
+          --connect-timeout 15 --max-time 60 --max-filesize "$3" "$1" -o "$2") || return $?;;
+    0) ;;
+    *) return "$_rc";;
+  esac
   [ -f "$2" ] && [ "$(wc -c < "$2")" -le "$3" ]
 }
 _hash_ok() {
@@ -234,27 +329,34 @@ _verify_release() {
   _signed="$1"
   # Only existing app-seeded trust roots. Never download keys or consult a
   # user's default GPG home/trustdb. The operation home starts empty.
+  # One dangling link or unsupported file must not break verification:
+  # pass only regular, readable, non-empty binary OpenPGP keyrings and log
+  # every skipped entry with its reason.
   set --
   for _key in "$PREFIX/etc/apt/trusted.gpg.d/"*.gpg; do
-    [ -f "$_key" ] && set -- "$@" --keyring "$_key"
+    [ -e "$_key" ] || [ -L "$_key" ] || continue
+    _keyring_ok "$_key" && set -- "$@" --keyring "$_key"
   done
-  [ "$#" -gt 0 ] || { _error 'missing trusted keyring'; return 1; }
+  [ "$#" -gt 0 ] || { _why='no usable trusted keyring in etc/apt/trusted.gpg.d'; return 1; }
   mkdir -p "$operation/gnupg" || return 1
   if [ -f "$_signed/InRelease" ]; then
     [ "$(wc -c < "$_signed/InRelease")" -le 1048576 ] || return 1
     rm -f "$operation/Release"
     gpgv --homedir "$operation/gnupg" "$@" --status-fd 3 \
-      --output "$operation/Release" "$_signed/InRelease" 3> "$operation/signature" 2> "$operation/gpg.log" || return 1
+      --output "$operation/Release" "$_signed/InRelease" 3> "$operation/signature" 2> "$operation/gpg.log" || {
+        _why="signature: $(grep -v '^gpgv: \(Signature made\|using\)' "$operation/gpg.log" | tail -1)"; return 1; }
   else
     [ -f "$_signed/Release" ] && [ -f "$_signed/Release.gpg" ] || return 1
     [ "$(wc -c < "$_signed/Release")" -le 1048576 ] &&
       [ "$(wc -c < "$_signed/Release.gpg")" -le 65536 ] || return 1
     gpgv --homedir "$operation/gnupg" "$@" --status-fd 3 \
-      "$_signed/Release.gpg" "$_signed/Release" 3> "$operation/signature" 2> "$operation/gpg.log" || return 1
+      "$_signed/Release.gpg" "$_signed/Release" 3> "$operation/signature" 2> "$operation/gpg.log" || {
+        _why="signature: $(grep -v '^gpgv: \(Signature made\|using\)' "$operation/gpg.log" | tail -1)"; return 1; }
     cp "$_signed/Release" "$operation/Release" || return 1
   fi
   # SHA-256/384/512 only; gpgv historically accepts weak digest signatures.
-  awk '$2=="VALIDSIG" && ($10==8 || $10==9 || $10==10) { ok=1 } END { exit !ok }' "$operation/signature" || return 1
+  awk '$2=="VALIDSIG" && ($10==8 || $10==9 || $10==10) { ok=1 } END { exit !ok }' "$operation/signature" || {
+    _why='signature: no valid SHA-2 signature'; return 1; }
   OVID_ARCH="$ARCH" awk -f "$PREFIX/libexec/ovid-pkg-release.awk" "$operation/Release" > "$operation/release-fields" || return 1
   _date="$(sed -n '1p' "$operation/release-fields")"
   _until="$(sed -n '2p' "$operation/release-fields")"
@@ -265,13 +367,14 @@ _verify_release() {
     _expiry="$(LC_ALL=C date -u -d "$_until" +%s)" || return 1
     [ "$_expiry" -lt "$expires" ] && expires="$_expiry"
   fi
-  [ "$released" -le "$((now + 300))" ] && [ "$now" -lt "$expires" ] && [ "$expires" -gt "$released" ] || return 1
+  [ "$released" -le "$((now + 300))" ] && [ "$now" -lt "$expires" ] && [ "$expires" -gt "$released" ] || {
+    _why='Release date outside its validity window (mirror out of date or device clock wrong)'; return 1; }
   release_hash="$(sha256sum "$operation/Release")" || return 1
   release_hash="${release_hash%% *}"
   if [ -f "$PKG_IDX/high-water" ]; then
     read -r _floor _floor_hash < "$PKG_IDX/high-water" || return 1
     case "$_floor" in ''|*[!0-9]*) return 1;; esac
-    [ "$released" -ge "$_floor" ] || return 1
+    [ "$released" -ge "$_floor" ] || { _why='mirror is behind an index already seen (stale mirror)'; return 1; }
     [ "$released" != "$_floor" ] || [ "$release_hash" = "$_floor_hash" ] || return 1
   fi
 }
@@ -293,6 +396,7 @@ _index_ok() {
 }
 _fetch_index() {
   # Revoke before transport, retaining the anti-rollback high-water mark.
+  _why=''
   : > "$PKG_IDX/revoked" || return 1
   _stage="$operation/generation"
   mkdir "$_stage" || return 1
@@ -300,7 +404,8 @@ _fetch_index() {
   if ! _bounded_fetch "$_base/InRelease" "$_stage/InRelease" 1048576 2>/dev/null; then
     rm -f "$_stage/InRelease"
     _bounded_fetch "$_base/Release" "$_stage/Release" 1048576 &&
-      _bounded_fetch "$_base/Release.gpg" "$_stage/Release.gpg" 65536 || return 1
+      _bounded_fetch "$_base/Release.gpg" "$_stage/Release.gpg" 65536 || {
+        _why="fetch: $MIRROR unreachable or HTTP error"; return 1; }
   fi
   _verify_release "$_stage" || return 1
   # Require a signed uncompressed digest even when transporting .gz/.xz.

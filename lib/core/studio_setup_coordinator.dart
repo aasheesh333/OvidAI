@@ -153,6 +153,7 @@ class StudioSetupCoordinator extends ChangeNotifier {
   @visibleForTesting
   static String friendlyError(Object e) {
     if (e is SandboxUnsupportedException) return e.message;
+    if (e is RuntimeSetupException) return e.message;
     if (e is _SetupPersistenceException) {
       return 'Could not save Studio setup status. Retry setup.';
     }

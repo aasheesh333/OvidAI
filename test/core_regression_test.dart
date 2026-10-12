@@ -7775,7 +7775,9 @@ block</pre>
       // Mirror rotation after a failed attempt (apt TLS/dead mirror, and the
       // signed-fallback catch path).
       expect(src, contains('[apt] mirror dead/stale — rotated to'));
-      expect(src, contains('_mirrorIdx = (_mirrorIdx + 1) % _aptMirrors.length;'));
+      // Rotation skips mirrors dropped (hard failure) earlier in the run.
+      expect(src, contains('final idx = (_mirrorIdx + step) % _aptMirrors.length;'));
+      expect(src, contains('_advanceMirror(markDead: hard, onLine: onLine)'));
     });
   });
 
