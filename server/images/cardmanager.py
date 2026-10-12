@@ -111,6 +111,7 @@ class CardManager:
         fp = fingerprint(name, item.params)
         card = default_card(name, fp)
         card['state'] = 'inferred'
+        card['edit_transport'] = item.params.get('edit_transport')
         facts, meta = static_extract(name, item.params, item.info, self._cost_map(), self._provider_entry(item))
         merge_facts(card, facts)
         card['static'] = meta

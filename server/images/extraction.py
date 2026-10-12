@@ -151,6 +151,10 @@ def static_extract(name, litellm_params=None, model_info=None, cost_map=None, pr
         sizes = list(hint['sizes'])
     if sizes:
         meta['sources'].append('name_hint' if sizes_source == 'inferred' else 'declared_sizes')
+    transport = litellm_params.get('edit_transport')
+    if transport in ('direct', 'none'):
+        _apply_edit_transport(ops, transport)
+        meta['edit_transport'] = transport
     facts = {'operations': ops}
     if sizes:
         facts['sizes'] = {'native': sizes, 'source': sizes_source, 'confidence': sizes_conf,
@@ -171,6 +175,21 @@ def static_extract(name, litellm_params=None, model_info=None, cost_map=None, pr
         meta['sources'].append('name_hint')
     meta['mode'] = mode
     return facts, meta
+
+
+def _apply_edit_transport(ops, transport):
+    """Edits go through the provider's documented JSON contract (single image, no
+    mask/background) or are unavailable. This is the provider contract, so it
+    overrides every name hint and LiteLLM claim (which assumed multipart)."""
+    if transport == 'direct':
+        ops['edit'] = cap(True, 'declared', 0.85)
+        for op in ('inpaint', 'multi_image', 'outpaint', 'reference_style', 'remove_background',
+                   'upscale'):
+            ops[op] = cap(False, 'declared', 0.85)
+    else:
+        for op in ('edit', 'inpaint', 'multi_image', 'outpaint', 'reference_style', 'remove_background',
+                   'upscale'):
+            ops[op] = cap(False, 'declared', 0.85)
 
 
 def _schema_props(entry):
