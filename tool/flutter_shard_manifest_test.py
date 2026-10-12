@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 import yaml
-from tool.run_flutter_suite import discover
+from tool.run_flutter_suite import discover, shard
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,11 +16,14 @@ WORKFLOW = ROOT / ".github/workflows/build.yml"
 
 class FlutterShardManifestTest(unittest.TestCase):
     @staticmethod
-    def _test_step_run():
-        document = yaml.safe_load(WORKFLOW.read_text())
+    def _shard_job():
+        return yaml.safe_load(WORKFLOW.read_text())["jobs"]["flutter-tests"]
+
+    @classmethod
+    def _test_step_run(cls):
         return next(
             step["run"]
-            for step in document["jobs"]["build"]["steps"]
+            for step in cls._shard_job()["steps"]
             if step.get("name") == "Test"
         )
 
@@ -65,6 +68,23 @@ class FlutterShardManifestTest(unittest.TestCase):
         self.assertTrue(all(0 < len(batch) <= 20 for batch in batches))
         self.assertIn('--batch-timeout 600', run)
         self.assertNotIn('|| true', run)
+
+    def test_workflow_shards_cover_every_test_file_exactly_once(self):
+        run = self._test_step_run()
+        count = int(re.search(r"--shard-count (\d+)", run).group(1))
+        self.assertIn("--shard-index ${{ matrix.shard }}", run)
+        indices = self._shard_job()["strategy"]["matrix"]["shard"]
+        self.assertEqual(indices, list(range(count)))
+        self.assertEqual(count, 3)
+        manifest = self._manifest_from_workflow(run)
+        shards = [shard(manifest, index, count) for index in indices]
+        flattened = [name for files in shards for name in files]
+        self.assertEqual(len(flattened), len(set(flattened)), "a test file runs in two shards")
+        self.assertEqual(sorted(flattened), manifest)
+        self.assertTrue(set(self._expected_manifest()) <= set(flattened))
+        self.assertTrue(all(files for files in shards))
+        # Round-robin keeps shards within one file of each other.
+        self.assertLessEqual(max(map(len, shards)) - min(map(len, shards)), 1)
 
     def test_manifest_fails_when_no_tracked_tests_are_available(self):
         import tempfile

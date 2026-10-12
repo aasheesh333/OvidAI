@@ -2,8 +2,9 @@ name: Validate and Build Android
 
 on:
   push:
-    # hoplite/** — agent thread branches: push builds a device-testable
-    # debug APK before review, so fixes can be tested without merging.
+    # hoplite/** — agent thread branches: push builds a device-testable APK
+    # (signed release when the keystore secret exists, otherwise debug) before
+    # review, so fixes can be tested without merging.
     branches: [main, ci/verified-android-build-20260827, 'hoplite/**', 'harness/**']
   pull_request:
     branches: [main, ci/verified-android-build-20260827]
@@ -30,12 +31,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # Job-level `if:` cannot read secrets or step env, so release-signing
+  # availability is computed once here and consumed as a job output.
+  detect:
+    name: Detect release signing
     runs-on: ubuntu-latest
-    # Bounded batches reuse Flutter startup across files; two isolates per batch
-    # keep memory bounded. Retain enough time for tests and Android compilation.
-    timeout-minutes: 90
+    timeout-minutes: 5
+    outputs:
+      release_signing: ${{ steps.signing.outputs.release_signing }}
+    steps:
+      - name: Detect release signing availability
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          # Signed full-feature release APK + AAB on every push (sideload profile), and on the
+          # manual release_candidate / production_release dispatches.
+          release_signing=false
+          if [ -n "$KEYSTORE_B64" ] && { [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.production_release }}" = "true" ] || [ "${{ inputs.release_candidate }}" = "true" ]; }; then
+            release_signing=true
+          fi
+          echo "release_signing=$release_signing" >> "$GITHUB_OUTPUT"
+
+  # Signed release APK + AAB. Deliberately does NOT wait for the Flutter test
+  # shards: artifacts are ready ~10 min after a push, while the run as a whole
+  # stays red unless every test job passes too.
+  release:
+    name: Build signed release APK + AAB
+    needs: detect
+    # production_release also runs without the keystore secret so the
+    # production signing preparation fails loudly instead of silently skipping.
+    if: needs.detect.outputs.release_signing == 'true' || inputs.production_release == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
+      release_signing: ${{ needs.detect.outputs.release_signing }}
       # In-app account deletion (server/account/README.md activation). Set the
       # repository variable OVID_ACCOUNT_ENABLED=true only after the account
       # service is live on the VPS; until then release builds ship the web /
@@ -44,19 +74,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Detect development Firebase configuration
-        env:
-          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: |
-          if [ -n "$GOOGLE_SERVICES" ]; then
-            echo "firebase=true" >> "$GITHUB_ENV"
-          fi
-
       - name: Setup Java
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
         with:
           distribution: 'temurin'
           java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle.kts
+            android/app/build.gradle.kts
+            android/gradle/wrapper/gradle-wrapper.properties
+            android/gradle.properties
 
       - name: Setup Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -67,15 +95,7 @@ jobs:
           flutter-version: '3.47.4'
           channel: stable
           cache: true
-
-      # Inject Firebase config from secret — never committed to the repo.
-      - name: Write google-services.json
-        if: env.firebase == 'true' && inputs.production_release != true
-        env:
-          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: |
-          mkdir -p android/app
-          printf '%s' "$GOOGLE_SERVICES" > android/app/google-services.json
+          pub-cache-key: "flutter-pub-:os:-:channel:-:version:-:arch:-:hash:-${{ hashFiles('pubspec.lock') }}"
 
       # Decode release keystore + write signing properties from secrets.
       - name: Prepare release signing
@@ -113,75 +133,20 @@ jobs:
       - name: Resolve dependencies
         run: flutter pub get --enforce-lockfile
 
+      # Pinned upstream assets are re-verified against their SHA-256 pins on
+      # every run (bootstrap_supply.py rejects a poisoned cache).
+      - name: Cache native sandbox bootstrap downloads
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: /tmp/opencode/bootstrap-work
+          key: bootstrap-${{ runner.os }}-${{ hashFiles('tool/bootstrap_supply.py', 'tool/prepare_bootstrap.sh') }}
+
       - name: Package native sandbox bootstrap (per-ABI jniLibs payload)
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq zip unzip >/dev/null
-          bash tool/prepare_bootstrap.sh
-
-      - name: Analyze
-        run: flutter analyze
-
-      - name: Test
-        if: inputs.bounded_flutter_suite != true
-        shell: bash
-        run: |
-          python3 tool/run_flutter_suite.py \
-            --flutter "$(command -v flutter)" \
-            --output "$RUNNER_TEMP/flutter-suite-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            --lock "$RUNNER_TEMP/flutter-suite.lock" \
-            --batch-size 20 --batch-timeout 600 --lock-timeout 900
-
-      - name: Test with bounded Flutter suite runner
-        if: inputs.bounded_flutter_suite == true
-        shell: bash
-        run: |
-          python3 tool/run_flutter_suite.py \
-            --flutter "$(command -v flutter)" \
-            --output "$RUNNER_TEMP/flutter-suite-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            --lock "$RUNNER_TEMP/flutter-suite.lock" \
-            --batch-size 20 --batch-timeout 600 --lock-timeout 900
-
-      - name: Upload bounded Flutter suite evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: Flutter-suite-evidence
-          path: ${{ runner.temp }}/flutter-suite-${{ github.run_id }}-${{ github.run_attempt }}/
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Build debug APK
-        run: flutter build apk --debug --dart-define=OVID_BUILD=${{ github.sha }}
-
-      - name: Native host tests
-        working-directory: android
-        run: ./gradlew :app:testDebugUnitTest --no-daemon
-
-      - name: Gate debug APK inventory
-        run: >-
-          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-debug.apk
-          --mode debug --expected-target 28 --output build/release-inventory/debug.json
-
-      - name: Upload debug APK
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: Ovid-APK-debug
-          path: build/app/outputs/flutter-apk/app-debug.apk
-          if-no-files-found: error
-          retention-days: 30
-
-      # Release artifacts are intentionally manual. Building the signed APK and
-      # AAB on every branch push duplicates the full Android compilation and
-      # made ordinary validation take roughly 20 minutes instead of 10.
-      - name: Detect release signing availability
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        run: |
-          # Signed full-feature release APK + AAB on every push (sideload profile), and on the
-          # manual release_candidate / production_release dispatches.
-          if [ -n "$KEYSTORE_B64" ] && { [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.production_release }}" = "true" ] || [ "${{ inputs.release_candidate }}" = "true" ]; }; then
-            echo "release_signing=true" >> "$GITHUB_ENV"
+          if ! command -v zip >/dev/null || ! command -v unzip >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq zip unzip >/dev/null
           fi
+          bash tool/prepare_bootstrap.sh
 
       - name: Prepare release signing
         if: env.release_signing == 'true' && inputs.production_release != true
@@ -193,8 +158,8 @@ jobs:
           GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           set -euo pipefail
-          # release_prepare.py refuses to overwrite; drop the push-time
-          # google-services.json plus any stale signing inputs first.
+          # release_prepare.py refuses to overwrite; drop any stale
+          # google-services.json plus signing inputs first.
           rm -f android/release-keystore.jks android/keystore.properties android/app/google-services.json
           keystore="$(mktemp)"
           trap 'rm -f "$keystore"' EXIT
@@ -212,9 +177,9 @@ jobs:
       - name: Free disk before release build
         if: env.release_signing == 'true'
         run: |
-          # The release build recompiles everything; the debug build's
-          # intermediates plus the NDK toolchain leave the runner tight on
-          # space (llvm-strip once died with "No space left on device").
+          # The release build compiles everything; the NDK toolchain leaves the
+          # runner tight on space (llvm-strip once died with "No space left on
+          # device").
           rm -rf build/app/intermediates build/app/tmp build/app/kotlin
           df -h /
 
@@ -276,14 +241,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload release inventory and native test evidence
+      - name: Upload release inventory evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: Ovid-release-evidence
-          path: |
-            build/release-inventory/
-            build/app/test-results/testDebugUnitTest/
+          path: build/release-inventory/
           if-no-files-found: warn
           retention-days: 30
 
@@ -296,6 +259,205 @@ jobs:
       # publishing them would defeat the `--obfuscate` build. They exist only
       # as ephemeral files on the runner and must be archived privately (or
       # uploaded to Crashlytics) if symbolication is ever needed.
+
+  # Static checks, workflow/tool unit tests and the JVM host tests. Native host
+  # tests need only the debug Flutter assets, not the bootstrap payload.
+  analyze:
+    name: Analyze and native host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle.kts
+            android/app/build.gradle.kts
+            android/gradle/wrapper/gradle-wrapper.properties
+            android/gradle.properties
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+          pub-cache-key: "flutter-pub-:os:-:channel:-:version:-:arch:-:hash:-${{ hashFiles('pubspec.lock') }}"
+
+      - name: Test release inventory gates
+        run: python3 -m unittest discover -s tool -p '*_test.py'
+
+      - name: Resolve dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Native host tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+
+      - name: Upload native test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Ovid-native-test-evidence
+          path: build/app/test-results/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # The Flutter suite split into deterministic round-robin shards
+  # (tool/run_flutter_suite.py --shard-index/--shard-count): every test file
+  # runs in exactly one shard, each with bounded batches and its own evidence.
+  flutter-tests:
+    name: Flutter tests (shard ${{ matrix.shard }} of 3)
+    runs-on: ubuntu-latest
+    # Bounded batches reuse Flutter startup across files; two isolates per batch
+    # keep memory bounded. ~1/3 of the suite per shard plus retry headroom.
+    timeout-minutes: 45
+    strategy:
+      # Every shard must finish and retain evidence even if another fails.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+          pub-cache-key: "flutter-pub-:os:-:channel:-:version:-:arch:-:hash:-${{ hashFiles('pubspec.lock') }}"
+
+      - name: Resolve dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Test
+        if: inputs.bounded_flutter_suite != true
+        shell: bash
+        run: |
+          python3 tool/run_flutter_suite.py \
+            --flutter "$(command -v flutter)" \
+            --output "$RUNNER_TEMP/flutter-suite-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --lock "$RUNNER_TEMP/flutter-suite.lock" \
+            --shard-index ${{ matrix.shard }} --shard-count 3 \
+            --batch-size 20 --batch-timeout 600 --lock-timeout 900
+
+      - name: Test with bounded Flutter suite runner
+        if: inputs.bounded_flutter_suite == true
+        shell: bash
+        run: |
+          python3 tool/run_flutter_suite.py \
+            --flutter "$(command -v flutter)" \
+            --output "$RUNNER_TEMP/flutter-suite-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --lock "$RUNNER_TEMP/flutter-suite.lock" \
+            --shard-index ${{ matrix.shard }} --shard-count 3 \
+            --batch-size 20 --batch-timeout 600 --lock-timeout 900
+
+      - name: Upload bounded Flutter suite evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Flutter-suite-evidence-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/flutter-suite-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Debug APK only when no signed release is built (pull requests, forks, or a
+  # repository without the keystore secret); the release job covers pushes.
+  debug-apk:
+    name: Build debug APK
+    needs: detect
+    if: needs.detect.outputs.release_signing != 'true' && inputs.production_release != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Detect development Firebase configuration
+        env:
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES" ]; then
+            echo "firebase=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle.kts
+            android/app/build.gradle.kts
+            android/gradle/wrapper/gradle-wrapper.properties
+            android/gradle.properties
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+          pub-cache-key: "flutter-pub-:os:-:channel:-:version:-:arch:-:hash:-${{ hashFiles('pubspec.lock') }}"
+
+      # Inject Firebase config from secret — never committed to the repo.
+      - name: Write google-services.json
+        if: env.firebase == 'true' && inputs.production_release != true
+        env:
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          mkdir -p android/app
+          printf '%s' "$GOOGLE_SERVICES" > android/app/google-services.json
+
+      - name: Resolve dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Cache native sandbox bootstrap downloads
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: /tmp/opencode/bootstrap-work
+          key: bootstrap-${{ runner.os }}-${{ hashFiles('tool/bootstrap_supply.py', 'tool/prepare_bootstrap.sh') }}
+
+      - name: Package native sandbox bootstrap (per-ABI jniLibs payload)
+        run: |
+          if ! command -v zip >/dev/null || ! command -v unzip >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq zip unzip >/dev/null
+          fi
+          bash tool/prepare_bootstrap.sh
+
+      - name: Build debug APK
+        run: flutter build apk --debug --dart-define=OVID_BUILD=${{ github.sha }}
+
+      - name: Gate debug APK inventory
+        run: >-
+          python3 tool/release_inventory.py build/app/outputs/flutter-apk/app-debug.apk
+          --mode debug --expected-target 28 --output build/release-inventory/debug.json
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Ovid-APK-debug
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload debug inventory evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Ovid-debug-evidence
+          path: build/release-inventory/
+          if-no-files-found: warn
+          retention-days: 30
 
   server-tests:
     name: Validate server account, sync, and collaboration
