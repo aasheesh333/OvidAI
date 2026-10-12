@@ -44,6 +44,7 @@ from server.images.capabilities import (
 )
 from server.images.cardmanager import CardManager, Discovered
 from server.images.cardstore import CardStore
+from server.images import costing
 from server.images.directedit import DirectEdit
 from server.images.probes import LiteLLMProbeTransport, ProbeRunner
 from server.images.routing import alternatives, parse_model, pick_backends, task_from_request, missing
@@ -201,6 +202,19 @@ def _key_spend(key_id):
     return None
 
 
+def _fetch_model_info():
+    headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
+    with httpx.Client(base_url=LITELLM_BASE, timeout=15) as client:
+        response = client.get("/model/info", headers=headers)
+    if response.status_code != 200:
+        raise RuntimeError("model/info unavailable")
+    return costing.parse_model_info(response.json())
+
+
+_PRICES = costing.PriceBook(_fetch_model_info, ttl=300.0)
+SPEND_RETRY_SECONDS = float(os.environ.get("OVID_IMAGE_SPEND_RETRY_SECONDS", "1.5"))
+
+
 class LiteLLMImageService:
     def __init__(self, discovery, ledger, *, clock=time.monotonic, direct_edit=None):
         self.discovery, self.ledger = discovery, ledger
@@ -341,10 +355,15 @@ class LiteLLMImageService:
             except Exception:
                 raise self._unknown(account, request, fingerprint) from None
             flat = result.pop("_settle", None)
-            after = _key_spend(key_id) if key_id and flat is None else None
-            actual = flat
-            if flat is None and before is not None and after is not None and after > before:
-                actual = money(str(after - before))
+            headers, usage = result.pop("_headers", None), result.pop("_usage", None)
+            actual, source = flat, "flat" if flat is not None else None
+            if flat is None:
+                actual, source = costing.determine_cost(
+                    headers=headers, usage=usage, prices=lambda m=backend.model: _PRICES.get(m),
+                    spend_before=before, spend_read=(lambda: _key_spend(key_id)) if key_id else None,
+                    spend_wait=SPEND_RETRY_SECONDS, spend_poll=SPEND_RETRY_SECONDS,
+                    bound=MAX_UPSTREAM_USD)
+            _LOG.info("image_cost source=%s model=%s actual=%s", source or "none", backend.model, actual)
             if actual is None or actual <= 0:
                 # No dashboard price recorded the spend: keep the reservation
                 # for reconciliation rather than fabricating a charge.
@@ -401,6 +420,8 @@ class LiteLLMImageService:
         if direct:
             # LiteLLM never saw this call, so its key-spend delta cannot settle it.
             result["_settle"] = engine.settlement_cost(data, MAX_UPSTREAM_USD)
+        else:
+            result["_headers"], result["_usage"] = response.headers, data.get("usage")
         return result
 
     def _litellm_forward(self, headers, backend, operation, prompt, size, image_b64, image_mime,
