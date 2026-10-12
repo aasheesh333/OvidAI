@@ -44,6 +44,7 @@ from server.images.capabilities import (
 )
 from server.images.cardmanager import CardManager, Discovered
 from server.images.cardstore import CardStore
+from server.images.directedit import DirectEdit
 from server.images.probes import LiteLLMProbeTransport, ProbeRunner
 from server.images.routing import alternatives, parse_model, pick_backends, task_from_request, missing
 from server.images.verifier import VerifierAuth, mount_images
@@ -61,6 +62,9 @@ PROBE_DAILY_USD = float(os.environ.get("OVID_PROBE_DAILY_USD", "5.00"))
 PROBE_MAX_SIZES = int(os.environ.get("OVID_PROBE_MAX_SIZES", "4"))
 PROBE_TTL = float(os.environ.get("OVID_PROBE_TTL_SECONDS", str(7 * 24 * 3600)))
 PROBE_INTERVAL = float(os.environ.get("OVID_PROBE_INTERVAL_SECONDS", "60"))
+# Edits bypass LiteLLM (it can only send multipart; the provider accepts JSON only).
+# Needs INFERHUB_API_KEY; see server/images/deploy/README.md. Never logged/returned.
+DIRECT_EDIT = DirectEdit.from_env(MAX_UPSTREAM_USD, HTTP_TIMEOUT)
 COSTMAP_URL = os.environ.get("OVID_IMAGE_COSTMAP_URL", "")  # optional raw LiteLLM cost-map JSON
 _CATALOG_TTL = 30.0
 _MAX_COOLDOWNS = 256
@@ -101,11 +105,12 @@ class _Backend:
 
     `card` is the capability card (None for legacy callers: a card is then
     synthesized from the declared sizes/edit flag)."""
-    __slots__ = ("model", "sizes", "edit", "card")
+    __slots__ = ("model", "sizes", "edit", "card", "params")
 
-    def __init__(self, model, sizes, edit, card=None):
+    def __init__(self, model, sizes, edit, card=None, params=None):
         self.model, self.sizes, self.edit = model, tuple(sizes), edit
         self.card = card
+        self.params = params or {}   # identity-only litellm_params (no credentials)
 
 
 def _backend_card(backend):
@@ -125,7 +130,8 @@ class _Discovery:
     CardManager fills; until a model has a card it is generate-only/1024x1024.
     """
 
-    def __init__(self, manager=None):
+    def __init__(self, manager=None, direct_edit=None):
+        self.direct_edit = direct_edit
         self._at = 0.0
         self._found = []
         self.manager = manager
@@ -148,9 +154,11 @@ class _Discovery:
                         continue
                     params = row.get("litellm_params", {}) or {}
                     # Keep only identity fields; credentials are never stored.
-                    found.append(Discovered(name, {k: params.get(k) for k in
-                                                   ("model", "api_base", "custom_llm_provider") if params.get(k)},
-                                            info))
+                    identity = {k: params.get(k) for k in
+                                ("model", "api_base", "custom_llm_provider") if params.get(k)}
+                    direct = self.direct_edit or DIRECT_EDIT
+                    identity["edit_transport"] = "direct" if direct.enabled_for(identity) else "none"
+                    found.append(Discovered(name, identity, info))
         except Exception as error:  # noqa: BLE001
             print(f"image discovery: model/info error: {error}")
             if self._found:
@@ -163,8 +171,18 @@ class _Discovery:
     def backends(self):
         found = self.discovered()
         if self.manager is None:
-            return [_Backend(d.name, ("1024x1024",), False, default_card(d.name)) for d in found]
-        return [_backend_from_card(self.manager.card(d.name, d.params)) for d in found]
+            return [_Backend(d.name, ("1024x1024",), False, default_card(d.name), d.params) for d in found]
+        out = []
+        for d in found:
+            card = dict(self.manager.card(d.name, d.params))
+            card["edit_transport"] = d.params.get("edit_transport")
+            backend = _backend_from_card(card)
+            backend.params = d.params
+            out.append(backend)
+        return out
+
+    def params_of(self, model):
+        return next((d.params for d in self._found if d.name == model), None)
 
 
 def _user_key(uid):
@@ -184,8 +202,9 @@ def _key_spend(key_id):
 
 
 class LiteLLMImageService:
-    def __init__(self, discovery, ledger, *, clock=time.monotonic):
+    def __init__(self, discovery, ledger, *, clock=time.monotonic, direct_edit=None):
         self.discovery, self.ledger = discovery, ledger
+        self.direct_edit = direct_edit
         self.clock = clock
         # Process-local, bounded negative readiness cache. Catalog refreshes do
         # not prove recovery. Only explicit no_capacity populates this cache.
@@ -302,9 +321,10 @@ class LiteLLMImageService:
             self.ledger.receipt(account, request)
             if self._retry_after(backend.model):
                 continue
-            before = _key_spend(key_id) if key_id else None
+            card = next(c for c in ranked if c["model"] == backend.model)
+            direct = operation == "edit" and card.get("edit_transport") == "direct"
+            before = _key_spend(key_id) if key_id and not direct else None
             try:
-                card = next(c for c in ranked if c["model"] == backend.model)
                 req_size = task.size or (card["sizes"]["native"] or ["1024x1024"])[0]
                 result = self._forward(key, backend, operation, prompt, req_size, image_b64, image_mime,
                                        mask=mask_raw, extra=extra_images,
@@ -320,9 +340,10 @@ class LiteLLMImageService:
                 continue  # Explicit, allowlisted pre-dispatch refusal only.
             except Exception:
                 raise self._unknown(account, request, fingerprint) from None
-            after = _key_spend(key_id) if key_id else None
-            actual = None
-            if before is not None and after is not None and after > before:
+            flat = result.pop("_settle", None)
+            after = _key_spend(key_id) if key_id and flat is None else None
+            actual = flat
+            if flat is None and before is not None and after is not None and after > before:
                 actual = money(str(after - before))
             if actual is None or actual <= 0:
                 # No dashboard price recorded the spend: keep the reservation
@@ -346,6 +367,44 @@ class LiteLLMImageService:
     def _forward(self, key, backend, operation, prompt, size, image_b64, image_mime, *,
                  mask=None, extra=(), transparent=False):
         headers = {"Authorization": f"Bearer {key}"}
+        direct = operation == "edit" and (getattr(backend, "card", None) or {}).get("edit_transport") == "direct"
+        if direct:
+            engine = self.direct_edit or DIRECT_EDIT
+            if mask or extra or transparent:   # defence in depth; routing refuses these earlier
+                raise ImageError(422, "unsupported_image_operation")
+            response = engine.post(backend.params, prompt, size, f"data:{image_mime};base64,{image_b64}")
+            if response.status_code in (401, 402, 403):
+                # Our provider credential/credit, not the user's: operator action needed.
+                _LOG.error("image provider rejected the gateway credential status=%s", response.status_code)
+        else:
+            response = self._litellm_forward(headers, backend, operation, prompt, size, image_b64,
+                                             image_mime, mask, extra, transparent)
+        if _capacity_rejected(response, backend.model):
+            raise _NotServed(response.status_code, 'no_capacity',
+                             capacity_retry_seconds(response.headers.get('Retry-After')))
+        if response.status_code == 400:
+            try:
+                code = structured_error_code(response.json())
+            except ValueError:
+                code = None
+            if code in PRE_PROVIDER_REFUSAL_CODES:
+                raise _NotServed(response.status_code, code)
+        if response.status_code != 200:
+            raise ImageError(502, "image_unavailable")
+        data = response.json()
+        rows = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or len(rows) != 1 or not rows[0].get("b64_json"):
+            raise ImageError(502, "invalid_image_response")
+        encoded = rows[0]["b64_json"]
+        mime = validate_image(encoded)
+        result = {"model": ALIAS, "data": [{"b64_json": encoded, "mime_type": mime}]}
+        if direct:
+            # LiteLLM never saw this call, so its key-spend delta cannot settle it.
+            result["_settle"] = engine.settlement_cost(data, MAX_UPSTREAM_USD)
+        return result
+
+    def _litellm_forward(self, headers, backend, operation, prompt, size, image_b64, image_mime,
+                         mask, extra, transparent):
         with httpx.Client(base_url=LITELLM_BASE, timeout=HTTP_TIMEOUT, follow_redirects=False) as client:
             if operation == "generate":
                 body = {"model": backend.model, "prompt": prompt, "size": size,
@@ -365,25 +424,7 @@ class LiteLLMImageService:
                 if mask:
                     files.append(("mask", ("mask.png", mask, "image/png")))
                 response = client.post("/v1/images/edits", headers=headers, data=data, files=files)
-        if _capacity_rejected(response, backend.model):
-            raise _NotServed(response.status_code, 'no_capacity',
-                             capacity_retry_seconds(response.headers.get('Retry-After')))
-        if response.status_code == 400:
-            try:
-                code = structured_error_code(response.json())
-            except ValueError:
-                code = None
-            if code in PRE_PROVIDER_REFUSAL_CODES:
-                raise _NotServed(response.status_code, code)
-        if response.status_code != 200:
-            raise ImageError(502, "image_unavailable")
-        data = response.json()
-        rows = data.get("data") if isinstance(data, dict) else None
-        if not isinstance(rows, list) or len(rows) != 1 or not rows[0].get("b64_json"):
-            raise ImageError(502, "invalid_image_response")
-        encoded = rows[0]["b64_json"]
-        mime = validate_image(encoded)
-        return {"model": ALIAS, "data": [{"b64_json": encoded, "mime_type": mime}]}
+        return response
 
     def _unknown(self, account, request, fingerprint):
         receipt = {"account_id": account, "request_id": request,
@@ -444,12 +485,13 @@ def _cost_map():
         return None
 
 
-def build_card_manager():
+def build_card_manager(params_for=None):
     store = CardStore(CARDS_DB)
     runner = None
     if PROBE_KEY:
         runner = ProbeRunner(
-            LiteLLMProbeTransport(LITELLM_BASE, PROBE_KEY, master_key=LITELLM_MASTER_KEY),
+            LiteLLMProbeTransport(LITELLM_BASE, PROBE_KEY, master_key=LITELLM_MASTER_KEY,
+                                  direct=DIRECT_EDIT, params_for=params_for),
             store, per_probe_cap=PROBE_PER_CALL_USD, daily_cap=PROBE_DAILY_USD, max_sizes=PROBE_MAX_SIZES)
     return CardManager(store, runner, fetch_json=_fetch_json, cost_map=_cost_map, ttl=PROBE_TTL)
 
@@ -458,8 +500,9 @@ def mount():
     if getattr(mint.app.state, "ovid_images_mounted", False):
         return
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    manager = build_card_manager()
-    discovery = _Discovery(manager)
+    discovery = _Discovery(None)
+    manager = build_card_manager(discovery.params_of)
+    discovery.manager = manager
     service = LiteLLMImageService(discovery, Ledger(DB_PATH))
     mount_images(mint, service, admission=admission, auth=VerifierAuth(mint))
     mount_admin(mint.app, manager, LITELLM_MASTER_KEY, wake=manager.wake)
@@ -467,7 +510,8 @@ def mount():
     manager.start(lambda: discovery.discovered(force=True), interval=PROBE_INTERVAL)
     mint.app.state.ovid_images_mounted = True
     print(f"Ovid images mounted: alias={ALIAS} image_models={[b.model for b in service.backends]} "
-          f"probes={'on' if PROBE_KEY else 'off (static cards only)'}")
+          f"probes={'on' if PROBE_KEY else 'off (static cards only)'} "
+          f"direct_edit={'on' if DIRECT_EDIT.has_key else 'off (INFERHUB_API_KEY unset: edits unsupported)'}")
 
 
 try:

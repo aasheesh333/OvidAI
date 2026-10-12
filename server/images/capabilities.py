@@ -34,6 +34,8 @@ def fingerprint(model, params=None):
                 'litellm_model': params.get('model') or '',
                 'api_base': (params.get('api_base') or '').rstrip('/'),
                 'provider': params.get('custom_llm_provider') or ''}
+    if params.get('edit_transport'):   # direct-json | none: toggling must re-extract + re-probe
+        material['edit_transport'] = params['edit_transport']
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 

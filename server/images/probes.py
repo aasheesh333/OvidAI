@@ -66,11 +66,32 @@ def classify_error(status, text=''):
     return TRANSIENT   # 408/409/425/429/5xx/anything else: no verdict
 
 
+_DIRECT_UNSUPPORTED_CODES = ('not_an_image_model', 'unsupported_modality')
+
+
+def classify_direct_error(status, response):
+    """Direct JSON edit probe verdict. Only the provider's documented structured
+    "this model cannot read images" codes prove a capability absent; any other
+    format/validation 400 (e.g. a malformed probe) is inconclusive."""
+    try:
+        error = response.json().get('error')
+        code = error.get('code') if isinstance(error, dict) else None
+    except Exception:  # noqa: BLE001
+        code = None
+    if status == 400 and code in _DIRECT_UNSUPPORTED_CODES:
+        return UNSUPPORTED
+    verdict = classify_error(status, '' if status == 400 else response.text[:2000])
+    return INCONCLUSIVE if verdict == UNSUPPORTED else verdict
+
+
 class LiteLLMProbeTransport:
     """Real transport: LiteLLM /v1/images/* with the dedicated probe key."""
 
-    def __init__(self, base_url, probe_key, *, master_key=None, timeout=90, spend_wait=4.0, client_factory=None):
+    def __init__(self, base_url, probe_key, *, master_key=None, timeout=90, spend_wait=4.0, client_factory=None,
+                 direct=None, params_for=None):
         self.base_url, self.key, self.master_key = base_url, probe_key, master_key
+        # Direct JSON edit path (same transport the gateway uses for user edits).
+        self.direct, self.params_for = direct, params_for
         self.timeout, self.spend_wait = timeout, spend_wait
         self.client_factory = client_factory or (lambda **kw: httpx.Client(**kw))
 
@@ -84,7 +105,36 @@ class LiteLLMProbeTransport:
             pass
         return None
 
+    @property
+    def edit_cost(self):
+        return float(self.direct.edit_cost) if self.direct is not None and self.direct.edit_cost else None
+
+    def _direct_edit(self, model, params):
+        started = time.monotonic()
+        lookup = (self.params_for(model) if self.params_for else None) or {}
+        if self.direct is None or not self.direct.enabled_for(lookup):
+            return ProbeOutcome(False, INCONCLUSIVE, 0, 0.0)
+        data_url = 'data:image/png;base64,' + base64.b64encode(params['images'][0]).decode()
+        try:
+            r = self.direct.post(lookup, params['prompt'], params['size'], data_url)
+        except httpx.HTTPError:
+            return ProbeOutcome(False, TRANSIENT, int((time.monotonic() - started) * 1000), 0.0)
+        latency = int((time.monotonic() - started) * 1000)
+        if r.status_code != 200:
+            return ProbeOutcome(False, classify_direct_error(r.status_code, r), latency, 0.0)
+        try:
+            body = r.json()
+            images = tuple(base64.b64decode(row['b64_json']) for row in body.get('data') or [])
+        except Exception:  # noqa: BLE001
+            return ProbeOutcome(False, TRANSIENT, latency, float(self.direct.edit_cost or 0))
+        cost = float(self.direct.settlement_cost(body, self.direct.edit_cost))
+        if not images:
+            return ProbeOutcome(False, TRANSIENT, latency, cost)
+        return ProbeOutcome(True, None, latency, cost, images)
+
     def call(self, model, kind, params):
+        if kind == 'edit' and params.get('direct'):
+            return self._direct_edit(model, params)
         headers = {'Authorization': f'Bearer {self.key}'}
         with self.client_factory(base_url=self.base_url, timeout=self.timeout, follow_redirects=False) as client:
             before = self._spend(client)
@@ -175,11 +225,18 @@ class ProbeRunner:
         def attempt(name, kind, **params):
             if ctx['stop']:
                 return None
-            if self.store.spent_since(day_start) + est > self.daily_cap:
+            est_here = est
+            if params.get('direct'):
+                flat = getattr(self.transport, 'edit_cost', None)
+                if flat:
+                    if flat > self.per_probe_cap:
+                        return None            # strict cap: never spend above the per-probe limit
+                    est_here = flat
+            if self.store.spent_since(day_start) + est_here > self.daily_cap:
                 ctx['stop'] = 'daily_budget'
                 return None
             out = self.transport.call(model, kind, params)
-            cost = out.cost_usd if out.cost_usd is not None else (est if out.ok else 0.0)
+            cost = out.cost_usd if out.cost_usd is not None else (est_here if out.ok else 0.0)
             ctx['spent'] += cost
             self.store.log_probe(model, name, out.ok, out.error_class, out.latency_ms, cost)
             ctx['results'].append({'probe': name, 'ok': out.ok, 'error_class': out.error_class,
@@ -228,14 +285,19 @@ class ProbeRunner:
 
         if generate_ok is not False:
             # 3: edit
-            out = attempt('edit', 'edit', prompt='make the square blue', size=size, images=[png])
-            edit_v = verdict(out)
+            transport = card.get('edit_transport')
+            direct = transport == 'direct'
+            edit_v = None
+            if transport != 'none':   # 'none': edits are unavailable by configuration, nothing to probe
+                out = attempt('edit', 'edit', prompt='make the square blue', size=size, images=[png], direct=direct)
+                edit_v = verdict(out)
             if edit_v is not None:
                 ops['edit'] = cap(edit_v, 'probed', 0.9)
             if edit_v is False:
                 for dependent in ('inpaint', 'outpaint', 'multi_image', 'reference_style', 'remove_background'):
                     ops[dependent] = cap(False, 'probed', 0.6)
-            elif edit_v:
+            elif edit_v and not direct:
+                # (direct JSON edits have no mask/extra-image contract: nothing to probe)
                 out = attempt('inpaint', 'edit', prompt='fill the transparent area with green', size=size,
                               images=[png], mask=synthetic_png(alpha=True))
                 inpaint_v = verdict(out)
@@ -254,7 +316,7 @@ class ProbeRunner:
             if out is not None and out.ok:
                 has_alpha = _has_alpha(out.images[0])
                 ops['transparent_output'] = cap(has_alpha, 'probed', 0.8)
-                if has_alpha and edit_v:
+                if has_alpha and edit_v and not direct:
                     ops['remove_background'] = cap(True, 'inferred', 0.5)
             elif verdict(out) is False:
                 ops['transparent_output'] = cap(False, 'probed', 0.7)

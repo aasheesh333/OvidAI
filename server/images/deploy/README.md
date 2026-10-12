@@ -92,6 +92,32 @@ the whole `server/images` package (new modules: `capabilities`, `extraction`,
    docker compose up -d mint
    ```
 
+## Image edits need a direct provider key
+
+LiteLLM forwards `/v1/images/edits` as multipart, but InferHub only accepts JSON
+(`400 body must be JSON`). The gateway therefore sends edits straight to the
+provider (`<api_base>/images/edits`, JSON, Bearer `INFERHUB_API_KEY`); generations
+still use LiteLLM. Details, card/probe behaviour and billing:
+`docs/image-capabilities/README.md`.
+
+Env (add to the `mint` service `environment:` in `/opt/ovid-gateway/docker-compose.yml`):
+
+```yaml
+      - INFERHUB_API_KEY=${INFERHUB_API_KEY}                      # required for edits
+      - OVID_IMAGE_DIRECT_EDIT_HOSTS=${OVID_IMAGE_DIRECT_EDIT_HOSTS:-api.inferhub.dev}
+      - OVID_IMAGE_EDIT_COST_USD=${OVID_IMAGE_EDIT_COST_USD:-}    # blank = the upstream bound
+```
+
+1. In InferHub create a dedicated, low-budget API key for Ovid edits.
+2. Put `INFERHUB_API_KEY=...` in the compose `.env` (never in git); optionally
+   set `OVID_IMAGE_EDIT_COST_USD` to the real per-edit price (default and
+   maximum = `OVID_IMAGE_MAX_UPSTREAM_USD`, which users are charged against).
+3. Re-vendor `server/images` + `images_gateway.py`, then
+   `docker compose up -d mint`. The mint log line shows `direct_edit=on|off`.
+4. Without the key the app simply sees edit as unsupported (cards say so,
+   edit requests are a clean 422); generation is unaffected. After adding the
+   key, cards re-extract within one worker poll and the edit probe runs.
+
 ## Add image models (dashboard)
 
 LiteLLM dashboard → **Models + Endpoints → Add Model**:
@@ -124,6 +150,7 @@ curl -s -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
 
 - No provider URL, model id or API key is stored in this directory; the operator
   owns them in the LiteLLM dashboard.
-- Only `LITELLM_MASTER_KEY` (from the mint environment) is read, for discovery
-  and spend reads. Paid image calls use the caller's own scoped virtual key.
+- `LITELLM_MASTER_KEY` (from the mint environment) is read for discovery and
+  spend reads; `INFERHUB_API_KEY` only for direct edits (allowlisted https host,
+  never logged or returned). Paid image calls use the caller's own scoped virtual key.
 - The mount is idempotent and wrapped so image faults never block mint startup.
