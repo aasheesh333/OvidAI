@@ -234,6 +234,22 @@ flutter {
 }
 
 dependencies {
+    // 16 KB page size: androidx.datastore 1.1.x (pulled in by
+    // shared_preferences_android 2.4.16 at 1.1.7) ships
+    // libdatastore_shared_counter.so with a GNU_RELRO end that is not 16 KB
+    // aligned. 1.2.0 still has it; 1.2.1 is the first release with 16 KB clean
+    // arm64-v8a/armeabi-v7a/x86/x86_64 libraries. minSdk 23 matches ours.
+    constraints {
+        for (artifact in listOf(
+            "datastore", "datastore-core", "datastore-core-android", "datastore-core-okio",
+            "datastore-preferences", "datastore-preferences-android",
+            "datastore-preferences-core", "datastore-preferences-core-jvm",
+        )) {
+            implementation("androidx.datastore:$artifact:1.2.1") {
+                because("first androidx.datastore with 16 KB aligned native libraries")
+            }
+        }
+    }
     implementation("com.android.installreferrer:installreferrer:2.2")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
