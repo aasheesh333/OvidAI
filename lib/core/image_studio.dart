@@ -9,8 +9,11 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import 'diag.dart';
+import 'image_capabilities.dart';
 import 'image_receipt_store.dart';
 
+export 'image_capabilities.dart'
+    show ImageCapabilities, ImageModelCard, localOpsGuidance;
 export 'image_receipt_store.dart'
     show ImageReceipt, ImageRequestRecord, imageChargeSummary;
 
@@ -67,6 +70,15 @@ class ImageStudioError implements Exception {
   static ImageStudioError? _fromResponse(_ImageHttpResponse? response) {
     if (response == null || response.status == 200) return null;
     final value = response.body['error'];
+    // Public alternatives on a 422 (slugs only), so the agent can retry.
+    final rawAlt = value is Map ? value['alternatives'] : null;
+    final alternatives = rawAlt is List
+        ? rawAlt
+              .whereType<String>()
+              .where(RegExp(r'^ovid-image:[A-Za-z0-9_-]{3,40}$').hasMatch)
+              .take(8)
+              .toList()
+        : <String>[];
     final rawCode = value is Map ? value['code'] : null;
     final code = rawCode is String && _codes.contains(rawCode) ? rawCode : null;
     final rawRetry = value is Map ? value['retryAfterSeconds'] : null;
@@ -87,11 +99,13 @@ class ImageStudioError implements Exception {
         'The server reports the image allowance limit was reached.',
       'sign_in_required' => 'Sign in to Ovid Cloud again to access images.',
       'image_access_denied' => 'The server denied image access for this account.',
+      'unsupported_image_operation' =>
+        'The server rejected the image arguments or requested operation: the chosen model '
+            'cannot do it.${alternatives.isEmpty ? ' No available model can; use a local tool or tell the user.' : ' Retry with model set to one of: ${alternatives.join(", ")} (or omit model).'}',
       'invalid_request_id' ||
       'invalid_image_request' ||
       'invalid_image' ||
-      'image_too_large' ||
-      'unsupported_image_operation' =>
+      'image_too_large' =>
         'The server rejected the image arguments or requested operation.',
       _ => 'The image service could not complete this request.',
     };
@@ -120,14 +134,23 @@ class ImageStudioResult {
   final String? notice;
   final ImageStudioError? error;
   ImageReceipt? get receipt => record.receipt;
+
+  /// Public slug of the model that served this request, when reported.
+  String? get servedModel => record.receipt?.modelSlug;
   bool get imageAvailable => bytes != null;
 }
 
 class _ImageHttpResponse {
-  const _ImageHttpResponse(this.status, this.body, {this.retryAfter});
+  const _ImageHttpResponse(
+    this.status,
+    this.body, {
+    this.retryAfter,
+    this.etag,
+  });
   final int status;
   final Map<String, dynamic> body;
   final String? retryAfter;
+  final String? etag;
 }
 
 /// The only image inference contract exposed to the app is Ovid's public alias.
@@ -183,6 +206,7 @@ class ImageStudio extends ChangeNotifier {
     _receipts = const [];
     _receiptsLoading = false;
     _receiptLoadError = null;
+    _cached = null;
     clearCapabilities();
     notifyListeners();
   }
@@ -243,25 +267,44 @@ class ImageStudio extends ChangeNotifier {
   static const maxBytes = 16 * 1024 * 1024;
   static const sizes = ['1024x1024', '1536x1024', '1024x1536', '2048x2048'];
   static const _base = 'https://api.ovidsi.com/v1/images';
-  Map<String, List<String>> _operations = {};
+  static const _capabilityTtl = Duration(minutes: 5);
+  ImageCapabilities _caps = ImageCapabilities.empty;
   DateTime? _refreshed;
 
-  List<String> supportedSizes(String operation) =>
+  // Last good payload per account, kept across clearCapabilities() so the next
+  // refresh can be a cheap conditional GET (If-None-Match -> 304).
+  ({String account, ImageCapabilities caps})? _cached;
+
+  /// Current public model cards (empty when stale or unavailable).
+  ImageCapabilities get capabilities => _fresh ? _caps : ImageCapabilities.empty;
+
+  bool get _fresh =>
       _refreshed != null &&
-          DateTime.now().difference(_refreshed!) < const Duration(minutes: 5)
-      ? _operations[operation] ?? const []
-      : const [];
+      DateTime.now().difference(_refreshed!) < _capabilityTtl;
+
+  List<String> supportedSizes(String operation) =>
+      _fresh ? _caps.sizesFor(operation) : const [];
 
   void clearCapabilities() {
     _capabilityGeneration++;
-    _operations = {};
+    _caps = ImageCapabilities.empty;
     _refreshed = null;
     _capabilityError = null;
   }
 
+  /// Use the cached cards while fresh; hit the network only when stale. This is
+  /// what keeps model selection off the per-request path.
+  Future<void> ensureFresh(Map<String, String> headers) async {
+    if (_fresh && !_caps.isEmpty) return;
+    await refresh(headers);
+  }
+
   Future<void> refresh(Map<String, String> headers) async {
-    clearCapabilities();
     final account = _accountId;
+    final cached = _cached != null && _cached!.account == account
+        ? _cached!.caps
+        : null;
+    clearCapabilities();
     final generation = _generation;
     final capabilityGeneration = _capabilityGeneration;
     if (headers.isEmpty || account == null) return;
@@ -269,31 +312,34 @@ class ImageStudio extends ChangeNotifier {
       final response = await _request(
         'GET',
         'capabilities',
-        headers,
+        {
+          ...headers,
+          if (cached?.etag != null) 'If-None-Match': cached!.etag!,
+        },
         null,
-        maxResponse: 16384,
+        maxResponse: 65536,
       );
       if (!_current(account, generation) ||
           capabilityGeneration != _capabilityGeneration) {
         return;
       }
       final body = response.body;
+      if (response.status == 304 && cached != null) {
+        _caps = cached;
+        _refreshed = DateTime.now();
+        return;
+      }
+      if (response.status == 401 || response.status == 403) _cached = null;
       if (response.status != 200) {
         _capabilityError = ImageStudioError._fromResponse(response);
         _rememberCapacity(_capabilityError);
         return;
       }
-      if (body['model'] != alias || body['operations'] is! Map) return;
-      for (final op in ['generate', 'edit']) {
-        final values = (body['operations'] as Map)[op];
-        if (values is List) {
-          _operations[op] = values
-              .whereType<String>()
-              .where(sizes.contains)
-              .toSet()
-              .toList();
-        }
-      }
+      if (body['model'] != alias) return;
+      final parsed = ImageCapabilities.parse(body, legacySizes: sizes);
+      if (parsed.isEmpty) return;
+      _caps = parsed;
+      _cached = (account: account, caps: parsed);
       _refreshed = DateTime.now();
     } catch (_) {
       if (_current(account, generation) &&
@@ -343,6 +389,9 @@ class ImageStudio extends ChangeNotifier {
           retryAfter: response.headers.entries
               .where((entry) => entry.key.toLowerCase() == 'retry-after')
               .firstOrNull?.value,
+          etag: response.headers.entries
+              .where((entry) => entry.key.toLowerCase() == 'etag')
+              .firstOrNull?.value,
         );
       })().timeout(
         method == 'GET'
@@ -386,6 +435,10 @@ class ImageStudio extends ChangeNotifier {
 
   /// Compatibility [infer] delegates here; callers needing accounting must use
   /// this result. Reusing an admitted ID is ALWAYS a read-only GET, never POST.
+  ///
+  /// [model] is an optional public slug from [capabilities] (null/omitted =
+  /// server picks). [preference], [requirements], [mask] and [references]
+  /// are routing hints the server hard-filters on.
   Future<ImageStudioResult> inferResult({
     required String prompt,
     required String size,
@@ -393,6 +446,11 @@ class ImageStudio extends ChangeNotifier {
     required Map<String, String> headers,
     String? requestId,
     String? sessionId,
+    String? model,
+    String? preference,
+    Map<String, dynamic>? requirements,
+    Uint8List? mask,
+    List<Uint8List> references = const [],
   }) async {
     final account = _accountId;
     final generation = _generation;
@@ -406,22 +464,40 @@ class ImageStudio extends ChangeNotifier {
     input = input == null ? null : Uint8List.fromList(input);
     requestId ??= newRequestId();
     final operation = input == null ? 'generate' : 'edit';
+    final cleanRequirements = _requirements(requirements);
     if (prompt.trim().isEmpty ||
         prompt.runes.length > 8000 ||
-        !sizes.contains(size) ||
-        !validImageRequestId(requestId)) {
+        !(sizes.contains(size) || _sizeRe.hasMatch(size)) ||
+        !validImageRequestId(requestId) ||
+        (model != null && !_slugRe.hasMatch(model)) ||
+        (preference != null && !preferences.contains(preference)) ||
+        cleanRequirements == null ||
+        (input == null && (mask != null || references.isNotEmpty)) ||
+        references.length > 7) {
       throw const ImageStudioError(
         'Supply a prompt (1–8000 characters) and request_id (8–128 letters, digits, dots, colons, underscores or hyphens).',
       );
     }
     final inputInfo = input == null ? null : await inspect(input);
+    final maskInfo = mask == null ? null : await inspect(mask);
+    final referenceInfo = [for (final r in references) await inspect(r)];
     _checkCurrent(account, generation);
-    // Sorted keys + Python ensure_ascii=True semantics match baseline7839d52.
+    String dataUrl(String mime, Uint8List bytes) =>
+        'data:$mime;base64,${base64Encode(bytes)}';
+    // Sorted keys (nested too) + Python ensure_ascii=True semantics: the
+    // server fingerprints this exact body, so key order is part of the contract.
     final body = <String, dynamic>{
-      if (input != null)
-        'image': 'data:${inputInfo!.mime};base64,${base64Encode(input)}',
-      'model': alias,
+      if (input != null) 'image': dataUrl(inputInfo!.mime, input),
+      if (references.isNotEmpty)
+        'images': [
+          for (var i = 0; i < references.length; i++)
+            dataUrl(referenceInfo[i].mime, references[i]),
+        ],
+      if (mask != null) 'mask': dataUrl(maskInfo!.mime, mask),
+      'model': model ?? alias,
+      'preference': ?preference,
       'prompt': prompt,
+      if (cleanRequirements.isNotEmpty) 'requirements': cleanRequirements,
       'size': size,
     };
     final fingerprint = sha256
@@ -440,7 +516,9 @@ class ImageStudio extends ChangeNotifier {
         candidate,
         isCurrent: () => _current(account, generation),
         canSubmit: () =>
-            capacityError == null && supportedSizes(operation).contains(size),
+            capacityError == null &&
+            _fresh &&
+            _caps.canServe(operation, size, model: _legacyModel(model)),
       );
     } on ImageAdmissionError catch (error) {
       _checkCurrent(account, generation);
@@ -725,6 +803,45 @@ class ImageStudio extends ChangeNotifier {
     notifyListeners();
   }
 
+  static final _sizeRe = RegExp(r'^[1-9][0-9]{2,3}x[1-9][0-9]{2,3}$');
+  static final _slugRe = RegExp(r'^ovid-image:[A-Za-z0-9_-]{3,40}$');
+
+  // Legacy gateways expose one synthetic card slugged "ovid-image"; an explicit
+  // slug can never match it, so only pass the model through when it exists.
+  String? _legacyModel(String? model) =>
+      model != null && _caps.models.any((m) => m.slug == model) ? model : null;
+
+  /// Whitelisted, key-sorted routing requirements; null = invalid.
+  static Map<String, dynamic>? _requirements(Map<String, dynamic>? raw) {
+    if (raw == null || raw.isEmpty) return <String, dynamic>{};
+    const allowed = {
+      'aspect_ratio',
+      'operation',
+      'text_rendering',
+      'transparent_background',
+    };
+    if (raw.keys.any((k) => !allowed.contains(k))) return null;
+    final out = <String, dynamic>{};
+    for (final key in raw.keys.toList()..sort()) {
+      final v = raw[key];
+      switch (key) {
+        case 'aspect_ratio':
+          if (v is! String || !RegExp(r'^[1-9][0-9]?:[1-9][0-9]?$').hasMatch(v)) {
+            return null;
+          }
+        case 'operation':
+          if (v is! String ||
+              !['edit', ...advancedEditOperations, 'variations'].contains(v)) {
+            return null;
+          }
+        default:
+          if (v is! bool) return null;
+      }
+      out[key] = v;
+    }
+    return out;
+  }
+
   static String _serverJson(Object value) {
     final json = jsonEncode(value);
     final buffer = StringBuffer();
@@ -918,31 +1035,15 @@ class ImageStudio extends ChangeNotifier {
   }
 
   List<Map<String, dynamic>> get tools => [
-    for (final op in ['generate', 'edit'])
-      if (supportedSizes(op).isNotEmpty)
-        _schema(
-          '${op}_image',
-          op == 'edit'
-              ? 'Edit an existing image through Ovid Cloud. Use the exact attachment or returned file path. No masks or multiple inputs supported.'
-              : 'Generate one image through Ovid Cloud. Returns a saved local image path and displays it in chat.',
-          {
-            'prompt': {'type': 'string', 'minLength': 1, 'maxLength': 8000},
-            'size': {'type': 'string', 'enum': supportedSizes(op)},
-            'request_id': {
-              'type': 'string',
-              'description':
-                  'Stable unique ID for this image job, 8–128 characters. Reuse it for retries; never change it after an uncertain outcome.',
-            },
-            if (op == 'edit') 'path': _path,
-          },
-          ['prompt', 'size', 'request_id', if (op == 'edit') 'path'],
-        ),
+    ...capabilities.cloudTools(schema: _schema, pathProperty: _path),
     for (final op in ['resize', 'crop'])
       _schema(
         '${op}_image',
         op == 'resize'
-            ? 'Resize locally to exact dimensions; may change aspect ratio. Returns a new PNG path.'
-            : 'Crop locally using a top-left pixel rectangle inside the source. Returns a new PNG path.',
+            ? 'Resize locally to exact dimensions (no image model, free, instant); may change aspect ratio. '
+                  'Use this - never a cloud model - to scale an image to a target size. Returns a new PNG path.'
+            : 'Crop locally using a top-left pixel rectangle inside the source (no image model, free, instant). '
+                  'Use this to trim a generated image to the wanted aspect ratio. Returns a new PNG path.',
         {
           'path': _path,
           'width': _dimension,

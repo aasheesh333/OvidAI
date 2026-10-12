@@ -44,9 +44,11 @@ def capacity_retry_seconds(value=None):
 
 class ImageError(Exception):
     def __init__(self, status=503, code='image_unavailable', *, receipt=None,
-                 retry_after_seconds=None):
+                 retry_after_seconds=None, detail=None):
         self.status, self.code = status, code
         self.receipt = receipt
+        # Public, allow-listed extras (e.g. alternative model slugs on a 422).
+        self.detail = detail
         self.retry_after_seconds = (capacity_retry_seconds(retry_after_seconds)
                                     if status == 503 and code == 'image_capacity_unavailable' else None)
         super().__init__(code)
@@ -156,6 +158,8 @@ class Ledger:
                 actual TEXT, response TEXT, budget_window TEXT NOT NULL,
                 PRIMARY KEY(account, request))''')
             columns = {row[1] for row in db.execute('PRAGMA table_info(image_jobs)')}
+            if 'served_model' not in columns:
+                db.execute('ALTER TABLE image_jobs ADD COLUMN served_model TEXT')
             if 'replay_until' not in columns:
                 db.execute('ALTER TABLE image_jobs ADD COLUMN replay_until INTEGER')
                 db.execute('ALTER TABLE image_jobs ADD COLUMN receipt_until INTEGER')
@@ -180,10 +184,14 @@ class Ledger:
 
     @staticmethod
     def _receipt(row):
-        return {'account_id': row['account'], 'request_id': row['request'],
-                'fingerprint': row['fingerprint'],
-                'state': 'confirmed' if row['state'] == 'done' else row['state'],
-                'charged': row['charged'] if row['state'] in ('done', 'failed') else None}
+        receipt = {'account_id': row['account'], 'request_id': row['request'],
+                   'fingerprint': row['fingerprint'],
+                   'state': 'confirmed' if row['state'] == 'done' else row['state'],
+                   'charged': row['charged'] if row['state'] in ('done', 'failed') else None}
+        # Public model slug that served the job (never the provider model).
+        if row['served_model']:
+            receipt['model'] = row['served_model']
+        return receipt
 
     def receipt(self, account, request):
         with self.connect() as db:
@@ -278,7 +286,7 @@ class Ledger:
                        (account, request, fingerprint, 'pending', str(reservation), budget_window))
         return None
 
-    def settle(self, account, request, actual, response):
+    def settle(self, account, request, actual, response, served_model=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             deleted = self._deleted(db, account)
@@ -292,8 +300,8 @@ class Ledger:
                 raise ImageError(409, 'image_request_failed', receipt=self._receipt(row))
             actual = money(actual)
             now = int(self.clock())
-            db.execute("UPDATE image_jobs SET state='done', actual=?, charged=?, response=?, replay_until=?, receipt_until=? WHERE account=? AND request=?",
-                       (None if deleted else str(actual), str(discounted(actual)),
+            db.execute("UPDATE image_jobs SET state='done', served_model=?, actual=?, charged=?, response=?, replay_until=?, receipt_until=? WHERE account=? AND request=?",
+                       (served_model, None if deleted else str(actual), str(discounted(actual)),
                         None if deleted else json.dumps(response),
                         0 if deleted else now + self.replay_retention,
                         0 if deleted else now + self.receipt_retention, account, request))

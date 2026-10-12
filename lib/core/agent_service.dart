@@ -11580,7 +11580,7 @@ can drive there yourself with the device_* tools):
         if (_runChainStale || !identical(AppState.I.sessionById(s.id), s)) {
           return;
         }
-        await ImageStudio.I.refresh(headers);
+        await ImageStudio.I.ensureFresh(headers);
       } catch (_) {
         if (!_runChainStale && identical(AppState.I.sessionById(s.id), s)) {
           ImageStudio.I.clearCapabilities();
@@ -25004,7 +25004,15 @@ ${await _agentsMdBlock()}
       if (!current()) return 'Cancelled: image run or account changed.';
       final inference = tool == 'generate_image' || tool == 'edit_image';
       final allowed = inference
-          ? {'prompt', 'size', 'request_id', if (tool == 'edit_image') 'path'}
+          ? {
+              'prompt',
+              'size',
+              'request_id',
+              'model',
+              'preference',
+              'requirements',
+              if (tool == 'edit_image') ...['path', 'mask_path', 'reference_paths'],
+            }
           : {
               'path',
               'width',
@@ -25033,6 +25041,28 @@ ${await _agentsMdBlock()}
         input = await ImageStudio.readInput(File(resolved));
         if (!current()) return 'Cancelled: image run or account changed.';
       }
+      // Optional mask / reference images for edit_image (same grant rules).
+      Uint8List? maskBytes;
+      final references = <Uint8List>[];
+      if (tool == 'edit_image') {
+        final extras = <String>[
+          if (args['mask_path'] is String) args['mask_path'] as String,
+          if (args['reference_paths'] is List)
+            ...(args['reference_paths'] as List).whereType<String>(),
+        ];
+        for (final extra in extras) {
+          final resolvedExtra = await _resolveGrantedPath(extra, tool: tool);
+          if (!current()) return 'Cancelled: image run or account changed.';
+          if (resolvedExtra == null) return _accessDeniedMessage([extra]);
+          final bytesExtra = await ImageStudio.readInput(File(resolvedExtra));
+          if (!current()) return 'Cancelled: image run or account changed.';
+          if (extra == args['mask_path']) {
+            maskBytes = bytesExtra;
+          } else {
+            references.add(bytesExtra);
+          }
+        }
+      }
       Uint8List bytes;
       if (inference) {
         final capacity =
@@ -25047,8 +25077,10 @@ ${await _agentsMdBlock()}
         if (headers.isEmpty) {
           return 'Error: sign in to Ovid Cloud to use image generation or editing.';
         }
-        await ImageStudio.I.refresh(headers);
+        // Cached model cards (ETag); no network unless the cache is stale.
+        await ImageStudio.I.ensureFresh(headers);
         if (!current()) return 'Cancelled: image run or account changed.';
+        final requirements = args['requirements'];
         final result = await ImageStudio.I.inferResult(
           prompt: args['prompt'] as String,
           size: args['size'] as String,
@@ -25056,6 +25088,13 @@ ${await _agentsMdBlock()}
           input: input,
           headers: headers,
           sessionId: session.id,
+          model: args['model'] as String?,
+          preference: args['preference'] as String?,
+          requirements: requirements is Map
+              ? Map<String, dynamic>.from(requirements)
+              : null,
+          mask: maskBytes,
+          references: references,
         );
         if (!current()) return 'Cancelled: image run or account changed.';
         if (result.error?.isCapacity == true) {
@@ -25066,6 +25105,7 @@ ${await _agentsMdBlock()}
             'exact charge ${result.receipt?.charged ?? 'unconfirmed'}; '
             '${result.receipt == null ? 'receipt unavailable; request' : 'receipt'} '
             '${result.receiptPersisted ? 'saved' : 'not saved'}. '
+            '${result.servedModel == null ? '' : 'Model ${result.servedModel}. '}'
             '${result.notice ?? ''}';
         if (result.error != null) {
           accounting += ' HTTP ${result.error!.statusCode}'
