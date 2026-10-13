@@ -349,4 +349,55 @@ void main() {
     expect(userRows(), contains('for the main agent'));
     expect(agent.queuedMessagesFor(root.id), isEmpty);
   });
+
+  test('a chip switch carried by a queued message never reaches a subagent; '
+      'the child keeps its own model', () async {
+    final childModels = <String?>[];
+    final mainModels = <String?>[];
+    var mainCalls = 0;
+    var childCalls = 0;
+    AgentService.llmOnceForTest = (p, msgs, session, tools) async {
+      requests.add((session: session.id, msgs: List.of(msgs)));
+      if (session.isSubagent) {
+        childModels.add(p.selectedModel);
+        if (++childCalls == 1) {
+          // Mid-child: the user switches the MAIN chip and queues a message.
+          root.model = 'switched-model';
+          agent.enqueueMessage('use the new model', sessionId: root.id);
+          return _toolCall('c1');
+        }
+        agent.streamToBubbleForTest(session, 'child done');
+        return _final('child done');
+      }
+      mainModels.add(p.selectedModel);
+      if (++mainCalls == 1) {
+        return {
+          'role': 'assistant',
+          'content': '',
+          'tool_calls': [
+            {
+              'id': 'd1',
+              'type': 'function',
+              'function': {
+                'name': 'dispatch_agent',
+                'arguments': jsonEncode({'prompt': 'investigate', 'label': 'w'}),
+              },
+            },
+          ],
+          'finish_reason': 'tool_calls',
+        };
+      }
+      return _final('main done');
+    };
+    await run('delegate');
+    await until(() => agent.subagentsOf(root.id).every((s) => s.finished));
+    await until(() => !agent.busyFor(root.id));
+
+    expect(childModels, hasLength(greaterThanOrEqualTo(2)));
+    expect(childModels.toSet(), {'test-model'});
+    expect(mainModels.first, 'test-model');
+    expect(mainModels.last, 'switched-model');
+    final child = app.childrenOf(root.id).single;
+    expect(child.model, isNot('switched-model'));
+  });
 }
