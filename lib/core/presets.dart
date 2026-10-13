@@ -164,7 +164,7 @@ class PresetRegistry {
       'browser_wait_for', 'browser_resize', 'browser_new_tab',
       'browser_switch_tab', 'browser_list_tabs', 'browser_close_tab',
       'browser_close', 'browser_tabs',
-      'generate_image', 'edit_image', 'resize_image', 'crop_image', 'workflow', 'ralph',
+      'generate_image', 'edit_image', 'edit_images', 'resize_image', 'crop_image', 'workflow', 'ralph',
     ],
     persona:
         'You are a lean agent: prefer direct answers and small file '
@@ -199,7 +199,7 @@ class PresetRegistry {
       'browser_wait_for', 'browser_resize', 'browser_new_tab',
       'browser_switch_tab', 'browser_list_tabs', 'browser_close_tab',
       'browser_close', 'browser_tabs',
-      'generate_image', 'edit_image', 'resize_image', 'crop_image',
+      'generate_image', 'edit_image', 'edit_images', 'resize_image', 'crop_image',
     ],
     persona:
         'You are a coding agent inside the user\'s repository. '

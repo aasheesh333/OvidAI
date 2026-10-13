@@ -69,6 +69,7 @@ import 'diag.dart';
 import 'secret_scrub.dart';
 import 'ssrf_guard.dart';
 import 'image_studio.dart';
+import 'image_task.dart';
 import 'ovid_cloud_service.dart';
 
 /// A persistent browser tab — owns its WebView controller lazily so the
@@ -6521,14 +6522,59 @@ user which one instead of assuming this one.''';
   String attachmentContextForTest(Iterable<MessageAttachment> attachments) =>
       _attachmentContext(attachments);
 
-  String _attachmentContext(Iterable<MessageAttachment> attachments) =>
-      '[User attachments in this session workspace:\n'
-      '${attachments.map((a) => '${jsonEncode(a.name)} (${_fmtSize(a.size)}): ${jsonEncode(a.path ?? a.name)}').join('\n')}\n'
-      'Use these exact paths for file operations and image editing '
-      '(edit_image path / reference_paths / mask_path, resize_image, '
-      'crop_image); they stay readable for this chat. '
-      'Use read_image for images (vision-capable models), read_attachment '
-      'for text, or run_shell for file processing.]';
+  String _attachmentContext(Iterable<MessageAttachment> attachments) {
+    final list = attachments.toList();
+    final images = <int>[];
+    final rows = <String>[];
+    for (var i = 0; i < list.length; i++) {
+      final a = list[i];
+      final px = _attachmentPixels(a.path, a.size);
+      if (px != null) images.add(i + 1);
+      final shape = px == null
+          ? ''
+          : ', image ${px.width}x${px.height} px, ${px.aspect} '
+                '${px.width == px.height ? 'square' : px.width > px.height ? 'landscape' : 'portrait'}';
+      rows.add(
+        '${i + 1}. ${jsonEncode(a.name)} (${_fmtSize(a.size)}$shape): '
+        '${jsonEncode(a.path ?? a.name)}',
+      );
+    }
+    final imageNote = images.isEmpty
+        ? ''
+        : '\nIMAGE INPUTS: ${images.length == 1 ? 'attachment ${images.single} is an image' : 'attachments ${images.join(', ')} are images'}. '
+              'If the user asks to change them, this is an image task: call '
+              '${images.length == 1 ? 'edit_image with that path' : 'edit_images with ALL those paths in this order (each edited independently, never merged)'} '
+              'and pass the instruction verbatim; edits keep each original\'s '
+              'size, aspect ratio and content unless the user asks otherwise. '
+              'Do not describe the image instead or ask for a re-upload.';
+    return '[User attachments in this session workspace:\n'
+        '${rows.join('\n')}\n'
+        'Use these exact paths for file operations and image editing '
+        '(edit_image / edit_images path(s), reference_paths, mask_path, '
+        'resize_image, crop_image); they stay readable for this chat. '
+        'Use read_image for images (vision-capable models), read_attachment '
+        'for text, or run_shell for file processing.$imageNote]';
+  }
+
+  /// Header-only pixel size of an attachment (cached; null for non-images
+  /// or unreadable files). Synchronous so prompt assembly stays simple.
+  static final Map<String, PixelSize?> _attachmentPixelCache = {};
+  static PixelSize? _attachmentPixels(String? path, int size) {
+    if (path == null) return null;
+    if (_attachmentPixelCache.length > 512) _attachmentPixelCache.clear();
+    return _attachmentPixelCache.putIfAbsent('$path|$size', () {
+      try {
+        final file = File(path).openSync();
+        try {
+          return imageHeaderSize(file.readSync(512 * 1024));
+        } finally {
+          file.closeSync();
+        }
+      } catch (_) {
+        return null;
+      }
+    });
+  }
 
   static String _fmtSize(int b) => b >= 1048576
       ? '${(b / 1048576).toStringAsFixed(1)} MB'
@@ -11634,6 +11680,12 @@ can drive there yourself with the device_* tools):
     // heuristics: the token becomes exactly `PlanModePolicy.promptSection` when
     // planning and the empty string when not, reproducing the old `sys`
     // byte-for-byte in both states (so provider prefix caching still hits).
+    final imageGuidance =
+        AppState.I.plugins.any(
+          (p) => p.name == 'Image Studio' && p.installed && p.enabled,
+        )
+        ? '$imageTaskGuidance\n'
+        : '';
     const planSectionToken = '<<<PLAN_MODE_SECTION>>>';
     final sysTemplate =
         '''
@@ -11725,7 +11777,7 @@ SHELL COMMAND HYGIENE:
 • When using pipelines with `head` or `tail` (e.g. `| head -5`), do NOT append trailing command names directly without a semicolon.
 • The native sandbox runs on Android bionic ARM64. Precompiled Linux glibc binary Node addons (.node) cannot be loaded directly. If an npm package fails to load a native module, explain this to the user instead of searching for phantom files.
 If the user asks to install a plugin or MCP, use agent_install_plugin or agent_install_mcp.
-$_appUiMapBlock
+$imageGuidance$_appUiMapBlock
 Catalog management: you have FULL provider control — list (catalog_list_providers,
 catalog_get_provider), add (catalog_add_provider, supports both OpenAI-compatible
 and native Anthropic via api_format), update name/description/base URL/API format
@@ -13307,6 +13359,8 @@ ${await _agentsMdBlock()}
       'run_code' || 'job_start' => const Duration(minutes: 5),
       'run_shell' => const Duration(minutes: 10),
       'generate_image' || 'edit_image' => const Duration(seconds: 150),
+      // Up to 20 images, 3 in flight, each bounded like edit_image.
+      'edit_images' => const Duration(minutes: 18),
       'fs_grep' || 'fs_glob' => const Duration(seconds: 45),
       'commit' || 'repo_sync' => const Duration(minutes: 3),
       'git_push' || 'git_pull' || 'git_clone' => const Duration(minutes: 5),
@@ -15507,6 +15561,7 @@ ${await _agentsMdBlock()}
         }
       case 'generate_image':
       case 'edit_image':
+      case 'edit_images':
       case 'resize_image':
       case 'crop_image':
         return _imageTool(name, args);
@@ -18965,6 +19020,7 @@ ${await _agentsMdBlock()}
       // Write-capable tools — always blocked in Read-Only.
       case 'generate_image':
       case 'edit_image':
+      case 'edit_images':
       case 'resize_image':
       case 'crop_image':
       case 'file_write':
@@ -19348,7 +19404,7 @@ ${await _agentsMdBlock()}
       'dispatch_agent' => args['prompt'],
       'report' => args['content'],
       'commit' => args['message'],
-      'generate_image' || 'edit_image' => args['prompt'],
+      'generate_image' || 'edit_image' || 'edit_images' => args['prompt'],
       'resize_image' || 'crop_image' => args['path'],
       'render_html' =>
         args['title'] is String ? args['title'] : 'Interactive artifact',
@@ -19506,6 +19562,7 @@ ${await _agentsMdBlock()}
       'fetch_url' => 'web',
       'generate_image' ||
       'edit_image' ||
+      'edit_images' ||
       'resize_image' ||
       'crop_image' => 'sparkle',
       'render_html' => 'code',
@@ -19595,6 +19652,7 @@ ${await _agentsMdBlock()}
     'generate_image' => 'Generate image',
     'render_html' => 'Render interactive artifact',
     'edit_image' => 'Edit image',
+    'edit_images' => 'Edit images',
     'resize_image' => 'Resize image',
     'crop_image' => 'Crop image',
     'read_attachment' => 'Read attachment',
@@ -21874,6 +21932,7 @@ ${await _agentsMdBlock()}
         if (args[key] is String) args[key] as String,
       if (args['reference_paths'] is List)
         ...(args['reference_paths'] as List).whereType<String>(),
+      if (args['paths'] is List) ...(args['paths'] as List).whereType<String>(),
     ];
     if (name == 'run_shell' || name == 'job_start' || name == 'run_code') {
       final cmd = args['command'] as String? ?? args['code'] as String? ?? '';
@@ -25235,201 +25294,748 @@ ${await _agentsMdBlock()}
     return results;
   }
 
+  /// Test seam: when set, cloud image calls go here instead of the gateway
+  /// (no sign-in, capability refresh or receipts involved).
+  @visibleForTesting
+  static Future<ImageInferOutcome> Function(ImageInferRequest request)?
+  imageInferOverrideForTest;
+
+  /// Test seam: capability cards used for model/size selection.
+  @visibleForTesting
+  static ImageCapabilities? imageCapabilitiesOverrideForTest;
+
+  ImageCapabilities get _imageCaps =>
+      imageCapabilitiesOverrideForTest ?? ImageStudio.I.capabilities;
+
+  static final _imageRequestIdRe = RegExp(r'^[A-Za-z0-9_.:-]{8,128}$');
+
+  /// Streams one progress line into the live tool card.
+  void _imageProgress(String line) {
+    final z = _runCtx;
+    if (z != null) _toolStreamFor(z.run, '$line\n');
+  }
+
   Future<String> _imageTool(String tool, Map<String, dynamic> args) async {
-    // Inference accounting survives local save/publication failures. A failed
-    // file write does not undo a confirmed charge or authorize another POST.
-    String accounting = '';
     try {
-      final app = AppState.I;
-      final owner = app.sessionAccountToken;
-      final run = _runCtx;
-      if (!AppState.I.plugins.any(
-        (p) => p.name == 'Image Studio' && p.installed && p.enabled,
-      )) {
-        return 'Error: enable Image Studio before using image tools.';
-      }
-      final session = _runSession;
-      if (session == null) return 'Error: image tools require a session.';
-      bool current() =>
-          identical(owner, app.sessionAccountToken) &&
-          app.sessionAccountReady &&
-          identical(session, app.sessionById(session.id)) &&
-          (run == null ||
-              (identical(run, _runCtx) &&
-                  run.epoch == run.run.runEpoch &&
-                  !run.run.cancelRequested &&
-                  identical(run.accountToken, owner)));
-      if (!current()) return 'Cancelled: image run or account changed.';
-      final inference = tool == 'generate_image' || tool == 'edit_image';
-      final allowed = inference
-          ? {
-              'prompt',
-              'size',
-              'request_id',
-              'model',
-              'preference',
-              'requirements',
-              if (tool == 'edit_image') ...['path', 'mask_path', 'reference_paths'],
-            }
-          : {
-              'path',
-              'width',
-              'height',
-              if (tool == 'crop_image') ...['x', 'y'],
-            };
+      final allowed = switch (tool) {
+        'generate_image' => const {
+          'prompt',
+          'size',
+          'request_id',
+          'model',
+          'preference',
+          'requirements',
+          'aspect_ratio',
+          'width',
+          'height',
+        },
+        'edit_image' => const {
+          'prompt',
+          'size',
+          'request_id',
+          'model',
+          'preference',
+          'requirements',
+          'path',
+          'mask_path',
+          'reference_paths',
+          'preserve',
+        },
+        'edit_images' => const {
+          'paths',
+          'prompt',
+          'request_id',
+          'model',
+          'preference',
+          'requirements',
+          'preserve',
+        },
+        'crop_image' => const {'path', 'width', 'height', 'x', 'y'},
+        _ => const {'path', 'width', 'height'},
+      };
       if (args.keys.any((k) => !allowed.contains(k))) {
         return 'Error: unsupported image arguments. Use the current tool schema.';
       }
-      final work = await _sessionWorkDir();
-      if (!current()) return 'Cancelled: image run or account changed.';
-      final outputRoot = await _resolveGrantedPath(work.path, tool: tool);
-      if (!current()) return 'Cancelled: image run or account changed.';
-      if (outputRoot == null) return _accessDeniedMessage([work.path]);
-      Uint8List? input;
-      if (tool != 'generate_image') {
-        final path = args['path'];
-        if (path is! String || path.isEmpty) {
-          return 'Error: exact image path is required.';
-        }
-        // Always use the canonical standard grant resolver, including relative
-        // paths and symlinks. Do not basename-match attachments.
-        String? refusal;
-        final resolved = await _resolveGrantedPath(
-          path,
-          tool: tool,
-          onRefusal: (r) => refusal = r,
-        );
-        if (!current()) return 'Cancelled: image run or account changed.';
-        if (resolved == null) return refusal ?? _accessDeniedMessage([path]);
-        input = await ImageStudio.readInput(File(resolved));
-        if (!current()) return 'Cancelled: image run or account changed.';
-      }
-      // Optional mask / reference images for edit_image (same grant rules).
-      Uint8List? maskBytes;
-      final references = <Uint8List>[];
-      if (tool == 'edit_image') {
-        final extras = <String>[
-          if (args['mask_path'] is String) args['mask_path'] as String,
-          if (args['reference_paths'] is List)
-            ...(args['reference_paths'] as List).whereType<String>(),
-        ];
-        for (final extra in extras) {
-          String? refusal;
-          final resolvedExtra = await _resolveGrantedPath(
-            extra,
-            tool: tool,
-            onRefusal: (r) => refusal = r,
-          );
-          if (!current()) return 'Cancelled: image run or account changed.';
-          if (resolvedExtra == null) {
-            return refusal ?? _accessDeniedMessage([extra]);
-          }
-          final bytesExtra = await ImageStudio.readInput(File(resolvedExtra));
-          if (!current()) return 'Cancelled: image run or account changed.';
-          if (extra == args['mask_path']) {
-            maskBytes = bytesExtra;
-          } else {
-            references.add(bytesExtra);
-          }
-        }
-      }
-      Uint8List bytes;
-      if (inference) {
-        final capacity =
-            _runResolved.imageCapacityFailure ?? ImageStudio.I.capacityError;
-        if (capacity != null) {
-          _runResolved.imageCapacityFailure = capacity;
-          return 'Error: ${capacity.code} (HTTP ${capacity.statusCode}). '
-              '${capacity.message} No new image request was submitted.';
-        }
-        final headers = await OvidCloudService.I.imageHeaders();
-        if (!current()) return 'Cancelled: image run or account changed.';
-        if (headers.isEmpty) {
-          return 'Error: sign in to Ovid Cloud to use image generation or editing.';
-        }
-        // Cached model cards (ETag); no network unless the cache is stale.
-        await ImageStudio.I.ensureFresh(headers);
-        if (!current()) return 'Cancelled: image run or account changed.';
-        final requirements = args['requirements'];
-        final result = await ImageStudio.I.inferResult(
-          prompt: args['prompt'] as String,
-          size: args['size'] as String,
-          requestId: args['request_id'] as String,
-          input: input,
-          headers: headers,
-          sessionId: session.id,
-          model: args['model'] as String?,
-          preference: args['preference'] as String?,
-          requirements: requirements is Map
-              ? Map<String, dynamic>.from(requirements)
-              : null,
-          mask: maskBytes,
-          references: references,
-        );
-        if (!current()) return 'Cancelled: image run or account changed.';
-        if (result.error?.isCapacity == true) {
-          _runResolved.imageCapacityFailure = result.error;
-        }
-        accounting =
-            'Request `${result.record.requestId}`: ${result.record.state}; '
-            'exact charge ${result.receipt?.charged ?? 'unconfirmed'}; '
-            '${result.receipt == null ? 'receipt unavailable; request' : 'receipt'} '
-            '${result.receiptPersisted ? 'saved' : 'not saved'}. '
-            '${result.servedModel == null ? '' : 'Model ${result.servedModel}. '}'
-            '${result.notice ?? ''}';
-        if (result.error != null) {
-          accounting += ' HTTP ${result.error!.statusCode}'
-              '${result.error!.code == null ? '' : ' ${result.error!.code}'}.';
-        }
-        if (result.bytes == null) {
-          final prefix = accounting.isEmpty ? '' : '$accounting ';
-          return 'Error: ${prefix}Image bytes unavailable; no image was saved.';
-        }
-        bytes = result.bytes!;
-      } else {
-        bytes = await ImageStudio.transform(
-          input!,
-          width: args['width'] as int,
-          height: args['height'] as int,
-          x: tool == 'crop_image' ? args['x'] as int : null,
-          y: tool == 'crop_image' ? args['y'] as int : null,
-        );
-        if (!current()) return 'Cancelled: image run or account changed.';
-      }
-      final file = await ImageStudio.save(bytes, Directory(outputRoot));
-      final prefix = accounting.isEmpty ? '' : '$accounting ';
-      if (!current()) {
-        return '${prefix}Image file saved but session changed; no chat publication.';
-      }
-      final relative = file.path.substring(outputRoot.length + 1);
-      _recordProduced(relative, bytes.length);
-      session.messages.add(
-        Message(
-          role: 'assistant',
-          kind: MsgKind.imageGen,
-          content:
-              args['prompt'] as String? ??
-              '${tool == 'crop_image' ? 'Cropped' : 'Resized'} image',
-          imagePath: file.path,
-        ),
-      );
-      AppState.I.refresh();
-      await AppState.I.persistSessions();
-      return '${prefix}Image saved: `${file.path}` (workspace path: `$relative`). '
-          'Displayed in chat. ${bytes.length} bytes.'
-          '${AppState.I.lastSessionPersistFailed ? ' Chat history persistence failed; the image file is saved.' : ''}';
+      final pre = await _imagePreflight(tool);
+      if (pre.error != null) return pre.error!;
+      final ctx = pre.ctx!;
+      return switch (tool) {
+        'edit_image' => await _editImageTool(ctx, args),
+        'edit_images' => await _editImagesTool(ctx, args),
+        'generate_image' => await _generateImageTool(ctx, args),
+        _ => await _localImageTool(ctx, tool, args),
+      };
     } on ImageStudioError catch (error) {
       if (error.isCapacity) _runResolved.imageCapacityFailure = error;
-      final prefix = accounting.isEmpty ? '' : '$accounting ';
-      return 'Error: $prefix$error'
+      return 'Error: $error'
           '${error.statusCode == null ? '' : ' HTTP ${error.statusCode}'}'
           '${error.code == null ? '' : ' ${error.code}'}';
     } catch (_) {
-      final prefix = accounting.isEmpty ? '' : '$accounting ';
-      return 'Error: ${prefix}image operation failed. Check arguments and the exact source path. '
+      return 'Error: image operation failed. Check arguments and the exact source path. '
           'For cloud retries reuse the same request_id.';
     }
   }
+
+  /// Shared gates for every image tool: plugin enabled, a session, the run
+  /// and account still current, and a granted output root.
+  Future<({_ImageCtx? ctx, String? error})> _imagePreflight(String tool) async {
+    final app = AppState.I;
+    final owner = app.sessionAccountToken;
+    final run = _runCtx;
+    if (!app.plugins.any(
+      (p) => p.name == 'Image Studio' && p.installed && p.enabled,
+    )) {
+      return (
+        ctx: null,
+        error: 'Error: enable Image Studio before using image tools.',
+      );
+    }
+    final session = _runSession;
+    if (session == null) {
+      return (ctx: null, error: 'Error: image tools require a session.');
+    }
+    bool current() =>
+        identical(owner, app.sessionAccountToken) &&
+        app.sessionAccountReady &&
+        identical(session, app.sessionById(session.id)) &&
+        (run == null ||
+            (identical(run, _runCtx) &&
+                run.epoch == run.run.runEpoch &&
+                !run.run.cancelRequested &&
+                identical(run.accountToken, owner)));
+    const cancelled = 'Cancelled: image run or account changed.';
+    if (!current()) return (ctx: null, error: cancelled);
+    final work = await _sessionWorkDir();
+    if (!current()) return (ctx: null, error: cancelled);
+    final outputRoot = await _resolveGrantedPath(work.path, tool: tool);
+    if (!current()) return (ctx: null, error: cancelled);
+    if (outputRoot == null) {
+      return (ctx: null, error: _accessDeniedMessage([work.path]));
+    }
+    return (
+      ctx: _ImageCtx(session: session, current: current, outputRoot: outputRoot),
+      error: null,
+    );
+  }
+
+  /// Reads one image through the canonical grant resolver (never a
+  /// basename match). Returns bytes or a refusal/error string.
+  Future<({Uint8List? bytes, String? error})> _imageRead(
+    _ImageCtx ctx,
+    Object? path,
+    String tool,
+  ) async {
+    if (path is! String || path.isEmpty) {
+      return (bytes: null, error: 'Error: exact image path is required.');
+    }
+    String? refusal;
+    final resolved = await _resolveGrantedPath(
+      path,
+      tool: tool,
+      onRefusal: (r) => refusal = r,
+    );
+    if (!ctx.current()) return (bytes: null, error: _ImageCtx.cancelled);
+    if (resolved == null) {
+      return (bytes: null, error: refusal ?? _accessDeniedMessage([path]));
+    }
+    try {
+      final bytes = await ImageStudio.readInput(File(resolved));
+      if (!ctx.current()) return (bytes: null, error: _ImageCtx.cancelled);
+      return (bytes: bytes, error: null);
+    } on ImageStudioError catch (e) {
+      return (bytes: null, error: 'Error: $e');
+    } on FileSystemException {
+      return (
+        bytes: null,
+        error: 'Error: image not found or unreadable at the exact path given.',
+      );
+    }
+  }
+
+  /// Capacity, sign-in and fresh capability cards — once per tool call,
+  /// before any model is chosen. Null when cloud calls may proceed.
+  Future<String?> _imageCloudReady(_ImageCtx ctx) async {
+    final capacity =
+        _runResolved.imageCapacityFailure ?? ImageStudio.I.capacityError;
+    if (capacity != null) {
+      _runResolved.imageCapacityFailure = capacity;
+      return 'Error: ${capacity.code} (HTTP ${capacity.statusCode}). '
+          '${capacity.message} No new image request was submitted.';
+    }
+    if (imageInferOverrideForTest != null) return null;
+    final headers = await OvidCloudService.I.imageHeaders();
+    if (!ctx.current()) return _ImageCtx.cancelled;
+    if (headers.isEmpty) {
+      return 'Error: sign in to Ovid Cloud to use image generation or editing.';
+    }
+    ctx.headers = headers;
+    // Cached model cards (ETag); no network unless the cache is stale.
+    await ImageStudio.I.ensureFresh(headers);
+    if (!ctx.current()) return _ImageCtx.cancelled;
+    return null;
+  }
+
+  /// One cloud call. Never throws for gateway errors: the outcome carries
+  /// the public error and the accounting for whatever was admitted.
+  Future<ImageInferOutcome> _imageInfer(
+    _ImageCtx ctx,
+    ImageInferRequest req,
+  ) async {
+    final override = imageInferOverrideForTest;
+    if (override != null) return override(req);
+    try {
+      final result = await ImageStudio.I.inferResult(
+        prompt: req.prompt,
+        size: req.size,
+        requestId: req.requestId,
+        input: req.input,
+        headers: ctx.headers,
+        sessionId: ctx.session.id,
+        model: req.model,
+        preference: req.preference,
+        requirements: req.requirements,
+        mask: req.mask,
+        references: req.references,
+      );
+      if (result.error?.isCapacity == true) {
+        _runResolved.imageCapacityFailure = result.error;
+      }
+      var accounting =
+          'Request `${result.record.requestId}`: ${result.record.state}; '
+          'exact charge ${result.receipt?.charged ?? 'unconfirmed'}; '
+          '${result.receipt == null ? 'receipt unavailable; request' : 'receipt'} '
+          '${result.receiptPersisted ? 'saved' : 'not saved'}. '
+          '${result.servedModel == null ? '' : 'Model ${result.servedModel}. '}'
+          '${result.notice ?? ''}';
+      if (result.error != null) {
+        accounting += ' HTTP ${result.error!.statusCode}'
+            '${result.error!.code == null ? '' : ' ${result.error!.code}'}.';
+      }
+      return ImageInferOutcome(
+        bytes: result.bytes,
+        accounting: accounting.trim(),
+        servedModel: result.servedModel,
+        error: result.bytes == null
+            ? 'Image bytes unavailable; no image was saved.'
+            : null,
+      );
+    } on ImageStudioError catch (error) {
+      if (error.isCapacity) _runResolved.imageCapacityFailure = error;
+      return ImageInferOutcome(
+        error: '$error'
+            '${error.statusCode == null ? '' : ' HTTP ${error.statusCode}'}'
+            '${error.code == null ? '' : ' ${error.code}'}',
+      );
+    }
+  }
+
+  /// Saves [bytes] and shows them in chat. Returns the result line.
+  Future<String> _imagePublish(
+    _ImageCtx ctx,
+    Uint8List bytes,
+    String caption,
+  ) async {
+    final file = await ImageStudio.save(bytes, Directory(ctx.outputRoot));
+    if (!ctx.current()) {
+      return 'Image file saved but session changed; no chat publication.';
+    }
+    final relative = file.path.substring(ctx.outputRoot.length + 1);
+    _recordProduced(relative, bytes.length);
+    ctx.session.messages.add(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.imageGen,
+        content: caption,
+        imagePath: file.path,
+      ),
+    );
+    AppState.I.refresh();
+    await AppState.I.persistSessions();
+    return 'Image saved: `${file.path}` (workspace path: `$relative`). '
+        'Displayed in chat. ${bytes.length} bytes.'
+        '${AppState.I.lastSessionPersistFailed ? ' Chat history persistence failed; the image file is saved.' : ''}';
+  }
+
+  Future<String> _localImageTool(
+    _ImageCtx ctx,
+    String tool,
+    Map<String, dynamic> args,
+  ) async {
+    final read = await _imageRead(ctx, args['path'], tool);
+    if (read.error != null) return read.error!;
+    final bytes = await ImageStudio.transform(
+      read.bytes!,
+      width: args['width'] as int,
+      height: args['height'] as int,
+      x: tool == 'crop_image' ? args['x'] as int : null,
+      y: tool == 'crop_image' ? args['y'] as int : null,
+    );
+    if (!ctx.current()) return _ImageCtx.cancelled;
+    return _imagePublish(
+      ctx,
+      bytes,
+      '${tool == 'crop_image' ? 'Cropped' : 'Resized'} image',
+    );
+  }
+
+  Map<String, dynamic>? _imageRequirementsArg(Object? raw) =>
+      raw is Map ? Map<String, dynamic>.from(raw) : null;
+
+  Future<String> _generateImageTool(
+    _ImageCtx ctx,
+    Map<String, dynamic> args,
+  ) async {
+    final prompt = args['prompt'];
+    if (prompt is! String || prompt.trim().isEmpty) {
+      return 'Error: prompt is required.';
+    }
+    final requirements = _imageRequirementsArg(args['requirements']);
+    final ratioArg =
+        (args['aspect_ratio'] as String?) ??
+        requirements?['aspect_ratio'] as String?;
+    final ratio = parseRatio(ratioArg);
+    if (ratioArg != null && ratio == null) {
+      return 'Error: aspect_ratio must look like "4:5".';
+    }
+    final width = args['width'] is int ? args['width'] as int : null;
+    final height = args['height'] is int ? args['height'] as int : null;
+    for (final d in [width, height]) {
+      if (d != null && (d < 16 || d > 4096)) {
+        return 'Error: width/height must be 16–4096 pixels.';
+      }
+    }
+    final shaped = ratio != null || width != null || height != null;
+    PixelSize? target;
+    if (width != null && height != null) {
+      target = PixelSize(width, height);
+    } else if (ratio != null) {
+      target = PixelSize((1000 * ratio).round(), 1000);
+    }
+    final ready = await _imageCloudReady(ctx);
+    if (ready != null) return ready;
+    String? refusal;
+    final choice = chooseImageModel(
+      _imageCaps,
+      operation: 'generate',
+      target: target,
+      transparent: requirements?['transparent_background'] == true,
+      text: requirements?['text_rendering'] == true,
+      preference: args['preference'] as String?,
+      requested: args['model'] as String?,
+      requestedSize: target == null ? args['size'] as String? : null,
+      onRefusal: (r) => refusal = r,
+    );
+    if (choice == null) {
+      return 'Error: ${refusal ?? 'image generation is unavailable'}. '
+          'No image request was submitted.';
+    }
+    final requestId = args['request_id'];
+    if (requestId is! String || !_imageRequestIdRe.hasMatch(requestId)) {
+      return 'Error: request_id must be 8–128 letters, digits, dots, colons, underscores or hyphens.';
+    }
+    final outcome = await _imageInfer(
+      ctx,
+      ImageInferRequest(
+        prompt: prompt,
+        size: choice.size,
+        requestId: requestId,
+        model: choice.requestModel,
+        preference:
+            args['preference'] as String? ?? (choice.sendModel ? 'cost' : null),
+        requirements: taskRequirements(
+          requirements,
+          operation: 'generate',
+          choice: choice,
+        ),
+      ),
+    );
+    if (!ctx.current()) return _ImageCtx.cancelled;
+    final accounting = outcome.accounting.isEmpty ? '' : '${outcome.accounting} ';
+    if (outcome.bytes == null) {
+      return 'Error: $accounting${outcome.error ?? 'Image bytes unavailable; no image was saved.'}';
+    }
+    var bytes = outcome.bytes!;
+    final notes = <String>[
+      'Model: ${_imageModelLabel(choice, outcome)} (${choice.rationale}).',
+    ];
+    if (shaped) {
+      final info = await ImageStudio.inspect(bytes);
+      final out = PixelSize(info.width, info.height);
+      final want = generationTarget(
+        out,
+        ratio: ratio,
+        width: width,
+        height: height,
+      );
+      if (want != out) {
+        try {
+          bytes = await ImageStudio.fitTo(
+            bytes,
+            width: want.width,
+            height: want.height,
+          );
+          notes.add(
+            'Generated at $out (${out.aspect}); centre-cropped/scaled locally to '
+            'exactly $want (${want.aspect}).',
+          );
+        } catch (_) {
+          notes.add(
+            'WARNING: could not crop the $out output to $want locally; saved '
+            'as generated (use crop_image).',
+          );
+        }
+      } else {
+        notes.add('Output $out (${out.aspect}) already matches the request.');
+      }
+    }
+    if (!ctx.current()) return _ImageCtx.cancelled;
+    return _imagePublishReported(ctx, bytes, prompt, accounting, notes);
+  }
+
+  /// [_imagePublish] that never loses the accounting of a paid job when the
+  /// local save fails.
+  Future<String> _imagePublishReported(
+    _ImageCtx ctx,
+    Uint8List bytes,
+    String caption,
+    String accounting,
+    List<String> notes,
+  ) async {
+    try {
+      final saved = await _imagePublish(ctx, bytes, caption);
+      return '$accounting$saved ${notes.join(' ')}'.trim();
+    } on ImageStudioError catch (e) {
+      return 'Error: $accounting$e';
+    } catch (_) {
+      return 'Error: ${accounting}image operation failed. Check arguments and the exact source path. '
+          'For cloud retries reuse the same request_id.';
+    }
+  }
+
+  String _imageModelLabel(ImageModelChoice choice, ImageInferOutcome outcome) {
+    final served = outcome.servedModel;
+    if (choice.requestModel != null) return choice.card.slug;
+    if (!choice.sendModel) return served ?? 'auto';
+    return served == null
+        ? 'auto (expected ${choice.card.slug})'
+        : served == choice.card.slug
+        ? served
+        : '$served (gateway failover from expected ${choice.card.slug})';
+  }
+
+  Future<String> _editImageTool(
+    _ImageCtx ctx,
+    Map<String, dynamic> args,
+  ) async {
+    final read = await _imageRead(ctx, args['path'], 'edit_image');
+    if (read.error != null) return read.error!;
+    // Optional mask / reference images (same grant rules).
+    Uint8List? mask;
+    final references = <Uint8List>[];
+    final extras = <String>[
+      if (args['mask_path'] is String) args['mask_path'] as String,
+      if (args['reference_paths'] is List)
+        ...(args['reference_paths'] as List).whereType<String>(),
+    ];
+    for (final extra in extras) {
+      final r = await _imageRead(ctx, extra, 'edit_image');
+      if (r.error != null) return r.error!;
+      if (extra == args['mask_path']) {
+        mask = r.bytes;
+      } else {
+        references.add(r.bytes!);
+      }
+    }
+    final prompt = args['prompt'];
+    if (prompt is! String || prompt.trim().isEmpty) {
+      return 'Error: prompt is required.';
+    }
+    final ready = await _imageCloudReady(ctx);
+    if (ready != null) return ready;
+    final requestId = args['request_id'];
+    if (requestId is! String || !_imageRequestIdRe.hasMatch(requestId)) {
+      return 'Error: request_id must be 8–128 letters, digits, dots, colons, underscores or hyphens.';
+    }
+    final edit = await _editOne(
+      ctx,
+      input: read.bytes!,
+      instruction: prompt,
+      preserve: args['preserve'] != false,
+      requestId: requestId,
+      model: args['model'] as String?,
+      preference: args['preference'] as String?,
+      requirements: _imageRequirementsArg(args['requirements']),
+      size: args['size'] as String?,
+      mask: mask,
+      references: references,
+    );
+    if (!ctx.current()) return _ImageCtx.cancelled;
+    final accounting = edit.accounting.isEmpty ? '' : '${edit.accounting} ';
+    if (edit.bytes == null) return 'Error: $accounting${edit.error}';
+    return _imagePublishReported(
+      ctx,
+      edit.bytes!,
+      prompt,
+      accounting,
+      edit.notes,
+    );
+  }
+
+  /// One faithful edit: choose the model and size, send the instruction
+  /// (with the preservation clause), then restore and verify the original
+  /// pixel dimensions. Never publishes; never throws for per-image failures.
+  Future<_ImageEditResult> _editOne(
+    _ImageCtx ctx, {
+    required Uint8List input,
+    required String instruction,
+    required bool preserve,
+    required String requestId,
+    String? model,
+    String? preference,
+    Map<String, dynamic>? requirements,
+    String? size,
+    Uint8List? mask,
+    List<Uint8List> references = const [],
+  }) async {
+    try {
+      final info = await ImageStudio.inspect(input);
+      final original = PixelSize(info.width, info.height);
+      String? refusal;
+      final choice = chooseImageModel(
+        _imageCaps,
+        operation: 'edit',
+        target: original,
+        transparent: requirements?['transparent_background'] == true,
+        text: requirements?['text_rendering'] == true,
+        preference: preference,
+        requested: model,
+        requestedSize: preserve ? null : size,
+        onRefusal: (r) => refusal = r,
+      );
+      if (choice == null) {
+        return _ImageEditResult.failed(
+          '${refusal ?? 'image editing is unavailable'}. No image request was submitted.',
+        );
+      }
+      final outcome = await _imageInfer(
+        ctx,
+        ImageInferRequest(
+          prompt: preserve ? preservationPrompt(instruction) : instruction,
+          size: choice.size,
+          requestId: requestId,
+          input: input,
+          model: choice.requestModel,
+          preference: preference ?? (choice.sendModel ? 'cost' : null),
+          requirements: taskRequirements(
+            requirements,
+            operation: 'edit',
+            choice: choice,
+          ),
+          mask: mask,
+          references: references,
+        ),
+      );
+      if (outcome.bytes == null) {
+        return _ImageEditResult.failed(
+          outcome.error ?? 'Image bytes unavailable; no image was saved.',
+          accounting: outcome.accounting,
+        );
+      }
+      var bytes = outcome.bytes!;
+      final notes = <String>[
+        'Model: ${_imageModelLabel(choice, outcome)} (${choice.rationale}); '
+            'requested ${choice.size}.',
+      ];
+      final outInfo = await ImageStudio.inspect(bytes);
+      final returned = PixelSize(outInfo.width, outInfo.height);
+      var finalSize = returned;
+      if (preserve) {
+        if (returned != original) {
+          final plan = restorePlan(returned, original);
+          try {
+            bytes = await ImageStudio.fitTo(
+              bytes,
+              width: original.width,
+              height: original.height,
+            );
+            final check = await ImageStudio.inspect(bytes);
+            finalSize = PixelSize(check.width, check.height);
+            notes.add(
+              plan.crops
+                  ? 'Model returned $returned (${returned.aspect}); scaled and '
+                        'centre-cropped to the original $original '
+                        '(${original.aspect}), trimming '
+                        '${(plan.trimmedFraction(returned) * 100).round()}% of '
+                        'the model output at the edges — check them.'
+                  : 'Model returned $returned; resized to the original $original.',
+            );
+          } catch (_) {
+            notes.add('Local restore to $original failed; kept the model output.');
+          }
+        }
+        notes.add(
+          finalSize == original
+              ? 'Output $finalSize matches the original $original (${original.aspect}).'
+              : 'WARNING: could not preserve the original size: output $finalSize, original $original.',
+        );
+        final finalMime = (await ImageStudio.inspect(bytes)).mime;
+        if (finalMime != info.mime) {
+          notes.add(
+            'Saved as ${finalMime.split('/').last.toUpperCase()} (original '
+            '${info.mime.split('/').last.toUpperCase()}).',
+          );
+        }
+      } else {
+        notes.add('Output $returned (${returned.aspect}); original $original.');
+      }
+      return _ImageEditResult(
+        bytes: bytes,
+        accounting: outcome.accounting,
+        notes: notes,
+        size: finalSize,
+      );
+    } on ImageStudioError catch (e) {
+      return _ImageEditResult.failed('$e');
+    }
+  }
+
+  /// `edit_images`: one instruction applied to N images independently —
+  /// one edit call per image, at most 3 in flight, per-image results and
+  /// errors, outputs published and reported in input order.
+  Future<String> _editImagesTool(
+    _ImageCtx ctx,
+    Map<String, dynamic> args,
+  ) async {
+    final rawPaths = args['paths'];
+    if (rawPaths is! List || rawPaths.isEmpty) {
+      return 'Error: paths must list every image to edit.';
+    }
+    if (rawPaths.length > maxBatchImages) {
+      return 'Error: edit_images accepts at most $maxBatchImages images per call.';
+    }
+    final prompt = args['prompt'];
+    if (prompt is! String || prompt.trim().isEmpty) {
+      return 'Error: prompt is required.';
+    }
+    final base = args['request_id'];
+    if (base is! String || !_imageRequestIdRe.hasMatch(base) || base.length > 120) {
+      return 'Error: request_id must be 8–120 letters, digits, dots, colons, underscores or hyphens.';
+    }
+    final n = rawPaths.length;
+    final preserve = args['preserve'] != false;
+    final requirements = _imageRequirementsArg(args['requirements']);
+    final results = List<_ImageEditResult?>.filled(n, null);
+    final inputs = List<Uint8List?>.filled(n, null);
+    _imageProgress(
+      'Editing $n image${n == 1 ? '' : 's'} independently: "$prompt"'
+      '${preserve ? ' (preserve original)' : ''}',
+    );
+    for (var i = 0; i < n; i++) {
+      final read = await _imageRead(ctx, rawPaths[i], 'edit_images');
+      if (!ctx.current()) return _ImageCtx.cancelled;
+      if (read.error != null) {
+        results[i] = _ImageEditResult.failed(read.error!);
+      } else {
+        inputs[i] = read.bytes;
+      }
+    }
+    if (inputs.any((b) => b != null)) {
+      final ready = await _imageCloudReady(ctx);
+      if (ready != null) return ready;
+    }
+    final saved = List<String?>.filled(n, null);
+    var published = 0;
+    var done = 0;
+    // Publish strictly in input order: flush the completed prefix.
+    Future<void> flush() async {
+      while (published < n && results[published] != null) {
+        final i = published++;
+        final r = results[i]!;
+        if (r.bytes != null && ctx.current()) {
+          final line = await _imagePublishReported(
+            ctx,
+            r.bytes!,
+            '$prompt (${i + 1}/$n)',
+            '',
+            const [],
+          );
+          if (line.startsWith('Error: ')) {
+            results[i] = _ImageEditResult.failed(
+              line.substring(7),
+              accounting: r.accounting,
+            );
+          } else {
+            saved[i] = line;
+          }
+        }
+      }
+    }
+
+    var flushing = Future<void>.value();
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        if (!ctx.current()) return;
+        final i = next++;
+        if (i >= n) return;
+        if (inputs[i] == null) continue;
+        _imageProgress('[${i + 1}/$n] editing…');
+        _ImageEditResult r;
+        try {
+          r = await _editOne(
+            ctx,
+            input: inputs[i]!,
+            instruction: prompt,
+            preserve: preserve,
+            requestId: '$base-${i + 1}',
+            model: args['model'] as String?,
+            preference: args['preference'] as String?,
+            requirements: requirements,
+          );
+        } catch (e) {
+          r = _ImageEditResult.failed('image edit failed.');
+        }
+        results[i] = r;
+        done++;
+        _imageProgress(
+          r.bytes == null
+              ? '[${i + 1}/$n] failed: ${r.error}'
+              : '[${i + 1}/$n] done ${r.size} ($done/${inputs.whereType<Uint8List>().length})',
+        );
+        flushing = flushing.then((_) => flush());
+        await flushing;
+      }
+    }
+
+    await Future.wait([
+      for (var w = 0; w < n && w < _imageBatchConcurrency; w++) worker(),
+    ]);
+    await flushing;
+    await flush();
+    if (!ctx.current()) return _ImageCtx.cancelled;
+    final ok = saved.whereType<String>().length;
+    final lines = <String>[];
+    for (var i = 0; i < n; i++) {
+      final r = results[i];
+      final acct = (r?.accounting ?? '').isEmpty ? '' : ' ${r!.accounting}';
+      lines.add(
+        r?.bytes != null && saved[i] != null
+            ? '${i + 1}. ${jsonEncode(rawPaths[i])} → ${saved[i]} ${r!.notes.join(' ')}$acct'
+            : '${i + 1}. ${jsonEncode(rawPaths[i])} → Error: ${r?.error ?? 'not edited (run changed).'}$acct',
+      );
+    }
+    final head = ok == 0
+        ? 'Error: none of the $n images could be edited.'
+        : 'Edited $ok of $n images independently with the same instruction'
+              '${preserve ? ', preserving each original' : ''}. '
+              'Results in input order:';
+    final summary = '$head\n${lines.join('\n')}'
+        '${ok > 0 && ok < n ? '\nOnly the failed images need a retry (reuse the same request_id).' : ''}';
+    _imageProgress(summary);
+    return summary;
+  }
+
+  static const _imageBatchConcurrency = 3;
 
   /// Strip HTML tags from a snippet for plain-text display.
   String _stripHtml(String html) {
@@ -25459,6 +26065,39 @@ ${await _agentsMdBlock()}
     ).firstMatch(raw);
     return m != null ? raw.substring(0, m.start).trim() : raw;
   }
+}
+
+/// Per-call state shared by the image tools.
+class _ImageCtx {
+  _ImageCtx({
+    required this.session,
+    required this.current,
+    required this.outputRoot,
+  });
+  static const cancelled = 'Cancelled: image run or account changed.';
+  final ChatSession session;
+  final bool Function() current;
+  final String outputRoot;
+  Map<String, String> headers = const {};
+}
+
+/// One image's edit outcome inside edit_image / edit_images.
+class _ImageEditResult {
+  const _ImageEditResult({
+    this.bytes,
+    this.accounting = '',
+    this.notes = const [],
+    this.size,
+  }) : error = null;
+  const _ImageEditResult.failed(String this.error, {this.accounting = ''})
+    : bytes = null,
+      notes = const [],
+      size = null;
+  final Uint8List? bytes;
+  final String? error;
+  final String accounting;
+  final List<String> notes;
+  final PixelSize? size;
 }
 
 /// One parsed web-search source (the web search result `WebSearchResult` shape, minus dates).

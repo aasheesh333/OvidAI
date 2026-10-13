@@ -2494,6 +2494,7 @@ class _PresetTileState extends State<_PresetTile> {
     'render_html',
     'generate_image',
     'edit_image',
+    'edit_images',
     'resize_image',
     'crop_image',
     'run_shell',
