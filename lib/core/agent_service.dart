@@ -21,6 +21,7 @@ import 'format.dart';
 import 'model_failure.dart';
 import 'voice_input_service.dart';
 import 'agent_notification_service.dart';
+import 'background_notifications.dart';
 import 'schedule_coordinator.dart';
 import 'state.dart';
 import 'usage_attempt.dart';
@@ -1423,6 +1424,7 @@ class AgentService extends ChangeNotifier {
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
   set pendingApproval(ApprovalRequest? v) {
     _runResolved.pendingApproval = v;
+    if (v != null && !v.completer.isCompleted) _notifyNeedsInput(v);
     if (!_runResolved.controlRun) return;
     // The corner glow must read "waiting on you" the moment a card
     // is raised, and go back to running the moment it is answered. Hooked here
@@ -11377,6 +11379,7 @@ user which one instead of assuming this one.''';
     final ctx = _RunCtx(bucket, s, route.providerCopy(), epoch, route: route);
     ctx.ownedRunId = '${s.id}:$epoch';
     bucket.activeRunId = ctx.ownedRunId;
+    final messagesBefore = s.messages.length;
     return runZoned(() async {
       try {
         await _prepareRunTask(
@@ -11394,8 +11397,95 @@ user which one instead of assuming this one.''';
           notifyListeners();
           _scheduleQueuedContinuation(s.id);
         }
+        // Scheduled runs report through the scheduler's own notification.
+        if (scheduledTask == null && epoch == bucket.runEpoch) {
+          _notifyRunFinished(s, bucket, messagesBefore);
+        }
       }
     }, zoneValues: {_runCtxKey: ctx, #ovidRunKey: s.id});
+  }
+
+  // ── Background notifications (BackgroundNotifier routes them: shade when
+  // Ovid is not on screen, in-app banner otherwise, nothing for the chat the
+  // user is looking at). ────────────────────────────────────────────────
+  void _notifyRunFinished(ChatSession s, AgentRun bucket, int before) {
+    if (s.isSubagent || bucket.stoppedByUser || bucket.cancelRequested) return;
+    final added = s.messages.length > before
+        ? s.messages.sublist(before)
+        : const <Message>[];
+    if (added.isEmpty) return;
+    final error = bucket.lastError;
+    final OvidNotification note;
+    if (error != null && error.isNotEmpty) {
+      note = OvidNotification.agentFailed(
+        sessionId: s.id,
+        sessionTitle: s.title,
+        error: error,
+      );
+    } else {
+      final images = added.where((m) => m.kind == MsgKind.imageGen).length;
+      final reply = added.lastWhere(
+        (m) => m.role == 'assistant' && m.content.trim().isNotEmpty,
+        orElse: () => Message(role: 'assistant', content: ''),
+      );
+      note = OvidNotification.agentFinished(
+        sessionId: s.id,
+        sessionTitle: s.title,
+        reply: reply.content,
+        images: images,
+      );
+    }
+    unawaited(BackgroundNotifier.I.post(note));
+  }
+
+  void _notifyNeedsInput(ApprovalRequest req) {
+    final s = _runSession ?? AppState.I.activeSession;
+    if (s == null) return;
+    // A subagent's prompt surfaces in its root chat.
+    final root = s.isSubagent ? (AppState.I.lineageOf(s.id).firstOrNull ?? s) : s;
+    final question = req.questions != null;
+    unawaited(
+      BackgroundNotifier.I.post(
+        OvidNotification.needsInput(
+          sessionId: root.id,
+          sessionTitle: root.title,
+          summary: question
+              ? req.questions!.map((q) => q.question).join(' · ')
+              : req.summary,
+          question: question,
+        ),
+      ),
+    );
+  }
+
+  void _onScheduleResult(
+    ScheduleEntry entry,
+    ScheduleResult result,
+    bool willRetry,
+  ) {
+    if (willRetry) return;
+    final s = AppState.I.sessionById(entry.sessionId);
+    final success = result.status == 'completed';
+    String? summary;
+    if (success && s != null) {
+      summary = s.messages
+          .lastWhere(
+            (m) => m.role == 'assistant' && m.content.trim().isNotEmpty,
+            orElse: () => Message(role: 'assistant', content: ''),
+          )
+          .content;
+    }
+    unawaited(
+      BackgroundNotifier.I.post(
+        OvidNotification.scheduleResult(
+          sessionId: entry.sessionId,
+          prompt: '${entry.task['prompt'] ?? ''}',
+          success: success,
+          summary: summary,
+          error: result.error,
+        ),
+      ),
+    );
   }
 
   Future<void> _prepareRunTask(
@@ -22655,7 +22745,13 @@ ${await _agentsMdBlock()}
       }
     },
     changed: _schedulesChanged,
+    onResult: _onScheduleResult,
   );
+
+  /// Completes once schedules were recovered (or recovery failed) after the
+  /// sessions loaded. main.dart uses it to settle a headless boot.
+  Future<void> get schedulesSettled => _schedulesSettled.future;
+  final Completer<void> _schedulesSettled = Completer<void>();
 
   Future<void> _persistSchedules() async {
     await AppState.I.flushSessionPersistence();
@@ -22677,6 +22773,8 @@ ${await _agentsMdBlock()}
       _startScheduleTimer();
     } catch (e) {
       Diag.swallow('schedule.recover', e);
+    } finally {
+      if (!_schedulesSettled.isCompleted) _schedulesSettled.complete();
     }
   }
 

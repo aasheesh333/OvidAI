@@ -10,6 +10,8 @@ import 'core/state.dart';
 import 'core/studio_drafts.dart';
 import 'core/agent_notification_service.dart';
 import 'core/agent_service.dart';
+import 'core/background_jobs.dart';
+import 'core/background_notifications.dart';
 import 'core/composer_drafts.dart';
 import 'core/mcp_client_requests.dart';
 import 'core/mcp_service.dart';
@@ -144,10 +146,28 @@ Future<void> main() async {
   // anymore. The sandbox (core + runtimes) installs on Studio first-open
   // via openStudio(); the sandboxInstalled detection above stays available
   // for guards elsewhere.
+  // Background runtime: the same entrypoint also runs headlessly when the
+  // foreground service / a schedule alarm boots Ovid after Android killed it
+  // (no Activity, no frames). Register the native bridge and notification
+  // channels now instead of waiting for the shell to build.
+  unawaited(AgentNotificationService.I.init());
+  unawaited(BackgroundNotifier.I.init());
+  attachBackgroundJobWatchers();
+  unawaited(
+    AgentService.I.schedulesSettled.then((_) async {
+      // Run tasks that fell due while Ovid was not running, then settle the
+      // service ("Ovid is active" with keep-alive on, stopped otherwise).
+      await AgentService.I.wakeSchedules();
+      AgentNotificationService.I.settleBackgroundService();
+    }),
+  );
   runApp(const OvidApp());
   WidgetsBinding.instance.addPostFrameCallback((_) {
     unawaited(_startReadiness());
   });
+  // A headless engine never draws a frame; start readiness (sessions,
+  // schedules) anyway. initializeReadiness() is idempotent.
+  Timer(const Duration(seconds: 3), () => unawaited(_startReadiness()));
 }
 
 Future<void> _startReadiness() => AppState.I.initializeReadiness();
@@ -189,6 +209,8 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     // Notification taps route through the app router (07 §1): back to the
     // chat root, validated id, then select.
     AgentNotificationService.I.selectSessionHandler = _openChatFromNotification;
+    AgentNotificationService.I.openRouteHandler = _openRouteFromNotification;
+    BackgroundNotifier.I.inAppPresenter = _showInAppNotification;
     _restoreAndListenForLinks();
   }
 
@@ -202,6 +224,38 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
       WidgetsBinding.instance.scheduleFrame();
     }
     return false;
+  }
+
+  /// Notification tap → `/c/<id>`, `/schedule/<id>`, `/settings` or `/`.
+  void _openRouteFromNotification(String path, [int attempt = 0]) {
+    final route = AppRouter.parse(Uri.parse(path));
+    if (route == null) return;
+    if (AppRouter.go(route)) return;
+    // Cold start: the navigator may not be attached for a few frames.
+    if (appNavigatorKey.currentState == null && attempt < 10 && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _openRouteFromNotification(path, attempt + 1),
+      );
+      WidgetsBinding.instance.scheduleFrame();
+    }
+  }
+
+  /// App in the foreground: show background events in-app, never as a
+  /// duplicate system notification.
+  void _showInAppNotification(OvidNotification n) {
+    final messenger = appScaffoldMessengerKey.currentState;
+    if (messenger == null || !mounted) return;
+    final text = [n.title, if (n.body.isNotEmpty) n.body].join('\n');
+    messenger.showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        content: Text(text),
+        action: SnackBarAction(
+          label: context.l10n.notificationOpen,
+          onPressed: () => _openRouteFromNotification(n.route),
+        ),
+      ),
+    );
   }
 
   /// Every incoming link: MCP OAuth redirects and chat links are routed
@@ -313,6 +367,13 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     if (AgentNotificationService.I.selectSessionHandler ==
         _openChatFromNotification) {
       AgentNotificationService.I.selectSessionHandler = null;
+    }
+    if (AgentNotificationService.I.openRouteHandler ==
+        _openRouteFromNotification) {
+      AgentNotificationService.I.openRouteHandler = null;
+    }
+    if (BackgroundNotifier.I.inAppPresenter == _showInAppNotification) {
+      BackgroundNotifier.I.inAppPresenter = null;
     }
     _linkSubscription?.cancel();
     super.dispose();

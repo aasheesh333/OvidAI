@@ -254,6 +254,21 @@ class AgentNotificationService {
   /// it only a session that still exists is selected — never a deleted id.
   bool Function(String sessionId)? selectSessionHandler;
 
+  /// Opens an app route from a notification tap (`/c/<id>`,
+  /// `/schedule/<id>`, `/`). Installed by main.dart (AppRouter).
+  void Function(String route)? openRouteHandler;
+
+  /// After a system-started wake (alarm, boot, sticky restart): when no
+  /// agent work is in flight, idle the service — "Ovid is active" presence
+  /// if keep-alive is on, otherwise stop it. Never runs mid-task.
+  void settleBackgroundService() {
+    if (backgroundStopped) return;
+    final schedulesBusy = anyRunActiveOverrideForTest == null &&
+        AgentService.I.schedules.busy;
+    if (_isAnyRunActive() || schedulesBusy) return;
+    agentIdle(serviceStarted: true);
+  }
+
   /// A notification for [sid] was tapped (`onSelectSession`).
   void handleSelectSession(String? sid) {
     if (sid == null || sid.isEmpty) return;
@@ -280,7 +295,16 @@ class AgentNotificationService {
           _onExitCallback!();
         }
       } else if (call.method == 'onScheduleWake') {
-        if (!backgroundStopped) await AgentService.I.wakeSchedules();
+        // A schedule alarm fired (the native service may have been started
+        // for it). Run due tasks, then let the service settle: idle
+        // presence with keep-alive on, stopped otherwise.
+        if (!backgroundStopped) {
+          await AgentService.I.wakeSchedules();
+          settleBackgroundService();
+        }
+      } else if (call.method == 'onOpenRoute') {
+        final route = call.arguments as String?;
+        if (route != null && route.isNotEmpty) openRouteHandler?.call(route);
       } else if (call.method == 'onBackgroundConstraint') {
         backgroundConstraint = call.arguments as String?;
         AppState.I.refresh();
@@ -355,7 +379,10 @@ class AgentNotificationService {
 
   /// Run finished / idle → notification either updates to Ready & Listening
   /// (if keep-alive enabled) or stops the foreground service.
-  void agentIdle({String? sessionId}) {
+  ///
+  /// [serviceStarted]: the native side may have started the service itself
+  /// (alarm/boot), so stop/update it even if Dart never posted it.
+  void agentIdle({String? sessionId, bool serviceStarted = false}) {
     if (backgroundStopped) return;
     if (!_maybeRearmSupport()) return;
     if (_isAnyRunActive()) {
@@ -378,6 +405,7 @@ class AgentNotificationService {
       return;
     }
     final hadNotificationWork =
+        serviceStarted ||
         _active ||
         _issuedGeneration > _committedGeneration ||
         (_debounce?.isActive ?? false);
@@ -421,11 +449,12 @@ class AgentNotificationService {
     }
 
     if (_isKeepAlive) {
-      // Keep foreground service active so scheduled tasks and message queue fire
+      // "Keep Ovid active in background": a low-importance, silent status
+      // notification keeps the process alive so schedules and queued work fire.
       unawaited(
         _invoke('agentServiceUpdate', {
-          'title': 'Ovid AI',
-          'text': 'Ready & Listening',
+          'title': 'Ovid is active',
+          'text': 'Ready for scheduled tasks and agent runs',
           // Idle presence: keep the notification, release the wake lock. An
           // idle service holding a 6h PARTIAL_WAKE_LOCK drains battery all
           // night with no agent work happening.

@@ -7,6 +7,7 @@ import '../core/schedule_coordinator.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
+import 'background_reliability_card.dart';
 import 'user_error.dart';
 import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
@@ -106,6 +107,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           body: ListView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
             children: [
+              // Missing notification/battery/exact-alarm grants, if any.
+              const BackgroundReliabilityCard(compact: true),
               _statusStrip(context, backgroundStopped),
               const SizedBox(height: 20),
               const AetherSectionTitle(eyebrow: 'Scheduled tasks'),

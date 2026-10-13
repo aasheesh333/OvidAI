@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Release builds shrink resources. The notification chime is referenced
+     only by URI (android.resource://.../raw/ovid_chime) from notification
+     channels, which the shrinker cannot see, so keep it explicitly. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@raw/ovid_chime" />

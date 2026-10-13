@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart' show WebViewCookieManager;
 
 import 'agent_notification_service.dart';
+import 'background_notifications.dart';
 import 'device_control_service.dart';
 import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
@@ -5936,6 +5937,7 @@ class AppState extends ChangeNotifier {
     if (!v) {
       AgentNotificationService.I.agentIdle();
     }
+    unawaited(BackgroundNotifier.I.syncKeepActive());
   }
 
   static const _kKeepAlivePref = 'ovid_keep_alive';
@@ -5945,9 +5947,9 @@ class AppState extends ChangeNotifier {
     if (_keepAliveEnabled == v) return;
     _keepAliveEnabled = v;
     unawaited(_saveKeepAlivePref(v));
-    if (!v) {
-      AgentNotificationService.I.agentIdle();
-    }
+    unawaited(BackgroundNotifier.I.syncKeepActive());
+    // ON starts the "Ovid is active" presence now; OFF stops an idle service.
+    AgentNotificationService.I.agentIdle();
     notifyListeners();
   }
 

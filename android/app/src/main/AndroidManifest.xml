@@ -12,10 +12,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Re-arm best-effort schedule alarms after reboot. Battery exemptions
-         are user-managed and do not guarantee process survival. -->
+    <!-- Restore schedules and the background service after reboot/update.
+         Battery exemptions are user-managed (Settings > Notifications &
+         background card) and do not guarantee process survival on every OEM. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Scheduled tasks fire on time via AlarmManager.setExactAndAllowWhileIdle.
+         SCHEDULE_EXACT_ALARM is user-revocable on Android 12+ (checked with
+         canScheduleExactAlarms, inexact + periodic job fallback when denied);
+         USE_EXACT_ALARM (Android 13+) is granted at install for task/reminder
+         apps. Play builds remove USE_EXACT_ALARM (src/play overlay). -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <!-- Device permissions the AI agent can request at runtime, each behind
          an in-chat user-consent gate first (Play policy: no surprise prompts). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -107,8 +115,10 @@
                 <data android:scheme="com.dhanuk.ovidai" android:host="oauth" android:path="/callback" />
             </intent-filter>
         </activity>
-        <!-- Foreground service: keeps the app alive while the AI agent
-             works in the background (notification with Stop action). -->
+        <!-- Foreground service: keeps Ovid alive while the AI agent works,
+             while scheduled tasks run and, with "Keep Ovid active in
+             background" on, as a low-importance status notification. It is
+             START_STICKY and restarted after reboot/update (BootReceiver). -->
         <service
             android:name=".AgentForegroundService"
             android:exported="false"
@@ -149,17 +159,31 @@
                 <action android:name="android.intent.action.TIME_SET"/>
             </intent-filter>
         </receiver>
-        <!-- Re-arm pending alarms after reboot; never auto-start a foreground service. -->
+        <!-- Re-register schedule alarms after reboot (LOCKED_BOOT_COMPLETED
+             re-arms from device-protected storage before unlock), time
+             changes and app updates; with "Keep Ovid active in background"
+             on, BOOT_COMPLETED and MY_PACKAGE_REPLACED also restart the
+             foreground service, which boots the Dart runtime headlessly. -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true"
-            android:enabled="true">
+            android:enabled="true"
+            android:directBootAware="true">
             <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED"/>
                 <action android:name="android.intent.action.BOOT_COMPLETED"/>
                 <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
         </receiver>
+        <!-- Periodic safety net for schedules when exact alarms are denied. -->
+        <service
+            android:name=".ScheduleFallbackJob"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

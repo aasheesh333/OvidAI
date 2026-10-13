@@ -579,4 +579,132 @@ class AppLocalizationsEn extends AppLocalizations {
     );
     return '$_temp0';
   }
+
+  @override
+  String get notificationOpen => 'Open';
+
+  @override
+  String get bgCardTitle => 'Background reliability';
+
+  @override
+  String get bgCardReady =>
+      'All set. Ovid can run schedules and agent tasks while it is closed.';
+
+  @override
+  String bgCardNeedsAttention(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count settings need attention',
+      one: '1 setting needs attention',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get bgNotificationsTitle => 'Notifications';
+
+  @override
+  String get bgNotificationsOk =>
+      'Allowed. You\'ll hear when a task finishes or needs you.';
+
+  @override
+  String get bgNotificationsNeeded =>
+      'Blocked. Ovid can\'t tell you when work finishes or needs approval.';
+
+  @override
+  String get bgBatteryTitle => 'Battery optimization';
+
+  @override
+  String get bgBatteryOk =>
+      'Unrestricted. Android won\'t pause Ovid in the background.';
+
+  @override
+  String get bgBatteryNeeded =>
+      'Restricted. Android may pause Ovid and delay scheduled tasks.';
+
+  @override
+  String get bgExactTitle => 'Exact alarms';
+
+  @override
+  String get bgExactOk => 'Allowed. Scheduled tasks start on time.';
+
+  @override
+  String get bgExactNeeded =>
+      'Not allowed. Scheduled tasks may start late because Android batches them.';
+
+  @override
+  String bgOemTitle(String maker) {
+    return '$maker background settings';
+  }
+
+  @override
+  String bgOemBody(String maker) {
+    return '$maker phones can stop apps despite the settings above. Allow Ovid to autostart and run in the background.';
+  }
+
+  @override
+  String get bgActionAllow => 'Allow';
+
+  @override
+  String get bgActionOpen => 'Open';
+
+  @override
+  String get bgActionGuide => 'Guide';
+
+  @override
+  String get bgStatusOk => 'Done';
+
+  @override
+  String get bgStatusNeeded => 'Needs attention';
+
+  @override
+  String get bgKeepActiveTitle => 'Keep Ovid active in background';
+
+  @override
+  String get bgKeepActiveOn =>
+      'On. A quiet status notification keeps schedules and agent runs working when Ovid is closed, and after a restart.';
+
+  @override
+  String get bgKeepActiveOff =>
+      'Off. Ovid only wakes for scheduled tasks and while a run is in progress.';
+
+  @override
+  String get bgChannelsTitle => 'Notification types';
+
+  @override
+  String get bgChannelAgent => 'Agent updates';
+
+  @override
+  String get bgChannelAgentHint =>
+      'Finished, needs input or approval, long jobs done';
+
+  @override
+  String get bgChannelSchedule => 'Scheduled task results';
+
+  @override
+  String get bgChannelScheduleHint =>
+      'Success or failure, with a short summary';
+
+  @override
+  String get bgChannelStatus => 'Background status';
+
+  @override
+  String get bgChannelStatusHint => 'Silent notification while Ovid is active';
+
+  @override
+  String get bgSoundChime => 'Ovid chime';
+
+  @override
+  String get bgSoundSystem => 'System default';
+
+  @override
+  String get bgSoundSilent => 'Silent';
+
+  @override
+  String get bgSoundLabel => 'Sound';
+
+  @override
+  String get bgChannelSystemSettings =>
+      'Android settings for this notification type';
 }
