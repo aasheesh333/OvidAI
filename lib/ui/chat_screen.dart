@@ -20,7 +20,6 @@ import '../core/voice_input_service.dart';
 import '../core/state.dart';
 import '../core/studio_setup_coordinator.dart';
 import '../core/native_share.dart';
-import 'conversation_share_sheet.dart';
 import 'share_actions.dart';
 import 'sandbox_setup.dart';
 import 'browser_screen.dart';
@@ -50,6 +49,8 @@ import '../core/ovid_cloud_service.dart';
 import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/attachment_tiles.dart';
+import 'chat_overflow_menu.dart';
+import '../l10n/l10n.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -1371,70 +1372,14 @@ class _ChatScreenState extends State<ChatScreen>
               ),
               ),
             ),
+            // Exactly three header actions (owner ask): Studio, Browser and
+            // a ⋮ overflow that holds everything else the header used to
+            // show (share, new chat, background jobs) plus the chat-level
+            // actions (rename, artifacts, trajectory, usage, delete).
             actions: [
-              // PR27/B1: the subagents + trajectory icons moved OFF the
-              // header (user ask) — subagents live on the subagent screen
-              // (chat "Open" links + the catalog sheet from a chat row),
-              // trajectory in the sidebar footer next to Settings.
-              // Background jobs badge (the job indicator header trigger): shows the
-              // live job count of THIS session, popover lists producer/label/
-              // state/per-second elapsed, with a Kill action per row.
-              AnimatedBuilder(
-                animation: AgentService.I,
-                builder: (_, _) {
-                  final jobs = s == null
-                      ? const <
-                          ({
-                            int id,
-                            String name,
-                            String state,
-                            int elapsedSec,
-                            int outChars,
-                          })
-                        >[]
-                      : AgentService.I.jobsFor(s.id);
-                  if (jobs.isEmpty) return const SizedBox.shrink();
-                  final running = jobs
-                      .where((j) => j.state == 'running')
-                      .length;
-                  return Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      IconButton(
-                        tooltip: 'Background jobs',
-                        icon: const Icon(Icons.terminal_outlined, size: 19),
-                        onPressed: () => _showJobsPopover(context, s!.id),
-                      ),
-                      Positioned(
-                        top: 8,
-                        right: 6,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 1,
-                          ),
-                          decoration: BoxDecoration(
-                            color: running > 0
-                                ? Aether.accentFill
-                                : Aether.textFaint,
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            '${jobs.length}',
-                            style: const TextStyle(
-                              fontSize: 8.5,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              ),
               IconButton(
-                tooltip: 'Studio — code & terminal',
+                key: const ValueKey('chat-header-studio'),
+                tooltip: context.l10n.chatHeaderStudio,
                 icon: const Icon(Icons.code, size: 19),
                 onPressed: () => openStudio(context),
               ),
@@ -1452,7 +1397,8 @@ class _ChatScreenState extends State<ChatScreen>
                     alignment: Alignment.center,
                     children: [
                       IconButton(
-                        tooltip: 'Browser — agent & login',
+                        key: const ValueKey('chat-header-browser'),
+                        tooltip: context.l10n.chatHeaderBrowser,
                         icon: const Icon(Icons.public, size: 19),
                         onPressed: () => Navigator.of(context).push(
                           MaterialPageRoute(
@@ -1463,13 +1409,15 @@ class _ChatScreenState extends State<ChatScreen>
                       Positioned(
                         top: 10,
                         right: 10,
-                        child: Container(
-                          width: 7,
-                          height: 7,
-                          decoration: BoxDecoration(
-                            color: dotColor,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Aether.bg, width: 1.5),
+                        child: IgnorePointer(
+                          child: Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: dotColor,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Aether.bg, width: 1.5),
+                            ),
                           ),
                         ),
                       ),
@@ -1477,20 +1425,11 @@ class _ChatScreenState extends State<ChatScreen>
                   );
                 },
               ),
-              // Share: Read-only link or live Collab session (F-185).
-              if (s != null && !s.isSubagent && s.messages.isNotEmpty)
-                IconButton(
-                  tooltip: 'Share chat',
-                  // Full 48dp target like the other header icons (PR-6b).
-                  icon: const Icon(Icons.ios_share_outlined, size: 18),
-                  onPressed: () => showConversationShareSheet(context, s),
-                ),
-              IconButton(
-                tooltip: 'New session',
-                icon: const Icon(Icons.edit_square, size: 18),
-                onPressed: app.newSession,
+              ChatOverflowMenu(
+                session: s,
+                onJobs: (id) => _showJobsPopover(context, id),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 4),
             ],
           ),
           body: SafeArea(

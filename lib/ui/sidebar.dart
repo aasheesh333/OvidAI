@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/connection_service.dart';
-import '../core/diag.dart';
 import '../core/firebase_service.dart';
 import '../core/session_history_store.dart';
 import '../core/theme.dart';
@@ -13,9 +12,11 @@ import '../core/agent_service.dart';
 import 'profile_avatar.dart';
 import 'settings_screen.dart';
 import 'trajectory_screen.dart';
+import 'artifacts_screen.dart';
+import '../l10n/l10n.dart';
 import 'schedule_screen.dart';
+import 'session_actions.dart';
 import 'conversation_share_sheet.dart';
-import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/ovid_mark.dart';
 
@@ -211,9 +212,10 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
           builder: (context, constraints) {
             // Reserve room for sessions when landscape, keyboard avoidance or
             // larger text leaves too little height for the full profile/nav.
+            // (Raised with the fourth footer row, Artifacts.)
             final compact =
                 constraints.maxHeight <
-                560 + (MediaQuery.textScalerOf(context).scale(13) - 13) * 12;
+                620 + (MediaQuery.textScalerOf(context).scale(13) - 13) * 16;
             return Column(
               children: [
                 Column(
@@ -510,6 +512,21 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                                     );
                                   }
                                 : null,
+                          ),
+                          // Artifacts: uploads + generated files, scoped to
+                          // the active chat with an "All chats" toggle.
+                          _SidebarNavRow(
+                            key: const ValueKey('sidebar-artifacts'),
+                            compact: compact,
+                            icon: Icons.folder_copy_outlined,
+                            label: context.l10n.artifactsTitle,
+                            enabled: true,
+                            onTap: () => _navigateFromSidebar(
+                              context,
+                              (_) => ArtifactsScreen(
+                                sessionId: app.activeSessionId,
+                              ),
+                            ),
                           ),
                           // Settings at the very bottom — DeepSeek style.
                           _SidebarNavRow(
@@ -856,6 +873,7 @@ class _PlanPill extends StatelessWidget {
 /// via Material/InkWell, and dims when disabled.
 class _SidebarNavRow extends StatelessWidget {
   const _SidebarNavRow({
+    super.key,
     required this.icon,
     required this.label,
     required this.enabled,
@@ -1080,91 +1098,15 @@ class _SessionTileState extends State<_SessionTile> {
   /// Delete confirmation dialog shared by the swipe gesture (via
   /// [confirmDismiss]) and the delete button. Returns true when the user
   /// confirmed; the caller performs the deletion.
-  Future<bool> _askDeleteConfirmed(BuildContext context) async {
-    final session = widget.session;
-    final app = AppState.I;
-    final descendants = app.descendantsOf(session.id);
-    final doomed = [session, ...descendants];
-    final runningDescendantCount = descendants
-        .where((candidate) => AgentService.I.busyFor(candidate.id))
-        .length;
-    final runningRoot = AgentService.I.busyFor(session.id);
-    final sandboxCount = doomed
-        .map((candidate) => candidate.sandboxId ?? candidate.id)
-        .toSet()
-        .length;
-    final details = <String>[
-      if (descendants.isNotEmpty)
-        '${descendants.length} child session${descendants.length == 1 ? '' : 's'}',
-      if (sandboxCount > 0)
-        '$sandboxCount sandbox workspace${sandboxCount == 1 ? '' : 's'}',
-      if (runningRoot) 'the running chat will be stopped',
-      if (runningDescendantCount > 0)
-        '$runningDescendantCount running descendant${runningDescendantCount == 1 ? '' : 's'} will be stopped',
-    ];
-    final impact = details.isEmpty
-        ? 'You can undo for a few seconds; after that this chat cannot be '
-              'recovered.'
-        : 'This will permanently delete ${details.join(', ')}. '
-              'You can undo for a few seconds; after that this chat cannot '
-              'be recovered.';
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text('Delete ${session.title}?'),
-        content: Text(impact),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: Text('Delete', style: TextStyle(color: Aether.danger)),
-          ),
-        ],
-      ),
-    );
-    return confirmed == true;
-  }
+  Future<bool> _askDeleteConfirmed(BuildContext context) =>
+      askDeleteSessionConfirmed(context, widget.session);
 
-  Future<void> _confirmDelete(BuildContext context) async {
-    if (await _askDeleteConfirmed(context) && context.mounted) {
-      _deleteWithUndo(context);
-    }
-  }
+  Future<void> _confirmDelete(BuildContext context) =>
+      confirmAndDeleteSession(context, widget.session);
 
-  /// Optimistic delete: the row disappears at once, a "Chat deleted · Undo"
-  /// snack bar runs for 5 s, and only then is the durable (possibly slow,
-  /// private-sync-backed) deletion awaited. A failure restores the row and
-  /// says so instead of leaving an invisible-but-undeleted chat.
-  void _deleteWithUndo(BuildContext context) {
-    final app = AppState.I;
-    final id = widget.session.id;
-    final messenger = ScaffoldMessenger.of(context);
-    app.hideSessionPending(id);
-    showUndoSnackBar(
-      messenger,
-      message: 'Chat deleted',
-      onUndo: () => app.unhideSession(id),
-      onCommit: () async {
-        try {
-          await app.commitPendingSessionDeletion(id);
-        } catch (e) {
-          Diag.swallow('sidebar.deleteSession', e);
-          if (messenger.mounted) {
-            messenger.showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'The chat could not be deleted and has been restored. Try again.',
-                ),
-              ),
-            );
-          }
-        }
-      },
-    );
-  }
+  /// Optimistic delete with a 5 s undo (see [deleteSessionWithUndo]).
+  void _deleteWithUndo(BuildContext context) =>
+      deleteSessionWithUndo(context, widget.session.id);
 
   void _showActions(BuildContext context) {
     final session = widget.session;
@@ -1244,60 +1186,8 @@ class _SessionTileState extends State<_SessionTile> {
     }
   }
 
-  void _rename(BuildContext context) {
-    final session = widget.session;
-    final c = TextEditingController(text: session.title);
-    String? errorText;
-
-    // Dialog controllers were leaked: each rename left a TextEditingController
-    // (and its listeners plus platform text-input resources) alive forever.
-    showDialog(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (_, setDialogState) {
-          void save(String value) {
-            final title = value.trim();
-            if (title.isEmpty) {
-              setDialogState(() => errorText = 'Session name cannot be empty');
-              return;
-            }
-            AppState.I.renameSession(session.id, title);
-            Navigator.pop(dialogContext);
-          }
-
-          return AlertDialog(
-            title: const Text(
-              'Rename session',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-            ),
-            content: TextField(
-              controller: c,
-              autofocus: true,
-              style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(errorText: errorText),
-              // The IME action key used to be a dead end: it showed a return key
-              // that did nothing, so the user had to reach for Save.
-              textInputAction: TextInputAction.done,
-              onSubmitted: save,
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () => save(c.text),
-                child: Text(
-                  'Save',
-                  style: TextStyle(color: Aether.accent),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-    ).whenComplete(c.dispose);
-  }
+  void _rename(BuildContext context) =>
+      showRenameSessionDialog(context, widget.session);
 }
 
 /// "● running" suffix on a session row. Listens to that session's busy flag

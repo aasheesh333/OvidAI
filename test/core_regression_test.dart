@@ -7419,7 +7419,12 @@ block</pre>
       );
       expect(block, isNot(contains('account_tree_outlined')));
       expect(block, isNot(contains('timeline_outlined')));
-      expect(block, contains('terminal_outlined')); // jobs badge stays
+      // Three header actions (Studio, Browser, ⋮); the jobs entry moved into
+      // the overflow menu, which keeps Trajectory reachable too.
+      expect(block, contains('ChatOverflowMenu('));
+      final menu = File('lib/ui/chat_overflow_menu.dart').readAsStringSync();
+      expect(menu, contains('terminal_outlined'));
+      expect(menu, contains('TrajectoryScreen'));
       // Trajectory still reachable — sidebar footer entry (PR27/B2).
       final sidebar = File('lib/ui/sidebar.dart').readAsStringSync();
       expect(sidebar, contains('TrajectoryScreen'));
