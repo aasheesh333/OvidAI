@@ -758,7 +758,7 @@ class _SandboxSetupScreenState extends State<SandboxSetupScreen> {
                   alignment: WrapAlignment.center,
                   children: [
                     _SetupBadge(
-                      label: 'NATIVE BIONIC',
+                      label: 'TERMUX · PROOT',
                       color: Aether.success,
                     ),
                     _SetupBadge(

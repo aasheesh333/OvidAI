@@ -7774,7 +7774,9 @@ block</pre>
       // because it is a declared dependency of nodejs/python, resolved by the
       // apt / ovid-pkg dependency closure.
       expect(src, contains("'make': ['make'],"));
-      expect(src, contains("'binutils': ['ld'],"));
+      // Verified by `as`: Termux binutils ships ld.bfd, not a bare `ld`
+      // (emulator e2e 2026-10-13: "ld: command not found" after install).
+      expect(src, contains("'binutils': ['as'],"));
       // Both transports install the SAME group key: apt first, then the
       // signed ovid-pkg graph.
       expect(src, contains('install -y --no-install-recommends \${group.key}'));

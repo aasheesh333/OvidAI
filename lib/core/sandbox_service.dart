@@ -15,6 +15,7 @@ import 'distribution.dart';
 import 'apt_trust.dart';
 import 'dpkg_compat.dart';
 import 'sandbox_pkg.dart';
+import 'termux_proot.dart';
 import 'global_repo_registry.dart';
 import 'pty_service.dart' show OwnedProcessTree;
 
@@ -24,27 +25,29 @@ typedef SandboxPolicy = ({
 });
 
 /// ═══════════════════════════════════════════════════════════════════
-/// NATIVE BIONIC SANDBOX — Termux-style architecture, NO proot.
+/// TERMUX USERLAND UNDER PROOT (see termux_proot.dart and
+/// docs/studio-setup-repro.md).
 /// ═══════════════════════════════════════════════════════════════════
-/// The agent-essential payload (bash/dash/coreutils/apt/dpkg/tar/curl/
-/// zstd/gpgv + their shared libs + apt methods + SYMLINKS.txt + terminfo)
-/// ships inside the APK as `jniLibs/<abi>/libovid_bootstrap.so` — a plain
-/// zip with a `.so` name.  Android's PackageManager extracts it to
-/// `nativeLibraryDir` WITH exec permission on every version (W^X-safe,
-/// Android 6→15+); AAB splits deliver only the device's ABI.
+/// The Termux bootstrap (minus docs/headers, plus the signed proot /
+/// libtalloc / libandroid-shmem debs) ships inside the APK as
+/// `jniLibs/<abi>/libovid_bootstrap.so` — a plain zip with a `.so` name
+/// (tool/bootstrap_supply.py).
 ///
 /// First Studio open installs it:
-///   read the .so bytes → unzip into `<files>/sandbox-staging`
-///   → chmod bin/, lib/apt/methods/ executable
-///   → create symlinks from SYMLINKS.txt (sh→dash, ls→coreutils, …)
-///   → rename staging → `<files>/sandbox`  (the $PREFIX)
+///   read the .so bytes → unzip into `<files>/sandbox-staging-N`
+///   → chmod bin/, lib/apt/methods/, libexec/ executable
+///   → symlinks from SYMLINKS.txt (absolute Termux targets made relative)
+///   → rename staging → `<files>/sandbox`  (the $PREFIX), HOME carried over
+/// No file is rewritten: configs, shebangs and binaries stay stock Termux.
 ///
-/// Exec runs `$PREFIX/bin/bash -c <cmd>` with the Termux environment:
-///   PREFIX, HOME, TMPDIR, PATH, LD_LIBRARY_PATH, TERM, and
-///   LD_PRELOAD=$PREFIX/lib/libtermux-exec-direct-ld-preload.so
-/// The termux-exec preload handles executable/interpreter paths; it is not
-/// a general filesystem relocator. Linker search paths and each runtime's
-/// configuration must point at our prefix, and readiness requires execution.
+/// Every sandbox process runs as
+///   `$PREFIX/bin/proot -b $PREFIX:/data/data/com.termux/files/usr … cmd`
+/// so the compiled-in Termux paths resolve to the app's own prefix (also
+/// when the Termux app is installed: a private glue dir is bound over
+/// /data/data/com.termux). Stock apt/dpkg then install any package.
+/// Prefixes from the earlier native design (path rewriting, dpkg --root,
+/// patched binaries) are detected and replaced on the next setup; the
+/// native branches below remain only for such prefixes in host tests.
 ///
 /// Compatibility: native sandbox needs Android 7+ (API 24) like current
 /// Termux.  On API 23 (Android 6) the phone-terminal tier (toybox) is
@@ -354,6 +357,10 @@ class SandboxService {
       // Without it every exec dies with "can't create temporary directory:
       // Permission denied" — Android's /tmp is not writable for the app.
       if (p != null) 'PROOT_TMP_DIR': '$p/tmp',
+      // The Termux proot has its loader path compiled in
+      // (/data/data/com.termux/…/libexec/proot/loader); point it at ours.
+      if (p != null && File('$p/${TermuxProot.loaderRel}').existsSync())
+        'PROOT_LOADER': '$p/${TermuxProot.loaderRel}',
     };
   }
 
@@ -616,6 +623,10 @@ class SandboxService {
     _prefix = null;
   }
 
+  /// True when [checkExisting] found a legacy (pre-proot) prefix that the
+  /// next setup will replace.
+  bool legacyPrefixFound = false;
+
   Future<bool> checkExisting() async {
     if (!Distribution.onDeviceSandboxAvailable) return false;
     if (_installInFlight) return _installed;
@@ -651,6 +662,25 @@ class SandboxService {
       final ldPreload = File(
         '${prefix.path}/lib/libtermux-exec-direct-ld-preload.so',
       );
+      if (TermuxProot.isProotLayout(prefix.path) && bash.existsSync()) {
+        _prefix = prefix;
+        _installed = true;
+        _checked = true;
+        // Idempotent, file-only: dirs, apt.conf.d snippet, launcher.
+        final layout = TermuxProot(prefix.path)..ensureLayout();
+        _writeLauncher(layout);
+        return true;
+      }
+      if (TermuxProot.isLegacyLayout(prefix.path)) {
+        // A prefix from the native path-rewriting design cannot be repaired
+        // in place (rewritten conffiles, patched dpkg, alias symlink). Report
+        // "not installed" so the next Studio setup replaces the core; its
+        // HOME is carried over (carryHomeOver). Nothing is deleted here.
+        _checked = true;
+        _installed = false;
+        legacyPrefixFound = true;
+        return false;
+      }
       if (bash.existsSync() &&
           coreutils.existsSync() &&
           ldPreload.existsSync()) {
@@ -812,6 +842,7 @@ class SandboxService {
     final oldAbi = _payloadAbi;
     var published = false;
     var committed = false;
+    var homeCarried = false;
     try {
       onPhase(0, 0.0, r'$ ovid sandbox --preflight');
       const buildStamp = String.fromEnvironment(
@@ -824,8 +855,7 @@ class SandboxService {
         0,
         0.1,
         'device ............ ${facts.abi} · API '
-        '${facts.sdkInt > 0 ? '${facts.sdkInt}' : '?'} '
-        '(native bionic, no proot)',
+        '${facts.sdkInt > 0 ? '${facts.sdkInt}' : '?'}',
       );
       // Honest device gates BEFORE the multi-minute install: permanent
       // blockers surface as an actionable "continue without sandbox",
@@ -836,7 +866,7 @@ class SandboxService {
       );
       if (blocker != null) throw blocker;
       if (Platform.isAndroid) {
-        onPhase(0, 0.15, 'runtime ........... native sandbox (API 24+)');
+        onPhase(0, 0.15, 'runtime ........... Termux userland under proot');
       }
 
       // ── Locate the bundled bootstrap payload ──
@@ -879,6 +909,12 @@ class SandboxService {
       checkCancellation();
       final symlinks = extracted.symlinks;
       final count = extracted.count;
+      // Payloads built by tool/bootstrap_supply.py (ovid-termux-proot-v2)
+      // carry proot: the userland then runs unmodified under proot and no
+      // file is rewritten. Older payloads keep the legacy native path.
+      final prootPayload =
+          File('${staging.path}/${TermuxProot.prootRel}').existsSync() &&
+          File('${staging.path}/${TermuxProot.loaderRel}').existsSync();
       onPhase(2, 1.0, 'extracted ......... $count files ✓');
 
       // ── chmod executables (TermuxInstaller rule) ──
@@ -907,7 +943,11 @@ class SandboxService {
           // (that's the "libreadline.so.8 not found" class of failure).
           // TermuxInstaller.java does the same: Os.symlink(oldPath, newPath)
           // with the raw relative target.
-          final dest = target.startsWith('/data/data/com.termux/files/usr/')
+          // proot payload: absolute Termux targets become RELATIVE (valid
+          // inside proot and for host-side file checks alike).
+          final dest = prootPayload
+              ? TermuxProot.relativeLinkTarget(target, linkPath)
+              : target.startsWith('/data/data/com.termux/files/usr/')
               ? target.replaceFirst(
                   '/data/data/com.termux/files/usr/',
                   '${prefix.path}/',
@@ -923,7 +963,13 @@ class SandboxService {
 
       // ── Config: rewrite Termux prefix → our prefix in text configs ──
       onPhase(5, 0.0, 'configuring prefix');
-      _rewritePrefixInConfigs(staging, finalPath: prefix.path);
+      if (prootPayload) {
+        // Stock Termux files, untouched: configs keep matching dpkg's
+        // conffile hashes, so upgrades never prompt.
+        TermuxProot(staging.path).ensureLayout();
+      } else {
+        _rewritePrefixInConfigs(staging, finalPath: prefix.path);
+      }
       onPhase(5, 1.0, 'prefix configured . ✓');
 
       // ── Move staging → prefix ──
@@ -931,17 +977,33 @@ class SandboxService {
       // advertises the candidate until this real subprocess succeeds.
       Directory('${staging.path}/home').createSync(recursive: true);
       Directory('${staging.path}/tmp').createSync(recursive: true);
+      final ({String executable, List<String> arguments, Map<String, String> environment}) sanitySpec;
+      if (prootPayload) {
+        final candidate = TermuxProot(staging.path);
+        final w = candidate.wrap('bash', ['--version'], cwd: '${staging.path}/home');
+        sanitySpec = (
+          executable: w.executable,
+          arguments: w.arguments,
+          environment: {...TermuxProot.guestEnv(), ...candidate.hostEnv()},
+        );
+      } else {
+        sanitySpec = (
+          executable: '${staging.path}/bin/bash',
+          arguments: ['--version'],
+          environment: {
+            'LD_LIBRARY_PATH': '${staging.path}/lib',
+            'LD_PRELOAD':
+                '${staging.path}/lib/libtermux-exec-direct-ld-preload.so',
+            'PREFIX': staging.path,
+            'TERMUX__PREFIX': staging.path,
+          },
+        );
+      }
       final sanity = await _trackedRun(
-        '${staging.path}/bin/bash',
-        ['--version'],
+        sanitySpec.executable,
+        sanitySpec.arguments,
         workingDirectory: '${staging.path}/home',
-        environment: {
-          'LD_LIBRARY_PATH': '${staging.path}/lib',
-          'LD_PRELOAD':
-              '${staging.path}/lib/libtermux-exec-direct-ld-preload.so',
-          'PREFIX': staging.path,
-          'TERMUX__PREFIX': staging.path,
-        },
+        environment: sanitySpec.environment,
       );
       checkCancellation();
       if (sanity.exitCode != 0) {
@@ -965,6 +1027,10 @@ class SandboxService {
       published = true;
       _prefix = prefix;
       _installed = false;
+      // User data survives a core reinstall (Health reset, or the one-time
+      // replacement of a legacy native prefix): carry the old HOME over.
+      homeCarried = carryHomeOver(previous, prefix);
+      if (homeCarried) onPhase(5, 1.0, 'home .............. kept from the previous sandbox ✓');
 
       // ── Create runtime dirs (not in bootstrap payload) ──
       // bash exec uses workingDirectory=$PREFIX/home; without this dir
@@ -976,11 +1042,13 @@ class SandboxService {
       // (npx/npm shebangs from .deb installs, older packages). The payload
       // root IS the "usr" — make `$PREFIX/usr` a self-symlink so
       // `$PREFIX/usr/bin/env` resolves to `$PREFIX/bin/env`.
-      try {
-        final usr = Link('${prefix.path}/usr');
-        if (!usr.existsSync()) usr.createSync('.');
-      } catch (e) {
-        Diag.swallow('sandbox_service', e);
+      if (!prootPayload) {
+        try {
+          final usr = Link('${prefix.path}/usr');
+          if (!usr.existsSync()) usr.createSync('.');
+        } catch (e) {
+          Diag.swallow('sandbox_service', e);
+        }
       }
 
       // ── Write OUR profile (defense-in-depth) ──
@@ -990,10 +1058,18 @@ class SandboxService {
       // profile), but the interactive terminal may still want a profile —
       // make sure OUR prefix's etc/profile points at OUR prefix, and drop a
       // bashrc that exports the right PATH/LD_LIBRARY_PATH.
-      _writeProfile(prefix);
-      // apt/dpkg have Termux's prefix compiled in and LD_PRELOAD redirect is
-      // unreliable — give apt an explicit Dir config rooted at OUR prefix.
-      _writeAptConfig(prefix);
+      if (prootPayload) {
+        // Stock Termux profile/apt config. Only the mirror list, the
+        // launcher and Ovid's non-interactive apt.conf.d snippet are added.
+        final layout = TermuxProot(prefix.path)..ensureLayout();
+        _writeLauncher(layout);
+        _ensureSourcesList(prefix);
+      } else {
+        _writeProfile(prefix);
+        // apt/dpkg have Termux's prefix compiled in and LD_PRELOAD redirect is
+        // unreliable — give apt an explicit Dir config rooted at OUR prefix.
+        _writeAptConfig(prefix);
+      }
       // Fresh install: await the keyring seed so the eager `apt update`
       // below verifies on every ABI, including payloads without
       // share/termux-keyring.
@@ -1080,6 +1156,13 @@ class SandboxService {
     } finally {
       if (staging.existsSync()) staging.deleteSync(recursive: true);
       if (!committed) {
+        if (homeCarried) {
+          try {
+            carryHomeOver(prefix, previous);
+          } catch (e) {
+            Diag.swallow('sandbox_service', e);
+          }
+        }
         if (published && prefix.existsSync()) {
           prefix.deleteSync(recursive: true);
         }
@@ -1110,7 +1193,7 @@ class SandboxService {
       },
       optional: const {
         'make': ['make'],
-        'binutils': ['ld'],
+        'binutils': ['as'], // Termux binutils ships ld.bfd, not ld
         'ripgrep': ['rg'],
         'openssh': ['ssh'],
         'rsync': ['rsync'],
@@ -1183,6 +1266,9 @@ class SandboxService {
   Future<void> _repairRuntimeEntryPoints() async {
     final prefix = _prefix;
     if (prefix == null) throw StateError('Sandbox prefix unavailable');
+    // Packages run unmodified under proot: no shebang rewriting, no wrapper
+    // scripts over package-owned files (that would break dpkg's hashes).
+    if (usesProot) return;
     await _patchExtractedShebangs(prefix);
     checkCancellation();
     _ensureTlsConfig(prefix);
@@ -1345,7 +1431,7 @@ class SandboxService {
           break;
         }
         onLine?.call('[runtime] ${required ? "essential" : "optional"} ${group.key} ($attempt/$attempts)');
-        if (aptFailures < 2) {
+        if (aptFailures < 2 || usesProot) {
           try {
             if (!aptReady) {
               final (code, output) = await _aptChecked('update 2>&1',
@@ -1364,7 +1450,7 @@ class SandboxService {
                 'install -y --no-install-recommends ${group.key} 2>&1',
                 timeout: cap(const Duration(minutes: 8)), deadline: left, onLine: onLine);
             checkCancellation();
-            if (code != 0 && looksLikeDpkgUnusable(output)) {
+            if (code != 0 && !usesProot && looksLikeDpkgUnusable(output)) {
               aptFailures = 2;
               onLine?.call('[runtime] native dpkg cannot install here — '
                   'using the signed ovid-pkg installer for the rest of this run');
@@ -1381,7 +1467,16 @@ class SandboxService {
             groupFailure = '$e';
           }
           if (installed) break;
+          if (usesProot) {
+            // Stock apt/dpkg is THE installer under proot (the curl+dpkg
+            // ovid-pkg fallback existed only to dodge the broken native
+            // dpkg). Next attempt: next healthy mirror, fresh index.
+            aptReady = false;
+            if (!_advanceMirror(onLine: onLine)) fatal = noMirrorAdvice;
+            continue;
+          }
         }
+        if (usesProot) continue;
         try {
           final prefix = _prefix;
           if (prefix == null) throw StateError('Sandbox prefix unavailable');
@@ -1864,6 +1959,47 @@ class SandboxService {
   /// files pointing at /data/data/com.termux/files/usr; our text rewrite
   /// fixes real files, but this guarantees a correct profile regardless of
   /// symlinks/permissions.
+  /// Move `<from>/home` to `<to>/home` when [to]'s home holds nothing yet.
+  /// Never overwrites a non-empty home. Drops the bashrc written by the
+  /// legacy native design (it exported host-path PREFIX/LD_PRELOAD values).
+  @visibleForTesting
+  static bool carryHomeOver(Directory from, Directory to) {
+    final old = Directory('${from.path}/home');
+    if (!old.existsSync()) return false;
+    final fresh = Directory('${to.path}/home');
+    if (fresh.existsSync()) {
+      if (fresh.listSync().isNotEmpty) return false;
+      fresh.deleteSync();
+    }
+    old.renameSync(fresh.path);
+    final rc = File('${fresh.path}/.bashrc');
+    try {
+      if (rc.existsSync() &&
+          rc.readAsStringSync().startsWith('# Ovid sandbox profile')) {
+        rc.deleteSync();
+      }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
+    return true;
+  }
+
+  /// `bin/ovid-shell` (see [TermuxProot.launcherScript]).
+  void _writeLauncher(TermuxProot layout) {
+    try {
+      final f = File('${layout.prefix}/bin/ovid-shell');
+      final text = layout.launcherScript();
+      if (!f.existsSync() || f.readAsStringSync() != text) {
+        f.writeAsStringSync(text, flush: true);
+      }
+      if (Platform.isAndroid || Platform.isLinux) {
+        Process.runSync(Platform.isAndroid ? '/system/bin/chmod' : 'chmod', ['0755', f.path]);
+      }
+    } catch (e) {
+      Diag.swallow('sandbox_service', e);
+    }
+  }
+
   void _writeProfile(Directory prefix) {
     final p = prefix.path;
     final etc = Directory('$p/etc')..createSync(recursive: true);
@@ -2122,11 +2258,17 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
       }
       // dpkg: neutralise the compiled-in Termux config dir (EACCES on
       // devices with Termux installed) and map the Termux prefix onto ours.
-      for (final line in [
-        ...DpkgCompat.patchDpkgBinaries(prefix),
-        ...DpkgCompat.ensureTermuxPrefixAlias(prefix),
-      ]) {
-        onLine?.call(line);
+      if (TermuxProot.isProotLayout(prefix.path)) {
+        // Under proot the compiled-in paths resolve to the prefix: stock
+        // dpkg, no binary patch and no alias symlink.
+        TermuxProot(prefix.path).ensureLayout();
+      } else {
+        for (final line in [
+          ...DpkgCompat.patchDpkgBinaries(prefix),
+          ...DpkgCompat.ensureTermuxPrefixAlias(prefix),
+        ]) {
+          onLine?.call(line);
+        }
       }
       OvidPkgInstaller.writeCmpShim(prefix);
       final bundled = await _loadBundledAptKeys();
@@ -2791,7 +2933,53 @@ exit 0
   // ═════════════════════════════════════════════════════════════════
   // EXEC — native sandbox (primary path)
   // ═════════════════════════════════════════════════════════════════
+  /// proot launcher for the current prefix, or null for a legacy (native,
+  /// path-rewriting) prefix and for host unit tests without a proot binary.
+  TermuxProot? get _proot {
+    final p = _prefix?.path;
+    if (p == null || !TermuxProot.isProotLayout(p)) return null;
+    return TermuxProot(p);
+  }
+
+  /// True when the installed prefix runs under proot (see termux_proot.dart).
+  bool get usesProot => _proot != null;
+
+  /// Every sandbox process starts here: under proot for a proot-layout
+  /// prefix (compiled-in Termux paths resolve to the prefix), natively for
+  /// a legacy prefix. [executable] is a bare command name or absolute path.
+  ({String executable, List<String> arguments, Map<String, String> environment})
+      _launchSpec(String executable, List<String> args,
+          {required String cwd, required Map<String, String> environment}) {
+    final proot = _proot;
+    if (proot == null) {
+      return (
+        executable: executable.startsWith('/') ? executable : '${_prefix!.path}/bin/$executable',
+        arguments: args,
+        environment: environment,
+      );
+    }
+    final wrapped = proot.wrap(executable, args, cwd: cwd);
+    return (
+      executable: wrapped.executable,
+      arguments: wrapped.arguments,
+      environment: {...environment, ...proot.hostEnv()},
+    );
+  }
+
+  @visibleForTesting
+  ({String executable, List<String> arguments, Map<String, String> environment})
+      launchSpecForTest(String executable, List<String> args, {required String cwd}) =>
+          _launchSpec(executable, args, cwd: cwd, environment: _sandboxEnv());
+
   Map<String, String> _sandboxEnv() {
+    if (_proot != null) {
+      // Stock Termux environment: every path below is the compiled-in one,
+      // bound to the prefix by proot. No per-tool relocation variables.
+      return {
+        ...TermuxProot.guestEnv(),
+        ...gitCredentialEnv(),
+      };
+    }
     final p = _prefix!.path;
     // Ensure the dirs the env below points at actually exist — npm/pip
     // try to mkdir them under the compiled-in Termux HOME otherwise
@@ -2963,6 +3151,7 @@ exit 0
   ///     Studio will surface a reinstall prompt (we don't force one here).
   Future<void> _selfHealSandbox(Directory prefix) async {
     final p = prefix.path;
+    if (TermuxProot.isProotLayout(p)) return; // nothing is rewritten under proot
     try {
       // 1. usr compat symlink.
       try {
@@ -3695,13 +3884,15 @@ exit 0
     }
     final merged = {..._sandboxEnv(), ...?env};
     try {
+      final workDir = cwd ??
+          (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home');
+      final spec = _launchSpec(args[0], args.sublist(1),
+          cwd: workDir, environment: merged);
       final result = await _trackedRun(
-        args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
-        args.sublist(1),
-        workingDirectory:
-            cwd ??
-            (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
-        environment: merged,
+        spec.executable,
+        spec.arguments,
+        workingDirectory: workDir,
+        environment: spec.environment,
       );
       checkCancellation();
       // PR32's _trackedRun already decodes stdout/stderr to String — the
@@ -3845,13 +4036,15 @@ exit 0
     final merged = {..._sandboxEnv(), ...?env};
     // PR32: tracked start (Process.run exposes no kill handle) — Stop
     // can SIGKILL this instantly via killAllProcesses().
+    final workDir = cwd ??
+        (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home');
+    final spec = _launchSpec(args[0], args.sublist(1),
+        cwd: workDir, environment: merged);
     final result = await _trackedRun(
-      args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
-      args.sublist(1),
-      workingDirectory:
-          cwd ??
-          (hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home'),
-      environment: merged,
+      spec.executable,
+      spec.arguments,
+      workingDirectory: workDir,
+      environment: spec.environment,
       onLine: onLine,
     );
     return (result.exitCode, '${result.stdout}${result.stderr}');
@@ -3965,8 +4158,39 @@ exit 0
       FileSystemEntity.typeSync('${_prefix!.path}/var/cache/ovid-pkg/transaction',
           followLinks: false) == FileSystemEntityType.notFound;
 
+  /// dpkg state left by a killed install (force-stop, OOM, reboot): journal
+  /// entries in `updates/` or packages stuck unpacked/half-configured.
+  @visibleForTesting
+  static bool dpkgNeedsConfigure(String prefix) {
+    try {
+      final updates = Directory('$prefix/var/lib/dpkg/updates');
+      if (updates.existsSync() &&
+          updates.listSync().any((e) => RegExp(r'/\d+$').hasMatch(e.path))) {
+        return true;
+      }
+      final status = File('$prefix/var/lib/dpkg/status');
+      if (!status.existsSync()) return false;
+      return RegExp(r'^Status: \S+ \S+ (unpacked|half-configured|triggers-awaited|triggers-pending)$',
+              multiLine: true)
+          .hasMatch(status.readAsStringSync());
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _recoverPendingPackageTransaction(void Function(String)? onLine) async {
     checkCancellation();
+    final prefix = _prefix;
+    if (usesProot && prefix != null && dpkgNeedsConfigure(prefix.path)) {
+      onLine?.call('[dpkg] finishing an interrupted package transaction…');
+      final (code, output) = await execChecked(
+          ['bash', '-c', 'dpkg --configure -a 2>&1'], onLine: onLine)
+          .timeout(const Duration(minutes: 10));
+      checkCancellation();
+      onLine?.call(code == 0
+          ? '[dpkg] interrupted transaction completed ✓'
+          : '[dpkg] dpkg --configure -a exit $code: ${_runtimeError(output)}');
+    }
     if (packageTransactionReady) return;
     try {
       final (code, output) = await _checkedCommand(
@@ -4041,8 +4265,20 @@ exit 0
     }, callKey: key);
   }
 
+  @visibleForTesting
+  static bool looksLikeAptTlsForTest(String out) => _looksLikeAptTls(out);
+
   static bool _looksLikeAptTls(String out) {
-    final l = out.toLowerCase();
+    // Only apt's error/warning lines count: package lists ("openssl",
+    // "libgnutls", "ca-certificates") and dpkg output contain these words
+    // too, which used to misreport a dpkg failure as "cert/TLS error" and
+    // rotate away from a healthy mirror.
+    final l = out
+        .split('\n')
+        .map((line) => line.trimLeft())
+        .where((line) => RegExp(r'^(E:|W:|Err:|Ign:|gpg: )').hasMatch(line))
+        .join('\n')
+        .toLowerCase();
     return l.contains('certificate') ||
         l.contains('ssl') ||
         l.contains('tls') ||
@@ -4948,13 +5184,15 @@ echo INSTALLED
       }
     }
     final merged = {..._sandboxEnv(), ...?env};
+    final workDir =
+        hostWorkDir != null ? hostWorkDir.path : '${_prefix!.path}/home';
+    final spec = _launchSpec(args[0], args.sublist(1),
+        cwd: workDir, environment: merged);
     final proc = await _startOwned(
-      args[0].startsWith('/') ? args[0] : '${_prefix!.path}/bin/${args[0]}',
-      args.sublist(1),
-      workingDirectory: hostWorkDir != null
-          ? hostWorkDir.path
-          : '${_prefix!.path}/home',
-      environment: merged,
+      spec.executable,
+      spec.arguments,
+      workingDirectory: workDir,
+      environment: spec.environment,
     );
     final scope = Zone.current[_processScopeKey];
     try {

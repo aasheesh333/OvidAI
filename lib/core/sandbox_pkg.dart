@@ -758,7 +758,7 @@ function finish( k, name, count, i, j, reqs, alts, p) {
   if (++total>50000) fail("dependency index record limit exceeded")
   name=field["Package"]
   if (name !~ /^[a-z0-9][a-z0-9+.-]*$/ || !version(field["Version"]) ||
-      field["Architecture"] !~ /^[a-z0-9][a-z0-9-]*$/)
+      field["Architecture"] !~ /^[a-z0-9][a-z0-9_-]*$/)
     fail("invalid dependency metadata: " name)
   for (k in field) data[total,k]=field[k]
   byName[name]=byName[name] " " total
