@@ -28,10 +28,13 @@ def test_new_install_seeds_24h_plans(client):
     s = mint.get_settings()
     assert mint.rds.hget(mint.LIMITS_HASH, "plans") is not None
     assert s["free_daily_usd"] == 0.15
-    assert [p["id"] for p in s["plans"]] == ["free", "starter", "pro", "max"]
+    assert [(p["id"], p["mult"], p["price_usd"], p["auto_oss"], p["slow_mode"]) for p in s["plans"]] == [
+        ("free", 1, 0, False, False), ("starter", 3, 5, False, False),
+        ("pro", 23, 25, True, False), ("max", 43, 60, True, False)]
     assert all(p["window_hours"] == 24 for p in s["plans"])
-    assert sorted(s["oss_models"]) == sorted(["glm-5.3-flash", "deepseek-v4.1-flash", "minimax-m3"])
+    assert [m["model"] for m in s["auto_oss_members"]] == ["glm-5.3-flash", "deepseek-v4.1-flash", "minimax-m3"]
     assert (s["slow_rpm"], s["slow_parallel"]) == (20, 2)
+    assert not {"oss_models", "auto_oss_group", "frontier_share"} & set(s)
 
 
 def test_existing_install_keeps_live_values_and_30d_paid_windows(env):
@@ -72,51 +75,51 @@ def test_tier_aliases(env, stored, plan):
     assert mint.effective_tier("u") == plan
 
 
-def test_shared_plans_free_times_multiplier_with_frontier_share(env):
+@pytest.mark.parametrize("tier,mult", [("free", 1), ("3x", 3), ("7x", 23), ("15x", 43), ("pro", 23)])
+def test_every_plan_is_free_allowance_times_mult(env, tier, mult):
     mint, _, _ = env
-    mint.rds.set(mint.BASE_BUDGET_KEY, "0.2")
-    mint.rds.set("user:s:tier", "3x")
-    p = mint.pools_for("s")
-    assert p["kind"] == "shared" and p["all"] == pytest.approx(0.6) and p["frontier"] == pytest.approx(0.15)
-    assert mint.tier_budget("s", "3x") == (pytest.approx(0.6), "24h")
-    assert mint.pools_for("f")["all"] == pytest.approx(0.2)
+    mint.rds.set(mint.BASE_BUDGET_KEY, "0.15")
+    mint.rds.set("user:u:tier", tier)
+    p = mint.pools_for("u")
+    assert p["all"] == pytest.approx(0.15 * mult)
+    assert mint.tier_budget("u", tier) == (pytest.approx(0.15 * mult), "24h")
 
 
-@pytest.mark.parametrize("tier,oss,frontier", [("7x", 2.0, 1.5), ("15x", 3.0, 3.5)])
-def test_split_plan_pools_and_key_ceiling(env, tier, oss, frontier):
+def test_slow_mode_plan_key_ceiling(env):
     mint, _, _ = env
-    mint.rds.set("user:p:tier", tier)
-    p = mint.pools_for("p")
-    assert (p["kind"], p["oss"], p["frontier"]) == ("split", oss, frontier)
-    assert mint.tier_budget("p", tier) == (pytest.approx(oss * 3 + frontier), "24h")
+    s = mint.get_settings()
+    s["plans"] = [dict(p, slow_mode=True) if p["id"] == "pro" else p for p in s["plans"]]
+    mint.store_settings(s)
+    assert mint.tier_budget("u", "pro")[0] == pytest.approx(0.15 * 23 * 3)
+    assert mint.tier_budget("u", "max")[0] == pytest.approx(0.15 * 43)
 
 
-def test_window_length_scales_pools(env):
+def test_window_length_scales_allowance(env):
     mint, _, _ = env
     s = mint.get_settings()
     s["plans"] = [dict(p, window_hours=720) if p["id"] == "pro" else p for p in s["plans"]]
     mint.store_settings(s)
     mint.rds.set("user:p:tier", "pro")
-    p = mint.pools_for("p")
-    assert p["oss"] == pytest.approx(60) and p["frontier"] == pytest.approx(45)
+    assert mint.pools_for("p")["all"] == pytest.approx(0.15 * 23 * 30)
     assert mint.tier_budget("p", "pro")[1] == "30d"
 
 
-def test_custom_free_limit_scales_shared_not_split(env):
+def test_custom_free_limit_scales_every_plan(env):
     mint, _, _ = env
     mint.rds.set("user:s:dailyUsd", "1")
     mint.rds.set("user:s:tier", "starter")
     assert mint.pools_for("s")["all"] == pytest.approx(3)
     mint.rds.set("user:s:tier", "pro")
-    assert mint.pools_for("s")["oss"] == 2.0
+    assert mint.pools_for("s")["all"] == pytest.approx(23)
 
 
-def test_custom_pools_override(env):
+def test_custom_plan_override(env):
     mint, _, _ = env
     mint.rds.set("user:p:tier", "pro")
-    mint.rds.set("user:p:pools", json.dumps({"frontier_usd": 10, "window_hours": 48}))
+    mint.rds.set("user:p:pools", json.dumps({"mult": 10, "window_hours": 48, "slow_mode": True, "auto_oss": False}))
     p = mint.pools_for("p")
-    assert p["frontier"] == pytest.approx(20) and p["oss"] == pytest.approx(4) and p["window_hours"] == 48
+    assert p["all"] == pytest.approx(0.15 * 10 * 2) and p["window_hours"] == 48
+    assert p["slow_mode"] is True and p["auto_oss"] is False
 
 
 def test_runtime_settings_take_effect_without_restart(client):
@@ -135,34 +138,35 @@ def test_runtime_settings_take_effect_without_restart(client):
     assert mint.get_settings()["slow_rpm"] == 5
 
 
-def test_frontier_share_and_classes_take_effect(client):
+def test_auto_oss_members_validated_against_litellm(client):
     c, mint, fake, _ = client
     standard_models(fake)
-    user_with_keys(mint, fake, "u")
-    s = mint.get_settings()
-    s["plans"] = [dict(p, frontier_share=0.5) if p["id"] == "free" else p for p in s["plans"]]
-    c.post("/admin/settings", headers=ADMIN, json={"plans": s["plans"], "oss_models": ["big-pro"]})
-    body = usage(c, "u")
-    big = next(m for m in body["models"] if m["id"] == "big-pro")
-    glm = next(m for m in body["models"] if m["id"] == "glm-5.3-flash")
-    assert big["class"] == "oss" and big["pool"] == "all"
-    assert glm["class"] == "frontier" and glm["pool"] == "frontier"
+    bad = c.post("/admin/settings", headers=ADMIN, json={"auto_oss_members": ["glm-5.3-flash", "no-such-model"]})
+    assert bad.status_code == 400 and "no-such-model" in bad.text
+    assert c.post("/admin/settings", headers=ADMIN, json={"auto_oss_members": ["auto"]}).status_code == 400
+    ok = c.post("/admin/settings", headers=ADMIN,
+                json={"auto_oss_members": [{"model": "minimax-m3", "weight": 3}, "glm-5.3-flash"]})
+    assert ok.status_code == 200, ok.text
+    assert mint.get_settings()["auto_oss_members"] == [{"model": "minimax-m3", "weight": 3.0},
+                                                      {"model": "glm-5.3-flash", "weight": 1.0}]
+    assert c.post("/admin/settings", headers=ADMIN, json={"auto_oss_members": []}).status_code == 200
+    assert mint.get_settings()["auto_oss_members"] == []
 
 
 def test_plan_add_edit_disable(client):
     c, mint, fake, _ = client
     toks = user_with_keys(mint, fake, "u")
     r = c.post("/admin/plans", headers=ADMIN, json={
-        "id": "team", "name": "Team", "price_usd": 99, "kind": "split", "window_hours": 24,
-        "oss_usd": 5, "frontier_usd": 4, "aliases": ["30x"]})
+        "id": "team", "name": "Team", "price_usd": 99, "window_hours": 24, "mult": 50,
+        "slow_mode": True, "auto_oss": True, "aliases": ["30x"]})
     assert r.status_code == 200, r.text
     assert c.post("/admin/set-tier", headers=ADMIN, json={"uid": "u", "tier": "team"}).status_code == 200
-    assert fake.keys[toks["web"]]["max_budget"] == pytest.approx(5 * 3 + 4)
+    assert fake.keys[toks["web"]]["max_budget"] == pytest.approx(0.15 * 50 * 3)  # slow-mode ceiling
     assert usage(c, "u")["plan"] == "team"
-    c.post("/admin/plans", headers=ADMIN, json={"id": "team", "name": "Team+", "frontier_usd": 6})
+    c.post("/admin/plans", headers=ADMIN, json={"id": "team", "name": "Team+", "mult": 60, "slow_mode": False})
     plan = next(p for p in mint.get_settings()["plans"] if p["id"] == "team")
-    assert (plan["name"], plan["frontier_usd"], plan["oss_usd"]) == ("Team+", 6, 5)
-    assert fake.keys[toks["web"]]["max_budget"] == pytest.approx(5 * 3 + 6)
+    assert (plan["name"], plan["mult"], plan["price_usd"], plan["slow_mode"]) == ("Team+", 60, 99, False)
+    assert fake.keys[toks["web"]]["max_budget"] == pytest.approx(0.15 * 60)
     assert "team" in [p["id"] for p in c.get("/plans").json()["plans"]]
     assert c.post("/admin/plans/team/disable", headers=ADMIN).status_code == 200
     assert "team" not in [p["id"] for p in c.get("/plans").json()["plans"]]
@@ -184,10 +188,11 @@ def test_upgrade_to_disabled_plan_falls_back_to_free(client, monkeypatch):
 
 @pytest.mark.parametrize("payload", [
     {"plans": [{"id": "starter", "kind": "shared"}]},                     # no free plan
-    {"plans": [{"id": "free", "kind": "shared", "enabled": False}]},
+    {"plans": [{"id": "free", "enabled": False}]},
     {"plans": [{"id": "free"}, {"id": "a", "aliases": ["free"]}]},          # duplicate alias
     {"plans": [{"id": "free"}, {"id": "Bad Id"}]},
-    {"plans": [{"id": "free", "frontier_share": 1.5}]},
+    {"plans": [{"id": "free", "mult": -1}]},
+    {"auto_oss_members": [{"model": "glm-5.3-flash", "weight": 0}]},
     {"free_daily_usd": -1},
     {"slow_rpm": 0},
     {"oss_models": "glm"},
@@ -259,4 +264,4 @@ def test_upgrade_reapplies_both_keys(client, monkeypatch):
     r = c.post("/upgrade", headers={"Authorization": "Bearer up", **AUTH}, json={"tier": "max"})
     assert r.status_code == 200 and r.json()["tier"] == "15x"
     for tok in toks.values():
-        assert fake.keys[tok]["max_budget"] == pytest.approx(3.0 * 3 + 3.5)
+        assert fake.keys[tok]["max_budget"] == pytest.approx(0.15 * 43)

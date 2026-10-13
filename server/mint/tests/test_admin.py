@@ -49,10 +49,12 @@ def test_admin_page(client):
     assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
     html = r.text
     assert "5 / 10 / 20" not in html
-    for needle in ("Plans", "Model classes", "Slow-mode rpm", "Reset window now",
-                   "Reset window for ALL users now", "Clear custom pools", "Clear custom free limit",
-                   "Models as the app sees them", "Audit log", "monthly backstop"):
+    for needle in ("Plans", "Model prices", "Auto-oss members", "auto uses auto-oss", "Slow-mode rpm",
+                   "Reset window now", "Reset window for ALL users now", "Clear custom plan",
+                   "Clear custom free limit", "Models as the app sees them", "Audit log", "monthly backstop"):
         assert needle in html, needle
+    for gone in ("Model classes", "frontier", "oss pool", "auto_oss_group"):
+        assert gone not in html, gone
 
 
 def test_custom_free_limit_and_clear(client):
@@ -67,19 +69,19 @@ def test_custom_free_limit_and_clear(client):
     assert fake.keys[toks["web"]]["max_budget"] == pytest.approx(0.45)
 
 
-def test_custom_plan_pools_and_clear(client):
+def test_custom_plan_override_and_clear(client):
     c, mint, fake, _ = client
     toks = user_with_keys(mint, fake, "u", tier="pro")
     r = c.post("/admin/user/update", headers=ADMIN,
-               json={"uid": "u", "pools": {"oss_usd": 10, "frontier_usd": 2}})
+               json={"uid": "u", "pools": {"mult": 40, "slow_mode": True, "auto_oss": False}})
     assert r.status_code == 200, r.text
-    assert fake.keys[toks["android"]]["max_budget"] == pytest.approx(10 * 3 + 2)
+    assert fake.keys[toks["android"]]["max_budget"] == pytest.approx(0.15 * 40 * 3)
     u = c.get("/admin/user", params={"q": "u"}, headers=ADMIN).json()
-    assert u["override_pools"] == {"oss_usd": 10.0, "frontier_usd": 2.0}
-    assert u["pools_usd"]["oss"] == 10
+    assert u["override_pools"] == {"mult": 40.0, "slow_mode": True, "auto_oss": False}
+    assert u["pools_usd"]["all"] == pytest.approx(6.0)
     c.post("/admin/user/update", headers=ADMIN, json={"uid": "u", "clear_pools": True})
     assert mint.user_pool_override("u") is None
-    assert fake.keys[toks["android"]]["max_budget"] == pytest.approx(2 * 3 + 1.5)
+    assert fake.keys[toks["android"]]["max_budget"] == pytest.approx(0.15 * 23)
 
 
 @pytest.mark.parametrize("body", [
@@ -108,8 +110,8 @@ def _prime(mint, fake, uid, tier="pro"):
         fake.keys[t]["spend"] = 0.7
     old = datetime.datetime.now(datetime.timezone.utc).timestamp() - 5 * 3600
     mint.rds.set(f"pool:{uid}:start", str(old))
-    mint.rds.set(f"pool:{uid}:spend:oss", "5")
-    mint.rds.set(f"pool:{uid}:spend:frontier", "1")
+    mint.rds.set(f"pool:{uid}:spend", "6")
+    mint.rds.hset(f"pool:{uid}:auto", "glm-5.3-flash", "4")
     mint.rds.hset("pools:slow", uid, "9999999999")
     fake.users[uid]["spend"] = 4.0
     return toks, old
@@ -126,7 +128,7 @@ def test_reset_window_one_user(client):
         upd = [u for u in fake.posts("/key/update") if u["key"] == t][-1]
         assert upd["budget_duration"] == "24h" and upd["rpm_limit"] == 240  # clock restarted, slow lifted
     assert fake.users["u"]["spend"] == 0  # paid: user budget is the window budget
-    assert mint.rds.get("pool:u:spend:oss") is None and mint.rds.get("pool:u:spend:frontier") is None
+    assert mint.rds.get("pool:u:spend") is None and mint.rds.hgetall("pool:u:auto") == {}
     assert float(mint.rds.get("pool:u:start")) > old + 4 * 3600
     assert not mint.in_slow_mode("u")
     after = c.post("/usage", headers={"Authorization": "Bearer u", **AUTH}).json()
@@ -159,7 +161,7 @@ def test_reset_window_all_users_background_with_progress(client, monkeypatch):
     status = c.get("/admin/reset-status", headers=ADMIN).json()
     assert status["state"] == "done" and status["done"] == status["total"] == 2 and status["keys"] == 4
     assert all(fake.keys[t]["spend"] == 0 for t in list(a.values()) + list(b.values()))
-    assert mint.rds.get("pool:a:spend:oss") is None and mint.rds.get("pool:b:spend:oss") is None
+    assert mint.rds.get("pool:a:spend") is None and mint.rds.get("pool:b:spend") is None
     assert mint.rds.hgetall("pools:slow") == {}
     entry = c.get("/admin/audit", headers=ADMIN).json()["entries"][0]
     assert (entry["action"], entry["target"]) == ("reset-window", "ALL")
@@ -188,7 +190,7 @@ def test_ban_blocks_both_keys(client):
     assert not any(fake.keys[t]["blocked"] for t in toks.values())
 
 
-def test_lookup_by_email_shows_pools_and_app_view(client):
+def test_lookup_by_email_shows_allowance_and_app_view(client):
     c, mint, fake, _ = client
     standard_models(fake)
     toks = user_with_keys(mint, fake, "u", tier="7x")
@@ -196,21 +198,22 @@ def test_lookup_by_email_shows_pools_and_app_view(client):
     fake.add_log(toks["web"], "prov/deepseek-v4.1-flash", group="auto", spend=0.3, ago_min=0)
     u = c.get("/admin/user", params={"q": "U@Example.com"}, headers=ADMIN).json()
     assert u["uid"] == "u" and u["plan"]["id"] == "pro" and u["tier"] == "7x"
-    assert u["spend_by_class_usd"]["oss"] == pytest.approx(0.3)
-    assert u["pool_state_usd"]["oss"]["remaining"] == pytest.approx(1.7)
+    assert u["pool_state_usd"]["all"]["spent"] == pytest.approx(0.3)
+    assert u["pool_state_usd"]["all"]["remaining"] == pytest.approx(0.15 * 23 - 0.3)
     assert u["today"]["by_model"]["deepseek-v4.1-flash"]["via_auto"] == 1
-    assert {p["class"] for p in u["app_view"]["pools"]} == {"oss", "frontier"}
+    assert [p["class"] for p in u["app_view"]["pools"]] == ["all"]
     assert set(u["app_view"]) == set(app_body)
     assert c.get("/admin/user", params={"q": "ghost"}, headers=ADMIN).status_code == 404
 
 
-def test_admin_models_classes(client):
+def test_admin_models_prices_and_estimates(client):
     c, mint, fake, _ = client
     standard_models(fake)
     j = c.get("/admin/models", headers=ADMIN).json()
-    cls = {m["id"]: m["class"] for m in j["models"]}
-    assert cls["glm-5.3-flash"] == "oss" and cls["gpt-5.6-luna"] == "frontier" and cls["auto"] == "auto"
-    assert next(m for m in j["models"] if m["id"] == "auto")["members"]
+    m = {x["id"]: x for x in j["models"]}
+    assert m["glm-5.3-flash"]["est_unit_cost_usd"] == pytest.approx(2e-7 * 2000 + 8e-7 * 600)
+    assert m["ovid-image"]["est_unit_cost_usd"] == 0.04 and m["mystery"]["est_unit_cost_usd"] is None
+    assert m["auto"]["members"] and "class" not in m["glm-5.3-flash"]
 
 
 def test_audit_log_and_file(client):

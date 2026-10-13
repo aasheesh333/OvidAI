@@ -101,6 +101,11 @@ class MemoryRedis:
             h[f] = str(v)
         return 1
 
+    def hincrby(self, k, f, n=1):
+        h = self.hashes.setdefault(k, {})
+        h[f] = str(int(h.get(f, 0)) + int(n))
+        return int(h[f])
+
     def hgetall(self, k):
         return dict(self.hashes.get(k, {}))
 
