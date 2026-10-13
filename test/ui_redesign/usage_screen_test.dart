@@ -166,9 +166,11 @@ void main() {
             'remaining_pct': 0.37,
             'models': [
               {
-                'model': 'ovid-pro-1',
-                'output_cost_per_token': 0.000075,
-                'remaining_pct': 0.23,
+                'id': 'ovid-pro-1',
+                'name': 'Ovid Pro with a long display name',
+                'kind': 'chat',
+                'priced': true,
+                'remaining_messages': 40,
               },
             ],
           }),
@@ -193,14 +195,15 @@ void main() {
       // Hero: server-authoritative allowance and plan pill.
       expect(find.text('MAX'), findsOneWidget);
       expect(find.text('37% remaining'), findsOneWidget);
-      expect(find.text('23% remaining'), findsOneWidget);
+      // Per-model remaining is the model's own count, not a shared percent.
+      expect(find.text('≈ 40 messages left'), findsOneWidget);
       expect(
         tester
             .widgetList<LinearProgressIndicator>(
               find.byType(LinearProgressIndicator),
             )
             .map((bar) => bar.value),
-        [0.37, 0.23],
+        [0.37],
       );
       // Retained totals include every provider-reported attempt.
       expect(find.text('1M'), findsOneWidget);

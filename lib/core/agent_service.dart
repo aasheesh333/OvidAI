@@ -13575,6 +13575,7 @@ ${await _agentsMdBlock()}
       final transportOutcome = result?['_attemptOutcome'] as String?;
       result?.remove('_attemptOutcome');
       if (attempt != null) {
+        final served = transportOutcome != 'failed' && result != null;
         await _completeUsageAttempt(
           attempt,
           outcome: transportOutcome == 'failed'
@@ -13586,6 +13587,11 @@ ${await _agentsMdBlock()}
                     : UsageOutcome.failed),
           reportedModel: result?['reportedModel'] as String?,
           usage: (result?['usage'] as Map?)?.cast<String, dynamic>(),
+          // Gateways that drop `stream_options` send no usage block; the
+          // journal then keeps a labelled local estimate (same chars/4
+          // heuristic as the run meter) instead of "unavailable".
+          estimatedInput: served ? _estimateRequestTokens(msgs) : null,
+          estimatedOutput: served ? _estimateReplyTokens(result) : null,
         );
       }
       return result;
@@ -13602,11 +13608,23 @@ ${await _agentsMdBlock()}
     }
   }
 
+  static int _estimateRequestTokens(List<Map<String, dynamic>> msgs) =>
+      msgs.fold<int>(0, (a, m) {
+        final c = m['content'];
+        return a + estimateMessageTokens(c is String ? c : '');
+      });
+
+  static int _estimateReplyTokens(Map<String, dynamic> msg) =>
+      estimateMessageTokens((msg['content'] as String?) ?? '') +
+      estimateMessageTokens((msg['reasoning_content'] as String?) ?? '');
+
   Future<void> _completeUsageAttempt(
     UsageAttemptHandle attempt, {
     required UsageOutcome outcome,
     String? reportedModel,
     Map<String, dynamic>? usage,
+    int? estimatedInput,
+    int? estimatedOutput,
   }) async {
     unawaited(
       attempt
@@ -13614,6 +13632,8 @@ ${await _agentsMdBlock()}
             outcome: outcome,
             reportedModel: reportedModel,
             usage: usage,
+            estimatedInput: estimatedInput,
+            estimatedOutput: estimatedOutput,
           )
           .then<void>((_) {
             if (!attempt.captureResult.captured) {
@@ -25515,6 +25535,7 @@ ${await _agentsMdBlock()}
         bytes: result.bytes,
         accounting: accounting.trim(),
         servedModel: result.servedModel,
+        requestId: result.record.requestId,
         error: result.bytes == null
             ? 'Image bytes unavailable; no image was saved.'
             : null,
@@ -25533,8 +25554,9 @@ ${await _agentsMdBlock()}
   Future<String> _imagePublish(
     _ImageCtx ctx,
     Uint8List bytes,
-    String caption,
-  ) async {
+    String caption, {
+    String? requestId,
+  }) async {
     final file = await ImageStudio.save(bytes, Directory(ctx.outputRoot));
     if (!ctx.current()) {
       return 'Image file saved but session changed; no chat publication.';
@@ -25547,6 +25569,7 @@ ${await _agentsMdBlock()}
         kind: MsgKind.imageGen,
         content: caption,
         imagePath: file.path,
+        imageRequestId: requestId,
       ),
     );
     AppState.I.refresh();
@@ -25689,7 +25712,14 @@ ${await _agentsMdBlock()}
       }
     }
     if (!ctx.current()) return _ImageCtx.cancelled;
-    return _imagePublishReported(ctx, bytes, prompt, accounting, notes);
+    return _imagePublishReported(
+      ctx,
+      bytes,
+      prompt,
+      accounting,
+      notes,
+      requestId: outcome.requestId,
+    );
   }
 
   /// [_imagePublish] that never loses the accounting of a paid job when the
@@ -25699,10 +25729,16 @@ ${await _agentsMdBlock()}
     Uint8List bytes,
     String caption,
     String accounting,
-    List<String> notes,
-  ) async {
+    List<String> notes, {
+    String? requestId,
+  }) async {
     try {
-      final saved = await _imagePublish(ctx, bytes, caption);
+      final saved = await _imagePublish(
+        ctx,
+        bytes,
+        caption,
+        requestId: requestId,
+      );
       return '$accounting$saved ${notes.join(' ')}'.trim();
     } on ImageStudioError catch (e) {
       return 'Error: $accounting$e';
@@ -25778,6 +25814,7 @@ ${await _agentsMdBlock()}
       prompt,
       accounting,
       edit.notes,
+      requestId: edit.requestId,
     );
   }
 
@@ -25893,6 +25930,7 @@ ${await _agentsMdBlock()}
         accounting: outcome.accounting,
         notes: notes,
         size: finalSize,
+        requestId: outcome.requestId,
       );
     } on ImageStudioError catch (e) {
       return _ImageEditResult.failed('$e');
@@ -25958,6 +25996,7 @@ ${await _agentsMdBlock()}
             '$prompt (${i + 1}/$n)',
             '',
             const [],
+            requestId: r.requestId,
           );
           if (line.startsWith('Error: ')) {
             results[i] = _ImageEditResult.failed(
@@ -26088,11 +26127,14 @@ class _ImageEditResult {
     this.accounting = '',
     this.notes = const [],
     this.size,
+    this.requestId,
   }) : error = null;
   const _ImageEditResult.failed(String this.error, {this.accounting = ''})
     : bytes = null,
       notes = const [],
-      size = null;
+      size = null,
+      requestId = null;
+  final String? requestId;
   final Uint8List? bytes;
   final String? error;
   final String accounting;

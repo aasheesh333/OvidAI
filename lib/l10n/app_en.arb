@@ -311,5 +311,123 @@
   "attachmentTypeVideo": "Video",
   "@attachmentTypeVideo": {"description": "Attachment type name for screen readers: a video file."},
   "attachmentTypeOther": "File",
-  "@attachmentTypeOther": {"description": "Attachment type name for screen readers: any other kind of file."}
+  "@attachmentTypeOther": {"description": "Attachment type name for screen readers: any other kind of file."},
+
+  "receiptResultNotOnDeviceTitle": "Image not saved on this device",
+  "@receiptResultNotOnDeviceTitle": {"description": "Image receipts: heading when a completed image request has no saved copy on this device."},
+  "receiptResultNotOnDeviceBody": "Recover image downloads it again from this receipt. It never starts a new paid request.",
+  "@receiptResultNotOnDeviceBody": {"description": "Image receipts: explains the Recover image button for a completed request with no local copy."},
+  "receiptResultFailedTitle": "No image: the request failed",
+  "@receiptResultFailedTitle": {"description": "Image receipts: heading for a failed image request, which produced no image."},
+  "receiptResultFailedBody": "Nothing was produced for this request. The summary above shows whether it was charged.",
+  "@receiptResultFailedBody": {"description": "Image receipts: body text for a failed image request."},
+  "receiptResultPendingTitle": "Result not ready yet",
+  "@receiptResultPendingTitle": {"description": "Image receipts: heading while an image request is pending or its outcome is unknown."},
+  "receiptResultPendingBody": "Check status to update this request. Do not submit a replacement.",
+  "@receiptResultPendingBody": {"description": "Image receipts: body text while an image request is pending or unknown."},
+  "receiptResultPreviewFailedTitle": "Image preview failed",
+  "@receiptResultPreviewFailedTitle": {"description": "Image receipts: heading when a saved or recovered image could not be decoded for preview."},
+  "receiptOutcomeNotOnServer": "Image no longer available from the server",
+  "@receiptOutcomeNotOnServer": {"description": "Image receipts: result line after Recover image when the server no longer keeps the image bytes."},
+
+  "usageTitle": "Usage",
+  "@usageTitle": {"description": "Usage screen app bar title."},
+  "usageMoreActions": "More actions",
+  "@usageMoreActions": {"description": "Tooltip for the Usage screen overflow menu."},
+  "usageImageReceipts": "Image receipts",
+  "@usageImageReceipts": {"description": "Usage screen menu item that opens the image receipts screen."},
+  "usageCloudName": "Ovid Cloud",
+  "@usageCloudName": {"description": "Product name shown in the Usage header. Usually not translated."},
+  "usagePlanSemantics": "Plan: {plan}",
+  "@usagePlanSemantics": {
+    "description": "Screen reader label for the plan pill in the Usage header.",
+    "placeholders": {"plan": {"type": "String", "example": "PLUS"}}
+  },
+  "usagePlanSaved": "Saved plan · awaiting server confirmation",
+  "@usagePlanSaved": {"description": "Usage header freshness line before the server has answered."},
+  "usagePlanLastKnown": "Last known plan and allowance",
+  "@usagePlanLastKnown": {"description": "Usage header freshness line when the latest refresh failed and older data is shown."},
+  "usagePlanConfirmed": "Server-confirmed plan and allowance",
+  "@usagePlanConfirmed": {"description": "Usage header freshness line when the server answered."},
+  "usageServerAuthoritative": "Server-authoritative",
+  "@usageServerAuthoritative": {"description": "Caption noting the allowance comes from the server, not the device."},
+  "usageRemainingPercent": "{percent}% remaining",
+  "@usageRemainingPercent": {
+    "description": "Overall plan allowance left, as a percentage. Never a price.",
+    "placeholders": {"percent": {"type": "int", "example": "37"}}
+  },
+  "usageRemainingUnknown": "Usage unavailable",
+  "@usageRemainingUnknown": {"description": "Shown instead of the overall allowance bar when the server has not reported it."},
+  "usageOverallBarLabel": "Plan allowance remaining",
+  "@usageOverallBarLabel": {"description": "Screen reader label for the overall allowance progress bar."},
+  "usageResetsUnderMinute": "Resets in under a minute",
+  "@usageResetsUnderMinute": {"description": "Allowance reset countdown, less than one minute left."},
+  "usageResetsInMinutes": "Resets in {minutes}m",
+  "@usageResetsInMinutes": {
+    "description": "Allowance reset countdown in minutes (m = minutes).",
+    "placeholders": {"minutes": {"type": "int", "example": "9"}}
+  },
+  "usageResetsInHoursMinutes": "Resets in {hours}h {minutes}m",
+  "@usageResetsInHoursMinutes": {
+    "description": "Allowance reset countdown in hours and minutes (h = hours, m = minutes).",
+    "placeholders": {"hours": {"type": "int", "example": "4"}, "minutes": {"type": "int", "example": "12"}}
+  },
+  "usageResetsInDays": "Resets in {days}d",
+  "@usageResetsInDays": {
+    "description": "Allowance reset countdown in whole days (d = days).",
+    "placeholders": {"days": {"type": "int", "example": "3"}}
+  },
+  "usageResetsInDaysHours": "Resets in {days}d {hours}h",
+  "@usageResetsInDaysHours": {
+    "description": "Allowance reset countdown in days and hours (d = days, h = hours).",
+    "placeholders": {"days": {"type": "int", "example": "3"}, "hours": {"type": "int", "example": "5"}}
+  },
+  "usageUpgradeUsedUp": "Allowance used up · See plans",
+  "@usageUpgradeUsedUp": {"description": "Usage header button when the allowance is exhausted."},
+  "usageUpgradeLow": "Running low · Upgrade",
+  "@usageUpgradeLow": {"description": "Usage header button when less than 10% of the allowance is left."},
+  "usageTodayTitle": "Today",
+  "@usageTodayTitle": {"description": "Section heading for today's usage counters in the Usage header."},
+  "usageTodayRequests": "Requests",
+  "@usageTodayRequests": {"description": "Label under today's request count."},
+  "usageTodayInput": "Input tokens",
+  "@usageTodayInput": {"description": "Label under today's input (prompt) token count."},
+  "usageTodayOutput": "Output tokens",
+  "@usageTodayOutput": {"description": "Label under today's output (reply) token count."},
+  "usageTodayImages": "Images",
+  "@usageTodayImages": {"description": "Label under today's generated image count."},
+  "usageTodayDeviceNote": "Counted on this device",
+  "@usageTodayDeviceNote": {"description": "Note under today's counters when they come from this device instead of the server."},
+  "usageTodayEstimatedNote": "≈ Includes estimates where the model sent no token counts",
+  "@usageTodayEstimatedNote": {"description": "Note when some of today's token counts are local estimates."},
+  "usageTodayAutoNote": "{count, plural, =1{Includes 1 request in Auto mode} other{Includes {count} requests in Auto mode}}",
+  "@usageTodayAutoNote": {
+    "description": "Note that Auto-mode requests are included in today's request count.",
+    "placeholders": {"count": {"type": "int", "example": "3"}}
+  },
+  "usageModelsTitle": "Remaining by model",
+  "@usageModelsTitle": {"description": "Section heading for the per-model remaining usage list."},
+  "usageModelsFootnote": "Each model has its own remaining usage: larger models use more of your plan per message, so they show fewer messages left.",
+  "@usageModelsFootnote": {"description": "Explains why models show different remaining counts. Must not mention prices or currency."},
+  "usageModelMessagesLeft": "{count, plural, =0{No messages left} =1{≈ 1 message left} other{≈ {count} messages left}}",
+  "@usageModelMessagesLeft": {
+    "description": "Approximate chat messages left for one model in the current window.",
+    "placeholders": {"count": {"type": "int", "example": "120"}}
+  },
+  "usageModelImagesLeft": "{count, plural, =0{No images left} =1{≈ 1 image left} other{≈ {count} images left}}",
+  "@usageModelImagesLeft": {
+    "description": "Approximate images left for one image model in the current window.",
+    "placeholders": {"count": {"type": "int", "example": "8"}}
+  },
+  "usageModelRemainingUnknown": "Remaining usage not known",
+  "@usageModelRemainingUnknown": {"description": "Screen reader label for a model whose remaining usage is unknown (shown as a dash)."},
+  "usageModelAuto": "Auto",
+  "@usageModelAuto": {"description": "Pill on the Auto model row: Auto picks a model for each request."},
+  "usageModelEstimateNote": "Estimate · Auto picks a model for each request",
+  "@usageModelEstimateNote": {"description": "Note under the Auto row explaining its remaining count is a conservative estimate."},
+  "usageProviderAutoRequests": "{count, plural, =1{1 request in Auto mode} other{{count} requests in Auto mode}}",
+  "@usageProviderAutoRequests": {
+    "description": "Provider card line: requests sent in Auto mode, also counted under their served model.",
+    "placeholders": {"count": {"type": "int", "example": "5"}}
+  }
 }

@@ -86,7 +86,8 @@ void main() {
     expect(find.text('Result'), findsOneWidget);
     expect(find.text('Check status'), findsOneWidget);
     expect(find.text('Recover image'), findsOneWidget);
-    expect(find.text('Image result unavailable'), findsOneWidget);
+    // Still pending locally: the state copy says so (never "unavailable").
+    expect(find.text('Result not ready yet'), findsOneWidget);
 
     await tester.tap(find.text('Copy request ID'));
     await tester.pumpAndSettle();
@@ -99,6 +100,6 @@ void main() {
     await tester.tap(find.text('Check status'));
     await tester.pumpAndSettle();
     expect(find.text('Status checked'), findsOneWidget);
-    expect(find.text('Image result unavailable'), findsOneWidget);
+    expect(find.text('Image not saved on this device'), findsOneWidget);
   });
 }

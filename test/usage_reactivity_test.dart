@@ -685,6 +685,11 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: UsageScreen()));
     await tester.pumpAndSettle();
     expect(find.text('1K in · 20 out'), findsOneWidget);
+    // The redesigned header is taller: bring the lazy provider card in.
+    await tester.scrollUntilVisible(
+      find.text('1 requests · 20 in · 10 out'),
+      200,
+    );
     expect(find.text('1 requests · 20 in · 10 out'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });

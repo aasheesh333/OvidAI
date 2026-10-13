@@ -113,6 +113,7 @@ void main() {
 
     await pumpScreen(tester, const UsageScreen());
 
+    await tester.scrollUntilVisible(find.byTooltip('View provider details'), 200);
     expect(find.byTooltip('View provider details'), findsOneWidget);
   });
 

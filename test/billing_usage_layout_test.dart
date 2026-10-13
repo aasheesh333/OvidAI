@@ -208,8 +208,6 @@ void main() {
             ..measuredTotal = 8888888
             ..measuredTotalKnown = true,
         ],
-        costUsd: 99,
-        hasPricedModel: true,
       );
       await pump(tester, ProviderUsageScreen(provider: provider), 320);
       await tester.scrollUntilVisible(

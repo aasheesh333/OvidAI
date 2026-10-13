@@ -1,6 +1,5 @@
 // ignore: unused_import
 import 'package:intl/intl.dart' as intl;
-
 import 'app_localizations.dart';
 
 // ignore_for_file: type=lint
@@ -398,4 +397,186 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get attachmentTypeOther => 'File';
+
+  @override
+  String get receiptResultNotOnDeviceTitle => 'Image not saved on this device';
+
+  @override
+  String get receiptResultNotOnDeviceBody =>
+      'Recover image downloads it again from this receipt. It never starts a new paid request.';
+
+  @override
+  String get receiptResultFailedTitle => 'No image: the request failed';
+
+  @override
+  String get receiptResultFailedBody =>
+      'Nothing was produced for this request. The summary above shows whether it was charged.';
+
+  @override
+  String get receiptResultPendingTitle => 'Result not ready yet';
+
+  @override
+  String get receiptResultPendingBody =>
+      'Check status to update this request. Do not submit a replacement.';
+
+  @override
+  String get receiptResultPreviewFailedTitle => 'Image preview failed';
+
+  @override
+  String get receiptOutcomeNotOnServer =>
+      'Image no longer available from the server';
+
+  @override
+  String get usageTitle => 'Usage';
+
+  @override
+  String get usageMoreActions => 'More actions';
+
+  @override
+  String get usageImageReceipts => 'Image receipts';
+
+  @override
+  String get usageCloudName => 'Ovid Cloud';
+
+  @override
+  String usagePlanSemantics(String plan) {
+    return 'Plan: $plan';
+  }
+
+  @override
+  String get usagePlanSaved => 'Saved plan · awaiting server confirmation';
+
+  @override
+  String get usagePlanLastKnown => 'Last known plan and allowance';
+
+  @override
+  String get usagePlanConfirmed => 'Server-confirmed plan and allowance';
+
+  @override
+  String get usageServerAuthoritative => 'Server-authoritative';
+
+  @override
+  String usageRemainingPercent(int percent) {
+    return '$percent% remaining';
+  }
+
+  @override
+  String get usageRemainingUnknown => 'Usage unavailable';
+
+  @override
+  String get usageOverallBarLabel => 'Plan allowance remaining';
+
+  @override
+  String get usageResetsUnderMinute => 'Resets in under a minute';
+
+  @override
+  String usageResetsInMinutes(int minutes) {
+    return 'Resets in ${minutes}m';
+  }
+
+  @override
+  String usageResetsInHoursMinutes(int hours, int minutes) {
+    return 'Resets in ${hours}h ${minutes}m';
+  }
+
+  @override
+  String usageResetsInDays(int days) {
+    return 'Resets in ${days}d';
+  }
+
+  @override
+  String usageResetsInDaysHours(int days, int hours) {
+    return 'Resets in ${days}d ${hours}h';
+  }
+
+  @override
+  String get usageUpgradeUsedUp => 'Allowance used up · See plans';
+
+  @override
+  String get usageUpgradeLow => 'Running low · Upgrade';
+
+  @override
+  String get usageTodayTitle => 'Today';
+
+  @override
+  String get usageTodayRequests => 'Requests';
+
+  @override
+  String get usageTodayInput => 'Input tokens';
+
+  @override
+  String get usageTodayOutput => 'Output tokens';
+
+  @override
+  String get usageTodayImages => 'Images';
+
+  @override
+  String get usageTodayDeviceNote => 'Counted on this device';
+
+  @override
+  String get usageTodayEstimatedNote =>
+      '≈ Includes estimates where the model sent no token counts';
+
+  @override
+  String usageTodayAutoNote(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Includes $count requests in Auto mode',
+      one: 'Includes 1 request in Auto mode',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get usageModelsTitle => 'Remaining by model';
+
+  @override
+  String get usageModelsFootnote =>
+      'Each model has its own remaining usage: larger models use more of your plan per message, so they show fewer messages left.';
+
+  @override
+  String usageModelMessagesLeft(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '≈ $count messages left',
+      one: '≈ 1 message left',
+      zero: 'No messages left',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String usageModelImagesLeft(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '≈ $count images left',
+      one: '≈ 1 image left',
+      zero: 'No images left',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get usageModelRemainingUnknown => 'Remaining usage not known';
+
+  @override
+  String get usageModelAuto => 'Auto';
+
+  @override
+  String get usageModelEstimateNote =>
+      'Estimate · Auto picks a model for each request';
+
+  @override
+  String usageProviderAutoRequests(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count requests in Auto mode',
+      one: '1 request in Auto mode',
+    );
+    return '$_temp0';
+  }
 }

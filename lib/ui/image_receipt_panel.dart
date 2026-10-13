@@ -1,12 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/image_result_locator.dart';
 import '../core/image_studio.dart';
 import '../core/native_share.dart';
 import '../core/recovered_images.dart';
 import '../core/theme.dart';
+import '../l10n/l10n.dart';
 import 'share_actions.dart';
 import 'widgets/aether_primitives.dart';
 
@@ -22,6 +25,7 @@ class ImageReceiptPanel extends StatefulWidget {
     this.persistRecovered,
     this.saveFile,
     this.shareFile,
+    this.locateResult,
   });
   final ImageStudio studio;
   final Future<Map<String, String>> Function() headers;
@@ -43,6 +47,10 @@ class ImageReceiptPanel extends StatefulWidget {
   /// Test seams for Save (system "Save as") and Share.
   final Future<bool> Function(String path, String fileName)? saveFile;
   final Future<void> Function(String path)? shareFile;
+
+  /// Finds a receipt's saved result on this device (chat image, kept copy).
+  /// Defaults to [ImageResultLocator.find].
+  final Future<File?> Function(ImageRequestRecord record)? locateResult;
 
   @override
   State<ImageReceiptPanel> createState() => _ImageReceiptPanelState();
@@ -83,6 +91,10 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
   final Map<String, String> _outcomes = {};
   final Map<String, Uint8List> _images = {};
   final Map<String, RecoveredImage> _files = {};
+
+  /// Results already saved on this device, found by [_locateAll].
+  final Map<String, File> _local = {};
+  final Set<String> _located = {};
   final Set<String> _copied = {};
   int _generation = 0;
   late int _accountGeneration;
@@ -97,6 +109,27 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
     if (!widget.studio.receiptsLoading &&
         widget.studio.receiptLoadError == null) {
       scheduleMicrotask(_reload);
+    }
+    _locateAll();
+  }
+
+  /// Looks up each receipt's saved image once (per account generation).
+  void _locateAll() {
+    final generation = _generation;
+    final locate = widget.locateResult ?? ImageResultLocator.find;
+    for (final record in widget.studio.receipts) {
+      final id = record.requestId;
+      if (record.state == 'failed' || !_located.add(id)) continue;
+      unawaited(() async {
+        File? file;
+        try {
+          file = await locate(record);
+        } catch (_) {
+          file = null;
+        }
+        if (file == null || !mounted || generation != _generation) return;
+        setState(() => _local[id] = file!);
+      }());
     }
   }
 
@@ -118,6 +151,8 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
     _outcomes.clear();
     _images.clear();
     _files.clear();
+    _local.clear();
+    _located.clear();
     _copied.clear();
   }
 
@@ -127,6 +162,7 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
       _accountGeneration = widget.studio.accountGeneration;
       _reset();
     }
+    _locateAll();
     setState(() {});
   }
 
@@ -160,7 +196,9 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
         unawaited(_keep(result.record, bytes, generation));
       }
       _outcomes[requestId] = retrieveImage
-          ? (bytes != null ? 'Image recovered' : 'Image unavailable')
+          ? (bytes != null
+                ? 'Image recovered'
+                : context.l10n.receiptOutcomeNotOnServer)
           : 'Status checked';
       _notices[requestId] =
           result.notice ??
@@ -232,10 +270,10 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
     () => (widget.shareFile ?? NativeShare.file)(kept.file.path),
   );
 
-  void _openViewer(Uint8List bytes) {
+  void _openViewer(ImageProvider image) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => _RecoveredImageViewer(bytes: bytes),
+        builder: (_) => _RecoveredImageViewer(image: image),
       ),
     );
   }
@@ -344,8 +382,18 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
     final chat = record.sessionId == null
         ? null
         : widget.sessionTitle?.call(record.sessionId!);
-    final image = _images[id];
-    final kept = _files[id];
+    final bytes = _images[id];
+    final local = _local[id];
+    final ImageProvider? image = bytes != null
+        ? MemoryImage(bytes)
+        : local != null
+        ? FileImage(local)
+        : null;
+    final kept =
+        _files[id] ??
+        (local == null
+            ? null
+            : RecoveredImage(local, sessionId: _liveSession(record)));
     return AetherCard(
       key: ValueKey('receipt-$id'),
       padding: const EdgeInsets.all(14),
@@ -432,8 +480,8 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
                 child: SizedBox(
                   width: double.infinity,
                   height: 180,
-                  child: Image.memory(
-                    image,
+                  child: Image(
+                    image: image,
                     height: 180,
                     fit: BoxFit.contain,
                     semanticLabel: 'Recovered image',
@@ -446,9 +494,7 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
               ),
             )
           else
-            _resultFallback(
-              'Recover checks the existing request and never submits a replacement paid job.',
-            ),
+            _missingResult(record.state),
           const SizedBox(height: 6),
           OverflowBar(
             spacing: 8,
@@ -543,7 +589,33 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
     ),
   );
 
-  Widget _resultFallback(String message) => Container(
+  /// The originating chat id when that chat still exists.
+  String? _liveSession(ImageRequestRecord record) {
+    final session = record.sessionId;
+    if (session == null) return null;
+    return widget.sessionTitle?.call(session) == null ? null : session;
+  }
+
+  /// What to say when no image is shown, by receipt state.
+  Widget _missingResult(String state) {
+    final l10n = context.l10n;
+    return switch (state) {
+      'confirmed' => _resultFallback(
+        l10n.receiptResultNotOnDeviceBody,
+        title: l10n.receiptResultNotOnDeviceTitle,
+      ),
+      'failed' => _resultFallback(
+        l10n.receiptResultFailedBody,
+        title: l10n.receiptResultFailedTitle,
+      ),
+      _ => _resultFallback(
+        l10n.receiptResultPendingBody,
+        title: l10n.receiptResultPendingTitle,
+      ),
+    };
+  }
+
+  Widget _resultFallback(String message, {String? title}) => Container(
     width: double.infinity,
     padding: const EdgeInsets.all(12),
     decoration: BoxDecoration(
@@ -560,7 +632,10 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Image result unavailable', style: AetherType.body),
+              Text(
+                title ?? context.l10n.receiptResultPreviewFailedTitle,
+                style: AetherType.body,
+              ),
               Text(message, style: AetherType.bodyMuted),
             ],
           ),
@@ -572,8 +647,8 @@ class _ImageReceiptPanelState extends State<ImageReceiptPanel> {
 
 /// Full-screen, zoomable view of a recovered image.
 class _RecoveredImageViewer extends StatelessWidget {
-  const _RecoveredImageViewer({required this.bytes});
-  final Uint8List bytes;
+  const _RecoveredImageViewer({required this.image});
+  final ImageProvider image;
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -586,8 +661,8 @@ class _RecoveredImageViewer extends StatelessWidget {
     body: InteractiveViewer(
       maxScale: 6,
       child: Center(
-        child: Image.memory(
-          bytes,
+        child: Image(
+          image: image,
           fit: BoxFit.contain,
           semanticLabel: 'Recovered image',
         ),

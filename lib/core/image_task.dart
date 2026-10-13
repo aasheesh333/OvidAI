@@ -518,11 +518,16 @@ class ImageInferOutcome {
     this.accounting = '',
     this.error,
     this.servedModel,
+    this.requestId,
   });
   final Uint8List? bytes;
   final String accounting;
   final String? error;
   final String? servedModel;
+
+  /// Gateway request id of the job, so the chat image row can be matched to
+  /// its receipt.
+  final String? requestId;
 }
 
 /// Requirements sent with a task: the agent's own hints plus the hard needs

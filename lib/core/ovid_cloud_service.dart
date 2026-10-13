@@ -1268,9 +1268,25 @@ class OvidUsage {
     this.planAutoRenews,
     this.resetsAt,
     this.planFeatures = const {},
+    this.window,
+    this.today,
+    this.hasRemainingFraction = false,
   });
 
   final String tier;
+
+  /// Server field `window` (`24h` | `30d`): the allowance window. Parsed only;
+  /// the client never derives a reset time from it ([resetsAt] is shown).
+  final String? window;
+
+  /// Server field `today`: authoritative counters for the current day, across
+  /// every device. Null on servers that predate it — the UI then falls back to
+  /// this device's own journal instead of the always-zero `requests_today`.
+  final OvidUsageToday? today;
+
+  /// Whether the server sent the newer `remaining_fraction` field (it wins
+  /// over the legacy `remaining_pct`).
+  final bool hasRemainingFraction;
 
   /// Server field `plan_expires_at`: end of the current paid period (Play
   /// subscription), for "Renews on / Ends on". Null when free or unknown.
@@ -1319,8 +1335,28 @@ class OvidUsage {
   /// Whether the server actually sent `remaining_pct`.
   final bool hasRemainingPct;
 
-  /// Available models with their shared remaining fraction.
+  /// Available models. On current servers each carries its own remaining
+  /// usage ([OvidModelUsage.hasPerModelRemaining]); older servers send only a
+  /// shared fraction, which the UI does not render per model.
   final List<OvidModelUsage> models;
+
+  /// Models with per-model remaining usage, ordered for display: chat models
+  /// before image models, then most remaining first; unpriced/unknown last.
+  List<OvidModelUsage> get perModel {
+    final rows = models.where((m) => m.hasPerModelRemaining).toList();
+    int rank(OvidModelUsage m) => m.kind == 'image' ? 1 : 0;
+    rows.sort((a, b) {
+      final kind = rank(a).compareTo(rank(b));
+      if (kind != 0) return kind;
+      final ar = a.remaining, br = b.remaining;
+      if (ar == null && br == null) return a.label.compareTo(b.label);
+      if (ar == null) return 1;
+      if (br == null) return -1;
+      final byRemaining = br.compareTo(ar);
+      return byRemaining != 0 ? byRemaining : a.label.compareTo(b.label);
+    });
+    return rows;
+  }
 
   /// Only a valid server fraction is displayable. Missing/invalid values are
   /// unknown, not zero, and are never reconstructed from internal budgets.
@@ -1340,8 +1376,17 @@ class OvidUsage {
     monthFreeCapUsd: (j['month_free_cap_usd'] as num?)?.toDouble() ?? 0,
     requestsToday: (j['requests_today'] as num?)?.toInt() ?? 0,
     budgetWindow: (j['budget_window'] as String?) ?? '',
-    remainingPct: (j['remaining_pct'] as num?)?.toDouble() ?? 0,
-    hasRemainingPct: j['remaining_pct'] is num,
+    remainingPct:
+        (j['remaining_fraction'] is num
+                ? j['remaining_fraction'] as num
+                : j['remaining_pct'] as num?)
+            ?.toDouble() ??
+        0,
+    hasRemainingPct:
+        j['remaining_fraction'] is num || j['remaining_pct'] is num,
+    hasRemainingFraction: j['remaining_fraction'] is num,
+    window: j['window'] is String ? j['window'] as String : null,
+    today: OvidUsageToday.tryParse(j['today']),
     billingEnabled: j['billing_enabled'] == true,
     planExpiresAt: _parseServerTime(j['plan_expires_at']),
     planAutoRenews: j['plan_auto_renews'] is bool
@@ -1366,9 +1411,45 @@ class OvidUsage {
   );
 }
 
-/// One available model: its public name and the shared remaining fraction of
-/// the user's plan usage. Per-token prices are parsed (internal) but never
-/// rendered.
+/// Server-authoritative counters for the current day (`today`).
+class OvidUsageToday {
+  const OvidUsageToday({
+    required this.requests,
+    required this.inputTokens,
+    required this.outputTokens,
+    required this.images,
+  });
+
+  final int requests;
+  final int inputTokens;
+  final int outputTokens;
+  final int images;
+
+  /// Null unless [value] is an object; missing/invalid counters read as 0.
+  static OvidUsageToday? tryParse(Object? value) {
+    if (value is! Map) return null;
+    int count(String key) {
+      final v = value[key];
+      return v is num && v.isFinite && v >= 0 ? v.toInt() : 0;
+    }
+
+    return OvidUsageToday(
+      requests: count('requests'),
+      inputTokens: count('input_tokens'),
+      outputTokens: count('output_tokens'),
+      images: count('images'),
+    );
+  }
+}
+
+/// One available model.
+///
+/// Current servers send `id`, `name`, `kind`, `priced` and the model's OWN
+/// remaining usage as a count (`remaining_messages` for chat models,
+/// `remaining_images` for image models), derived server-side from that
+/// model's price: expensive models show fewer, cheap ones more. Older servers
+/// send `model` plus a shared `remaining_pct`; per-token prices are parsed
+/// (internal) but never rendered.
 class OvidModelUsage {
   const OvidModelUsage({
     required this.model,
@@ -1376,8 +1457,39 @@ class OvidModelUsage {
     required this.outputCostPerToken,
     required this.remainingPct,
     this.hasRemainingPct = true,
+    this.name,
+    this.kind = 'chat',
+    this.priced = false,
+    this.remainingMessages,
+    this.remainingImages,
+    this.auto = false,
+    this.estimate,
+    this.hasPerModelRemaining = false,
   });
+
+  /// Public model id (`id`, or legacy `model`).
   final String model;
+
+  /// Display name from the server, when sent.
+  final String? name;
+
+  /// `chat` | `image`.
+  final String kind;
+
+  /// Whether the server knows this model's price. Unpriced → remaining "—".
+  final bool priced;
+  final int? remainingMessages;
+  final int? remainingImages;
+
+  /// The Auto route (picks among the manual models per request).
+  final bool auto;
+
+  /// `conservative` when [remaining] is an estimate (Auto), else null.
+  final String? estimate;
+
+  /// True when the payload is the per-model contract (not the legacy shared
+  /// fraction).
+  final bool hasPerModelRemaining;
 
   /// Internal — never render.
   final double? inputCostPerToken;
@@ -1387,20 +1499,61 @@ class OvidModelUsage {
   final double remainingPct;
   final bool hasRemainingPct;
 
+  bool get isImage => kind == 'image';
+
+  /// Remaining count in this model's own unit; null when unknown/unpriced.
+  int? get remaining {
+    if (!priced) return null;
+    return isImage ? remainingImages : remainingMessages;
+  }
+
+  /// Name to show: server `name`, else the public id label.
+  String get label {
+    final n = name?.trim();
+    return n != null && n.isNotEmpty ? n : ovidModelLabel(model);
+  }
+
   double? get remainingFraction =>
       hasRemainingPct ? _validRemainingFraction(remainingPct) : null;
 
-  factory OvidModelUsage.fromJson(Map<String, dynamic> j) => OvidModelUsage(
-    model: (j['model'] as String?) ?? '',
-    inputCostPerToken: j['model'] == ImageStudio.alias
-        ? null
-        : (j['input_cost_per_token'] as num?)?.toDouble(),
-    outputCostPerToken: j['model'] == ImageStudio.alias
-        ? null
-        : (j['output_cost_per_token'] as num?)?.toDouble(),
-    remainingPct: (j['remaining_pct'] as num?)?.toDouble() ?? 0,
-    hasRemainingPct: j['remaining_pct'] is num,
-  );
+  factory OvidModelUsage.fromJson(Map<String, dynamic> j) {
+    final id = j['id'] is String ? j['id'] as String : null;
+    final legacyModel = (j['model'] as String?) ?? '';
+    final model = id ?? legacyModel;
+    int? count(String key) {
+      final v = j[key];
+      return v is num && v.isFinite && v >= 0 ? v.toInt() : null;
+    }
+
+    final perModel =
+        id != null ||
+        j.containsKey('remaining_messages') ||
+        j.containsKey('remaining_images');
+    final kind = j['kind'] == 'image' || model == ImageStudio.alias
+        ? 'image'
+        : 'chat';
+    return OvidModelUsage(
+      model: model,
+      name: j['name'] is String ? j['name'] as String : null,
+      kind: kind,
+      priced: j['priced'] is bool
+          ? j['priced'] as bool
+          : (count('remaining_messages') ?? count('remaining_images')) != null,
+      remainingMessages: count('remaining_messages'),
+      remainingImages: count('remaining_images'),
+      auto: j['auto'] == true || model == 'auto',
+      estimate: j['estimate'] is String ? j['estimate'] as String : null,
+      hasPerModelRemaining: perModel,
+      inputCostPerToken: legacyModel == ImageStudio.alias
+          ? null
+          : (j['input_cost_per_token'] as num?)?.toDouble(),
+      outputCostPerToken: legacyModel == ImageStudio.alias
+          ? null
+          : (j['output_cost_per_token'] as num?)?.toDouble(),
+      remainingPct: (j['remaining_pct'] as num?)?.toDouble() ?? 0,
+      hasRemainingPct: j['remaining_pct'] is num,
+    );
+  }
 }
 
 DateTime? _parseServerTime(Object? value) =>
