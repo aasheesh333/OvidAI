@@ -771,6 +771,216 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Image no longer available from the server'**
   String get receiptOutcomeNotOnServer;
+
+  /// Usage screen app bar title.
+  ///
+  /// In en, this message translates to:
+  /// **'Usage'**
+  String get usageTitle;
+
+  /// Tooltip for the Usage screen overflow menu.
+  ///
+  /// In en, this message translates to:
+  /// **'More actions'**
+  String get usageMoreActions;
+
+  /// Usage screen menu item that opens the image receipts screen.
+  ///
+  /// In en, this message translates to:
+  /// **'Image receipts'**
+  String get usageImageReceipts;
+
+  /// Product name shown in the Usage header. Usually not translated.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid Cloud'**
+  String get usageCloudName;
+
+  /// Screen reader label for the plan pill in the Usage header.
+  ///
+  /// In en, this message translates to:
+  /// **'Plan: {plan}'**
+  String usagePlanSemantics(String plan);
+
+  /// Usage header freshness line before the server has answered.
+  ///
+  /// In en, this message translates to:
+  /// **'Saved plan · awaiting server confirmation'**
+  String get usagePlanSaved;
+
+  /// Usage header freshness line when the latest refresh failed and older data is shown.
+  ///
+  /// In en, this message translates to:
+  /// **'Last known plan and allowance'**
+  String get usagePlanLastKnown;
+
+  /// Usage header freshness line when the server answered.
+  ///
+  /// In en, this message translates to:
+  /// **'Server-confirmed plan and allowance'**
+  String get usagePlanConfirmed;
+
+  /// Caption noting the allowance comes from the server, not the device.
+  ///
+  /// In en, this message translates to:
+  /// **'Server-authoritative'**
+  String get usageServerAuthoritative;
+
+  /// Overall plan allowance left, as a percentage. Never a price.
+  ///
+  /// In en, this message translates to:
+  /// **'{percent}% remaining'**
+  String usageRemainingPercent(int percent);
+
+  /// Shown instead of the overall allowance bar when the server has not reported it.
+  ///
+  /// In en, this message translates to:
+  /// **'Usage unavailable'**
+  String get usageRemainingUnknown;
+
+  /// Screen reader label for the overall allowance progress bar.
+  ///
+  /// In en, this message translates to:
+  /// **'Plan allowance remaining'**
+  String get usageOverallBarLabel;
+
+  /// Allowance reset countdown, less than one minute left.
+  ///
+  /// In en, this message translates to:
+  /// **'Resets in under a minute'**
+  String get usageResetsUnderMinute;
+
+  /// Allowance reset countdown in minutes (m = minutes).
+  ///
+  /// In en, this message translates to:
+  /// **'Resets in {minutes}m'**
+  String usageResetsInMinutes(int minutes);
+
+  /// Allowance reset countdown in hours and minutes (h = hours, m = minutes).
+  ///
+  /// In en, this message translates to:
+  /// **'Resets in {hours}h {minutes}m'**
+  String usageResetsInHoursMinutes(int hours, int minutes);
+
+  /// Allowance reset countdown in whole days (d = days).
+  ///
+  /// In en, this message translates to:
+  /// **'Resets in {days}d'**
+  String usageResetsInDays(int days);
+
+  /// Allowance reset countdown in days and hours (d = days, h = hours).
+  ///
+  /// In en, this message translates to:
+  /// **'Resets in {days}d {hours}h'**
+  String usageResetsInDaysHours(int days, int hours);
+
+  /// Usage header button when the allowance is exhausted.
+  ///
+  /// In en, this message translates to:
+  /// **'Allowance used up · See plans'**
+  String get usageUpgradeUsedUp;
+
+  /// Usage header button when less than 10% of the allowance is left.
+  ///
+  /// In en, this message translates to:
+  /// **'Running low · Upgrade'**
+  String get usageUpgradeLow;
+
+  /// Section heading for today's usage counters in the Usage header.
+  ///
+  /// In en, this message translates to:
+  /// **'Today'**
+  String get usageTodayTitle;
+
+  /// Label under today's request count.
+  ///
+  /// In en, this message translates to:
+  /// **'Requests'**
+  String get usageTodayRequests;
+
+  /// Label under today's input (prompt) token count.
+  ///
+  /// In en, this message translates to:
+  /// **'Input tokens'**
+  String get usageTodayInput;
+
+  /// Label under today's output (reply) token count.
+  ///
+  /// In en, this message translates to:
+  /// **'Output tokens'**
+  String get usageTodayOutput;
+
+  /// Label under today's generated image count.
+  ///
+  /// In en, this message translates to:
+  /// **'Images'**
+  String get usageTodayImages;
+
+  /// Note under today's counters when they come from this device instead of the server.
+  ///
+  /// In en, this message translates to:
+  /// **'Counted on this device'**
+  String get usageTodayDeviceNote;
+
+  /// Note when some of today's token counts are local estimates.
+  ///
+  /// In en, this message translates to:
+  /// **'≈ Includes estimates where the model sent no token counts'**
+  String get usageTodayEstimatedNote;
+
+  /// Note that Auto-mode requests are included in today's request count.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{Includes 1 request in Auto mode} other{Includes {count} requests in Auto mode}}'**
+  String usageTodayAutoNote(int count);
+
+  /// Section heading for the per-model remaining usage list.
+  ///
+  /// In en, this message translates to:
+  /// **'Remaining by model'**
+  String get usageModelsTitle;
+
+  /// Explains why models show different remaining counts. Must not mention prices or currency.
+  ///
+  /// In en, this message translates to:
+  /// **'Each model has its own remaining usage: larger models use more of your plan per message, so they show fewer messages left.'**
+  String get usageModelsFootnote;
+
+  /// Approximate chat messages left for one model in the current window.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =0{No messages left} =1{≈ 1 message left} other{≈ {count} messages left}}'**
+  String usageModelMessagesLeft(int count);
+
+  /// Approximate images left for one image model in the current window.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =0{No images left} =1{≈ 1 image left} other{≈ {count} images left}}'**
+  String usageModelImagesLeft(int count);
+
+  /// Screen reader label for a model whose remaining usage is unknown (shown as a dash).
+  ///
+  /// In en, this message translates to:
+  /// **'Remaining usage not known'**
+  String get usageModelRemainingUnknown;
+
+  /// Pill on the Auto model row: Auto picks a model for each request.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto'**
+  String get usageModelAuto;
+
+  /// Note under the Auto row explaining its remaining count is a conservative estimate.
+  ///
+  /// In en, this message translates to:
+  /// **'Estimate · Auto picks a model for each request'**
+  String get usageModelEstimateNote;
+
+  /// Provider card line: requests sent in Auto mode, also counted under their served model.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 request in Auto mode} other{{count} requests in Auto mode}}'**
+  String usageProviderAutoRequests(int count);
 }
 
 class _AppLocalizationsDelegate

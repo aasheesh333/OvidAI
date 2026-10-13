@@ -180,9 +180,7 @@ void main() {
         );
         if (states[id] != 'pending') {
           await store.update(
-            _row(
-              id,
-            ).withReceipt(ImageReceipt.parse(_receipt(id, states[id]!))),
+            _row(id).withReceipt(ImageReceipt.parse(_receipt(id, states[id]!))),
             isCurrent: () => true,
           );
         }

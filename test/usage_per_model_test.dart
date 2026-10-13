@@ -175,12 +175,10 @@ void main() {
         'input_tokens': 'many',
         'output_tokens': 7,
       })!;
-      expect((t.requests, t.inputTokens, t.outputTokens, t.images), (
-        0,
-        0,
-        7,
-        0,
-      ));
+      expect(
+        (t.requests, t.inputTokens, t.outputTokens, t.images),
+        (0, 0, 7, 0),
+      );
     });
   });
 
@@ -283,35 +281,38 @@ void main() {
   });
 
   group('recorder estimates', () {
-    test('unreported usage is journaled as a labelled local estimate', () async {
-      final writes = <UsageAttempt>[];
-      final recorder = UsageAttemptRecorder(
-        owner: Object(),
-        write: (attempt, {owner}) async {
-          writes.add(attempt);
-          return true;
-        },
-      );
-      final handle = (await recorder.begin(
-        requestId: 'request-estimate',
-        provider: AppState.ovidCloudProviderId,
-        requestedModel: 'auto',
-        purpose: 'agent',
-        sessionId: null,
-        runId: null,
-      ))!;
-      await handle.complete(
-        outcome: UsageOutcome.succeeded,
-        reportedModel: 'ovid-lite',
-        estimatedInput: 40,
-        estimatedOutput: 8,
-      );
-      final last = writes.last;
-      expect(last.inputTokens, UsageTokenCount.estimated(40));
-      expect(last.outputTokens, UsageTokenCount.estimated(8));
-      expect(last.totalTokens, UsageTokenCount.estimated(48));
-      expect(last.reportedModel, 'ovid-lite');
-    });
+    test(
+      'unreported usage is journaled as a labelled local estimate',
+      () async {
+        final writes = <UsageAttempt>[];
+        final recorder = UsageAttemptRecorder(
+          owner: Object(),
+          write: (attempt, {owner}) async {
+            writes.add(attempt);
+            return true;
+          },
+        );
+        final handle = (await recorder.begin(
+          requestId: 'request-estimate',
+          provider: AppState.ovidCloudProviderId,
+          requestedModel: 'auto',
+          purpose: 'agent',
+          sessionId: null,
+          runId: null,
+        ))!;
+        await handle.complete(
+          outcome: UsageOutcome.succeeded,
+          reportedModel: 'ovid-lite',
+          estimatedInput: 40,
+          estimatedOutput: 8,
+        );
+        final last = writes.last;
+        expect(last.inputTokens, UsageTokenCount.estimated(40));
+        expect(last.outputTokens, UsageTokenCount.estimated(8));
+        expect(last.totalTokens, UsageTokenCount.estimated(48));
+        expect(last.reportedModel, 'ovid-lite');
+      },
+    );
 
     test('reported usage always beats the estimate', () async {
       final writes = <UsageAttempt>[];

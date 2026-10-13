@@ -23,6 +23,8 @@ const _baseline = <String, int>{
   'lib/ui/providers_screen.dart': 53,
   'lib/ui/settings_screen.dart': 114,
   'lib/ui/settings_backup_screen.dart': 20,
+  'lib/ui/usage_screen.dart': 27,
+  'lib/ui/image_receipt_panel.dart': 13,
 };
 
 final _literal = RegExp(

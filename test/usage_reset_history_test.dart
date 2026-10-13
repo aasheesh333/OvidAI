@@ -111,7 +111,14 @@ void main() {
     );
     await mount(tester);
     expect(find.text('Resets in 4h 12m'), findsOneWidget);
-    expect(find.text('7 requests today'), findsOneWidget);
+    // Legacy server: requests_today (7) beats an empty device journal.
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('usage-requests-today')),
+        matching: find.text('7'),
+      ),
+      findsOneWidget,
+    );
     expect(find.byKey(const ValueKey('usage-upgrade')), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });

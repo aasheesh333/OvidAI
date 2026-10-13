@@ -8,6 +8,8 @@ import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
 import 'package:ovid_ai/core/usage_attempt.dart';
 import 'package:ovid_ai/core/usage_attempt_store.dart';
+import 'package:ovid_ai/core/usage_today.dart';
+import 'package:ovid_ai/l10n/l10n.dart';
 import 'package:ovid_ai/ui/billing_screen.dart';
 import 'package:ovid_ai/ui/cloud_usage_status.dart';
 import 'package:ovid_ai/ui/image_receipt_panel.dart';
@@ -21,59 +23,6 @@ import 'package:ovid_ai/ui/widgets/memo_listenable_builder.dart';
 /// web-IDE StatsLine + TurnUsage pattern,
 /// with server-authoritative remaining usage for Ovid Cloud.
 /// ═══════════════════════════════════════════════════════════════════
-
-/// Approximate public list pricing per model family, USD per 1M tokens
-/// (input, output). Internal only; costs are not rendered.
-class _Pricing {
-  final double inputPer1M;
-  final double outputPer1M;
-  const _Pricing(this.inputPer1M, this.outputPer1M);
-
-  static const List<(String, _Pricing)> _table = [
-    ('gpt-4o-mini', _Pricing(0.15, 0.60)),
-    ('gpt-4o', _Pricing(2.50, 10)),
-    ('gpt-4.1', _Pricing(2, 8)),
-    ('o3-mini', _Pricing(1.10, 4.40)),
-    ('o3', _Pricing(2, 8)),
-    ('o4-mini', _Pricing(1.10, 4.40)),
-    ('gemini-2.5-pro', _Pricing(1.25, 10)),
-    ('gemini-2.5-flash', _Pricing(0.30, 2.50)),
-    ('gemini-2.0-flash', _Pricing(0.10, 0.40)),
-    ('gemini', _Pricing(1.25, 10)),
-    ('deepseek-reasoner', _Pricing(0.55, 2.19)),
-    ('deepseek-chat', _Pricing(0.27, 1.10)),
-    ('deepseek-v4', _Pricing(0.25, 1.00)),
-    ('deepseek', _Pricing(0.27, 1.10)),
-    ('grok', _Pricing(3, 15)),
-    ('mistral-large', _Pricing(2, 6)),
-    ('codestral', _Pricing(0.30, 0.90)),
-    ('mistral', _Pricing(2, 6)),
-    ('qwen2.5-coder-32b', _Pricing(0.18, 0.18)),
-    ('qwen', _Pricing(0.35, 1.40)),
-    ('kimi', _Pricing(0.50, 2.00)),
-    ('llama-4', _Pricing(0.18, 0.18)),
-    ('llama-3.3-70b', _Pricing(0.10, 0.10)),
-    ('nemotron', _Pricing(0.20, 0.60)),
-    ('sonar', _Pricing(1, 1)),
-  ];
-
-  /// Pricing for a model id (keyword match, table order = precedence).
-  static _Pricing? forModel(String model) {
-    final m = model.split('·').first.trim().toLowerCase();
-    for (final (key, pricing) in _table) {
-      if (m.contains(key)) return pricing;
-    }
-    return null;
-  }
-
-  /// Approx USD cost for (input, output) tokens of [model]; null if the
-  /// model family is unknown.
-  static double? estimate(String model, int inTok, int outTok) {
-    final p = forModel(model);
-    if (p == null) return null;
-    return inTok / 1e6 * p.inputPer1M + outTok / 1e6 * p.outputPer1M;
-  }
-}
 
 class ProviderUsage {
   final String providerId;
@@ -96,8 +45,13 @@ class ProviderUsage {
   final Map<UsageProvenance, int> alternateTotals;
   final Set<UsageProvenance> provenances;
   int unknownTokenFields;
-  double costUsd; // approx, only known models contribute
-  bool hasPricedModel;
+
+  /// Locally estimated input/output (provider sent no usage block).
+  int estimatedIn;
+  int estimatedOut;
+
+  /// Requests sent in Auto mode (also counted under their served model).
+  int autoRequests;
   List<UsageModelUsage> models;
   ProviderUsage({
     required this.providerId,
@@ -121,8 +75,9 @@ class ProviderUsage {
     Map<UsageProvenance, int>? alternateTotals,
     Set<UsageProvenance>? provenances,
     this.unknownTokenFields = 0,
-    this.costUsd = 0,
-    this.hasPricedModel = false,
+    this.estimatedIn = 0,
+    this.estimatedOut = 0,
+    this.autoRequests = 0,
   }) : alternateTotals = alternateTotals ?? <UsageProvenance, int>{},
        provenances = provenances ?? <UsageProvenance>{};
 }
@@ -131,6 +86,9 @@ class UsageModelUsage {
   UsageModelUsage(this.model);
   final String model;
   int requests = 0;
+
+  /// Of [requests], how many were routed here by Auto mode.
+  int autoRequests = 0;
   int measuredTotal = 0;
   bool measuredTotalKnown = false;
   bool hasUnknownTotal = false;
@@ -149,7 +107,12 @@ class UsageSnapshot {
     required this.todayHasUnknown,
     required this.todayAlternate,
     required this.daily,
+    required this.deviceToday,
   });
+
+  /// Today's Ovid Cloud activity counted on this device (header fallback
+  /// when the server sends no `today`).
+  final UsageToday deviceToday;
 
   /// Per-provider aggregate, most-requested first.
   final List<ProviderUsage> providers;
@@ -189,6 +152,8 @@ class UsageSnapshot {
         for (final p in app.providers) Object.hash(p.id, p.name, p.isFree),
       ]),
       DateTime(now.year, now.month, now.day),
+      // Image receipts feed today's image count.
+      ImageStudio.I.receipts,
     );
   }
 
@@ -224,10 +189,12 @@ class UsageScreen extends StatelessWidget {
     for (final e in app.usageAttempts) {
       final local = e.startedAt.toLocal();
       final date = DateTime(local.year, local.month, local.day);
-      final dayTotal = e.totalTokens;
+      final dayTotal = _totalOf(e);
       if (date == today) {
         if (dayTotal == null || dayTotal.value == null) {
-          todayHasUnknown = true;
+          // In-flight, failed and cancelled attempts were not served; only a
+          // served request without counts makes today's total incomplete.
+          if (e.outcome == UsageOutcome.succeeded) todayHasUnknown = true;
         } else if (dayTotal.provenance == UsageProvenance.providerReported) {
           todayTokens += dayTotal.value!;
         } else {
@@ -245,9 +212,10 @@ class UsageScreen extends StatelessWidget {
             dayTotal?.provenance == UsageProvenance.providerReported &&
             dayTotal?.value != null &&
             dayTotal!.value! > 0) {
-          daily.putIfAbsent(e.provider, () => List<int>.filled(14, 0))[13 -
-                  age] +=
-              dayTotal.value!;
+          daily.putIfAbsent(
+            e.provider,
+            () => List<int>.filled(14, 0),
+          )[13 - age] += dayTotal.value!;
         }
       }
       final config = app.providerById(e.provider);
@@ -273,7 +241,34 @@ class UsageScreen extends StatelessWidget {
         ),
       );
       p.requests++;
-      final tokens = [e.inputTokens, e.outputTokens, e.totalTokens];
+      final viaAuto = e.requestedModel.trim().toLowerCase() == 'auto';
+      if (viaAuto) p.autoRequests++;
+      final model = e.reportedModel == null
+          ? 'Requested: ${e.requestedModel} · reported model unavailable'
+          : e.reportedModel!;
+      final modelIndex = modelsByProvider.putIfAbsent(
+        e.provider,
+        () => <String, UsageModelUsage>{},
+      );
+      final m = modelIndex[model];
+      final modelUsage = m ?? UsageModelUsage(model);
+      if (m == null) {
+        modelIndex[model] = modelUsage;
+        p.models.add(modelUsage);
+      }
+      modelUsage.requests++;
+      // Auto routes to the same manual models: the request counts under the
+      // served model and is also tallied as an Auto request.
+      if (viaAuto) modelUsage.autoRequests++;
+      // An attempt that was never served (failed, cancelled, in flight) with
+      // no counts is not "unknown usage": it counts as a request only.
+      if (e.outcome != UsageOutcome.succeeded &&
+          e.inputTokens?.value == null &&
+          e.outputTokens?.value == null &&
+          e.totalTokens?.value == null) {
+        continue;
+      }
+      final tokens = [e.inputTokens, e.outputTokens, _totalOf(e)];
       for (final token in tokens) {
         if (token == null || token.value == null) {
           p.unknownTokenFields++;
@@ -294,6 +289,9 @@ class UsageScreen extends StatelessWidget {
         p.inputKnown = p.inputMeasuredKnown;
       } else {
         p.inputKnown = p.inputMeasuredKnown;
+        if (input.provenance == UsageProvenance.locallyEstimated) {
+          p.estimatedIn += input.value!;
+        }
       }
       if (output?.provenance == UsageProvenance.providerReported &&
           output?.value != null) {
@@ -305,8 +303,11 @@ class UsageScreen extends StatelessWidget {
         p.outputKnown = p.outputMeasuredKnown;
       } else {
         p.outputKnown = p.outputMeasuredKnown;
+        if (output.provenance == UsageProvenance.locallyEstimated) {
+          p.estimatedOut += output.value!;
+        }
       }
-      final total = e.totalTokens;
+      final total = _totalOf(e);
       if (total?.provenance == UsageProvenance.providerReported &&
           total?.value != null) {
         p.measuredTotalKnown = true;
@@ -320,31 +321,6 @@ class UsageScreen extends StatelessWidget {
           ifAbsent: () => total.value!,
         );
       }
-      final model = e.reportedModel == null
-          ? 'Requested: ${e.requestedModel} · reported model unavailable'
-          : e.reportedModel!;
-      if (input?.provenance == UsageProvenance.providerReported &&
-          output?.provenance == UsageProvenance.providerReported &&
-          input?.value != null &&
-          output?.value != null) {
-        final cost = _Pricing.estimate(model, input!.value!, output!.value!);
-        if (cost != null) {
-          p
-            ..costUsd += cost
-            ..hasPricedModel = true;
-        }
-      }
-      final modelIndex = modelsByProvider.putIfAbsent(
-        e.provider,
-        () => <String, UsageModelUsage>{},
-      );
-      final m = modelIndex[model];
-      final modelUsage = m ?? UsageModelUsage(model);
-      if (m == null) {
-        modelIndex[model] = modelUsage;
-        p.models.add(modelUsage);
-      }
-      modelUsage.requests++;
       if (total?.provenance == UsageProvenance.providerReported &&
           total?.value != null) {
         modelUsage.measuredTotalKnown = true;
@@ -370,7 +346,27 @@ class UsageScreen extends StatelessWidget {
       todayHasUnknown: todayHasUnknown,
       todayAlternate: todayAlternate,
       daily: daily,
+      deviceToday: UsageToday.fromDevice(
+        attempts: app.usageAttempts,
+        receipts: ImageStudio.I.receipts,
+        provider: AppState.ovidCloudProviderId,
+        now: now,
+      ),
     );
+  }
+
+  /// The attempt's total; when the provider sent input and output but no
+  /// total, their sum — labelled derived (or estimated), never "reported".
+  static UsageTokenCount? _totalOf(UsageAttempt e) {
+    final total = e.totalTokens;
+    if (total?.value != null) return total;
+    final i = e.inputTokens, o = e.outputTokens;
+    if (i?.value == null || o?.value == null) return total;
+    final sum = i!.value! + o!.value!;
+    return i.provenance == UsageProvenance.locallyEstimated ||
+            o.provenance == UsageProvenance.locallyEstimated
+        ? UsageTokenCount.estimated(sum)
+        : UsageTokenCount.derived(sum);
   }
 
   IconData _iconFor(String name) {
@@ -401,10 +397,10 @@ class UsageScreen extends StatelessWidget {
       backgroundColor: Aether.bg,
       appBar: AppBar(
         leading: const BackButton(),
-        title: const Text('Usage'),
+        title: Text(context.l10n.usageTitle),
         actions: [
           PopupMenuButton<String>(
-            tooltip: 'More actions',
+            tooltip: context.l10n.usageMoreActions,
             icon: Icon(Icons.more_vert, color: Aether.textMuted),
             onSelected: (value) {
               if (value == 'image-receipts') {
@@ -415,17 +411,17 @@ class UsageScreen extends StatelessWidget {
                 );
               }
             },
-            itemBuilder: (context) => const [
+            itemBuilder: (context) => [
               PopupMenuItem<String>(
                 value: 'image-receipts',
-                child: Text('Image receipts'),
+                child: Text(context.l10n.usageImageReceipts),
               ),
             ],
           ),
         ],
       ),
       body: MemoListenableBuilder(
-        listenable: app,
+        listenable: Listenable.merge([app, ImageStudio.I]),
         memoKey: () => UsageSnapshot.keyFor(app),
         builder: (_) {
           // Aggregate INSIDE the builder (memoised by journal revision): the
@@ -440,8 +436,8 @@ class UsageScreen extends StatelessWidget {
           return ListView(
             padding: const EdgeInsets.only(bottom: 40),
             children: [
-              // ---- Hero: Ovid Cloud plan (server-authoritative) ----
-              const _PlanHeroHeader(),
+              // ---- Hero: Ovid Cloud plan, today and per-model remaining ----
+              _PlanHeroHeader(deviceToday: usage.deviceToday),
 
               // ---- Local token banner (unchanged copy for parity) ----
               Padding(
@@ -450,6 +446,8 @@ class UsageScreen extends StatelessWidget {
                   todayTokens: todayTokens,
                   tokensIn: tokensIn,
                   tokensOut: tokensOut,
+                  estimatedIn: providers.fold(0, (s, p) => s + p.estimatedIn),
+                  estimatedOut: providers.fold(0, (s, p) => s + p.estimatedOut),
                   inputKnown: providers.any((p) => p.inputKnown),
                   outputKnown: providers.any((p) => p.outputKnown),
                   inputHasUnknown: providers.any((p) => p.inputHasUnknown),
@@ -519,8 +517,7 @@ class UsageScreen extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(18, 6, 18, 0),
                   child: Text(
-                    'Observed attempts are separate from the server allowance. '
-                    'Unknown prices remain unavailable.',
+                    'Observed attempts are separate from the server allowance.',
                     style: AetherType.caption,
                   ),
                 ),
@@ -609,18 +606,25 @@ class _UsageHistoryNotice extends StatelessWidget {
 }
 
 /// "Resets in 4h 12m" for a server reset time (F-204). Null when unknown.
-String? formatResetCountdown(DateTime? resetsAt, {DateTime? now}) {
+String? formatResetCountdown(
+  DateTime? resetsAt, {
+  DateTime? now,
+  AppLocalizations? l10n,
+}) {
   if (resetsAt == null) return null;
+  final t = l10n ?? appLocalizationsFallback;
   final left = resetsAt.difference((now ?? DateTime.now()).toUtc());
-  if (left.inMinutes < 1) return 'Resets in under a minute';
+  if (left.inMinutes < 1) return t.usageResetsUnderMinute;
   if (left.inDays >= 1) {
     final hours = left.inHours % 24;
-    return 'Resets in ${left.inDays}d${hours > 0 ? ' ${hours}h' : ''}';
+    return hours > 0
+        ? t.usageResetsInDaysHours(left.inDays, hours)
+        : t.usageResetsInDays(left.inDays);
   }
   if (left.inHours >= 1) {
-    return 'Resets in ${left.inHours}h ${left.inMinutes % 60}m';
+    return t.usageResetsInHoursMinutes(left.inHours, left.inMinutes % 60);
   }
-  return 'Resets in ${left.inMinutes}m';
+  return t.usageResetsInMinutes(left.inMinutes);
 }
 
 /// A single compact stat column used by the local totals strip.
@@ -647,7 +651,17 @@ Widget _stat(String label, String value, {bool big = false}) {
 
 String _fmtTok(int n) => formatCompactCount(n);
 
-String _displayTokenValue(int value, bool known, bool hasUnknown) {
+String _displayTokenValue(
+  int value,
+  bool known,
+  bool hasUnknown, {
+  int estimated = 0,
+}) {
+  if (estimated > 0) {
+    // Reported plus locally estimated counts: approximate, never "unknown".
+    final approx = '≈ ${_fmtTok(value + estimated)}';
+    return hasUnknown ? '$approx · some unavailable' : approx;
+  }
   if (!known) return 'Unavailable';
   return hasUnknown ? '${_fmtTok(value)} · some unavailable' : _fmtTok(value);
 }
@@ -695,6 +709,8 @@ class _LocalTotalsStrip extends StatelessWidget {
     required this.todayTokens,
     required this.tokensIn,
     required this.tokensOut,
+    this.estimatedIn = 0,
+    this.estimatedOut = 0,
     required this.inputKnown,
     required this.outputKnown,
     required this.inputHasUnknown,
@@ -707,6 +723,8 @@ class _LocalTotalsStrip extends StatelessWidget {
   final int todayTokens;
   final int tokensIn;
   final int tokensOut;
+  final int estimatedIn;
+  final int estimatedOut;
   final bool inputKnown;
   final bool outputKnown;
   final bool inputHasUnknown;
@@ -714,6 +732,21 @@ class _LocalTotalsStrip extends StatelessWidget {
   final bool hasUnknown;
   final bool todayHasUnknown;
   final Map<UsageProvenance, int> todayAlternate;
+
+  /// Reported tokens today; local estimates make it approximate ("≈"),
+  /// never "Unavailable" when any count exists.
+  String _todayValue() {
+    final estimated =
+        (todayAlternate[UsageProvenance.locallyEstimated] ?? 0) +
+        (todayAlternate[UsageProvenance.derived] ?? 0);
+    final base = estimated > 0
+        ? '≈ ${_fmtTok(todayTokens + estimated)}'
+        : _fmtTok(todayTokens);
+    if (!todayHasUnknown) return base;
+    return todayTokens == 0 && estimated == 0
+        ? 'Unavailable'
+        : '$base · some unavailable';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -726,14 +759,7 @@ class _LocalTotalsStrip extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           child: Row(
             children: [
-              _stat(
-                'Today · provider-reported tokens',
-                todayHasUnknown
-                    ? (todayTokens == 0
-                          ? 'Unavailable'
-                          : '${_fmtTok(todayTokens)} · some unavailable')
-                    : _fmtTok(todayTokens),
-              ),
+              _stat('Today · provider-reported tokens', _todayValue()),
             ],
           ),
         ),
@@ -759,6 +785,8 @@ class _LocalTotalsStrip extends StatelessWidget {
               Text(
                 hasUnknown
                     ? 'Input · output · some values unavailable'
+                    : estimatedIn + estimatedOut > 0
+                    ? 'Input · output · includes estimates (≈)'
                     : 'Input · output · provider-reported usage',
                 style: TextStyle(fontSize: 11, color: Aether.textFaint),
               ),
@@ -768,8 +796,8 @@ class _LocalTotalsStrip extends StatelessWidget {
                   style: TextStyle(fontSize: 11, color: Aether.textFaint),
                 ),
               Text(
-                '${_displayTokenValue(tokensIn, inputKnown, inputHasUnknown)} in · '
-                '${_displayTokenValue(tokensOut, outputKnown, outputHasUnknown)} out',
+                '${_displayTokenValue(tokensIn, inputKnown, inputHasUnknown, estimated: estimatedIn)} in · '
+                '${_displayTokenValue(tokensOut, outputKnown, outputHasUnknown, estimated: estimatedOut)} out',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w700,
@@ -795,17 +823,28 @@ class _LocalTotalsStrip extends StatelessWidget {
 /// Hero plan header rendered on an [AetherGradientHeader] wash.
 ///
 /// Server-authoritative data from [CloudUsageStore] / [OvidCloudService] drives
-/// the pill (FREE/PLUS/PRO/MAX), the big "remaining" number, and the soft
-/// progress bar. Freshness state is surfaced via [CloudUsageStatus].
+/// the plan pill (FREE/PLUS/PRO/MAX), the overall remaining bar, the reset
+/// countdown and the per-model remaining list. Today's counters come from the
+/// server's `today` object, or this device's journal on older servers and
+/// offline. No price or currency is ever rendered.
 class _PlanHeroHeader extends StatefulWidget {
-  const _PlanHeroHeader();
+  const _PlanHeroHeader({required this.deviceToday});
+
+  final UsageToday deviceToday;
 
   @override
   State<_PlanHeroHeader> createState() => _PlanHeroHeaderState();
 }
 
-class _PlanHeroHeaderState extends State<_PlanHeroHeader> {
+class _PlanHeroHeaderState extends State<_PlanHeroHeader>
+    with AutomaticKeepAliveClientMixin {
   late final CloudUsageStore _store;
+
+  /// Stay mounted while scrolled away: the store subscription (and its fetch)
+  /// is not torn down and re-run as the user scrolls, and the list keeps a
+  /// stable scroll extent.
+  @override
+  bool get wantKeepAlive => true;
   OvidUsage? get _usage => _store.usage;
   bool get _loading => _store.loading && _usage == null;
 
@@ -848,12 +887,18 @@ class _PlanHeroHeaderState extends State<_PlanHeroHeader> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
+    final l10n = context.l10n;
     final app = AppState.I;
-    final tier = _usage?.tier ?? app.ovidCloudTier;
-    final isPaid = _usage?.isPaid ?? app.ovidCloudIsPaid;
+    final usage = _usage;
+    final tier = usage?.tier ?? app.ovidCloudTier;
+    final isPaid = usage?.isPaid ?? app.ovidCloudIsPaid;
     final label = _pillLabel(tier, isPaid);
     final pillColor = isPaid ? Aether.accent : Aether.textMuted;
-    final pct = _usage?.remainingFraction;
+    final pct = usage?.remainingFraction;
+    final today = UsageToday.resolve(usage, widget.deviceToday);
+    final models = usage?.perModel ?? const <OvidModelUsage>[];
+    final reset = formatResetCountdown(usage?.resetsAt, l10n: l10n);
 
     final card = AetherCard(
       padding: const EdgeInsets.all(20),
@@ -867,17 +912,21 @@ class _PlanHeroHeaderState extends State<_PlanHeroHeader> {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Icon(Icons.auto_awesome, size: 18, color: Aether.accent),
-              Text('Ovid Cloud', style: AetherType.title),
-              AetherPill(label: label, color: pillColor),
+              Text(l10n.usageCloudName, style: AetherType.title),
+              Semantics(
+                label: l10n.usagePlanSemantics(label),
+                excludeSemantics: true,
+                child: AetherPill(label: label, color: pillColor),
+              ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
-            _usage == null
-                ? 'Saved plan · awaiting server confirmation'
+            usage == null
+                ? l10n.usagePlanSaved
                 : _store.stale || _store.error != null
-                ? 'Last known plan and allowance'
-                : 'Server-confirmed plan and allowance',
+                ? l10n.usagePlanLastKnown
+                : l10n.usagePlanConfirmed,
             style: AetherType.caption,
           ),
           const SizedBox(height: 14),
@@ -889,30 +938,18 @@ class _PlanHeroHeaderState extends State<_PlanHeroHeader> {
             )
           else
             _RemainingHero(pct: pct),
-          if (_usage != null) ...[
+          // Only the server's own reset time is shown; the client never
+          // interprets the window itself.
+          if (reset != null) ...[
             const SizedBox(height: 10),
-            Wrap(
-              spacing: 14,
-              runSpacing: 6,
-              children: [
-                // Only the server's own reset time is shown; the client never
-                // interprets `budget_window` itself.
-                if (formatResetCountdown(_usage!.resetsAt) case final reset?)
-                  _HeroFact(
-                    key: const ValueKey('usage-reset'),
-                    icon: Icons.schedule,
-                    label: reset,
-                  ),
-                _HeroFact(
-                  key: const ValueKey('usage-requests-today'),
-                  icon: Icons.bolt_outlined,
-                  label: _usage!.requestsToday == 1
-                      ? '1 request today'
-                      : '${_usage!.requestsToday} requests today',
-                ),
-              ],
+            _HeroFact(
+              key: const ValueKey('usage-reset'),
+              icon: Icons.schedule,
+              label: reset,
             ),
           ],
+          const SizedBox(height: 16),
+          _TodayStats(today: today),
           if (pct != null && pct < 0.1 && tier != '15x') ...[
             const SizedBox(height: 12),
             SizedBox(
@@ -925,32 +962,31 @@ class _PlanHeroHeaderState extends State<_PlanHeroHeader> {
                 ),
                 icon: const Icon(Icons.arrow_upward, size: 18),
                 label: Text(
-                  pct <= 0
-                      ? 'Allowance used up · See plans'
-                      : 'Running low · Upgrade',
+                  pct <= 0 ? l10n.usageUpgradeUsedUp : l10n.usageUpgradeLow,
                 ),
               ),
             ),
           ],
           const SizedBox(height: 10),
-          Text('Server-authoritative', style: AetherType.caption),
+          Text(l10n.usageServerAuthoritative, style: AetherType.caption),
           CloudUsageStatus(store: _store),
-          if (_usage != null && _usage!.models.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            Text(
-              'AVAILABLE MODELS · remaining usage',
-              style: AetherType.caption.copyWith(
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.9,
+          if (models.isNotEmpty) ...[
+            const SizedBox(height: 18),
+            Semantics(
+              header: true,
+              child: Text(
+                l10n.usageModelsTitle.toUpperCase(),
+                style: AetherType.caption.copyWith(
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.9,
+                ),
               ),
             ),
             const SizedBox(height: 8),
-            for (final m in _usage!.models) _ModelRow(model: m),
+            for (final m in models)
+              _ModelRow(key: ValueKey('usage-model-${m.model}'), model: m),
             const SizedBox(height: 4),
-            Text(
-              'All models share your plan’s usage allowance.',
-              style: AetherType.caption,
-            ),
+            Text(l10n.usageModelsFootnote, style: AetherType.caption),
           ],
         ],
       ),
@@ -981,94 +1017,243 @@ class _HeroFact extends StatelessWidget {
   );
 }
 
+/// Today's requests / input tokens / output tokens / images. Four columns
+/// when there is room, two otherwise (320dp, large text).
+class _TodayStats extends StatelessWidget {
+  const _TodayStats({required this.today});
+  final UsageToday today;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final approx = today.tokensEstimated ? '≈ ' : '';
+    final cells = <(Key?, String, String)>[
+      (
+        const ValueKey('usage-requests-today'),
+        l10n.usageTodayRequests,
+        formatCompactCount(today.requests),
+      ),
+      (
+        const ValueKey('usage-input-today'),
+        l10n.usageTodayInput,
+        '$approx${formatCompactCount(today.inputTokens)}',
+      ),
+      (
+        const ValueKey('usage-output-today'),
+        l10n.usageTodayOutput,
+        '$approx${formatCompactCount(today.outputTokens)}',
+      ),
+      (
+        const ValueKey('usage-images-today'),
+        l10n.usageTodayImages,
+        formatCompactCount(today.images),
+      ),
+    ];
+    final notes = [
+      if (today.source == UsageTodaySource.device) l10n.usageTodayDeviceNote,
+      // Auto is tallied from this device's journal, so only claim it when
+      // the counters themselves are device-local.
+      if (today.source == UsageTodaySource.device && today.autoRequests > 0)
+        l10n.usageTodayAutoNote(today.autoRequests),
+      if (today.tokensEstimated) l10n.usageTodayEstimatedNote,
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Semantics(
+          header: true,
+          child: Text(
+            l10n.usageTodayTitle.toUpperCase(),
+            style: AetherType.caption.copyWith(
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.9,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final scale = MediaQuery.textScalerOf(context).scale(1);
+            final columns = constraints.maxWidth / scale >= 300 ? 4 : 2;
+            const gap = 10.0;
+            final width =
+                (constraints.maxWidth - gap * (columns - 1)) / columns;
+            return Wrap(
+              spacing: gap,
+              runSpacing: gap,
+              children: [
+                for (final (key, label, value) in cells)
+                  SizedBox(
+                    key: key,
+                    width: width,
+                    child: MergeSemantics(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Aether.surfaceAlt,
+                          borderRadius: BorderRadius.circular(AetherRadius.rMd),
+                          border: Border.all(color: Aether.hairline),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              value,
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                                fontFamily: Aether.mono,
+                                color: Aether.text,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(label, style: AetherType.caption),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+        for (final note in notes) ...[
+          const SizedBox(height: 6),
+          Text(note, style: AetherType.caption),
+        ],
+      ],
+    );
+  }
+}
+
 class _RemainingHero extends StatelessWidget {
   const _RemainingHero({required this.pct});
   final double? pct;
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     if (pct == null) {
-      return Text('Usage unavailable', style: AetherType.bodyMuted);
+      return Text(l10n.usageRemainingUnknown, style: AetherType.bodyMuted);
     }
-    final percentText = '${(pct! * 100).round()}% remaining';
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(percentText, style: AetherType.display),
-        const SizedBox(height: 10),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: LinearProgressIndicator(
-            value: pct,
-            minHeight: 8,
-            backgroundColor: Aether.surfaceAlt,
-            valueColor: AlwaysStoppedAnimation(
-              pct! < 0.1 ? Aether.danger : Aether.accent,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _ModelRow extends StatelessWidget {
-  const _ModelRow({required this.model});
-  final OvidModelUsage model;
-
-  @override
-  Widget build(BuildContext context) {
-    final pct = model.remainingFraction;
-    final label = pct == null
-        ? 'Usage unavailable'
-        : '${(pct * 100).round()}% remaining';
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+    final percentText = l10n.usageRemainingPercent((pct! * 100).round());
+    return MergeSemantics(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            ovidModelLabel(model.model),
-            style: TextStyle(
-              fontSize: 12,
-              fontFamily: Aether.mono,
-              color: Aether.text,
-            ),
-          ),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              color: pct != null && pct < 0.15 ? Aether.danger : Aether.accent,
-            ),
-          ),
-          const SizedBox(height: 4),
-          if (pct != null)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(5),
-              child: LinearProgressIndicator(
-                value: pct,
-                minHeight: 5,
-                backgroundColor: Aether.surfaceAlt,
-                valueColor: AlwaysStoppedAnimation(
-                  pct < 0.15 ? Aether.danger : Aether.accent,
-                ),
+          Text(percentText, style: AetherType.display),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: pct,
+              minHeight: 8,
+              semanticsLabel: l10n.usageOverallBarLabel,
+              backgroundColor: Aether.surfaceAlt,
+              valueColor: AlwaysStoppedAnimation(
+                pct! < 0.1 ? Aether.danger : Aether.accent,
               ),
             ),
+          ),
         ],
       ),
     );
   }
 }
 
-/// Per-provider card.
-///
-/// Replaces the previous `ListTile` + chevron with a self-contained
-/// [AetherCard] featuring an icon chip, provider title with a tier
-/// [AetherPill], a mono counts row (reqs / in / out), and an
-/// button that toggles an inline per-model breakdown. Tapping the
-/// card still opens the full [ProviderUsageScreen] for charts and totals.
+/// One model's own remaining usage: "≈ 120 messages left" / "≈ 8 images
+/// left", "—" when the model is unpriced or the count is unknown.
+class _ModelRow extends StatelessWidget {
+  const _ModelRow({super.key, required this.model});
+  final OvidModelUsage model;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final remaining = model.remaining;
+    final value = remaining == null
+        ? '—'
+        : model.isImage
+        ? l10n.usageModelImagesLeft(remaining)
+        : l10n.usageModelMessagesLeft(remaining);
+    final low = remaining != null && remaining < (model.isImage ? 2 : 10);
+    final name = Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Icon(
+          model.isImage ? Icons.image_outlined : Icons.chat_bubble_outline,
+          size: 15,
+          color: Aether.textMuted,
+        ),
+        Text(model.label, style: AetherType.body.copyWith(color: Aether.text)),
+        // The Auto row is usually named "Auto" already; only tag renamed ones.
+        if (model.auto && model.label.trim().toLowerCase() != 'auto')
+          AetherPill(label: l10n.usageModelAuto, color: Aether.accent),
+      ],
+    );
+    final count = Semantics(
+      label: remaining == null ? l10n.usageModelRemainingUnknown : null,
+      excludeSemantics: remaining == null,
+      child: Text(
+        value,
+        textAlign: TextAlign.end,
+        style: AetherType.body.copyWith(
+          fontWeight: FontWeight.w700,
+          fontFamily: Aether.mono,
+          color: remaining == null
+              ? Aether.textMuted
+              : low
+              ? Aether.danger
+              : Aether.text,
+        ),
+      ),
+    );
+    return MergeSemantics(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final scale = MediaQuery.textScalerOf(context).scale(1);
+                // Side by side when there is room; stacked at 320dp / 2.0x.
+                if (constraints.maxWidth / scale < 240) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [name, const SizedBox(height: 2), count],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: name),
+                    const SizedBox(width: 12),
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: constraints.maxWidth * 0.62,
+                      ),
+                      child: count,
+                    ),
+                  ],
+                );
+              },
+            ),
+            if (model.estimate != null) ...[
+              const SizedBox(height: 2),
+              Text(l10n.usageModelEstimateNote, style: AetherType.caption),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ProviderCard extends StatefulWidget {
   const _ProviderCard({required this.provider});
   final ProviderUsage provider;
@@ -1085,8 +1270,8 @@ class _ProviderCardState extends State<_ProviderCard> {
     final p = widget.provider;
     final countsLine =
         '${p.requests} requests · '
-        '${_displayTokenValue(p.tokensIn, p.inputKnown, p.inputHasUnknown)} in · '
-        '${_displayTokenValue(p.tokensOut, p.outputKnown, p.outputHasUnknown)} out';
+        '${_displayTokenValue(p.tokensIn, p.inputKnown, p.inputHasUnknown, estimated: p.estimatedIn)} in · '
+        '${_displayTokenValue(p.tokensOut, p.outputKnown, p.outputHasUnknown, estimated: p.estimatedOut)} out';
     return InkWell(
       borderRadius: BorderRadius.circular(AetherRadius.rLg),
       onTap: () => Navigator.of(context).push(
@@ -1141,6 +1326,13 @@ class _ProviderCardState extends State<_ProviderCard> {
                     fontSize: 12,
                   ),
                 ),
+                if (p.autoRequests > 0) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    context.l10n.usageProviderAutoRequests(p.autoRequests),
+                    style: AetherType.caption,
+                  ),
+                ],
                 if (_provenanceSummary(p).isNotEmpty) ...[
                   const SizedBox(height: 4),
                   Text(
@@ -1246,7 +1438,7 @@ class _ModelCounts extends StatelessWidget {
       Text(model.model, style: AetherType.mono.copyWith(color: Aether.text)),
       const SizedBox(height: 4),
       Text(
-        '${model.requests} req · ${model.measuredTotalKnown && !model.hasUnknownTotal ? '${_fmtTok(model.measuredTotal)} provider-reported tok' : 'Unavailable total'}',
+        '${model.requests} req${model.autoRequests > 0 ? ' (${model.autoRequests} via Auto)' : ''} · ${model.measuredTotalKnown && !model.hasUnknownTotal ? '${_fmtTok(model.measuredTotal)} provider-reported tok' : 'Unavailable total'}',
         style: AetherType.caption,
       ),
       if (model.alternateTotals.isNotEmpty)
@@ -1399,6 +1591,7 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                       p.tokensIn,
                       p.inputKnown,
                       p.inputHasUnknown,
+                      estimated: p.estimatedIn,
                     ),
                   ),
                   _cell(
@@ -1407,6 +1600,7 @@ class _ProviderUsageScreenState extends State<ProviderUsageScreen> {
                       p.tokensOut,
                       p.outputKnown,
                       p.outputHasUnknown,
+                      estimated: p.estimatedOut,
                     ),
                   ),
                   _cell(
