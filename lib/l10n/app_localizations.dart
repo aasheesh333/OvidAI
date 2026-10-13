@@ -723,6 +723,54 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'File'**
   String get attachmentTypeOther;
+
+  /// Image receipts: heading when a completed image request has no saved copy on this device.
+  ///
+  /// In en, this message translates to:
+  /// **'Image not saved on this device'**
+  String get receiptResultNotOnDeviceTitle;
+
+  /// Image receipts: explains the Recover image button for a completed request with no local copy.
+  ///
+  /// In en, this message translates to:
+  /// **'Recover image downloads it again from this receipt. It never starts a new paid request.'**
+  String get receiptResultNotOnDeviceBody;
+
+  /// Image receipts: heading for a failed image request, which produced no image.
+  ///
+  /// In en, this message translates to:
+  /// **'No image: the request failed'**
+  String get receiptResultFailedTitle;
+
+  /// Image receipts: body text for a failed image request.
+  ///
+  /// In en, this message translates to:
+  /// **'Nothing was produced for this request. The summary above shows whether it was charged.'**
+  String get receiptResultFailedBody;
+
+  /// Image receipts: heading while an image request is pending or its outcome is unknown.
+  ///
+  /// In en, this message translates to:
+  /// **'Result not ready yet'**
+  String get receiptResultPendingTitle;
+
+  /// Image receipts: body text while an image request is pending or unknown.
+  ///
+  /// In en, this message translates to:
+  /// **'Check status to update this request. Do not submit a replacement.'**
+  String get receiptResultPendingBody;
+
+  /// Image receipts: heading when a saved or recovered image could not be decoded for preview.
+  ///
+  /// In en, this message translates to:
+  /// **'Image preview failed'**
+  String get receiptResultPreviewFailedTitle;
+
+  /// Image receipts: result line after Recover image when the server no longer keeps the image bytes.
+  ///
+  /// In en, this message translates to:
+  /// **'Image no longer available from the server'**
+  String get receiptOutcomeNotOnServer;
 }
 
 class _AppLocalizationsDelegate

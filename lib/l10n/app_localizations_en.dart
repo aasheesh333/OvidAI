@@ -1,6 +1,5 @@
 // ignore: unused_import
 import 'package:intl/intl.dart' as intl;
-
 import 'app_localizations.dart';
 
 // ignore_for_file: type=lint
@@ -398,4 +397,32 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get attachmentTypeOther => 'File';
+
+  @override
+  String get receiptResultNotOnDeviceTitle => 'Image not saved on this device';
+
+  @override
+  String get receiptResultNotOnDeviceBody =>
+      'Recover image downloads it again from this receipt. It never starts a new paid request.';
+
+  @override
+  String get receiptResultFailedTitle => 'No image: the request failed';
+
+  @override
+  String get receiptResultFailedBody =>
+      'Nothing was produced for this request. The summary above shows whether it was charged.';
+
+  @override
+  String get receiptResultPendingTitle => 'Result not ready yet';
+
+  @override
+  String get receiptResultPendingBody =>
+      'Check status to update this request. Do not submit a replacement.';
+
+  @override
+  String get receiptResultPreviewFailedTitle => 'Image preview failed';
+
+  @override
+  String get receiptOutcomeNotOnServer =>
+      'Image no longer available from the server';
 }

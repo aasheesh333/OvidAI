@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'image_receipt_store.dart';
 import 'image_studio.dart';
 import 'state.dart';
 
@@ -29,6 +30,17 @@ class RecoveredImages {
       Directory(
         '${(await getApplicationSupportDirectory()).path}/recovered-images',
       );
+
+  /// The kept copy for [requestId], if one was written by [persist].
+  static Future<File?> existing(String requestId) async {
+    if (!validImageRequestId(requestId)) return null;
+    final root = await _root();
+    for (final extension in const ['png', 'jpg', 'webp']) {
+      final file = File('${root.path}/$requestId.$extension');
+      if (await file.exists()) return file;
+    }
+    return null;
+  }
 
   static Future<RecoveredImage> persist(
     ImageRequestRecord record,
@@ -57,6 +69,7 @@ class RecoveredImages {
           kind: MsgKind.imageGen,
           content: 'Recovered image',
           imagePath: file.path,
+          imageRequestId: record.requestId,
         ),
       );
       state.refresh();

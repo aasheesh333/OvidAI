@@ -1122,6 +1122,7 @@ class Message {
     this.toolInput,
     this.attachments = const [],
     this.imagePath,
+    this.imageRequestId,
     this.htmlArtifact,
     this.feedback,
     this.feedbackNote,
@@ -1133,6 +1134,10 @@ class Message {
   /// Local file path for `MsgKind.imageGen` rows — the generated image
   /// saved into the session workspace (rendered in-chat, tappable to open).
   final String? imagePath;
+
+  /// Ovid Cloud image request id behind an `imageGen` row, so Image receipts
+  /// can show the saved result instead of "unavailable".
+  final String? imageRequestId;
 
   final HtmlArtifact? htmlArtifact;
 
@@ -1179,6 +1184,9 @@ class Message {
     toolSessionId: j['toolSessionId'] as String?,
     toolInput: j['toolInput'] as String?,
     imagePath: j['imagePath'] as String?,
+    imageRequestId: j['imageRequestId'] is String
+        ? j['imageRequestId'] as String
+        : null,
     htmlArtifact: HtmlArtifact.tryFromJson(j['htmlArtifact']),
     feedback: j['feedback'] as String?,
     feedbackNote: j['feedbackNote'] as String?,
@@ -1205,6 +1213,7 @@ class Message {
     if (toolSessionId != null) 'toolSessionId': toolSessionId,
     if (toolInput != null) 'toolInput': toolInput,
     if (imagePath != null) 'imagePath': imagePath,
+    if (imageRequestId != null) 'imageRequestId': imageRequestId,
     if (htmlArtifact != null) 'htmlArtifact': htmlArtifact!.toJson(),
     if (feedback != null) 'feedback': feedback,
     if (feedbackNote != null && feedbackNote!.isNotEmpty)

@@ -311,5 +311,22 @@
   "attachmentTypeVideo": "Video",
   "@attachmentTypeVideo": {"description": "Attachment type name for screen readers: a video file."},
   "attachmentTypeOther": "File",
-  "@attachmentTypeOther": {"description": "Attachment type name for screen readers: any other kind of file."}
+  "@attachmentTypeOther": {"description": "Attachment type name for screen readers: any other kind of file."},
+
+  "receiptResultNotOnDeviceTitle": "Image not saved on this device",
+  "@receiptResultNotOnDeviceTitle": {"description": "Image receipts: heading when a completed image request has no saved copy on this device."},
+  "receiptResultNotOnDeviceBody": "Recover image downloads it again from this receipt. It never starts a new paid request.",
+  "@receiptResultNotOnDeviceBody": {"description": "Image receipts: explains the Recover image button for a completed request with no local copy."},
+  "receiptResultFailedTitle": "No image: the request failed",
+  "@receiptResultFailedTitle": {"description": "Image receipts: heading for a failed image request, which produced no image."},
+  "receiptResultFailedBody": "Nothing was produced for this request. The summary above shows whether it was charged.",
+  "@receiptResultFailedBody": {"description": "Image receipts: body text for a failed image request."},
+  "receiptResultPendingTitle": "Result not ready yet",
+  "@receiptResultPendingTitle": {"description": "Image receipts: heading while an image request is pending or its outcome is unknown."},
+  "receiptResultPendingBody": "Check status to update this request. Do not submit a replacement.",
+  "@receiptResultPendingBody": {"description": "Image receipts: body text while an image request is pending or unknown."},
+  "receiptResultPreviewFailedTitle": "Image preview failed",
+  "@receiptResultPreviewFailedTitle": {"description": "Image receipts: heading when a saved or recovered image could not be decoded for preview."},
+  "receiptOutcomeNotOnServer": "Image no longer available from the server",
+  "@receiptOutcomeNotOnServer": {"description": "Image receipts: result line after Recover image when the server no longer keeps the image bytes."}
 }

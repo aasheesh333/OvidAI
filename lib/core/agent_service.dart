@@ -25354,6 +25354,7 @@ ${await _agentsMdBlock()}
         }
       }
       Uint8List bytes;
+      String? imageRequestId;
       if (inference) {
         final capacity =
             _runResolved.imageCapacityFailure ?? ImageStudio.I.capacityError;
@@ -25406,6 +25407,7 @@ ${await _agentsMdBlock()}
           return 'Error: ${prefix}Image bytes unavailable; no image was saved.';
         }
         bytes = result.bytes!;
+        imageRequestId = result.record.requestId;
       } else {
         bytes = await ImageStudio.transform(
           input!,
@@ -25431,6 +25433,7 @@ ${await _agentsMdBlock()}
               args['prompt'] as String? ??
               '${tool == 'crop_image' ? 'Cropped' : 'Resized'} image',
           imagePath: file.path,
+          imageRequestId: imageRequestId,
         ),
       );
       AppState.I.refresh();
