@@ -733,8 +733,13 @@ class _RunCtx {
   final Object accountToken = AppState.I.sessionAccountToken;
   final AgentRun run;
   final ChatSession session;
-  final ProviderConfig provider;
-  final _RequestRoute route;
+
+  /// The run's request route. Starts as the composer chip at admission and
+  /// is re-pointed at the CURRENT chip whenever a chat-box message joins the
+  /// running loop ([AgentService._adoptChipRoute]); the run then continues on
+  /// it. Changing the chip without sending never touches it.
+  ProviderConfig provider;
+  _RequestRoute route;
 
   /// The run generation this chain belongs to (see [AgentRun.runEpoch]):
   /// Stop and newer runs bump the bucket's epoch, so a stale chain can be
@@ -10397,6 +10402,7 @@ user which one instead of assuming this one.''';
   }) async {
     if (!_hasInRunQueueMessages) return;
     final parts = <String>[];
+    var fromChatBox = false;
     while (_hasInRunQueueMessages) {
       _syncQueueIds(_runResolved);
       final index = _runResolved.queueIds.indexWhere(
@@ -10405,6 +10411,9 @@ user which one instead of assuming this one.''';
       final userReferences = _runResolved.userReferenceQueueIds.contains(
         _runResolved.queueIds[index],
       );
+      // Only composer rows carry userReferences; internal notices
+      // (subagent reports, settlement notices) never switch the model.
+      if (userReferences) fromChatBox = true;
       final attachments = _attachmentsForQueuedMessage(_runResolved, index);
       attachmentsToAcknowledge?.addAll(attachments);
       final queued = _queueRemoveAt(_runResolved, index);
@@ -10444,12 +10453,65 @@ user which one instead of assuming this one.''';
       );
     }
     msgs.add({'role': 'user', 'content': parts.join('\n\n')});
+    final ctx = _runCtx;
+    if (fromChatBox && ctx != null) _adoptChipRoute(ctx);
     _emit(
       'think',
       parts.length == 1
           ? 'queued message joined this run'
           : '${parts.length} queued messages joined this run',
     );
+  }
+
+  /// Owner rule: the composer chip is authoritative. When a chat-box message
+  /// joins the running loop, the run switches to the chip's CURRENT route
+  /// (provider, credentials, Ovid Cloud vs BYOK, Auto, preset temperature)
+  /// for that request and every later one. Subagents keep their own model.
+  /// An unusable chip (unconfigured provider, foreign Ovid Cloud key) keeps
+  /// the current route with a visible note. Returns whether it switched.
+  bool _adoptChipRoute(_RunCtx ctx) {
+    final s = ctx.session;
+    if (s.isSubagent) return false;
+    final provider = AppState.I.providerForSession(s);
+    final usable =
+        provider != null &&
+        provider.isConfigured &&
+        s.model.isNotEmpty &&
+        s.model != 'Select a provider' &&
+        (provider.id != AppState.ovidCloudProviderId ||
+            OvidCloudService.I.keyOwnedByCurrentAccount);
+    if (!usable) {
+      if (provider?.id != ctx.route.providerId ||
+          s.model != ctx.route.model) {
+        _emit(
+          'think',
+          'selected model is not available — continuing on '
+              '${ctx.route.model}',
+        );
+      }
+      return false;
+    }
+    final next = _RequestRoute(
+      provider,
+      s.model,
+      temperature: PresetRegistry.byId(s.presetId).temperature,
+    );
+    final cur = ctx.route;
+    if (next.providerId == cur.providerId &&
+        next.model == cur.model &&
+        next.baseUrl == cur.baseUrl &&
+        next.apiKey == cur.apiKey &&
+        next.apiFormat == cur.apiFormat &&
+        next.temperature == cur.temperature) {
+      return false;
+    }
+    ctx.route = next;
+    ctx.provider = next.providerCopy();
+    ctx.run.modelSnapshot = next.model;
+    ctx.run.temperatureSnapshot = next.temperature;
+    _emit('think', 'switched to ${next.model} for this message');
+    notifyListeners();
+    return true;
   }
 
   /// ── compaction parity (ovid-compaction-basic) ──────────────────────
@@ -10533,8 +10595,9 @@ user which one instead of assuming this one.''';
     return requested > cap ? cap : requested;
   }
 
-  /// Model captured from the session chip at admission. Budgeting/accounting
-  /// follows that snapshot while the user chooses a model for the next turn.
+  /// Model the run is actually using: the chip at admission, re-captured
+  /// whenever a chat-box message joins the run. Budgeting/accounting follows
+  /// it while a chip change without a send waits for the next message.
   static String effectiveModelForSession(ChatSession s) {
     final r = AgentService.I._runs[s.id];
     return r?.modelSnapshot ?? s.model;
@@ -11750,7 +11813,9 @@ can drive there yourself with the device_* tools):
     Message? submittedMessage,
   }) async {
     final s = ctx.session;
-    final p = ctx.provider;
+    // Re-read after every queue drain: a chat-box message switches the run
+    // to the chip's current route (see _adoptChipRoute).
+    var p = ctx.provider;
     if (_runChainStale || ctx.run.activeRunId != ctx.ownedRunId) return;
     final runId = ctx.ownedRunId!;
     ctx.run.runKey = s.id;
@@ -12214,6 +12279,7 @@ ${await _agentsMdBlock()}
           attachmentsToAcknowledge: attachmentsToAcknowledge,
         );
         if (_runChainStale) break;
+        p = ctx.provider;
         final requestId = _logicalRequestId();
         var msg = await _callLlm(p, msgs, s, requestId: requestId);
         if (_runChainStale) break;
@@ -12704,6 +12770,7 @@ ${await _agentsMdBlock()}
           msgs,
           attachmentsToAcknowledge: attachmentsToAcknowledge,
         );
+        p = ctx.provider;
         // Soft turn budget, applied AFTER the reply was fully processed:
         // compact history and nudge the model to keep going. Task completion
         // is still the only real bound.

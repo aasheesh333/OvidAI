@@ -15,6 +15,8 @@ import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
+import 'package:ovid_ai/core/usage_attempt.dart';
+import 'package:ovid_ai/core/usage_attempt_recorder.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
 
@@ -210,38 +212,6 @@ void main() {
     expect(agent.busyFor(session.id), isFalse);
   });
 
-  test('ordinary queue joins the running loop on the admitted route', () async {
-    final entered = Completer<void>();
-    final release = Completer<void>();
-    respond = (req, body) async {
-      if (requests.length == 1) {
-        entered.complete();
-        await release.future;
-        await answer(req, '', tool: true);
-      } else {
-        await answer(req, 'done-${requests.length}');
-      }
-    };
-    final first = agent.runTask('first', sessionId: session.id);
-    await entered.future;
-    app.providers.add(ProviderConfig(id: 'next-provider', name: 'Next',
-        description: '', baseUrl: 'http://127.0.0.1:${server.port}/next/',
-        apiKey: 'next-key', models: ['next-model']));
-    session..providerId = 'next-provider'..model = 'next-model';
-    agent.enqueueMessage('ordinary follow-up', sessionId: session.id);
-    release.complete();
-    await first;
-    await until(() => !agent.busyFor(session.id));
-    // Queueing never stops the run: the follow-up rides the run's very next
-    // request (after the tool result) on the route the run was admitted with.
-    expect(requests.map((r) => r['model']), ['chip-model', 'chip-model']);
-    expect(requests[1]['path'], '/original/chat/completions');
-    expect(jsonEncode(requests[1]['messages']), contains('ordinary follow-up'));
-    expect(agent.queuedMessagesFor(session.id), isEmpty);
-    expect(session.messages.where((m) => m.role == 'user' &&
-        m.content == 'ordinary follow-up'), hasLength(1));
-  });
-
   test('fanout inside an admitted run leaves its model and transcript intact', () async {
     String? result;
     String? snapshot;
@@ -258,6 +228,109 @@ void main() {
     expect(snapshot, 'chip-model');
     expect(session.model, 'next-model');
     expect(session.messages.where((m) => m.role == 'assistant' && m.content == 'done'), hasLength(1));
+  });
+
+  void addNextProvider() {
+    app.providers.add(ProviderConfig(id: 'next-provider', name: 'Next',
+        description: '', baseUrl: 'http://127.0.0.1:${server.port}/next/',
+        apiKey: 'next-key', models: ['next-model']));
+  }
+
+  void selectNextChip() {
+    addNextProvider();
+    session..providerId = 'next-provider'..model = 'next-model';
+  }
+
+  test('a queued message after a chip change switches the route for that '
+      'and every later request of the run', () async {
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    respond = (req, body) async {
+      if (requests.length == 1) {
+        entered.complete();
+        await release.future;
+        await answer(req, '', tool: true);
+      } else if (requests.length == 2) {
+        await answer(req, '', tool: true); // the run keeps looping
+      } else {
+        await answer(req, 'done-${requests.length}');
+      }
+    };
+    final first = agent.runTask('first', sessionId: session.id);
+    await entered.future;
+    selectNextChip();
+    agent.enqueueMessage('ordinary follow-up', sessionId: session.id);
+    release.complete();
+    await first;
+    await until(() => !agent.busyFor(session.id));
+    // Queueing never stops the run; the follow-up rides its very next
+    // request on the chip selected when it is delivered — and the run then
+    // CONTINUES on that route through the tool loop.
+    expect(requests.map((r) => r['model']),
+        ['chip-model', 'next-model', 'next-model']);
+    expect(requests.map((r) => r['path']), [
+      '/original/chat/completions',
+      '/next/chat/completions',
+      '/next/chat/completions',
+    ]);
+    expect(requests[1]['authorization'], 'Bearer next-key');
+    expect(requests[2]['authorization'], 'Bearer next-key');
+    expect(jsonEncode(requests[1]['messages']), contains('ordinary follow-up'));
+    expect(agent.queuedMessagesFor(session.id), isEmpty);
+    expect(session.messages.where((m) => m.role == 'user' &&
+        m.content == 'ordinary follow-up'), hasLength(1));
+  });
+
+  test('a chip change without a send keeps the running run on its route', () async {
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    respond = (req, body) async {
+      if (requests.length == 1) {
+        entered.complete();
+        await release.future;
+        await answer(req, '', tool: true);
+      } else if (requests.length == 2) {
+        await answer(req, '', tool: true);
+      } else {
+        await answer(req, 'done');
+      }
+    };
+    final first = agent.runTask('first', sessionId: session.id);
+    await entered.future;
+    selectNextChip();
+    release.complete();
+    await first;
+    await until(() => !agent.busyFor(session.id));
+    expect(requests.map((r) => r['model']),
+        ['chip-model', 'chip-model', 'chip-model']);
+    expect(requests.map((r) => r['authorization']).toSet(),
+        {'Bearer original-key'});
+    expect(AgentService.effectiveModelForSession(session), 'chip-model');
+  });
+
+  test('internal notices never switch the route; only chat-box rows do', () async {
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    respond = (req, body) async {
+      if (requests.length == 1) {
+        entered.complete();
+        await release.future;
+        await answer(req, '', tool: true);
+      } else {
+        await answer(req, 'done');
+      }
+    };
+    final first = agent.runTask('first', sessionId: session.id);
+    await entered.future;
+    selectNextChip();
+    // Subagent reports / settlement notices enter the queue without the
+    // composer flag.
+    agent.runBucketForTest(session.id).queue.add('subagent report');
+    release.complete();
+    await first;
+    await until(() => !agent.busyFor(session.id));
+    expect(requests.map((r) => r['model']), ['chip-model', 'chip-model']);
+    expect(jsonEncode(requests[1]['messages']), contains('subagent report'));
   });
 
   test('steered and ordinary rows join the next request together, in queue order', () async {
@@ -277,14 +350,91 @@ void main() {
     agent.enqueueMessage('ordinary', sessionId: session.id);
     agent.enqueueMessage('steering', sessionId: session.id);
     agent.steerQueuedMessageById(agent.queuedMessageIdsFor(session.id).last);
-    session.model = 'next-model';
+    selectNextChip();
     release.complete();
     await task;
     await until(() => !agent.busyFor(session.id));
-    expect(requests.map((r) => r['model']), ['chip-model', 'chip-model']);
+    expect(requests.map((r) => r['model']), ['chip-model', 'next-model']);
     final sent = jsonEncode(requests[1]['messages']);
     expect(sent.indexOf('steering'), greaterThan(-1));
     expect(sent.indexOf('ordinary'), greaterThan(sent.indexOf('steering')));
+  });
+
+  test('stop-and-send-now runs the queued message on the current chip', () async {
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    respond = (req, body) async {
+      if (requests.length == 1) {
+        entered.complete();
+        await release.future;
+        try {
+          await answer(req, '', tool: true);
+        } catch (_) {}
+      } else {
+        await answer(req, 'done');
+      }
+    };
+    final first = agent.runTask('first', sessionId: session.id);
+    await entered.future;
+    agent.enqueueMessage('urgent', sessionId: session.id);
+    selectNextChip();
+    agent.quickSendQueuedMessage(agent.queuedMessageIdsFor(session.id).single,
+        sessionId: session.id);
+    release.complete();
+    await first;
+    await until(() => requests.length >= 2 && !agent.busyFor(session.id));
+    expect(requests.map((r) => r['model']), ['chip-model', 'next-model']);
+    expect(requests[1]['path'], '/next/chat/completions');
+    expect(requests[1]['authorization'], 'Bearer next-key');
+    expect(jsonEncode(requests[1]['messages']), contains('urgent'));
+  });
+
+  test('a new run uses the current chip', () async {
+    await agent.runTask('first', sessionId: session.id);
+    selectNextChip();
+    await agent.runTask('second', sessionId: session.id);
+    expect(requests.map((r) => r['model']), ['chip-model', 'next-model']);
+    expect(requests[1]['authorization'], 'Bearer next-key');
+  });
+
+  test('usage attribution follows the model actually used after a switch', () async {
+    final attempts = <UsageAttempt>[];
+    agent.resetUsageAttemptRecorderForTest(recorder: UsageAttemptRecorder(
+      owner: AppState.I.sessionAccountToken,
+      write: (attempt, {owner}) async {
+        attempts.add(attempt);
+        return true;
+      },
+    ));
+    addTearDown(() => agent.resetUsageAttemptRecorderForTest());
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    respond = (req, body) async {
+      if (requests.length == 1) {
+        entered.complete();
+        await release.future;
+        await answer(req, '', tool: true);
+      } else {
+        await answer(req, 'done');
+      }
+    };
+    final first = agent.runTask('first', sessionId: session.id);
+    await entered.future;
+    selectNextChip();
+    agent.enqueueMessage('follow-up', sessionId: session.id);
+    release.complete();
+    await first;
+    await until(() => !agent.busyFor(session.id));
+    final byRequest = <String, UsageAttempt>{};
+    for (final a in attempts) {
+      byRequest[a.requestId] = a;
+    }
+    final used = byRequest.values
+        .where((a) => a.purpose == 'agent')
+        .map((a) => '${a.provider}/${a.requestedModel}')
+        .toList();
+    expect(used, ['dispatch-fixture/chip-model', 'next-provider/next-model']);
+    expect(AgentService.effectiveModelForSession(session), 'next-model');
   });
 
   for (final barrier in ['pre_request', 'retry']) {
