@@ -50,7 +50,11 @@ import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/attachment_tiles.dart';
 import 'chat_overflow_menu.dart';
+import 'artifact_preview.dart';
+import '../core/session_artifacts.dart';
 import '../l10n/l10n.dart';
+import 'widgets/chat_tool_visuals.dart';
+import 'widgets/code_highlight.dart';
 
 /// Chat screen — Gemini/DeepSeek grade: reasoning chips, code blocks,
 /// in-chat image generation card, model picker, utility input bar.
@@ -209,9 +213,14 @@ class _ChatTranscriptState extends State<ChatTranscript> {
 /// `row-in` / `wide-in` entrance — fade + 8px slide-up, plays ONCE
 /// when the widget is inserted (streaming rebuilds don't re-trigger it
 /// because the State persists in the ListView element).
+///
+/// [fromUser] rows (the message the user just sent) slide in from the right
+/// with a slight scale-up, the way the Claude app "drops" a sent bubble into
+/// the thread; assistant rows rise from below.
 class _RowIn extends StatefulWidget {
   final Widget child;
-  const _RowIn({required this.child});
+  final bool fromUser;
+  const _RowIn({required this.child, this.fromUser = false});
   @override
   State<_RowIn> createState() => _RowInState();
 }
@@ -237,15 +246,24 @@ class _RowInState extends State<_RowIn> with SingleTickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     final curved = CurvedAnimation(parent: _c, curve: Curves.easeOutCubic);
+    final slid = SlideTransition(
+      position: Tween<Offset>(
+        begin: widget.fromUser
+            ? const Offset(0.05, 0.02)
+            : const Offset(0, 0.04),
+        end: Offset.zero,
+      ).animate(curved),
+      child: widget.child,
+    );
     return FadeTransition(
       opacity: curved,
-      child: SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(0, 0.04),
-          end: Offset.zero,
-        ).animate(curved),
-        child: widget.child,
-      ),
+      child: widget.fromUser
+          ? ScaleTransition(
+              alignment: Alignment.bottomRight,
+              scale: Tween<double>(begin: 0.96, end: 1).animate(curved),
+              child: slid,
+            )
+          : slid,
     );
   }
 }
@@ -375,6 +393,7 @@ Widget _buildItem(
 }) {
   if (item is SingleItem) {
     return _RowIn(
+      fromUser: item.m.role == 'user',
       child: _MessageView(
         m: item.m,
         session: s,
@@ -3212,10 +3231,56 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+/// Session-local thinking timeline of a live bubble.
+///
+/// The agent streams reasoning into the SAME message that later becomes the
+/// answer, so once the answer starts the reasoning text is no longer on the
+/// message. The UI records when thinking started/ended and the last
+/// reasoning text it showed, so the finished answer can keep a collapsed
+/// "Thought for 6s" block above it (Claude-app parity) without changing the
+/// persisted transcript shape. Lost on restart by design: persisted rows
+/// carry their own reasoning messages.
+class _ThinkClock {
+  DateTime start;
+  DateTime? end;
+  String snapshot = '';
+  _ThinkClock(this.start);
+
+  static final Expando<_ThinkClock> _clocks = Expando('think-clock');
+
+  static _ThinkClock? of(Message m) => _clocks[m];
+
+  /// Called from the bubble's build: cheap, idempotent bookkeeping.
+  static void observe(Message m) {
+    final c = _clocks[m];
+    if (m.thinking) {
+      final clock = c ?? (_clocks[m] = _ThinkClock(DateTime.now()));
+      if (m.content.isNotEmpty) clock.snapshot = m.content;
+      return;
+    }
+    if (c != null && c.end == null) c.end = DateTime.now();
+  }
+
+  Duration? get duration => end?.difference(start);
+}
+
+/// Compact human duration for the thinking label ("4s", "1m 12s").
+String _thinkDuration(Duration d) {
+  final s = d.inSeconds < 1 ? 1 : d.inSeconds;
+  if (s < 60) return '${s}s';
+  final m = s ~/ 60;
+  final r = s % 60;
+  return r == 0 ? '${m}m' : '${m}m ${r}s';
+}
+
 /// Compact, default-collapsed reasoning disclosure — DSH-style geometry.
-/// A 28px summary row (leading glyph · truncating title · rotating chevron)
-/// expands to a hairline-separated, full-width muted body. The live
-/// "Thinking…" shimmer is preserved in the summary while streaming.
+/// A 33px summary row (leading glyph · truncating title · rotating chevron)
+/// expands to a hairline-separated, full-width muted body.
+///
+/// Claude-style states:
+///   • live: chase dots + shimmering "Thinking… 4s" (seconds tick live);
+///   • done: "Thought for 6s" (or "Thoughts" when the duration is unknown);
+///   • the body opens/closes with a short size animation.
 class _ReasoningCard extends StatefulWidget {
   final Message m;
 
@@ -3223,7 +3288,19 @@ class _ReasoningCard extends StatefulWidget {
   /// message while it thinks). Finalized rows still default to collapsed;
   /// a user tap always wins via [_ReasoningCardState._override].
   final bool expandedByDefault;
-  const _ReasoningCard(this.m, {this.expandedByDefault = false});
+
+  /// Reasoning text to show instead of `m.content` (the recorded snapshot
+  /// of a bubble that has since turned into the answer).
+  final String? contentOverride;
+
+  /// Thinking duration when known from the live timeline.
+  final Duration? duration;
+  const _ReasoningCard(
+    this.m, {
+    this.expandedByDefault = false,
+    this.contentOverride,
+    this.duration,
+  });
   @override
   State<_ReasoningCard> createState() => _ReasoningCardState();
 }
@@ -3232,12 +3309,66 @@ class _ReasoningCardState extends State<_ReasoningCard> {
   /// null = default (collapsed, unless [expandedByDefault]). Once the user
   /// taps, we lock to their choice.
   bool? _override;
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReasoningCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncTicker();
+  }
+
+  /// A 1 s ticker only while thinking, so the live seconds advance even
+  /// when no token arrives; stopped (and never created) otherwise.
+  void _syncTicker() {
+    final live = widget.m.thinking && widget.contentOverride == null;
+    if (live && _tick == null) {
+      _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!live) {
+      _tick?.cancel();
+      _tick = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  Duration? _doneDuration() {
+    if (widget.duration != null) return widget.duration;
+    final m = widget.m;
+    if (m.kind == MsgKind.reasoning && m.elapsedMs != null) {
+      return Duration(milliseconds: m.elapsedMs!);
+    }
+    return _ThinkClock.of(m)?.duration;
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isStreaming = widget.m.thinking;
+    final l10n = context.l10n;
+    final isStreaming = widget.m.thinking && widget.contentOverride == null;
     final expanded = _override ?? widget.expandedByDefault;
-    final hasBody = widget.m.content.trim().isNotEmpty;
+    final body = widget.contentOverride ?? widget.m.content;
+    final hasBody = body.trim().isNotEmpty;
+    final liveStart = _ThinkClock.of(widget.m)?.start;
+    final liveLabel = liveStart == null
+        ? l10n.chatThinking
+        : l10n.chatThinkingFor(
+            _thinkDuration(DateTime.now().difference(liveStart)),
+          );
+    final done = _doneDuration();
+    final doneLabel = done == null
+        ? l10n.chatThoughts
+        : l10n.chatThoughtFor(_thinkDuration(done));
     return Container(
       key: const ValueKey('chat-reasoning-disclosure'),
       margin: const EdgeInsets.only(bottom: 4),
@@ -3253,79 +3384,98 @@ class _ReasoningCardState extends State<_ReasoningCard> {
                 bottom: BorderSide(color: Aether.hairlineStrong, width: 0.5),
               ),
             ),
-            child: InkWell(
-              key: const ValueKey('chat-reasoning-summary'),
-              borderRadius: BorderRadius.circular(6),
-              onTap: hasBody
-                  ? () => setState(() => _override = !expanded)
-                  : null,
-              child: SizedBox(
-                height: 33,
-                child: Row(
-                  children: [
-                    if (isStreaming)
-                      _ChaseDot(Aether.accent)
-                    else
-                      Icon(
-                        Icons.psychology_outlined,
-                        size: 15,
-                        color: Aether.textMuted,
-                      ),
-                    const SizedBox(width: 6),
-                    if (isStreaming)
-                      Expanded(
-                        child: _ShimmerText(
-                          'Thinking…',
-                          style: TextStyle(
-                            fontSize: 14,
-                            height: 24 / 14,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                      )
-                    else
-                      Expanded(
-                        child: Text(
-                          'Thoughts',
-                          key: const ValueKey('chat-reasoning-title'),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 14,
-                            height: 24 / 14,
-                            color: Aether.textMuted,
-                          ),
-                        ),
-                      ),
-                    if (hasBody)
-                      AnimatedRotation(
-                        key: const ValueKey('chat-reasoning-chevron'),
-                        turns: expanded ? 0.0 : -0.25,
-                        duration: const Duration(milliseconds: 100),
-                        child: Icon(
-                          Icons.chevron_right,
-                          size: 16,
+            child: Semantics(
+              button: hasBody,
+              expanded: hasBody ? expanded : null,
+              child: InkWell(
+                key: const ValueKey('chat-reasoning-summary'),
+                borderRadius: BorderRadius.circular(6),
+                onTap: hasBody
+                    ? () => setState(() => _override = !expanded)
+                    : null,
+                child: SizedBox(
+                  height: 33,
+                  child: Row(
+                    children: [
+                      if (isStreaming)
+                        _ChaseDot(Aether.accent)
+                      else
+                        Icon(
+                          Icons.psychology_outlined,
+                          size: 15,
                           color: Aether.textMuted,
                         ),
-                      ),
-                  ],
+                      const SizedBox(width: 6),
+                      if (isStreaming)
+                        Expanded(
+                          child: _ShimmerText(
+                            liveLabel,
+                            style: TextStyle(
+                              fontSize: 14,
+                              height: 24 / 14,
+                              color: Aether.textMuted,
+                            ),
+                          ),
+                        )
+                      else
+                        Expanded(
+                          child: Text(
+                            doneLabel,
+                            key: const ValueKey('chat-reasoning-title'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 14,
+                              height: 24 / 14,
+                              color: Aether.textMuted,
+                            ),
+                          ),
+                        ),
+                      if (hasBody)
+                        AnimatedRotation(
+                          key: const ValueKey('chat-reasoning-chevron'),
+                          turns: expanded ? 0.0 : -0.25,
+                          duration: const Duration(milliseconds: 100),
+                          child: Icon(
+                            Icons.chevron_right,
+                            size: 16,
+                            color: Aether.textMuted,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-          // Body — full column width, regular markdown at primary color
-          // (the reference shows reasoning at the same 14/24 as prose).
-          if (expanded && hasBody)
-            Container(
-              key: const ValueKey('chat-reasoning-body'),
-              width: double.infinity,
-              padding: const EdgeInsets.only(top: 8, bottom: 4),
-              child: _OvidMarkdown(
-                content: widget.m.content,
-                fontSize: 14,
-                color: Aether.text,
-              ),
-            ),
+          // Body — full column width, muted markdown with a left rule (the
+          // Claude app's thinking quote), opening with a short size tween.
+          AnimatedSize(
+            duration: Aether.motionFast,
+            curve: Aether.ease,
+            alignment: Alignment.topLeft,
+            child: expanded && hasBody
+                ? Container(
+                    key: const ValueKey('chat-reasoning-body'),
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(top: 8, bottom: 4, left: 7),
+                    padding: const EdgeInsets.only(left: 12),
+                    decoration: BoxDecoration(
+                      border: Border(
+                        left: BorderSide(
+                          color: Aether.hairlineStrong,
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                    child: _OvidMarkdown(
+                      content: body,
+                      fontSize: 13.5,
+                      color: Aether.textMuted,
+                    ),
+                  )
+                : const SizedBox(width: double.infinity),
+          ),
         ],
       ),
     );
@@ -3344,7 +3494,11 @@ class _ReasoningCardState extends State<_ReasoningCard> {
 // ═══════════════════════════════════════════════════════════════════════
 class _ToolCard extends StatefulWidget {
   final Message m;
-  const _ToolCard(this.m);
+
+  /// Nested inside a subagent card: never re-nests a dispatch row and skips
+  /// the inline artifact card (the parent card links the transcript).
+  final bool nested;
+  const _ToolCard(this.m, {super.key, this.nested = false});
   @override
   State<_ToolCard> createState() => _ToolCardState();
 }
@@ -3371,22 +3525,6 @@ class _ToolCardState extends State<_ToolCard>
     super.dispose();
   }
 
-  static IconData _iconFor(String kind) => switch (kind) {
-    'web' => Icons.public,
-    'read' => Icons.description_outlined,
-    'edit' => Icons.edit_outlined,
-    'terminal' => Icons.terminal,
-    'code' => Icons.code,
-    'search' => Icons.search,
-    'sparkle' => Icons.auto_awesome,
-    'agent' => Icons.smart_toy_outlined,
-    'git' => Icons.source_outlined,
-    'goal' => Icons.flag_outlined,
-    'schedule' => Icons.schedule_outlined,
-    'memory' => Icons.psychology_outlined,
-    _ => Icons.bolt_outlined,
-  };
-
   /// PR25/D3: (+added, −removed) counts from the card's real diff body —
   /// null when this card carries no diff (non-edit tools).
   (int, int)? _diffCountsOf(String? detail) {
@@ -3404,17 +3542,27 @@ class _ToolCardState extends State<_ToolCard>
   @override
   Widget build(BuildContext context) {
     final m = widget.m;
+    // Subagents render as a nested, collapsible card (Claude Code parity).
+    if (m.toolName == 'dispatch_agent' && !widget.nested) {
+      return _SubagentCard(m);
+    }
     final running = m.toolState == 'running';
     if (!running && _sweep.isAnimating) _sweep.stop();
+    if (running && !_sweep.isAnimating) _sweep.repeat();
     final failed = m.toolState == 'error';
-    final stopped = m.toolState == 'stopped';
-    final iconKind = AgentService.toolIcon(m.toolName ?? '');
     final hasDetail = (m.toolDetail ?? '').trim().isNotEmpty;
     // PR25/D3: +N/−M chip data (null for non-diff cards).
     final diffCounts = _diffCountsOf(m.toolDetail);
-    // dispatch_agent rows own a real child session — the row becomes a link
-    // into that transcript (and the child may still be running).
+    // A nested dispatch row (inside a subagent card) still links its child.
     final childSessionId = m.toolSessionId;
+    // A whole-file write leaves an artifact card under its row.
+    final artifact = widget.nested || m.toolName != 'file_write'
+        ? null
+        : generatedFileArtifactOf(
+            m,
+            sessionId: AppState.I.activeSessionId ?? '',
+            sessionTitle: AppState.I.activeSession?.title ?? '',
+          );
 
     return Container(
       key: const ValueKey('chat-tool-disclosure'),
@@ -3422,128 +3570,128 @@ class _ToolCardState extends State<_ToolCard>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Compact 30px summary. The running glare sweep paints over this
-          // row via a Stack so it never adds layout height.
+          // Compact 30px Claude-Code row: [type glyph] Title · summary
+          // [+N −M] [status] [chevron]. The running glare sweep paints over
+          // this row via a Stack so it never adds layout height.
           Stack(
             children: [
-              InkWell(
-                key: const ValueKey('chat-tool-summary'),
-                borderRadius: BorderRadius.circular(6),
-                onTap: hasDetail ? () => setState(() => _open = !_open) : null,
-                child: SizedBox(
-                  height: 30,
-                  child: Row(
-                    children: [
-                      const SizedBox(width: 10),
-                      if (failed)
-                        _StateDot(Aether.dangerC)
-                      else if (m.toolState == 'unknown')
-                        _StateDot(Aether.textFaint)
-                      else if (stopped)
-                        _StateDot(Aether.warnLight)
-                      else if (running)
-                        _ChaseDot(Aether.accent)
-                      else
+              Semantics(
+                button: hasDetail,
+                expanded: hasDetail ? _open : null,
+                child: InkWell(
+                  key: const ValueKey('chat-tool-summary'),
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: hasDetail
+                      ? () => setState(() => _open = !_open)
+                      : null,
+                  child: SizedBox(
+                    height: 30,
+                    child: Row(
+                      children: [
+                        const SizedBox(width: 10),
                         Icon(
-                          _iconFor(iconKind),
+                          chatToolIcon(m.toolName ?? ''),
+                          key: ValueKey(
+                            'chat-tool-icon-${chatToolFamily(m.toolName ?? '')}',
+                          ),
                           size: 14,
-                          color: Aether.textMuted,
+                          color: failed ? Aether.dangerC : Aether.textMuted,
                         ),
-                      const SizedBox(width: 7),
-                      Flexible(
-                        child: Text(
-                          m.toolTitle ?? m.toolName ?? 'tool',
-                          key: const ValueKey('chat-tool-title'),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: failed ? Aether.dangerC : Aether.text,
-                          ),
-                        ),
-                      ),
-                      if ((m.toolSummary ?? '').isNotEmpty) ...[
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 7),
-                          child: Container(
-                            width: 2,
-                            height: 2,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Aether.textFaint,
-                            ),
-                          ),
-                        ),
-                        Expanded(
+                        const SizedBox(width: 7),
+                        Flexible(
                           child: Text(
-                            m.toolSummary!,
+                            m.toolTitle ?? m.toolName ?? 'tool',
+                            key: const ValueKey('chat-tool-title'),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontSize: 11.5,
-                              color: failed ? Aether.dangerC : Aether.textMuted,
-                              fontFamily: Aether.mono,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: failed ? Aether.dangerC : Aether.text,
                             ),
                           ),
                         ),
-                        // PR25/D3: edit cards show a +N/−M line-count chip
-                        // (the diff badge diff-row parity) computed from the real diff.
-                        if (diffCounts != null) ...[
-                          const SizedBox(width: 6),
-                          Text(
-                            '+${diffCounts.$1} −${diffCounts.$2}',
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontFamily: Aether.mono,
-                              color: Aether.successLight,
+                        if ((m.toolSummary ?? '').isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 7),
+                            child: Container(
+                              width: 2,
+                              height: 2,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: Aether.textFaint,
+                              ),
                             ),
                           ),
-                        ],
-                      ] else
-                        const Spacer(),
-                      if (hasDetail)
-                        AnimatedRotation(
-                          key: const ValueKey('chat-tool-chevron'),
-                          turns: _open ? 0.5 : 0.0,
-                          duration: const Duration(milliseconds: 150),
-                          child: Icon(
-                            Icons.expand_more,
-                            size: 16,
-                            color: Aether.textFaint,
+                          Expanded(
+                            child: Text(
+                              m.toolSummary!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: failed
+                                    ? Aether.dangerC
+                                    : Aether.textMuted,
+                                fontFamily: Aether.mono,
+                              ),
+                            ),
                           ),
-                        ),
-                      // A subagent card links to the child's OWN session, so the
-                      // user can read its full transcript instead of the summary.
-                      if (childSessionId != null)
-                        InkWell(
-                          borderRadius: BorderRadius.circular(6),
-                          onTap: () =>
-                              SubagentScreen.open(context, childSessionId),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 4),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  'Open',
-                                  style: TextStyle(
-                                    fontSize: 10.5,
-                                    fontWeight: FontWeight.w600,
-                                    color: Aether.accent,
+                          // PR25/D3: edit cards show a +N/−M line-count chip
+                          // computed from the real diff.
+                          if (diffCounts != null) ...[
+                            const SizedBox(width: 6),
+                            Text.rich(
+                              TextSpan(
+                                children: [
+                                  TextSpan(
+                                    text: '+${diffCounts.$1}',
+                                    style: TextStyle(
+                                      color: Aether.successLight,
+                                    ),
                                   ),
-                                ),
-                                Icon(
-                                  Icons.open_in_new,
-                                  size: 12,
-                                  color: Aether.accent,
-                                ),
-                              ],
+                                  const TextSpan(text: ' '),
+                                  TextSpan(
+                                    text: '−${diffCounts.$2}',
+                                    style: TextStyle(color: Aether.danger),
+                                  ),
+                                ],
+                              ),
+                              style: const TextStyle(
+                                fontSize: 10,
+                                fontFamily: Aether.mono,
+                              ),
+                            ),
+                          ],
+                        ] else
+                          const Spacer(),
+                        const SizedBox(width: 6),
+                        ToolStatusBadge(state: m.toolState, size: 13),
+                        if (hasDetail)
+                          AnimatedRotation(
+                            key: const ValueKey('chat-tool-chevron'),
+                            turns: _open ? 0.5 : 0.0,
+                            duration: const Duration(milliseconds: 150),
+                            child: Icon(
+                              Icons.expand_more,
+                              size: 16,
+                              color: Aether.textFaint,
                             ),
                           ),
-                        ),
-                      const SizedBox(width: 8),
-                    ],
+                        // A nested subagent row links to the child's OWN
+                        // session, so its full transcript stays reachable.
+                        if (childSessionId != null)
+                          IconButton(
+                            tooltip: context.l10n.subagentOpenTranscript,
+                            visualDensity: VisualDensity.compact,
+                            iconSize: 14,
+                            onPressed: () =>
+                                SubagentScreen.open(context, childSessionId),
+                            icon: Icon(Icons.open_in_new, color: Aether.accent),
+                          ),
+                        const SizedBox(width: 8),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -3577,26 +3725,346 @@ class _ToolCardState extends State<_ToolCard>
                 ),
             ],
           ),
-          // A single hairline separates summary from the expanded body.
-          if (_open && hasDetail) Container(height: 1, color: Aether.hairline),
-          // Expanded detail — Terminal / Diff / plain body.
-          if (_open && hasDetail) _DetailBody(m: m),
+          // Expanded detail — a hairline, then Input / Output (Terminal /
+          // Diff / highlighted code / plain body), opening with a size tween.
+          AnimatedSize(
+            duration: Aether.motionFast,
+            curve: Aether.ease,
+            alignment: Alignment.topLeft,
+            child: _open && hasDetail
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(height: 1, color: Aether.hairline),
+                      _DetailBody(m: m),
+                    ],
+                  )
+                : const SizedBox(width: double.infinity),
+          ),
+          if (artifact != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 2, 0, 6),
+              child: ArtifactCard(artifact: artifact),
+            ),
         ],
       ),
     );
   }
 }
 
-/// 8px state dot (the tool status indicator StateDot) — replaces the icon on error/stopped.
-class _StateDot extends StatelessWidget {
-  final Color color;
-  const _StateDot(this.color);
+/// Claude-Code-style subagent card: a nested, collapsible surface with the
+/// agent's name and task, live status (spinner · tool count · elapsed) and
+/// the subagent's OWN tool rows, read live from its child session.
+///
+/// Open while the subagent runs (so its progress is visible), collapsed once
+/// it finished; a tap always wins. Only the latest [_maxRows] tool rows are
+/// built, so a long child run never inflates the parent transcript.
+class _SubagentCard extends StatefulWidget {
+  final Message m;
+  const _SubagentCard(this.m);
   @override
-  Widget build(BuildContext context) => Container(
-    width: 8,
-    height: 8,
-    decoration: BoxDecoration(shape: BoxShape.circle, color: color),
-  );
+  State<_SubagentCard> createState() => _SubagentCardState();
+}
+
+class _SubagentCardState extends State<_SubagentCard> {
+  static const _maxRows = 6;
+  bool? _override;
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SubagentCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncTicker();
+  }
+
+  /// Elapsed seconds advance live only while the subagent runs.
+  void _syncTicker() {
+    final running = widget.m.toolState == 'running';
+    if (running && _tick == null) {
+      _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!running) {
+      _tick?.cancel();
+      _tick = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  Map<String, dynamic> _input() {
+    final raw = widget.m.toolInput;
+    if (raw == null || raw.isEmpty) return const {};
+    try {
+      final d = jsonDecode(raw);
+      return d is Map<String, dynamic> ? d : const {};
+    } catch (e) {
+      Diag.swallow('chat.subagentCard.input', e);
+      return const {};
+    }
+  }
+
+  static String? _str(Map<String, dynamic> j, List<String> keys) {
+    for (final k in keys) {
+      final v = j[k];
+      if (v is String && v.trim().isNotEmpty) return v.trim();
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final m = widget.m;
+    final input = _input();
+    final child = m.toolSessionId == null
+        ? null
+        : AppState.I.sessionById(m.toolSessionId);
+    final running = m.toolState == 'running';
+    final name =
+        _str(input, const ['subagent_type', 'agent', 'name']) ??
+        l10n.subagentDefaultName;
+    final task =
+        _str(input, const ['objective', 'prompt', 'message']) ??
+        (m.toolSummary ?? '').trim();
+    final tools = <Message>[
+      if (child != null)
+        for (final cm in child.messages)
+          if (cm.kind == MsgKind.tool) cm,
+    ];
+    final status = switch (m.toolState) {
+      'running' => l10n.subagentStatusRunning,
+      'error' => l10n.subagentStatusFailed,
+      'stopped' => l10n.subagentStatusStopped,
+      _ => l10n.subagentStatusDone,
+    };
+    final end = running
+        ? DateTime.now()
+        : (child != null && child.messages.isNotEmpty
+              ? child.messages.last.time
+              : null);
+    final elapsed = end?.difference(m.time);
+    final meta = [
+      status,
+      l10n.subagentToolUses(tools.length),
+      if (elapsed != null && elapsed.inSeconds > 0)
+        formatCompactDuration(elapsed),
+    ].join(' · ');
+    final open = _override ?? running;
+    final shown = tools.length > _maxRows
+        ? tools.sublist(tools.length - _maxRows)
+        : tools;
+    final failed = m.toolState == 'error';
+    return Container(
+      key: const ValueKey('chat-subagent-card'),
+      margin: const EdgeInsets.only(bottom: 6, top: 2),
+      decoration: BoxDecoration(
+        color: Aether.surface,
+        borderRadius: BorderRadius.circular(AetherRadius.rMd),
+        border: Border.all(
+          color: running
+              ? Aether.accent.withValues(alpha: 0.35)
+              : Aether.hairline,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Semantics(
+            button: true,
+            expanded: open,
+            label: l10n.subagentCardSemantics(name, status),
+            child: InkWell(
+              key: const ValueKey('chat-subagent-header'),
+              onTap: () => setState(() => _override = !open),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 48),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 26,
+                        height: 26,
+                        decoration: BoxDecoration(
+                          color: failed
+                              ? Aether.danger.withValues(alpha: 0.12)
+                              : Aether.accentSoft,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Center(
+                          child: running
+                              ? _ChaseDot(Aether.accent)
+                              : Icon(
+                                  Icons.account_tree_outlined,
+                                  size: 14,
+                                  color: failed ? Aether.danger : Aether.accent,
+                                ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ExcludeSemantics(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                name,
+                                key: const ValueKey('chat-subagent-name'),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: Aether.text,
+                                ),
+                              ),
+                              if (task.isNotEmpty)
+                                Text(
+                                  task,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    height: 1.35,
+                                    color: Aether.textMuted,
+                                  ),
+                                ),
+                              const SizedBox(height: 2),
+                              running
+                                  ? _ShimmerText(
+                                      meta,
+                                      style: const TextStyle(fontSize: 11),
+                                    )
+                                  : Text(
+                                      meta,
+                                      key: const ValueKey(
+                                        'chat-subagent-status',
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: failed
+                                            ? Aether.danger
+                                            : Aether.textFaint,
+                                      ),
+                                    ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      ToolStatusBadge(state: m.toolState),
+                      AnimatedRotation(
+                        turns: open ? 0.5 : 0.0,
+                        duration: const Duration(milliseconds: 150),
+                        child: Icon(
+                          Icons.expand_more,
+                          size: 18,
+                          color: Aether.textFaint,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          AnimatedSize(
+            duration: Aether.motionFast,
+            curve: Aether.ease,
+            alignment: Alignment.topCenter,
+            child: !open
+                ? const SizedBox(width: double.infinity)
+                : Container(
+                    key: const ValueKey('chat-subagent-body'),
+                    decoration: BoxDecoration(
+                      border: Border(top: BorderSide(color: Aether.hairline)),
+                    ),
+                    padding: const EdgeInsets.fromLTRB(6, 6, 6, 4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (tools.length > shown.length)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 2, 10, 4),
+                            child: Text(
+                              l10n.subagentEarlierTools(
+                                tools.length - shown.length,
+                              ),
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Aether.textFaint,
+                              ),
+                            ),
+                          ),
+                        if (shown.isEmpty)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+                            child: Text(
+                              l10n.subagentNoToolsYet,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Aether.textFaint,
+                              ),
+                            ),
+                          ),
+                        // A left rule nests the child rows under the card.
+                        for (final t in shown)
+                          Container(
+                            margin: const EdgeInsets.only(left: 6),
+                            decoration: BoxDecoration(
+                              border: Border(
+                                left: BorderSide(
+                                  color: Aether.hairlineStrong,
+                                  width: 1.5,
+                                ),
+                              ),
+                            ),
+                            child: _ToolCard(
+                              t,
+                              key: ObjectKey(t),
+                              nested: true,
+                            ),
+                          ),
+                        if (m.toolSessionId != null)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              key: const ValueKey('chat-subagent-open'),
+                              onPressed: () => SubagentScreen.open(
+                                context,
+                                m.toolSessionId!,
+                              ),
+                              icon: const Icon(Icons.open_in_new, size: 14),
+                              label: Text(
+                                l10n.subagentOpenTranscript,
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Expanded tool body: terminal-style for shell/code/jobs, diff-style for
@@ -3637,6 +4105,7 @@ class _DetailBodyState extends State<_DetailBody> {
             );
     final isTerminal = kind == 'terminal' || kind == 'code' || kind == 'agent';
 
+    final inputRows = isTerminal ? const <(String, String)>[] : _inputRows(m);
     return Container(
       key: const ValueKey('chat-tool-body'),
       width: double.infinity,
@@ -3644,6 +4113,49 @@ class _DetailBodyState extends State<_DetailBody> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Input — the small identifying args recorded at dispatch (path,
+          // command, url, query …), never file bodies.
+          if (inputRows.isNotEmpty) ...[
+            _sectionLabel(context.l10n.toolDetailInput),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final (k, v) in inputRows)
+                    Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: '$k  ',
+                            style: TextStyle(color: Aether.textFaint),
+                          ),
+                          TextSpan(text: v),
+                        ],
+                      ),
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: Aether.mono,
+                        fontSize: 11.5,
+                        color: Aether.textMuted,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+          // Output header with a copy action for the full result.
+          Row(
+            children: [
+              Expanded(child: _sectionLabel(context.l10n.toolDetailOutput)),
+              Tooltip(
+                message: context.l10n.toolDetailCopy,
+                child: _CopyButton(code: detail),
+              ),
+              const SizedBox(width: 2),
+            ],
+          ),
           if (isTerminal)
             Padding(
               padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
@@ -3713,6 +4225,50 @@ class _DetailBodyState extends State<_DetailBody> {
     );
   }
 
+  Widget _sectionLabel(String text) => Padding(
+    padding: const EdgeInsets.fromLTRB(10, 4, 10, 2),
+    child: Text(
+      text.toUpperCase(),
+      style: TextStyle(
+        fontSize: 10,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 0.6,
+        color: Aether.textFaint,
+      ),
+    ),
+  );
+
+  /// `key value` pairs of the tool's recorded input (at most six).
+  static List<(String, String)> _inputRows(Message m) {
+    final raw = m.toolInput;
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return const [];
+      return [
+        for (final e in decoded.entries.take(6))
+          if (e.value != null && '${e.value}'.trim().isNotEmpty)
+            (
+              '${e.key}',
+              e.value is String ? e.value as String : jsonEncode(e.value),
+            ),
+      ];
+    } catch (e) {
+      Diag.swallow('chat.toolDetail.input', e);
+      return const [];
+    }
+  }
+
+  /// Language of a read tool's file for highlighting, or null.
+  static String? _codeLangOf(Message m) {
+    if (chatToolFamily(m.toolName ?? '') != 'read') return null;
+    final path = toolInputPath(m.toolInput);
+    if (path == null) return null;
+    final kind = artifactKindFor(path);
+    if (kind != ArtifactKind.code && kind != ArtifactKind.html) return null;
+    return artifactExtension(path);
+  }
+
   Widget _buildRichDetail(
     Message m,
     bool isDiff,
@@ -3747,6 +4303,22 @@ class _DetailBodyState extends State<_DetailBody> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: shown.map((l) => _DiffLine(l)).toList(),
+      );
+    }
+    // A read of a source file: syntax-highlighted like the code viewer.
+    final lang = _codeLangOf(m);
+    if (lang != null && m.toolState != 'error') {
+      return SelectableText.rich(
+        highlightCode(
+          shown.join('\n'),
+          lang: lang,
+          style: TextStyle(
+            fontFamily: Aether.mono,
+            fontSize: 11.5,
+            height: 1.5,
+            color: Aether.text,
+          ),
+        ),
       );
     }
     // Rich tool result: detect JSON, Mermaid, colors, URLs in generic output.
@@ -4445,15 +5017,12 @@ class _CompactionRowState extends State<_CompactionRow> {
   }
 }
 
-/// "Produced" parity — card under the final answer listing files the
-/// agent created/edited this run.  Tap a file to open it in Studio.
+/// "Produced" parity — artifact cards under the final answer for the files
+/// the agent created/edited this run. Tap a card to preview the file (the
+/// preview offers "Open in Studio" for workspace files).
 class _ProducedFilesCard extends StatelessWidget {
   final List<({String path, int size})> files;
   const _ProducedFilesCard({required this.files});
-
-  /// Chips shown inline; the rest collapse into a "+N files" chip that
-  /// expands the full list in a sheet.
-  static const _maxChips = 6;
 
   String _fmtSize(int b) => b >= 1048576
       ? '${(b / 1048576).toStringAsFixed(1)} MB'
@@ -4462,22 +5031,6 @@ class _ProducedFilesCard extends StatelessWidget {
       : '$b B';
 
   String _base(String path) => path.contains('/') ? path.split('/').last : path;
-
-  Future<void> _open(BuildContext context, String path) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final ok = await AgentService.I.openWorkspaceFileInStudio(path);
-    if (!context.mounted) return;
-    if (!ok) {
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('Could not open $path'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-      return;
-    }
-    openStudio(context);
-  }
 
   void _showAll(BuildContext context) {
     showModalBottomSheet<void>(
@@ -4554,7 +5107,7 @@ class _ProducedFilesCard extends StatelessWidget {
                 ),
                 onTap: () {
                   Navigator.pop(sheetCtx);
-                  _open(context, f.path);
+                  openArtifactPreview(context, _artifactOf(f));
                 },
               ),
           ],
@@ -4615,65 +5168,74 @@ class _ProducedFilesCard extends StatelessWidget {
           );
   }
 
+  /// The produced file as an artifact of the active chat (workspace path).
+  SessionArtifact _artifactOf(({String path, int size}) f) {
+    final s = AppState.I.activeSession;
+    return SessionArtifact(
+      id: '${s?.id ?? ''}:gen:${f.path}',
+      name: _base(f.path),
+      path: f.path,
+      size: f.size,
+      sessionId: s?.id ?? '',
+      sessionTitle: s?.title ?? '',
+      time: DateTime.now(),
+      origin: ArtifactOrigin.generated,
+      kind: artifactKindFor(f.path),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final shown = files.take(_maxChips).toList();
+    final l10n = context.l10n;
+    // Artifact cards (Claude-style) for the first few files; the rest fold
+    // into a "+N more files" chip that lists everything in a sheet.
+    const cards = 4;
+    final shown = files.take(cards).toList();
     final rest = files.length - shown.length;
     return Container(
-      margin: const EdgeInsets.only(bottom: 8, right: 40),
-      padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
-      decoration: BoxDecoration(
-        color: Aether.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Aether.hairline),
-      ),
+      key: const ValueKey('chat-produced-card'),
+      margin: const EdgeInsets.only(bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(
-                Icons.upload_file_outlined,
-                size: 13,
-                color: Aether.successLight,
-              ),
-              const SizedBox(width: 6),
-              Text(
-                'Produced · ${files.length} file${files.length == 1 ? '' : 's'}',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.4,
-                  color: Aether.textMuted,
+          Padding(
+            padding: const EdgeInsets.only(left: 2, bottom: 6),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.auto_awesome_rounded,
+                  size: 13,
+                  color: Aether.accent,
                 ),
-              ),
-            ],
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    l10n.chatProducedFiles(files.length),
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: Aether.textMuted,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 8),
-          // Chip lane — tapping a chip opens THAT file in Studio (the old
-          // rows opened Studio but dropped the path).
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              for (final f in shown)
-                _chip(
-                  context,
-                  icon: Icons.insert_drive_file_outlined,
-                  label: _base(f.path),
-                  tooltip: f.path,
-                  trailing: _fmtSize(f.size),
-                  onTap: () => _open(context, f.path),
-                ),
-              if (rest > 0)
-                _chip(
-                  context,
-                  icon: Icons.more_horiz,
-                  label: '+$rest file${rest == 1 ? '' : 's'}',
-                  onTap: () => _showAll(context),
-                ),
-            ],
-          ),
+          for (final f in shown)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: ArtifactCard(
+                artifact: _artifactOf(f),
+                subtitle: '${f.path} · ${_fmtSize(f.size)}',
+              ),
+            ),
+          if (rest > 0)
+            _chip(
+              context,
+              icon: Icons.more_horiz,
+              label: l10n.chatProducedMore(rest),
+              onTap: () => _showAll(context),
+            ),
         ],
       ),
     );
@@ -4757,7 +5319,7 @@ class _MessageView extends StatelessWidget {
                   MsgKind.tool => _toolCard(),
                   MsgKind.turnTail => _turnTail(),
                   MsgKind.compact => _CompactionRow(m),
-                  _ => _text(isUser),
+                  _ => _answer(isUser),
                 },
                 // Attachment chips under the user bubble (in-chat display).
                 if (isUser && m.attachments.isNotEmpty)
@@ -5350,18 +5912,57 @@ class _MessageView extends StatelessWidget {
 
   Widget _reasoning() => _ReasoningCard(m);
 
+  /// The collapsed "Thought for Ns" block a live bubble leaves above its
+  /// answer once thinking ended (see [_ThinkClock]); empty otherwise.
+  List<Widget> _thoughtAbove() {
+    final clock = _ThinkClock.of(m);
+    if (clock == null ||
+        clock.end == null ||
+        clock.snapshot.trim().isEmpty ||
+        !AppState.I.showReasoning) {
+      return const [];
+    }
+    return [
+      _ReasoningCard(
+        m,
+        contentOverride: clock.snapshot,
+        duration: clock.duration,
+      ),
+    ];
+  }
+
+  /// A finished assistant answer, with its thinking block above when the
+  /// live timeline recorded one.
+  Widget _answer(bool isUser) {
+    if (isUser) return _text(isUser);
+    _ThinkClock.observe(m);
+    final thought = _thoughtAbove();
+    if (thought.isEmpty) return _text(isUser);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [...thought, _text(isUser)],
+    );
+  }
+
   /// Live streaming bubble (MsgKind.streaming): answer text renders as
   /// markdown the moment it arrives (never hidden behind a thinking card);
   /// while the model is still thinking, the reasoning card shows expanded
-  /// by default so the live thought stream stays visible.
+  /// by default so the live thought stream stays visible. Once the answer
+  /// streams, a soft pulsing caret marks the growing edge.
   Widget _streaming() {
+    _ThinkClock.observe(m);
     final hasBody = m.content.trim().isNotEmpty;
     final isUser = m.role == 'user';
+    final live =
+        hasBody && !m.thinking && AgentService.I.busyFor(session.id as String);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (!m.thinking) ..._thoughtAbove(),
         if (hasBody && !m.thinking) _text(isUser),
+        if (live) const _StreamingCaret(),
         if (m.thinking) _ReasoningCard(m, expandedByDefault: true),
       ],
     );
@@ -6928,6 +7529,47 @@ class _OlderMessagesIndicator extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Pulsing caret at the growing edge of a streaming answer (Claude-app
+/// parity). Purely decorative: excluded from semantics.
+class _StreamingCaret extends StatefulWidget {
+  const _StreamingCaret();
+  @override
+  State<_StreamingCaret> createState() => _StreamingCaretState();
+}
+
+class _StreamingCaretState extends State<_StreamingCaret>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 650),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ExcludeSemantics(
+    child: Padding(
+      key: const ValueKey('chat-streaming-caret'),
+      padding: const EdgeInsets.only(left: 6, top: 2, bottom: 4),
+      child: FadeTransition(
+        opacity: Tween<double>(begin: 0.25, end: 1).animate(_c),
+        child: Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            color: Aether.accent,
+            shape: BoxShape.circle,
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 class _TypingBubble extends StatelessWidget {
@@ -9434,13 +10076,18 @@ class _OvidCodeBox extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             child: _isDiff
                 ? _DiffLines(code: code)
-                : SelectableText(
-                    code,
-                    style: TextStyle(
-                      fontFamily: Aether.mono,
-                      fontSize: 11,
-                      height: 19 / 11,
-                      color: Aether.text,
+                // Syntax-highlighted (keywords, strings, comments, numbers,
+                // types) via the shared dependency-free highlighter.
+                : SelectableText.rich(
+                    highlightCode(
+                      code,
+                      lang: lang,
+                      style: TextStyle(
+                        fontFamily: Aether.mono,
+                        fontSize: 11,
+                        height: 19 / 11,
+                        color: Aether.text,
+                      ),
                     ),
                   ),
           ),
