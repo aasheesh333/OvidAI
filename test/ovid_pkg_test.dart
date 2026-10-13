@@ -623,6 +623,113 @@ cp "$source" "$out"
       );
     }
 
+    group('mirror fallback (2026-10-13 "stale mirror" device report)', () {
+      String floorFile(String mirror) =>
+          '${tmp.path}/var/cache/ovid-pkg/high-water.d/${sha256.convert(mirror.codeUnits)}';
+
+      /// Serves the signed fixture repository for EVERY mirror and records URLs.
+      void serveEveryMirror() {
+        writeStub(Directory('${tmp.path}/stubs'), 'curl', r"""
+prev=""; out=""; url=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && out="$a"
+  case "$a" in https://*) url="$a";; esac
+  prev="$a"
+done
+printf '%s\n' "$url" >> "$PREFIX/urls"
+case "$url" in
+  */dists/stable/*) source="$PREFIX/repo/dists/stable/${url#*/dists/stable/}";;
+  */pool/*) source="$PREFIX/repo/pool/${url##*/}";;
+  *) exit 22;;
+esac
+[ -f "$source" ] || exit 22
+exec /bin/cp "$source" "$out"
+""");
+      }
+
+      /// Index + archives published, nothing cached yet (fresh fetch path).
+      void publishWithoutCache(Map<String, String> packages) {
+        seedIndex(packages);
+        File('${tmp.path}/var/cache/ovid-pkg/current').deleteSync();
+        Directory('${tmp.path}/var/cache/ovid-pkg/generation.fixture').deleteSync(recursive: true);
+        successfulInstallStubs();
+        serveEveryMirror();
+      }
+
+      void stale(String mirror) {
+        final f = File(floorFile(mirror))..createSync(recursive: true);
+        final future = DateTime.now().add(const Duration(days: 2)).millisecondsSinceEpoch ~/ 1000;
+        f.writeAsStringSync('$future ${'0' * 64}\n');
+      }
+
+      test('a floor learned from another mirror family never pins this one', () async {
+        publishWithoutCache({'app': ''});
+        // Pre-fix builds kept one global floor; a newer index seen on a
+        // different mirror made every other mirror "stale" forever.
+        final future = DateTime.now().add(const Duration(days: 2)).millisecondsSinceEpoch ~/ 1000;
+        File('${tmp.path}/var/cache/ovid-pkg/high-water').writeAsStringSync('$future ${'0' * 64}\n');
+
+        final res = await Process.run('/bin/sh', [script, 'update'], environment: env)
+            .timeout(const Duration(seconds: 30));
+
+        expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
+        expect(res.stdout, contains('[ovid-pkg] index ready'));
+        expect(File('${tmp.path}/var/cache/ovid-pkg/high-water').existsSync(), isFalse);
+        expect(File(floorFile(mirrors.first)).existsSync(), isTrue);
+      });
+
+      // Two full installs: generous limits for slow/loaded CI hosts.
+      Future<ProcessResult> slowInstall() => Process.run('/bin/sh', [script, 'install', 'app'],
+          environment: env).timeout(const Duration(minutes: 2));
+
+      test('a stale mirror falls back to the next one and installs from it', timeout: const Timeout(Duration(minutes: 5)), () async {
+        publishWithoutCache({'app': ''});
+        stale(mirrors.first);
+
+        final res = await slowInstall();
+
+        final out = '${res.stdout}${res.stderr}';
+        expect(res.exitCode, 0, reason: out);
+        expect(res.stderr, contains('mirror ${mirrors.first} rejected: mirror is behind an index already seen'));
+        expect(File('${tmp.path}/bin/app').readAsStringSync(), 'app_1.deb\n');
+        final urls = recorded('urls');
+        expect(urls.where((u) => u.contains('/pool/')), everyElement(startsWith(mirrors[1])));
+        // The next install reuses the fallback mirror's index (no refetch).
+        final again = await slowInstall();
+        expect(again.exitCode, 0, reason: '${again.stdout}${again.stderr}');
+        expect(again.stderr, isNot(contains('rejected')));
+        expect(recorded('urls').where((u) => u.contains('/dists/')).length,
+            urls.where((u) => u.contains('/dists/')).length);
+      });
+
+      test('fallback is bounded and the failure names the reason', () async {
+        publishWithoutCache({'app': ''});
+        stale(mirrors.first);
+        stale(mirrors[1]);
+
+        final res = await Process.run('/bin/sh', [script, 'update'],
+            environment: {...env, 'OVID_PKG_MAX_MIRRORS': '1'}).timeout(const Duration(seconds: 30));
+
+        expect(res.exitCode, isNot(0));
+        expect(res.stderr, contains('stale mirror'));
+        expect(res.stderr, contains('tried 1 mirror(s)'));
+        expect(recorded('urls').where((u) => u.startsWith(mirrors[1])), isEmpty);
+      });
+    });
+
+    test('install relocates correctly with the Termux prefix alias in place', () async {
+      seedIndex({'app': ''});
+      successfulInstallStubs();
+      Directory('${tmp.path}/data/data/com.termux/files').createSync(recursive: true);
+      Link('${tmp.path}/data/data/com.termux/files/usr').createSync('../../../..');
+
+      final res = await install(['app']);
+
+      expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
+      expect(File('${tmp.path}/bin/app').readAsStringSync(), 'app_1.deb\n');
+      expect(Link('${tmp.path}/data/data/com.termux/files/usr').targetSync(), '../../../..');
+    });
+
     test('apt install -y does not resolve -y as a package', () async {
       // Pre-seed an index so a non-stripped flag would be looked up
       // rather than triggering a network update.

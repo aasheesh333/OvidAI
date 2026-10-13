@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ovid_ai/core/dpkg_compat.dart';
 import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/studio_setup_coordinator.dart';
 
@@ -67,6 +68,7 @@ void main() {
     SandboxService.execCheckedOverrideForTest = null;
     SandboxService.bundledAptKeysOverrideForTest = null;
     SandboxService.runtimeInstallBudget = const Duration(minutes: 20);
+    SandboxService.runtimeGroupBudget = const Duration(minutes: 10);
     sandbox.resetCheckExistingForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), null);
@@ -235,6 +237,86 @@ void main() {
       expect(used.length, lessThanOrEqualTo(SandboxService.mirrorCountForTest));
       expect(lines.join('\n'), contains(SandboxService.noMirrorAdvice));
     });
+  });
+
+  test('step 1 prepares dpkg: sandbox dirs, neutral config dir, Termux prefix alias', () async {
+    final dpkg = File('${prefix.path}/bin/dpkg')
+      ..writeAsBytesSync([0, ...DpkgCompat.termuxConfigDir.codeUnits, 0, 0]);
+    Process.runSync('chmod', ['0755', dpkg.path]);
+    final log = <String>[];
+
+    await sandbox.ensureAptTrustForTest(prefix, onLine: log.add);
+
+    expect(String.fromCharCodes(dpkg.readAsBytesSync()), contains(DpkgCompat.neutralConfigDir));
+    expect(log.join('\n'), contains('[dpkg] dpkg: compiled-in Termux config dir neutralised'));
+    for (final rel in ['etc/dpkg/dpkg.cfg.d', 'var/log/apt', 'var/lib/dpkg/info']) {
+      expect(Directory('${prefix.path}/$rel').existsSync(), isTrue, reason: rel);
+    }
+    // apt's Termux-relative default resolves into the prefix now.
+    expect(Directory('${prefix.path}/data/data/com.termux/files/usr/var/log/apt').existsSync(), isTrue);
+    expect(File('${prefix.path}/etc/apt/ovid-apt.conf').readAsStringSync(),
+        contains('Dir::Log "${prefix.path}/var/log/apt";'));
+  });
+
+  test('a structural dpkg failure moves the rest of the run to ovid-pkg at once', () async {
+    final aptInstalls = <String>[];
+    final pkgInstalls = <String>[];
+    SandboxService.execCheckedOverrideForTest = (args, env) async {
+      final command = args.last;
+      commands.add(command);
+      if (command.contains('OVIDMIRROR')) return (0, probeOut);
+      if (command.startsWith('apt-get install')) {
+        aptInstalls.add(command);
+        return (100, "dpkg: error: error opening configuration directory "
+            "'/data/data/com.termux/files/usr/etc/dpkg/dpkg.cfg.d': Permission denied\n"
+            'E: Sub-process ${prefix.path}/bin/dpkg returned an error code (2)');
+      }
+      if (command.startsWith('ovid-pkg install')) {
+        pkgInstalls.add(command);
+        for (final b in ['node', 'npm', 'npx', 'python', 'pip', 'uv', 'uvx', 'git', 'curl']) {
+          ready.add(b);
+        }
+        return (0, 'extracted');
+      }
+      if (command.contains('--version') || command.contains('command -v')) {
+        for (final bin in ['node', 'npm', 'npx', 'python', 'pip', 'git', 'curl', 'uv', 'uvx']) {
+          if (RegExp('\\b$bin\\b').hasMatch(command) && !ready.contains(bin)) return (127, 'missing $bin');
+        }
+        return (0, 'fixture version');
+      }
+      return (0, '');
+    };
+
+    expect(await sandbox.ensureRuntime('python', onLine: lines.add), isTrue);
+
+    expect(aptInstalls, hasLength(1), reason: 'native apt is not retried per group');
+    expect(pkgInstalls.first, contains('ovid-pkg install python'));
+    expect(lines.join('\n'), contains('native dpkg cannot install here'));
+  });
+
+  test('a stuck package fails within its time limit with an actionable message', () async {
+    SandboxService.runtimeGroupBudget = const Duration(milliseconds: 300);
+    SandboxService.execCheckedOverrideForTest = (args, env) async {
+      final command = args.last;
+      commands.add(command);
+      if (command.contains('OVIDMIRROR')) return (0, probeOut);
+      if (RegExp(r'^(apt-get|ovid-pkg) (update|install)').hasMatch(command)) {
+        // Stands in for a download that never finishes (reaped after kill).
+        await Future<void>.delayed(const Duration(seconds: 1));
+        return (137, 'killed');
+      }
+      if (command.contains('--version') || command.contains('command -v')) return (127, 'missing');
+      return (0, '');
+    };
+    final clock = Stopwatch()..start();
+
+    expect(await sandbox.ensureRuntime('node', onLine: lines.add), isFalse);
+
+    expect(clock.elapsed, lessThan(const Duration(seconds: 15)));
+    final log = lines.join('\n');
+    expect(log, contains('time limit per package'));
+    expect(log, contains('Could not install nodejs npm'));
+    expect(log, contains('tap Retry'));
   });
 
   test('total runtime setup time is bounded', () async {

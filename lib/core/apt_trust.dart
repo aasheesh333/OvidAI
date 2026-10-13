@@ -52,15 +52,20 @@ class AptTrust {
     'etc/apt/trusted.gpg.d',
     'etc/apt/auth.conf.d',
     'etc/apt/keyrings',
+    'etc/dpkg/dpkg.cfg.d',
     'var/lib/apt/lists/partial',
     'var/lib/apt/periodic',
     'var/cache/apt/archives/partial',
     'var/lib/dpkg/info',
     'var/lib/dpkg/updates',
     'var/lib/dpkg/triggers',
+    'var/lib/dpkg/alternatives',
     'var/log/apt',
     'tmp',
   ];
+
+  /// Files dpkg needs in its admindir before the first run (empty is valid).
+  static const dpkgAdminFiles = ['var/lib/dpkg/status', 'var/lib/dpkg/available'];
 
   /// True when [bytes] start with a binary OpenPGP public-key packet tag
   /// apt-key/gpgv accept (0x99/0x98 old format, 0xC6 new format).
@@ -88,6 +93,17 @@ class AptTrust {
           dir.createSync(recursive: true);
           _chmod('0755', path);
           lines.add('[apt] created missing directory $rel');
+        }
+      } catch (e) {
+        lines.add('[apt] could not create $rel: $e');
+      }
+    }
+    for (final rel in dpkgAdminFiles) {
+      final path = '${prefix.path}/$rel';
+      try {
+        if (FileSystemEntity.typeSync(path) == FileSystemEntityType.notFound) {
+          File(path).writeAsStringSync('');
+          lines.add('[apt] created missing $rel');
         }
       } catch (e) {
         lines.add('[apt] could not create $rel: $e');
