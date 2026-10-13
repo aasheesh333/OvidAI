@@ -99,9 +99,13 @@ class StudioSetupCoordinator extends ChangeNotifier {
     };
     // Run every group: a missing Node must not short-circuit Python/Git checks.
     for (final entry in commands.entries) {
-      _runtimeVerification[entry.key] = await _runs(entry.value)
-          ? RuntimeVerification.verified
-          : RuntimeVerification.unavailable;
+      final ok = await _runs(entry.value);
+      _runtimeVerification[entry.key] =
+          ok ? RuntimeVerification.verified : RuntimeVerification.unavailable;
+      // Logged (not parsed): makes a re-run over an existing sandbox show
+      // what was actually executed and verified.
+      _log.add('verify ${entry.key.name}: ${entry.value} → ${ok ? 'ok' : 'not ready'}');
+      _persistLine(_log.last);
       _publish();
     }
     if (!transactionReady()) return false;
@@ -264,7 +268,62 @@ class StudioSetupCoordinator extends ChangeNotifier {
     }
     _log.add(line);
     if (_log.length > 1000) _log.removeAt(0);
+    _persistLine(line);
     _publish();
+  }
+
+  // ── Persisted setup log ────────────────────────────────────────────
+  // The in-memory log dies with the process (force-stop, crash, OOM kill).
+  // Mirror every line to <app support>/studio-setup.log so a failed setup
+  // can be exported/shared and the emulator e2e harness can read it
+  // (scripts/studio_e2e.sh: `run-as <app> cat files/studio-setup.log`).
+  IOSink? _logSink;
+  Future<IOSink?>? _logSinkOpening;
+
+  /// File name under the app support dir (`files/` on Android).
+  static const setupLogName = 'studio-setup.log';
+
+  @visibleForTesting
+  static bool persistLogForTest = !Platform.environment.containsKey('FLUTTER_TEST');
+
+  Future<IOSink?> _openLogSink() async {
+    if (!persistLogForTest) return null;
+    try {
+      final dir = await SandboxService.I.filesRoot();
+      final sink = File('${dir.path}/$setupLogName')
+          .openWrite(mode: FileMode.writeOnly);
+      sink.writeln('# Ovid Studio setup ${DateTime.now().toIso8601String()}');
+      return sink;
+    } catch (_) {
+      return null; // Diagnostics only — never fail setup over the log file.
+    }
+  }
+
+  void _persistLine(String line) {
+    if (!persistLogForTest) return;
+    final opening = _logSinkOpening ??= _openLogSink().then((s) => _logSink = s);
+    final stamp = DateTime.now().toIso8601String().substring(11, 23);
+    final text = '$stamp $line';
+    if (_logSink != null) {
+      _logSink!.writeln(text);
+    } else {
+      unawaited(opening.then((s) => s?.writeln(text)));
+    }
+  }
+
+  Future<void> _closeLog(String summary) async {
+    final opening = _logSinkOpening;
+    _logSinkOpening = null;
+    if (opening == null) return;
+    try {
+      final sink = await opening;
+      sink?.writeln('# result: $summary');
+      await sink?.flush();
+      await sink?.close();
+    } catch (_) {
+      // Diagnostics only.
+    }
+    _logSink = null;
   }
 
   /// Same key consumed by AppState.loadStudioFirstOpenFlag. Its existing
@@ -359,6 +418,9 @@ class StudioSetupCoordinator extends ChangeNotifier {
           : StudioSetupStatus.failed;
     } finally {
       _finishedAt = DateTime.now();
+      await _closeLog('${_status.name} in ${elapsed.inSeconds}s'
+          '${_error == null ? '' : ' — $_error'}'
+          '${_errorDetail == null ? '' : ' [$_errorDetail]'}');
       _publish();
     }
   }

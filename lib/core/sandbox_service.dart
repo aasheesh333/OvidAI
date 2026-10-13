@@ -585,6 +585,9 @@ class SandboxService {
   @visibleForTesting
   static Directory? filesRootOverrideForTest;
 
+  /// App support dir that holds the sandbox prefix (`files/` on Android).
+  Future<Directory> filesRoot() => _ensureFilesRoot();
+
   Future<Directory> _ensureFilesRoot() async {
     Directory base;
     final override = filesRootOverrideForTest;

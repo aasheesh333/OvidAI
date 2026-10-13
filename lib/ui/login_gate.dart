@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -43,6 +44,13 @@ class LoginGate extends StatefulWidget {
   /// Test seam: skip the gate entirely (host widget tests pump the shell).
   @visibleForTesting
   static bool disabledForTest = false;
+
+  /// Emulator e2e harness only (scripts/studio_e2e.sh): a DEBUG build made
+  /// with `--dart-define=OVID_E2E_SKIP_LOGIN=true` skips the gate so the
+  /// harness can reach Studio on an emulator without a Google account.
+  /// Compiled out of profile/release builds (kDebugMode is const false).
+  static const bool e2eSkipLogin =
+      kDebugMode && bool.fromEnvironment('OVID_E2E_SKIP_LOGIN');
 
   @override
   State<LoginGate> createState() => _LoginGateState();
@@ -144,7 +152,7 @@ class _LoginGateState extends State<LoginGate> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    if (LoginGate.disabledForTest) return widget.child;
+    if (LoginGate.disabledForTest || LoginGate.e2eSkipLogin) return widget.child;
 
     // ── State 1: loading (Firebase initializing) ──
     if (_initializing) return const _SplashScreen();
