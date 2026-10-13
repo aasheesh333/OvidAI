@@ -6,12 +6,15 @@ No network trust-on-first-use or checksum overrides are exposed by the CLI.
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import zipfile
 
@@ -26,16 +29,44 @@ PINS = {
     'x86_64': {'size': 32584674, 'sha256': '5f7c54e860df1ef5146b8475dc90e69af666da6588ca1fd47be8f7036b07e8cb'},
 }
 ABI_MAP = {'aarch64': 'arm64-v8a', 'arm': 'armeabi-v7a', 'x86_64': 'x86_64'}
-BINS = set('''bash dash coreutils apt apt-get apt-cache apt-mark apt-config apt-key
-dpkg dpkg-deb dpkg-query dpkg-trigger dpkg-divert dpkg-split dpkg-realpath
-tar gzip gunzip zcat bzip2 bunzip2 xz unxz zstd unzstd curl wget gpgv
-grep sed awk gawk find xargs which less head tail cat ls cp mv rm mkdir rmdir touch
-chmod chown ln uname whoami id env printenv ps top kill pkill date sleep true
-false test sha256sum md5sum base64 cut sort uniq wc tr tee
-termux-exec-ld-preload-lib termux-exec-system-linker-exec'''.split())
-METHODS = set('copy gpgv http https file store rsh cdrom'.split())
-TREES = ('etc/', 'share/terminfo/', 'share/termux-keyring/', 'var/lib/dpkg/')
+# Derivation: the COMPLETE upstream bootstrap minus documentation/headers.
+# Earlier recipes kept a hand-picked binary subset. dpkg itself then refused
+# to run ("'diff' / 'start-stop-daemon' not found in PATH") and every package
+# in var/lib/dpkg/status whose files were dropped stayed "installed" but
+# missing, so maintainer scripts failed. Termux packages assume the whole
+# essential set; only files nothing executes are dropped here.
+DROP = ('share/man/', 'share/info/', 'share/doc/', 'include/',
+        'libexec/installed-tests/', 'share/LICENSES/')
 MAX_EXPANDED = 512 * 1024 * 1024
+
+# proot runs every sandbox process with the app-private prefix bound at the
+# compiled-in /data/data/com.termux/files/usr (see lib/core/termux_proot.dart).
+# It is not part of the upstream bootstrap, so the exact signed Termux
+# repository debs are vendored (tool/vendor/termux-debs/<arch>/) and pinned
+# here; they are merged into the payload and registered in the dpkg database
+# so apt can upgrade them like any other package.
+VENDOR = Path(__file__).resolve().parent / 'vendor' / 'termux-debs'
+DEB_PINS = {
+    'aarch64': {
+        'libandroid-shmem_0.7_aarch64.deb': '0da3a24d558b93c92bcf8d611e0826a99ff96e396b148e6cdf33b47c47c57ff6',
+        'libtalloc_2.5.0_aarch64.deb': '556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7',
+        'proot_5.1.107.96_aarch64.deb': '8199dca06dccb693ec09fb1759e3e1ad08b4863f0c11c612f89c20bd9ecdc1a0',
+    },
+    'arm': {
+        'libandroid-shmem_0.7_arm.deb': '5832fd11dca9be2a288dd8fbc2b2799b289c812c7a8764f1f8234c425aa64ce5',
+        'libtalloc_2.5.0_arm.deb': '98ace4f1fcbb04b75e859a12b689a9ae4ac91ff8fd34ab221e5359c95ba47f52',
+        'proot_5.1.107.96_arm.deb': '19cd0aa78583e46075381398f23f8ee3647e61f166b5d02a487d99312d4ea51d',
+    },
+    'x86_64': {
+        'libandroid-shmem_0.7_x86_64.deb': 'ffa9e4c87467b158b148d0ff92dda796aa038276c2075af3269cdcdb06f25797',
+        'libtalloc_2.5.0_x86_64.deb': 'b8c6d95f20075dc1f9ec6573575b2444e8d526e48e0d8d6d5cf4e071e6e06530',
+        'proot_5.1.107.96_x86_64.deb': '77ea45540071ca543adda2b51aca2bc3761c52904d013fd0890682288eff9455',
+    },
+}
+TERMUX_PREFIX = 'data/data/com.termux/files/usr/'
+REQUIRED = ('SYMLINKS.txt', 'bin/bash', 'bin/gpgv', 'bin/gawk', 'bin/dpkg',
+            'bin/diff', 'bin/start-stop-daemon', 'bin/proot',
+            'libexec/proot/loader', 'lib/libtalloc.so.2', 'var/lib/dpkg/status')
 
 
 def digest(path):
@@ -51,11 +82,83 @@ def verify(asset, pin):
 
 
 def keep(name):
-    parts = name.split('/')
-    return (name == 'SYMLINKS.txt' or name.startswith(TREES)
-            or (len(parts) == 2 and parts[0] == 'bin' and parts[1] in BINS)
-            or (len(parts) == 2 and parts[0] == 'lib' and '.so' in parts[1])
-            or (name.startswith('lib/apt/methods/') and parts[-1] in METHODS))
+    return not name.startswith(DROP)
+
+
+def _ar_members(data):
+    if data[:8] != b'!<arch>\n':
+        raise ValueError('not a deb (ar) archive')
+    members, i = {}, 8
+    while i < len(data):
+        header = data[i:i + 60]
+        name = header[:16].decode().strip().rstrip('/')
+        size = int(header[48:58])
+        i += 60
+        members[name] = data[i:i + size]
+        i += size + (size & 1)
+    return members
+
+
+def vendored_debs(abi):
+    """Pinned vendored debs for [abi]: [(control_text, [(path, kind, data, mode, link)])]."""
+    out = []
+    for name, pin in sorted(DEB_PINS[abi].items()):
+        data = (VENDOR / abi / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != pin:
+            raise ValueError(f'vendored deb SHA256 mismatch: {name}')
+        members = _ar_members(data)
+        control_tar = next(v for k, v in members.items() if k.startswith('control.tar'))
+        data_tar = next(v for k, v in members.items() if k.startswith('data.tar'))
+        with tarfile.open(fileobj=io.BytesIO(control_tar)) as tar:
+            control = tar.extractfile('./control').read().decode()
+        entries = []
+        with tarfile.open(fileobj=io.BytesIO(data_tar)) as tar:
+            for member in tar.getmembers():
+                rel = member.name.removeprefix('./')
+                if not (rel + '/').startswith(TERMUX_PREFIX):
+                    continue
+                path = rel[len(TERMUX_PREFIX):] if rel != TERMUX_PREFIX.rstrip('/') else ''
+                if '..' in PurePosixPath(path).parts:
+                    raise ValueError(f'unsafe deb member: {member.name!r}')
+                if member.isdir():
+                    entries.append((path, 'dir', b'', 0o755, ''))
+                elif member.issym():
+                    entries.append((path, 'link', b'', 0o777, member.linkname))
+                elif member.isfile():
+                    mode = 0o755 if member.mode & 0o111 else 0o644
+                    entries.append((path, 'file', tar.extractfile(member).read(), mode, ''))
+                else:
+                    raise ValueError(f'unsupported deb member type: {member.name!r}')
+        out.append((control, entries))
+    return out
+
+
+def merge_vendored(contents, abi):
+    """Add the vendored debs to [contents] and register them with dpkg."""
+    status = contents['var/lib/dpkg/status'][0].decode()
+    links = contents['SYMLINKS.txt'][0].decode()
+    for control, entries in vendored_debs(abi):
+        package = re.search(r'^Package: (\S+)$', control, re.M).group(1)
+        if re.search(rf'^Package: {re.escape(package)}$', status, re.M):
+            raise ValueError(f'vendored package already in bootstrap: {package}')
+        listed, sums = [], []
+        for path, kind, data, mode, link in entries:
+            guest = '/' + TERMUX_PREFIX + path if path else '/' + TERMUX_PREFIX.rstrip('/')
+            listed.append(guest.rstrip('/'))
+            if kind == 'dir' or not keep(path):
+                continue
+            if kind == 'link':
+                links += f'{link}←./{path}\n'
+            else:
+                contents[path] = (data, mode)
+                sums.append(f'{hashlib.md5(data).hexdigest()}  {guest.lstrip("/")}\n')
+        status = status.rstrip('\n') + '\n\n' + control.rstrip('\n').replace(
+            f'Package: {package}\n', f'Package: {package}\nStatus: install ok installed\n', 1) + '\n'
+        contents[f'var/lib/dpkg/info/{package}.list'] = (
+            ('\n'.join(['/.', *sorted(set(l for l in listed if l))]) + '\n').encode(), 0o644)
+        contents[f'var/lib/dpkg/info/{package}.md5sums'] = (''.join(sums).encode(), 0o644)
+    contents['var/lib/dpkg/status'] = (status.encode(), 0o644)
+    contents['SYMLINKS.txt'] = (links.encode(), 0o644)
 
 
 def alignment_findings(contents, abi):
@@ -77,11 +180,16 @@ def alignment_findings(contents, abi):
     return findings
 
 
+def _symlinked(contents, path):
+    return any(line.split('←', 1)[-1].removeprefix('./') == path
+               for line in contents['SYMLINKS.txt'][0].decode().splitlines())
+
+
 def build(asset, output, abi, pin):
     """Verify before even opening the archive; never extract into the host tree."""
     asset, output = Path(asset), Path(output)
     verify(asset, pin)
-    entries, contents = [], {}
+    contents = {}
     with zipfile.ZipFile(asset) as source:
         infos = source.infolist()
         if len(infos) > 100000 or sum(i.file_size for i in infos) > MAX_EXPANDED:
@@ -103,15 +211,17 @@ def build(asset, output, abi, pin):
             data = source.read(info)  # bounded above, CRC checked by ZipFile
             mode = 0o755 if ((info.external_attr >> 16) & 0o111) else 0o644
             contents[name] = (data, mode)
-            entries.append({'path': name, 'size': len(data), 'mode': f'{mode:04o}',
-                            'sha256': hashlib.sha256(data).hexdigest()})
     if not any(n.startswith('share/termux-keyring/') and n.endswith('.gpg') for n in contents):
         raise ValueError('missing keyring')
     if not any(n.startswith('share/terminfo/') for n in contents):
         raise ValueError('missing terminfo')
-    for required in ('SYMLINKS.txt', 'bin/bash', 'bin/gpgv', 'bin/gawk', 'var/lib/dpkg/status'):
-        if required not in contents:
+    merge_vendored(contents, abi)
+    for required in REQUIRED:
+        if required not in contents and not _symlinked(contents, required):
             raise ValueError(f'missing required payload: {required}')
+    entries = [{'path': name, 'size': len(data), 'mode': f'{mode:04o}',
+                'sha256': hashlib.sha256(data).hexdigest()}
+               for name, (data, mode) in sorted(contents.items())]
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.bootstrap-', dir=output.parent) as tmp:
         staged = Path(tmp) / 'payload.zip'
@@ -136,7 +246,7 @@ def build(asset, output, abi, pin):
                 info.compress_type = zipfile.ZIP_DEFLATED
                 dest.writestr(info, data, compresslevel=9)
         manifest = {
-            'schema': 1, 'derivation': 'ovid-agent-essential-v1', 'abi': abi,
+            'schema': 1, 'derivation': 'ovid-termux-proot-v2', 'abi': abi,
             'androidAbi': ABI_MAP[abi],
             'upstream': {'url': f'{BASE}/bootstrap-{abi}.zip', **pin},
             'recipeSha256': digest(Path(__file__)),

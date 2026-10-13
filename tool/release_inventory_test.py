@@ -379,7 +379,10 @@ class BootstrapSupplyAlignmentTest(unittest.TestCase):
         source = root / 'upstream.zip'
         entries = {
             'bin/bash': elf(), 'bin/gpgv': elf(), 'bin/apt': elf(),
-            'bin/apt-get': elf(),
+            'bin/apt-get': elf(), 'bin/dpkg': elf(), 'bin/diff': elf(),
+            'bin/start-stop-daemon': elf(),
+            # Dropped by the derivation (documentation/headers only).
+            'share/man/man1/bash.1.gz': b'man', 'include/stdio.h': b'header',
             'SYMLINKS.txt': 'gawk←./bin/awk\nbash←./bin/sh\n'.encode(),
             'var/lib/dpkg/status': b'Package: gawk\nStatus: install ok installed\n',
             'share/termux-keyring/fixture.gpg': b'fixture',
@@ -412,6 +415,46 @@ class BootstrapSupplyAlignmentTest(unittest.TestCase):
                     entry = next(e for e in manifest['entries'] if e['path'] == name)
                     self.assertEqual(entry['sha256'], hashlib.sha256(z.read(name)).hexdigest())
                     self.assertEqual(entry['size'], len(z.read(name)))
+
+    def test_derivation_keeps_dpkg_prerequisites_and_drops_only_docs(self):
+        # 2026-10-13 emulator repro: the hand-picked subset dropped diff and
+        # start-stop-daemon, so every dpkg run aborted with "expected programs
+        # not found in PATH".
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.fixture_build(Path(directory))
+            with zipfile.ZipFile(output) as z:
+                names = set(z.namelist())
+        for kept in ('bin/dpkg', 'bin/diff', 'bin/start-stop-daemon', 'bin/apt-get'):
+            self.assertIn(kept, names)
+        self.assertNotIn('share/man/man1/bash.1.gz', names)
+        self.assertNotIn('include/stdio.h', names)
+
+    def test_vendored_proot_is_merged_and_registered_with_dpkg(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.fixture_build(Path(directory))
+            with zipfile.ZipFile(output) as z:
+                names = set(z.namelist())
+                status = z.read('var/lib/dpkg/status').decode()
+                links = z.read('SYMLINKS.txt').decode()
+                proot_list = z.read('var/lib/dpkg/info/proot.list').decode()
+                manifest = json.loads(z.read('.ovid-bootstrap-manifest.json'))
+        for path in ('bin/proot', 'libexec/proot/loader', 'lib/libtalloc.so.2.5.0',
+                     'lib/libandroid-shmem.so'):
+            self.assertIn(path, names)
+        self.assertIn('libtalloc.so.2.5.0←./lib/libtalloc.so.2', links)
+        for package in ('proot', 'libtalloc', 'libandroid-shmem'):
+            self.assertRegex(status, rf'Package: {package}\nStatus: install ok installed\n')
+        self.assertIn('Package: gawk', status)  # bootstrap entries kept
+        self.assertIn('/data/data/com.termux/files/usr/bin/proot', proot_list)
+        # Runtime repair verifies SYMLINKS.txt/status against the manifest.
+        entry = next(e for e in manifest['entries'] if e['path'] == 'SYMLINKS.txt')
+        self.assertEqual(entry['size'], len(links.encode()))
+
+    def test_vendored_deb_pins_are_enforced(self):
+        for abi, pins in self.supply.DEB_PINS.items():
+            for name, sha in pins.items():
+                data = (self.supply.VENDOR / abi / name).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), sha, name)
 
     def test_missing_gawk_fails_before_derived_output_publication(self):
         with tempfile.TemporaryDirectory() as directory:
