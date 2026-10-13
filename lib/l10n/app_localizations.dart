@@ -1191,6 +1191,474 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Android settings for this notification type'**
   String get bgChannelSystemSettings;
+
+  /// Generic button that dismisses a dialog without changes.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get actionCancel;
+
+  /// Generic button that saves the dialog's changes.
+  ///
+  /// In en, this message translates to:
+  /// **'Save'**
+  String get actionSave;
+
+  /// Generic destructive confirm button.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get actionDelete;
+
+  /// Tooltip of the chat header button that opens Studio (editor + terminal).
+  ///
+  /// In en, this message translates to:
+  /// **'Studio — code & terminal'**
+  String get chatHeaderStudio;
+
+  /// Tooltip of the chat header button that opens the in-app browser.
+  ///
+  /// In en, this message translates to:
+  /// **'Browser — agent & login'**
+  String get chatHeaderBrowser;
+
+  /// Tooltip of the three-dot overflow menu button.
+  ///
+  /// In en, this message translates to:
+  /// **'More options'**
+  String get chatMenuMore;
+
+  /// Accessibility label of the overflow menu button while background jobs exist.
+  ///
+  /// In en, this message translates to:
+  /// **'More options, {count, plural, =1{1 background job} other{{count} background jobs}}'**
+  String chatMenuMoreJobs(int count);
+
+  /// Overflow menu item: share the current conversation.
+  ///
+  /// In en, this message translates to:
+  /// **'Share chat'**
+  String get chatMenuShare;
+
+  /// Overflow menu item: start a new, empty chat.
+  ///
+  /// In en, this message translates to:
+  /// **'New chat'**
+  String get chatMenuNewChat;
+
+  /// Overflow menu item that lists this chat's background jobs.
+  ///
+  /// In en, this message translates to:
+  /// **'Background jobs ({count})'**
+  String chatMenuJobs(int count);
+
+  /// Overflow menu item: rename the current chat.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename chat'**
+  String get chatMenuRename;
+
+  /// Overflow menu item: open the chat's event ledger (trajectory).
+  ///
+  /// In en, this message translates to:
+  /// **'Trajectory'**
+  String get chatMenuTrajectory;
+
+  /// Overflow menu item: open usage statistics and plan limits.
+  ///
+  /// In en, this message translates to:
+  /// **'Usage & limits'**
+  String get chatMenuUsage;
+
+  /// Overflow menu item: delete the current chat (asks for confirmation).
+  ///
+  /// In en, this message translates to:
+  /// **'Delete chat'**
+  String get chatMenuDelete;
+
+  /// Live label of the reasoning block while the model is thinking.
+  ///
+  /// In en, this message translates to:
+  /// **'Thinking…'**
+  String get chatThinking;
+
+  /// Live label of the reasoning block with the elapsed thinking time.
+  ///
+  /// In en, this message translates to:
+  /// **'Thinking… {duration}'**
+  String chatThinkingFor(String duration);
+
+  /// Title of a finished reasoning block when its duration is unknown.
+  ///
+  /// In en, this message translates to:
+  /// **'Thoughts'**
+  String get chatThoughts;
+
+  /// Title of a finished reasoning block with how long the model thought.
+  ///
+  /// In en, this message translates to:
+  /// **'Thought for {duration}'**
+  String chatThoughtFor(String duration);
+
+  /// Accessibility label of a tool call that is still running.
+  ///
+  /// In en, this message translates to:
+  /// **'Running'**
+  String get toolStatusRunning;
+
+  /// Accessibility label of a tool call that finished successfully.
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get toolStatusDone;
+
+  /// Accessibility label of a tool call that failed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed'**
+  String get toolStatusFailed;
+
+  /// Accessibility label of a tool call that was stopped.
+  ///
+  /// In en, this message translates to:
+  /// **'Stopped'**
+  String get toolStatusStopped;
+
+  /// Accessibility label of a tool call whose outcome is unknown (interrupted).
+  ///
+  /// In en, this message translates to:
+  /// **'Status unknown'**
+  String get toolStatusUnknown;
+
+  /// Section label above a tool call's arguments in its expanded details.
+  ///
+  /// In en, this message translates to:
+  /// **'Input'**
+  String get toolDetailInput;
+
+  /// Section label above a tool call's result in its expanded details.
+  ///
+  /// In en, this message translates to:
+  /// **'Output'**
+  String get toolDetailOutput;
+
+  /// Tooltip: copies a tool call's output.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy output'**
+  String get toolDetailCopy;
+
+  /// Name shown on a subagent card when the agent type is unknown.
+  ///
+  /// In en, this message translates to:
+  /// **'Subagent'**
+  String get subagentDefaultName;
+
+  /// Subagent card status while the subagent works.
+  ///
+  /// In en, this message translates to:
+  /// **'Running'**
+  String get subagentStatusRunning;
+
+  /// Subagent card status after the subagent finished.
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get subagentStatusDone;
+
+  /// Subagent card status after the subagent failed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed'**
+  String get subagentStatusFailed;
+
+  /// Subagent card status after the subagent was stopped.
+  ///
+  /// In en, this message translates to:
+  /// **'Stopped'**
+  String get subagentStatusStopped;
+
+  /// Subagent card: how many tools the subagent called.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =0{No tool uses} =1{1 tool use} other{{count} tool uses}}'**
+  String subagentToolUses(int count);
+
+  /// Subagent card: older tool rows hidden above the latest ones.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 earlier tool use} other{{count} earlier tool uses}}'**
+  String subagentEarlierTools(int count);
+
+  /// Subagent card body before the subagent called any tool.
+  ///
+  /// In en, this message translates to:
+  /// **'No tool calls yet'**
+  String get subagentNoToolsYet;
+
+  /// Subagent card button that opens the subagent's full transcript.
+  ///
+  /// In en, this message translates to:
+  /// **'Open transcript'**
+  String get subagentOpenTranscript;
+
+  /// Accessibility label of a subagent card header.
+  ///
+  /// In en, this message translates to:
+  /// **'Subagent {name}: {status}'**
+  String subagentCardSemantics(String name, String status);
+
+  /// Header of the card listing files the agent produced this run.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{Produced 1 file} other{Produced {count} files}}'**
+  String chatProducedFiles(int count);
+
+  /// Button that shows the remaining produced files.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{+1 more file} other{+{count} more files}}'**
+  String chatProducedMore(int count);
+
+  /// Title of the Artifacts screen and its sidebar / menu entry (uploaded and generated files).
+  ///
+  /// In en, this message translates to:
+  /// **'Artifacts'**
+  String get artifactsTitle;
+
+  /// Artifacts filter tab: every item.
+  ///
+  /// In en, this message translates to:
+  /// **'All'**
+  String get artifactsFilterAll;
+
+  /// Artifacts filter tab: files the user attached.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploaded'**
+  String get artifactsFilterUploaded;
+
+  /// Artifacts filter tab: files Ovid produced.
+  ///
+  /// In en, this message translates to:
+  /// **'Generated'**
+  String get artifactsFilterGenerated;
+
+  /// Artifacts toggle: show items from every chat instead of only the current one.
+  ///
+  /// In en, this message translates to:
+  /// **'All chats'**
+  String get artifactsScopeAllChats;
+
+  /// Artifacts empty-state title.
+  ///
+  /// In en, this message translates to:
+  /// **'No artifacts yet'**
+  String get artifactsEmptyTitle;
+
+  /// Artifacts empty-state explanation.
+  ///
+  /// In en, this message translates to:
+  /// **'Files you attach and files, images and pages Ovid creates will appear here.'**
+  String get artifactsEmptyBody;
+
+  /// Badge tooltip: the user attached this file.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploaded by you'**
+  String get artifactOriginUploaded;
+
+  /// Badge tooltip: Ovid produced this file.
+  ///
+  /// In en, this message translates to:
+  /// **'Generated by Ovid'**
+  String get artifactOriginGenerated;
+
+  /// Accessibility hint for the long-press action on an artifact row.
+  ///
+  /// In en, this message translates to:
+  /// **'Share or remove'**
+  String get artifactActionsHint;
+
+  /// Shares an artifact file.
+  ///
+  /// In en, this message translates to:
+  /// **'Share'**
+  String get artifactShare;
+
+  /// Hides an artifact from the Artifacts list; the file and chat stay.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove from list'**
+  String get artifactRemoveFromList;
+
+  /// Snackbar after hiding an artifact (with Undo).
+  ///
+  /// In en, this message translates to:
+  /// **'Removed from Artifacts'**
+  String get artifactRemoved;
+
+  /// Accessibility label of an artifact card.
+  ///
+  /// In en, this message translates to:
+  /// **'Open {name}'**
+  String artifactOpenSemantics(String name);
+
+  /// Artifact type label.
+  ///
+  /// In en, this message translates to:
+  /// **'Image'**
+  String get artifactKindImage;
+
+  /// Artifact type label for HTML artifacts.
+  ///
+  /// In en, this message translates to:
+  /// **'Web page'**
+  String get artifactKindHtml;
+
+  /// Artifact type label.
+  ///
+  /// In en, this message translates to:
+  /// **'Code'**
+  String get artifactKindCode;
+
+  /// Artifact type label.
+  ///
+  /// In en, this message translates to:
+  /// **'Document'**
+  String get artifactKindDocument;
+
+  /// Artifact type label for other files.
+  ///
+  /// In en, this message translates to:
+  /// **'File'**
+  String get artifactKindFile;
+
+  /// Tooltip: copies the previewed text/code.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy'**
+  String get artifactCopy;
+
+  /// Snackbar after copying an artifact's text.
+  ///
+  /// In en, this message translates to:
+  /// **'Copied to clipboard'**
+  String get artifactCopied;
+
+  /// Opens the artifact in another installed app.
+  ///
+  /// In en, this message translates to:
+  /// **'Open with…'**
+  String get artifactOpenWith;
+
+  /// Opens a generated workspace file in Studio's editor.
+  ///
+  /// In en, this message translates to:
+  /// **'Open in Studio'**
+  String get artifactOpenInStudio;
+
+  /// The artifact's file was moved, deleted, or lives only in a remote repo.
+  ///
+  /// In en, this message translates to:
+  /// **'This file isn\'t on this device anymore.'**
+  String get artifactNotOnDevice;
+
+  /// Preview title when the artifact file is missing.
+  ///
+  /// In en, this message translates to:
+  /// **'File not available'**
+  String get artifactMissingTitle;
+
+  /// Preview title for a text file above the preview size limit.
+  ///
+  /// In en, this message translates to:
+  /// **'Too large to preview'**
+  String get artifactTooLargeTitle;
+
+  /// Preview hint for a file too large to show inline.
+  ///
+  /// In en, this message translates to:
+  /// **'Open it in another app to read it.'**
+  String get artifactTooLargeBody;
+
+  /// Preview title for a binary file type Ovid cannot render.
+  ///
+  /// In en, this message translates to:
+  /// **'No preview available'**
+  String get artifactNoPreviewTitle;
+
+  /// Preview hint for a binary file type.
+  ///
+  /// In en, this message translates to:
+  /// **'Open it with another app or share it.'**
+  String get artifactNoPreviewBody;
+
+  /// Rename-chat dialog title.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename session'**
+  String get sessionRenameTitle;
+
+  /// Rename-chat validation error.
+  ///
+  /// In en, this message translates to:
+  /// **'Session name cannot be empty'**
+  String get sessionRenameEmpty;
+
+  /// Delete-chat confirmation title.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete {title}?'**
+  String sessionDeleteTitle(String title);
+
+  /// Delete-chat confirmation body when nothing else is affected.
+  ///
+  /// In en, this message translates to:
+  /// **'You can undo for a few seconds; after that this chat cannot be recovered.'**
+  String get sessionDeleteImpactUndo;
+
+  /// Delete-chat confirmation body listing what else is deleted or stopped.
+  ///
+  /// In en, this message translates to:
+  /// **'This will permanently delete {details}. You can undo for a few seconds; after that this chat cannot be recovered.'**
+  String sessionDeleteImpactDetails(String details);
+
+  /// Delete-chat impact item.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 child session} other{{count} child sessions}}'**
+  String sessionDeleteChildSessions(int count);
+
+  /// Delete-chat impact item.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 sandbox workspace} other{{count} sandbox workspaces}}'**
+  String sessionDeleteSandboxes(int count);
+
+  /// Delete-chat impact item when the chat is mid-reply.
+  ///
+  /// In en, this message translates to:
+  /// **'the running chat will be stopped'**
+  String get sessionDeleteStopsRunning;
+
+  /// Delete-chat impact item for running subagents.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 running descendant will be stopped} other{{count} running descendants will be stopped}}'**
+  String sessionDeleteStopsDescendants(int count);
+
+  /// Snackbar after deleting a chat (with Undo).
+  ///
+  /// In en, this message translates to:
+  /// **'Chat deleted'**
+  String get sessionDeleted;
+
+  /// Snackbar when the durable delete failed and the chat was restored.
+  ///
+  /// In en, this message translates to:
+  /// **'The chat could not be deleted and has been restored. Try again.'**
+  String get sessionDeleteFailed;
 }
 
 class _AppLocalizationsDelegate

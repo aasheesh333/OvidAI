@@ -26,6 +26,12 @@ const _baseline = <String, int>{
   'lib/ui/usage_screen.dart': 27,
   'lib/ui/image_receipt_panel.dart': 13,
   'lib/ui/background_reliability_card.dart': 0,
+  'lib/ui/artifact_preview.dart': 0,
+  'lib/ui/artifacts_screen.dart': 0,
+  'lib/ui/chat_overflow_menu.dart': 0,
+  'lib/ui/session_actions.dart': 0,
+  'lib/ui/widgets/chat_tool_visuals.dart': 0,
+  'lib/ui/widgets/code_highlight.dart': 0,
 };
 
 final _literal = RegExp(
