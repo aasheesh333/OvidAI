@@ -13521,6 +13521,7 @@ ${await _agentsMdBlock()}
       final transportOutcome = result?['_attemptOutcome'] as String?;
       result?.remove('_attemptOutcome');
       if (attempt != null) {
+        final served = transportOutcome != 'failed' && result != null;
         await _completeUsageAttempt(
           attempt,
           outcome: transportOutcome == 'failed'
@@ -13532,6 +13533,11 @@ ${await _agentsMdBlock()}
                     : UsageOutcome.failed),
           reportedModel: result?['reportedModel'] as String?,
           usage: (result?['usage'] as Map?)?.cast<String, dynamic>(),
+          // Gateways that drop `stream_options` send no usage block; the
+          // journal then keeps a labelled local estimate (same chars/4
+          // heuristic as the run meter) instead of "unavailable".
+          estimatedInput: served ? _estimateRequestTokens(msgs) : null,
+          estimatedOutput: served ? _estimateReplyTokens(result) : null,
         );
       }
       return result;
@@ -13548,11 +13554,23 @@ ${await _agentsMdBlock()}
     }
   }
 
+  static int _estimateRequestTokens(List<Map<String, dynamic>> msgs) =>
+      msgs.fold<int>(0, (a, m) {
+        final c = m['content'];
+        return a + estimateMessageTokens(c is String ? c : '');
+      });
+
+  static int _estimateReplyTokens(Map<String, dynamic> msg) =>
+      estimateMessageTokens((msg['content'] as String?) ?? '') +
+      estimateMessageTokens((msg['reasoning_content'] as String?) ?? '');
+
   Future<void> _completeUsageAttempt(
     UsageAttemptHandle attempt, {
     required UsageOutcome outcome,
     String? reportedModel,
     Map<String, dynamic>? usage,
+    int? estimatedInput,
+    int? estimatedOutput,
   }) async {
     unawaited(
       attempt
@@ -13560,6 +13578,8 @@ ${await _agentsMdBlock()}
             outcome: outcome,
             reportedModel: reportedModel,
             usage: usage,
+            estimatedInput: estimatedInput,
+            estimatedOutput: estimatedOutput,
           )
           .then<void>((_) {
             if (!attempt.captureResult.captured) {

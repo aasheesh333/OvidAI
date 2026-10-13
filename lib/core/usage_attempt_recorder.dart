@@ -74,6 +74,8 @@ class UsageAttemptHandle {
   bool _finished = false;
   int _revision = 1;
   Map<String, dynamic>? _usage;
+  int? _estimatedInput;
+  int? _estimatedOutput;
   String? _reportedModel;
   int? _transportElapsedMilliseconds;
   Timer? _updateTimer;
@@ -140,16 +142,28 @@ class UsageAttemptHandle {
     return Future<void>.value();
   }
 
+  /// Terminal upsert. [estimatedInput]/[estimatedOutput] are local
+  /// estimates used ONLY for fields the provider did not report (some
+  /// gateways drop `stream_options` and never send a usage block); they are
+  /// stored with [UsageProvenance.locallyEstimated], never as reported.
   Future<void> complete({
     required UsageOutcome outcome,
     String? reportedModel,
     Map<String, dynamic>? usage,
+    int? estimatedInput,
+    int? estimatedOutput,
   }) async {
     if (_finished) return;
     _updateTimer?.cancel();
     _updateTimer = null;
     _finished = true;
     if (usage != null) _usage = Map<String, dynamic>.from(usage);
+    if (estimatedInput != null && estimatedInput >= 0) {
+      _estimatedInput = estimatedInput;
+    }
+    if (estimatedOutput != null && estimatedOutput >= 0) {
+      _estimatedOutput = estimatedOutput;
+    }
     if (reportedModel != null) _reportedModel = reportedModel;
     await _enqueueSave(
       dispatchStage: UsageDispatchStage.completed,
@@ -162,9 +176,25 @@ class UsageAttemptHandle {
     required UsageOutcome outcome,
   }) async {
     if (_finished && outcome == UsageOutcome.pending) return;
-    final input = _token(_usage, 'prompt_tokens');
-    final output = _token(_usage, 'completion_tokens');
-    final total = _token(_usage, 'total_tokens');
+    final reportedInput = _token(_usage, 'prompt_tokens');
+    final reportedOutput = _token(_usage, 'completion_tokens');
+    final input =
+        reportedInput ??
+        (_estimatedInput == null
+            ? null
+            : UsageTokenCount.estimated(_estimatedInput!));
+    final output =
+        reportedOutput ??
+        (_estimatedOutput == null
+            ? null
+            : UsageTokenCount.estimated(_estimatedOutput!));
+    var total = _token(_usage, 'total_tokens');
+    if (total == null &&
+        input?.value != null &&
+        output?.value != null &&
+        (reportedInput == null || reportedOutput == null)) {
+      total = UsageTokenCount.estimated(input!.value! + output!.value!);
+    }
     final completedAt = DateTime.now().toUtc();
     final elapsed = _transportElapsedMilliseconds == null
         ? null
