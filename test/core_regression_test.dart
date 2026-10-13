@@ -1386,16 +1386,18 @@ void main() {
           await Future<void>.delayed(const Duration(milliseconds: 150));
           app.selectSession(sessionB.id);
           await run.timeout(const Duration(seconds: 90));
-          // The queued follow-up must start a continuation run in A (not B).
-          // Wait for the second request (the continuation).
-          for (var i = 0; i < 50 && requests < 2; i++) {
+          // The queued follow-up joins A's running loop at its next model
+          // request (here the run's first request, as it was queued before
+          // that request left) — or a continuation in A — never B.
+          for (var i = 0; i < 50 && agent.busyFor(sessionA.id); i++) {
             await Future<void>.delayed(const Duration(milliseconds: 100));
           }
           expect(
             requests,
-            greaterThanOrEqualTo(2),
-            reason: 'queued message should trigger a continuation run',
+            greaterThanOrEqualTo(1),
+            reason: 'queued message must reach the model',
           );
+          expect(agent.queuedMessagesFor(sessionA.id), isEmpty);
           // B never received A's queued message as a user bubble.
           expect(sessionB.messages.where((m) => m.role == 'user'), isEmpty);
           // A received it.

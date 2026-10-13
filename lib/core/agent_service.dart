@@ -836,8 +836,10 @@ class AgentRun {
   /// Only composer-originated queue entries may authorize @session reads.
   final Set<int> userReferenceQueueIds = {};
 
-  /// Ordinary composer messages start a fresh dispatch. Explicit steering
-  /// removes this marker; internal agent notices may still join the live run.
+  /// Entries held back from the live run until the next fresh dispatch.
+  /// Composer messages no longer use it (they join the running loop at the
+  /// next model request, Claude Code style); kept for Undo snapshots and any
+  /// future caller that must wait for a fresh admission.
   final Set<int> nextDispatchQueueIds = {};
   int nextQueueId = 0;
   ApprovalRequest? pendingApproval;
@@ -1786,9 +1788,46 @@ class AgentService extends ChangeNotifier {
     // dispatch_agent runs stop too (mirrors hardStopAll's loop).
     _interruptSubagentTree(sessionId);
     // Stop with queued work: start the next message immediately rather than
-    // waiting for the cancelled run to finish unwinding.
-    if (wasActive && queuePreserved) _scheduleQueuedContinuation(sessionId);
+    // waiting for the cancelled run to finish unwinding. The promoted run
+    // shares this bucket and resets its live buffers at turn start, which
+    // would DELETE the stopped run's partial bubble — settle it first so the
+    // partial output stays in the transcript.
+    if (wasActive && queuePreserved) {
+      _keepStoppedPartial(r);
+      _scheduleQueuedContinuation(sessionId);
+    }
     return queuePreserved;
+  }
+
+  /// Settles [r]'s un-finalized live bubble as stopped (partial content and
+  /// reasoning kept) and detaches it from the bucket, so a replacement run's
+  /// live-buffer reset can never remove it. No-op without a live bubble.
+  void _keepStoppedPartial(AgentRun r) {
+    final s = r.liveSession;
+    final m = r.liveMsg;
+    if (s != null && m != null && s.messages.contains(m)) {
+      final content = r.liveContent.toString();
+      final reasoning = r.liveReasoning.toString();
+      m.thinking = false;
+      if (content.trim().isNotEmpty) {
+        m.kind = MsgKind.text;
+        m.content = '$content\n\n*⏹ stopped by user*';
+      } else if (reasoning.trim().isNotEmpty) {
+        m.kind = MsgKind.reasoning;
+        m.content =
+            '${cleanReasoningText(reasoning)}\n\n*⏹ stopped by user*';
+      } else {
+        // Nothing streamed yet: drop the empty placeholder.
+        s.messages.remove(m);
+      }
+      s.touch();
+      AppState.I.refresh();
+      AppState.I.persistSessions();
+    }
+    r.liveContent.clear();
+    r.liveReasoning.clear();
+    r.liveMsg = null;
+    r.liveSession = null;
   }
 
   /// Mark every live descendant subagent of [sessionId] (children,
@@ -2543,13 +2582,16 @@ class AgentService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Enqueue a message to run after the current turn completes.
+  /// Queue a composer message while a run is active. This NEVER stops the
+  /// run: the message joins the running agent loop at its next model request
+  /// (appended as a user turn after the current tool results) and leaves the
+  /// queue at that point. If the run settles before another request, the
+  /// queue starts the next run immediately ([_scheduleQueuedContinuation]).
   void enqueueMessage(String text, {String? sessionId}) {
     if (_runChainStale || !AppState.I.sessionAccountReady) return;
     if (text.trim().isEmpty) return;
     final run = sessionId != null ? _runFor(sessionId) : _runResolved;
     _queueAdd(run, text, userReferences: true);
-    run.nextDispatchQueueIds.add(run.queueIds.last);
     final sid = sessionId ?? _runSession?.id ?? '';
     _queuedAttachments[(sid, run.queueIds.last)] = List.of(
       _attachmentsFor(sid),
@@ -2567,8 +2609,9 @@ class AgentService extends ChangeNotifier {
   ///
   /// Called when a run ends (completed or stopped) and by Stop itself, so a
   /// queued message starts immediately on Stop instead of waiting for the
-  /// unwind. Exactly one message is promoted per run: the rest stay queued
-  /// and start when the new run ends. Idempotent per session while in flight.
+  /// unwind. The head becomes the new run's prompt; the rest of the queue
+  /// joins that run's first model request, so every queued message is
+  /// delivered together, in order. Idempotent per session while in flight.
   void _scheduleQueuedContinuation(String sessionId) {
     final run = _runs[sessionId];
     if (run == null || run.queue.isEmpty || run.activeRunId != null) return;
@@ -10339,10 +10382,11 @@ user which one instead of assuming this one.''';
     );
   }
 
-  /// Explicit steering and internal notices join the current run. Ordinary
-  /// composer messages wait for a fresh dispatch with the then-selected route.
-  /// Drains eligible entries into [msgs] as user turns
-  /// and records them in the session so the chat bubble shows immediately.
+  /// Queued messages (composer, steering, internal notices) join the current
+  /// run at its next model request. Drains every eligible entry, in order,
+  /// into [msgs] as ONE user turn (strict-alternation providers reject
+  /// back-to-back user rows) and records each in the session so its chat
+  /// bubble shows at that point of the transcript.
   /// PR23/M6: queued text gets the SAME @reference expansion as a direct
   /// send — a queued "@notes.txt summarize" must not reach the model raw.
   Future<void> _drainQueueIntoMsgs(
@@ -10350,6 +10394,7 @@ user which one instead of assuming this one.''';
     List<({String name, String path, int size})>? attachmentsToAcknowledge,
   }) async {
     if (!_hasInRunQueueMessages) return;
+    final parts = <String>[];
     while (_hasInRunQueueMessages) {
       _syncQueueIds(_runResolved);
       final index = _runResolved.queueIds.indexWhere(
@@ -10388,16 +10433,21 @@ user which one instead of assuming this one.''';
           Diag.swallow('agent_service', e);
         }
       }
-      msgs.add({
-        'role': 'user',
-        'content': [
+      parts.add(
+        [
           modelText,
           if (attachments.isNotEmpty)
             _attachmentContext(_attachmentMetadata(attachments)),
         ].join('\n\n'),
-      });
+      );
     }
-    _emit('think', 'queued message joined this run');
+    msgs.add({'role': 'user', 'content': parts.join('\n\n')});
+    _emit(
+      'think',
+      parts.length == 1
+          ? 'queued message joined this run'
+          : '${parts.length} queued messages joined this run',
+    );
   }
 
   /// ── compaction parity (ovid-compaction-basic) ──────────────────────
@@ -12066,6 +12116,14 @@ ${await _agentsMdBlock()}
         if (sessionCtx.isNotEmpty) {
           msgs.insert(0, {'role': 'system', 'content': sessionCtx});
         }
+        // Queued messages join EVERY model request of this run, including
+        // the first (the rest of the queue after a continuation promoted its
+        // head) and any continue path (nudges, retries, compaction).
+        await _drainQueueIntoMsgs(
+          msgs,
+          attachmentsToAcknowledge: attachmentsToAcknowledge,
+        );
+        if (_runChainStale) break;
         final requestId = _logicalRequestId();
         var msg = await _callLlm(p, msgs, s, requestId: requestId);
         if (_runChainStale) break;
@@ -12288,8 +12346,8 @@ ${await _agentsMdBlock()}
 
         final toolCalls = msg['tool_calls'] as List?;
         if (toolCalls == null || toolCalls.isEmpty) {
-          // Explicit steering/internal notices join the next request of this
-          // run. Ordinary queued messages get a new admission after settlement.
+          // Queued messages that arrived during this final reply join the
+          // next request of this run instead of being dropped or waiting.
           if (_hasInRunQueueMessages) {
             msgs.add({'role': 'assistant', 'content': msg['content'] ?? ''});
             _finalizeLive();
