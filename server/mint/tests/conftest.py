@@ -49,6 +49,25 @@ class MemoryRedis:
     def exists(self, *keys):
         return sum(1 for k in keys if any(k in s for s in (self.kv, self.sets, self.hashes, self.lists)))
 
+    def incrbyfloat(self, k, amount):
+        self.kv[k] = repr(float(self.kv.get(k, 0)) + float(amount))
+        return float(self.kv[k])
+
+    def srem(self, k, *vals):
+        s = self.sets.get(k, set())
+        n = len(s & set(vals))
+        s.difference_update(vals)
+        return n
+
+    def hdel(self, k, *fields):
+        h = self.hashes.get(k, {})
+        n = 0
+        for f in fields:
+            if f in h:
+                del h[f]
+                n += 1
+        return n
+
     def incr(self, k):
         self.kv[k] = str(int(self.kv.get(k, 0)) + 1)
         return int(self.kv[k])
@@ -104,6 +123,22 @@ class MemoryRedis:
         for k in list(self.kv):
             if fnmatch.fnmatch(k, match):
                 yield k
+
+
+class AsyncRedis:
+    """Async facade over a sync fake (what the LiteLLM hook uses)."""
+
+    def __init__(self, sync, fail=False):
+        self.sync, self.fail = sync, fail
+
+    def __getattr__(self, name):
+        fn = getattr(self.sync, name)
+
+        async def call(*a, **kw):
+            if self.fail:
+                raise ConnectionError("redis down")
+            return fn(*a, **kw)
+        return call
 
 
 def make_redis():
@@ -218,6 +253,7 @@ def env(tmp_path, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     if str(MINT_DIR) not in sys.path:
         sys.path.insert(0, str(MINT_DIR))
+    monkeypatch.setenv("MINT_SWEEP_S", "3600")
     sys.modules.pop("mint", None)
     mint = importlib.import_module("mint")
     fake = FakeLiteLLM()
@@ -243,6 +279,7 @@ ADMIN = {"Authorization": f"Bearer {MASTER}"}
 
 
 def user_with_keys(mint, fake, uid, tier="free", android=True, web=True, **kw):
+    # `tier` is what billing/admin store: a plan id or alias (3x/7x/15x).
     """Register a user with android and/or web keys in Redis + the fake."""
     mint.rds.sadd(mint.ALL_UIDS_SET, uid)
     if tier != "free":
