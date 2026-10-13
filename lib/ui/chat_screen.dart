@@ -395,9 +395,6 @@ class _StatsLine extends StatelessWidget {
   const _StatsLine();
 
   String _fmtTok(int t) => formatCompactCount(t);
-  String _fmtCost(double usd) => usd >= 1
-      ? '\$${usd.toStringAsFixed(2)}'
-      : '\$${usd.toStringAsFixed(usd >= 0.01 ? 3 : 4)}';
 
   @override
   Widget build(BuildContext context) {
@@ -443,8 +440,6 @@ class _StatsLine extends StatelessWidget {
                         'cached ${analytics.cachedPercent.toStringAsFixed(0)}%',
                       if (analytics.averageTtftMs > 0)
                         'ttft ~${analytics.averageTtftMs} ms',
-                      if (analytics.estimatedCostUsd > 0)
-                        '≈ ${_fmtCost(analytics.estimatedCostUsd)}',
                       if (s.compactedSummary != null) 'compacted',
                     ].join('  |  '),
                     maxLines: 1,
@@ -562,18 +557,7 @@ class _StatsLine extends StatelessWidget {
                         ? '—'
                         : '${a.decodeTokensPerSecond.toStringAsFixed(1)} tok/s',
                   ),
-                  _analyticsMetric(
-                    'Est. cost',
-                    a.estimatedCostUsd == 0
-                        ? '—'
-                        : _fmtCost(a.estimatedCostUsd),
-                  ),
                 ],
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'Cost is an approximate public list-price estimate. Custom or unknown models show no invented price.',
-                style: TextStyle(color: Aether.textFaint, fontSize: 10.5),
               ),
             ],
           ),
