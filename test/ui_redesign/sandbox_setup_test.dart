@@ -400,7 +400,7 @@ void main() {
       expect(find.text('Sandbox ready'), findsOneWidget);
       expect(find.byType(AetherCard), findsWidgets);
       expect(
-        find.widgetWithText(AetherPill, 'NATIVE BIONIC'),
+        find.widgetWithText(AetherPill, 'TERMUX · PROOT'),
         findsOneWidget,
       );
       expect(

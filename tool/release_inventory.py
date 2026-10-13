@@ -39,6 +39,10 @@ import zipfile
 
 ABIS = {'arm64-v8a': (2, 183), 'armeabi-v7a': (1, 40), 'x86_64': (2, 62)}
 BOOTSTRAP = 'libovid_bootstrap.so'
+# proot ships a 32-bit loader next to the 64-bit one (to exec 32-bit guests).
+# It is the only bootstrap member allowed to be the ABI's 32-bit counterpart.
+PROOT_LOADER32 = 'libexec/proot/loader32'
+COMPAT32 = {'arm64-v8a': (1, 40), 'x86_64': (1, 3)}
 MAX_MEMBER = 256 * 1024 * 1024
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
 ALIGNMENT_REMEDIATION = (
@@ -77,11 +81,11 @@ def relro_contained(loads, relro_ranges):
     return True
 
 
-def elf_inventory(data, abi):
+def elf_inventory(data, abi, expected=None):
     if len(data) < 52 or data[:4] != b'\x7fELF' or data[4] not in (1, 2) or data[5] != 1:
         raise ValueError('invalid/truncated little-endian ELF')
     cls, machine = data[4], struct.unpack_from('<H', data, 18)[0]
-    if (cls, machine) != ABIS[abi]:
+    if (cls, machine) != (expected or ABIS[abi]):
         raise ValueError(f'ELF class/machine {cls}/{machine} does not match {abi}')
     if cls == 2:
         phoff = struct.unpack_from('<Q', data, 32)[0]
@@ -168,7 +172,9 @@ def inspect_native(source, kind, expected_abis, profile='sideload'):
                             payload = nested.read(member)
                             if not payload.startswith(b'\x7fELF'):
                                 continue
-                            child = elf_inventory(payload, abi)
+                            compat = (COMPAT32.get(abi)
+                                      if member.filename == PROOT_LOADER32 else None)
+                            child = elf_inventory(payload, abi, compat)
                             child['path'] = member.filename
                             child['sha256'] = hashlib.sha256(payload).hexdigest()
                             entry['elfs'].append(child)
