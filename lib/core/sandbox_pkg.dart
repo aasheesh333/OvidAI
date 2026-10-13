@@ -207,15 +207,20 @@ esac
 
 # Mirror order: the app-written list first, then the generated
 # sources.list, then the public default. Keeps the script aligned with
-# the mirror pool the app actually uses.
-MIRROR=""
+# the mirror pool the app actually uses. An index update falls back along
+# this list (bounded by OVID_PKG_MAX_MIRRORS) when a mirror is unreachable,
+# fails verification or lags behind what was already seen from it.
+MIRRORS=""
 if [ -r "$PREFIX/etc/apt/ovid-mirrors" ]; then
-  MIRROR="$(awk 'NF { print; exit }' "$PREFIX/etc/apt/ovid-mirrors")"
+  MIRRORS="$(awk '$1 ~ /^https:\/\/[A-Za-z0-9._~:\/@%+-]+$/ && !seen[$1]++ { print $1 }' "$PREFIX/etc/apt/ovid-mirrors")"
 fi
-if [ -z "$MIRROR" ] && [ -r "$PREFIX/etc/apt/sources.list" ]; then
-  MIRROR="$(awk '/^deb /{print $2; exit}' "$PREFIX/etc/apt/sources.list")"
+if [ -z "$MIRRORS" ] && [ -r "$PREFIX/etc/apt/sources.list" ]; then
+  MIRRORS="$(awk '/^deb /{print $2; exit}' "$PREFIX/etc/apt/sources.list")"
 fi
-[ -z "$MIRROR" ] && MIRROR=https://packages.termux.dev/apt/termux-main
+[ -z "$MIRRORS" ] && MIRRORS=https://packages.termux.dev/apt/termux-main
+MIRROR="$(printf '%s\n' "$MIRRORS" | sed -n 1p)"
+MAX_MIRRORS="${OVID_PKG_MAX_MIRRORS:-3}"
+case "$MAX_MIRRORS" in ''|*[!0-9]*|0) MAX_MIRRORS=3;; esac
 
 # Serialize update/read/install so a generation cannot change under a reader.
 # A killed process may leave a lock: fail closed; the caller must reap its old
@@ -371,12 +376,23 @@ _verify_release() {
     _why='Release date outside its validity window (mirror out of date or device clock wrong)'; return 1; }
   release_hash="$(sha256sum "$operation/Release")" || return 1
   release_hash="${release_hash%% *}"
-  if [ -f "$PKG_IDX/high-water" ]; then
-    read -r _floor _floor_hash < "$PKG_IDX/high-water" || return 1
+  # Anti-rollback floor PER MIRROR: a mirror may never go back behind an
+  # index it already served. Mirrors of one repository legitimately lag each
+  # other by hours, so a floor learned from mirror A must not pin mirror B
+  # (that made every reachable mirror fail as "stale" for good); the signed
+  # validity window above bounds how old any accepted index can be.
+  _hw="$(_high_water)" || return 1
+  if [ -f "$_hw" ]; then
+    read -r _floor _floor_hash < "$_hw" || return 1
     case "$_floor" in ''|*[!0-9]*) return 1;; esac
     [ "$released" -ge "$_floor" ] || { _why='mirror is behind an index already seen (stale mirror)'; return 1; }
-    [ "$released" != "$_floor" ] || [ "$release_hash" = "$_floor_hash" ] || return 1
+    [ "$released" != "$_floor" ] || [ "$release_hash" = "$_floor_hash" ] || {
+      _why='mirror re-signed an index with the same date (rollback)'; return 1; }
   fi
+}
+_high_water() {
+  _k="$(printf '%s' "$MIRROR" | sha256sum)" || return 1
+  printf '%s/high-water.d/%s\n' "$PKG_IDX" "${_k%% *}"
 }
 _packages_hash() {
   awk -v path="main/binary-$ARCH/Packages$1" 'NR>2 && $3==path { print $1, $2 }' "$operation/release-fields"
@@ -387,7 +403,10 @@ _index_ok() {
   case "$generation" in generation.*) ;; *) return 1;; esac
   case "$generation" in *[!a-zA-Z0-9.]* ) return 1;; esac
   _cached="$PKG_IDX/$generation"
-  [ "$(cat "$_cached/mirror" 2>/dev/null)" = "$MIRROR" ] || return 1
+  # The cached index may come from any mirror still in the app's pool.
+  _cm="$(cat "$_cached/mirror" 2>/dev/null)" || return 1
+  printf '%s\n' "$MIRRORS" | grep -Fqx -- "$_cm" || return 1
+  MIRROR="$_cm"
   _verify_release "$_cached" || return 1
   set -- $(_packages_hash '')
   [ "$#" = 2 ] && _hash_ok "$_cached/Packages" "$2" "$1" || return 1
@@ -399,6 +418,7 @@ _fetch_index() {
   _why=''
   : > "$PKG_IDX/revoked" || return 1
   _stage="$operation/generation"
+  rm -rf "$_stage"
   mkdir "$_stage" || return 1
   _base="$MIRROR/dists/stable"
   if ! _bounded_fetch "$_base/InRelease" "$_stage/InRelease" 1048576 2>/dev/null; then
@@ -431,8 +451,11 @@ _fetch_index() {
   printf '%s\n' "$MIRROR" > "$_stage/mirror" || return 1
   generation="generation.${operation##*.}"
   mv "$_stage" "$PKG_IDX/$generation" || return 1
+  _hw="$(_high_water)" && mkdir -p "$PKG_IDX/high-water.d" || return 1
   printf '%s %s\n' "$released" "$release_hash" > "$operation/high-water" &&
-    mv "$operation/high-water" "$PKG_IDX/high-water" || return 1
+    mv "$operation/high-water" "$_hw" || return 1
+  # Older builds kept ONE floor shared by every mirror; it is superseded.
+  rm -f "$PKG_IDX/high-water"
   printf '%s\n' "$generation" > "$operation/current" &&
     mv "$operation/current" "$PKG_IDX/current" || return 1
   rm -f "$PKG_IDX/revoked" || return 1
@@ -443,16 +466,32 @@ _fetch_index() {
   done
 }
 
+# Try the mirror pool in order (bounded) until one yields a verified, fresh
+# index. Each rejected mirror is reported with its reason.
+_fetch_any() {
+  _tried=0; _last_why=''
+  for _m in $MIRRORS; do
+    [ "$_tried" -lt "$MAX_MIRRORS" ] || break
+    _tried=$((_tried + 1))
+    MIRROR="$_m"
+    _fetch_index && return 0
+    _last_why="${_why:-index fetch or verification failed}"
+    echo "[ovid-pkg] mirror $MIRROR rejected: $_last_why" >&2
+  done
+  _why="$_last_why; tried $_tried mirror(s)"
+  return 1
+}
+
 cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
   recover) echo '[ovid-pkg] pending transaction recovered';;
   update)
-    _fetch_index && _index_ok || { _error 'fetch, signature, hash, expiry or stale generation'; exit 1; }
+    _fetch_any && _index_ok || { _error 'fetch, signature, hash, expiry or stale generation'; exit 1; }
     echo "[ovid-pkg] index ready ($generation; Release SHA256=$release_hash; expires=$expires)"
     ;;
   search)
     pat="${1:-}"; [ -z "$pat" ] && { echo "usage: ovid-pkg search '<text>'" >&2; exit 1; }
-    if ! _index_ok; then _fetch_index || { _error 'cache/update'; exit 1; }; fi
+    if ! _index_ok; then _fetch_any || { _error 'cache/update'; exit 1; }; fi
     _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
     grep -B8 -- "$pat" "$INDEX" | grep '^Package: ' | sort -u | head -40
     ;;
@@ -469,7 +508,7 @@ case "$cmd" in
     # shellcheck disable=SC2086
     set -- $_names
     [ "$#" -lt 1 ] && { echo "usage: ovid-pkg install <pkg>..." >&2; exit 1; }
-    if ! _index_ok; then _fetch_index || { _error 'cache/update'; exit 1; }; fi
+    if ! _index_ok; then _fetch_any || { _error 'cache/update'; exit 1; }; fi
     _index_ok || { echo "[ovid-pkg] index empty or stale" >&2; exit 1; }
     # Resolve the entire closure before transport or extraction. An owned
     # temporary directory prevents archive-name collisions between versions.

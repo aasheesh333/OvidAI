@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'distribution.dart';
 import 'apt_trust.dart';
+import 'dpkg_compat.dart';
 import 'sandbox_pkg.dart';
 import 'global_repo_registry.dart';
 import 'pty_service.dart' show OwnedProcessTree;
@@ -1199,6 +1200,25 @@ class SandboxService {
   @visibleForTesting
   static Duration runtimeInstallBudget = const Duration(minutes: 20);
 
+  /// Upper bound for ONE package group (all attempts, native apt and
+  /// ovid-pkg). Every command timeout inside the group is capped by what is
+  /// left of it, so a stuck download fails the group instead of the run.
+  @visibleForTesting
+  static Duration runtimeGroupBudget = const Duration(minutes: 10);
+
+  /// Native dpkg failed for a reason that will not change for the rest of
+  /// the run (config dir, admindir, chroot, missing apt dirs, …). Retrying
+  /// apt-get per group would only repeat it; ovid-pkg needs no dpkg install.
+  @visibleForTesting
+  static bool looksLikeDpkgUnusable(String out) {
+    final l = out.toLowerCase();
+    return RegExp(r'sub-process \S*dpkg returned an error code').hasMatch(l) ||
+        l.contains('error opening configuration directory') ||
+        (l.contains('dpkg: error') && l.contains('permission denied')) ||
+        l.contains('failed to chroot') ||
+        RegExp(r"e: directory '[^']*' missing").hasMatch(l);
+  }
+
   /// User-facing text when package signatures still fail after the bundled
   /// keys were repaired.
   static const signatureFailureAdvice =
@@ -1295,6 +1315,21 @@ class SandboxService {
       final required = essential.containsKey(group.key);
       final attempts = required ? 3 : 1;
       var installed = false;
+      var timedOut = false;
+      String? groupFailure;
+      final groupClock = Stopwatch()..start();
+      // Time left for this group: the smaller of its own budget and the run's.
+      Duration left() {
+        final g = runtimeGroupBudget - groupClock.elapsed;
+        final r = runtimeInstallBudget - clock.elapsed;
+        return g < r ? g : r;
+      }
+      // A command never outlives the group: cap [want] by what is left.
+      Duration cap(Duration want) {
+        final l = left();
+        if (l <= Duration.zero) throw TimeoutException('package group time budget used up');
+        return want < l ? want : l;
+      }
       for (var attempt = 1; attempt <= attempts && !installed && fatal == null; attempt++) {
         checkCancellation();
         if (clock.elapsed > runtimeInstallBudget) {
@@ -1302,12 +1337,16 @@ class SandboxService {
               'without a working package mirror. $noMirrorAdvice';
           break;
         }
+        if (groupClock.elapsed >= runtimeGroupBudget) {
+          timedOut = true;
+          break;
+        }
         onLine?.call('[runtime] ${required ? "essential" : "optional"} ${group.key} ($attempt/$attempts)');
         if (aptFailures < 2) {
           try {
             if (!aptReady) {
               final (code, output) = await _aptChecked('update 2>&1',
-                  timeout: const Duration(minutes: 3), onLine: onLine);
+                  timeout: cap(const Duration(minutes: 3)), deadline: left, onLine: onLine);
               checkCancellation();
               if (code != 0) {
                 aptFailures++;
@@ -1320,8 +1359,13 @@ class SandboxService {
             // dependency closure belongs in an essential transaction.
             final (code, output) = await _aptChecked(
                 'install -y --no-install-recommends ${group.key} 2>&1',
-                timeout: const Duration(minutes: 8), onLine: onLine);
+                timeout: cap(const Duration(minutes: 8)), deadline: left, onLine: onLine);
             checkCancellation();
+            if (code != 0 && looksLikeDpkgUnusable(output)) {
+              aptFailures = 2;
+              onLine?.call('[runtime] native dpkg cannot install here — '
+                  'using the signed ovid-pkg installer for the rest of this run');
+            }
             if (code != 0) throw StateError('apt-get install exit $code: ${_runtimeError(output)}');
             await _repairRuntimeEntryPoints();
             installed = await verify(group.value);
@@ -1331,6 +1375,7 @@ class SandboxService {
             rethrow;
           } catch (e) {
             onLine?.call('[runtime] ${group.key}: $e');
+            groupFailure = '$e';
           }
           if (installed) break;
         }
@@ -1344,13 +1389,13 @@ class SandboxService {
           if (!signedReady) {
             final (awkCode, awkOutput) = await _checkedCommand(
                 ['bash', '-c', "awk 'BEGIN { exit 0 }' </dev/null 2>&1"],
-                timeout: const Duration(seconds: 15));
+                timeout: cap(const Duration(seconds: 15)));
             checkCancellation();
             if (awkCode != 0) {
               throw StateError('bootstrap prerequisite awk cannot execute; verified bundled repair required: ${_runtimeError(awkOutput)}');
             }
             final (code, output) = await _checkedCommand(
-                ['bash', '-c', 'ovid-pkg update 2>&1'], timeout: const Duration(minutes: 6), onLine: onLine);
+                ['bash', '-c', 'ovid-pkg update 2>&1'], timeout: cap(const Duration(minutes: 6)), onLine: onLine);
             checkCancellation();
             if (code != 0) {
               if (_looksLikeSignatureFailure(output)) await onSignatureFailure();
@@ -1359,7 +1404,7 @@ class SandboxService {
             signedReady = true;
           }
           final (code, output) = await _checkedCommand(
-              ['bash', '-c', 'ovid-pkg install ${group.key} 2>&1'], timeout: const Duration(minutes: 12), onLine: onLine);
+              ['bash', '-c', 'ovid-pkg install ${group.key} 2>&1'], timeout: cap(const Duration(minutes: 12)), onLine: onLine);
           checkCancellation();
           if (code != 0) throw StateError('signed install exit $code: ${_runtimeError(output)}');
           await _repairRuntimeEntryPoints();
@@ -1370,6 +1415,8 @@ class SandboxService {
           rethrow;
         } catch (e) {
           onLine?.call('[runtime] ${group.key}: $e');
+          groupFailure = '$e';
+          if (e is TimeoutException) timedOut = true;
           final hard = _isHardMirrorFailure('$e');
           signedReady = false;
           aptReady = false;
@@ -1378,13 +1425,35 @@ class SandboxService {
           }
         }
       }
+      if (!installed && timedOut) {
+        groupFailure = 'stopped after ${groupClock.elapsed.inMinutes} min '
+            '(time limit per package)';
+        onLine?.call('[runtime] ${group.key}: $groupFailure');
+      }
       onLine?.call('[runtime] ${group.key}: ${installed ? "verified ✓" : required ? "FAILED" : "optional unavailable"}');
-      if (required && !installed) essentialMissing = true;
+      if (required && !installed) {
+        essentialMissing = true;
+        // Shown in the setup log right away (with the Retry path) instead of
+        // leaving the user watching a silent spinner.
+        onLine?.call('[runtime] FAILED: '
+            '${runtimeGroupFailureMessage([group.key], groupFailure)}');
+      }
     }
     if (fatal != null) {
       onLine?.call('[runtime] FAILED: $fatal');
       if (essentialMissing) throw RuntimeSetupException(fatal!);
     }
+  }
+
+  /// One actionable sentence for essential groups that did not install.
+  @visibleForTesting
+  static String runtimeGroupFailureMessage(List<String> groups, String? lastError) {
+    final reason = lastError == null
+        ? ''
+        : ' Last error: ${lastError.split('\n').map((l) => l.trim()).lastWhere((l) => l.isNotEmpty, orElse: () => lastError.trim())}.';
+    return 'Could not install ${groups.join(', ')}.$reason '
+        'Check the connection, then tap Retry. If it keeps failing, use '
+        'Health → Reset sandbox.';
   }
 
   /// Recover only broken package prerequisites from the installed, signed APK.
@@ -1938,8 +2007,19 @@ export PIP_CACHE_DIR="\$HOME/.cache/pip"
 // Ovid sandbox apt config — override the compiled-in Termux prefix.
 Dir "$p";
 Dir::State "$p/var/lib/apt";
+Dir::State::lists "$p/var/lib/apt/lists";
+Dir::State::extended_states "$p/var/lib/apt/extended_states";
 Dir::State::status "$p/var/lib/dpkg/status";
 Dir::Cache "$p/var/cache/apt";
+Dir::Cache::archives "$p/var/cache/apt/archives";
+// Termux apt resolves an unset Dir::Log to <Dir>/data/data/com.termux/files/
+// usr/var/log/apt ("E: Directory … missing" before dpkg even runs). Pin every
+// log path inside the prefix; AptTrust.ensureAptDirectories creates it.
+Dir::Log "$p/var/log/apt";
+Dir::Log::Terminal "$p/var/log/apt/term.log";
+Dir::Log::History "$p/var/log/apt/history.log";
+Dir::Log::Planner "$p/var/log/apt/eipp.log.xz";
+Dir::Log::Solver "$p/var/log/apt/edsp.log.xz";
 Dir::Etc "$p/etc/apt";
 Dir::Etc::sourcelist "$p/etc/apt/sources.list";
 Dir::Etc::sourceparts "$p/etc/apt/sources.list.d";
@@ -1947,6 +2027,10 @@ Dir::Etc::main "$p/etc/apt/apt.conf";
 Dir::Etc::parts "$p/etc/apt/apt.conf.d";
 Dir::Etc::trusted "$p/etc/apt/trusted.gpg";
 Dir::Etc::trustedparts "$p/etc/apt/trusted.gpg.d";
+Dir::Etc::preferences "$p/etc/apt/preferences";
+Dir::Etc::preferencesparts "$p/etc/apt/preferences.d";
+Dir::Etc::netrc "$p/etc/apt/auth.conf";
+Dir::Etc::netrcparts "$p/etc/apt/auth.conf.d";
 Dir::Bin::dpkg "$p/bin/dpkg";
 Dir::Bin::apt-get "$p/bin/apt-get";
 // apt 2.8's signature verifier (ExecGPGV) does NOT exec gpgv directly — it
@@ -1960,8 +2044,14 @@ Dir::Bin::methods "$p/lib/apt/methods";
 Dir::Bin::solvers "$p/lib/apt/solvers";
 Dir::Bin::planners "$p/lib/apt/planners";
 DPkg::Pre-Install-Pkgs "";
+// dpkg: members (./data/data/com.termux/files/usr/…) unpack under --root,
+// which DpkgCompat maps back onto the prefix. A non-root app cannot chroot
+// for maintainer scripts, so run them in place.
 DPkg::Options:: "--root=$p";
 DPkg::Options:: "--admindir=$p/var/lib/dpkg";
+DPkg::Options:: "--force-script-chrootless";
+DPkg::Options:: "--force-not-root";
+DPkg::Options:: "--log=$p/var/log/dpkg.log";
 GPkg::Source::No-Advance "false";
 // TLS for apt's https mirror fetch — the prefix-compiled apt method needs
 // an explicit CA bundle (Android has no /etc/ssl; the sandbox's bundle
@@ -2025,6 +2115,14 @@ Acquire::https::CAInfo "$p/etc/tls/cert.pem";
   }) async {
     try {
       for (final line in AptTrust.ensureAptDirectories(prefix)) {
+        onLine?.call(line);
+      }
+      // dpkg: neutralise the compiled-in Termux config dir (EACCES on
+      // devices with Termux installed) and map the Termux prefix onto ours.
+      for (final line in [
+        ...DpkgCompat.patchDpkgBinaries(prefix),
+        ...DpkgCompat.ensureTermuxPrefixAlias(prefix),
+      ]) {
         onLine?.call(line);
       }
       OvidPkgInstaller.writeCmpShim(prefix);
@@ -3776,6 +3874,7 @@ exit 0
   Future<(int, String)> _aptChecked(
     String sub, {
     required Duration timeout,
+    Duration Function()? deadline,
     void Function(String line)? onLine,
   }) async {
     // Step 1 before every apt run: dirs, cmp, regular-file trust roots.
@@ -3786,8 +3885,15 @@ exit 0
     // Success summaries are held back until the exit code confirms them.
     Future<(int, String)> run(String args) async {
       final held = <String>[];
+      // Retries/rotations share the caller's remaining time, never extend it.
+      var t = timeout;
+      final remaining = deadline?.call();
+      if (remaining != null) {
+        if (remaining <= Duration.zero) throw TimeoutException('package group time budget used up');
+        if (remaining < t) t = remaining;
+      }
       final (code, out) = await _checkedCommand(
-          ['bash', '-c', 'apt-get $args'], timeout: timeout,
+          ['bash', '-c', 'apt-get $args'], timeout: t,
           onLine: onLine == null
               ? null
               : (line) => _aptSuccessSummary.hasMatch(line) ? held.add(line) : onLine(line));
