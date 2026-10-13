@@ -337,13 +337,13 @@ void main() {
     agent.runBucketForTest(session.id).queue.add('delegate @session:private');
     release.complete({'role': 'assistant', 'content': 'First.', 'finish_reason': 'stop'});
     await run;
-    // The internal notice joins the first run; the composer row is admitted
-    // separately and expands its reference with its own attachment snapshot.
-    await until(() => requests.length == 3 && !agent.busyFor(session.id));
+    // Both rows join the running loop's next request: the composer row
+    // expands its reference with its own attachment snapshot; the internal
+    // notice gets neither a grant nor the composer's files.
+    await until(() => requests.length == 2 && !agent.busyFor(session.id));
     expect(requests[1], contains('delegate @session:private'));
-    expect(requests[1], isNot(contains('REFERENCE CONTENT')));
-    expect(requests.last, contains('REFERENCE CONTENT'));
-    expect(requests.last, contains(firstPath));
+    expect(requests[1], contains('REFERENCE CONTENT'));
+    expect(requests[1], contains(firstPath));
     expect(jsonEncode(requests), isNot(contains(secondPath)));
     expect(jsonEncode(requests), isNot(contains('PRIVATE CONTENT')));
     expect(session.referencedSessionIds, {'reference'});

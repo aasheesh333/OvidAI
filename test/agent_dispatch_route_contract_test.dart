@@ -210,7 +210,7 @@ void main() {
     expect(agent.busyFor(session.id), isFalse);
   });
 
-  test('ordinary queue waits for next dispatch and uses the newly selected provider/model', () async {
+  test('ordinary queue joins the running loop on the admitted route', () async {
     final entered = Completer<void>();
     final release = Completer<void>();
     respond = (req, body) async {
@@ -231,13 +231,13 @@ void main() {
     agent.enqueueMessage('ordinary follow-up', sessionId: session.id);
     release.complete();
     await first;
-    await until(() => requests.length >= 3 && !agent.busyFor(session.id));
-    expect(requests.map((r) => r['model']), ['chip-model', 'chip-model', 'next-model']);
+    await until(() => !agent.busyFor(session.id));
+    // Queueing never stops the run: the follow-up rides the run's very next
+    // request (after the tool result) on the route the run was admitted with.
+    expect(requests.map((r) => r['model']), ['chip-model', 'chip-model']);
     expect(requests[1]['path'], '/original/chat/completions');
-    expect(jsonEncode(requests[1]['messages']), isNot(contains('ordinary follow-up')));
-    expect(requests[2]['path'], '/next/chat/completions');
-    expect(requests[2]['authorization'], 'Bearer next-key');
-    expect(jsonEncode(requests[2]['messages']), contains('ordinary follow-up'));
+    expect(jsonEncode(requests[1]['messages']), contains('ordinary follow-up'));
+    expect(agent.queuedMessagesFor(session.id), isEmpty);
     expect(session.messages.where((m) => m.role == 'user' &&
         m.content == 'ordinary follow-up'), hasLength(1));
   });
@@ -260,7 +260,7 @@ void main() {
     expect(session.messages.where((m) => m.role == 'assistant' && m.content == 'done'), hasLength(1));
   });
 
-  test('explicit steering joins the admitted route while ordinary rows stay queued', () async {
+  test('steered and ordinary rows join the next request together, in queue order', () async {
     final entered = Completer<void>();
     final release = Completer<void>();
     respond = (req, body) async {
@@ -280,11 +280,11 @@ void main() {
     session.model = 'next-model';
     release.complete();
     await task;
-    await until(() => requests.length == 3 && !agent.busyFor(session.id));
-    expect(jsonEncode(requests[1]['messages']), contains('steering'));
-    expect(jsonEncode(requests[1]['messages']), isNot(contains('ordinary')));
-    expect(requests.map((r) => r['model']), ['chip-model', 'chip-model', 'next-model']);
-    expect(jsonEncode(requests[2]['messages']), contains('ordinary'));
+    await until(() => !agent.busyFor(session.id));
+    expect(requests.map((r) => r['model']), ['chip-model', 'chip-model']);
+    final sent = jsonEncode(requests[1]['messages']);
+    expect(sent.indexOf('steering'), greaterThan(-1));
+    expect(sent.indexOf('ordinary'), greaterThan(sent.indexOf('steering')));
   });
 
   for (final barrier in ['pre_request', 'retry']) {

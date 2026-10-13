@@ -6918,21 +6918,15 @@ class _InputBarState extends State<_InputBar> {
                       return Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          // Stop remains independent of the draft/save action.
-                          if (runningNow)
-                            AetherDangerButton(
-                              label: 'Stop',
-                              tooltip: hasQueued
-                                  ? 'Stop session (next queued will run)'
-                                  : 'Stop session',
-                              icon: Icons.stop_rounded,
-                              iconOnly: true,
-                              onPressed: stop,
-                            ),
+                          // Stop remains independent of the draft/save action
+                          // and stays pinned in the rightmost slot: the Queue
+                          // button sits to its LEFT, so when queueing clears
+                          // the draft (and the Queue button vanishes), Stop
+                          // never slides under the finger that just queued.
+                          // A repeat tap must not stop the run.
                           if (!runningNow ||
                               hasDraft ||
                               widget.editingQueue) ...[
-                            if (runningNow) const SizedBox(width: 4),
                             AetherPrimaryButton(
                               label: actionLabel,
                               tooltip: actionTooltip,
@@ -6943,7 +6937,18 @@ class _InputBarState extends State<_InputBar> {
                               loading: widget.commandBusy,
                               onPressed: canSubmit ? onSend : null,
                             ),
+                            if (runningNow) const SizedBox(width: 4),
                           ],
+                          if (runningNow)
+                            AetherDangerButton(
+                              label: 'Stop',
+                              tooltip: hasQueued
+                                  ? 'Stop session (next queued will run)'
+                                  : 'Stop session',
+                              icon: Icons.stop_rounded,
+                              iconOnly: true,
+                              onPressed: stop,
+                            ),
                         ],
                       );
                     },

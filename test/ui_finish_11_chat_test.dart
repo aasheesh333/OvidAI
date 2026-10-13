@@ -231,12 +231,23 @@ void main() {
     await pumpAt(tester, const ChatScreen(), size: const Size(360, 640), scale: 2, keyboard: 280);
     final field = find.byKey(const ValueKey('chat-composer'));
     expect(find.byTooltip('Stop session').hitTestable(), findsOneWidget);
+    final stopRect = tester.getRect(find.byTooltip('Stop session'));
     await tester.enterText(field, 'Queue this draft');
     await tester.pump();
+    // Owner bug: Stop used to slide into the Queue button's slot once the
+    // draft cleared, so a repeat tap stopped the run. Stop stays pinned on
+    // the right; Queue sits to its left.
+    final queueRect = tester.getRect(find.byTooltip('Add to queue'));
+    expect(tester.getRect(find.byTooltip('Stop session')), stopRect);
+    expect(queueRect.right, lessThanOrEqualTo(stopRect.left));
     await tester.tap(find.byTooltip('Add to queue'));
     await tester.pump();
     expect(agent.queuedMessagesFor('ui-finish-11'), ['Queue this draft']);
     expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+    final queuedStop = find.byTooltip('Stop session (next queued will run)');
+    expect(tester.getRect(queuedStop).right, stopRect.right);
+    expect(tester.getRect(queuedStop).contains(queueRect.center), isFalse);
+    expect(agent.busyFor('ui-finish-11'), isTrue);
     // Remove the queued fixture before Stop so this assertion does not start
     // a real continuation/network request.
     agent.removeQueuedMessage(0);
