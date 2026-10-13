@@ -25,6 +25,25 @@ const advancedEditOperations = [
 
 const preferences = ['balanced', 'quality', 'speed', 'cost'];
 
+/// Most images one `edit_images` call accepts (matches the attachment cap).
+const maxBatchImages = 20;
+
+/// Rules repeated in both edit tool descriptions.
+const editRules =
+    'Pass the user\'s instruction verbatim as prompt; never add changes they '
+    'did not ask for. Leave model and size unset: the app picks an '
+    'edit-capable model and the size nearest the input ratio, and with '
+    'preserve (default true) keeps everything else identical and restores the '
+    'original pixel dimensions.';
+
+const preserveProperty = {
+  'type': 'boolean',
+  'description':
+      'Default true: change only what the prompt asks and keep the original '
+      'size, aspect ratio, framing and content. Set false only when the user '
+      'asks to change size, ratio or framing, or to reimagine the image.',
+};
+
 /// Guidance the agent sees in every cloud image tool description.
 const localOpsGuidance =
     'LOCAL operations need NO model, cost nothing and are instant: crop, resize, '
@@ -51,6 +70,7 @@ class ImageModelCard {
     this.latencyP50S,
     this.costTier = 'med',
     this.verified = false,
+    this.priced = true,
   });
 
   final String slug;
@@ -68,6 +88,10 @@ class ImageModelCard {
   final int? latencyP50S;
   final String costTier;
   final bool verified;
+
+  /// False when the gateway marks the model unpriced (it could never be
+  /// settled); such a card is never selected.
+  final bool priced;
 
   bool supports(String op) => operations.containsKey(op);
 
@@ -119,6 +143,9 @@ class ImageModelCard {
       latencyP50S: latency is int && latency >= 0 ? latency : null,
       costTier: oneOf(raw['cost_tier'], const ['low', 'med', 'high'], 'med'),
       verified: raw['verified'] == true,
+      priced:
+          raw['priced'] != false &&
+          !(raw['tags'] is List && (raw['tags'] as List).contains('unpriced')),
     );
   }
 
@@ -273,7 +300,11 @@ class ImageCapabilities {
         'size': {
           'type': 'string',
           'enum': sizes,
-          if (!legacy)
+          if (op == 'edit')
+            'description':
+                'Optional; leave unset. With preserve the app requests the size '
+                'nearest the input ratio and restores the original dimensions.'
+          else if (!legacy)
             'description':
                 'Output size. Pick the entry matching the wanted aspect ratio.',
         },
@@ -283,7 +314,30 @@ class ImageCapabilities {
               'Stable unique ID for this image job, 8–128 characters. Reuse it for retries; never change it after an uncertain outcome.',
         },
         if (op == 'edit') 'path': pathProperty,
+        if (op == 'edit') 'preserve': preserveProperty,
       };
+      if (op == 'generate' && !legacy) {
+        properties['aspect_ratio'] = {
+          'type': 'string',
+          'pattern': r'^[1-9][0-9]?:[1-9][0-9]?$',
+          'description':
+              'Exact output ratio the user asked for, e.g. "4:5" or "16:9". '
+              'A model with that native ratio is preferred; otherwise the '
+              'nearest size is generated and centre-cropped to exactly it.',
+        };
+        properties['width'] = {
+          'type': 'integer',
+          'minimum': 16,
+          'maximum': 4096,
+          'description': 'Exact output width in pixels, only when the user asked for one.',
+        };
+        properties['height'] = {
+          'type': 'integer',
+          'minimum': 16,
+          'maximum': 4096,
+          'description': 'Exact output height in pixels, only when the user asked for one.',
+        };
+      }
       if (!legacy) {
         properties['model'] = {
           'type': 'string',
@@ -347,7 +401,8 @@ class ImageCapabilities {
         }
       }
       final head = op == 'edit'
-          ? 'Edit an existing image through Ovid Cloud. Use the exact attachment or returned file path.'
+          ? 'Edit ONE existing image through Ovid Cloud. Use the exact attachment or returned file path. '
+                '$editRules'
           : 'Generate one image through Ovid Cloud. Returns a saved local image path and displays it in chat.';
       final description = legacy
           ? '$head ${op == "edit" ? "No masks or multiple inputs supported." : ""}'
@@ -358,9 +413,43 @@ class ImageCapabilities {
           '${op}_image',
           description,
           properties,
-          ['prompt', 'size', 'request_id', if (op == 'edit') 'path'],
+          ['prompt', if (op == 'generate') 'size', 'request_id', if (op == 'edit') 'path'],
         ),
       );
+      if (op == 'edit') {
+        tools.add(
+          schema(
+            'edit_images',
+            'Apply ONE instruction to SEVERAL images, each edited independently '
+                '(one edit per image, outputs in input order, per-image errors '
+                'never abort the rest). Use it whenever the user says "edit '
+                'all/each of these" or attaches several images with one '
+                'instruction. Never merges or combines the images. $editRules',
+            {
+              'paths': {
+                'type': 'array',
+                'minItems': 1,
+                'maxItems': maxBatchImages,
+                'items': pathProperty,
+                'description':
+                    'Every image to edit, exact paths, in the order the user gave them.',
+              },
+              'prompt': properties['prompt'],
+              'request_id': {
+                'type': 'string',
+                'description':
+                    'Stable unique batch ID, 8–120 characters; per-image IDs derive from it. Reuse it for retries.',
+              },
+              'preserve': preserveProperty,
+              if (!legacy) ...{
+                'preference': properties['preference'],
+                'requirements': properties['requirements'],
+              },
+            },
+            ['paths', 'prompt', 'request_id'],
+          ),
+        );
+      }
     }
     return tools;
   }

@@ -11,9 +11,10 @@ import 'package:flutter/foundation.dart';
 import 'diag.dart';
 import 'image_capabilities.dart';
 import 'image_receipt_store.dart';
+import 'image_task.dart';
 
 export 'image_capabilities.dart'
-    show ImageCapabilities, ImageModelCard, localOpsGuidance;
+    show ImageCapabilities, ImageModelCard, localOpsGuidance, maxBatchImages;
 export 'image_receipt_store.dart'
     show ImageReceipt, ImageRequestRecord, imageChargeSummary;
 
@@ -993,6 +994,53 @@ class ImageStudio extends ChangeNotifier {
               width.toDouble(),
               height.toDouble(),
             ),
+      ui.Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+      ui.Paint()..filterQuality = ui.FilterQuality.high,
+    );
+    final picture = recorder.endRecording();
+    ui.Image? output;
+    try {
+      output = await picture.toImage(width, height);
+      final result = (await output.toByteData(
+        format: ui.ImageByteFormat.png,
+      ))!.buffer.asUint8List();
+      if (result.length > maxBytes) {
+        throw const ImageStudioError('Output exceeds 16 MiB.');
+      }
+      return result;
+    } finally {
+      output?.dispose();
+      picture.dispose();
+      source.dispose();
+      codec.dispose();
+    }
+  }
+
+  /// Restores [bytes] to exactly [width]×[height] without distortion: a
+  /// plain resize when the aspect ratios already match (within 1%), else a
+  /// uniform scale-to-cover plus centre crop ([restorePlan]). Returns the
+  /// input untouched when it already has those dimensions (format kept);
+  /// otherwise a PNG, since Flutter's codec only encodes PNG losslessly.
+  static Future<Uint8List> fitTo(
+    Uint8List bytes, {
+    required int width,
+    required int height,
+  }) async {
+    final info = await inspect(bytes);
+    if (info.width == width && info.height == height) return bytes;
+    if (width < 1 || height < 1 || width > 4096 || height > 4096) {
+      throw const ImageStudioError('Invalid target size.');
+    }
+    final plan = restorePlan(
+      PixelSize(info.width, info.height),
+      PixelSize(width, height),
+    );
+    final codec = await ui.instantiateImageCodec(bytes);
+    final source = (await codec.getNextFrame()).image;
+    final recorder = ui.PictureRecorder();
+    ui.Canvas(recorder).drawImageRect(
+      source,
+      ui.Rect.fromLTWH(plan.srcX, plan.srcY, plan.srcWidth, plan.srcHeight),
       ui.Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
       ui.Paint()..filterQuality = ui.FilterQuality.high,
     );
