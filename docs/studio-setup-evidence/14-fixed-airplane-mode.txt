@@ -1,0 +1,30 @@
+# Ovid Studio setup 2026-10-13T12:13:41.972058
+12:13:41.963 Checking existing sandbox…
+12:13:42.025 $ ovid sandbox --preflight
+12:13:42.025 ovid build ........ proot-v1b
+12:13:42.592 device ............ x86_64 · API 34
+12:13:42.594 runtime ........... Termux userland under proot
+12:13:42.595 $ read bundled bootstrap (libovid_bootstrap.so)
+12:13:43.706 payload ........... 21.2 MB · x86_64 ✓
+12:13:43.706 extracting sandbox payload
+12:13:48.272 extracted ......... 1026 files ✓
+12:13:48.276 setting exec bits
+12:13:49.523 exec bits ......... ✓
+12:13:49.526 linking tool aliases
+12:13:50.163 linked ............ 1181 aliases ✓
+12:13:50.163 configuring prefix
+12:13:50.182 prefix configured . ✓
+12:13:52.458 $ bash --version (native exec sanity)
+12:13:52.874 native exec ....... ✓ GNU bash, version 5.3.15(1)-release (x86_64-pc-lin
+12:13:52.875 $ apt-get update && apt-get install runtimes
+12:13:52.999 [keys] 9 bundled signing keys verified readable
+12:13:53.010 [mirror] checking 7 package mirrors…
+12:14:04.787 [mirror] https://packages-cf.termux.dev/apt/termux-main: dns
+12:14:04.788 [mirror] https://packages.termux.dev/apt/termux-main: dns
+12:14:04.788 [mirror] https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main: dns
+12:14:04.788 [mirror] https://mirror.nju.edu.cn/termux/apt/termux-main: dns
+12:14:04.789 [mirror] https://termux.librehat.com/apt/termux-main: dns
+12:14:04.789 [mirror] https://termux.cdn.lumito.net/apt/termux-main: dns
+12:14:04.789 [mirror] https://termux.astra.in.ua/apt/termux-main: dns
+12:14:04.789 [runtime] FAILED: No package mirror is reachable. Check the internet connection, Private DNS / VPN settings, then tap Retry.
+# result: failed in 23s — No package mirror is reachable. Check the internet connection, Private DNS / VPN settings, then tap Retry. [No package mirror is reachable. Check the internet connection, Private DNS / VPN settings, then tap Retry.]

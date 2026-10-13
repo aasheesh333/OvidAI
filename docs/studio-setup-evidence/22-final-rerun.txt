@@ -1,0 +1,11 @@
+# Ovid Studio setup 2026-10-13T13:21:40.428719
+13:21:40.425 Checking existing sandbox…
+13:21:45.573 verify node: node --version && npm --version && npx --version → ok
+13:21:48.986 verify python: python --version && pip --version && uv --version && uvx --version → ok
+13:21:49.493 verify git: git --version → ok
+13:21:50.343 verify curl: curl --version → ok
+13:21:55.650 verify node: node --version && npm --version && npx --version → ok
+13:21:58.926 verify python: python --version && pip --version && uv --version && uvx --version → ok
+13:21:59.507 verify git: git --version → ok
+13:22:00.101 verify curl: curl --version → ok
+# result: ready in 20s

@@ -1,0 +1,220 @@
+# Ovid Studio setup 2026-10-13T13:03:38.957812
+13:03:38.901 Checking existing sandbox…
+13:03:39.043 $ ovid sandbox --preflight
+13:03:39.043 ovid build ........ repro-base-ci-payload
+13:03:39.820 device ............ x86_64 · API 34 (native bionic, no proot)
+13:03:39.822 runtime ........... native sandbox (API 24+)
+13:03:39.822 $ read bundled bootstrap (libovid_bootstrap.so)
+13:03:40.291 payload ........... 15.4 MB · x86_64 ✓
+13:03:40.291 extracting sandbox payload
+13:03:43.010 extracted ......... 439 files ✓
+13:03:43.011 setting exec bits
+13:03:43.654 exec bits ......... ✓
+13:03:43.655 linking tool aliases
+13:03:44.015 linked ............ 1179 aliases ✓
+13:03:44.016 configuring prefix
+13:03:44.156 prefix configured . ✓
+13:03:47.636 $ bash --version (native exec sanity)
+13:03:47.953 native exec ....... ✓ GNU bash, version 5.3.15(1)-release (x86_64-pc-lin
+13:03:47.957 $ apt-get update && apt-get install runtimes
+13:03:48.316 [keys] 9 bundled signing keys verified readable
+13:03:48.323 [mirror] checking 7 package mirrors…
+13:04:05.953 [mirror] https://packages.termux.dev/apt/termux-main: ok 1176 ms
+13:04:05.954 [mirror] https://packages-cf.termux.dev/apt/termux-main: ok 1281 ms
+13:04:05.954 [mirror] https://termux.librehat.com/apt/termux-main: ok 1223 ms
+13:04:05.954 [mirror] https://mirror.nju.edu.cn/termux/apt/termux-main: ok 2482 ms
+13:04:05.954 [mirror] https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main: ok 1477 ms
+13:04:05.954 [mirror] https://termux.cdn.lumito.net/apt/termux-main: timeout
+13:04:05.954 [mirror] https://termux.astra.in.ua/apt/termux-main: timeout
+13:04:05.967 [mirror] using https://packages.termux.dev/apt/termux-main
+13:04:06.523 [runtime] essential nodejs npm (1/3)
+13:04:08.172 Get:1 https://packages.termux.dev/apt/termux-main stable InRelease [14.0 kB]
+13:04:11.301 Get:2 https://packages.termux.dev/apt/termux-main stable/main x86_64 Packages [591 kB]
+13:04:12.818 Fetched 605 kB in 6s (102 kB/s)
+13:04:12.980 Reading package lists...
+13:04:13.340 Reading package lists...
+13:04:13.341 Building dependency tree...
+13:04:14.216 The following additional packages will be installed:
+13:04:14.216   c-ares libicu libsqlite
+13:04:14.216 Suggested packages:
+13:04:14.217   clang make pkg-config python
+13:04:14.425 The following NEW packages will be installed:
+13:04:14.426   c-ares libicu libsqlite nodejs npm
+13:04:15.668 0 upgraded, 5 newly installed, 0 to remove and 37 not upgraded.
+13:04:15.669 Need to get 24.2 MB of archives.
+13:04:15.669 After this operation, 119 MB of additional disk space will be used.
+13:04:15.669 Get:1 https://packages.termux.dev/apt/termux-main stable/main x86_64 c-ares x86_64 1.34.8 [206 kB]
+13:04:16.366 Get:2 https://packages.termux.dev/apt/termux-main stable/main x86_64 libicu x86_64 78.3 [10.3 MB]
+13:04:21.137 Get:3 https://packages.termux.dev/apt/termux-main stable/main x86_64 libsqlite x86_64 3.54.0 [815 kB]
+13:04:21.523 Get:4 https://packages.termux.dev/apt/termux-main stable/main x86_64 nodejs x86_64 26.4.0-1 [10.8 MB]
+13:04:26.076 Get:5 https://packages.termux.dev/apt/termux-main stable/main x86_64 npm all 11.20.0 [2026 kB]
+13:04:27.084 Fetched 24.2 MB in 13s (1935 kB/s)
+13:04:27.193 dpkg: warning: 'sh' not found in PATH or not executable
+13:04:27.194 dpkg: warning: 'rm' not found in PATH or not executable
+13:04:27.194 dpkg: warning: 'tar' not found in PATH or not executable
+13:04:27.194 dpkg: warning: 'diff' not found in PATH or not executable
+13:04:27.194 dpkg: warning: 'dpkg-deb' not found in PATH or not executable
+13:04:27.194 dpkg: warning: 'start-stop-daemon' not found in PATH or not executable
+13:04:27.194 dpkg: error: 6 expected programs not found in PATH or not executable
+13:04:27.195 Note: root's PATH should usually contain /usr/local/sbin, /usr/sbin and /sbin
+13:04:27.298 E: Sub-process /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/dpkg returned an error code (2)
+13:04:27.304 [apt] apt-get install FAILED (exit 100)
+13:04:27.305 [runtime] native dpkg cannot install here — using the signed ovid-pkg installer for the rest of this run
+13:04:27.308 [runtime] nodejs npm: Bad state: apt-get install exit 100: dpkg: warning: 'diff' not found in PATH or not executable
+dpkg: warning: 'dpkg-deb' not found in PATH or not executable
+dpkg: warning: 'start-stop-daemon' not found in PATH or not executable
+dpkg: error: 6 expected programs not found in PATH or not executable
+Note: root's PATH should usually contain /usr/local/sbin, /usr/sbin and /sbin
+E: Sub-process /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/dpkg returned an error code (2)
+13:04:35.271 [ovid-pkg] index ready (generation.OJ6QU7; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:04:38.275 [ovid-pkg] invalid dependency metadata: 0verkill
+13:04:38.467 [runtime] nodejs npm: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:04:38.472 [runtime] essential nodejs npm (2/3)
+13:04:47.179 [ovid-pkg] index ready (generation.jV5vXU; Release SHA256=be9ed31aaf802fc7f4b2c45fcc095cc205880ed161b1e6174fa5a4aac321a8e1; expires=1792408581)
+13:04:50.060 [ovid-pkg] invalid dependency metadata: 0verkill
+13:04:50.255 [runtime] nodejs npm: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:04:50.257 [runtime] essential nodejs npm (3/3)
+13:04:59.154 [ovid-pkg] index ready (generation.cKozr7; Release SHA256=80588c534acdf130161f1e60b0e7224996de028e1f07dd4e424a95b52cca33b8; expires=1792439242)
+13:05:02.152 [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:02.320 [runtime] nodejs npm: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:02.322 [runtime] nodejs npm: FAILED
+13:05:02.324 [runtime] FAILED: Could not install nodejs npm. Last error: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill. Check the connection, then tap Retry. If it keeps failing, use Health → Reset sandbox.
+13:05:02.324 [runtime] essential python (1/3)
+13:05:06.928 curl: (22) The requested URL returned error: 404
+13:05:08.075 curl: (22) The requested URL returned error: 404
+13:05:08.081 [ovid-pkg] mirror https://termux.librehat.com/apt/termux-main rejected: index fetch or verification failed
+13:05:14.874 [ovid-pkg] index ready (generation.MTZ5vv; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:05:17.654 [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:17.858 [runtime] python: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:17.861 [runtime] essential python (2/3)
+13:05:23.996 [ovid-pkg] index ready (generation.JWfC2W; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:05:26.820 [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:27.021 [runtime] python: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:27.028 [runtime] essential python (3/3)
+13:05:35.058 [ovid-pkg] index ready (generation.f7mHrc; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:05:37.942 [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:38.118 [runtime] python: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:38.120 [runtime] python: FAILED
+13:05:38.121 [runtime] FAILED: Could not install python. Last error: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill. Check the connection, then tap Retry. If it keeps failing, use Health → Reset sandbox.
+13:05:38.121 [runtime] essential python-pip (1/3)
+13:05:47.121 [ovid-pkg] index ready (generation.yHHFIH; Release SHA256=be9ed31aaf802fc7f4b2c45fcc095cc205880ed161b1e6174fa5a4aac321a8e1; expires=1792408581)
+13:05:50.240 [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:50.562 [runtime] python-pip: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:05:50.564 [runtime] essential python-pip (2/3)
+13:05:59.551 [ovid-pkg] index ready (generation.57B17j; Release SHA256=80588c534acdf130161f1e60b0e7224996de028e1f07dd4e424a95b52cca33b8; expires=1792439242)
+13:06:02.404 [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:02.543 [runtime] python-pip: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:02.546 [runtime] essential python-pip (3/3)
+13:06:06.978 curl: (22) The requested URL returned error: 404
+13:06:08.212 curl: (22) The requested URL returned error: 404
+13:06:08.213 [ovid-pkg] mirror https://termux.librehat.com/apt/termux-main rejected: index fetch or verification failed
+13:06:12.781 [ovid-pkg] index ready (generation.Ya083y; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:06:15.871 [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:16.013 [runtime] python-pip: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:16.015 [runtime] python-pip: FAILED
+13:06:16.016 [runtime] FAILED: Could not install python-pip. Last error: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill. Check the connection, then tap Retry. If it keeps failing, use Health → Reset sandbox.
+13:06:16.016 [runtime] essential uv (1/3)
+13:06:21.839 [ovid-pkg] index ready (generation.3VuBMO; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:06:24.712 [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:24.844 [runtime] uv: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:24.845 [runtime] essential uv (2/3)
+13:06:32.736 [ovid-pkg] index ready (generation.7lnGDN; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:06:35.257 [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:35.387 [runtime] uv: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:35.388 [runtime] essential uv (3/3)
+13:06:43.828 [ovid-pkg] index ready (generation.kejEGi; Release SHA256=be9ed31aaf802fc7f4b2c45fcc095cc205880ed161b1e6174fa5a4aac321a8e1; expires=1792408581)
+13:06:46.614 [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:46.762 [runtime] uv: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:46.764 [runtime] uv: FAILED
+13:06:46.765 [runtime] FAILED: Could not install uv. Last error: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill. Check the connection, then tap Retry. If it keeps failing, use Health → Reset sandbox.
+13:06:46.765 [runtime] essential git (1/3)
+13:06:56.033 [ovid-pkg] index ready (generation.MGxXqO; Release SHA256=80588c534acdf130161f1e60b0e7224996de028e1f07dd4e424a95b52cca33b8; expires=1792439242)
+13:06:59.042 [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:59.177 [runtime] git: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:06:59.179 [runtime] essential git (2/3)
+13:07:03.782 curl: (22) The requested URL returned error: 404
+13:07:04.968 curl: (22) The requested URL returned error: 404
+13:07:04.978 [ovid-pkg] mirror https://termux.librehat.com/apt/termux-main rejected: index fetch or verification failed
+13:07:10.284 [ovid-pkg] index ready (generation.IP669e; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:07:13.385 [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:13.496 [runtime] git: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:13.499 [runtime] essential git (3/3)
+13:07:19.645 [ovid-pkg] index ready (generation.P2bZ4k; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:07:22.767 [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:22.937 [runtime] git: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:22.940 [runtime] git: FAILED
+13:07:22.944 [runtime] FAILED: Could not install git. Last error: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill. Check the connection, then tap Retry. If it keeps failing, use Health → Reset sandbox.
+13:07:22.945 [runtime] essential curl (1/3)
+13:07:31.121 [ovid-pkg] index ready (generation.hwzO7Z; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:07:33.984 [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:34.102 [runtime] curl: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:34.105 [runtime] essential curl (2/3)
+13:07:43.110 [ovid-pkg] index ready (generation.M186zS; Release SHA256=be9ed31aaf802fc7f4b2c45fcc095cc205880ed161b1e6174fa5a4aac321a8e1; expires=1792408581)
+13:07:45.842 [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:45.982 [runtime] curl: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:45.985 [runtime] essential curl (3/3)
+13:07:55.719 [ovid-pkg] index ready (generation.RjtsVC; Release SHA256=80588c534acdf130161f1e60b0e7224996de028e1f07dd4e424a95b52cca33b8; expires=1792439242)
+13:07:58.567 [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:58.714 [runtime] curl: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:07:58.716 [runtime] curl: FAILED
+13:07:58.716 [runtime] FAILED: Could not install curl. Last error: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill. Check the connection, then tap Retry. If it keeps failing, use Health → Reset sandbox.
+13:07:58.716 [runtime] optional make (1/1)
+13:08:03.719 curl: (22) The requested URL returned error: 404
+13:08:04.987 curl: (22) The requested URL returned error: 404
+13:08:04.994 [ovid-pkg] mirror https://termux.librehat.com/apt/termux-main rejected: index fetch or verification failed
+13:08:10.428 [ovid-pkg] index ready (generation.rnYahT; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:08:13.750 [ovid-pkg] invalid dependency metadata: 0verkill
+13:08:13.912 [runtime] make: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:08:13.914 [runtime] make: optional unavailable
+13:08:13.914 [runtime] optional binutils (1/1)
+13:08:19.995 [ovid-pkg] index ready (generation.VSjJis; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:08:23.041 [ovid-pkg] invalid dependency metadata: 0verkill
+13:08:23.189 [runtime] binutils: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:08:23.193 [runtime] binutils: optional unavailable
+13:08:23.194 [runtime] optional ripgrep (1/1)
+13:08:30.996 [ovid-pkg] index ready (generation.u9E9oi; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:08:34.040 [ovid-pkg] invalid dependency metadata: 0verkill
+13:08:34.163 [runtime] ripgrep: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:08:34.165 [runtime] ripgrep: optional unavailable
+13:08:34.165 [runtime] optional openssh (1/1)
+13:08:43.198 [ovid-pkg] index ready (generation.sthoHT; Release SHA256=be9ed31aaf802fc7f4b2c45fcc095cc205880ed161b1e6174fa5a4aac321a8e1; expires=1792408581)
+13:08:46.778 [ovid-pkg] invalid dependency metadata: 0verkill
+13:08:46.944 [runtime] openssh: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:08:46.945 [runtime] openssh: optional unavailable
+13:08:46.946 [runtime] optional rsync (1/1)
+13:08:58.326 [ovid-pkg] index ready (generation.Hp7XcK; Release SHA256=80588c534acdf130161f1e60b0e7224996de028e1f07dd4e424a95b52cca33b8; expires=1792439242)
+13:09:01.451 [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:01.702 [runtime] rsync: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:01.705 [runtime] rsync: optional unavailable
+13:09:01.708 [runtime] optional jq (1/1)
+13:09:06.254 curl: (22) The requested URL returned error: 404
+13:09:07.478 curl: (22) The requested URL returned error: 404
+13:09:07.488 [ovid-pkg] mirror https://termux.librehat.com/apt/termux-main rejected: index fetch or verification failed
+13:09:12.604 [ovid-pkg] index ready (generation.CNnLxr; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:09:15.663 [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:15.779 [runtime] jq: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:15.781 [runtime] jq: optional unavailable
+13:09:15.781 [runtime] optional unzip (1/1)
+13:09:21.681 [ovid-pkg] index ready (generation.Yd8M7H; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:09:24.641 [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:24.816 [runtime] unzip: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:24.819 [runtime] unzip: optional unavailable
+13:09:24.819 [runtime] optional tmux (1/1)
+13:09:32.557 [ovid-pkg] index ready (generation.SRBFle; Release SHA256=3e7bbd82a69bafea5e62ba3a604730d2f30a3a043c60874d1b9be9ff2b37a4a4; expires=1792492770)
+13:09:35.362 [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:35.488 [runtime] tmux: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:35.490 [runtime] tmux: optional unavailable
+13:09:35.490 [runtime] optional gh (1/1)
+13:09:44.589 [ovid-pkg] index ready (generation.TW1qbs; Release SHA256=be9ed31aaf802fc7f4b2c45fcc095cc205880ed161b1e6174fa5a4aac321a8e1; expires=1792408581)
+13:09:47.310 [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:47.439 [runtime] gh: Bad state: signed install exit 1: [ovid-pkg] invalid dependency metadata: 0verkill
+13:09:47.441 [runtime] gh: optional unavailable
+13:09:47.746 node ................ ⚠ exit 127: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/bash: line 1: node: command not found
+13:09:47.934 npm ................ ⚠ exit 127: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/npm: 3: exec: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/node: not found
+13:09:48.077 npx ................ ⚠ exit 127: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/npx: 3: exec: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/node: not found
+13:09:48.238 python ................ ⚠ exit 127: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/bash: line 1: python: command not found
+13:09:48.412 git ................ ⚠ exit 127: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/bash: line 1: git: command not found
+13:09:48.624 curl ................ ✓
+13:09:48.813 pip ................ ⚠ exit 127: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/bash: line 1: pip: command not found
+13:09:48.978 uvx ................ ⚠ exit 127: /data/user/0/com.dhanuk.ovidai/files/sandbox/bin/bash: line 1: uvx: command not found
+# result: failed in 370s — Sandbox setup did not finish. Retry, or continue to chat without the sandbox. [Bad state: Sandbox core ready; runtime verification failed. Retry runtime setup.]

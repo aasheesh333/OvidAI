@@ -1,0 +1,29 @@
+v26.4.0
+  (exit 0, 939 ms)
+11.20.0
+  (exit 0, 3343 ms)
+11.20.0
+  (exit 0, 2781 ms)
+Python 3.14.6
+  (exit 0, 1020 ms)
+pip 26.2.1 from /data/data/com.termux/files/usr/lib/python3.14/site-packages/pip (python 3.14)
+  (exit 0, 3482 ms)
+git version 2.56.0
+  (exit 0, 638 ms)
+curl 8.22.0 (x86_64-pc-linux-android) libcurl/8.22.0 OpenSSL/3.6.5 zlib/1.3.2 libssh2/1.11.1 nghttp2/1.70.0 ngtcp2/1.25.0 nghttp3/1.18.0
+  (exit 0, 1095 ms)
+uv 0.13.0 (x86_64-linux-android)
+  (exit 0, 717 ms)
+
+added 1 package in 9s
+true
+  (exit 0, 25418 ms)
+Collecting six==1.16.0
+  Downloading six-1.16.0-py2.py3-none-any.whl.metadata (1.8 kB)
+Downloading six-1.16.0-py2.py3-none-any.whl (11 kB)
+Installing collected packages: six
+Successfully installed six-1.16.0
+1.16.0
+  (exit 0, 9443 ms)
+1
+  (exit 0, 2259 ms)
