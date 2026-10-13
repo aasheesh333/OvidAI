@@ -26,10 +26,14 @@ import jwt  # PyJWT
 from jwt import PyJWKClient
 import redis
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ovid_plans as plans  # noqa: E402  (shared with the LiteLLM pools hook)
 
 # ── config (from env; secrets never in code) ──
 FIREBASE_PROJECT = os.environ["FIREBASE_PROJECT_ID"]          # e.g. ovid-ai
@@ -62,50 +66,49 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/2")
 FREE_MONTHLY_CAP_USD = float(os.environ.get("FREE_MONTHLY_CAP_USD", "10"))
 
 
-# ── usage limits: owner-editable settings ──
+# ── usage limits: plans are data, every number is a runtime setting ──
 #
-# Every user has an independent allowance (never a shared pool):
-#   free allowance  = user:{uid}:dailyUsd override, else the global free daily
-#                     amount (config:base_daily_usd, seeded from BASE_DAILY_USD)
-#   paid allowance  = that user's free allowance × the plan multiplier
-#   paid window     = "30d" (monthly pool = allowance × 30, the original
-#                     behaviour and the default) or "24h" (daily allowance)
-#   free backstop   = LiteLLM user budget over 30d (FREE_MONTHLY_CAP_USD,
-#                     admin-editable, per-user override user:{uid}:monthlyCapUsd)
-# All of these are editable from the /admin console; every change is re-applied
-# to every key (android + web) and to the LiteLLM user budget, and audited.
-BASE_DAILY_USD = float(os.environ.get("BASE_DAILY_USD", "0.50"))
-# Plan ids are fixed (they are stored on users and sold in the app); their
-# multipliers are editable. TIER_MULT keeps the seed values for back-compat;
-# the live values come from get_tier_mult().
+# All limits live in Redis (config:limits + config:base_daily_usd) and are
+# edited from the /admin console; mint reads them on every request, so a change
+# takes effect immediately (no rebuild/restart). The env values and the seeds
+# in ovid_plans.py are FIRST-RUN SEEDS only: ensure_default_settings() writes
+# them for fields that are unset and never overwrites a stored value.
+#
+#   shared plans (free, starter): allowance = the user's free allowance × mult
+#       per window; frontier models may use at most frontier_share of it.
+#   split plans (pro, max): oss fair-use pool + frontier pool. Over the oss
+#       pool → slow mode (lower rpm/tpm/parallel), never a block. Frontier
+#       exhausted → frontier requests get `frontier_limit_reached`.
+# Pools are enforced in the LiteLLM request path by litellm_hook/ovid_pools.py
+# (reads the same Redis settings); LiteLLM key/user budgets stay a backstop.
+BASE_DAILY_USD = float(os.environ.get("BASE_DAILY_USD", "0.15"))
+SEEDS = {
+    "free_daily_usd": BASE_DAILY_USD,
+    "free_monthly_cap_usd": FREE_MONTHLY_CAP_USD,
+    "normal_rpm": KEY_RPM,
+    "normal_tpm": KEY_TPM,
+    "normal_parallel": KEY_MAX_PARALLEL,
+    "est_input_tokens": int(os.environ.get("EST_INPUT_TOKENS", "2000")),
+    "est_output_tokens": int(os.environ.get("EST_OUTPUT_TOKENS", "600")),
+    "est_image_tokens": int(os.environ.get("EST_IMAGE_TOKENS", "1500")),
+}
+# Back-compat names (images_gateway, billing): legacy tier ids are aliases.
 TIER_MULT = {"free": 1, "3x": 3, "7x": 7, "15x": 15}
 TIERS = {t: {"mult": m} for t, m in TIER_MULT.items()}
-PAID_TIERS = ("3x", "7x", "15x")
-PAID_WINDOWS = ("24h", "30d")
-PAID_WINDOW_DEFAULT = os.environ.get("PAID_WINDOW", "30d")
-if PAID_WINDOW_DEFAULT not in PAID_WINDOWS:
-    PAID_WINDOW_DEFAULT = "30d"
-# "Typical message" used to turn the remaining budget into a message count.
-EST_INPUT_TOKENS = int(os.environ.get("EST_INPUT_TOKENS", "2000"))
-EST_OUTPUT_TOKENS = int(os.environ.get("EST_OUTPUT_TOKENS", "600"))
-# Output tokens of a typical image when a model has no per-image price.
-EST_IMAGE_TOKENS = int(os.environ.get("EST_IMAGE_TOKENS", "1500"))
 # Settings + audit mirrors on the mint volume (mintdata:/data), so a Redis loss
 # does not lose the owner's limits or the audit trail.
 MINT_STATE_DIR = os.environ.get("MINT_STATE_DIR", "/data")
-# Above this many users a "re-apply to everyone" runs in the background.
+# Above this many users a "re-apply/reset everyone" runs in the background.
 REAPPLY_SYNC_MAX = int(os.environ.get("REAPPLY_SYNC_MAX", "200"))
 
-# All known user ids (so an admin change can be re-applied to every existing
-# user at once).
 ALL_UIDS_SET = "ovid:uids"
-BASE_BUDGET_KEY = "config:base_daily_usd"
-LIMITS_HASH = "config:limits"          # mult:<tier>, paid_window, free_monthly_cap_usd, est_*
+BASE_BUDGET_KEY = plans.BASE_BUDGET_KEY
+LIMITS_HASH = plans.LIMITS_HASH
 REAPPLY_STATUS_KEY = "config:reapply_status"
+RESET_STATUS_KEY = "config:reset_status"
 AUDIT_LIST = "audit:admin"
 AUDIT_MAX = int(os.environ.get("AUDIT_MAX", "5000"))
 KEY_NAMESPACES = ("", "web:")          # android key, web key
-WINDOW_SECONDS = {"24h": 86400, "30d": 30 * 86400}
 
 
 def _float_or(v, default: float) -> float:
@@ -122,52 +125,48 @@ def _int_or(v, default: int) -> int:
         return default
 
 
+def get_settings() -> dict:
+    """Live settings, read from Redis on every call (no caching)."""
+    return plans.parse_settings(rds.hgetall(LIMITS_HASH), rds.get(BASE_BUDGET_KEY), SEEDS)
+
+
 def get_base_daily() -> float:
-    """Global free allowance per user per 24h (Redis), falling back to env."""
-    return _float_or(rds.get(BASE_BUDGET_KEY), BASE_DAILY_USD)
-
-
-def get_tier_mult() -> dict:
-    out = dict(TIER_MULT)
-    for t in PAID_TIERS:
-        out[t] = _float_or(rds.hget(LIMITS_HASH, f"mult:{t}"), TIER_MULT[t])
-    out["free"] = 1
-    return out
-
-
-def get_paid_window() -> str:
-    w = rds.hget(LIMITS_HASH, "paid_window")
-    return w if w in PAID_WINDOWS else PAID_WINDOW_DEFAULT
+    return get_settings()["free_daily_usd"]
 
 
 def get_free_monthly_cap() -> float:
-    return _float_or(rds.hget(LIMITS_HASH, "free_monthly_cap_usd"), FREE_MONTHLY_CAP_USD)
+    return get_settings()["free_monthly_cap_usd"]
 
 
-def get_settings() -> dict:
-    return {
-        "free_daily_usd": get_base_daily(),
-        "tier_mult": get_tier_mult(),
-        "paid_window": get_paid_window(),
-        "free_monthly_cap_usd": get_free_monthly_cap(),
-        "est_input_tokens": _int_or(rds.hget(LIMITS_HASH, "est_input_tokens"), EST_INPUT_TOKENS),
-        "est_output_tokens": _int_or(rds.hget(LIMITS_HASH, "est_output_tokens"), EST_OUTPUT_TOKENS),
-        "est_image_tokens": _int_or(rds.hget(LIMITS_HASH, "est_image_tokens"), EST_IMAGE_TOKENS),
-    }
-
-
-def _store_settings(s: dict) -> None:
-    rds.set(BASE_BUDGET_KEY, str(s["free_daily_usd"]))
-    fields = {f"mult:{t}": str(s["tier_mult"][t]) for t in PAID_TIERS}
-    fields.update({
-        "paid_window": s["paid_window"],
-        "free_monthly_cap_usd": str(s["free_monthly_cap_usd"]),
-        "est_input_tokens": str(s["est_input_tokens"]),
-        "est_output_tokens": str(s["est_output_tokens"]),
-        "est_image_tokens": str(s["est_image_tokens"]),
-    })
+def store_settings(s: dict) -> dict:
+    s = plans.validate_settings(s)
+    base, fields = plans.serialize_settings(s)
+    rds.set(BASE_BUDGET_KEY, base)
     rds.hset(LIMITS_HASH, mapping=fields)
     _persist_settings(s)
+    return s
+
+
+def ensure_default_settings() -> list[str]:
+    """Write first-run seeds for UNSET fields only (never overwrites).
+
+    An existing install (users or a base budget already in Redis) gets paid
+    plan windows of 720h (30 days, the behaviour before plans existed); a new
+    install gets 24h. Returns the fields written."""
+    existing = bool(rds.exists(BASE_BUDGET_KEY) or rds.scard(ALL_UIDS_SET))
+    written = []
+    if not rds.exists(BASE_BUDGET_KEY):
+        rds.set(BASE_BUDGET_KEY, str(SEEDS["free_daily_usd"]))
+        written.append("free_daily_usd")
+    seeded = plans.parse_settings({}, None, {**SEEDS, "plans": plans.seed_plans(720 if existing else 24)})
+    _, fields = plans.serialize_settings(seeded)
+    for f, v in fields.items():
+        if rds.hget(LIMITS_HASH, f) is None:
+            rds.hset(LIMITS_HASH, f, v)
+            written.append(f)
+    if written:
+        _persist_settings(get_settings())
+    return written
 
 
 def _state_path(name: str) -> str | None:
@@ -201,69 +200,61 @@ def restore_settings_if_missing() -> bool:
             saved = json.load(f)
         s = get_settings()
         s.update({k: v for k, v in saved.items() if k in s})
-        _store_settings(_validate_settings(s))
+        store_settings(s)
         print("[mint] limits restored from volume mirror", flush=True)
         return True
-    except (OSError, ValueError, HTTPException) as e:
+    except (OSError, ValueError) as e:
         print(f"[mint] settings restore failed: {type(e).__name__}", flush=True)
         return False
 
 
-def _validate_settings(s: dict) -> dict:
-    def num(name, v, lo, hi):
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            raise HTTPException(400, f"{name} must be a number")
-        if not (lo <= f <= hi) or math.isnan(f):
-            raise HTTPException(400, f"{name} must be between {lo} and {hi}")
-        return f
-
-    out = dict(s)
-    out["free_daily_usd"] = num("free_daily_usd", s["free_daily_usd"], 0, 10000)
-    out["free_monthly_cap_usd"] = num("free_monthly_cap_usd", s["free_monthly_cap_usd"], 0, 100000)
-    mult = {"free": 1}
-    for t in PAID_TIERS:
-        mult[t] = num(f"tier_mult.{t}", s["tier_mult"].get(t, TIER_MULT[t]), 1, 1000)
-    out["tier_mult"] = mult
-    if s["paid_window"] not in PAID_WINDOWS:
-        raise HTTPException(400, "paid_window must be '24h' or '30d'")
-    for k in ("est_input_tokens", "est_output_tokens", "est_image_tokens"):
-        out[k] = int(num(k, s[k], 1, 10_000_000))
-    return out
-
-
-def user_free_daily(uid: str) -> float:
-    """This user's free allowance per 24h: per-user override or the global."""
+def user_free_daily(uid: str, s: dict | None = None) -> float:
+    """This user's free allowance per 24h: custom free limit or the global."""
     override = rds.get(f"user:{uid}:dailyUsd")
     if override not in (None, ""):
         try:
             return float(override)
         except (TypeError, ValueError):
             pass
-    return get_base_daily()
+    return (s or get_settings())["free_daily_usd"]
+
+
+def user_pool_override(uid: str) -> dict | None:
+    raw = rds.get(f"user:{uid}:pools")
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except ValueError:
+        return None
+
+
+def plan_for(uid: str, s: dict | None = None) -> dict:
+    s = s or get_settings()
+    return plans.find_plan(s, rds.get(f"user:{uid}:tier"))
+
+
+def pools_for(uid: str, s: dict | None = None, plan: dict | None = None) -> dict:
+    s = s or get_settings()
+    plan = plan or plan_for(uid, s)
+    return plans.user_pools(s, plan, user_free_daily(uid, s), user_pool_override(uid))
 
 
 def tier_daily(uid: str, tier: str) -> float:
-    """Per-user daily amount = the user's FREE allowance × plan multiplier.
-    (Fixes L2: an override is the user's free allowance and scales with the
-    plan, instead of replacing the plan amount.)"""
-    return user_free_daily(uid) * get_tier_mult().get(tier, 1)
+    """Back-compat: the user's total allowance per 24h on `tier`."""
+    s = get_settings()
+    p = plans.user_pools(s, plans.find_plan(s, tier), user_free_daily(uid, s), user_pool_override(uid))
+    total = p["all"] if p["all"] is not None else p["oss"] + p["frontier"]
+    return total * 24 / p["window_hours"]
 
 
 def tier_budget(uid: str, tier: str) -> tuple[float, str]:
-    """Return (max_budget, budget_duration) for a user.
-
-    FREE: the free allowance per 24h. PAID: allowance × multiplier, either per
-    24h (paid_window "24h") or as a 30-day pool of 30 × that amount
-    (paid_window "30d", the default and the original behaviour).
-    """
-    amount = tier_daily(uid, tier)
-    if tier == "free":
-        return round(amount, 6), "24h"
-    if get_paid_window() == "24h":
-        return round(amount, 6), "24h"
-    return round(amount * 30, 6), "30d"
+    """(LiteLLM key max_budget, budget_duration) for a user on `tier` (plan id
+    or alias). Kept for images_gateway."""
+    s = get_settings()
+    p = plans.user_pools(s, plans.find_plan(s, tier), user_free_daily(uid, s), user_pool_override(uid))
+    return plans.key_budget(p, s), plans.window_str(p["window_hours"])
 
 
 # Anti-abuse knobs (all server-side, per spec §7).
@@ -474,16 +465,15 @@ def _project_number() -> str:
 
 
 
-# ── tier + free-cap ──
+# ── plan, budgets, windows, slow mode ──
 def effective_tier(uid: str) -> str:
-    t = rds.get(f"user:{uid}:tier")
-    return t if t in TIERS else "free"
+    """The user's plan id (stored legacy ids 3x/7x/15x resolve via aliases)."""
+    return plan_for(uid)["id"]
 
 
 def month_key(uid: str) -> str:
     """Legacy counter key (never written; kept so old deletes stay harmless)."""
-    ym = _now().strftime("%Y-%m")
-    return f"freecap:{uid}:{ym}"
+    return f"freecap:{uid}:{_now().strftime('%Y-%m')}"
 
 
 def free_cap_usd(uid: str) -> float:
@@ -491,10 +481,18 @@ def free_cap_usd(uid: str) -> float:
 
 
 def month_spent(uid: str) -> float:
-    """User-level spend over the current 30d window, from LiteLLM."""
+    """User-level spend over the current LiteLLM user-budget window."""
     try:
         with litellm_client(10) as c:
-            r = c.get("/user/info", headers=_admin_headers(), params={"user_id": uid})
+            return _month_spent_c(c, uid)
+    except Exception as e:  # noqa: BLE001
+        print(f"[mint] user/info error: {type(e).__name__}", flush=True)
+    return 0.0
+
+
+def _month_spent_c(c: httpx.Client, uid: str) -> float:
+    try:
+        r = c.get("/user/info", headers=_admin_headers(), params={"user_id": uid})
         if r.status_code == 200:
             return float((r.json().get("user_info") or {}).get("spend") or 0.0)
     except Exception as e:  # noqa: BLE001
@@ -503,29 +501,31 @@ def month_spent(uid: str) -> float:
 
 
 def user_budget_target(uid: str, tier: str) -> tuple[float, str]:
-    """LiteLLM user budget (enforced across all of the user's keys).
-    Free: the monthly backstop per 30d. Paid: the same as the key budget."""
-    if tier == "free":
+    """LiteLLM user budget (across all of the user's keys). Free plan: the
+    monthly backstop per 30d. Other plans: the key budget per plan window."""
+    if plans.find_plan(get_settings(), tier)["id"] == "free":
         return free_cap_usd(uid), "30d"
     return tier_budget(uid, tier)
 
 
-def ensure_user_budget(c: httpx.Client, headers: dict, uid: str, tier: str) -> None:
+def ensure_user_budget(c: httpx.Client, headers: dict, uid: str, tier: str,
+                       force_duration: bool = False, extra: dict | None = None) -> None:
     budget, duration = user_budget_target(uid, tier)
-    body = {"user_id": uid, "max_budget": budget}
+    body = {"user_id": uid, "max_budget": budget, **(extra or {})}
     # Only send budget_duration when it changes: LiteLLM restarts the budget
     # clock (budget_reset_at = now + duration) whenever it is sent, so sending
     # it on every mint would keep pushing the reset out.
     current = None
-    try:
-        r = c.get("/user/info", headers=headers, params={"user_id": uid})
-        if r.status_code == 200:
-            current = (r.json().get("user_info") or {}).get("budget_duration")
-        elif r.status_code != 404:
-            current = "unknown"  # outage: don't touch the clock
-    except Exception:  # noqa: BLE001
-        current = "unknown"
-    if current != duration and current != "unknown":
+    if not force_duration:
+        try:
+            r = c.get("/user/info", headers=headers, params={"user_id": uid})
+            if r.status_code == 200:
+                current = (r.json().get("user_info") or {}).get("budget_duration")
+            elif r.status_code != 404:
+                current = "unknown"  # outage: don't touch the clock
+        except Exception:  # noqa: BLE001
+            current = "unknown"
+    if force_duration or (current != duration and current != "unknown"):
         body["budget_duration"] = duration
     r = c.post("/user/update", headers=headers, json=body)
     if r.status_code >= 300:
@@ -548,11 +548,12 @@ def _key_info(c: httpx.Client, key_id: str) -> dict | None:
 
 
 def apply_key_budget(c: httpx.Client, key_id: str, budget: float, duration: str,
-                     info: dict | None, extra: dict | None = None) -> bool:
-    """Set a key's budget; send budget_duration only when it changes (see
-    ensure_user_budget). Returns True when LiteLLM accepted the update."""
+                     info: dict | None, extra: dict | None = None,
+                     force_duration: bool = False) -> bool:
+    """Set a key's budget (+ rate limits in `extra`); budget_duration only when
+    it changes or a window reset forces the LiteLLM clock to restart."""
     body = {"key": key_id, "max_budget": budget, **(extra or {})}
-    if info is not None and info.get("budget_duration") != duration:
+    if force_duration or (info is not None and info.get("budget_duration") != duration):
         body["budget_duration"] = duration
     r = c.post("/key/update", headers=_admin_headers(), json=body)
     if r.status_code >= 300:
@@ -571,16 +572,32 @@ def user_key_ids(uid: str) -> dict:
     return out
 
 
-def reapply_user(c: httpx.Client, uid: str, extra: dict | None = None) -> dict:
-    """Re-apply this user's budgets to EVERY key (android + web — fixes L3) and
-    to the LiteLLM user budget. `extra` adds fields to each key update (e.g.
-    spend=0 for a reset)."""
+def in_slow_mode(uid: str) -> bool:
+    until = _float_or(rds.hget(plans.SLOW_HASH, uid), 0.0)
+    return until > time.time()
+
+
+def rate_limits(uid: str, s: dict | None = None) -> dict:
+    s = s or get_settings()
+    mode = "slow" if in_slow_mode(uid) else "normal"
+    return {"rpm_limit": s[f"{mode}_rpm"], "tpm_limit": s[f"{mode}_tpm"],
+            "max_parallel_requests": s[f"{mode}_parallel"]}
+
+
+def reapply_user(c: httpx.Client, uid: str, extra: dict | None = None,
+                 force_duration: bool = False, user_extra: dict | None = None,
+                 user_force_duration: bool = False) -> dict:
+    """Re-apply this user's budget + rate limits to EVERY key (android + web)
+    and to the LiteLLM user budget."""
+    s = get_settings()
     tier = effective_tier(uid)
     budget, duration = tier_budget(uid, tier)
+    body_extra = {**rate_limits(uid, s), **(extra or {})}
     keys = errors = 0
     for _ns, key_id in user_key_ids(uid).items():
         try:
-            if apply_key_budget(c, key_id, budget, duration, _key_info(c, key_id), extra):
+            info = None if force_duration else _key_info(c, key_id)
+            if apply_key_budget(c, key_id, budget, duration, info, body_extra, force_duration):
                 keys += 1
             else:
                 errors += 1
@@ -588,37 +605,165 @@ def reapply_user(c: httpx.Client, uid: str, extra: dict | None = None) -> dict:
             errors += 1
             print(f"[mint] reapply key error: {type(e).__name__}", flush=True)
     try:
-        ensure_user_budget(c, _admin_headers(), uid, tier)
+        ensure_user_budget(c, _admin_headers(), uid, tier, user_force_duration, user_extra)
     except Exception as e:  # noqa: BLE001
         errors += 1
         print(f"[mint] reapply user error: {type(e).__name__}", flush=True)
     return {"keys": keys, "errors": errors}
 
 
-def reapply_all(uids: list[str] | None = None) -> dict:
-    uids = list(uids if uids is not None else rds.smembers(ALL_UIDS_SET))
+def _run_over_users(status_key: str, uids: list[str], fn) -> dict:
     total = {"users": 0, "keys": 0, "errors": 0}
-    rds.set(REAPPLY_STATUS_KEY, json.dumps({"state": "running", "total": len(uids), "done": 0}))
+    rds.set(status_key, json.dumps({"state": "running", "total": len(uids), "done": 0, "at": _now_iso()}))
     with litellm_client(20) as c:
         for i, uid in enumerate(uids, 1):
-            res = reapply_user(c, uid)
+            res = fn(c, uid)
             total["users"] += 1
-            total["keys"] += res["keys"]
-            total["errors"] += res["errors"]
-            if i % 50 == 0:
-                rds.set(REAPPLY_STATUS_KEY, json.dumps({"state": "running", "total": len(uids), "done": i}))
-    rds.set(REAPPLY_STATUS_KEY, json.dumps({"state": "done", "total": len(uids), "done": len(uids),
-                                            **total, "at": _now_iso()}))
+            total["keys"] += res.get("keys", 0)
+            total["errors"] += res.get("errors", 0)
+            if i % 25 == 0:
+                rds.set(status_key, json.dumps({"state": "running", "total": len(uids), "done": i,
+                                                **total, "at": _now_iso()}))
+    rds.set(status_key, json.dumps({"state": "done", "total": len(uids), "done": len(uids),
+                                    **total, "at": _now_iso()}))
     return total
 
 
-def reapply_everyone() -> dict:
-    """Re-apply to all users now (small) or in the background (large)."""
-    uids = list(rds.smembers(ALL_UIDS_SET))
+def run_for_everyone(status_key: str, fn) -> dict:
+    """Run fn(client, uid) for all users: inline when small, else background
+    with progress in `status_key`."""
+    uids = sorted(rds.smembers(ALL_UIDS_SET))
     if len(uids) <= REAPPLY_SYNC_MAX:
-        return {"mode": "sync", **reapply_all(uids)}
-    threading.Thread(target=reapply_all, args=(uids,), daemon=True).start()
+        return {"mode": "sync", **_run_over_users(status_key, uids, fn)}
+    threading.Thread(target=_run_over_users, args=(status_key, uids, fn), daemon=True).start()
     return {"mode": "background", "users": len(uids)}
+
+
+def reapply_all(uids: list[str] | None = None) -> dict:
+    uids = list(uids if uids is not None else rds.smembers(ALL_UIDS_SET))
+    return _run_over_users(REAPPLY_STATUS_KEY, uids, lambda c, u: reapply_user(c, u))
+
+
+def reapply_everyone() -> dict:
+    return run_for_everyone(REAPPLY_STATUS_KEY, lambda c, u: reapply_user(c, u))
+
+
+def window_bounds(uid: str, pools: dict, create: bool = True,
+                  first_use: datetime.datetime | None = None) -> tuple[datetime.datetime, datetime.datetime]:
+    """The user's current pool window [start, resets_at). It starts at the
+    first use (hook or mint, whichever sees it first; `first_use` lets mint
+    anchor it at the earliest request it finds) and lasts the plan's
+    window_hours; an admin reset restarts it now."""
+    k = plans.pool_keys(uid)
+    secs = int(pools["window_hours"] * 3600)
+    now = _now()
+    start = current_window_start(uid, pools)
+    if start is None:
+        if not create:
+            return now, now + datetime.timedelta(seconds=secs)
+        begin = min(first_use or now, now)
+        ttl = max(1, int(secs - (now - begin).total_seconds()))
+        # floor to whole seconds so the first request is never after "start"
+        rds.set(k["start"], str(math.floor(begin.timestamp())), nx=True, ex=ttl)
+        start = _epoch_dt(rds.get(k["start"])) or begin
+    return start, start + datetime.timedelta(seconds=secs)
+
+
+def current_window_start(uid: str, pools: dict) -> datetime.datetime | None:
+    """Start of the live window, or None (expired windows are cleared)."""
+    k = plans.pool_keys(uid)
+    start = _epoch_dt(rds.get(k["start"]))
+    if start is not None and start + datetime.timedelta(hours=pools["window_hours"]) <= _now():
+        rds.delete(k["start"], k["oss"], k["frontier"])
+        return None
+    return start
+
+
+def _epoch_dt(v) -> datetime.datetime | None:
+    try:
+        return datetime.datetime.fromtimestamp(float(v), datetime.timezone.utc) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def hook_spend(uid: str) -> dict:
+    k = plans.pool_keys(uid)
+    return {c: _float_or(rds.get(k[c]), 0.0) for c in plans.CLASSES}
+
+
+def push_rate_limits(c: httpx.Client, uid: str) -> None:
+    limits = rate_limits(uid)
+    for key_id in user_key_ids(uid).values():
+        try:
+            c.post("/key/update", headers=_admin_headers(), json={"key": key_id, **limits})
+        except Exception as e:  # noqa: BLE001
+            print(f"[mint] rate-limit update error: {type(e).__name__}", flush=True)
+
+
+def sync_slow_mode(c: httpx.Client, uid: str, slow: bool, until: datetime.datetime) -> bool:
+    """Turn slow mode on/off on all of the user's keys. Returns True on change."""
+    was = in_slow_mode(uid)
+    if slow:
+        rds.hset(plans.SLOW_HASH, uid, f"{until.timestamp():.3f}")
+    else:
+        rds.hdel(plans.SLOW_HASH, uid)
+    if was == slow:
+        return False
+    push_rate_limits(c, uid)
+    return True
+
+
+def sweep_slow_mode() -> dict:
+    """Apply slow mode for users the hook flagged; lift it when windows end."""
+    out = {"checked": 0, "lifted": 0}
+    for uid in list(rds.smembers(plans.SLOW_PENDING)):
+        rds.srem(plans.SLOW_PENDING, uid)
+        try:
+            compute_usage(uid)  # syncs slow mode from the pools
+            out["checked"] += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[mint] slow sweep error: {type(e).__name__}", flush=True)
+    now = time.time()
+    with litellm_client(15) as c:
+        for uid, until in list(rds.hgetall(plans.SLOW_HASH).items()):
+            if _float_or(until, 0) <= now:
+                rds.hdel(plans.SLOW_HASH, uid)
+                push_rate_limits(c, uid)
+                out["lifted"] += 1
+    return out
+
+
+def _sweeper() -> None:
+    while True:
+        try:
+            sweep_slow_mode()
+            refresh_public_map()
+        except Exception as e:  # noqa: BLE001
+            print(f"[mint] sweeper: {type(e).__name__}", flush=True)
+        time.sleep(int(os.environ.get("MINT_SWEEP_S", "30")))
+
+
+def reset_window_user(c: httpx.Client, uid: str, reset_month_free: bool = False) -> dict:
+    """Restart the user's window NOW: clear pool counters and slow mode, zero
+    spend on every key (android + web), restart the LiteLLM budget clocks and
+    re-apply budgets."""
+    s = get_settings()
+    pools = pools_for(uid, s)
+    k = plans.pool_keys(uid)
+    rds.delete(k["oss"], k["frontier"], f"usagecache:{uid}")
+    rds.set(k["start"], f"{time.time():.3f}", ex=int(pools["window_hours"] * 3600))
+    rds.hdel(plans.SLOW_HASH, uid)
+    rds.srem(plans.SLOW_PENDING, uid)
+    # The free plan's LiteLLM user budget is the monthly backstop with its own
+    # 30-day clock; only reset it when asked. Other plans' user budget is the
+    # window budget, so it restarts with the window.
+    is_free = plan_for(uid, s)["id"] == "free"
+    restart_user = not is_free or reset_month_free
+    res = reapply_user(c, uid, extra={"spend": 0}, force_duration=True,
+                       user_extra={"spend": 0} if restart_user else None,
+                       user_force_duration=restart_user)
+    rds.delete(month_key(uid))  # legacy key, harmless
+    return res
 
 
 def _now() -> datetime.datetime:
@@ -778,9 +923,8 @@ def litellm_mint_or_get(uid: str, tier: str, platform: str = "android") -> str:
             "max_budget": budget,
             "budget_duration": duration,
             "metadata": {"tier": tier, "ovid_uid": uid, "platform": platform},
-            "rpm_limit": KEY_RPM,
-            "tpm_limit": KEY_TPM,
-            "max_parallel_requests": KEY_MAX_PARALLEL,
+            # Runtime-editable limits; slow-mode limits while the user is in it.
+            **rate_limits(uid),
         }
         if platform == "web":
             body["team_id"] = web_team_id(c, headers)
@@ -873,7 +1017,7 @@ ALLOW_TEST_UPGRADE = os.environ.get("ALLOW_TEST_UPGRADE", "false").lower() == "t
 
 
 class UpgradeReq(BaseModel):
-    tier: str  # free | 3x | 7x | 15x
+    tier: str  # plan id or alias (free | starter/3x | pro/7x | max/15x | ...)
 
 
 class UpgradeResp(BaseModel):
@@ -897,7 +1041,11 @@ def upgrade(
     platform = verify_app_check(x_firebase_appcheck)
     claims = verify_google_id_token(id_token)
     uid = claims["sub"]
-    tier = body.tier if body.tier in TIER_MULT else "free"
+    s = get_settings()
+    plan = plans.find_plan(s, body.tier)
+    if not plan["enabled"] or (body.tier != plan["id"] and body.tier not in plan["aliases"]):
+        plan = plans.find_plan(s, "free")
+    tier = plans.stored_tier(plan)
     rds.set(f"user:{uid}:tier", tier)
     # Re-apply the new tier's budget to the live keys (android + web) now.
     try:
@@ -956,14 +1104,16 @@ def mint(
     key = litellm_mint_or_get(uid, tier, platform)
     return MintResp(
         key=key,
-        tier=tier,
+        tier=plans.stored_tier(plan_for(uid)),  # legacy ids (3x/7x/15x) for app builds
         base_url=os.environ.get("PUBLIC_BASE_URL", "https://cloud.dhanuksoftwares.com/v1"),
     )
 
 
 
+
+
 # ── usage: counts + per-model remaining (no prices shown to users) ──
-AUTO_MODEL = os.environ.get("AUTO_MODEL_GROUP", "auto")
+AUTO_MODEL = plans.AUTO_MODEL
 USAGE_CACHE_S = int(os.environ.get("USAGE_CACHE_S", "15"))
 IMAGE_CALL_TYPES = {"image_generation", "aimage_generation", "image_edit", "aimage_edit",
                     "image_variation", "aimage_variation"}
@@ -1004,7 +1154,7 @@ def _suffix(model: str) -> str:
     return model.split("/", 1)[-1] if model else model
 
 
-def model_catalog(c: httpx.Client) -> dict:
+def model_catalog(c: httpx.Client, hidden: set | None = None) -> dict:
     """Owner-published models from LiteLLM /model/info, grouped by public name
     (the 'auto' group has one deployment per member model)."""
     data = []
@@ -1046,7 +1196,7 @@ def model_catalog(c: httpx.Client) -> dict:
                        "output_cost_per_token": info.get("output_cost_per_token")}
         if info.get("id"):
             dep_underlying[str(info["id"])] = under
-        if under and name != AUTO_MODEL:
+        if under and name != AUTO_MODEL and name not in (hidden or ()):
             under_to_public.setdefault(under, name)
             under_to_public.setdefault(_suffix(under), name)
     return {"groups": groups, "dep_underlying": dep_underlying, "under_to_public": under_to_public}
@@ -1077,7 +1227,7 @@ def attribute_row(row: dict, cat: dict) -> tuple[str, bool]:
     if not under and row.get("model_id"):
         under = cat["dep_underlying"].get(str(row["model_id"]), "")
     groups = cat["groups"]
-    if group == AUTO_MODEL:
+    if group and group in cat.get("auto_groups", {AUTO_MODEL}):
         return (_public_for(cat, under) or AUTO_MODEL), True
     if group in groups:
         return group, False
@@ -1089,35 +1239,6 @@ def attribute_row(row: dict, cat: dict) -> tuple[str, bool]:
     return (group or under or "unknown"), False
 
 
-def count_usage(rows: list[dict], cat: dict) -> tuple[dict, float, dict]:
-    """(today counts, logged spend USD, measured avg image tokens per model)."""
-    today = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "images": 0,
-             "auto_requests": 0, "by_model": {}}
-    spend = 0.0
-    img_tokens: dict = {}
-    for row in rows:
-        if str(row.get("status") or "success").lower() == "failure":
-            continue
-        mid, via_auto = attribute_row(row, cat)
-        is_image = (str(row.get("call_type") or "") in IMAGE_CALL_TYPES
-                    or _group_kind(cat["groups"].get(mid)) == "image")
-        pin = _int_or(row.get("prompt_tokens"), 0)
-        pout = _int_or(row.get("completion_tokens"), 0)
-        spend += _float_or(row.get("spend"), 0.0)
-        bm = today["by_model"].setdefault(mid, {"requests": 0, "input_tokens": 0, "output_tokens": 0,
-                                                "images": 0, "via_auto": 0})
-        for d in (today, bm):
-            d["requests"] += 1
-            d["input_tokens"] += pin
-            d["output_tokens"] += pout
-            d["images"] += 1 if is_image else 0
-        if via_auto:
-            today["auto_requests"] += 1
-            bm["via_auto"] += 1
-        if is_image and pout > 0:
-            img_tokens.setdefault(mid, []).append(pout)
-    measured = {m: sum(v) / len(v) for m, v in img_tokens.items()}
-    return today, spend, measured
 
 
 def _unit_cost(g: dict, settings: dict, measured_img: dict) -> float | None:
@@ -1135,41 +1256,6 @@ def _unit_cost(g: dict, settings: dict, measured_img: dict) -> float | None:
     return cost if cost > 0 else None
 
 
-def model_estimates(cat: dict, remaining_usd: float, remaining_fraction: float,
-                    settings: dict, measured_img: dict | None = None) -> list[dict]:
-    measured_img = measured_img or {}
-    groups = cat["groups"]
-    out = []
-    for gid, g in groups.items():
-        is_auto = gid == AUTO_MODEL
-        kind = "chat" if is_auto else _group_kind(g)
-        entry = {"id": gid, "name": g["name"], "kind": kind, "auto": is_auto,
-                 "estimate": "typical"}
-        if is_auto:
-            members = sorted({p for u in g["underlying"] for p in [_public_for(cat, u)]
-                              if p and p != AUTO_MODEL and p in groups})
-            costs = [c for c in (_unit_cost(groups[m], settings, measured_img) for m in members) if c]
-            own = _unit_cost(g, settings, measured_img)
-            if own:
-                costs.append(own)
-            cost = max(costs) if costs else None
-            entry["estimate"] = "conservative"  # priced at the most expensive member
-            entry["members"] = members
-        else:
-            cost = _unit_cost(g, settings, measured_img)
-        priced = cost is not None and cost > 0
-        entry["priced"] = priced
-        remaining = math.floor(max(0.0, remaining_usd) / cost + 1e-9) if priced else None
-        entry["remaining_images" if kind == "image" else "remaining_messages"] = remaining
-        # Back-compat fields read by current app builds (prices are parsed but
-        # never rendered there). Not for display.
-        entry["model"] = gid
-        entry["input_cost_per_token"] = g["legacy"].get("input_cost_per_token")
-        entry["output_cost_per_token"] = g["legacy"].get("output_cost_per_token")
-        entry["remaining_pct"] = round(remaining_fraction, 4)
-        out.append(entry)
-    out.sort(key=lambda e: (not e["auto"], e["kind"] != "chat", e["name"].lower()))
-    return out
 
 
 def _spend_logs(c: httpx.Client, token: str, start: datetime.datetime,
@@ -1200,61 +1286,213 @@ def _spend_logs(c: httpx.Client, token: str, start: datetime.datetime,
     return out
 
 
-def _month_spent_c(c: httpx.Client, uid: str) -> float:
-    try:
-        r = c.get("/user/info", headers=_admin_headers(), params={"user_id": uid})
-        if r.status_code == 200:
-            return float((r.json().get("user_info") or {}).get("spend") or 0.0)
-    except Exception as e:  # noqa: BLE001
-        print(f"[mint] user/info error: {type(e).__name__}", flush=True)
-    return 0.0
+
+
+def catalog_for(c: httpx.Client, s: dict) -> dict:
+    hidden = {s["auto_oss_group"]} if s.get("auto_oss_group") else set()
+    cat = model_catalog(c, hidden)
+    cat["auto_groups"] = {AUTO_MODEL} | hidden
+    cat["hidden"] = hidden
+    return cat
+
+
+def refresh_public_map(cat: dict | None = None) -> None:
+    """Publish underlying-model → public-name for the LiteLLM hook, which
+    attributes auto requests by the served model's class."""
+    if cat is None:
+        with litellm_client(15) as c:
+            cat = catalog_for(c, get_settings())
+    if not cat["groups"]:
+        return
+    blob = json.dumps(cat["under_to_public"], sort_keys=True)
+    if rds.get(plans.PUBLIC_MAP_KEY) != blob:
+        rds.set(plans.PUBLIC_MAP_KEY, blob)
+
+
+def count_usage(rows: list[dict], cat: dict, s: dict | None = None) -> tuple[dict, float, dict, dict]:
+    """(window counts, logged spend USD, measured avg image tokens per model,
+    spend per class {oss, frontier})."""
+    s = s or get_settings()
+    today = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "images": 0,
+             "auto_requests": 0, "by_model": {}}
+    spend = 0.0
+    by_class = {"oss": 0.0, "frontier": 0.0}
+    img_tokens: dict = {}
+    for row in rows:
+        if str(row.get("status") or "success").lower() == "failure":
+            continue
+        mid, via_auto = attribute_row(row, cat)
+        call_type = str(row.get("call_type") or "")
+        is_image = call_type in IMAGE_CALL_TYPES or _group_kind(cat["groups"].get(mid)) == "image"
+        pin = _int_or(row.get("prompt_tokens"), 0)
+        pout = _int_or(row.get("completion_tokens"), 0)
+        cost = _float_or(row.get("spend"), 0.0)
+        spend += cost
+        if is_image:
+            cls = "frontier"
+        elif mid in cat["groups"] and mid not in cat.get("auto_groups", {AUTO_MODEL}):
+            cls = plans.model_class(mid, s)
+        else:
+            cls = "frontier"  # auto with an unknown member: conservative
+        by_class[cls] += cost
+        bm = today["by_model"].setdefault(mid, {"requests": 0, "input_tokens": 0, "output_tokens": 0,
+                                                "images": 0, "via_auto": 0, "class": cls})
+        for d in (today, bm):
+            d["requests"] += 1
+            d["input_tokens"] += pin
+            d["output_tokens"] += pout
+            d["images"] += 1 if is_image else 0
+        if via_auto:
+            today["auto_requests"] += 1
+            bm["via_auto"] += 1
+        if is_image and pout > 0:
+            img_tokens.setdefault(mid, []).append(pout)
+    measured = {m: sum(v) / len(v) for m, v in img_tokens.items()}
+    return today, spend, measured, by_class
+
+
+def _pool_of(cls: str, pools: dict) -> str:
+    if pools["kind"] == "shared":
+        return "frontier" if cls == "frontier" else "all"
+    return cls
+
+
+def model_estimates(cat: dict, st: dict, pools: dict, settings: dict,
+                    measured_img: dict | None = None, remaining_fraction: float = 0.0) -> list[dict]:
+    """Per-model remaining messages/images, each from THAT model's pool and
+    at THAT model's LiteLLM price. No money in display fields."""
+    measured_img = measured_img or {}
+    groups = cat["groups"]
+    split = pools["kind"] == "split"
+
+    def rem(pool):
+        return st[pool]["remaining"]
+
+    def count(pool, cost):
+        return math.floor(max(0.0, rem(pool)) / cost + 1e-9)
+
+    out = []
+    for gid, g in groups.items():
+        if gid in cat.get("hidden", ()):
+            continue
+        is_auto = gid == AUTO_MODEL
+        kind = "chat" if is_auto else _group_kind(g)
+        entry = {"id": gid, "name": g["name"], "kind": kind, "auto": is_auto, "estimate": "typical"}
+        remaining = None
+        if is_auto:
+            members = sorted({p for u in g["underlying"] for p in [_public_for(cat, u)]
+                              if p and p in groups and p not in cat.get("auto_groups", ())})
+            entry["class"] = "auto"
+            entry["estimate"] = "conservative"
+            if split and settings.get("auto_oss_group"):
+                members = [m for m in members if plans.model_class(m, settings) == "oss"]
+                pool = "oss"
+            else:
+                pool = "mixed" if split else "all"
+            entry["members"] = members
+            costed = [(m, _unit_cost(groups[m], settings, measured_img)) for m in members]
+            costed = [(m, c) for m, c in costed if c]
+            priced = bool(costed)
+            if priced and pool == "mixed":
+                remaining = min(count(_pool_of(plans.model_class(m, settings), pools), c) for m, c in costed)
+            elif priced:
+                remaining = count(pool, max(c for _, c in costed))
+            entry["slow_mode"] = bool(split and st["slow_mode"] and pool in ("oss", "mixed"))
+        else:
+            cls = "frontier" if kind == "image" else plans.model_class(gid, settings)
+            pool = _pool_of(cls, pools)
+            entry["class"] = cls
+            cost = _unit_cost(g, settings, measured_img)
+            priced = cost is not None and cost > 0
+            if priced:
+                remaining = count(pool, cost)
+            entry["slow_mode"] = bool(split and cls == "oss" and st["slow_mode"])
+        entry["pool"] = pool
+        entry["priced"] = priced
+        entry["remaining_images" if kind == "image" else "remaining_messages"] = remaining
+        # Back-compat fields read by current app builds (prices are parsed but
+        # never rendered there). Not for display.
+        entry["model"] = gid
+        entry["input_cost_per_token"] = g["legacy"].get("input_cost_per_token")
+        entry["output_cost_per_token"] = g["legacy"].get("output_cost_per_token")
+        entry["remaining_pct"] = round(remaining_fraction, 4)
+        out.append(entry)
+    out.sort(key=lambda e: (not e["auto"], e["kind"] != "chat", e["name"].lower()))
+    return out
 
 
 def compute_usage(uid: str) -> tuple[dict, dict]:
     """(public /usage body, admin-only detail). Spend comes from LiteLLM for
-    ALL of the user's keys (android + web — fixes L5)."""
-    tier = effective_tier(uid)
-    settings = get_settings()
-    budget, window = tier_budget(uid, tier)
-    dur = datetime.timedelta(seconds=WINDOW_SECONDS[window])
-    now = _now()
+    ALL of the user's keys (android + web) plus the hook's pool counters."""
+    s = get_settings()
+    plan = plan_for(uid, s)
+    pools = plans.user_pools(s, plan, user_free_daily(uid, s), user_pool_override(uid))
     keys = user_key_ids(uid)
     key_detail = []
-    key_spend, key_spend_known, resets = 0.0, False, []
     rows: list[dict] = []
+    now = _now()
+    start = current_window_start(uid, pools)
+    # No live window: look back one window length; the window then starts at
+    # the earliest request found (or now when there is none).
+    since = start or now - datetime.timedelta(hours=pools["window_hours"])
     with litellm_client(15) as c:
         for ns, kid in keys.items():
             info = _key_info(c, kid)
             d = {"platform": "web" if ns else "android", "present": True}
             if info is not None:
-                key_spend_known = True
-                key_spend += _float_or(info.get("spend"), 0.0)
-                t = _parse_time(info.get("budget_reset_at"))
-                if t is not None and t > now:
-                    resets.append(t)
                 d.update(spend_usd=_float_or(info.get("spend"), 0.0),
                          max_budget_usd=info.get("max_budget"),
                          budget_duration=info.get("budget_duration"),
                          budget_reset_at=info.get("budget_reset_at"),
+                         rpm_limit=info.get("rpm_limit"),
+                         max_parallel_requests=info.get("max_parallel_requests"),
                          blocked=bool(info.get("blocked")))
             key_detail.append(d)
-        resets_at = min(resets + [now + dur])
-        start = resets_at - dur
-        for kid in keys.values():
-            rows.extend(_spend_logs(c, _token_id(kid), start, now))
-        cat = model_catalog(c)
+            rows.extend(_spend_logs(c, _token_id(kid), since, now))
+        if start is None:
+            times = [t for t in (_parse_time(r.get("startTime") or r.get("start_time")) for r in rows) if t]
+            start, _ = window_bounds(uid, pools, first_use=min(times) if times else now)
+            rows = [r for r in rows
+                    if (_parse_time(r.get("startTime") or r.get("start_time")) or now) >= start]
+        resets_at = start + datetime.timedelta(hours=pools["window_hours"])
+        cat = catalog_for(c, s)
+        refresh_public_map(cat)
         month_free_spent = _month_spent_c(c, uid) if keys else 0.0
-    today, log_spend, measured = count_usage(rows, cat)
-    spent = key_spend if key_spend_known else log_spend
-    month_cap = free_cap_usd(uid)
-    remaining = max(0.0, budget - spent)
-    if tier == "free":
-        # The monthly backstop can bind before the daily allowance does.
-        remaining = min(remaining, max(0.0, month_cap - month_free_spent))
-    fraction = min(1.0, remaining / budget) if budget > 0 else 0.0
+        today, log_spend, measured, by_class = count_usage(rows, cat, s)
+        counters = hook_spend(uid)
+        spend = {k: max(by_class[k], counters[k]) for k in plans.CLASSES}
+        month_cap = free_cap_usd(uid)
+        cap_left = (month_cap - month_free_spent) if plan["id"] == "free" else None
+        st = plans.pool_state(pools, spend, cap_left)
+        if pools["kind"] == "split":
+            sync_slow_mode(c, uid, st["slow_mode"], resets_at)
+        elif in_slow_mode(uid):
+            sync_slow_mode(c, uid, False, resets_at)
+    resets_iso = _iso(resets_at)
+
+    def frac(p):
+        return round(min(1.0, p["remaining"] / p["cap"]), 4) if p["cap"] > 0 else 0.0
+
+    if pools["kind"] == "shared":
+        budget, remaining = st["all"]["cap"], st["all"]["remaining"]
+        pool_list = [
+            {"class": "all", "remaining_fraction": frac(st["all"]), "resets_at": resets_iso, "slow_mode": False},
+            {"class": "frontier", "remaining_fraction": frac(st["frontier"]), "resets_at": resets_iso,
+             "slow_mode": False}]
+    else:
+        budget = st["oss"]["cap"] + st["frontier"]["cap"]
+        remaining = st["oss"]["remaining"] + st["frontier"]["remaining"]
+        pool_list = [
+            {"class": "oss", "remaining_fraction": frac(st["oss"]), "resets_at": resets_iso,
+             "slow_mode": bool(st["slow_mode"])},
+            {"class": "frontier", "remaining_fraction": frac(st["frontier"]), "resets_at": resets_iso,
+             "slow_mode": False}]
+    spent = spend["oss"] + spend["frontier"]
+    fraction = round(min(1.0, remaining / budget), 4) if budget > 0 else 0.0
+    window = plans.window_str(pools["window_hours"])
     body = {
-        "tier": tier,
-        "is_paid": tier != "free",
+        "tier": plans.stored_tier(plan),
+        "is_paid": plan["id"] != "free",
         # Back-compat / internal USD (never rendered by the app).
         "daily_spent_usd": round(spent, 6),
         "daily_budget_usd": round(budget, 6),
@@ -1263,15 +1501,22 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
         "month_free_cap_usd": round(month_cap, 6),
         "requests_today": today["requests"],
         "budget_window": window,
-        "remaining_pct": round(fraction, 4),
+        "remaining_pct": fraction,
         # Display-safe fields (no money).
+        "plan": plan["id"],
+        "plan_name": plan["name"],
         "window": window,
-        "resets_at": _iso(resets_at),
+        "resets_at": resets_iso,
         "today": today,
-        "remaining_fraction": round(fraction, 4),
-        "models": model_estimates(cat, remaining, fraction, settings, measured),
+        "remaining_fraction": fraction,
+        "pools": pool_list,
+        "models": model_estimates(cat, st, pools, s, measured, fraction),
     }
     detail = {"keys": key_detail, "spend_usd": round(spent, 6), "logged_spend_usd": round(log_spend, 6),
+              "spend_by_class_usd": {k: round(v, 6) for k, v in spend.items()},
+              "hook_counters_usd": counters, "pools_usd": pools,
+              "pool_state_usd": {k: v for k, v in st.items() if k != "slow_mode"},
+              "slow_mode": bool(st["slow_mode"]),
               "window_start": _iso(start), "remaining_usd": round(remaining, 6)}
     return body, detail
 
@@ -1289,10 +1534,13 @@ class UsageResp(BaseModel):
     budget_window: str
     remaining_pct: float
     # Display-safe additions (see README "API contract").
+    plan: str
+    plan_name: str
     window: str
     resets_at: str
     today: dict
     remaining_fraction: float
+    pools: list[dict]
     models: list[dict]
 
 
@@ -1304,8 +1552,8 @@ def usage(
     """Server-authoritative usage for the signed-in user.
 
     Spend and counts are read from LiteLLM (the source of truth), NOT computed
-    on the device. Users never see prices: per-model availability is expressed
-    as remaining messages / images.
+    on the device. Users never see prices: availability is expressed as pool
+    fractions and remaining messages / images per model.
     """
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer id token")
@@ -1324,6 +1572,17 @@ def usage(
     if USAGE_CACHE_S > 0:
         rds.set(f"usagecache:{uid}", json.dumps(body), ex=USAGE_CACHE_S)
     return body
+
+
+@app.get("/plans")
+def public_plans():
+    """Enabled plans for the app's plan screen (subscription price is plan
+    metadata, not model pricing). Ids and aliases match user:{uid}:tier."""
+    s = get_settings()
+    return {"plans": [{"id": p["id"], "name": p["name"], "price_usd": p["price_usd"],
+                       "aliases": p["aliases"], "kind": p["kind"],
+                       "window": plans.window_str(p["window_hours"])}
+                      for p in s["plans"] if p["enabled"]]}
 
 
 def _drop_usage_cache(uids) -> None:
@@ -1373,21 +1632,28 @@ def audit(request: Request | None, action: str, target=None, before=None, after=
     return entry
 
 
+
+
 def _user_state(uid: str) -> dict:
-    return {"tier": effective_tier(uid),
+    return {"tier": rds.get(f"user:{uid}:tier") or "free",
+            "plan": effective_tier(uid),
             "daily_usd_override": rds.get(f"user:{uid}:dailyUsd"),
             "monthly_cap_override": rds.get(f"user:{uid}:monthlyCapUsd"),
+            "pools_override": user_pool_override(uid),
             "banned": rds.get(f"user:{uid}:banned")}
 
 
 class AdminAction(BaseModel):
     uid: str | None = None
     ip: str | None = None
-    tier: str | None = None
-    daily_usd: float | None = None          # user's FREE allowance per 24h
-    monthly_cap_usd: float | None = None    # user's free monthly backstop
+    tier: str | None = None                 # plan id or alias
+    daily_usd: float | None = None          # custom FREE allowance per 24h
+    monthly_cap_usd: float | None = None    # custom free monthly backstop
+    pools: dict | None = None               # custom plan pools (mult, frontier_share, oss_usd, frontier_usd, window_hours)
     clear_daily_usd: bool = False
     clear_monthly_cap_usd: bool = False
+    clear_pools: bool = False
+
 
 
 def _set_key_blocked(uid: str, blocked: bool) -> None:
@@ -1432,22 +1698,54 @@ def admin_unban(body: AdminAction, request: Request, authorization: str = Header
     return {"ok": True}
 
 
+
+def _validate_pool_override(p: dict) -> dict:
+    out = {}
+    for f, v in p.items():
+        if f not in plans.POOL_OVERRIDE_FIELDS:
+            raise HTTPException(400, f"unknown pool field {f!r}")
+        if v is None:
+            continue
+        lo, hi, _kinds = plans.PLAN_NUMBERS[f]
+        try:
+            out[f] = plans._bounded(f, v, lo, hi)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    if "window_hours" in out:
+        out["window_hours"] = int(out["window_hours"])
+    return out
+
+
+def _bad_request(fn, *a):
+    try:
+        return fn(*a)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/admin/set-tier")
+@app.post("/admin/user/update")
 def admin_set_tier(body: AdminAction, request: Request, authorization: str = Header(default="")):
-    """Change one user's plan and/or per-user overrides, then re-apply the
-    user's budgets to all of their keys (android + web)."""
+    """Change one user's plan and/or per-user overrides (custom free limit,
+    custom monthly backstop, custom plan pools), then re-apply the user's
+    budgets to all of their keys (android + web)."""
     _require_admin(authorization)
     if not body.uid:
         raise HTTPException(400, "uid required")
     uid = body.uid.strip()
-    if body.tier and body.tier not in TIERS:
-        raise HTTPException(400, "unknown tier")
+    s = get_settings()
+    plan = None
+    if body.tier:
+        plan = plans.find_plan(s, body.tier)
+        if body.tier not in (plan["id"], *plan["aliases"]):
+            raise HTTPException(400, "unknown plan")
     for name, v in (("daily_usd", body.daily_usd), ("monthly_cap_usd", body.monthly_cap_usd)):
         if v is not None and (v < 0 or math.isnan(v)):
             raise HTTPException(400, f"{name} must be >= 0")
+    pools_override = _validate_pool_override(body.pools) if body.pools else None
     before = _user_state(uid)
-    if body.tier:
-        rds.set(f"user:{uid}:tier", body.tier)
+    if plan:
+        rds.set(f"user:{uid}:tier", plans.stored_tier(plan))
     if body.clear_daily_usd:
         rds.delete(f"user:{uid}:dailyUsd")
     elif body.daily_usd is not None:
@@ -1456,6 +1754,10 @@ def admin_set_tier(body: AdminAction, request: Request, authorization: str = Hea
         rds.delete(f"user:{uid}:monthlyCapUsd")
     elif body.monthly_cap_usd is not None:
         rds.set(f"user:{uid}:monthlyCapUsd", str(body.monthly_cap_usd))
+    if body.clear_pools:
+        rds.delete(f"user:{uid}:pools")
+    elif pools_override:
+        rds.set(f"user:{uid}:pools", json.dumps(pools_override, sort_keys=True))
     with litellm_client(15) as c:
         res = reapply_user(c, uid)
     _drop_usage_cache([uid])
@@ -1464,34 +1766,19 @@ def admin_set_tier(body: AdminAction, request: Request, authorization: str = Hea
     return {"ok": True, "user": after, "reapplied": res}
 
 
-class SettingsUpdate(BaseModel):
-    free_daily_usd: float | None = None
-    tier_mult: dict[str, float] | None = None
-    paid_window: str | None = None
-    free_monthly_cap_usd: float | None = None
-    est_input_tokens: int | None = None
-    est_output_tokens: int | None = None
-    est_image_tokens: int | None = None
-    reapply: bool = True
-
-
-def _apply_settings(request: Request | None, changes: dict, reapply: bool, action: str) -> dict:
+def _apply_settings(request: Request | None, changes: dict, reapply: bool, action: str,
+                    target="global") -> dict:
     before = get_settings()
     merged = dict(before)
     for k, v in changes.items():
         if v is None:
             continue
-        if k == "tier_mult":
-            unknown = set(v) - set(PAID_TIERS) - {"free"}
-            if unknown:
-                raise HTTPException(400, f"unknown tier(s): {sorted(unknown)}")
-            merged["tier_mult"] = {**before["tier_mult"], **v}
-        else:
-            merged[k] = v
-    after = _validate_settings(merged)
-    _store_settings(after)
+        if k not in merged:
+            raise HTTPException(400, f"unknown setting {k!r}")
+        merged[k] = v
+    after = _bad_request(store_settings, merged)
     result = reapply_everyone() if reapply else {"mode": "skipped"}
-    audit(request, action, "global", before, after, result)
+    audit(request, action, target, before, after, result)
     return {"ok": True, "settings": get_settings(), "reapplied": result}
 
 
@@ -1499,19 +1786,76 @@ def _apply_settings(request: Request | None, changes: dict, reapply: bool, actio
 def admin_get_settings(authorization: str = Header(default="")):
     _require_admin(authorization)
     status = rds.get(REAPPLY_STATUS_KEY)
-    return {"settings": get_settings(), "tiers": list(TIER_MULT),
-            "paid_windows": list(PAID_WINDOWS), "users": rds.scard(ALL_UIDS_SET),
-            "reapply_status": json.loads(status) if status else None}
+    reset = rds.get(RESET_STATUS_KEY)
+    return {"settings": get_settings(), "users": rds.scard(ALL_UIDS_SET),
+            "scalars": {k: {"min": lo, "max": hi} for k, (_t, _s, lo, hi) in plans.SCALARS.items()},
+            "reapply_status": json.loads(status) if status else None,
+            "reset_status": json.loads(reset) if reset else None}
 
 
 @app.post("/admin/settings")
-def admin_set_settings(body: SettingsUpdate, request: Request, authorization: str = Header(default="")):
-    """Owner settings: global free allowance, plan multipliers, paid window,
-    free monthly backstop and the message/image estimate. Re-applied to every
-    key (android + web) and every LiteLLM user budget."""
+def admin_set_settings(request: Request, payload: dict = Body(...), authorization: str = Header(default="")):
+    """Partial update of any setting (free_daily_usd, scalars, oss_models,
+    auto_oss_group, plans). Takes effect immediately and is re-applied to
+    every key (android + web) and LiteLLM user budget."""
     _require_admin(authorization)
-    changes = body.model_dump(exclude={"reapply"})
-    return _apply_settings(request, changes, body.reapply, "settings")
+    payload = dict(payload)
+    reapply = bool(payload.pop("reapply", True))
+    return _apply_settings(request, payload, reapply, "settings")
+
+
+@app.get("/admin/plans")
+def admin_get_plans(authorization: str = Header(default="")):
+    _require_admin(authorization)
+    return {"plans": get_settings()["plans"]}
+
+
+@app.post("/admin/plans")
+def admin_upsert_plan(request: Request, payload: dict = Body(...), authorization: str = Header(default="")):
+    """Add a plan or edit one (by id): name, price, enabled, aliases, kind,
+    window_hours, mult/frontier_share (shared) or oss_usd/frontier_usd (split)."""
+    _require_admin(authorization)
+    payload = dict(payload)
+    reapply = bool(payload.pop("reapply", True))
+    pid = str(payload.get("id") or "")
+    current = get_settings()["plans"]
+    found = next((p for p in current if p["id"] == pid), None)
+    new_plan = {**(found or {}), **payload}
+    new_list = [new_plan if p["id"] == pid else p for p in current] if found else current + [new_plan]
+    return _apply_settings(request, {"plans": new_list}, reapply,
+                           "plan-edit" if found else "plan-add", pid)
+
+
+@app.post("/admin/plans/{pid}/{action}")
+def admin_plan_toggle(pid: str, action: str, request: Request, authorization: str = Header(default="")):
+    _require_admin(authorization)
+    if action not in ("enable", "disable"):
+        raise HTTPException(404, "unknown action")
+    current = get_settings()["plans"]
+    if not any(p["id"] == pid for p in current):
+        raise HTTPException(404, "unknown plan")
+    new_list = [{**p, "enabled": action == "enable"} if p["id"] == pid else p for p in current]
+    return _apply_settings(request, {"plans": new_list}, False, f"plan-{action}", pid)
+
+
+@app.get("/admin/models")
+def admin_models(authorization: str = Header(default="")):
+    """Models LiteLLM publishes with their class (for the class editor). Admin
+    only: includes LiteLLM prices."""
+    _require_admin(authorization)
+    s = get_settings()
+    with litellm_client(15) as c:
+        cat = catalog_for(c, s)
+    out = []
+    for gid, g in sorted(cat["groups"].items()):
+        out.append({"id": gid, "name": g["name"], "kind": _group_kind(g),
+                    "class": plans.model_class(gid, s), "hidden": gid in cat["hidden"],
+                    "input_cost_per_token": max(g["inputs"]) if g["inputs"] else None,
+                    "output_cost_per_token": max(g["outputs"]) if g["outputs"] else None,
+                    "output_cost_per_image": max(g["per_image"]) if g["per_image"] else None,
+                    "members": sorted({_public_for(cat, u) or u for u in g["underlying"]})
+                    if gid in cat["auto_groups"] else None})
+    return {"models": out, "oss_models": s["oss_models"], "auto_oss_group": s["auto_oss_group"]}
 
 
 class BaseBudgetAction(BaseModel):
@@ -1522,63 +1866,99 @@ class BaseBudgetAction(BaseModel):
 @app.post("/admin/set-base-budget")
 def admin_set_base_budget(body: BaseBudgetAction, request: Request,
                           authorization: str = Header(default="")):
-    """Legacy: set the global FREE allowance per user per 24h. Paid plans are
-    free allowance × multiplier. Re-applies to all keys (android + web)."""
+    """Legacy: set the global FREE allowance per user per 24h."""
     _require_admin(authorization)
     if body.daily_usd < 0:
         raise HTTPException(400, "daily_usd must be >= 0")
     res = _apply_settings(request, {"free_daily_usd": body.daily_usd}, body.reapply, "set-base-budget")
     r = res["reapplied"]
     return {"ok": True, "base_daily_usd": body.daily_usd,
-            "reapplied": r.get("keys", r.get("users", 0)) if isinstance(r, dict) else 0,
-            "detail": r}
+            "reapplied": r.get("keys", r.get("users", 0)), "detail": r}
 
 
 class ResetAction(BaseModel):
-    uid: str | None = None  # omit → reset ALL users
-    reset_month_free: bool = True
+    uid: str | None = None          # omit → ALL users (background when large)
+    reset_month_free: bool = False  # also zero the free monthly backstop
 
 
-def _reset_users(uids: list[str], reset_month_free: bool) -> dict:
-    out = {"users": 0, "keys": 0, "errors": 0}
-    with litellm_client(20) as c:
-        for uid in uids:
-            if not uid:
-                continue
-            # spend=0 on every key restarts the window's usage.
-            res = reapply_user(c, uid, extra={"spend": 0})
-            out["users"] += 1
-            out["keys"] += res["keys"]
-            out["errors"] += res["errors"]
-            if reset_month_free:
-                # L4: the monthly backstop is LiteLLM's USER spend; zero it.
-                try:
-                    r = c.post("/user/update", headers=_admin_headers(),
-                               json={"user_id": uid, "spend": 0})
-                    if r.status_code >= 300:
-                        out["errors"] += 1
-                except Exception:  # noqa: BLE001
-                    out["errors"] += 1
-                rds.delete(month_key(uid))  # legacy key, harmless
-            rds.delete(f"usagecache:{uid}")
-    return out
+def _reset(request: Request, body: ResetAction, action: str) -> dict:
+    if body.uid:
+        uid = body.uid.strip()
+        with litellm_client(20) as c:
+            res = {"mode": "sync", "users": 1, **reset_window_user(c, uid, body.reset_month_free)}
+        target = uid
+    else:
+        res = run_for_everyone(RESET_STATUS_KEY,
+                               lambda c, u: reset_window_user(c, u, body.reset_month_free))
+        target = "ALL"
+    audit(request, action, target, None, {"reset_month_free": body.reset_month_free}, res)
+    return {"ok": True, "reset": res.get("keys", 0), "detail": res}
+
+
+@app.post("/admin/reset-window")
+def admin_reset_window(body: ResetAction, request: Request, authorization: str = Header(default="")):
+    """Restart the 24h (plan) window NOW for one user (uid) or ALL users:
+    pool counters and slow mode cleared, spend zeroed on every key (android +
+    web), LiteLLM budget clocks restarted, budgets re-applied."""
+    _require_admin(authorization)
+    return _reset(request, body, "reset-window")
 
 
 @app.post("/admin/reset-usage")
-def admin_reset_usage(body: ResetAction, request: Request, authorization: str = Header(default="")):
-    """Reset usage for one user (uid) or ALL users (uid omitted): zero the
-    spend on every key (android + web) and, with reset_month_free, the LiteLLM
-    user spend that carries the monthly backstop."""
+def admin_reset_usage(request: Request, body: dict = Body(default={}),
+                      authorization: str = Header(default="")):
+    """Legacy name: a window reset that also zeroes the monthly backstop."""
     _require_admin(authorization)
-    targets = [body.uid.strip()] if body.uid else list(rds.smembers(ALL_UIDS_SET))
-    if len(targets) > REAPPLY_SYNC_MAX:
-        threading.Thread(target=_reset_users, args=(targets, body.reset_month_free), daemon=True).start()
-        res = {"mode": "background", "users": len(targets)}
-    else:
-        res = _reset_users(targets, body.reset_month_free)
-    audit(request, "reset-usage", body.uid or "ALL", None,
-          {"reset_month_free": body.reset_month_free}, res)
-    return {"ok": True, "reset": res.get("keys", 0), "detail": res}
+    act = ResetAction(uid=body.get("uid"), reset_month_free=body.get("reset_month_free", True))
+    return _reset(request, act, "reset-usage")
+
+
+@app.get("/admin/reset-status")
+def admin_reset_status(authorization: str = Header(default="")):
+    _require_admin(authorization)
+    status = rds.get(RESET_STATUS_KEY)
+    return json.loads(status) if status else {"state": "never"}
+
+
+@app.get("/admin/user")
+def admin_user(q: str, authorization: str = Header(default="")):
+    """Look a user up by uid or email: plan, overrides, pools, window usage
+    (requests, tokens, images, spend) and the per-model table exactly as the
+    app sees it."""
+    _require_admin(authorization)
+    uid = _resolve_uid(q)
+    if not uid:
+        raise HTTPException(404, "user not found")
+    body, detail = compute_usage(uid)
+    s = get_settings()
+    plan = plan_for(uid, s)
+    return {
+        "uid": uid,
+        "email": rds.get(f"user:{uid}:email"),
+        "tier": body["tier"],
+        "plan": plan,
+        "banned": rds.get(f"user:{uid}:banned"),
+        "override_daily_usd": rds.get(f"user:{uid}:dailyUsd"),
+        "override_monthly_cap_usd": rds.get(f"user:{uid}:monthlyCapUsd"),
+        "override_pools": user_pool_override(uid),
+        "free_daily_usd": user_free_daily(uid, s),
+        "pools_usd": detail["pools_usd"],
+        "pool_state_usd": detail["pool_state_usd"],
+        "spend_by_class_usd": detail["spend_by_class_usd"],
+        "slow_mode": detail["slow_mode"],
+        "allowance_usd": body["daily_budget_usd"],
+        "window": body["window"],
+        "window_start": detail["window_start"],
+        "resets_at": body["resets_at"],
+        "today": {**body["today"], "spend_usd": detail["spend_usd"]},
+        "month_spent_usd": body["month_free_spent_usd"],
+        "month_cap_usd": body["month_free_cap_usd"],
+        "remaining_usd": detail["remaining_usd"],
+        "remaining_fraction": body["remaining_fraction"],
+        "keys": detail["keys"],
+        "app_view": body,
+    }
+
 
 
 def _resolve_uid(q: str) -> str | None:
@@ -1594,38 +1974,6 @@ def _resolve_uid(q: str) -> str | None:
     return None
 
 
-@app.get("/admin/user")
-def admin_user(q: str, authorization: str = Header(default="")):
-    """Look a user up by uid or email: plan, overrides, window usage (requests,
-    tokens, images, spend) and the per-model table exactly as the app sees it."""
-    _require_admin(authorization)
-    uid = _resolve_uid(q)
-    if not uid:
-        raise HTTPException(404, "user not found")
-    body, detail = compute_usage(uid)
-    tier = body["tier"]
-    s = get_settings()
-    return {
-        "uid": uid,
-        "email": rds.get(f"user:{uid}:email"),
-        "tier": tier,
-        "banned": rds.get(f"user:{uid}:banned"),
-        "override_daily_usd": rds.get(f"user:{uid}:dailyUsd"),
-        "override_monthly_cap_usd": rds.get(f"user:{uid}:monthlyCapUsd"),
-        "free_daily_usd": user_free_daily(uid),
-        "multiplier": s["tier_mult"].get(tier, 1),
-        "allowance_usd": body["daily_budget_usd"],
-        "window": body["window"],
-        "resets_at": body["resets_at"],
-        "today": {**body["today"], "spend_usd": detail["spend_usd"]},
-        "month_spent_usd": body["month_free_spent_usd"],
-        "month_cap_usd": body["month_free_cap_usd"],
-        "remaining_usd": detail["remaining_usd"],
-        "remaining_fraction": body["remaining_fraction"],
-        "keys": detail["keys"],
-        "window_start": detail["window_start"],
-        "app_view": body,
-    }
 
 
 @app.get("/admin/audit")
@@ -1635,11 +1983,20 @@ def admin_audit(limit: int = 100, authorization: str = Header(default="")):
     return {"entries": [json.loads(x) for x in rds.lrange(AUDIT_LIST, 0, limit - 1)]}
 
 
+
+
 @app.get("/admin/reapply-status")
 def admin_reapply_status(authorization: str = Header(default="")):
     _require_admin(authorization)
     status = rds.get(REAPPLY_STATUS_KEY)
     return json.loads(status) if status else {"state": "never"}
+
+
+@app.post("/admin/sweep")
+def admin_sweep(request: Request, authorization: str = Header(default="")):
+    """Run the slow-mode sweep now (it also runs in the background)."""
+    _require_admin(authorization)
+    return sweep_slow_mode()
 
 
 @app.get("/admin/export")
@@ -1657,60 +2014,80 @@ def admin_export(authorization: str = Header(default="")):
 
 
 # ── Admin web page (localhost / SSH-tunnel only — NOT routed publicly) ──
-# This page is served by the mint service on port 8090. Caddy's public vhost
-# only exposes /v1, /mint, /usage, /healthz — NOT /admin — so this console is
-# reachable ONLY through an SSH tunnel to 127.0.0.1:8090. It calls the admin
-# endpoints with the master key you paste in (kept in the tab's memory only).
+# Served by mint on port 8090. Caddy's public vhost does NOT route /admin, so
+# the console is reachable only through an SSH tunnel to 127.0.0.1:8090. It is
+# a pure client of the /admin JSON API, authorized with the master key pasted
+# into the tab (kept in memory only).
 _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=referrer content=no-referrer>
 <title>Ovid Admin</title>
 <style>
- body{font:15px/1.5 system-ui,sans-serif;max-width:980px;margin:0 auto;padding:24px;background:#0d1117;color:#e6edf3}
- h1{font-size:20px}h2{font-size:15px;margin:26px 0 8px;color:#8b949e;text-transform:uppercase;letter-spacing:.08em}
- .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:16px;margin:10px 0}
+ body{font:14px/1.5 system-ui,sans-serif;max-width:1180px;margin:0 auto;padding:24px;background:#0d1117;color:#e6edf3}
+ h1{font-size:20px}h2{font-size:14px;margin:26px 0 8px;color:#8b949e;text-transform:uppercase;letter-spacing:.08em}
+ .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:16px;margin:10px 0;overflow-x:auto}
  label{display:block;font-size:12px;color:#8b949e;margin:8px 0 4px}
- input,select{width:100%;box-sizing:border-box;padding:9px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;font-size:14px}
- button{margin:12px 8px 0 0;padding:9px 14px;border:0;border-radius:8px;background:#2f81f7;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
- button.danger{background:#da3633}button.ghost{background:#30363d}
- .row{display:flex;gap:10px;flex-wrap:wrap}.row>div{flex:1;min-width:120px}
+ input,select{width:100%;box-sizing:border-box;padding:7px;border-radius:7px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;font-size:13px}
+ input[type=checkbox]{width:auto}
+ button{margin:10px 8px 0 0;padding:8px 13px;border:0;border-radius:8px;background:#2f81f7;color:#fff;font-size:13px;font-weight:600;cursor:pointer}
+ button.danger{background:#da3633}button.ghost{background:#30363d}button.sm{margin:0;padding:5px 9px}
+ .row{display:flex;gap:10px;flex-wrap:wrap}.row>div{flex:1;min-width:130px}
  .out{margin-top:10px;font-size:12px;color:#7ee787;white-space:pre-wrap;font-family:ui-monospace,monospace}
- .err{color:#ff7b72}.muted{color:#8b949e;font-size:12px}.warn{color:#d29922;font-size:13px}
+ .err{color:#ff7b72}.muted{color:#8b949e;font-size:12px}
  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
- th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #30363d;vertical-align:top}
+ th,td{text-align:left;padding:5px 6px;border-bottom:1px solid #30363d;vertical-align:top}
  th{color:#8b949e;font-weight:600}td.num{text-align:right;font-variant-numeric:tabular-nums}
- .kv{display:grid;grid-template-columns:200px 1fr;gap:4px 12px;font-size:13px}.kv div:nth-child(odd){color:#8b949e}
+ td input,td select{min-width:70px}
+ .kv{display:grid;grid-template-columns:210px 1fr;gap:4px 12px;font-size:13px}.kv div:nth-child(odd){color:#8b949e}
 </style></head><body>
 <h1>Ovid Cloud — Admin</h1>
 <div class=card>
  <label>Master key (stays in this tab only)</label>
  <input id=mk type=password placeholder="sk-..." autocomplete=off>
  <button onclick=loadAll()>Load</button>
- <div class=muted>Every change below is re-applied to all affected keys (android + web) and written to the audit log.</div>
+ <div class=muted>Every number below is live: saving takes effect immediately (no restart), is re-applied to all affected keys (android + web) and is written to the audit log.</div>
 </div>
 
-<h2>Usage limits (all users)</h2>
+<h2>Global limits</h2>
 <div class=card>
  <div class=row>
-  <div><label>Free allowance per user per 24h (USD)</label><input id=s_free type=number step=0.01 min=0 oninput=preview()></div>
-  <div><label>Free monthly backstop per user (USD / 30 days)</label><input id=s_cap type=number step=0.01 min=0 oninput=preview()></div>
+  <div><label>Free allowance per user per 24h (USD)</label><input id=g_free_daily_usd type=number step=0.01 min=0></div>
+  <div><label>Free monthly backstop per user (USD / 30 days)</label><input id=g_free_monthly_cap_usd type=number step=0.01 min=0></div>
+  <div><label>Key ceiling for split plans (× oss pool + frontier)</label><input id=g_hard_ceiling_mult type=number step=0.1 min=1></div>
+ </div>
+ <div class=muted>The monthly backstop is a second cap on free users across all their keys: with a high daily amount it stops a heavy user after a few days (e.g. $3/day with a $10 backstop: day 4). <span id=backstopNote></span></div>
+ <div class=row>
+  <div><label>Normal rpm</label><input id=g_normal_rpm type=number min=1></div>
+  <div><label>Normal tpm</label><input id=g_normal_tpm type=number min=1></div>
+  <div><label>Normal parallel</label><input id=g_normal_parallel type=number min=1></div>
+  <div><label>Slow-mode rpm</label><input id=g_slow_rpm type=number min=1></div>
+  <div><label>Slow-mode tpm</label><input id=g_slow_tpm type=number min=1></div>
+  <div><label>Slow-mode parallel</label><input id=g_slow_parallel type=number min=1></div>
  </div>
  <div class=row>
-  <div><label>3x plan multiplier</label><input id=s_m3 type=number step=0.1 min=1 oninput=preview()></div>
-  <div><label>7x plan multiplier</label><input id=s_m7 type=number step=0.1 min=1 oninput=preview()></div>
-  <div><label>15x plan multiplier</label><input id=s_m15 type=number step=0.1 min=1 oninput=preview()></div>
-  <div><label>Paid window</label><select id=s_win onchange=preview()><option value=30d>30d — monthly pool</option><option value=24h>24h — daily allowance</option></select></div>
+  <div><label>Typical message: input tokens</label><input id=g_est_input_tokens type=number min=1></div>
+  <div><label>Typical message: output tokens</label><input id=g_est_output_tokens type=number min=1></div>
+  <div><label>Typical image: output tokens</label><input id=g_est_image_tokens type=number min=1></div>
+  <div><label>Oss-only auto group for split plans (LiteLLM model group, empty = off)</label><input id=g_auto_oss_group></div>
  </div>
- <div class=row>
-  <div><label>Typical message: input tokens</label><input id=s_ein type=number min=1></div>
-  <div><label>Typical message: output tokens</label><input id=s_eout type=number min=1></div>
-  <div><label>Typical image: output tokens (no per-image price)</label><input id=s_eimg type=number min=1></div>
- </div>
- <div class=out id=preview style="color:#e6edf3"></div>
- <div class=muted>Paid allowance = the user's free allowance × plan multiplier. With the <b>30d</b> window a paid user gets a monthly pool of 30 × that amount; with <b>24h</b> it resets every 24 hours.
- The <b>monthly backstop</b> is a second, 30-day cap on free users (LiteLLM user budget across all their keys): with a high daily free amount it cuts users off after a few days — e.g. $3/day with a $10 backstop stops a heavy user on day 4. Raise it together with the daily amount if that is not intended.</div>
- <button onclick=saveSettings()>Save and re-apply to all users</button>
- <div class=out id=settingsOut></div>
+ <button onclick=saveGlobal()>Save global limits</button>
+ <div class=out id=globalOut></div>
+</div>
+
+<h2>Plans</h2>
+<div class=card>
+ <div class=muted>Amounts are USD per 24h and scale with the window (720h = 30 days → ×30). Shared plans: allowance = user's free allowance × mult, frontier capped at frontier share. Split plans: oss fair-use pool (over it → slow mode) + frontier pool (exhausted → frontier_limit_reached). Price is admin/plan-screen metadata only. Disable = stop selling; users already on it keep it.</div>
+ <table><thead><tr><th>id</th><th>name</th><th>price $</th><th>on</th><th>aliases</th><th>kind</th><th>window h</th><th>mult</th><th>frontier share</th><th>oss $/24h</th><th>frontier $/24h</th><th></th></tr></thead><tbody id=planRows></tbody></table>
+ <button class=ghost onclick=addPlanRow()>Add plan</button>
+ <div class=out id=planOut></div>
+</div>
+
+<h2>Model classes</h2>
+<div class=card>
+ <div class=muted>oss = open-source fair-use pool; frontier = everything else (images are always frontier). Auto is counted by the model that served each request.</div>
+ <table><thead><tr><th>Model</th><th>Kind</th><th>Class</th><th>In $/tok</th><th>Out $/tok</th><th>$/image</th></tr></thead><tbody id=classRows></tbody></table>
+ <button onclick=saveClasses()>Save classes</button>
+ <div class=out id=classOut></div>
 </div>
 
 <h2>User</h2>
@@ -1721,24 +2098,37 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
  <div id=userBox style="display:none">
   <div class=kv id=userKv style="margin-top:12px"></div>
   <h2>Models as the app sees them</h2>
-  <table><thead><tr><th>Model</th><th>Kind</th><th class=num>Remaining</th><th>Estimate</th><th class=num>Requests (window)</th><th class=num>Tokens in / out</th><th class=num>Images</th></tr></thead><tbody id=modelRows></tbody></table>
+  <table><thead><tr><th>Model</th><th>Class / pool</th><th class=num>Remaining</th><th>Estimate</th><th class=num>Requests</th><th class=num>Tokens in / out</th><th class=num>Images</th></tr></thead><tbody id=modelRows></tbody></table>
   <h2>Change this user</h2>
   <div class=row>
-   <div><label>Plan</label><select id=u_tier><option>free</option><option>3x</option><option>7x</option><option>15x</option></select></div>
-   <div><label>Free allowance override (USD / 24h, empty = global)</label><input id=u_daily type=number step=0.01 min=0></div>
-   <div><label>Monthly backstop override (USD, empty = global)</label><input id=u_cap type=number step=0.01 min=0></div>
+   <div><label>Plan</label><select id=u_tier></select></div>
+   <div><label>Custom free limit (USD / 24h)</label><input id=u_daily type=number step=0.01 min=0></div>
+   <div><label>Custom monthly backstop (USD)</label><input id=u_cap type=number step=0.01 min=0></div>
   </div>
-  <button onclick=saveUser()>Save user</button>
-  <button class=ghost onclick=resetUser()>Reset this user's usage</button>
+  <div class=row>
+   <div><label>Custom pool: mult</label><input id=u_p_mult type=number step=0.1 min=0></div>
+   <div><label>frontier share</label><input id=u_p_frontier_share type=number step=0.01 min=0 max=1></div>
+   <div><label>oss $/24h</label><input id=u_p_oss_usd type=number step=0.01 min=0></div>
+   <div><label>frontier $/24h</label><input id=u_p_frontier_usd type=number step=0.01 min=0></div>
+   <div><label>window hours</label><input id=u_p_window_hours type=number min=1></div>
+  </div>
+  <button onclick=saveUser()>Save plan + overrides</button>
+  <button class=ghost onclick="clearUser('clear_daily_usd')">Clear custom free limit</button>
+  <button class=ghost onclick="clearUser('clear_monthly_cap_usd')">Clear custom backstop</button>
+  <button class=ghost onclick="clearUser('clear_pools')">Clear custom pools</button>
+  <br><button class=ghost onclick=resetUser()>Reset window now</button>
+  <label style="display:inline"><input type=checkbox id=u_month> also reset monthly backstop</label>
   <button class=danger onclick=banUser(true)>Ban</button>
   <button class=ghost onclick=banUser(false)>Unban</button>
   <div class=out id=userActOut></div>
  </div>
 </div>
 
-<h2>Reset / IP ban</h2>
+<h2>All users</h2>
 <div class=card>
- <button class=danger onclick=resetAll()>Reset usage for ALL users</button>
+ <button class=danger onclick=resetAll()>Reset window for ALL users now</button>
+ <label style="display:inline"><input type=checkbox id=all_month> also reset monthly backstops</label>
+ <div class=out id=resetStatus></div>
  <div class=row><div><label>IP</label><input id=banIp></div></div>
  <button class=danger onclick=ipBan(true)>Ban IP (30 days)</button>
  <button class=ghost onclick=ipBan(false)>Unban IP</button>
@@ -1753,7 +2143,9 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
 
 <script>
 const $=id=>document.getElementById(id);
-let current=null, settings=null;
+const GLOBAL=['free_daily_usd','free_monthly_cap_usd','hard_ceiling_mult','normal_rpm','normal_tpm','normal_parallel','slow_rpm','slow_tpm','slow_parallel','est_input_tokens','est_output_tokens','est_image_tokens','auto_oss_group'];
+const PFIELDS=['mult','frontier_share','oss_usd','frontier_usd','window_hours'];
+let current=null, settings=null, models=[];
 function mk(){return $('mk').value.trim()}
 async function api(method,path,body){
  const r=await fetch(path,{method,headers:{'Authorization':'Bearer '+mk(),'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
@@ -1762,30 +2154,55 @@ async function api(method,path,body){
  return j;
 }
 function show(id,v,err){const o=$(id);o.className='out'+(err?' err':'');o.textContent=typeof v==='string'?v:JSON.stringify(v,null,1)}
-function cell(tr,v,cls){const td=document.createElement('td');td.textContent=(v===null||v===undefined)?'—':String(v);if(cls)td.className=cls;tr.appendChild(td)}
-function num(id){const v=$(id).value.trim();return v===''?null:parseFloat(v)}
+function el(tag,attrs,text){const e=document.createElement(tag);for(const k in (attrs||{}))e[k]=attrs[k];if(text!==undefined)e.textContent=text;return e}
+function cell(tr,v,cls){const td=el('td',{},(v===null||v===undefined)?'—':String(v));if(cls)td.className=cls;tr.appendChild(td);return td}
+function num(v){v=String(v).trim();return v===''?null:Number(v)}
 function money(v){return '$'+Number(v||0).toFixed(2)}
-async function loadAll(){await loadSettings();await loadAudit()}
+async function loadAll(){await loadSettings();await loadModels();await loadAudit();pollReset()}
 async function loadSettings(){
  try{const j=await api('GET','/admin/settings');settings=j.settings;
-  $('s_free').value=settings.free_daily_usd;$('s_cap').value=settings.free_monthly_cap_usd;
-  $('s_m3').value=settings.tier_mult['3x'];$('s_m7').value=settings.tier_mult['7x'];$('s_m15').value=settings.tier_mult['15x'];
-  $('s_win').value=settings.paid_window;$('s_ein').value=settings.est_input_tokens;$('s_eout').value=settings.est_output_tokens;$('s_eimg').value=settings.est_image_tokens;
-  preview();show('settingsOut',j.users+' known users'+(j.reapply_status?' · last re-apply: '+JSON.stringify(j.reapply_status):''));
- }catch(e){show('settingsOut',String(e),true)}
+  for(const k of GLOBAL)$('g_'+k).value=settings[k];
+  const f=settings.free_daily_usd,c=settings.free_monthly_cap_usd;
+  $('backstopNote').textContent=f>0&&c>0?'Now: '+money(f)+'/day and '+money(c)+'/30 days, so a user spending the full daily amount stops after about '+Math.ceil(c/f)+' day(s).':'';
+  renderPlans();
+  const sel=$('u_tier');sel.textContent='';for(const p of settings.plans)sel.appendChild(el('option',{value:p.id},p.name+' ('+p.id+(p.aliases.length?' / '+p.aliases.join(','):'')+')'+(p.enabled?'':' [disabled]')));
+  show('globalOut',j.users+' known users');
+ }catch(e){show('globalOut',String(e),true)}
 }
-function preview(){
- const f=num('s_free')||0,cap=num('s_cap')||0,w=$('s_win').value;
- const lines=['Free: '+money(f)+' per 24h'+(f>0&&cap>0?' · monthly backstop '+money(cap)+' (a user spending the full daily amount is stopped after ~'+Math.ceil(cap/f)+' day(s))':'')];
- for(const [t,id] of [['3x','s_m3'],['7x','s_m7'],['15x','s_m15']]){const m=num(id)||1;lines.push(t+': ×'+m+' = '+money(f*m)+' per 24h'+(w==='30d'?' → pool '+money(f*m*30)+' per 30 days':''))}
- $('preview').textContent=lines.join('\\n');
+async function saveGlobal(){
+ const b={reapply:true};for(const k of GLOBAL){const v=$('g_'+k).value;b[k]=k==='auto_oss_group'?v.trim():num(v)}
+ try{const j=await api('POST','/admin/settings',b);show('globalOut',{saved:true,reapplied:j.reapplied});loadSettings();loadAudit()}catch(e){show('globalOut',String(e),true)}
 }
-async function saveSettings(){
- if(!confirm('Apply these limits to ALL users now?'))return;
- const b={free_daily_usd:num('s_free'),free_monthly_cap_usd:num('s_cap'),paid_window:$('s_win').value,
-  tier_mult:{'3x':num('s_m3'),'7x':num('s_m7'),'15x':num('s_m15')},
-  est_input_tokens:num('s_ein'),est_output_tokens:num('s_eout'),est_image_tokens:num('s_eimg'),reapply:true};
- try{const j=await api('POST','/admin/settings',b);show('settingsOut',{saved:j.settings,reapplied:j.reapplied});loadAudit()}catch(e){show('settingsOut',String(e),true)}
+function planRow(p,isNew){
+ const tr=el('tr');const inp=(k,type,v)=>{const td=el('td');const i=el('input',{type:type||'text',value:v??''});i.dataset.k=k;if(type==='number')i.step='any';td.appendChild(i);tr.appendChild(td);return i};
+ const id=inp('id','text',p.id);if(!isNew)id.readOnly=true;
+ inp('name','text',p.name);inp('price_usd','number',p.price_usd);
+ const td=el('td');const cb=el('input',{type:'checkbox',checked:p.enabled!==false});cb.dataset.k='enabled';td.appendChild(cb);tr.appendChild(td);
+ inp('aliases','text',(p.aliases||[]).join(','));
+ const tk=el('td');const sel=el('select');sel.dataset.k='kind';for(const k of ['shared','split'])sel.appendChild(el('option',{value:k,selected:p.kind===k},k));tk.appendChild(sel);tr.appendChild(tk);
+ inp('window_hours','number',p.window_hours);inp('mult','number',p.mult);inp('frontier_share','number',p.frontier_share);inp('oss_usd','number',p.oss_usd);inp('frontier_usd','number',p.frontier_usd);
+ const ts=el('td');const b=el('button',{className:'sm'},'Save');b.onclick=()=>savePlan(tr);ts.appendChild(b);tr.appendChild(ts);
+ return tr;
+}
+function renderPlans(){const tb=$('planRows');tb.textContent='';for(const p of settings.plans)tb.appendChild(planRow(p,false))}
+function addPlanRow(){$('planRows').appendChild(planRow({kind:'split',window_hours:24,enabled:false,aliases:[]},true))}
+async function savePlan(tr){
+ const b={reapply:true};for(const i of tr.querySelectorAll('[data-k]')){const k=i.dataset.k;
+  if(k==='enabled')b[k]=i.checked;else if(k==='aliases')b[k]=i.value.split(',').map(x=>x.trim()).filter(Boolean);
+  else if(['id','name','kind'].includes(k))b[k]=i.value.trim();else{const v=num(i.value);if(v!==null)b[k]=v}}
+ try{const j=await api('POST','/admin/plans',b);show('planOut',{saved:b.id,reapplied:j.reapplied});loadSettings();loadAudit()}catch(e){show('planOut',String(e),true)}
+}
+async function loadModels(){
+ try{const j=await api('GET','/admin/models');models=j.models;const tb=$('classRows');tb.textContent='';
+  for(const m of models){if(m.hidden)continue;const tr=el('tr');cell(tr,m.name+(m.members?' (auto: '+m.members.join(', ')+')':''));cell(tr,m.kind);
+   const td=el('td');if(m.members||m.kind==='image'){td.textContent=m.members?'by served model':'frontier'}else{const s=el('select');s.dataset.model=m.id;for(const c of ['oss','frontier'])s.appendChild(el('option',{value:c,selected:m.class===c},c));td.appendChild(s)}
+   tr.appendChild(td);cell(tr,m.input_cost_per_token,'num');cell(tr,m.output_cost_per_token,'num');cell(tr,m.output_cost_per_image,'num');tb.appendChild(tr)}
+ }catch(e){show('classOut',String(e),true)}
+}
+async function saveClasses(){
+ const keep=(settings.oss_models||[]).filter(m=>!models.some(x=>x.id===m));
+ const oss=[...keep,...[...document.querySelectorAll('#classRows select')].filter(s=>s.value==='oss').map(s=>s.dataset.model)];
+ try{await api('POST','/admin/settings',{oss_models:oss,reapply:false});show('classOut','saved: '+oss.join(', '));loadSettings();loadAudit()}catch(e){show('classOut',String(e),true)}
 }
 async function lookup(){
  const q=$('q').value.trim();if(!q)return;
@@ -1793,39 +2210,51 @@ async function lookup(){
  catch(e){$('userBox').style.display='none';show('userOut',String(e),true)}
 }
 function renderUser(){
- const u=current,t=u.today,kv=$('userKv');kv.textContent='';
- const rows=[['uid',u.uid],['email',u.email],['plan',u.tier+' (×'+u.multiplier+')'],['banned',u.banned||'no'],
-  ['free allowance / 24h',money(u.free_daily_usd)+(u.override_daily_usd!==null?' (override)':' (global)')],
-  ['allowance this window',money(u.allowance_usd)+' per '+u.window],['window',u.window_start+' → '+u.resets_at],
-  ['window usage',t.requests+' requests · '+t.input_tokens+' in / '+t.output_tokens+' out tokens · '+t.images+' images · '+t.auto_requests+' via auto'],
-  ['window spend',money(t.spend_usd)+' · remaining '+money(u.remaining_usd)+' ('+Math.round(u.remaining_fraction*100)+'%)'],
-  ['monthly backstop',money(u.month_spent_usd)+' of '+money(u.month_cap_usd)+(u.override_monthly_cap_usd!==null?' (override)':'')+(u.tier==='free'?'':' (paid: user budget = plan pool)')],
-  ['keys',u.keys.map(k=>k.platform+': spend '+money(k.spend_usd)+' / '+(k.max_budget_usd??'?')+' per '+(k.budget_duration||'?')+(k.blocked?' BLOCKED':'')).join(' · ')||'none']];
- for(const [k,v] of rows){const a=document.createElement('div');a.textContent=k;const b=document.createElement('div');b.textContent=v==null?'—':String(v);kv.appendChild(a);kv.appendChild(b)}
+ const u=current,t=u.today,kv=$('userKv');kv.textContent='';const ps=u.pool_state_usd;
+ const pool=n=>ps[n]?money(ps[n].spent)+' of '+money(ps[n].cap)+' · left '+money(ps[n].remaining):'—';
+ const rows=[['uid',u.uid],['email',u.email],['plan',u.plan.name+' ('+u.plan.id+', stored as '+u.tier+', '+u.plan.kind+')'],['banned',u.banned||'no'],
+  ['free allowance / 24h',money(u.free_daily_usd)+(u.override_daily_usd!==null?' (custom)':' (global)')],
+  ['custom pools',u.override_pools?JSON.stringify(u.override_pools):'none'],
+  ['window',u.window+': '+u.window_start+' → '+u.resets_at],
+  ['pool all',pool('all')],['pool oss',pool('oss')+(u.slow_mode?' · SLOW MODE':'')],['pool frontier',pool('frontier')],
+  ['window usage',t.requests+' requests · '+t.input_tokens+' in / '+t.output_tokens+' out tokens · '+t.images+' images · '+t.auto_requests+' via auto · spend '+money(t.spend_usd)],
+  ['monthly backstop',money(u.month_spent_usd)+' of '+money(u.month_cap_usd)+(u.override_monthly_cap_usd!==null?' (custom)':'')],
+  ['app pools',u.app_view.pools.map(p=>p.class+' '+Math.round(p.remaining_fraction*100)+'%'+(p.slow_mode?' slow':'')).join(' · ')],
+  ['keys',u.keys.map(k=>k.platform+': spend '+money(k.spend_usd)+' / '+(k.max_budget_usd??'?')+' per '+(k.budget_duration||'?')+' · rpm '+(k.rpm_limit??'?')+(k.blocked?' BLOCKED':'')).join(' · ')||'none']];
+ for(const [k,v] of rows){kv.appendChild(el('div',{},k));kv.appendChild(el('div',{},v==null?'—':String(v)))}
  const tb=$('modelRows');tb.textContent='';
- for(const m of u.app_view.models){const tr=document.createElement('tr');const bm=t.by_model[m.id]||{};
-  cell(tr,m.name+(m.auto?' (auto: '+(m.members||[]).join(', ')+')':''));cell(tr,m.kind);
+ for(const m of u.app_view.models){const tr=el('tr');const bm=t.by_model[m.id]||{};
+  cell(tr,m.name+(m.auto?' (auto: '+(m.members||[]).join(', ')+')':''));cell(tr,m.class+' / '+m.pool+(m.slow_mode?' (slow)':''));
   cell(tr,!m.priced?'unpriced':(m.kind==='image'?m.remaining_images+' images':m.remaining_messages+' messages'),'num');
   cell(tr,m.estimate);cell(tr,bm.requests||0,'num');cell(tr,(bm.input_tokens||0)+' / '+(bm.output_tokens||0),'num');cell(tr,bm.images||0,'num');tb.appendChild(tr)}
- $('u_tier').value=u.tier;$('u_daily').value=u.override_daily_usd??'';$('u_cap').value=u.override_monthly_cap_usd??'';
+ $('u_tier').value=u.plan.id;$('u_daily').value=u.override_daily_usd??'';$('u_cap').value=u.override_monthly_cap_usd??'';
+ for(const f of PFIELDS)$('u_p_'+f).value=(u.override_pools||{})[f]??'';
  $('userBox').style.display='block';
 }
-async function saveUser(){
+async function userCall(b){try{show('userActOut',await api('POST','/admin/user/update',b));await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
+function saveUser(){
  if(!current)return;const b={uid:current.uid,tier:$('u_tier').value};
- const d=num('u_daily'),c=num('u_cap');if(d===null)b.clear_daily_usd=true;else b.daily_usd=d;if(c===null)b.clear_monthly_cap_usd=true;else b.monthly_cap_usd=c;
- try{const j=await api('POST','/admin/set-tier',b);show('userActOut',j);await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}
+ const d=num($('u_daily').value),c=num($('u_cap').value);if(d!==null)b.daily_usd=d;if(c!==null)b.monthly_cap_usd=c;
+ const p={};for(const f of PFIELDS){const v=num($('u_p_'+f).value);if(v!==null)p[f]=v}if(Object.keys(p).length)b.pools=p;
+ userCall(b)
 }
-async function resetUser(){if(!current||!confirm('Reset usage for '+current.uid+'?'))return;
- try{show('userActOut',await api('POST','/admin/reset-usage',{uid:current.uid}));await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
+function clearUser(flag){if(current)userCall({uid:current.uid,[flag]:true})}
+async function resetUser(){if(!current||!confirm('Restart the window now for '+current.uid+'?'))return;
+ try{show('userActOut',await api('POST','/admin/reset-window',{uid:current.uid,reset_month_free:$('u_month').checked}));await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
 async function banUser(on){if(!current)return;
  try{show('userActOut',await api('POST',on?'/admin/ban':'/admin/unban',{uid:current.uid}));await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
-async function resetAll(){if(!confirm('Reset usage for ALL users?'))return;
- try{show('miscOut',await api('POST','/admin/reset-usage',{}));loadAudit()}catch(e){show('miscOut',String(e),true)}}
+async function resetAll(){if(!confirm('Restart the window now for ALL users?'))return;
+ try{show('resetStatus',await api('POST','/admin/reset-window',{reset_month_free:$('all_month').checked}));loadAudit();pollReset()}catch(e){show('resetStatus',String(e),true)}}
+async function pollReset(){
+ try{const s=await api('GET','/admin/reset-status');if(s.state==='never')return;
+  show('resetStatus','Last global reset: '+s.state+' · '+s.done+'/'+s.total+' users'+(s.errors?' · '+s.errors+' errors':'')+' · '+(s.at||''));
+  if(s.state==='running')setTimeout(pollReset,2000)}catch(e){}
+}
 async function ipBan(on){const ip=$('banIp').value.trim();if(!ip)return;
  try{show('miscOut',await api('POST',on?'/admin/ban':'/admin/unban',{ip}));loadAudit()}catch(e){show('miscOut',String(e),true)}}
 async function loadAudit(){
  try{const j=await api('GET','/admin/audit?limit=200');const tb=$('auditRows');tb.textContent='';
-  for(const e of j.entries){const tr=document.createElement('tr');cell(tr,e.ts);cell(tr,e.action);cell(tr,typeof e.target==='string'?e.target:JSON.stringify(e.target));
+  for(const e of j.entries){const tr=el('tr');cell(tr,e.ts);cell(tr,e.action);cell(tr,typeof e.target==='string'?e.target:JSON.stringify(e.target));
    cell(tr,JSON.stringify({before:e.before,after:e.after,result:e.result}));tb.appendChild(tr)}
  }catch(e){}
 }
@@ -1857,7 +2286,11 @@ if os.environ.get("MINT_MOUNT_IMAGES", "true").lower() == "true":
 def _start_monitors() -> None:
     try:
         restore_settings_if_missing()
+        written = ensure_default_settings()
+        if written:
+            print(f"[mint] seeded unset settings: {', '.join(written)}", flush=True)
     except Exception as e:  # noqa: BLE001
-        print(f"[mint] settings restore error: {type(e).__name__}", flush=True)
+        print(f"[mint] settings init error: {type(e).__name__}", flush=True)
     if os.environ.get("MINT_SPEND_MONITOR", "true").lower() == "true":
         threading.Thread(target=_spend_monitor, daemon=True).start()
+        threading.Thread(target=_sweeper, daemon=True).start()
