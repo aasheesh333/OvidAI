@@ -4,7 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// BATTERY / PLAY POLICY (2026-09-24): the foreground service used to acquire a
 /// renewable **6-hour PARTIAL_WAKE_LOCK** on ANY `startForegroundService` call —
-/// including the idle "Ready & Listening" update and the BootReceiver start.
+/// including the idle presence update and the BootReceiver start.
 /// With keep-alive defaulting ON, every device that ever installed Ovid held the
 /// CPU awake overnight with no agent work in flight, and a permanently-running
 /// `specialUse` FGS with no task is a Play policy exposure.
@@ -18,8 +18,10 @@ void main() {
   final service = File(
     'android/app/src/main/kotlin/com/dhanuk/ovidai/AgentForegroundService.kt',
   ).readAsStringSync();
+  // agentServiceStart/Update moved from MainActivity into BackgroundChannel
+  // so a headless engine (no Activity) can drive the service too.
   final activity = File(
-    'android/app/src/main/kotlin/com/dhanuk/ovidai/MainActivity.kt',
+    'android/app/src/main/kotlin/com/dhanuk/ovidai/BackgroundChannel.kt',
   ).readAsStringSync();
   final dart = File(
     'lib/core/agent_notification_service.dart',
@@ -66,11 +68,16 @@ void main() {
       expect(stop.indexOf('releaseWakeLock()'), greaterThan(-1));
     });
 
-    test('MainActivity forwards the Dart flag on both routes', () {
-      // agentServiceStart AND agentServiceUpdate both carry it — an in-run
-      // update must not drop the lock, and an idle update must not take it.
+    test('the channel forwards the Dart flag on both routes', () {
+      // agentServiceStart AND agentServiceUpdate both build their intent
+      // with serviceIntent(), which carries it — an in-run update must not
+      // drop the lock, and an idle update must not take it.
       expect(
         'call.argument<String>("wake") == "true"'.allMatches(activity).length,
+        1,
+      );
+      expect(
+        'startService(app, serviceIntent(app, call))'.allMatches(activity).length,
         2,
         reason: 'both start and update must forward EXTRA_WAKE',
       );

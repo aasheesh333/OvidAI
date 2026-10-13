@@ -981,6 +981,216 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{count, plural, =1{1 request in Auto mode} other{{count} requests in Auto mode}}'**
   String usageProviderAutoRequests(int count);
+
+  /// Snackbar action: opens the chat or screen a background notification refers to.
+  ///
+  /// In en, this message translates to:
+  /// **'Open'**
+  String get notificationOpen;
+
+  /// Settings card heading: whether Ovid can keep working while closed.
+  ///
+  /// In en, this message translates to:
+  /// **'Background reliability'**
+  String get bgCardTitle;
+
+  /// Card summary when every background permission is granted.
+  ///
+  /// In en, this message translates to:
+  /// **'All set. Ovid can run schedules and agent tasks while it is closed.'**
+  String get bgCardReady;
+
+  /// Card summary: number of background permissions still missing.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 setting needs attention} other{{count} settings need attention}}'**
+  String bgCardNeedsAttention(int count);
+
+  /// Requirement row: Android notification permission.
+  ///
+  /// In en, this message translates to:
+  /// **'Notifications'**
+  String get bgNotificationsTitle;
+
+  /// Notification permission granted.
+  ///
+  /// In en, this message translates to:
+  /// **'Allowed. You\'ll hear when a task finishes or needs you.'**
+  String get bgNotificationsOk;
+
+  /// Notification permission missing.
+  ///
+  /// In en, this message translates to:
+  /// **'Blocked. Ovid can\'t tell you when work finishes or needs approval.'**
+  String get bgNotificationsNeeded;
+
+  /// Requirement row: exemption from Android battery optimization.
+  ///
+  /// In en, this message translates to:
+  /// **'Battery optimization'**
+  String get bgBatteryTitle;
+
+  /// Battery optimization exemption granted.
+  ///
+  /// In en, this message translates to:
+  /// **'Unrestricted. Android won\'t pause Ovid in the background.'**
+  String get bgBatteryOk;
+
+  /// Battery optimization still applies to Ovid.
+  ///
+  /// In en, this message translates to:
+  /// **'Restricted. Android may pause Ovid and delay scheduled tasks.'**
+  String get bgBatteryNeeded;
+
+  /// Requirement row: Android 'Alarms & reminders' permission.
+  ///
+  /// In en, this message translates to:
+  /// **'Exact alarms'**
+  String get bgExactTitle;
+
+  /// Exact alarm permission granted (or not needed).
+  ///
+  /// In en, this message translates to:
+  /// **'Allowed. Scheduled tasks start on time.'**
+  String get bgExactOk;
+
+  /// Exact alarm permission missing.
+  ///
+  /// In en, this message translates to:
+  /// **'Not allowed. Scheduled tasks may start late because Android batches them.'**
+  String get bgExactNeeded;
+
+  /// Requirement row for phone makers with aggressive battery managers.
+  ///
+  /// In en, this message translates to:
+  /// **'{maker} background settings'**
+  String bgOemTitle(String maker);
+
+  /// Guidance for phone makers that kill background apps.
+  ///
+  /// In en, this message translates to:
+  /// **'{maker} phones can stop apps despite the settings above. Allow Ovid to autostart and run in the background.'**
+  String bgOemBody(String maker);
+
+  /// Button that requests a missing background permission.
+  ///
+  /// In en, this message translates to:
+  /// **'Allow'**
+  String get bgActionAllow;
+
+  /// Button that opens the phone maker's background/autostart settings.
+  ///
+  /// In en, this message translates to:
+  /// **'Open'**
+  String get bgActionOpen;
+
+  /// Button that opens a web guide for the phone maker's battery settings.
+  ///
+  /// In en, this message translates to:
+  /// **'Guide'**
+  String get bgActionGuide;
+
+  /// Accessibility label for a granted requirement tick.
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get bgStatusOk;
+
+  /// Accessibility label for a missing requirement.
+  ///
+  /// In en, this message translates to:
+  /// **'Needs attention'**
+  String get bgStatusNeeded;
+
+  /// Switch: keep the background service running.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep Ovid active in background'**
+  String get bgKeepActiveTitle;
+
+  /// Subtitle when keep-active is on.
+  ///
+  /// In en, this message translates to:
+  /// **'On. A quiet status notification keeps schedules and agent runs working when Ovid is closed, and after a restart.'**
+  String get bgKeepActiveOn;
+
+  /// Subtitle when keep-active is off.
+  ///
+  /// In en, this message translates to:
+  /// **'Off. Ovid only wakes for scheduled tasks and while a run is in progress.'**
+  String get bgKeepActiveOff;
+
+  /// Heading above per-type notification settings.
+  ///
+  /// In en, this message translates to:
+  /// **'Notification types'**
+  String get bgChannelsTitle;
+
+  /// Notification type: agent run finished / needs input / long job done.
+  ///
+  /// In en, this message translates to:
+  /// **'Agent updates'**
+  String get bgChannelAgent;
+
+  /// Explains the Agent updates notification type.
+  ///
+  /// In en, this message translates to:
+  /// **'Finished, needs input or approval, long jobs done'**
+  String get bgChannelAgentHint;
+
+  /// Notification type: results of scheduled tasks.
+  ///
+  /// In en, this message translates to:
+  /// **'Scheduled task results'**
+  String get bgChannelSchedule;
+
+  /// Explains the Scheduled task results notification type.
+  ///
+  /// In en, this message translates to:
+  /// **'Success or failure, with a short summary'**
+  String get bgChannelScheduleHint;
+
+  /// Notification type: silent 'Ovid is active' service notification.
+  ///
+  /// In en, this message translates to:
+  /// **'Background status'**
+  String get bgChannelStatus;
+
+  /// Explains the Background status notification type.
+  ///
+  /// In en, this message translates to:
+  /// **'Silent notification while Ovid is active'**
+  String get bgChannelStatusHint;
+
+  /// Sound choice: Ovid's own notification sound.
+  ///
+  /// In en, this message translates to:
+  /// **'Ovid chime'**
+  String get bgSoundChime;
+
+  /// Sound choice: the phone's default notification sound.
+  ///
+  /// In en, this message translates to:
+  /// **'System default'**
+  String get bgSoundSystem;
+
+  /// Sound choice: no sound.
+  ///
+  /// In en, this message translates to:
+  /// **'Silent'**
+  String get bgSoundSilent;
+
+  /// Label of the notification sound picker.
+  ///
+  /// In en, this message translates to:
+  /// **'Sound'**
+  String get bgSoundLabel;
+
+  /// Tooltip: opens Android's settings for one notification channel.
+  ///
+  /// In en, this message translates to:
+  /// **'Android settings for this notification type'**
+  String get bgChannelSystemSettings;
 }
 
 class _AppLocalizationsDelegate

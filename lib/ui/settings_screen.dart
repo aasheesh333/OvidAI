@@ -23,6 +23,7 @@ import 'settings_backup_screen.dart';
 import 'settings_health_screen.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
+import 'background_reliability_card.dart';
 import 'profile_avatar.dart';
 import 'share_actions.dart';
 import 'billing_screen.dart';
@@ -289,7 +290,7 @@ class SettingsScreen extends StatelessWidget {
               children: [
                 const _NotificationsTile(),
                 _hairline(),
-                const _KeepAliveToggle(),
+                const BackgroundReliabilityCard(),
               ],
             ),
           ),
@@ -1277,43 +1278,6 @@ class _NotificationsTileState extends State<_NotificationsTile>
           ],
         );
       },
-    );
-  }
-}
-
-/// AI response timeout picker — real, persisted in AppState (responseTimeoutSec).
-/// Background keep-alive toggle — keeps foreground service active in idle state.
-class _KeepAliveToggle extends StatelessWidget {
-  const _KeepAliveToggle();
-
-  @override
-  Widget build(BuildContext context) {
-    final app = AppState.I;
-    return AnimatedBuilder(
-      animation: app,
-      builder: (_, _) => Column(
-        children: [
-          SwitchListTile(
-            dense: true,
-            secondary: Icon(
-              Icons.bolt_outlined,
-              size: 19,
-              color: Aether.textMuted,
-            ),
-            title: const Text(
-              'Background keep-alive',
-              style: TextStyle(fontSize: 14),
-            ),
-            subtitle: Text(
-              'Request background keep-alive. OS permission, service availability and background Stop can prevent scheduled work.',
-              style: TextStyle(fontSize: 11.5, color: Aether.textFaint),
-            ),
-            value: app.keepAliveEnabled,
-            activeTrackColor: Aether.accent,
-            onChanged: (v) => app.keepAliveEnabled = v,
-          ),
-        ],
-      ),
     );
   }
 }

@@ -24,6 +24,71 @@ class ScheduleResult {
       safeToRetry = true;
 }
 
+/// What to do with an occurrence that fell due while Ovid was not running
+/// (phone off, process killed, alarm deferred by the OS).
+enum CatchUp {
+  /// Not missed (still in the future, or within the on-time tolerance).
+  onTime,
+
+  /// Run once now. Several missed occurrences of a recurring task collapse
+  /// into this single run; the next slot is computed after it finishes.
+  runNow,
+
+  /// Recurring task missed by more than its grace window: do not run late,
+  /// move to the next future slot.
+  skipToNext,
+
+  /// One-off task missed by more than a day: never fire a stale action by
+  /// surprise; pause it so the user can review and resume.
+  pauseForReview,
+}
+
+/// Missed-run catch-up policy, applied once when the runtime starts (cold
+/// start, boot, restart after the OS killed Ovid).
+class MissedRunPolicy {
+  const MissedRunPolicy._();
+
+  /// Delays below this count as on time (alarm/boot jitter).
+  static const tolerance = Duration(minutes: 2);
+
+  /// One-off tasks still run when at most this late.
+  static const oneOffGrace = Duration(hours: 24);
+
+  /// Upper bound of a recurring task's grace window.
+  static const recurringGraceCap = Duration(hours: 6);
+
+  /// Grace window: half the period for interval tasks (capped), 6 h daily.
+  static Duration graceFor(Map<String, dynamic> task) {
+    final every = task['every'];
+    if (every is num && every > 0) {
+      final half = Duration(seconds: every.toInt() ~/ 2);
+      return half < recurringGraceCap ? half : recurringGraceCap;
+    }
+    if (task['dailyAt'] != null) return recurringGraceCap;
+    return oneOffGrace;
+  }
+
+  static bool isRecurring(Map<String, dynamic> task) =>
+      (task['every'] is num && (task['every'] as num) > 0) ||
+      task['dailyAt'] is String;
+
+  static CatchUp decide(Map<String, dynamic> task, DateTime due, DateTime now) {
+    final late = now.difference(due);
+    if (late <= tolerance) return CatchUp.onTime;
+    if (late <= graceFor(task)) return CatchUp.runNow;
+    return isRecurring(task) ? CatchUp.skipToNext : CatchUp.pauseForReview;
+  }
+
+  /// First recurring slot strictly after [now].
+  static DateTime nextSlot(Map<String, dynamic> task, DateTime due, DateTime now) {
+    final daily = task['dailyAt'];
+    if (daily is String) return ScheduleCoordinator.nextDaily(daily, now);
+    final interval = (task['every'] as num).toInt();
+    final steps = now.difference(due).inSeconds ~/ interval + 1;
+    return due.add(Duration(seconds: interval * steps));
+  }
+}
+
 /// At-most-once automatic dispatch of each occurrence. External effects cannot
 /// be made exactly-once: a process lost after claiming is paused for review.
 class ScheduleCoordinator {
@@ -34,9 +99,17 @@ class ScheduleCoordinator {
   Future<ScheduleResult> Function(ScheduleEntry) execute;
   final void Function(String) cancel;
   final void Function() changed;
+
+  /// Observes each finished occurrence (notifications). [willRetry] is true
+  /// when the task is re-queued for another attempt.
+  void Function(ScheduleEntry entry, ScheduleResult result, bool willRetry)?
+  onResult;
   bool stopped = false;
   bool _ticking = false;
   bool get dispatching => _ticking;
+
+  /// True while a tick runs or any claimed occurrence is still executing.
+  bool get busy => _ticking || _executions.isNotEmpty;
   final Set<String> _activeSessions = {};
   final Set<Map<String, dynamic>> _activeTasks = Set.identity();
   final Set<Future<void>> _executions = {};
@@ -50,6 +123,7 @@ class ScheduleCoordinator {
     required this.execute,
     required this.cancel,
     required this.changed,
+    this.onResult,
   });
 
   Map<String, dynamic> create(Map<String, dynamic> args) {
@@ -192,9 +266,35 @@ class ScheduleCoordinator {
       } else {
         t['fireAt'] = due.toUtc().toIso8601String();
         if (daily != null) t['localDate'] ??= _calendarDate(due);
+        if (t['status'] == 'pending' && (t['attempt'] ?? 0) == 0) {
+          _catchUp(t);
+        }
       }
     }
     await _save();
+  }
+
+  /// Applies [MissedRunPolicy] to a pending task on runtime start.
+  void _catchUp(Map<String, dynamic> t) {
+    final due = _due(t);
+    if (due == null) return;
+    final now = clock();
+    switch (MissedRunPolicy.decide(t, due, now)) {
+      case CatchUp.onTime:
+      case CatchUp.runNow:
+        return; // the next tick dispatches it exactly once
+      case CatchUp.skipToNext:
+        final next = MissedRunPolicy.nextSlot(t, due, now);
+        t['fireAt'] = next.toUtc().toIso8601String();
+        if (t['dailyAt'] != null) t['localDate'] = _calendarDate(next);
+        t['lastStatus'] = 'skipped';
+        t['skippedAt'] = due.toUtc().toIso8601String();
+      case CatchUp.pauseForReview:
+        t['status'] = 'paused';
+        t['error'] =
+            'Missed while Ovid was not running (due ${due.toLocal()}); '
+            'review before resuming.';
+    }
   }
 
   DateTime? get nextWake {
@@ -294,8 +394,15 @@ class ScheduleCoordinator {
       t['finishedAt'] = clock().toUtc().toIso8601String();
       t['error'] = result.error;
       final attempt = (t['attempt'] as num?)?.toInt() ?? 0;
-      if (result.safeToRetry &&
-          attempt < ((t['maxRetries'] as num?)?.toInt() ?? 0)) {
+      final willRetry =
+          result.safeToRetry &&
+          attempt < ((t['maxRetries'] as num?)?.toInt() ?? 0);
+      try {
+        onResult?.call(entry, result, willRetry);
+      } catch (_) {
+        // Observers never affect dispatch bookkeeping.
+      }
+      if (willRetry) {
         t['attempt'] = attempt + 1;
         t['fireAt'] = clock()
             .add(Duration(seconds: 30 * (1 << attempt)))

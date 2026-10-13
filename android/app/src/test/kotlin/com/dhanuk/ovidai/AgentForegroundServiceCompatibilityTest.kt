@@ -24,6 +24,7 @@ class AgentForegroundServiceCompatibilityTest {
         app = RuntimeEnvironment.getApplication()
         BackgroundScheduleState.resume(app)
         AgentNotificationBridge.scheduleHandler = {}
+        OvidEngineHost.factoryForTest = { true }
     }
 
     @After fun cleanup() {
@@ -31,6 +32,7 @@ class AgentForegroundServiceCompatibilityTest {
         AgentNotificationBridge.scheduleHandler = null
         AgentNotificationBridge.stopHandler = null
         AgentNotificationBridge.exitHandler = null
+        OvidEngineHost.factoryForTest = null
     }
 
     @Test fun stopRemovesNotificationReleasesWakeLockAndNotifiesRuntime() {

@@ -90,6 +90,14 @@ internal fun bindNotificationHostCallbacks(emit: (String) -> Unit, exitHost: () 
     }
 }
 
+/** Notification tap: consume the app route extra once (see OvidNotifications). */
+internal fun routeNotificationIntent(intent: Intent?, openRoute: (String) -> Unit) {
+    val route = intent?.getStringExtra(OvidNotifications.EXTRA_ROUTE) ?: return
+    intent.removeExtra(OvidNotifications.EXTRA_ROUTE)
+    if (route.isBlank() || !route.startsWith("/") || route.length > 200) return
+    openRoute(route)
+}
+
 /** Consume a routed launch extra so host recreation cannot replay selection. */
 internal fun routeSessionIntent(intent: Intent?, selectSession: (String) -> Unit) {
     val sessionId = intent?.getStringExtra("sessionId") ?: return
@@ -103,7 +111,7 @@ class MainActivity : FlutterActivity() {
     // retaining the engine keeps the actual Dart scheduler alive after UI close.
     // Process death still requires reopen/reconciliation, never a second engine.
     override fun provideFlutterEngine(context: Context): FlutterEngine? =
-        FlutterEngineCache.getInstance().get("ovid-background")
+        FlutterEngineCache.getInstance().get(OvidEngineHost.ENGINE_ID)
 
     override fun shouldDestroyEngineWithHost(): Boolean = false
 
@@ -569,15 +577,9 @@ class MainActivity : FlutterActivity() {
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
-        FlutterEngineCache.getInstance().put("ovid-background", flutterEngine)
+        FlutterEngineCache.getInstance().put(OvidEngineHost.ENGINE_ID, flutterEngine)
         refreshNotificationCallbacks(flutterEngine)
-        val backgroundChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-        AgentNotificationBridge.scheduleHandler = {
-            backgroundChannel.invokeMethod("onScheduleWake", null)
-        }
-        AgentNotificationBridge.constraintHandler = { message ->
-            backgroundChannel.invokeMethod("onBackgroundConstraint", message)
-        }
+        BackgroundChannel.bindRuntime(flutterEngine)
         webViewHandler = OvidWebViewHandler(
             this,
             flutterEngine,
@@ -613,6 +615,11 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                 } else rawResult
+                // Service, alarms, notifications: shared with the headless
+                // engine (BackgroundChannel) so both behave identically.
+                if (BackgroundChannel.handle(applicationContext, call, result)) {
+                    return@setMethodCallHandler
+                }
                 when (call.method) {
                     "deviceBeginActions" -> {
                         deviceActions.begin()
@@ -623,7 +630,6 @@ class MainActivity : FlutterActivity() {
                         OvidAccessibilityService.instance?.stopControlNow()
                         result.success(null)
                     }
-                    "backgroundState" -> result.success(BackgroundScheduleState.state(applicationContext))
                     "getInstallReferrer" -> {
                         val referrer = InstallReferrerClient.newBuilder(this).build()
                         var completed = false
@@ -655,24 +661,6 @@ class MainActivity : FlutterActivity() {
                             complete(null)
                         }
                     }
-                    "backgroundStop" -> {
-                        BackgroundScheduleState.stop(applicationContext)
-                        result.success(true)
-                    }
-                    "backgroundResume" -> {
-                        // Only the app's explicit Resume action clears the latch.
-                        BackgroundScheduleState.resume(applicationContext)
-                        result.success(true)
-                    }
-                    "scheduleAlarm" -> {
-                        try {
-                            BackgroundScheduleState.arm(applicationContext, call.argument<Number>("at")?.toLong())
-                            result.success(true)
-                        } catch (e: Exception) {
-                            BackgroundScheduleState.constraint(applicationContext, "Alarm unavailable: ${e.message}")
-                            result.error("ALARM_UNAVAILABLE", e.message, null)
-                        }
-                    }
                     "getNativeLibraryDir" -> {
                         // This directory is exec-ALLOWED on Android 10+:
                         // the PackageManager labels extracted native libs
@@ -682,88 +670,6 @@ class MainActivity : FlutterActivity() {
                             result.success(dir)
                         } else {
                             result.error("UNAVAILABLE", "nativeLibraryDir is null", null)
-                        }
-                    }
-                    "agentServiceStart" -> {
-                        if (BackgroundScheduleState.stopped(applicationContext)) {
-                            result.success(false)
-                            return@setMethodCallHandler
-                        }
-                        // Foreground service: keeps the app alive while the
-                        // agent works. Args: title, text (notification copy).
-                        try {
-                            val intent = Intent(this, AgentForegroundService::class.java)
-                            intent.putExtra(
-                                AgentForegroundService.EXTRA_TITLE,
-                                call.argument<String>("title") ?: "Ovid AI"
-                            )
-                            intent.putExtra(
-                                AgentForegroundService.EXTRA_TEXT,
-                                call.argument<String>("text") ?: "Agent is working…"
-                            )
-                            // Hold the partial wake lock only while a run is
-                            // actually in flight. Absent/false → the service
-                            // releases it (idle presence must not keep the CPU
-                            // awake). See AgentForegroundService.EXTRA_WAKE.
-                            intent.putExtra(
-                                AgentForegroundService.EXTRA_WAKE,
-                                call.argument<String>("wake") == "true"
-                            )
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                startForegroundService(intent)
-                            } else {
-                                startService(intent)
-                            }
-                            result.success(true)
-                        } catch (e: Exception) {
-                            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                                e.javaClass.name.contains("ForegroundServiceStartNotAllowedException")) {
-                                "FGS_BACKGROUND_DENIED"
-                            } else {
-                                "START_FAIL"
-                            }
-                            result.error(code, "${e.message}", null)
-                        }
-                    }
-                    "agentServiceUpdate" -> {
-                        if (BackgroundScheduleState.stopped(applicationContext)) {
-                            result.success(false)
-                            return@setMethodCallHandler
-                        }
-                        try {
-                            val intent = Intent(this, AgentForegroundService::class.java)
-                            intent.putExtra(
-                                AgentForegroundService.EXTRA_TITLE,
-                                call.argument<String>("title") ?: "Ovid AI"
-                            )
-                            intent.putExtra(
-                                AgentForegroundService.EXTRA_TEXT,
-                                call.argument<String>("text") ?: "Agent is working…"
-                            )
-                            // Hold the partial wake lock only while a run is
-                            // actually in flight. Absent/false → the service
-                            // releases it (idle presence must not keep the CPU
-                            // awake). See AgentForegroundService.EXTRA_WAKE.
-                            intent.putExtra(
-                                AgentForegroundService.EXTRA_WAKE,
-                                call.argument<String>("wake") == "true"
-                            )
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                startForegroundService(intent)
-                            } else {
-                                startService(intent)
-                            }
-                            result.success(true)
-                        } catch (e: Exception) {
-                            result.error("UPDATE_FAIL", "${e.message}", null)
-                        }
-                    }
-                    "agentServiceStop" -> {
-                        try {
-                            stopService(Intent(this, AgentForegroundService::class.java))
-                            result.success(true)
-                        } catch (e: Exception) {
-                            result.error("STOP_FAIL", "${e.message}", null)
                         }
                     }
                     "deviceServiceEnabled" -> {
@@ -1572,10 +1478,14 @@ class MainActivity : FlutterActivity() {
             routeSessionIntent(intent) { sid ->
                 MethodChannel(messenger, channelName).invokeMethod("onSelectSession", sid)
             }
+            routeNotificationIntent(intent) { route ->
+                MethodChannel(messenger, channelName).invokeMethod("onOpenRoute", route)
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        liveHosts++
         super.onCreate(savedInstanceState)
         routeSessionSelection(intent)
     }
@@ -1593,6 +1503,21 @@ class MainActivity : FlutterActivity() {
         OvidAccessibilityService.overlayEventListener = null
         safExportCoordinator.cleanup()
         gestureExecutor.shutdownNow()
+        val engine = flutterEngine
         super.onDestroy()
+        // The retained engine keeps running schedules after the UI closes:
+        // hand its channel back to the Activity-free background handler so
+        // calls never reach this destroyed Activity.
+        liveHosts = maxOf(0, liveHosts - 1)
+        if (liveHosts == 0 && engine != null &&
+            FlutterEngineCache.getInstance().get(OvidEngineHost.ENGINE_ID) === engine
+        ) {
+            BackgroundChannel.attachHeadless(applicationContext, engine)
+        }
+    }
+
+    companion object {
+        /// MainActivity instances between onCreate and onDestroy.
+        private var liveHosts = 0
     }
 }
