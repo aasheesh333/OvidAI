@@ -74,13 +74,13 @@ FREE_MONTHLY_CAP_USD = float(os.environ.get("FREE_MONTHLY_CAP_USD", "10"))
 # in ovid_plans.py are FIRST-RUN SEEDS only: ensure_default_settings() writes
 # them for fields that are unset and never overwrites a stored value.
 #
-#   shared plans (free, starter): allowance = the user's free allowance × mult
-#       per window; frontier models may use at most frontier_share of it.
-#   split plans (pro, max): oss fair-use pool + frontier pool. Over the oss
-#       pool → slow mode (lower rpm/tpm/parallel), never a block. Frontier
-#       exhausted → frontier requests get `frontier_limit_reached`.
-# Pools are enforced in the LiteLLM request path by litellm_hook/ovid_pools.py
-# (reads the same Redis settings); LiteLLM key/user budgets stay a backstop.
+#   Every plan is ONE allowance per window = the user's free allowance × the
+#   plan's mult, consumed at each model's LiteLLM price (owner-set in
+#   LiteLLM). Used up → `daily_limit_reached`, or slow mode (lower
+#   rpm/tpm/parallel) for plans that enable it.
+# The allowance is enforced per user (across android + web keys) in the
+# LiteLLM request path by litellm_hook/ovid_pools.py (same Redis settings);
+# LiteLLM key/user budgets stay a backstop.
 BASE_DAILY_USD = float(os.environ.get("BASE_DAILY_USD", "0.15"))
 SEEDS = {
     "free_daily_usd": BASE_DAILY_USD,
@@ -245,8 +245,7 @@ def tier_daily(uid: str, tier: str) -> float:
     """Back-compat: the user's total allowance per 24h on `tier`."""
     s = get_settings()
     p = plans.user_pools(s, plans.find_plan(s, tier), user_free_daily(uid, s), user_pool_override(uid))
-    total = p["all"] if p["all"] is not None else p["oss"] + p["frontier"]
-    return total * 24 / p["window_hours"]
+    return p["all"] * 24 / p["window_hours"]
 
 
 def tier_budget(uid: str, tier: str) -> tuple[float, str]:
@@ -674,7 +673,7 @@ def current_window_start(uid: str, pools: dict) -> datetime.datetime | None:
     k = plans.pool_keys(uid)
     start = _epoch_dt(rds.get(k["start"]))
     if start is not None and start + datetime.timedelta(hours=pools["window_hours"]) <= _now():
-        rds.delete(k["start"], k["oss"], k["frontier"])
+        rds.delete(k["start"], k["spend"], k["auto"])
         return None
     return start
 
@@ -686,9 +685,9 @@ def _epoch_dt(v) -> datetime.datetime | None:
         return None
 
 
-def hook_spend(uid: str) -> dict:
-    k = plans.pool_keys(uid)
-    return {c: _float_or(rds.get(k[c]), 0.0) for c in plans.CLASSES}
+def hook_spend(uid: str) -> float:
+    """The hook's per-user spend counter for the live window (all keys)."""
+    return _float_or(rds.get(plans.pool_keys(uid)["spend"]), 0.0)
 
 
 def push_rate_limits(c: httpx.Client, uid: str) -> None:
@@ -737,7 +736,7 @@ def _sweeper() -> None:
     while True:
         try:
             sweep_slow_mode()
-            refresh_public_map()
+            refresh_model_groups()
         except Exception as e:  # noqa: BLE001
             print(f"[mint] sweeper: {type(e).__name__}", flush=True)
         time.sleep(int(os.environ.get("MINT_SWEEP_S", "30")))
@@ -750,7 +749,7 @@ def reset_window_user(c: httpx.Client, uid: str, reset_month_free: bool = False)
     s = get_settings()
     pools = pools_for(uid, s)
     k = plans.pool_keys(uid)
-    rds.delete(k["oss"], k["frontier"], f"usagecache:{uid}")
+    rds.delete(k["spend"], k["auto"], f"usagecache:{uid}")
     rds.set(k["start"], f"{time.time():.3f}", ex=int(pools["window_hours"] * 3600))
     rds.hdel(plans.SLOW_HASH, uid)
     rds.srem(plans.SLOW_PENDING, uid)
@@ -1154,7 +1153,7 @@ def _suffix(model: str) -> str:
     return model.split("/", 1)[-1] if model else model
 
 
-def model_catalog(c: httpx.Client, hidden: set | None = None) -> dict:
+def model_catalog(c: httpx.Client) -> dict:
     """Owner-published models from LiteLLM /model/info, grouped by public name
     (the 'auto' group has one deployment per member model)."""
     data = []
@@ -1196,7 +1195,7 @@ def model_catalog(c: httpx.Client, hidden: set | None = None) -> dict:
                        "output_cost_per_token": info.get("output_cost_per_token")}
         if info.get("id"):
             dep_underlying[str(info["id"])] = under
-        if under and name != AUTO_MODEL and name not in (hidden or ()):
+        if under and name != AUTO_MODEL:
             under_to_public.setdefault(under, name)
             under_to_public.setdefault(_suffix(under), name)
     return {"groups": groups, "dep_underlying": dep_underlying, "under_to_public": under_to_public}
@@ -1288,35 +1287,43 @@ def _spend_logs(c: httpx.Client, token: str, start: datetime.datetime,
 
 
 
-def catalog_for(c: httpx.Client, s: dict) -> dict:
-    hidden = {s["auto_oss_group"]} if s.get("auto_oss_group") else set()
-    cat = model_catalog(c, hidden)
-    cat["auto_groups"] = {AUTO_MODEL} | hidden
-    cat["hidden"] = hidden
+_LAST_CATALOG: dict = {"groups": {}}
+
+
+def catalog_for(c: httpx.Client, s: dict | None = None) -> dict:
+    """LiteLLM catalog; also publishes the model names for the hook (which
+    only routes auto to members that exist)."""
+    global _LAST_CATALOG
+    cat = model_catalog(c)
+    cat["auto_groups"] = {AUTO_MODEL}
+    if cat["groups"]:
+        _LAST_CATALOG = cat
+        blob = json.dumps(sorted(cat["groups"]))
+        if rds.get(plans.MODEL_GROUPS_KEY) != blob:
+            rds.set(plans.MODEL_GROUPS_KEY, blob)
     return cat
 
 
-def refresh_public_map(cat: dict | None = None) -> None:
-    """Publish underlying-model → public-name for the LiteLLM hook, which
-    attributes auto requests by the served model's class."""
-    if cat is None:
-        with litellm_client(15) as c:
-            cat = catalog_for(c, get_settings())
-    if not cat["groups"]:
-        return
-    blob = json.dumps(cat["under_to_public"], sort_keys=True)
-    if rds.get(plans.PUBLIC_MAP_KEY) != blob:
-        rds.set(plans.PUBLIC_MAP_KEY, blob)
+def _available_models() -> list[dict]:
+    """Model rows the app may see. server/images wraps this to drop private
+    image backends and add the public image alias."""
+    return [{"model": name} for name in _LAST_CATALOG["groups"]]
 
 
-def count_usage(rows: list[dict], cat: dict, s: dict | None = None) -> tuple[dict, float, dict, dict]:
-    """(window counts, logged spend USD, measured avg image tokens per model,
-    spend per class {oss, frontier})."""
-    s = s or get_settings()
+def refresh_model_groups() -> None:
+    with litellm_client(15) as c:
+        catalog_for(c)
+
+
+def count_usage(rows: list[dict], cat: dict, s: dict | None = None,
+                auto_hits: dict | None = None) -> tuple[dict, float, dict]:
+    """(window counts, logged spend USD, measured avg image tokens per model).
+    Auto requests are counted and attributed to the model that served them;
+    `auto_hits` (served model -> n) adds requests the hook rewrote from auto,
+    which LiteLLM logs under the member's name."""
     today = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "images": 0,
              "auto_requests": 0, "by_model": {}}
     spend = 0.0
-    by_class = {"oss": 0.0, "frontier": 0.0}
     img_tokens: dict = {}
     for row in rows:
         if str(row.get("status") or "success").lower() == "failure":
@@ -1326,17 +1333,9 @@ def count_usage(rows: list[dict], cat: dict, s: dict | None = None) -> tuple[dic
         is_image = call_type in IMAGE_CALL_TYPES or _group_kind(cat["groups"].get(mid)) == "image"
         pin = _int_or(row.get("prompt_tokens"), 0)
         pout = _int_or(row.get("completion_tokens"), 0)
-        cost = _float_or(row.get("spend"), 0.0)
-        spend += cost
-        if is_image:
-            cls = "frontier"
-        elif mid in cat["groups"] and mid not in cat.get("auto_groups", {AUTO_MODEL}):
-            cls = plans.model_class(mid, s)
-        else:
-            cls = "frontier"  # auto with an unknown member: conservative
-        by_class[cls] += cost
+        spend += _float_or(row.get("spend"), 0.0)
         bm = today["by_model"].setdefault(mid, {"requests": 0, "input_tokens": 0, "output_tokens": 0,
-                                                "images": 0, "via_auto": 0, "class": cls})
+                                                "images": 0, "via_auto": 0})
         for d in (today, bm):
             d["requests"] += 1
             d["input_tokens"] += pin
@@ -1347,74 +1346,72 @@ def count_usage(rows: list[dict], cat: dict, s: dict | None = None) -> tuple[dic
             bm["via_auto"] += 1
         if is_image and pout > 0:
             img_tokens.setdefault(mid, []).append(pout)
+    for served, n in (auto_hits or {}).items():
+        mid = served if served in cat["groups"] else (_public_for(cat, served) or served)
+        bm = today["by_model"].get(mid)
+        if not bm:
+            continue
+        add = max(0, min(_int_or(n, 0), bm["requests"] - bm["via_auto"]))
+        bm["via_auto"] += add
+        today["auto_requests"] += add
     measured = {m: sum(v) / len(v) for m, v in img_tokens.items()}
-    return today, spend, measured, by_class
+    return today, spend, measured
 
 
-def _pool_of(cls: str, pools: dict) -> str:
-    if pools["kind"] == "shared":
-        return "frontier" if cls == "frontier" else "all"
-    return cls
-
-
-def model_estimates(cat: dict, st: dict, pools: dict, settings: dict,
-                    measured_img: dict | None = None, remaining_fraction: float = 0.0) -> list[dict]:
-    """Per-model remaining messages/images, each from THAT model's pool and
-    at THAT model's LiteLLM price. No money in display fields."""
+def model_estimates(cat: dict, st: dict, settings: dict, measured_img: dict | None = None,
+                    remaining_fraction: float = 0.0, auto_members: list[str] | None = None,
+                    visible: list[str] | None = None) -> list[dict]:
+    """Per-model remaining messages/images from the ONE allowance, at THAT
+    model's LiteLLM price — expensive models show fewer. No money in display
+    fields. Auto is priced at its most expensive member (conservative); when
+    the user's plan routes auto to auto_oss_members, those are its members."""
     measured_img = measured_img or {}
     groups = cat["groups"]
-    split = pools["kind"] == "split"
-
-    def rem(pool):
-        return st[pool]["remaining"]
-
-    def count(pool, cost):
-        return math.floor(max(0.0, rem(pool)) / cost + 1e-9)
-
+    rem = max(0.0, st["all"]["remaining"])
+    names = list(groups) if visible is None else list(dict.fromkeys(visible))
+    shown = set(names)
     out = []
-    for gid, g in groups.items():
-        if gid in cat.get("hidden", ()):
-            continue
-        is_auto = gid == AUTO_MODEL
-        kind = "chat" if is_auto else _group_kind(g)
-        entry = {"id": gid, "name": g["name"], "kind": kind, "auto": is_auto, "estimate": "typical"}
-        remaining = None
-        if is_auto:
-            members = sorted({p for u in g["underlying"] for p in [_public_for(cat, u)]
-                              if p and p in groups and p not in cat.get("auto_groups", ())})
-            entry["class"] = "auto"
-            entry["estimate"] = "conservative"
-            if split and settings.get("auto_oss_group"):
-                members = [m for m in members if plans.model_class(m, settings) == "oss"]
-                pool = "oss"
-            else:
-                pool = "mixed" if split else "all"
-            entry["members"] = members
-            costed = [(m, _unit_cost(groups[m], settings, measured_img)) for m in members]
-            costed = [(m, c) for m, c in costed if c]
-            priced = bool(costed)
-            if priced and pool == "mixed":
-                remaining = min(count(_pool_of(plans.model_class(m, settings), pools), c) for m, c in costed)
-            elif priced:
-                remaining = count(pool, max(c for _, c in costed))
-            entry["slow_mode"] = bool(split and st["slow_mode"] and pool in ("oss", "mixed"))
+    for gid in names:
+        g = groups.get(gid)
+        is_auto = gid in cat.get("auto_groups", {AUTO_MODEL})
+        if g is None:
+            # Public alias with no LiteLLM group of its own (the image studio
+            # alias): price it at the dearest private image backend.
+            kind = "image"
+            private = [x for name, x in groups.items() if name not in shown and _group_kind(x) == "image"]
+            costs = [c for c in (_unit_cost(x, settings, measured_img) for x in private) if c]
+            cost = max(costs) if costs else None
+            entry = {"id": gid, "name": gid, "kind": kind, "auto": False, "estimate": "conservative"}
+            legacy = {}
         else:
-            cls = "frontier" if kind == "image" else plans.model_class(gid, settings)
-            pool = _pool_of(cls, pools)
-            entry["class"] = cls
-            cost = _unit_cost(g, settings, measured_img)
-            priced = cost is not None and cost > 0
-            if priced:
-                remaining = count(pool, cost)
-            entry["slow_mode"] = bool(split and cls == "oss" and st["slow_mode"])
-        entry["pool"] = pool
+            kind = "chat" if is_auto else _group_kind(g)
+            entry = {"id": gid, "name": g["name"], "kind": kind, "auto": is_auto, "estimate": "typical"}
+            legacy = g["legacy"]
+            if is_auto:
+                members = [m for m in (auto_members or []) if m in groups]
+                if not members:
+                    members = sorted({p for u in g["underlying"] for p in [_public_for(cat, u)]
+                                      if p and p in groups and p not in cat.get("auto_groups", ())})
+                costs = [c for c in (_unit_cost(groups[m], settings, measured_img) for m in members) if c]
+                if not auto_members:
+                    own = _unit_cost(g, settings, measured_img)
+                    if own:
+                        costs.append(own)
+                cost = max(costs) if costs else None
+                entry["estimate"] = "conservative"
+                entry["members"] = sorted(members)
+            else:
+                cost = _unit_cost(g, settings, measured_img)
+        priced = cost is not None and cost > 0
         entry["priced"] = priced
-        entry["remaining_images" if kind == "image" else "remaining_messages"] = remaining
+        entry["slow_mode"] = bool(st["slow_mode"])
+        entry["remaining_images" if kind == "image" else "remaining_messages"] = (
+            math.floor(rem / cost + 1e-9) if priced else None)
         # Back-compat fields read by current app builds (prices are parsed but
         # never rendered there). Not for display.
         entry["model"] = gid
-        entry["input_cost_per_token"] = g["legacy"].get("input_cost_per_token")
-        entry["output_cost_per_token"] = g["legacy"].get("output_cost_per_token")
+        entry["input_cost_per_token"] = legacy.get("input_cost_per_token")
+        entry["output_cost_per_token"] = legacy.get("output_cost_per_token")
         entry["remaining_pct"] = round(remaining_fraction, 4)
         out.append(entry)
     out.sort(key=lambda e: (not e["auto"], e["kind"] != "chat", e["name"].lower()))
@@ -1423,7 +1420,7 @@ def model_estimates(cat: dict, st: dict, pools: dict, settings: dict,
 
 def compute_usage(uid: str) -> tuple[dict, dict]:
     """(public /usage body, admin-only detail). Spend comes from LiteLLM for
-    ALL of the user's keys (android + web) plus the hook's pool counters."""
+    ALL of the user's keys (android + web) plus the hook's per-user counter."""
     s = get_settings()
     plan = plan_for(uid, s)
     pools = plans.user_pools(s, plan, user_free_daily(uid, s), user_pool_override(uid))
@@ -1456,39 +1453,23 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
                     if (_parse_time(r.get("startTime") or r.get("start_time")) or now) >= start]
         resets_at = start + datetime.timedelta(hours=pools["window_hours"])
         cat = catalog_for(c, s)
-        refresh_public_map(cat)
         month_free_spent = _month_spent_c(c, uid) if keys else 0.0
-        today, log_spend, measured, by_class = count_usage(rows, cat, s)
+        today, log_spend, measured = count_usage(rows, cat, s, rds.hgetall(plans.pool_keys(uid)["auto"]))
         counters = hook_spend(uid)
-        spend = {k: max(by_class[k], counters[k]) for k in plans.CLASSES}
+        # The hook's counter is exact and real time; spend logs may lag. Take
+        # whichever is ahead.
+        spent = max(log_spend, counters)
         month_cap = free_cap_usd(uid)
         cap_left = (month_cap - month_free_spent) if plan["id"] == "free" else None
-        st = plans.pool_state(pools, spend, cap_left)
-        if pools["kind"] == "split":
+        st = plans.pool_state(pools, spent, cap_left)
+        if st["slow_mode"] or in_slow_mode(uid):
             sync_slow_mode(c, uid, st["slow_mode"], resets_at)
-        elif in_slow_mode(uid):
-            sync_slow_mode(c, uid, False, resets_at)
     resets_iso = _iso(resets_at)
-
-    def frac(p):
-        return round(min(1.0, p["remaining"] / p["cap"]), 4) if p["cap"] > 0 else 0.0
-
-    if pools["kind"] == "shared":
-        budget, remaining = st["all"]["cap"], st["all"]["remaining"]
-        pool_list = [
-            {"class": "all", "remaining_fraction": frac(st["all"]), "resets_at": resets_iso, "slow_mode": False},
-            {"class": "frontier", "remaining_fraction": frac(st["frontier"]), "resets_at": resets_iso,
-             "slow_mode": False}]
-    else:
-        budget = st["oss"]["cap"] + st["frontier"]["cap"]
-        remaining = st["oss"]["remaining"] + st["frontier"]["remaining"]
-        pool_list = [
-            {"class": "oss", "remaining_fraction": frac(st["oss"]), "resets_at": resets_iso,
-             "slow_mode": bool(st["slow_mode"])},
-            {"class": "frontier", "remaining_fraction": frac(st["frontier"]), "resets_at": resets_iso,
-             "slow_mode": False}]
-    spent = spend["oss"] + spend["frontier"]
+    budget, remaining = st["all"]["cap"], st["all"]["remaining"]
     fraction = round(min(1.0, remaining / budget), 4) if budget > 0 else 0.0
+    # One allowance per plan; `pools` keeps its list shape for compatibility.
+    pool_list = [{"class": "all", "remaining_fraction": fraction, "resets_at": resets_iso,
+                  "slow_mode": bool(st["slow_mode"])}]
     window = plans.window_str(pools["window_hours"])
     body = {
         "tier": plans.stored_tier(plan),
@@ -1510,11 +1491,13 @@ def compute_usage(uid: str) -> tuple[dict, dict]:
         "today": today,
         "remaining_fraction": fraction,
         "pools": pool_list,
-        "models": model_estimates(cat, st, pools, s, measured, fraction),
+        "models": model_estimates(
+            cat, st, s, measured, fraction,
+            auto_members=[m["model"] for m in s["auto_oss_members"]] if pools["auto_oss"] else None,
+            visible=[r["model"] for r in _available_models() if r.get("model")]),
     }
     detail = {"keys": key_detail, "spend_usd": round(spent, 6), "logged_spend_usd": round(log_spend, 6),
-              "spend_by_class_usd": {k: round(v, 6) for k, v in spend.items()},
-              "hook_counters_usd": counters, "pools_usd": pools,
+              "hook_counter_usd": counters, "pools_usd": pools,
               "pool_state_usd": {k: v for k, v in st.items() if k != "slow_mode"},
               "slow_mode": bool(st["slow_mode"]),
               "window_start": _iso(start), "remaining_usd": round(remaining, 6)}
@@ -1580,7 +1563,7 @@ def public_plans():
     metadata, not model pricing). Ids and aliases match user:{uid}:tier."""
     s = get_settings()
     return {"plans": [{"id": p["id"], "name": p["name"], "price_usd": p["price_usd"],
-                       "aliases": p["aliases"], "kind": p["kind"],
+                       "aliases": p["aliases"],
                        "window": plans.window_str(p["window_hours"])}
                       for p in s["plans"] if p["enabled"]]}
 
@@ -1649,7 +1632,7 @@ class AdminAction(BaseModel):
     tier: str | None = None                 # plan id or alias
     daily_usd: float | None = None          # custom FREE allowance per 24h
     monthly_cap_usd: float | None = None    # custom free monthly backstop
-    pools: dict | None = None               # custom plan pools (mult, frontier_share, oss_usd, frontier_usd, window_hours)
+    pools: dict | None = None               # custom plan fields: mult, window_hours, slow_mode
     clear_daily_usd: bool = False
     clear_monthly_cap_usd: bool = False
     clear_pools: bool = False
@@ -1702,11 +1685,16 @@ def admin_unban(body: AdminAction, request: Request, authorization: str = Header
 def _validate_pool_override(p: dict) -> dict:
     out = {}
     for f, v in p.items():
-        if f not in plans.POOL_OVERRIDE_FIELDS:
-            raise HTTPException(400, f"unknown pool field {f!r}")
+        if f not in plans.OVERRIDE_FIELDS:
+            raise HTTPException(400, f"unknown override field {f!r}")
         if v is None:
             continue
-        lo, hi, _kinds = plans.PLAN_NUMBERS[f]
+        if f in plans.BOOL_FIELDS:
+            if not isinstance(v, bool):
+                raise HTTPException(400, f"{f} must be true or false")
+            out[f] = v
+            continue
+        lo, hi, _default = plans.PLAN_NUMBERS[f]
         try:
             out[f] = plans._bounded(f, v, lo, hi)
         except ValueError as e:
@@ -1766,6 +1754,21 @@ def admin_set_tier(body: AdminAction, request: Request, authorization: str = Hea
     return {"ok": True, "user": after, "reapplied": res}
 
 
+def _check_members_exist(members: list[dict]) -> None:
+    """auto_oss_members must be existing LiteLLM model names (/model/info)."""
+    if not members:
+        return
+    with litellm_client(15) as c:
+        cat = catalog_for(c)
+    if not cat["groups"]:
+        raise HTTPException(400, "cannot validate auto_oss_members: LiteLLM /model/info unavailable")
+    unknown = [m["model"] for m in members if m["model"] not in cat["groups"]]
+    if unknown:
+        raise HTTPException(400, f"not LiteLLM models: {', '.join(unknown)}")
+    if any(m["model"] in cat["auto_groups"] for m in members):
+        raise HTTPException(400, "auto_oss_members cannot contain the auto group")
+
+
 def _apply_settings(request: Request | None, changes: dict, reapply: bool, action: str,
                     target="global") -> dict:
     before = get_settings()
@@ -1776,6 +1779,8 @@ def _apply_settings(request: Request | None, changes: dict, reapply: bool, actio
         if k not in merged:
             raise HTTPException(400, f"unknown setting {k!r}")
         merged[k] = v
+    if changes.get("auto_oss_members") is not None:
+        _check_members_exist(_bad_request(plans.validate_members, changes["auto_oss_members"]))
     after = _bad_request(store_settings, merged)
     result = reapply_everyone() if reapply else {"mode": "skipped"}
     audit(request, action, target, before, after, result)
@@ -1795,8 +1800,8 @@ def admin_get_settings(authorization: str = Header(default="")):
 
 @app.post("/admin/settings")
 def admin_set_settings(request: Request, payload: dict = Body(...), authorization: str = Header(default="")):
-    """Partial update of any setting (free_daily_usd, scalars, oss_models,
-    auto_oss_group, plans). Takes effect immediately and is re-applied to
+    """Partial update of any setting (free_daily_usd, scalars, plans). Takes
+    effect immediately and is re-applied to
     every key (android + web) and LiteLLM user budget."""
     _require_admin(authorization)
     payload = dict(payload)
@@ -1812,8 +1817,8 @@ def admin_get_plans(authorization: str = Header(default="")):
 
 @app.post("/admin/plans")
 def admin_upsert_plan(request: Request, payload: dict = Body(...), authorization: str = Header(default="")):
-    """Add a plan or edit one (by id): name, price, enabled, aliases, kind,
-    window_hours, mult/frontier_share (shared) or oss_usd/frontier_usd (split)."""
+    """Add a plan or edit one (by id): name, price, enabled, aliases,
+    window_hours, mult, slow_mode."""
     _require_admin(authorization)
     payload = dict(payload)
     reapply = bool(payload.pop("reapply", True))
@@ -1840,22 +1845,22 @@ def admin_plan_toggle(pid: str, action: str, request: Request, authorization: st
 
 @app.get("/admin/models")
 def admin_models(authorization: str = Header(default="")):
-    """Models LiteLLM publishes with their class (for the class editor). Admin
-    only: includes LiteLLM prices."""
+    """Models LiteLLM publishes with their prices and the per-message/per-image
+    estimate used for the app's counts. Admin only (prices are set in LiteLLM)."""
     _require_admin(authorization)
     s = get_settings()
     with litellm_client(15) as c:
         cat = catalog_for(c, s)
     out = []
     for gid, g in sorted(cat["groups"].items()):
-        out.append({"id": gid, "name": g["name"], "kind": _group_kind(g),
-                    "class": plans.model_class(gid, s), "hidden": gid in cat["hidden"],
+        out.append({"id": gid, "name": g["name"], "kind": "chat" if gid in cat["auto_groups"] else _group_kind(g),
+                    "est_unit_cost_usd": _unit_cost(g, s, {}),
                     "input_cost_per_token": max(g["inputs"]) if g["inputs"] else None,
                     "output_cost_per_token": max(g["outputs"]) if g["outputs"] else None,
                     "output_cost_per_image": max(g["per_image"]) if g["per_image"] else None,
                     "members": sorted({_public_for(cat, u) or u for u in g["underlying"]})
                     if gid in cat["auto_groups"] else None})
-    return {"models": out, "oss_models": s["oss_models"], "auto_oss_group": s["auto_oss_group"]}
+    return {"models": out}
 
 
 class BaseBudgetAction(BaseModel):
@@ -1944,7 +1949,7 @@ def admin_user(q: str, authorization: str = Header(default="")):
         "free_daily_usd": user_free_daily(uid, s),
         "pools_usd": detail["pools_usd"],
         "pool_state_usd": detail["pool_state_usd"],
-        "spend_by_class_usd": detail["spend_by_class_usd"],
+        "hook_counter_usd": detail["hook_counter_usd"],
         "slow_mode": detail["slow_mode"],
         "allowance_usd": body["daily_budget_usd"],
         "window": body["window"],
@@ -2053,7 +2058,7 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
  <div class=row>
   <div><label>Free allowance per user per 24h (USD)</label><input id=g_free_daily_usd type=number step=0.01 min=0></div>
   <div><label>Free monthly backstop per user (USD / 30 days)</label><input id=g_free_monthly_cap_usd type=number step=0.01 min=0></div>
-  <div><label>Key ceiling for split plans (× oss pool + frontier)</label><input id=g_hard_ceiling_mult type=number step=0.1 min=1></div>
+  <div><label>Key ceiling for slow-mode plans (× allowance)</label><input id=g_hard_ceiling_mult type=number step=0.1 min=1></div>
  </div>
  <div class=muted>The monthly backstop is a second cap on free users across all their keys: with a high daily amount it stops a heavy user after a few days (e.g. $3/day with a $10 backstop: day 4). <span id=backstopNote></span></div>
  <div class=row>
@@ -2068,7 +2073,6 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
   <div><label>Typical message: input tokens</label><input id=g_est_input_tokens type=number min=1></div>
   <div><label>Typical message: output tokens</label><input id=g_est_output_tokens type=number min=1></div>
   <div><label>Typical image: output tokens</label><input id=g_est_image_tokens type=number min=1></div>
-  <div><label>Oss-only auto group for split plans (LiteLLM model group, empty = off)</label><input id=g_auto_oss_group></div>
  </div>
  <button onclick=saveGlobal()>Save global limits</button>
  <div class=out id=globalOut></div>
@@ -2076,18 +2080,27 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
 
 <h2>Plans</h2>
 <div class=card>
- <div class=muted>Amounts are USD per 24h and scale with the window (720h = 30 days → ×30). Shared plans: allowance = user's free allowance × mult, frontier capped at frontier share. Split plans: oss fair-use pool (over it → slow mode) + frontier pool (exhausted → frontier_limit_reached). Price is admin/plan-screen metadata only. Disable = stop selling; users already on it keep it.</div>
- <table><thead><tr><th>id</th><th>name</th><th>price $</th><th>on</th><th>aliases</th><th>kind</th><th>window h</th><th>mult</th><th>frontier share</th><th>oss $/24h</th><th>frontier $/24h</th><th></th></tr></thead><tbody id=planRows></tbody></table>
+ <div class=muted>Every plan is one allowance per window = the user's free allowance × mult (per 24h, scaled by the window: 720h = 30 days → ×30), consumed at each model's LiteLLM price. When it is used up: <b>daily_limit_reached</b> until the window resets — or, with <b>slow</b> ticked, requests continue with the slow-mode limits (up to the key ceiling). Price is admin/plan-screen metadata only. Disable = stop selling; users already on it keep it.</div>
+ <table><thead><tr><th>id</th><th>name</th><th>price $</th><th>on</th><th>aliases</th><th>window h</th><th>mult</th><th>allowance / 24h</th><th>slow</th><th>auto uses auto-oss</th><th></th></tr></thead><tbody id=planRows></tbody></table>
  <button class=ghost onclick=addPlanRow()>Add plan</button>
  <div class=out id=planOut></div>
 </div>
 
-<h2>Model classes</h2>
+<h2>Auto-oss members (hidden auto routing)</h2>
 <div class=card>
- <div class=muted>oss = open-source fair-use pool; frontier = everything else (images are always frontier). Auto is counted by the model that served each request.</div>
- <table><thead><tr><th>Model</th><th>Kind</th><th>Class</th><th>In $/tok</th><th>Out $/tok</th><th>$/image</th></tr></thead><tbody id=classRows></tbody></table>
- <button onclick=saveClasses()>Save classes</button>
- <div class=out id=classOut></div>
+ <div class=muted>For plans with "auto uses auto-oss" ticked, a request for <b>auto</b> goes to one of these LiteLLM models (weighted random; the others are fallbacks). The app still sees "auto". Names are checked against LiteLLM; if none is usable, plain auto is used.</div>
+ <table><thead><tr><th>Model</th><th>Weight</th><th></th></tr></thead><tbody id=memberRows></tbody></table>
+ <div class=row><div><label>Add model</label><select id=memberAdd></select></div><div><label>Weight</label><input id=memberWeight type=number step=0.1 min=0.0001 value=1></div></div>
+ <button class=ghost onclick=addMember()>Add</button>
+ <button onclick=saveMembers()>Save members</button>
+ <div class=out id=memberOut></div>
+</div>
+
+<h2>Model prices (from LiteLLM, admin only)</h2>
+<div class=card>
+ <div class=muted>Prices are set in LiteLLM. The app turns the remaining allowance into "messages left" per model using these prices and the typical message/image sizes above; users never see amounts. Auto is estimated at its most expensive member.</div>
+ <table><thead><tr><th>Model</th><th>Kind</th><th class=num>In $/tok</th><th class=num>Out $/tok</th><th class=num>$/image</th><th class=num>Est. $/message or image</th></tr></thead><tbody id=priceRows></tbody></table>
+ <div class=out id=priceOut></div>
 </div>
 
 <h2>User</h2>
@@ -2106,16 +2119,15 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
    <div><label>Custom monthly backstop (USD)</label><input id=u_cap type=number step=0.01 min=0></div>
   </div>
   <div class=row>
-   <div><label>Custom pool: mult</label><input id=u_p_mult type=number step=0.1 min=0></div>
-   <div><label>frontier share</label><input id=u_p_frontier_share type=number step=0.01 min=0 max=1></div>
-   <div><label>oss $/24h</label><input id=u_p_oss_usd type=number step=0.01 min=0></div>
-   <div><label>frontier $/24h</label><input id=u_p_frontier_usd type=number step=0.01 min=0></div>
-   <div><label>window hours</label><input id=u_p_window_hours type=number min=1></div>
+   <div><label>Custom plan: mult</label><input id=u_p_mult type=number step=0.1 min=0></div>
+   <div><label>Custom plan: window hours</label><input id=u_p_window_hours type=number min=1></div>
+   <div><label>Custom plan: slow mode</label><select id=u_p_slow_mode><option value="">(plan default)</option><option value=true>on</option><option value=false>off</option></select></div>
+   <div><label>Custom plan: auto uses auto-oss</label><select id=u_p_auto_oss><option value="">(plan default)</option><option value=true>on</option><option value=false>off</option></select></div>
   </div>
   <button onclick=saveUser()>Save plan + overrides</button>
   <button class=ghost onclick="clearUser('clear_daily_usd')">Clear custom free limit</button>
   <button class=ghost onclick="clearUser('clear_monthly_cap_usd')">Clear custom backstop</button>
-  <button class=ghost onclick="clearUser('clear_pools')">Clear custom pools</button>
+  <button class=ghost onclick="clearUser('clear_pools')">Clear custom plan</button>
   <br><button class=ghost onclick=resetUser()>Reset window now</button>
   <label style="display:inline"><input type=checkbox id=u_month> also reset monthly backstop</label>
   <button class=danger onclick=banUser(true)>Ban</button>
@@ -2143,8 +2155,8 @@ _ADMIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
 
 <script>
 const $=id=>document.getElementById(id);
-const GLOBAL=['free_daily_usd','free_monthly_cap_usd','hard_ceiling_mult','normal_rpm','normal_tpm','normal_parallel','slow_rpm','slow_tpm','slow_parallel','est_input_tokens','est_output_tokens','est_image_tokens','auto_oss_group'];
-const PFIELDS=['mult','frontier_share','oss_usd','frontier_usd','window_hours'];
+const GLOBAL=['free_daily_usd','free_monthly_cap_usd','hard_ceiling_mult','normal_rpm','normal_tpm','normal_parallel','slow_rpm','slow_tpm','slow_parallel','est_input_tokens','est_output_tokens','est_image_tokens'];
+const PFIELDS=['mult','window_hours'];const PBOOLS=['slow_mode','auto_oss'];let members=[];
 let current=null, settings=null, models=[];
 function mk(){return $('mk').value.trim()}
 async function api(method,path,body){
@@ -2164,13 +2176,13 @@ async function loadSettings(){
   for(const k of GLOBAL)$('g_'+k).value=settings[k];
   const f=settings.free_daily_usd,c=settings.free_monthly_cap_usd;
   $('backstopNote').textContent=f>0&&c>0?'Now: '+money(f)+'/day and '+money(c)+'/30 days, so a user spending the full daily amount stops after about '+Math.ceil(c/f)+' day(s).':'';
-  renderPlans();
+  renderPlans();members=(settings.auto_oss_members||[]).map(m=>({...m}));renderMembers();
   const sel=$('u_tier');sel.textContent='';for(const p of settings.plans)sel.appendChild(el('option',{value:p.id},p.name+' ('+p.id+(p.aliases.length?' / '+p.aliases.join(','):'')+')'+(p.enabled?'':' [disabled]')));
   show('globalOut',j.users+' known users');
  }catch(e){show('globalOut',String(e),true)}
 }
 async function saveGlobal(){
- const b={reapply:true};for(const k of GLOBAL){const v=$('g_'+k).value;b[k]=k==='auto_oss_group'?v.trim():num(v)}
+ const b={reapply:true};for(const k of GLOBAL){const v=$('g_'+k).value;b[k]=num(v)}
  try{const j=await api('POST','/admin/settings',b);show('globalOut',{saved:true,reapplied:j.reapplied});loadSettings();loadAudit()}catch(e){show('globalOut',String(e),true)}
 }
 function planRow(p,isNew){
@@ -2179,30 +2191,32 @@ function planRow(p,isNew){
  inp('name','text',p.name);inp('price_usd','number',p.price_usd);
  const td=el('td');const cb=el('input',{type:'checkbox',checked:p.enabled!==false});cb.dataset.k='enabled';td.appendChild(cb);tr.appendChild(td);
  inp('aliases','text',(p.aliases||[]).join(','));
- const tk=el('td');const sel=el('select');sel.dataset.k='kind';for(const k of ['shared','split'])sel.appendChild(el('option',{value:k,selected:p.kind===k},k));tk.appendChild(sel);tr.appendChild(tk);
- inp('window_hours','number',p.window_hours);inp('mult','number',p.mult);inp('frontier_share','number',p.frontier_share);inp('oss_usd','number',p.oss_usd);inp('frontier_usd','number',p.frontier_usd);
+ inp('window_hours','number',p.window_hours);inp('mult','number',p.mult);
+ cell(tr,isNew?'—':money((settings.free_daily_usd||0)*(p.mult||0)));
+ for(const k of ['slow_mode','auto_oss']){const tsl=el('td');const sl=el('input',{type:'checkbox',checked:!!p[k]});sl.dataset.k=k;tsl.appendChild(sl);tr.appendChild(tsl)}
  const ts=el('td');const b=el('button',{className:'sm'},'Save');b.onclick=()=>savePlan(tr);ts.appendChild(b);tr.appendChild(ts);
  return tr;
 }
 function renderPlans(){const tb=$('planRows');tb.textContent='';for(const p of settings.plans)tb.appendChild(planRow(p,false))}
-function addPlanRow(){$('planRows').appendChild(planRow({kind:'split',window_hours:24,enabled:false,aliases:[]},true))}
+function addPlanRow(){$('planRows').appendChild(planRow({window_hours:24,mult:1,enabled:false,slow_mode:false,auto_oss:false,aliases:[]},true))}
 async function savePlan(tr){
  const b={reapply:true};for(const i of tr.querySelectorAll('[data-k]')){const k=i.dataset.k;
-  if(k==='enabled')b[k]=i.checked;else if(k==='aliases')b[k]=i.value.split(',').map(x=>x.trim()).filter(Boolean);
-  else if(['id','name','kind'].includes(k))b[k]=i.value.trim();else{const v=num(i.value);if(v!==null)b[k]=v}}
+  if(['enabled','slow_mode','auto_oss'].includes(k))b[k]=i.checked;else if(k==='aliases')b[k]=i.value.split(',').map(x=>x.trim()).filter(Boolean);
+  else if(['id','name'].includes(k))b[k]=i.value.trim();else{const v=num(i.value);if(v!==null)b[k]=v}}
  try{const j=await api('POST','/admin/plans',b);show('planOut',{saved:b.id,reapplied:j.reapplied});loadSettings();loadAudit()}catch(e){show('planOut',String(e),true)}
 }
+function renderMembers(){const tb=$('memberRows');tb.textContent='';
+ members.forEach((m,i)=>{const tr=el('tr');cell(tr,m.model);const tw=el('td');const w=el('input',{type:'number',step:'any',value:m.weight});w.onchange=()=>{m.weight=num(w.value)};tw.appendChild(w);tr.appendChild(tw);
+  const td=el('td');const b=el('button',{className:'sm danger'},'Remove');b.onclick=()=>{members.splice(i,1);renderMembers()};td.appendChild(b);tr.appendChild(td);tb.appendChild(tr)})}
+function addMember(){const m=$('memberAdd').value;if(!m||members.some(x=>x.model===m))return;members.push({model:m,weight:num($('memberWeight').value)||1});renderMembers()}
+async function saveMembers(){try{await api('POST','/admin/settings',{auto_oss_members:members,reapply:false});show('memberOut','saved');loadSettings();loadAudit()}catch(e){show('memberOut',String(e),true)}}
 async function loadModels(){
- try{const j=await api('GET','/admin/models');models=j.models;const tb=$('classRows');tb.textContent='';
-  for(const m of models){if(m.hidden)continue;const tr=el('tr');cell(tr,m.name+(m.members?' (auto: '+m.members.join(', ')+')':''));cell(tr,m.kind);
-   const td=el('td');if(m.members||m.kind==='image'){td.textContent=m.members?'by served model':'frontier'}else{const s=el('select');s.dataset.model=m.id;for(const c of ['oss','frontier'])s.appendChild(el('option',{value:c,selected:m.class===c},c));td.appendChild(s)}
-   tr.appendChild(td);cell(tr,m.input_cost_per_token,'num');cell(tr,m.output_cost_per_token,'num');cell(tr,m.output_cost_per_image,'num');tb.appendChild(tr)}
- }catch(e){show('classOut',String(e),true)}
-}
-async function saveClasses(){
- const keep=(settings.oss_models||[]).filter(m=>!models.some(x=>x.id===m));
- const oss=[...keep,...[...document.querySelectorAll('#classRows select')].filter(s=>s.value==='oss').map(s=>s.dataset.model)];
- try{await api('POST','/admin/settings',{oss_models:oss,reapply:false});show('classOut','saved: '+oss.join(', '));loadSettings();loadAudit()}catch(e){show('classOut',String(e),true)}
+ try{const j=await api('GET','/admin/models');const tb=$('priceRows');tb.textContent='';
+  const sel=$('memberAdd');sel.textContent='';for(const m of j.models)if(!m.members&&m.kind==='chat')sel.appendChild(el('option',{value:m.id},m.id));
+  for(const m of j.models){const tr=el('tr');cell(tr,m.name+(m.members?' (auto: '+m.members.join(', ')+')':''));cell(tr,m.kind);
+   cell(tr,m.input_cost_per_token,'num');cell(tr,m.output_cost_per_token,'num');cell(tr,m.output_cost_per_image,'num');
+   cell(tr,m.est_unit_cost_usd==null?'unpriced':'$'+Number(m.est_unit_cost_usd).toFixed(5),'num');tb.appendChild(tr)}
+ }catch(e){show('priceOut',String(e),true)}
 }
 async function lookup(){
  const q=$('q').value.trim();if(!q)return;
@@ -2210,32 +2224,33 @@ async function lookup(){
  catch(e){$('userBox').style.display='none';show('userOut',String(e),true)}
 }
 function renderUser(){
- const u=current,t=u.today,kv=$('userKv');kv.textContent='';const ps=u.pool_state_usd;
- const pool=n=>ps[n]?money(ps[n].spent)+' of '+money(ps[n].cap)+' · left '+money(ps[n].remaining):'—';
- const rows=[['uid',u.uid],['email',u.email],['plan',u.plan.name+' ('+u.plan.id+', stored as '+u.tier+', '+u.plan.kind+')'],['banned',u.banned||'no'],
+ const u=current,t=u.today,kv=$('userKv');kv.textContent='';const a=u.pool_state_usd.all;
+ const rows=[['uid',u.uid],['email',u.email],['plan',u.plan.name+' ('+u.plan.id+', stored as '+u.tier+', ×'+u.plan.mult+(u.plan.slow_mode?', slow mode':'')+')'],['banned',u.banned||'no'],
   ['free allowance / 24h',money(u.free_daily_usd)+(u.override_daily_usd!==null?' (custom)':' (global)')],
-  ['custom pools',u.override_pools?JSON.stringify(u.override_pools):'none'],
+  ['custom plan',u.override_pools?JSON.stringify(u.override_pools):'none'],
   ['window',u.window+': '+u.window_start+' → '+u.resets_at],
-  ['pool all',pool('all')],['pool oss',pool('oss')+(u.slow_mode?' · SLOW MODE':'')],['pool frontier',pool('frontier')],
+  ['allowance',money(a.spent)+' of '+money(a.cap)+' · left '+money(a.remaining)+' ('+Math.round(u.remaining_fraction*100)+'%)'+(u.slow_mode?' · SLOW MODE':'')],
   ['window usage',t.requests+' requests · '+t.input_tokens+' in / '+t.output_tokens+' out tokens · '+t.images+' images · '+t.auto_requests+' via auto · spend '+money(t.spend_usd)],
   ['monthly backstop',money(u.month_spent_usd)+' of '+money(u.month_cap_usd)+(u.override_monthly_cap_usd!==null?' (custom)':'')],
-  ['app pools',u.app_view.pools.map(p=>p.class+' '+Math.round(p.remaining_fraction*100)+'%'+(p.slow_mode?' slow':'')).join(' · ')],
+  ['app view',Math.round(u.app_view.remaining_fraction*100)+'% left'+(u.app_view.pools[0]&&u.app_view.pools[0].slow_mode?' · slow':'')+' · auto '+(u.plan.auto_oss||(u.override_pools||{}).auto_oss?'uses auto-oss members (hidden)':'plain')],
   ['keys',u.keys.map(k=>k.platform+': spend '+money(k.spend_usd)+' / '+(k.max_budget_usd??'?')+' per '+(k.budget_duration||'?')+' · rpm '+(k.rpm_limit??'?')+(k.blocked?' BLOCKED':'')).join(' · ')||'none']];
  for(const [k,v] of rows){kv.appendChild(el('div',{},k));kv.appendChild(el('div',{},v==null?'—':String(v)))}
  const tb=$('modelRows');tb.textContent='';
  for(const m of u.app_view.models){const tr=el('tr');const bm=t.by_model[m.id]||{};
-  cell(tr,m.name+(m.auto?' (auto: '+(m.members||[]).join(', ')+')':''));cell(tr,m.class+' / '+m.pool+(m.slow_mode?' (slow)':''));
+  cell(tr,m.name+(m.auto?' (auto: '+(m.members||[]).join(', ')+')':''));cell(tr,m.kind+(m.slow_mode?' (slow)':''));
   cell(tr,!m.priced?'unpriced':(m.kind==='image'?m.remaining_images+' images':m.remaining_messages+' messages'),'num');
   cell(tr,m.estimate);cell(tr,bm.requests||0,'num');cell(tr,(bm.input_tokens||0)+' / '+(bm.output_tokens||0),'num');cell(tr,bm.images||0,'num');tb.appendChild(tr)}
  $('u_tier').value=u.plan.id;$('u_daily').value=u.override_daily_usd??'';$('u_cap').value=u.override_monthly_cap_usd??'';
  for(const f of PFIELDS)$('u_p_'+f).value=(u.override_pools||{})[f]??'';
+ for(const f of PBOOLS){const v=(u.override_pools||{})[f];$('u_p_'+f).value=v===undefined||v===null?'':String(v)}
  $('userBox').style.display='block';
 }
 async function userCall(b){try{show('userActOut',await api('POST','/admin/user/update',b));await lookup();loadAudit()}catch(e){show('userActOut',String(e),true)}}
 function saveUser(){
  if(!current)return;const b={uid:current.uid,tier:$('u_tier').value};
  const d=num($('u_daily').value),c=num($('u_cap').value);if(d!==null)b.daily_usd=d;if(c!==null)b.monthly_cap_usd=c;
- const p={};for(const f of PFIELDS){const v=num($('u_p_'+f).value);if(v!==null)p[f]=v}if(Object.keys(p).length)b.pools=p;
+ const p={};for(const f of PFIELDS){const v=num($('u_p_'+f).value);if(v!==null)p[f]=v}
+ for(const f of PBOOLS){const v=$('u_p_'+f).value;if(v!=='')p[f]=v==='true'}if(Object.keys(p).length)b.pools=p;
  userCall(b)
 }
 function clearUser(flag){if(current)userCall({uid:current.uid,[flag]:true})}
