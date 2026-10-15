@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { SessionEvent } from "@ovid/shared";
 import { createDb, migrate, type Db } from "./client.js";
-import { eventMirror, messages, newId, runs, sessions } from "./repos.js";
+import { eventMirror, messages, newId, runs, sessions, users as usersRepo } from "./repos.js";
 import {
   runs as runsTable,
   sessions as sessionsTable,
@@ -294,5 +294,40 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
 
     // Session isolation.
     expect(await eventMirror.readSince(db, newId(), null, 100)).toEqual([]);
+  });
+
+  it("users.ensure: insert-new, idempotent re-ensure, null email never clobbers, tier never overwritten", async () => {
+    const uid = newId();
+
+    // Insert-new: row created with the given email and the column-default tier.
+    const first = await usersRepo.ensure(db, uid, "first@test.local");
+    expect(first.uid).toBe(uid);
+    expect(first.email).toBe("first@test.local");
+    expect(first.tier).toBe("free");
+    expect(first.bannedAt).toBeNull();
+    expect(first.createdAt).toBeInstanceOf(Date);
+
+    // Re-ensure is idempotent: still exactly ONE row.
+    const again = await usersRepo.ensure(db, uid, "first@test.local");
+    expect(again.uid).toBe(uid);
+    const counted = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(users)
+      .where(eq(users.uid, uid));
+    expect(counted[0]!.n).toBe(1);
+
+    // A new non-null email updates the stored one.
+    const updated = await usersRepo.ensure(db, uid, "second@test.local");
+    expect(updated.email).toBe("second@test.local");
+
+    // email = null must NOT clobber the stored email (COALESCE ruling).
+    const kept = await usersRepo.ensure(db, uid, null);
+    expect(kept.email).toBe("second@test.local");
+
+    // ensure never touches tier — an operator-set tier survives re-ensure.
+    await db.update(users).set({ tier: "pro" }).where(eq(users.uid, uid));
+    const afterTier = await usersRepo.ensure(db, uid, "third@test.local");
+    expect(afterTier.tier).toBe("pro");
+    expect(afterTier.email).toBe("third@test.local");
   });
 });

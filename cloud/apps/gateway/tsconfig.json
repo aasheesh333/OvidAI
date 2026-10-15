@@ -2,8 +2,13 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    // Same rationale as @ovid/db's tsconfig: the gateway consumes @ovid/db,
+    // whose .d.ts files pull in drizzle-orm declarations referencing optional
+    // peer deps (gel, mysql2, …) that fail whole-program lib checking.
+    // skipLibCheck only skips .d.ts files; our sources stay fully checked.
+    "skipLibCheck": true
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "src/test"]
 }

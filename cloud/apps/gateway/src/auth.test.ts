@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import type { App } from "firebase-admin/app";
 import {
   authHook,
@@ -152,6 +152,83 @@ describe("authHook", () => {
       expect(res.statusCode).toBe(200);
     });
     expect(calls.appCheckTokens).toEqual([null]);
+  });
+});
+
+// Task 6 review carry-over (binding on Task 7): the swallowed verification
+// error must be diagnosable server-side — logged via request.log.warn WITH the
+// underlying error — while the client-facing 401 envelope stays generic.
+describe("authHook observability", () => {
+  interface CapturingLogger {
+    logger: FastifyBaseLogger;
+    warns: unknown[][];
+  }
+
+  function capturingLogger(): CapturingLogger {
+    const warns: unknown[][] = [];
+    const noop = (): void => {};
+    const logger = {
+      level: "warn",
+      fatal: noop,
+      error: noop,
+      warn: (...args: unknown[]) => {
+        warns.push(args);
+      },
+      info: noop,
+      debug: noop,
+      trace: noop,
+      silent: noop,
+      child: () => logger,
+    } as unknown as FastifyBaseLogger;
+    return { logger, warns };
+  }
+
+  async function withLoggedApp(
+    verifier: Verifier,
+    run: (app: FastifyInstance, warns: unknown[][]) => Promise<void>,
+  ): Promise<void> {
+    const { logger, warns } = capturingLogger();
+    const app = Fastify({ loggerInstance: logger });
+    try {
+      app.addHook("preHandler", authHook(verifier));
+      app.get("/probe", async () => ({ ok: true }));
+      await run(app, warns);
+    } finally {
+      await app.close();
+    }
+  }
+
+  it("logs the swallowed verifier error server-side; client envelope unchanged", async () => {
+    await withLoggedApp(throwingVerifier(), async (app) => {
+      const res = await app.inject({ method: "GET", url: "/probe", headers: AUTH_HEADERS });
+      expect(res.statusCode).toBe(401);
+      expect(res.json().error.code).toBe("unauthenticated");
+      expect(res.body).not.toContain("s3cr3t-jwk"); // still no detail leak
+    });
+  });
+
+  it("the warn log carries the underlying verification error", async () => {
+    await withLoggedApp(throwingVerifier(), async (app, warns) => {
+      await app.inject({ method: "GET", url: "/probe", headers: AUTH_HEADERS });
+      const logged = warns
+        .map((args) => args[0])
+        .filter(
+          (a): a is { err: unknown } =>
+            typeof a === "object" && a !== null && "err" in (a as object),
+        )
+        .map((a) => a.err);
+      expect(
+        logged.some((e) => e instanceof Error && e.message.includes("s3cr3t-jwk")),
+      ).toBe(true);
+    });
+  });
+
+  it("logs header-rejection 401s too (every hook 401 is diagnosable)", async () => {
+    await withLoggedApp(resolvingVerifier({ idTokens: [], appCheckTokens: [] }), async (app, warns) => {
+      const res = await app.inject({ method: "GET", url: "/probe" });
+      expect(res.statusCode).toBe(401);
+      expect(warns.length).toBeGreaterThan(0);
+    });
   });
 });
 

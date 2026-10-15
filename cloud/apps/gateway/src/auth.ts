@@ -112,13 +112,20 @@ export function authHook(verifier: Verifier): preHandlerHookHandler {
       authorization !== null && authorization.startsWith(BEARER_PREFIX)
         ? authorization.slice(BEARER_PREFIX.length)
         : null;
+    const appCheckToken = headerValue(request.headers[APP_CHECK_HEADER]);
     if (idToken === null || idToken === "") {
+      // Task 6 review carry-over: every hook 401 is diagnosable server-side;
+      // the client keeps the generic envelope.
+      request.log.warn("auth rejected: missing or malformed Authorization header");
       return unauthenticated(reply);
     }
-    const appCheckToken = headerValue(request.headers[APP_CHECK_HEADER]);
     try {
       request.principal = await verifier(idToken, appCheckToken);
-    } catch {
+    } catch (err) {
+      // The verification error is still swallowed FOR THE CLIENT (alg/kid/
+      // expiry details are an oracle we must not leak), but it is logged with
+      // the request logger so outages are diagnosable server-side.
+      request.log.warn({ err }, "auth verification failed");
       return unauthenticated(reply);
     }
     // Falls through to the route handler with request.principal set.

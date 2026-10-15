@@ -7,10 +7,12 @@ import {
   runs as runsTable,
   sessions as sessionsTable,
   sessionEventMirror,
+  users as usersTable,
   type MessageRow,
   type RunRow,
   type SessionEventMirrorRow,
   type SessionRow,
+  type UserRow,
 } from "./schema.js";
 
 /** Message role union, sourced from the shared wire protocol (do not redefine). */
@@ -20,6 +22,34 @@ export type MessageRole = MessageDto["role"];
 export function newId(): string {
   return uuidv7();
 }
+
+// ---------------------------------------------------------------------------
+// users
+// ---------------------------------------------------------------------------
+
+export const users = {
+  /**
+   * Idempotent user provisioning for the gateway's authenticated request path
+   * (sessions.userId has an FK here, so the row must exist before any session
+   * or message insert). Controller ruling:
+   *
+   *   INSERT … ON CONFLICT (uid) DO UPDATE SET email = COALESCE(excluded.email, users.email)
+   *
+   * — a null email never clobbers a stored one, and `tier` is NEVER touched
+   * (billing/operator-owned; queue priority reads it). Returns the stored row.
+   */
+  async ensure(db: Db, uid: string, email: string | null): Promise<UserRow> {
+    const [row] = await db
+      .insert(usersTable)
+      .values({ uid, email })
+      .onConflictDoUpdate({
+        target: usersTable.uid,
+        set: { email: sql`COALESCE(excluded.email, ${usersTable.email})` },
+      })
+      .returning();
+    return row!;
+  },
+};
 
 // ---------------------------------------------------------------------------
 // sessions
