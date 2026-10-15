@@ -2,7 +2,11 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    // drizzle-orm's .d.ts files reference optional peer deps (gel, mysql2, …)
+    // and fail whole-program lib checking; skipLibCheck only skips .d.ts files,
+    // our own sources remain fully type-checked.
+    "skipLibCheck": true
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"]
