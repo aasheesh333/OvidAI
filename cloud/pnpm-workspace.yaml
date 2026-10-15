@@ -6,3 +6,7 @@ packages:
 # binary; pnpm blocks dependency build scripts unless approved here.
 allowBuilds:
   esbuild: true
+  # bullmq serializes job payloads with msgpackr; msgpackr-extract is msgpackr's
+  # optional native accelerator (its install script places a prebuilt binary,
+  # falling back to pure-JS decoding when unavailable — no toolchain required).
+  msgpackr-extract: true

@@ -1,1 +1,1 @@
-export const PKG = "queue";
+export * from "./queues.js";
