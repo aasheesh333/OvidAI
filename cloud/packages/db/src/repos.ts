@@ -25,6 +25,16 @@ export function newId(): string {
 // sessions
 // ---------------------------------------------------------------------------
 
+// Cursors are client-controlled (Task 7 passes them through opaquely), so
+// decode must never yield a value that throws downstream. postgres.js
+// serializes Date params via toISOString and PG's timestamptz parser only
+// accepts 4-digit years; outside years 0001–9999 (or beyond JS Date's own
+// ±8.64e15 ms range → Invalid Date) binding throws. Real updatedAt values are
+// epoch ms, so anything outside these bounds is a crafted/garbage cursor and
+// degrades to "no cursor" (first page) instead of a 500.
+const CURSOR_MS_MIN = -62_135_596_800_000; // 0001-01-01T00:00:00.000Z
+const CURSOR_MS_MAX = 253_402_300_799_999; // 9999-12-31T23:59:59.999Z
+
 // Opaque keyset cursor for sessions.list: "<updatedAt epoch ms>~<session id>".
 function encodeSessionCursor(row: SessionRow): string {
   return `${row.updatedAt.getTime()}~${row.id}`;
@@ -38,7 +48,17 @@ function decodeSessionCursor(
   if (sep <= 0) return null;
   const ms = Number(cursor.slice(0, sep));
   const id = cursor.slice(sep + 1);
-  if (!Number.isInteger(ms) || id.length === 0) return null;
+  // Number.isSafeInteger rejects NaN/Infinity/non-integers/out-of-range magnitudes
+  // (e.g. 1e20, which would decode to Invalid Date); the bounds check rejects
+  // values JS can represent but PG cannot bind (years outside 0001–9999).
+  if (
+    !Number.isSafeInteger(ms) ||
+    ms < CURSOR_MS_MIN ||
+    ms > CURSOR_MS_MAX ||
+    id.length === 0
+  ) {
+    return null;
+  }
   return { updatedAt: new Date(ms), id };
 }
 

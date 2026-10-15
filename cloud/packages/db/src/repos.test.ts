@@ -113,6 +113,34 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     const first = await sessions.list(db, uid, 2);
     expect(first.rows.map((r) => r.id)).toEqual([created[4]!.id, created[3]!.id]);
     expect(first.nextCursor).toBeTruthy();
+
+    // Crafted/garbage cursors degrade leniently to the first page — never throw.
+    // Covers integer-but-Invalid-Date ms (1e20, Date-max±1) AND valid JS Dates
+    // that Postgres cannot bind (years outside 0001–9999 → PG parser error).
+    for (const bad of [
+      "99999999999999999999~x", // Number.isInteger(1e20) === true, Date → Invalid
+      "8640000000000001~x", // Date max + 1 → Invalid Date
+      "-8640000000000001~x", // Date min - 1 → Invalid Date
+      "8640000000000000~x", // Date max, valid JS Date but year 275760 → PG rejects
+      "253402300800000~x", // year 10000 → PG rejects expanded-year format
+      "-62167219200000~x", // year 0 → PG rejects
+      "NaN~x",
+      "1.5~x",
+      "garbage",
+      "~x",
+      `${BASE}~`, // empty id part
+    ]) {
+      const res = await sessions.list(db, uid, 2, bad);
+      expect(res.rows.map((r) => r.id), `cursor ${JSON.stringify(bad)}`).toEqual([
+        created[4]!.id,
+        created[3]!.id,
+      ]);
+    }
+    // Well-formed cursors at the accepted bounds bind without throwing.
+    const upperEdge = await sessions.list(db, uid, 2, "253402300799999~ffffffff-ffff-7fff-bfff-ffffffffffff");
+    expect(upperEdge.rows.map((r) => r.id)).toEqual([created[4]!.id, created[3]!.id]); // all 2023 sessions sort before year 9999
+    const lowerEdge = await sessions.list(db, uid, 2, "-62135596800000~00000000-0000-7000-8000-000000000000");
+    expect(lowerEdge).toEqual({ rows: [], nextCursor: null }); // nothing sorts before year 1
   });
 
   it("sessions.touch bumps updatedAt and moves the session to the front", async () => {
