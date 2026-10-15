@@ -1,0 +1,8 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+
+# esbuild (a vitest dependency) needs its postinstall to place its platform
+# binary; pnpm blocks dependency build scripts unless approved here.
+allowBuilds:
+  esbuild: true

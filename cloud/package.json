@@ -1,0 +1,12 @@
+{
+  "name": "cloud",
+  "private": true,
+  "packageManager": "pnpm@12.11.2",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
+  }
+}
