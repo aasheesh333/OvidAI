@@ -16,7 +16,12 @@
     "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "typescript": "^5.6.0",
     "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "@ovid/shared": "workspace:*",
+    "ioredis": "^5.11.1"
   }
 }

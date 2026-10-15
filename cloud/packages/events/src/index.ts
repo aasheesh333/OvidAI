@@ -1,1 +1,1 @@
-export const PKG = "events";
+export * from "./eventLog.js";
