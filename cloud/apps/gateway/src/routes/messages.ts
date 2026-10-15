@@ -5,7 +5,7 @@ import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import type { MessageDto, Page, SendMessageResponse } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
 import { MintHttpError } from "../keys.js";
-import { badRequest, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
+import { badRequest, isUuid, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
 
 // Message routes — all mounted inside the authenticated /cloud/v1 scope.
 
@@ -45,7 +45,10 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
 
     // 1. Ownership FIRST: wrong owner and unknown session are both 404 (never
     //    403), before body validation so nobody can probe a session they
-    //    don't own through validation behavior.
+    //    don't own through validation behavior. The shape guard folds a
+    //    malformed :id into the same 404 envelope (identical message — still
+    //    no existence leaks) and keeps client garbage away from the db.
+    if (!isUuid(sessionId)) return notFound(reply);
     const session = await sessions.get(deps.db, sessionId, uid);
     if (session === null) return notFound(reply);
 
@@ -124,15 +127,26 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
 
   app.get("/sessions/:id/messages", async (request, reply) => {
     const { id: sessionId } = request.params as { id: string };
-    // Ownership 404 first — same rule as every other :id route.
+    // Ownership 404 first — same rule as every other :id route (malformed :id
+    // folds into the same envelope via the shape guard, never a 500).
+    if (!isUuid(sessionId)) return notFound(reply);
     const session = await sessions.get(deps.db, sessionId, request.principal.uid);
     if (session === null) return notFound(reply);
 
     const query = request.query as Record<string, string | string[] | undefined>;
     const limit = parsePageLimit(query.limit);
+    // DOCUMENTED CHOICE: a malformed `before` is IGNORED and the first page is
+    // served — the same lenient degradation the sessions-list `cursor` has
+    // (garbage cursor → first page, pinned in sessions.test.ts). Not a 400:
+    // paging params stay clamp-or-ignore everywhere, and an unguarded value
+    // would reach the keyset id comparison, where bpchar string ordering makes
+    // results arbitrary (e.g. before=0 filters EVERY UUIDv7 id out → empty
+    // page instead of the intended "no valid cursor → start over").
+    const rawBefore = queryValue(query.before);
+    const beforeId = rawBefore !== null && isUuid(rawBefore) ? rawBefore : null;
     const { rows, nextCursor } = await messages.page(deps.db, sessionId, {
       limit,
-      beforeId: queryValue(query.before),
+      beforeId,
     });
     // Newest-first keyset page (UUIDv7 id order); nextCursor is the oldest id.
     return { items: rows.map(toMessageDto), nextCursor } satisfies Page<MessageDto>;

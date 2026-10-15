@@ -3,7 +3,7 @@ import { z } from "zod";
 import { sessions, users, type SessionRow } from "@ovid/db";
 import type { Page, SessionDto } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
-import { notFound, parsePageLimit, queryValue, zodBadRequest } from "./http.js";
+import { isUuid, notFound, parsePageLimit, queryValue, zodBadRequest } from "./http.js";
 
 // Session routes — all mounted inside the authenticated /cloud/v1 scope.
 
@@ -49,6 +49,10 @@ export function registerSessionRoutes(app: FastifyInstance, deps: GatewayDeps): 
 
   app.get("/sessions/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
+    // Shape guard: a malformed id gets the SAME 404 envelope as an unknown one
+    // (no existence leaks either way) and never reaches the db — client typos
+    // must not be able to produce a 500 from the id column binding.
+    if (!isUuid(id)) return notFound(reply);
     // sessions.get is ownership-scoped: unknown id and wrong owner both come
     // back null → 404 (never 403 — no existence leaks).
     const row = await sessions.get(deps.db, id, request.principal.uid);

@@ -54,3 +54,17 @@ export function queryValue(raw: string | string[] | undefined): string | null {
   const text = Array.isArray(raw) ? raw[0] : raw;
   return typeof text === "string" && text !== "" ? text : null;
 }
+
+// Canonical UUID shape: 8-4-4-4-12 hex digits, any version, case-insensitive.
+// Version/variant bits are deliberately NOT checked — the guard's only job is
+// to keep client garbage away from id-typed db columns and keyset comparisons
+// (a non-UUID bound to a native Postgres `uuid` column raises 22P02, which
+// would surface as a 500 and pollute the 5xx alert signal with client typos).
+// Any canonically-shaped UUID is safe to bind and simply matches no row, which
+// the routes already answer with the contracted 404 not_found envelope.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** True when `value` has canonical UUID shape (8-4-4-4-12 hex). */
+export function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}

@@ -150,6 +150,30 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
     expect(unknown.json().error.code).toBe("not_found");
   });
 
+  it("GET /sessions/:id with a malformed id → 404 not_found (never 500 via Postgres 22P02)", async () => {
+    const uid = testUid("sess-badid");
+    // Client-typo shapes that would raise Postgres 22P02 (invalid uuid syntax)
+    // if bound raw to the uuid column; the route contract says 404 not_found.
+    const malformed = [
+      "not-a-uuid", // a non-UUID word
+      "9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a", // long random string
+      "1234567", // numeric string
+    ];
+    for (const bad of malformed) {
+      const res = await app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${bad}`,
+        headers: authHeaders(uid),
+      });
+      expect(res.statusCode, bad).toBe(404);
+      expect(res.statusCode, `${bad} must never be a 500`).not.toBe(500);
+      expect(res.json().error.code).toBe("not_found");
+      // Route-level envelope, not Fastify's unmatched-route 404 (both use
+      // code not_found — the message proves the session route answered).
+      expect(res.json().error.message).toBe("Session not found.");
+    }
+  });
+
   it("GET /sessions pages via cursor, most recent activity first, and never leaks other users", async () => {
     const uid = testUid("sess-list");
     const other = testUid("sess-list-other");

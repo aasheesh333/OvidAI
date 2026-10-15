@@ -386,6 +386,67 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(messagePage.parse(garbage.json()).items).toHaveLength(5);
   });
 
+  it("malformed session :id on POST and GET messages → 404 not_found (never 500 via Postgres 22P02), nothing enqueued", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-badid");
+    // Same three client-typo shapes as sessions.test.ts: a non-UUID word, a
+    // long random string, a numeric string.
+    const malformed = [
+      "not-a-uuid",
+      "9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a",
+      "1234567",
+    ];
+    for (const bad of malformed) {
+      const post = await sendMessage(handle, uid, bad, { content: "valid body" });
+      expect(post.statusCode, `POST ${bad}`).toBe(404);
+      expect(post.statusCode, `POST ${bad} must never be a 500`).not.toBe(500);
+      expect(post.json().error.code).toBe("not_found");
+      expect(post.json().error.message).toBe("Session not found.");
+
+      const get = await handle.app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${bad}/messages`,
+        headers: authHeaders(uid),
+      });
+      expect(get.statusCode, `GET ${bad}`).toBe(404);
+      expect(get.statusCode, `GET ${bad} must never be a 500`).not.toBe(500);
+      expect(get.json().error.code).toBe("not_found");
+      expect(get.json().error.message).toBe("Session not found.");
+    }
+    // Rejected at the shape guard — no dependency was touched on the way.
+    expect(handle.adds).toHaveLength(0);
+    expect(handle.mint.calls).toHaveLength(0);
+  });
+
+  it("GET messages with a malformed before degrades to the first page (documented choice: ignore it, lenient like the sessions cursor)", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-badbefore");
+    const sid = await createSession(handle, uid);
+    const seeded = [];
+    for (let i = 0; i < 3; i++) {
+      seeded.push(
+        await messages.append(db, { sessionId: sid, role: "user", content: `m${i}` }),
+      );
+    }
+    const newestFirst = [...seeded].reverse().map((m) => m.id);
+
+    // Ruling pinned here: a malformed `before` is IGNORED (first page served),
+    // consistent with the sessions-list garbage-cursor contract — never a 500,
+    // never a 400. "0" is the discriminating case: an unguarded bpchar keyset
+    // comparison would filter EVERY UUIDv7 id out (all start "01…" > "0") and
+    // serve an empty page; only the gateway-side guard guarantees the full
+    // first page for every malformed value.
+    for (const bad of ["garbage", "1234567", "not-a-uuid", "0"]) {
+      const res = await handle.app.inject({
+        method: "GET",
+        url: `/cloud/v1/sessions/${sid}/messages?before=${encodeURIComponent(bad)}`,
+        headers: authHeaders(uid),
+      });
+      expect(res.statusCode, bad).toBe(200);
+      expect(messagePage.parse(res.json()).items.map((m) => m.id)).toEqual(newestFirst);
+    }
+  });
+
   it("message routes answer 401 unauthenticated with the Task 6 envelope", async () => {
     const handle = makeApp();
     const uid = testUid("msg-401");
