@@ -10,3 +10,12 @@ allowBuilds:
   # optional native accelerator (its install script places a prebuilt binary,
   # falling back to pure-JS decoding when unavailable — no toolchain required).
   msgpackr-extract: true
+  # @firebase/util (firebase-admin transitive) ships dist/postinstall.{js,mjs}
+  # only via its postinstall script — the ESM entry imports ./postinstall.mjs,
+  # which does not exist in the published tarball, so the script is required
+  # for firebase-admin to load under ESM. It reads $FIREBASE_WEBAPP_CONFIG
+  # (unset in every env we run) and writes a no-op default config; no network.
+  "@firebase/util": true
+  # protobufjs's postinstall only prints a version-scheme advisory when a
+  # dependent mis-pins it; nothing functional, so it stays explicitly denied.
+  protobufjs: false
