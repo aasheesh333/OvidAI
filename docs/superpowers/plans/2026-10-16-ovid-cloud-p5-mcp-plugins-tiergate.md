@@ -14,10 +14,10 @@
 
 **Cross-phase seams (read before dispatching any task):**
 
-- **P2 (`@ovid/sandbox` or as-landed name):** P5 consumes three narrow interfaces — `SandboxSpawner` (long-lived jailed process with stdin/stdout lines), `SandboxFiles` (read/write/list/stat/remove + `uploadDir` + one-shot `exec`), scoped to `/workspaces/users/{uid}`. They are DEFINED in Task 3/5 of this plan (that is the contract); if P2 landed with different signatures, adapt ONLY inside `cloud/apps/worker/src/sandboxSeam.ts` — every P5 test uses fakes, so no other file changes. If P2 has not landed, `createUnavailableSandbox()` (Task 16) makes stdio/filesystem/memory/plugin installs fail with `sandbox_unavailable` while everything else works.
-- **P3 (roster):** the seam is `McpToolProvider` (Task 16). If P3 has not landed, P5 ships the router-level API + tests only (this plan's fallback, per controller brief); P3 later calls `createMcpToolProvider(router)` and passes `RunContext.sampler` from the run's model transport.
+- **P2 (`@ovid/sandbox` or as-landed name):** `SandboxSpawner` (long-lived jailed stdio process: writable stdin, line-streamed stdout, kill) and `SandboxFiles` (read/write/list/stat/remove + `uploadDir` + one-shot `exec`, uid-scoped) are DEFINED in `@ovid/sandbox` by P2's revision and IMPORTED by P5's packages — `@ovid/mcp` (stdio transport) and `@ovid/plugins` (installer) each declare `@ovid/sandbox workspace:*`; P5 does NOT re-define them. Task 3 specifies the explicit mapping of the stdio transport onto P2's long-lived-process primitive. If P2 lands with drifted member names, adapt ONLY inside `cloud/apps/worker/src/sandboxSeam.ts` — every P5 test uses fakes, so no other file changes. If P2 has not landed when Task 3/14 dispatch, the controller sequences P2's seam-defining task first; `createUnavailableSandbox()` (Task 16) makes stdio/filesystem/memory/plugin installs fail with `sandbox_unavailable` while everything else works.
+- **P3 (roster):** the seam is `McpToolProvider` (Task 16), registered through the canonical tool seam (`execute(args, ctx) → ToolResult {content, isError?, artifacts?}`). If P3 has not landed, P5 ships the router-level API + tests only (this plan's fallback, per controller brief); P3 later calls `createMcpToolProvider(router)` and routes `mcp__` tool-calls through the canonical `execute` seam.
 - **P8 (GitHub OAuth):** the GitHub singleton reads the token from the per-user MCP config secret `GITHUB_TOKEN` (Task 5). P8 swaps in a `GitHubTokenProvider` at the same injection point.
-- **P9 (escrow formalization):** Task 8's `createEnvelopeCrypto` IS the escrow pattern (AES-256-GCM, per-record DEK wrapped by `OVID_MASTER_KEY`); P9 consolidates, it does not redesign.
+- **P9 (escrow — CANONICAL interface):** P9's `EnvelopeCrypto` in `@ovid/escrow` is the canonical interface: `encrypt(plaintext, recordId): EncryptedEnvelope` / `decrypt(e, recordId)`, structured `EncryptedEnvelope { wrappedDek, iv, ciphertext, tag }` (all base64), AES-256-GCM with a per-record DEK wrapped under `OVID_MASTER_KEY`, AAD = recordId on BOTH layers, `EnvelopeAuthError` on any failure. Task 8's `crypto.ts` is a thin shim aligned EXACTLY to that interface shape — same method names, same recordId parameter, same envelope structure; it lives in `@ovid/mcp` only until P9 lands `@ovid/escrow`, at which point P5's call sites swap imports mechanically. P9 executes after P5 and consolidates — it does not redesign.
 - **P1 (queue priority):** `plugin-installs` jobs use P1's existing mapping — `priority = tier === "free" ? 2 : 1` (gateway install route reads `users.getTier`).
 
 ## Global Constraints
@@ -27,7 +27,7 @@
 - Route prefix: all new HTTP under `/cloud/v1/*`; WS at `/cloud/ws`. Public (unauthenticated) routes are EXACTLY: `/cloud/v1/health`, `/cloud/v1/mcp/oauth/callback`, `/cloud/ws` (ticket IS the auth).
 - Redis split (AG3): BullMQ + Streams + system-channel pub/sub on `redis-q` (noeviction). Tests use the dev containers only: `TEST_DATABASE_URL=postgres://postgres:ovid@127.0.0.1:5433/postgres`, `TEST_REDIS_URL=redis://127.0.0.1:6390`; DB/Redis suites skip (not fail) when unset.
 - Auth on every REST/WS handshake: Firebase ID token + App Check; dev bypass `OVID_AUTH_MODE=test`; refused when `NODE_ENV=production`.
-- Error envelope (REST): `{ "error": { "code": string, "message": string } }`. Codes ADDED by this plan: `pro_required` (HTTP **402**), `sandbox_unavailable` (503), `archive_unsafe` (400), `invalid_source` (400), `grant_denied` (409), `oauth_failed` (400), `install_failed` (500 on read-back only — the failure itself arrives as a WS system event).
+- Error envelope (REST): `{ "error": { "code": string, "message": string } }`. REST codes ADDED by this plan: `pro_required` (HTTP **402**), `oauth_failed` (400), `unavailable` (503 when an mcp/plugins route's dependency is absent). The failure-family codes `archive_unsafe`, `invalid_source`, `grant_denied`, and `install_failed` are NOT REST response codes — they surface as WS system-event outcome reasons and `PluginDto` status/reason text (install failures arrive as events, never REST bodies). `sandbox_unavailable` is the shared sandbox-unavailable wire code (P2's `SandboxCapacityError` — tool-result text and run-failure codes, not a REST code).
 - `@ovid/shared` and `@ovid/queue` extensions are strictly **ADDITIVE**: new union variants, new exports, new optional interface fields. Never edit or reorder existing members (shipped P1 code consumes them).
 - Secrets NEVER in logs, events, WS frames, error messages, or plaintext columns. At rest: AES-256-GCM envelope (`OVID_MASTER_KEY` env, 64 hex chars = 32 bytes; no default value ever). Every DTO masks secret material (`hasSecrets: boolean`, never values). System-event payloads carry previews/labels only.
 - Stdio MCP servers and plugin dependency scripts run ONLY inside P2 jails, never in the worker process. Worker-side staging downloads and validates archives but NEVER executes downloaded code.
@@ -43,7 +43,7 @@
 1. **Hostile or flaky MCP server** — infinite `tools/list` pagination (repeated/oversized cursors), multi-MB tool results, garbage JSON-RPC frames, death mid-call. Expected: pages capped at 50, cursor ≤4096 chars and never repeated, results trimmed head+tail at 6000 chars with the exact omission notice, malformed frames answered as JSON-RPC errors, disconnect → backoff 500 ms→30 s, give up after 10, never reconnect after an explicit close. Pinned by Task 1/2 tests.
 2. **Malicious plugin archive** — zip-slip (`../` entries), absolute paths, symlink escape, >64 MB payload, non-regular files. Expected: rejected during worker-side staging validation BEFORE anything is written into the sandbox; install fails `archive_unsafe`; staging discarded. Pinned by Task 12 tests.
 3. **Tier-gate bypass** — Free user posts a custom server config straight at the router (not REST), a Pro user is downgraded mid-session with live custom connections, or the agent calls `catalog_add_mcp`/`agent_install_plugin` for a Free user. Expected: the gate re-checks `users.tier` at EVERY decision point (REST create, router add/connect/dispatch, install job start, agent tool), custom connections of a downgraded user are refused at next dispatch with `pro_required`, curated keep working. Pinned by Task 11/14/15/16 tests.
-4. **Secret exfiltration** — MCP env secrets, OAuth tokens, plugin user-config values appearing in logs, WS system frames, session events, DTOs, or error envelopes. Expected: sealed at rest (`ev1:` envelope), masked in every DTO (`hasSecrets`), never present in any emitted frame/event payload (tests grep serialized output for the literal secret). Pinned by Task 8/10/15 tests.
+4. **Secret exfiltration** — MCP env secrets, OAuth tokens, plugin user-config values appearing in logs, WS system frames, session events, DTOs, or error envelopes. Expected: sealed at rest (structured `EncryptedEnvelope` via the P9-aligned crypto shim, Task 8), masked in every DTO (`hasSecrets`), never present in any emitted frame/event payload (tests grep serialized output for the literal secret). Pinned by Task 8/10/15 tests.
 5. **SSRF via user-controlled URLs** — Fetch-handler target, custom HTTP/SSE MCP URL, REST-descriptor `host` extra (self-hosted GitLab/Jira), plugin ZIP download URL. Expected: one guarded egress client resolves DNS and refuses when ANY resolved address is non-public (RFC1918/loopback/link-local/CGNAT/metadata/IPv6-embedded-IPv4), ports 443/80 only. Pinned by Task 3/6/12 tests.
 
 ---
@@ -140,10 +140,11 @@ export interface HttpTransportOptions {
 }
 export class McpAuthRequiredError extends Error { constructor(readonly status: number, readonly wwwAuthenticate: string | null); }
 export class McpSessionExpiredError extends Error {}
-export function createHttpTransport(opts: HttpTransportOptions): McpTransport; // keeps Mcp-Session-Id from the initialize response header, echoes it + MCP-Protocol-Version on later requests
+export interface HttpTransport extends McpTransport { setProtocolVersion(v: string): void; } // typed member — the router hands it the negotiated version (no cast)
+export function createHttpTransport(opts: HttpTransportOptions): HttpTransport; // keeps Mcp-Session-Id from the initialize response header, echoes it + MCP-Protocol-Version (set via setProtocolVersion) on later requests
 
 // transports/sse.ts
-export function createSseTransport(opts: HttpTransportOptions): McpTransport; // GET url (Accept: text/event-stream) → `endpoint` event gives the POST target; all JSON-RPC both directions over the two channels
+export function createSseTransport(opts: HttpTransportOptions): McpTransport; // GET url (Accept: text/event-stream) → `endpoint` event gives the POST target; all JSON-RPC both directions over the two channels. NO setProtocolVersion: legacy SSE (2024-11-05 era) has no MCP-Protocol-Version header — the router echoes the negotiated version on Streamable HTTP only
 
 // backoff.ts
 export const RECONNECT_INITIAL_MS = 500;
@@ -160,7 +161,7 @@ export class McpReconnector {
 ```
 
 - [ ] **Step 1: Write failing tests.**
-  - `http.test.ts` runs a real `node:http` fixture server on `127.0.0.1:0`: `initialize round-trip captures Mcp-Session-Id and echoes it` (server asserts header on request 2); `SSE-formatted response body is parsed` (server replies `content-type: text/event-stream` with `data: {…}\n\n` → response resolves); `JSON response body parses`; `401 throws McpAuthRequiredError carrying WWW-Authenticate`; `404 on a remembered session throws McpSessionExpiredError`; `MCP-Protocol-Version header sent after initialize` (set via a setter the client transport exposes: `setProtocolVersion(v)` — pin this extra method on the returned object).
+  - `http.test.ts` runs a real `node:http` fixture server on `127.0.0.1:0`: `initialize round-trip captures Mcp-Session-Id and echoes it` (server asserts header on request 2); `SSE-formatted response body is parsed` (server replies `content-type: text/event-stream` with `data: {…}\n\n` → response resolves); `JSON response body parses`; `401 throws McpAuthRequiredError carrying WWW-Authenticate`; `404 on a remembered session throws McpSessionExpiredError`; `MCP-Protocol-Version header sent after initialize` (set via the `setProtocolVersion(v)` member of the returned `HttpTransport` — typed on the interface, not a cast).
   - `sse.test.ts` fixture server: `endpoint event provides POST target and messages flow both ways` (server sends `event: endpoint\ndata: /msg?sid=1\n\n`; client POSTs initialize there; server pushes the response as `event: message`); `GET refusal surfaces as transport start error`; `server closing the stream fires onClose unexpected`.
   - `backoff.test.ts` with an injected fake `schedule`: `delays double 500→1000→…→30000 cap` (pin exact sequence for attempts 1..8: 500,1000,2000,4000,8000,16000,30000,30000); `gives up after 10 attempts` (11th `scheduleUnexpected` schedules nothing); `markConnected resets`; `cancel clears pending timer and counter`; `successful connect() === true stops rescheduling`.
 - [ ] **Step 2: Run to verify fail.** `pnpm --filter @ovid/mcp test` — FAIL (modules missing).
@@ -175,7 +176,7 @@ export class McpReconnector {
 - Test: `cloud/packages/mcp/src/ssrf.test.ts`, `src/transports/stdio.test.ts`, `src/transports/native.test.ts`
 
 **Interfaces:**
-- Consumes: `McpTransport` (Task 1).
+- Consumes: `McpTransport` (Task 1); `SandboxSpawner` imported from `@ovid/sandbox` (P2's revision defines it — see seam list).
 - Produces:
 
 ```ts
@@ -195,16 +196,16 @@ export function createGuardedFetch(opts?: GuardedFetchOptions): GuardedFetch;
 // slip one internal target in); loopback exemption ONLY when NODE_ENV !== "production"
 // (tests/dev fixture servers run on 127.0.0.1).
 
-// transports/stdio.ts — the P2 seam contract (adapt names in worker sandboxSeam.ts if P2 differs)
-export interface SandboxProcessHandle {
-  writeLine(line: string): void;
-  onStdoutLine(cb: (line: string) => void): void;
-  onExit(cb: (code: number | null) => void): void;
-  kill(): Promise<void>;
-}
-export interface SandboxSpawner {
-  spawn(uid: string, spec: { command: string; args: string[]; env?: Record<string, string>; cwd?: string }): Promise<SandboxProcessHandle>;
-}
+// transports/stdio.ts — SandboxSpawner comes from @ovid/sandbox (P2: long-lived jailed stdio
+// process with WRITABLE STDIN, LINE-STREAMED STDOUT, KILL). @ovid/mcp declares
+// `@ovid/sandbox workspace:*`; P5 does NOT re-declare the interface (adapt member names only in
+// worker sandboxSeam.ts if P2 as-landed differs).
+// EXPLICIT MAPPING onto P2's primitive (this adapter's whole job):
+//   McpTransport.send(msg)        → ONE `JSON.stringify(msg)` line written to the process's stdin
+//   each stdout line               → parsed as a JsonRpcMessage → onMessage (partial lines buffered, never emitted)
+//   McpTransport.close()           → process kill() → onClose({expected:true})
+//   process exit not from close()  → onClose({expected:false}) → reconnector territory (Task 2/11)
+// spawn(uid, {command, args, env?, cwd?}) starts the jailed long-lived process under the caller's uid.
 export class McpConfigError extends Error {}
 export const LAUNCHER_ONLY_COMMANDS = ["npx", "uvx", "bunx", "pnpm", "yarn"] as const;
 export function createStdioTransport(spawner: SandboxSpawner, uid: string, spec: { command: string; args: string[]; env?: Record<string, string>; cwd?: string }): McpTransport;
@@ -423,7 +424,7 @@ export function parseMcpConfig(raw: string, opts?: { env?: Record<string, string
 
 **Files:**
 - Create: `cloud/packages/mcp/src/crypto.ts`
-- Modify: `cloud/packages/db/src/schema.ts` (ADDITIVE tables), `cloud/packages/db/src/repos.ts` (ADDITIVE namespaces + `users.getTier`), `cloud/packages/db/drizzle/0001_*.sql` (generated)
+- Modify: `cloud/packages/db/src/schema.ts` (ADDITIVE tables), `cloud/packages/db/src/repos.ts` (ADDITIVE namespaces + `users.getTier`), `cloud/packages/db/drizzle/NNNN_<timestamp>_<name>.sql` (generated — the controller assigns NNNN at dispatch; P5 takes the number after P4's @ovid/db migration in the same wave)
 - Test: `cloud/packages/mcp/src/crypto.test.ts`, `cloud/packages/db/src/mcpRepos.test.ts`
 
 **Interfaces:**
@@ -431,29 +432,35 @@ export function parseMcpConfig(raw: string, opts?: { env?: Record<string, string
 - Produces:
 
 ```ts
-// crypto.ts (the D3-adjacent escrow pattern P9 formalizes)
-export const SEALED_PREFIX = "ev1:";
-export class CryptoError extends Error {}
-export interface EnvelopeCrypto { seal(plaintext: string): string; open(sealed: string): string; }
+// crypto.ts — thin shim aligned EXACTLY to P9's canonical EnvelopeCrypto (@ovid/escrow, P9 Task 11):
+// same method names (encrypt/decrypt), same recordId parameter, same structured envelope. It lives
+// in @ovid/mcp only until P9 lands @ovid/escrow, at which point P5's call sites swap imports
+// mechanically and this shim is deleted.
+export interface EncryptedEnvelope { wrappedDek: string; iv: string; ciphertext: string; tag: string; } // all base64
+export interface EnvelopeCrypto { encrypt(plaintext: string, recordId: string): EncryptedEnvelope; decrypt(e: EncryptedEnvelope, recordId: string): string; }
+export class EnvelopeAuthError extends Error {}
 export function createEnvelopeCrypto(masterKeyHex: string): EnvelopeCrypto;
 // masterKeyHex: exactly 64 hex chars (32 bytes) else throw at construction.
-// seal: random 32-byte DEK → AES-256-GCM(plaintext, DEK); AES-256-GCM(DEK, masterKey);
-// output "ev1:" + base64url(mkIv12 ‖ mkTag16 ‖ wrappedDek32 ‖ dataIv12 ‖ dataTag16 ‖ ciphertext).
-// open: wrong key / ANY flipped byte → CryptoError (never returns garbage, never throws raw crypto errors).
+// encrypt: per-record random 32-byte DEK → AES-256-GCM(plaintext, DEK); DEK wrapped with
+// AES-256-GCM under the master key (own IV); AAD = UTF-8 recordId on BOTH layers (a record-swap
+// across rows fails auth). decrypt failure (wrong key, wrong recordId, ANY flipped byte,
+// malformed envelope) → EnvelopeAuthError (never returns garbage, never throws raw crypto errors).
+// recordId convention (PINNED so P9's consolidation needs no data migration):
+//   mcp_servers:{row.id} · mcp_oauth_tokens:{server_id} · mcp_oauth_flows:{state} · plugins:{row.id}
 
 // schema.ts additions (columns pinned; indexes builder's choice)
 mcp_servers    { id char(36) PK, user_id text FK users.uid, name text, transport text, curated_id text|null,
                  config jsonb,               // NON-secret: {url?, command?, args?, cwd?, type?}
-                 secrets_sealed text,        // envelope: {env?, headers?, oauth?}
+                 secrets_sealed jsonb,       // EncryptedEnvelope of {env?, headers?, oauth?} (recordId mcp_servers:{id})
                  enabled boolean default true, created_at, updated_at, UNIQUE(user_id, name) }
 mcp_oauth_tokens { id char(36) PK, user_id text, server_id char(36) FK mcp_servers.id ON DELETE CASCADE,
-                 tokens_sealed text NOT NULL, // envelope: {accessToken, refreshToken?, expiresAt?, registration?}
+                 tokens_sealed jsonb NOT NULL, // EncryptedEnvelope of {accessToken, refreshToken?, expiresAt?, registration?} (recordId mcp_oauth_tokens:{server_id})
                  updated_at, UNIQUE(server_id) }
-mcp_oauth_flows { state text PK, user_id text, server_id char(36), verifier_sealed text, config jsonb,
+mcp_oauth_flows { state text PK, user_id text, server_id char(36), verifier_sealed jsonb, config jsonb,
                  expires_at timestamptz, used boolean default false, created_at }
 plugins        { id char(36) PK, user_id text, plugin_id text,      // canonical "publisher/name"
                  version text, source jsonb, status text,            // installing|pending_grant|active|degraded|failed|uninstalling
-                 content_dir text, manifest jsonb, probe_failures jsonb, config_sealed text,
+                 content_dir text, manifest jsonb, probe_failures jsonb, config_sealed jsonb,
                  installed_at, updated_at, UNIQUE(user_id, plugin_id) }
 plugin_grants  { id char(36) PK, user_id text, plugin_id text, capabilities jsonb, env_names jsonb,
                  manifest_digest text, allow_dependency_scripts boolean default false, granted_at,
@@ -474,10 +481,10 @@ users.getTier(db, uid): Promise<string>; // row?.tier ?? "free" — missing user
 ```
 
 - [ ] **Step 1: Write failing tests.**
-  - `crypto.test.ts` (no DB): `seal/open round-trips unicode`; `sealed output starts with ev1: and never contains the plaintext`; `same plaintext twice → different ciphertexts` (random DEK/IVs); `tampered ciphertext → CryptoError` (flip one base64 char); `wrong master key → CryptoError`; `bad key length throws at construction`; `open("garbage") → CryptoError`.
-  - `mcpRepos.test.ts` (gated on `TEST_DATABASE_URL`, `openTestDb()` + `testUid()` convention from `apps/gateway/src/test/db.ts`): `mcpServers CRUD round-trip + UNIQUE(user_id,name) violation surfaces`; `ownership: get/update/remove with wrong uid → null/false, row untouched`; `mcpOauthFlows.consume is one-use` (second consume → null; expired → null — insert with past `expires_at`); `plugins.upsert updates on (user_id,plugin_id) conflict`; `pluginGrants.put upserts capabilities`; `users.getTier missing row → "free"`, `tier "pro" round-trips`.
+  - `crypto.test.ts` (no DB): `encrypt/decrypt round-trips unicode`; `serialized envelope never contains the plaintext`; `same plaintext twice → different ciphertexts` (random DEK/IVs); `decrypt with a different recordId → EnvelopeAuthError` (P9 pin — a record-swap across rows must fail auth); `tampered ciphertext → EnvelopeAuthError` (flip one base64 char); `wrong master key → EnvelopeAuthError`; `bad key length throws at construction`; `decrypt of a malformed/garbage envelope → EnvelopeAuthError`.
+  - `mcpRepos.test.ts` (gated on `TEST_DATABASE_URL`; LOCAL `openTestDb()` + `testUid()` helpers defined IN-FILE — the small `apps/gateway/src/test/db.ts` conventions copied as literal code, NOT imported: a `@ovid/db` package test must not import from an app): `mcpServers CRUD round-trip + UNIQUE(user_id,name) violation surfaces`; `ownership: get/update/remove with wrong uid → null/false, row untouched`; `mcpOauthFlows.consume is one-use` (second consume → null; expired → null — insert with past `expires_at`); `plugins.upsert updates on (user_id,plugin_id) conflict`; `pluginGrants.put upserts capabilities`; `users.getTier missing row → "free"`, `tier "pro" round-trips`.
 - [ ] **Step 2: Run to verify fail.** `pnpm --filter @ovid/mcp test && pnpm --filter @ovid/db test` — FAIL.
-- [ ] **Step 3: Implement.** schema/repo additions per signatures; generate migration: `cd cloud/packages/db && pnpm exec drizzle-kit generate` (journal appends `0001_*`; verify the SQL creates exactly the 5 tables + FKs and nothing else — no edits to `0000_*`).
+- [ ] **Step 3: Implement.** schema/repo additions per signatures; generate migration: `cd cloud/packages/db && pnpm exec drizzle-kit generate` (journal appends `NNNN_<timestamp>_<name>.sql` — the controller assigns the migration number at dispatch, because P4 adds a migration to the same journal in the same wave; never edit or renumber an already-landed migration). Verify the generated SQL creates exactly the 5 tables + FKs and nothing else.
 - [ ] **Step 4: Run to verify pass.** Both packages PASS; `pnpm -r build && pnpm -r test` green (existing P1 suites unaffected — additions only).
 - [ ] **Step 5: Commit.** `git commit -m "feat(cloud): envelope crypto (AES-256-GCM, OVID_MASTER_KEY) + mcp/plugin tables and repos"`
 
@@ -485,11 +492,12 @@ users.getTier(db, uid): Promise<string>; // row?.tier ?? "free" — missing user
 
 **Files:**
 - Create: `cloud/packages/mcp/src/oauth/discovery.ts`, `src/oauth/flow.ts`
-- Modify: `cloud/deploy/caddy-snippet.conf` (repo-only: `ovidsi.com/oauth/callback` → gateway `/cloud/v1/mcp/oauth/callback`; activation owner-gated)
 - Test: `cloud/packages/mcp/src/oauth/discovery.test.ts`, `src/oauth/flow.test.ts`
 
+(Task 9 deliberately touches NO deploy files: the `ovidsi.com/oauth/callback` → gateway reverse-proxy block in `cloud/deploy/caddy-snippet.conf` is owned canonically by Task 15 — the task that creates the callback route — and this task's `DEFAULT_MCP_REDIRECT_URI` merely targets it.)
+
 **Interfaces:**
-- Consumes: `EnvelopeCrypto`, `mcpOauthTokens`, `mcpOauthFlows` (Task 8), `GuardedFetch` (Task 3), `UserSystemBus` (Task 10 — declare the type here; flow.ts only calls `publish`).
+- Consumes: `EnvelopeCrypto`, `mcpOauthTokens`, `mcpOauthFlows` (Task 8), `GuardedFetch` (Task 3). Task 10's `UserSystemBus` is NOT re-declared here — flow.ts depends only on the narrow structural `SystemEventPublisher` below, which Task 10's bus satisfies (the `UserSystemBus` type itself is declared ONCE, in Task 10).
 - Produces (port of `mcp_oauth_discovery.dart` + the PKCE half of `mcp_service.dart`):
 
 ```ts
@@ -516,7 +524,8 @@ export const OAUTH_FLOW_TTL_MS = 600_000;                     // ten-minute, one
 export const DEFAULT_MCP_REDIRECT_URI = "https://ovidsi.com/oauth/callback";
 export function pkcePair(random?: (n: number) => Buffer): { verifier: string; challenge: string }; // S256, base64url no padding
 export function buildAuthorizeUrl(cfg: DiscoveredOAuthConfig, o: { state: string; codeChallenge: string; redirectUri: string }): string; // includes resource (RFC 8707) when set
-export interface OAuthFlowDeps { db: Db; crypto: EnvelopeCrypto; systemBus: Pick<UserSystemBus, "publish">; fetchImpl?: GuardedFetch; redirectUri?: string; }
+export interface SystemEventPublisher { publish(uid: string, event: { kind: string; requiresResponse?: boolean; payload: Record<string, unknown> }): Promise<void>; } // structural subset — Task 10's UserSystemBus satisfies it
+export interface OAuthFlowDeps { db: Db; crypto: EnvelopeCrypto; systemBus: SystemEventPublisher; fetchImpl?: GuardedFetch; redirectUri?: string; } // every crypto call carries its recordId (Task 8 convention: mcp_oauth_tokens:{serverId} / mcp_oauth_flows:{state})
 export interface OAuthFlow {
   start(uid: string, serverId: string): Promise<{ authorizeUrl: string }>;
   handleCallback(params: { state: string; code?: string; error?: string; iss?: string }): Promise<{ uid: string; serverId: string; ok: boolean; reason?: string }>;
@@ -538,7 +547,7 @@ export function createOAuthFlow(deps: OAuthFlowDeps): OAuthFlow;
 
 **Files:**
 - Create: `cloud/packages/shared/src/system.ts`, `cloud/apps/gateway/src/systemChannel.ts`, `cloud/packages/mcp/src/systemBus.ts`
-- Modify: `cloud/packages/shared/src/ws.ts` (ADDITIVE variants only), `cloud/packages/shared/src/index.ts`, `cloud/apps/gateway/src/ws.ts`, `cloud/apps/gateway/src/app.ts` (deps), `cloud/apps/gateway/src/main.ts` (wiring)
+- Modify: `cloud/packages/shared/src/ws.ts` (ADDITIVE variants only), `cloud/packages/shared/src/index.ts`, `cloud/apps/gateway/src/ws.ts`, `cloud/apps/gateway/src/ws.test.ts` (ADDITIVE cases only — see Step 1), `cloud/apps/gateway/src/app.ts` (deps), `cloud/apps/gateway/src/main.ts` (wiring)
 - Test: `cloud/packages/shared/src/system.test.ts`, `cloud/apps/gateway/src/systemChannel.test.ts`, `cloud/packages/mcp/src/systemBus.test.ts`
 
 **Interfaces:**
@@ -584,9 +593,9 @@ export function createRedisSystemBus(redis: Redis, opts?: { idGen?: () => string
   - `system.test.ts`: envelope round-trip; unknown kind rejected; `wsServerMsg({op:"system_event",…})` and `wsClientMsg({op:"system_response",…})` parse; **regression pin:** every P1 variant still parses unchanged (copy the four existing shapes into the test).
   - `systemChannel.test.ts` (gated `TEST_REDIS_URL`, two uids): `publishOut on redis → attached socket callback receives envelope`; `two sockets same uid both receive` (fan-out); `respond publishes on sys:{uid}:in`; `detach stops delivery and releases the subscription` (subscribe-count returns to baseline).
   - `systemBus.test.ts` (gated `TEST_REDIS_URL`; a test harness subscribes to `sys:{uid}:out` and replies on `sys:{uid}:in`): `request round-trips response by id`; `timeout → null` (timeoutMs: 50); `publish fills ts and defaults requiresResponse:false`; `mismatched id ignored`; `close releases connections`.
-  - gateway `ws.test.ts` ADDITION (modify existing file additively): `authenticated socket receives system_event frames pushed via hub` and `system_response frame from client reaches hub.respond`; unparseable system_response → `bad_message` error frame, connection survives.
+  - gateway `ws.test.ts` ADDITION (modify existing file additively): `authenticated socket receives system_event frames pushed via systemHub` and `system_response frame from client reaches systemHub.respond`; unparseable system_response → `bad_message` error frame, connection survives.
 - [ ] **Step 2: Run to verify fail.** `pnpm --filter @ovid/shared test && pnpm --filter @ovid/gateway test && pnpm --filter @ovid/mcp test` — FAIL.
-- [ ] **Step 3: Implement.** Hub: `Map<uid, {sockets:Set, sub}>`, lazy ioredis `duplicate()` subscriber per uid (P1 convention: each subscribe owns its connection; detach unsubscribes when the set empties). ws.ts: after ticket verify, `const detachSystem = deps.system.attach(uid, …)` registered in the SAME teardown bookkeeping block as session subs (before any await — P1 Task-8 lesson); `processFrame` gains the `system_response` case → `deps.system.respond(uid, …)`. `GatewayDeps` gains `system: SystemHub`; main.ts constructs `createSystemHub(redisQ)`. Worker bus: one subscriber on `sys:{uid}:in` per pending request (or a shared per-uid map — builder's choice, tests pin behavior only).
+- [ ] **Step 3: Implement.** Hub: `Map<uid, {sockets:Set, sub}>`, lazy ioredis `duplicate()` subscriber per uid (P1 convention: each subscribe owns its connection; detach unsubscribes when the set empties). ws.ts: after ticket verify, `const detachSystem = deps.systemHub?.attach(uid, …)` registered in the SAME teardown bookkeeping block as session subs (before any await — P1 Task-8 lesson); `processFrame` gains the `system_response` case → `deps.systemHub?.respond(uid, …)`. `GatewayDeps` gains `systemHub?: SystemHub` — the ONE canonical name for this dependency (Task 15 consumes the SAME field; no second `system:`/`hub:` alias), ADDITIVE-OPTIONAL so P1-only wiring and its untouched tests compile (ws.ts skips the system attach and answers an incoming `system_response` with a `bad_message` error frame when the field is absent); main.ts constructs `createSystemHub(redisQ)` and passes it. Worker bus: one subscriber on `sys:{uid}:in` per pending request (or a shared per-uid map — builder's choice, tests pin behavior only).
 - [ ] **Step 4: Run to verify pass.** All PASS; `pnpm -r build && pnpm -r test` green (P1 gateway/worker/e2e suites untouched).
 - [ ] **Step 5: Commit.** `git commit -m "feat(cloud): WS system channel — additive shared schemas, gateway hub, worker system bus (120s default-deny)"`
 
@@ -650,7 +659,7 @@ export function createMcpRouter(deps: McpRouterDeps): McpRouter;
   - client-requests wiring: server sends `sampling/createMessage` → bus `request` observed with kind `mcp_sampling_approval` and preview payload; bus null (timeout) → JSON-RPC `-1` returned to the fake server; approve + runCtx.sampler → sampler result returned. `elicitation/create` → bus kind `mcp_elicitation`, accept-response validated and returned.
   - singleton-through-router pin: two uids call `mcp__fetch__fetch` → fake fetchImpl saw 2 requests, catalog handler instance count still 1.
 - [ ] **Step 2: Run to verify fail.** FAIL.
-- [ ] **Step 3: Implement.** Router keeps `Map<serverRowId, {client, transport, reconnector, lastUsed}>`; curated entries keyed `curated:<id>:<uid>` share ONE handler but get a per-uid thin McpClient over `createNativeTransport(handler, () => ctxFor(uid, runCtx))` — the handler object identity stays shared (that's the pinned contract); ctx built per call: secrets decrypted lazily from `mcp_servers.secrets_sealed` (curated credential rows) via `crypto.open`, workspace/fetch/bus/sampler from deps+runCtx. OAuth: http transport `accessToken: () => oauth.getAccessToken(uid, serverId)`; `McpAuthRequiredError` during connect → summary status `needs_auth` (caller starts the flow via Task 15 REST). Tier read via `users.getTier` at EVERY gate point (no caching).
+- [ ] **Step 3: Implement.** Router keeps `Map<serverRowId, {client, transport, reconnector, lastUsed}>`; curated entries keyed `curated:<id>:<uid>` share ONE handler but get a per-uid thin McpClient over `createNativeTransport(handler, () => ctxFor(uid, runCtx))` — the handler object identity stays shared (that's the pinned contract); ctx built per call: secrets decrypted lazily from `mcp_servers.secrets_sealed` (curated credential rows) via `crypto.decrypt(sealed, "mcp_servers:" + serverRowId)` — the Task-8 recordId convention, workspace/fetch/bus/sampler from deps+runCtx. OAuth: http transport `accessToken: () => oauth.getAccessToken(uid, serverId)`; `McpAuthRequiredError` during connect → summary status `needs_auth` (caller starts the flow via Task 15 REST). Tier read via `users.getTier` at EVERY gate point (no caching).
 - [ ] **Step 4: Run to verify pass.** PASS; `pnpm -r build && pnpm -r test` green.
 - [ ] **Step 5: Commit.** `git commit -m "feat(cloud): McpRouter — Free/Pro tier gate middleware, mcp__ tool naming with unique-alias resolution, per-run stdio lifecycle"`
 
@@ -699,7 +708,7 @@ export function validateAndExtractArchive(input: { bytes: Uint8Array; format: "z
   - `archive.test.ts` (build fixture archives in-test with `node:zlib` tar + a minimal zip writer or checked-in binary fixtures under `src/__fixtures__/`): `safe tar extracts all files preserving relative layout`; `safe zip extracts`; `entry "../evil" rejected BEFORE any file written` (dest dir empty afterwards); `absolute path entry rejected`; `symlink escaping staging rejected (zip and tar)`; `contained symlink skipped, not created`; `fifo/device entry rejected`; `declared-size sum over 64MB rejected without writing` (craft a tar header claiming a huge size); `fileCount reported`.
   - `sources.test.ts` (fake fetchImpl; local fixture servers not needed): `github: trees API → raw downloads into staging, provenance carries repo/ref/sha`; `github tree metadata over 4MB rejected`; `npm: registry doc → tarball URL + dist.integrity sha512 VERIFIED (matching base64 sha512 of fixture bytes)`; `npm integrity mismatch → PluginSourceError, staging discarded`; `zip url: SSRF-guarded fetch` (fetchImpl fake asserting it is the guarded one; a `http://10.0.0.1/x.zip` input → SsrfBlockedError surfaces as PluginSourceError); `zip download exceeding 64MB aborted`; `paste: >1MB rejected; valid .mcp.json/plugin.json written into staging`; `npm name validation rejects "../evil" and bad chars`; `resolve() progress callback receives byte counts`; `discard() removes the staging dir`.
 - [ ] **Step 2: Run to verify fail.** `pnpm install && pnpm --filter @ovid/plugins test` — FAIL.
-- [ ] **Step 3: Implement.** Package scaffold copied from `@ovid/mcp` (deps: `@ovid/mcp workspace:*`, `zod`). Tar parsing: hand-rolled 512-byte-header reader (ustar) — no new dependency; zip: central-directory parse + `node:zlib` inflateRaw (or add `fflate ^0.8` — allowed, pin the choice in the commit; prefer fflate for correctness on zip64/UTF-8 names). Staging root default `os.tmpdir()/ovid-plugin-staging/<txid>`; txid = UUIDv7. GitHub raw downloads via `{githubApiBase|https://api.github.com}/repos/{owner}/{repo}/…` + `codeload` tarball shortcut allowed (builder's choice; tests pin provenance only).
+- [ ] **Step 3: Implement.** Package scaffold copied from `@ovid/mcp` (deps: `@ovid/mcp workspace:*`, `@ovid/shared workspace:*` — sources.ts re-exports `PluginSourceInput` from `@ovid/shared`, so the dep is required, `zod`). Tar parsing: hand-rolled 512-byte-header reader (ustar) — no new dependency; zip: central-directory parse + `node:zlib` inflateRaw (or add `fflate ^0.8` — allowed, pin the choice in the commit; prefer fflate for correctness on zip64/UTF-8 names). Staging root default `os.tmpdir()/ovid-plugin-staging/<txid>`; txid = UUIDv7. GitHub raw downloads via `{githubApiBase|https://api.github.com}/repos/{owner}/{repo}/…` + `codeload` tarball shortcut allowed (builder's choice; tests pin provenance only).
 - [ ] **Step 4: Run to verify pass.** PASS.
 - [ ] **Step 5: Commit.** `git commit -m "feat(cloud): plugin source resolver (GitHub/npm-SRI/ZIP/paste) + two-pass archive validation"`
 
@@ -756,7 +765,7 @@ export const CAPABILITY_EXPLANATIONS: Record<PluginCapability, string>; // one-l
 // registry.ts — the P3 seam (hook EXECUTION is P3's engine; this is registration only)
 export interface ContributionRecord { canonicalId: string; kind: string; pluginId: string; name: string; rootPath: string; data: Record<string, unknown>; }
 export interface ContributionRegistry {
-  register(recs: ContributionRecord[]): void;            // duplicate canonicalId → throws
+  register(recs: ContributionRecord[]): void;            // existing canonicalId → IDEMPOTENT UPSERT (the record is replaced — reinstall/upgrade re-registers the same version-independent ids, so it must NOT throw); duplicate canonicalId WITHIN one register() call → throws
   unregisterPlugin(pluginId: string): number;            // returns removed count
   list(filter?: { kind?: string; pluginId?: string }): ContributionRecord[];
   get(canonicalId: string): ContributionRecord | undefined;
@@ -768,7 +777,7 @@ export function contributionsFromManifest(m: NormalizedPluginManifest): Contribu
 - [ ] **Step 1: Write failing tests** (fixture plugin trees written to `mkdtemp` in-test):
   - manifest: `claude-code bundle normalizes` (`.claude-plugin/plugin.json` + `commands/foo.md` + `.mcp.json` + hooks json → contributions with exact canonical ids `plugin:acme/demo/command:foo`, `plugin:acme/demo/mcp:bar`, `plugin:acme/demo/hook:PreToolUse:0`); `inline mcpServers and "./.mcp.json" pointer both parsed`; `codex adapter normalizes`; `missing author → ManifestError`; `unknown capability in a declaration stripped + warning recorded`; `digest stable across rootPath change, changes when a command is added`; `capability inference` (command hook → shellExecute+hooksObserve+hooksBlock+workspaceRead; stdio mcp → mcpRegister+processSpawn; env names → environmentRead).
   - grants: `capabilityDelta of a null grant = every requested capability`; `exact grant → delta []`; `update adding a hook → delta [shellExecute,…] non-empty (re-approval forced)`; `grantCovers` inverse.
-  - registry: `register/list/get/unregisterPlugin`; `duplicate canonicalId throws`; `unregisterPlugin removes only that plugin's records`.
+  - registry: `register/list/get/unregisterPlugin`; `re-registering an existing canonicalId upserts idempotently` (reinstall pin — no throw, record replaced, total count unchanged); `duplicate canonicalId within a single register() call throws`; `unregisterPlugin removes only that plugin's records`.
 - [ ] **Step 2: Run to verify fail.** FAIL.
 - [ ] **Step 3: Implement.** Adapters read the fixture shapes exactly as the Dart adapters do (field-by-field port; Dart tests in `test/` for plugin_manifest are the case source per AG4 — port the pinned ones).
 - [ ] **Step 4: Run to verify pass.** PASS.
@@ -777,20 +786,19 @@ export function contributionsFromManifest(m: NormalizedPluginManifest): Contribu
 ### Task 14: Atomic install transaction into the sandbox + plugin-installs queue + WS progress/approvals
 
 **Files:**
-- Create: `cloud/packages/plugins/src/install.ts`
-- Modify: `cloud/packages/queue/src/queues.ts` (ADDITIVE), `cloud/apps/worker/src/pluginInstallProcessor.ts` (new), `cloud/apps/worker/src/sandboxSeam.ts` (new — `SandboxFiles` extension)
+- Create: `cloud/packages/plugins/src/install.ts`, `cloud/apps/worker/src/pluginInstallProcessor.ts`
+- Modify: `cloud/packages/queue/src/queues.ts` (ADDITIVE)
 - Test: `cloud/packages/plugins/src/install.test.ts`, `cloud/packages/queue/src/pluginQueue.test.ts`
 
 **Interfaces:**
-- Consumes: Task 12 resolver/archive, Task 13 manifest/grants/registry, Task 8 `plugins`/`pluginGrants` repos + crypto, Task 10 `UserSystemBus`, `SandboxSpawner` (Task 3).
+- Consumes: Task 12 resolver/archive, Task 13 manifest/grants/registry, Task 8 `plugins`/`pluginGrants` repos + crypto, Task 10 `UserSystemBus`, `SandboxSpawner` + `SandboxFiles` imported from `@ovid/sandbox` (P2's revision defines them — see seam list).
 - Produces:
 
 ```ts
-// sandboxSeam.ts (extends the Task-5 WorkspaceFiles with what installs need)
-export interface SandboxFiles extends WorkspaceFiles {
-  uploadDir(uid: string, localDir: string, remoteDir: string): Promise<void>;
-  exec(uid: string, spec: { command: string; args: string[]; cwd?: string; env?: Record<string, string>; timeoutMs?: number }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
-}
+// SandboxFiles comes from @ovid/sandbox (P2's revision): read/write/list/stat/remove +
+// uploadDir(uid, localDir, remoteDir) + one-shot exec(uid, {command, args, cwd?, env?, timeoutMs?}).
+// @ovid/plugins imports it (`@ovid/sandbox workspace:*`) — P5 does NOT define or re-declare it here
+// (a package must not consume a type defined in an app).
 
 // @ovid/queue additions (ADDITIVE — QueueServices gains an optional member; existing consumers compile.
 // Package deps gain `@ovid/shared workspace:*` for the PluginSourceInput type.)
@@ -804,12 +812,12 @@ export function createPluginInstallsWorker(conn: { url: string }, processor: Pro
 // optional flag { withPluginInstalls: true } is passed — default keeps P1 behavior byte-identical).
 
 // install.ts
-export type InstallPhase = "resolved" | "normalized" | "awaiting_grant" | "deps" | "probe" | "activate" | "committed" | "rolled_back" | "failed";
+export type InstallPhase = "resolved" | "normalized" | "pending_grant" | "deps" | "probe" | "activate" | "committed" | "rolled_back" | "failed"; // "pending_grant" everywhere — same vocabulary as the plugins.status column, no second name
 export interface PluginInstallOutcome { status: "active" | "degraded" | "failed"; pluginId: string; version?: string; probeFailures: string[]; reason?: string; }
 export interface InstallerDeps {
   db: Db; crypto: EnvelopeCrypto; systemBus: UserSystemBus;
   resolver: { resolve(input: PluginSourceInput, onProgress?): Promise<ResolvedSource> };
-  sandbox: { files: SandboxFiles; spawner: SandboxSpawner };
+  sandbox: { files: SandboxFiles; spawner: SandboxSpawner }; // both imported from @ovid/sandbox (P2)
   registry: ContributionRegistry;
   approvalTimeoutMs?: number;             // default APPROVAL_TIMEOUT_MS (120 s)
 }
@@ -821,14 +829,14 @@ export function pluginDir(pluginId: string, version: string): string;   // `${WO
 export function pluginStagingDir(pluginId: string, version: string): string; // `${pluginDir}.staging-${installId}`
 ```
 
-**Transaction (Dart `plugin_runtime.dart` 8 steps, cloud-adapted):** ①resolve source into worker staging (progress events `resolved`) → ②`adaptPlugin` + digest (`normalized`) → ③grant check: stored grant covers `inferRequestedCapabilities` AND digest matches → continue; else status `pending_grant` + `systemBus.request(plugin_grant_approval, {installId, pluginId, version, capabilities:[{name, explanation}], envNames, allowDependencyScripts:false}, 120s)`; null/deny → `rolled_back` + outcome failed `grant_denied`; approve → `pluginGrants.put` (`awaiting_grant`→approved) → ④`files.uploadDir(uid, stagingDir, pluginStagingDir(...))` → ⑤deps: staging contains `package.json` → `spawner`-side one-shot `exec(uid, {command:"npm", args:["install","--prefix",dir, ...(allowDependencyScripts ? [] : ["--ignore-scripts"])], cwd:dir})`; non-zero exit → rollback (`deps` phase failure) → ⑥probe: `files.stat` every contribution file; missing → recorded in `probeFailures` (status `degraded`, NOT failed — Dart parity) → ⑦write `plugins.upsert` (manifest jsonb with `rootPath = pluginDir`, sealed user config carried over from a previous install) + `registry.register(contributionsFromManifest)` (`activate`) → ⑧COMMIT: `exec(uid, {command:"mv", args:[stagingDir, activeDir]})` — the atomic rename; mv failure → registry.unregisterPlugin + row status `failed` + staging removed (prior active version untouched — the upgrade-rollback guarantee); success → remove the previous version dir, publish `committed`. ANY failure before ⑧: staging discarded (`ResolvedSource.discard` + remote staging rm), no registry entries survive, row `failed`/`rolled_back`. Every phase publishes `plugin_install_progress {installId, pluginId, phase, message?}` (requiresResponse:false). `${user_config.x}` substitution: at ⑦, plugin manifest env values containing `${user_config.x}` are resolved from the row's sealed `config_sealed` map; unresolved → literal (credential gate shows it). Uninstall: `unregisterPlugin` + remote `rm -rf pluginDir` + row/grant removal.
+**Transaction (Dart `plugin_runtime.dart` 8 steps, cloud-adapted):** ①resolve source into worker staging (progress events `resolved`) → ②`adaptPlugin` + digest (`normalized`) → ③grant check: stored grant covers `inferRequestedCapabilities` AND digest matches → continue; else status `pending_grant` + `systemBus.request(plugin_grant_approval, {installId, pluginId, version, capabilities:[{name, explanation}], envNames, allowDependencyScripts:false}, 120s)`; null/deny → `rolled_back` + outcome failed `grant_denied`; approve → `pluginGrants.put` (row status `pending_grant` → `active` at step ⑦) → ④`files.uploadDir(uid, stagingDir, pluginStagingDir(...))` → ⑤deps: staging contains `package.json` → `spawner`-side one-shot `exec(uid, {command:"npm", args:["install","--prefix",dir, ...(allowDependencyScripts ? [] : ["--ignore-scripts"])], cwd:dir})`; non-zero exit → rollback (`deps` phase failure) → ⑥probe: `files.stat` every contribution file; missing → recorded in `probeFailures` (status `degraded`, NOT failed — Dart parity) → ⑦write `plugins.upsert` (manifest jsonb with `rootPath = pluginDir`, sealed user config carried over from a previous install) + `registry.register(contributionsFromManifest)` (`activate`; register is an IDEMPOTENT UPSERT — Task 13 — so a reinstall/upgrade re-registering the same version-independent canonicalIds never throws) → ⑧COMMIT: `exec(uid, {command:"mv", args:[stagingDir, activeDir]})` — the atomic rename; mv failure → registry.unregisterPlugin + row status `failed` + staging removed (prior active version untouched — the upgrade-rollback guarantee); success → remove the previous version dir, publish `committed`. ANY failure before ⑧: staging discarded (`ResolvedSource.discard` + remote staging rm), no registry entries survive, row `failed`/`rolled_back`. Every phase publishes `plugin_install_progress {installId, pluginId, phase, message?}` (requiresResponse:false). `${user_config.x}` substitution: at ⑦, plugin manifest env values containing `${user_config.x}` are resolved from the row's sealed `config_sealed` map; unresolved → literal (credential gate shows it). Uninstall: `unregisterPlugin` + remote `rm -rf pluginDir` + row/grant removal.
 
 - [ ] **Step 1: Write failing tests.** `install.test.ts` (gated `TEST_DATABASE_URL`; fake SandboxFiles over an in-memory fs map + fake spawner + fake resolver serving a fixture tree; real systemBus replaced by a fake that auto-responds):
   - `happy path: phases published in order resolved→normalized→(grant)→deps→probe→activate→committed; row active; registry populated with canonical ids; content at pluginDir (staging renamed)`
   - `no stored grant → pending_grant + approval request payload carries explanations, NEVER a secret; approve → grant row persisted with digest + allowDependencyScripts`
   - `approval timeout (fake bus returns null) → rolled_back, outcome failed grant_denied, NO remote dir, NO registry entries, NO grant row`
   - `deny response → same as timeout`
-  - `digest change on reinstall forces re-approval` (second install with modified manifest → approval requested again)
+  - `digest change on reinstall forces re-approval` (second install with modified manifest → approval requested again; after approval the install COMMITS and the registry re-registers the same canonicalIds idempotently — upsert per Task 13, no duplicate-canonicalId throw, record count unchanged)
   - `deps: npm install invoked with --ignore-scripts by default; with allowDependencyScripts grant → without the flag; non-zero exit → rolled_back, staging gone, prior version row untouched`
   - `probe: missing contribution file → status degraded + probeFailures lists it (commit still happens)`
   - `rename failure (fake exec mv exit 1) → registry emptied, row failed, previous active version still present and registered`
@@ -845,9 +853,9 @@ export function pluginStagingDir(pluginId: string, version: string): string; // 
 ### Task 15: Gateway REST — /cloud/v1/mcp/*, /cloud/v1/plugins/*, OAuth endpoints, system responses
 
 **Files:**
-- Create: `cloud/apps/gateway/src/routes/mcpServers.ts`, `src/routes/mcpCatalog.ts`, `src/routes/mcpOauth.ts`, `src/routes/plugins.ts`, `src/routes/systemResponses.ts`
-- Modify: `cloud/apps/gateway/src/app.ts` (register routes + public callback scope), `src/env.ts` (`OVID_MASTER_KEY`, `OVID_MCP_REDIRECT_URI`), `src/main.ts`, `cloud/packages/shared/src/mcpRest.ts` (new DTO module) + `index.ts`, `cloud/deploy/.env.example` (if present — else `DEPLOY.md` env table), `cloud/deploy/docker-compose.yml` (env passthrough for gateway+worker: `OVID_MASTER_KEY`)
-- Test: `cloud/apps/gateway/src/routes/mcpServers.test.ts`, `mcpCatalog.test.ts`, `mcpOauth.test.ts`, `plugins.test.ts`
+- Create: `cloud/apps/gateway/src/routes/mcpServers.ts`, `src/routes/mcpCatalog.ts`, `src/routes/mcpOauth.ts`, `src/routes/plugins.ts`, `src/routes/systemResponses.ts`, `cloud/packages/shared/src/mcpRest.ts` (DTO module)
+- Modify: `cloud/apps/gateway/src/app.ts` (register routes + public callback scope), `src/env.ts` (`OVID_MASTER_KEY`, `OVID_MCP_REDIRECT_URI`), `src/main.ts`, `cloud/packages/shared/src/index.ts` (additive re-export), `cloud/deploy/.env.example` (if present — else `DEPLOY.md` env table), `cloud/deploy/docker-compose.yml` (env passthrough for gateway+worker: `OVID_MASTER_KEY`)
+- Test: `cloud/apps/gateway/src/routes/mcpServers.test.ts`, `mcpCatalog.test.ts`, `mcpOauth.test.ts`, `plugins.test.ts`, `systemResponses.test.ts`
 
 **Interfaces:**
 - Consumes: `parseMcpConfig`, `CURATED_MANIFEST`, `createEnvelopeCrypto`, `createOAuthFlow`, repos (Task 8), `SystemHub.respond/publishOut`, `PLUGIN_INSTALLS` queue, `users.getTier`, P1 route helpers (`sendError/badRequest/notFound/zodBadRequest/isUuid/parsePageLimit`).
@@ -869,34 +877,34 @@ PATCH  /cloud/v1/mcp/servers/:id        // {enabled?, secrets?} — secrets REPL
 DELETE /cloud/v1/mcp/servers/:id
 GET    /cloud/v1/mcp/catalog            // {items: CatalogServerDto[]} from CURATED_MANIFEST + configured flags
 GET    /cloud/v1/mcp/oauth/start?serverId=…   // → {authorizeUrl}; starts Task-9 flow (needsAuth prerequisite)
-GET    /cloud/v1/mcp/oauth/callback           // PUBLIC scope; query {state, code?, error?, iss?} → HTML page; publishes mcp_oauth_completed/failed via hub.publishOut
+GET    /cloud/v1/mcp/oauth/callback           // PUBLIC scope; query {state, code?, error?, iss?} → HTML page; publishes mcp_oauth_completed/failed via systemHub.publishOut
 POST   /cloud/v1/mcp/oauth/disconnect         // {serverId} → forget tokens
 GET    /cloud/v1/plugins                      // PluginDto[]
 POST   /cloud/v1/plugins/install              // {source: PluginSourceInput} validated with @ovid/shared pluginSourceInputSchema (no @ovid/plugins dep in the gateway); free → 402 pro_required; creates plugins row (status queued→installing by worker) + enqueues PluginInstallJob {priority: tier free?2:1}; → 202 PluginInstallResponse
 GET    /cloud/v1/plugins/:id
 PATCH  /cloud/v1/plugins/:id/config           // {config: Record<string,string>} → sealed into config_sealed (for ${user_config.x})
 DELETE /cloud/v1/plugins/:id                  // enqueues mode:"uninstall" → 202
-POST   /cloud/v1/system/responses             // {id, payload} → hub.respond(uid, …) — the REST answer path for ANY pending approval (spec §6.2 "client answers via REST/WS")
+POST   /cloud/v1/system/responses             // {id, payload} → systemHub.respond(uid, …) — the REST answer path for ANY pending approval (spec §6.2 "client answers via REST/WS")
 ```
 
-`GatewayDeps` gains (additive optional fields so P1 tests compile untouched): `crypto?: EnvelopeCrypto; oauth?: OAuthFlow; hub?: SystemHub;` — mcp/plugins routes return 503 `unavailable` when their dep is absent (keeps P1-only wiring bootable). `loadGatewayEnv` gains `masterKey: string` (required when `authMode === "firebase"`; test mode: required only if the mcp routes are exercised — tests pass a fixed 64-hex constant) and `mcpRedirectUri` (default `https://ovidsi.com/oauth/callback`).
+`GatewayDeps` gains (additive optional fields so P1 tests compile untouched): `crypto?: EnvelopeCrypto; oauth?: OAuthFlow;` — plus the `systemHub?: SystemHub` field Task 10 already added (ONE canonical name; this task consumes that field, it does not add a second one). mcp/plugins routes return 503 `unavailable` when their dep is absent (keeps P1-only wiring bootable). `loadGatewayEnv` gains `masterKey: string` (required when `authMode === "firebase"`; test mode: required only if the mcp routes are exercised — tests pass a fixed 64-hex constant) and `mcpRedirectUri` (default `https://ovidsi.com/oauth/callback`).
 
 - [ ] **Step 1: Write failing tests** (inject()-level, P1 gateway test conventions — `OVID_AUTH_MODE=test`, `openTestDb`, `testUid`):
-  - mcpServers: `POST custom as free → 402 {error:{code:"pro_required",message:PRO_REQUIRED_MESSAGE}}` (exact message); `POST custom as pro (tier row flipped) → 201, stored row's secrets_sealed starts "ev1:" and the response has hasSecrets:true and NO env values`; `POST pasted .mcp.json parses via parseMcpConfig (stdio entry as pro)`; `POST curated credential {curatedId:"github", secrets:{GITHUB_TOKEN:"x"}} as FREE → 201` (curated is not gated); `duplicate name → 409 server_exists`; `GET list masks everything` (JSON.stringify contains no secret); `PATCH secrets replaces; DELETE removes; wrong owner → 404 everywhere`.
+  - mcpServers: `POST custom as free → 402 {error:{code:"pro_required",message:PRO_REQUIRED_MESSAGE}}` (exact message); `POST custom as pro (tier row flipped) → 201, stored row's secrets_sealed holds an EncryptedEnvelope whose JSON serialization contains NO env value, and the response has hasSecrets:true and NO env values`; `POST pasted .mcp.json parses via parseMcpConfig (stdio entry as pro)`; `POST curated credential {curatedId:"github", secrets:{GITHUB_TOKEN:"x"}} as FREE → 201` (curated is not gated); `duplicate name → 409 server_exists`; `GET list masks everything` (JSON.stringify contains no secret); `PATCH secrets replaces; DELETE removes; wrong owner → 404 everywhere`.
   - mcpCatalog: `GET returns 20 entries with tools and configured flags reflecting the caller's credential rows`.
-  - mcpOauth: `start returns authorizeUrl containing state` (flow over fake fetchImpl + real db); `callback is reachable WITHOUT auth headers` (public scope pin) and `valid state → 200 HTML + hub.publishOut observed`; `unknown state → 400 oauth_failed HTML`; `disconnect removes the tokens row`.
+  - mcpOauth: `start returns authorizeUrl containing state` (flow over fake fetchImpl + real db); `callback is reachable WITHOUT auth headers` (public scope pin) and `valid state → 200 HTML + systemHub.publishOut observed`; `unknown state → 400 oauth_failed HTML`; `disconnect removes the tokens row`.
   - plugins: `install as free → 402 pro_required`; `install as pro → 202 {installId,status:"queued"} + BullMQ job observed (fake queue) with priority 1`; `free-tier priority 2 for a pro-downgraded…` — pin: priority read from users.getTier at request time; `PATCH config seals values`; `DELETE enqueues uninstall`; `GET list masks config secrets`.
-  - systemResponses: `POST {id,payload} → hub.respond called with the caller's uid`; `malformed body → 400`.
+  - systemResponses: `POST {id,payload} → systemHub.respond called with the caller's uid`; `malformed body → 400`.
 - [ ] **Step 2: Run to verify fail.** `pnpm --filter @ovid/gateway test` — FAIL.
-- [ ] **Step 3: Implement** routes + wiring; register the callback in the PUBLIC scope next to health (explicit no-auth comment, mirroring P1's ws scope pattern); compose file gains `OVID_MASTER_KEY=${OVID_MASTER_KEY}` for gateway+worker and `caddy-snippet.conf` gains the `ovidsi.com/oauth/callback` reverse-proxy block (repo-only; DEPLOY.md notes activation is owner-gated).
+- [ ] **Step 3: Implement** routes + wiring; register the callback in the PUBLIC scope next to health (explicit no-auth comment, mirroring P1's ws scope pattern); compose file gains `OVID_MASTER_KEY=${OVID_MASTER_KEY}` for gateway+worker and `caddy-snippet.conf` gains the `ovidsi.com/oauth/callback` reverse-proxy block (repo-only; DEPLOY.md notes activation is owner-gated) — THIS task canonically owns the caddy edit (Task 9 touches no deploy files and points at this block).
 - [ ] **Step 4: Run to verify pass.** PASS; `docker compose -f cloud/deploy/docker-compose.yml config -q` exits 0 (dry validation only — never `up`).
 - [ ] **Step 5: Commit.** `git commit -m "feat(cloud): gateway REST — mcp servers CRUD (sealed secrets), catalog, plugins + installs, oauth flow endpoints, system responses"`
 
 ### Task 16: Worker MCP runtime, P3 roster seam, agent catalog/install tools, router-level e2e
 
 **Files:**
-- Create: `cloud/apps/worker/src/mcpRuntime.ts`, `cloud/apps/worker/src/mcpTools.ts`, `cloud/apps/e2e/src/mcpTierGate.test.ts`
-- Modify: `cloud/apps/worker/src/main.ts` (wiring), `cloud/apps/worker/src/sandboxSeam.ts` (`createUnavailableSandbox`), `cloud/apps/e2e/src/index.ts` (export the harness helpers if needed)
+- Create: `cloud/apps/worker/src/mcpRuntime.ts`, `cloud/apps/worker/src/mcpTools.ts`, `cloud/apps/worker/src/sandboxSeam.ts` (`createSandboxSeam`/`createUnavailableSandbox` — the P2 adaptation file), `cloud/apps/e2e/src/mcpTierGate.test.ts`
+- Modify: `cloud/apps/worker/src/main.ts` (wiring), `cloud/apps/e2e/src/index.ts` (export the harness helpers if needed)
 - Test: `cloud/apps/worker/src/mcpRuntime.test.ts`, `src/mcpTools.test.ts`, `cloud/apps/e2e/src/mcpTierGate.test.ts`
 
 **Interfaces:**
@@ -915,34 +923,48 @@ export class SandboxUnavailableError extends Error { readonly code = "sandbox_un
 
 // sandboxSeam.ts
 export function createSandboxSeam(): { spawner: SandboxSpawner; files: SandboxFiles } | null;
-// Returns null until P2 lands. ADAPTATION POINT: when P2 has landed, this is the ONLY file that
-// imports @ovid/sandbox (or its as-landed name) and maps its API onto SandboxSpawner/SandboxFiles.
+// Returns null until P2 lands. ADAPTATION POINT: when P2 has landed, this is the ONLY app file
+// that constructs the P2-backed pair (SandboxSpawner/SandboxFiles are DEFINED in @ovid/sandbox —
+// every package imports them unchanged) and, where shapes differ, maps SandboxFiles onto the
+// @ovid/mcp WorkspaceFiles used for ctx.workspace. P2's "{workspacesRoot}/{uid}/workspace"
+// layout is absorbed here too.
 export function createUnavailableSandbox(): { spawner: SandboxSpawner; files: SandboxFiles };
 
-// mcpTools.ts — the P3 roster seam (documented; P3 calls these from the run loop)
-export interface AgentToolDef { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown>; } }
+// mcpTools.ts — the P3 roster seam (documented; P3 calls these from the run loop).
+// CANONICAL TOOL SEAM (P2's landed AgentTool, additively extended): every MCP tool and catalog
+// tool registers as execute(args, ctx) → ToolResult { content, isError?, artifacts? } — never a
+// bespoke list/call pair. The wire-level McpToolCallResult {text, isError, content} maps to
+// {content: text, isError} at this seam.
+export interface ToolResult { content: string; isError?: boolean; artifacts?: unknown[]; } // P2's landed {content, isError} + optional artifacts; isError omitted === false
+export interface McpToolContext { uid: string; sessionId: string; runId: string; }          // the subset of P2's ToolContext the MCP surface needs (RunContext rides alongside)
+export interface McpAgentTool {
+  readonly name: string;                          // published name mcp__<server>__<tool>
+  readonly description: string;
+  readonly parameters: Record<string, unknown>;    // JSON Schema object sent to the model
+  execute(args: Record<string, unknown>, ctx: McpToolContext): Promise<ToolResult>; // validates args itself; user errors → isError result, never a throw
+}
 export interface McpToolProvider {
-  listTools(uid: string): Promise<AgentToolDef[]>;                        // every McpToolListing as an OpenAI function tool (sorted by name — prompt-cache-stable, P3 contract)
-  callTool(uid: string, name: string, args: Record<string, unknown>, runCtx: RunContext): Promise<McpToolCallResult>; // resolveTool → router.callTool; unresolved → isError "Unknown tool: <name>"
+  tools(uid: string): Promise<McpAgentTool[]>;   // one McpAgentTool per McpToolListing, sorted by name (prompt-cache-stable, P3 contract); execute → router.resolveTool → router.callTool; unresolved → {content:"Unknown tool: <name>", isError:true}
+  specs(uid: string): Promise<ModelToolSpec[]>;  // [OI] function specs derived from tools() (ModelToolSpec imported from P2's tools/types), same sort
 }
 export function createMcpToolProvider(router: McpRouter): McpToolProvider;
-export const CATALOG_AGENT_TOOLS: readonly AgentToolDef[];
+export const CATALOG_AGENT_TOOLS: readonly McpAgentTool[];
 // catalog_list_mcp {scope?: "curated"|"custom"|"all"}, catalog_add_mcp {config: string},
 // agent_install_mcp {server: string}, agent_install_plugin {source: string}
 export interface CatalogToolDeps { router: McpRouter; db: Db; queues: { pluginInstalls: Queue<PluginInstallJob> }; }
-export function createCatalogToolHandlers(deps: CatalogToolDeps): Record<string, (uid: string, args: Record<string, unknown>, runCtx: RunContext) => Promise<McpToolCallResult>>;
-// Tool-handler rules: a GATED refusal is a normal tool result {isError:true, text:PRO_REQUIRED_MESSAGE}
+export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[];
+// Tool rules: a GATED refusal is a normal tool result {content: PRO_REQUIRED_MESSAGE, isError: true}
 // (the agent can adapt and tell the user — never a thrown error into the run loop).
 // catalog_add_mcp: parseMcpConfig → first entry → router.addServer (tier gate inside).
 // agent_install_plugin: source-string parse ("owner/repo" → github, "npm:<pkg>" → npm, http(s) URL → zip,
 //   otherwise paste) → tier gate (free → pro_required result) → plugins row + enqueue (priority by tier).
 ```
 
-**Seam documentation (write as the header comment of `mcpTools.ts`):** P3's roster builder calls `mcpToolProvider.listTools(uid)` alongside native tools when assembling the sorted tool list, and routes any model tool-call whose name starts with `mcp__` (or resolves via `router.resolveTool`) to `mcpToolProvider.callTool(uid, name, args, runCtx)`, constructing `RunContext` from the active run (`sampler` = a closure over the run's `ModelTransport` + the run's API key — one completion call, NO retry layer). `catalog` agent tools register as ordinary roster tools owned by P3; until P3 lands, they are exercised here at router level.
+**Seam documentation (write as the header comment of `mcpTools.ts`):** P3's roster builder calls `mcpToolProvider.tools(uid)`/`specs(uid)` alongside native tools when assembling the sorted tool list, and routes any model tool-call whose name starts with `mcp__` (or resolves via `router.resolveTool`) to that tool's canonical `execute(args, ctx)` (ctx carries uid + session/run ids; the provider closes over `RunContext` from the active run, whose `sampler` is a closure over the run's `ModelTransport` + the run's API key — one completion call, NO retry layer; reword the sampler note when P9's `RunDeps.keys: KeyResolver` lands). `catalog` agent tools register as ordinary roster tools owned by P3 through the SAME canonical seam; until P3 lands, they are exercised here at router level.
 
 - [ ] **Step 1: Write failing tests.**
   - `mcpRuntime.test.ts` (gated DB+Redis): `createMcpRuntime with sandbox null → curated fetch call works, filesystem call → isError sandbox_unavailable`; `router+bus+installer share one runtime instance`; `shutdown closes bus + router`.
-  - `mcpTools.test.ts`: `listTools returns sorted OpenAI function defs for curated servers`; `callTool routes mcp__fetch__fetch through the router`; `unknown name → isError "Unknown tool: x"`; `catalog_add_mcp as free → isError text === PRO_REQUIRED_MESSAGE (not a throw)`; `catalog_add_mcp as pro persists the server row`; `agent_install_plugin "acme/demo" → github source parsed, job enqueued with priority from tier`; `agent_install_plugin as free → pro_required result, nothing enqueued`; `agent_install_mcp {server:"github"} for a user with credentials → connected summary text includes the tool count`.
+  - `mcpTools.test.ts`: `tools() returns canonical McpAgentTool registrations sorted by name; specs() returns sorted [OI] function defs for curated servers`; `execute on mcp__fetch__fetch routes through the router → {content, isError:false}`; `execute with an unknown name → {content:"Unknown tool: x", isError:true}`; `catalog_add_mcp execute as free → {content: PRO_REQUIRED_MESSAGE, isError:true} (not a throw)`; `catalog_add_mcp as pro persists the server row`; `catalog_list_mcp {scope:"all"} → content names all 20 curated ids; {scope:"custom"} for a user with no custom servers → curated omitted, empty list` (the previously-untested fourth catalog tool, now pinned); `agent_install_plugin "acme/demo" → github source parsed, job enqueued with priority from tier`; `agent_install_plugin as free → pro_required result, nothing enqueued`; `agent_install_mcp {server:"github"} for a user with credentials → connected summary text includes the tool count`.
   - `mcpTierGate.test.ts` (e2e, gated DB+Redis, fakes for sandbox/model): **the brief's acceptance tests** — ① free user: catalog lists 20; fetch singleton call succeeds; custom http server POST → 402 pro_required; router-level addServer → ProRequiredError; ② pro user: custom http server (fixture server on 127.0.0.1) connects, tools list, call round-trips; stdio server (fake spawner echoing a canned tools/list + call) works; ③ **shared singleton across users:** users A (free) and B (pro) both call `mcp__fetch__fetch` → fixture fetch server saw 2 requests, catalog instance count 1; ④ downgrade B → free mid-flight → next custom callTool → pro_required, curated still works; ⑤ plugin install as pro with auto-approving fake bus → row active + registry entries + progress events observed on sys:{uid}:out in phase order.
 - [ ] **Step 2: Run to verify fail.** `pnpm --filter @ovid/worker test && pnpm --filter @ovid/e2e test` — FAIL.
 - [ ] **Step 3: Implement** runtime + tools + seam; wire `main.ts`: `createMcpRuntime` (sandbox seam → `createSandboxSeam()` returning null until P2 lands), `createPluginInstallsWorker` consuming `plugin-installs` with the Task-14 processor, graceful shutdown extended (runtime.shutdown + plugin worker close). Queue creation: `createQueues({url}, {withPluginInstalls:true})` in BOTH gateway main (producer) and worker main (consumer).
@@ -957,15 +979,15 @@ export function createCatalogToolHandlers(deps: CatalogToolDeps): Record<string,
 - G9 tier gate: Tasks 11 (router middleware, per-dispatch re-check), 15 (REST 402 pro_required), 14 (install-job re-check), 16 (agent tools) — all four gate points, matching Review Focus 3.
 - §6.1 McpRouter: 4 transports (T1–T3, T5 native), OAuth PKCE with `https://ovidsi.com/oauth/callback` relayed to the client (T9 flow + T10 system event + T15 callback route), elicitation/sampling over WS system channel (T4 + T10 + T11 wiring).
 - §11 secrets: envelope encryption with `OVID_MASTER_KEY` (T8), tokens per user encrypted (T8/T9), SSRF-guarded egress for ALL agent HTTP out of the MCP surface (T3, consumed by T5/T6/T9/T12).
-- D3-adjacent escrow pattern: T8 `createEnvelopeCrypto` is the same construction P9 formalizes (noted in the seam list).
+- Escrow: T8's `crypto.ts` is a thin shim aligned EXACTLY to P9's canonical `EnvelopeCrypto` (encrypt/decrypt + recordId AAD on both layers + structured `EncryptedEnvelope` + `EnvelopeAuthError`); when P9 lands `@ovid/escrow`, P5's call sites swap imports mechanically and the shim is deleted (seam list).
 - §16 curated lineup: decided + documented in T6 (20 servers; exclusions reasoned).
 - Plugin pipeline: sources/validation (T12), manifests/adapters/capabilities (T13), atomic transaction + grants + deps + progress (T14), REST/agent entry points (T15/T16), contribution registry canonical ids incl. hook registration-only seam for P3 (T13).
 - Brief items verified present: `.mcp.json` parser (T7), pagination/backoff/trim/naming (T1/T2/T11), ping/roots/sampling/elicitation (T4), DCR (T9), two-pass archive validation + SRI + size caps (T12), `--ignore-scripts` default (T14), `${user_config.x}` (T14), shared-singleton proof test (T6 + T11 + T16 ③), queue priority coordination (T14/T15/T16 via P1's free=2/pro=1).
 - Gap accepted (documented, not silently dropped): prompts/resources catalog tools (`catalog_mcp_list_prompts` etc. from `mcp_catalog_tools.dart`) are NOT in P5 — the curated lineup is tools-only; prompts/resources ride a later increment. The Dart catalog renderer's 6000-char bounding is preserved via `trimToolResult` everywhere results are rendered.
 
-**2. Step scan.** Every step names one action with a checkable result; test steps carry exact names + the spec-pinned values (6000/50/4096/500→30 s/10/120 s/10 min/64 MiB/4 MiB/1 MiB/30 s clamp 5..300/−1/−32601/−32602/−32603/402/pro_required). Implementation steps give signatures + pinned values and leave bodies to the implementer, except where the algorithm IS the decision (envelope layout, two-pass validation, transaction order) — those are specified in prose, not code. No "TBD"/"handle edge cases" lines. Two spots deliberately defer to builder's choice with the choice pinned in the commit: zip library (fflate vs hand-rolled, T12) and GitHub download route (trees API vs codeload, T12).
+**2. Step scan.** Every step names one action with a checkable result; test steps carry exact names + the spec-pinned values (6000/50/4096/500→30 s/10/120 s/10 min/64 MiB/4 MiB/1 MiB/30 s clamp 5..300/−1/−32601/−32602/−32603/402/pro_required). Implementation steps give signatures + pinned values and leave bodies to the implementer, except where the algorithm IS the decision (P9-aligned envelope construction, two-pass validation, transaction order) — those are specified in prose, not code. No "TBD"/"handle edge cases" lines. Two spots deliberately defer to builder's choice with the choice pinned in the commit: zip library (fflate vs hand-rolled, T12) and GitHub download route (trees API vs codeload, T12).
 
-**3. Type consistency.** `McpTransport/McpClient` (T1) ← T2/T3 transports; `NativeMcpHandler/McpCallContext` (T3) ← T5/T6 handlers; `WorkspaceFiles` (T5) ← T6/T11/T14; `SandboxSpawner` (T3) ← T11/T14/T16; `SandboxFiles extends WorkspaceFiles` (T14) is the only widening, at the seam file; `UserSystemBus` (T10) ← T9 (`Pick<…,"publish">`), T11, T14, T16; `EnvelopeCrypto` (T8) ← T9/T11/T14/T15; `ImportedMcp` (T7) ← T11 (`AddServerInput`), T13 (`PluginMcpServerContribution`), T15; `PluginSourceInput` (T12) ← T14 job, T15/T16 install entry points; `ContributionRegistry` (T13) ← T14/T16; `RunContext` (T11) ← T16 provider; `PluginInstallJob` (T14) ← T15/T16 enqueue sites. `users.getTier` (T8) is the single tier read used by T11/T14/T15/T16. Forward references inside T3's `McpCallContext` are declared in-package (acyclic: types only).
+**3. Type consistency.** `McpTransport/McpClient` (T1) ← T2/T3 transports (`HttpTransport extends McpTransport` carries `setProtocolVersion`); `NativeMcpHandler/McpCallContext` (T3) ← T5/T6 handlers; `WorkspaceFiles` (T5) ← T6/T11; `SandboxSpawner`/`SandboxFiles` ← DEFINED in `@ovid/sandbox` (P2's revision) and imported by T3 (stdio adapter maps onto the long-lived jailed-stdio primitive), T14 (`InstallerDeps.sandbox`) and T16; the worker `sandboxSeam.ts` maps `SandboxFiles` → `WorkspaceFiles` where shapes differ — the only drift surface; `UserSystemBus` (T10) ← T11, T14, T16, with T9 depending only on the structural `SystemEventPublisher` (the bus type is declared once); `EnvelopeCrypto` (T8, P9-aligned) ← T9/T11/T14/T15; `ImportedMcp` (T7) ← T11 (`AddServerInput`), T13 (`PluginMcpServerContribution`), T15; `PluginSourceInput` (T12) ← T14 job, T15/T16 install entry points; `ContributionRegistry` (T13) ← T14/T16; `RunContext` (T11) ← T16 provider; `PluginInstallJob` (T14) ← T15/T16 enqueue sites; tool registration (T16) goes through the canonical seam `execute(args, ctx) → ToolResult {content, isError?, artifacts?}` (P2's `AgentTool` additively extended). `users.getTier` (T8) is the single tier read used by T11/T14/T15/T16. Forward references inside T3's `McpCallContext` are declared in-package (acyclic: types only).
 
 **4. Review Focus coverage.** #1 → T1 (pagination caps, trim, malformed frames) + T2 (backoff ladder, expected-vs-unexpected close); #2 → T12 (every traversal/symlink/size case, "nothing written" assertions); #3 → T11 (router-direct + downgrade), T14 (job-start re-check), T15 (REST 402), T16 (agent tools + e2e ④); #4 → T8 (sealed at rest), T9/T14 (hygiene pins on bus payloads), T15 (DTO masking + response-stringify grep); #5 → T3 (classifier incl. IPv6-embedded forms + production loopback block), T6 (host-extra egress via ctx.fetchImpl), T12 (zip URL guarded).
 
