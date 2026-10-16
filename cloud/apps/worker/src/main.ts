@@ -16,12 +16,18 @@ export interface WorkerEnv {
   litellmBaseUrl: string;
   defaultModel: string;
   runStaleMs: number;
+  runQueueWaitMs: number;
 }
 
 /** A 'running' run older than this is considered stranded (sweeper threshold). */
 const DEFAULT_RUN_STALE_MS = 600_000;
 /** How often the stale-run sweeper re-checks after the boot pass. */
 const STALE_SWEEP_INTERVAL_MS = 60_000;
+/**
+ * C1 default: how long a job may wait for older active same-session runs
+ * (OVID_RUN_QUEUE_WAIT_MS); mirrors the processor's DEFAULT_RUN_QUEUE_WAIT_MS.
+ */
+const DEFAULT_RUN_QUEUE_WAIT_MS = 600_000;
 
 /**
  * Validate the worker environment — same production-safety mindset as the
@@ -53,6 +59,20 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     runStaleMs = parsed;
   }
 
+  // C1: how long a job may wait for older active runs of the same session
+  // before run_queue_wait_timeout. Same validation discipline as above.
+  let runQueueWaitMs = DEFAULT_RUN_QUEUE_WAIT_MS;
+  const queueWaitRaw = raw.OVID_RUN_QUEUE_WAIT_MS;
+  if (queueWaitRaw !== undefined) {
+    const parsed = Number(queueWaitRaw.trim());
+    if (queueWaitRaw.trim() === "" || !Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error(
+        `OVID_RUN_QUEUE_WAIT_MS must be a positive integer (milliseconds), got: ${queueWaitRaw}`,
+      );
+    }
+    runQueueWaitMs = parsed;
+  }
+
   return {
     nodeEnv: raw.NODE_ENV?.trim() || "development",
     databaseUrl: required("DATABASE_URL"),
@@ -61,6 +81,7 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     litellmBaseUrl: required("OVID_LITELLM_BASE"),
     defaultModel: required("OVID_DEFAULT_MODEL"),
     runStaleMs,
+    runQueueWaitMs,
   };
 }
 
@@ -101,6 +122,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     transport: createOpenAiTransport(),
     litellmBaseUrl: cfg.litellmBaseUrl,
     defaultModel: cfg.defaultModel,
+    runQueueWaitMs: cfg.runQueueWaitMs,
   });
 
   // Connection OPTIONS OBJECT — a bare URL string silently spreads into

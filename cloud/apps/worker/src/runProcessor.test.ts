@@ -400,6 +400,105 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       await runs.finish(db, seeded.runId, "failed", "test cleanup");
     });
 
+    // -------------------------------------------------------------------------
+    // C1: single active run per session. The processor must not claim a run
+    // while an older active run of the SAME session exists (worker concurrency
+    // 8 would otherwise interleave two runs' deltas in one transcript).
+    // -------------------------------------------------------------------------
+
+    /** Two runs of ONE session: `older` claimed by "another worker", `newer` enqueued. */
+    async function seedTwoRuns(): Promise<{
+      uid: string;
+      sessionId: string;
+      older: string;
+      newer: string;
+    }> {
+      const userUid = uid("w9u");
+      await users.ensure(db, userUid, `${userUid}@stub.test`);
+      const session = await sessions.create(db, userUid);
+      createdSessions.push(session.id);
+      const promptMessage = await messages.append(db, {
+        sessionId: session.id,
+        role: "user",
+        content: "p",
+      });
+      const first = await runs.create(db, {
+        sessionId: session.id,
+        promptMessageId: promptMessage.id,
+      });
+      const second = await runs.create(db, {
+        sessionId: session.id,
+        promptMessageId: promptMessage.id,
+      });
+      expect(await runs.claimNext(db, first.id)).toBe(true); // another worker owns it
+      return { uid: userUid, sessionId: session.id, older: first.id, newer: second.id };
+    }
+
+    it("C1: newer run waits for the older active run, then starts strictly after its run_completed", async () => {
+      const two = await seedTwoRuns();
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["after wait"] }]);
+      // The injected sleep plays the older run's processor: on run2's first
+      // poll-wait it emits run_completed (event FIRST) and flips the row —
+      // exactly the terminal sequence the real processor now guarantees.
+      const deps = makeDeps(transport, {
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          if (sleeps.length === 1) {
+            const event = await events.append(two.sessionId, "run_completed", {
+              runId: two.older,
+            });
+            await eventMirror.put(db, event);
+            await runs.finish(db, two.older, "completed");
+          }
+        },
+      });
+
+      await createAgentRunProcessor(deps)({
+        data: { runId: two.newer, sessionId: two.sessionId, userId: two.uid, prompt: "p" },
+      });
+
+      expect(sleeps).toEqual([250]); // one poll interval, then the older run was gone
+      expect(calls).toHaveLength(1); // the model call happened exactly once, after the wait
+      const evts = await readEvents(two.sessionId);
+      expect(types(evts)).toEqual([
+        "run_completed", // the OLDER run's terminal event…
+        "run_started", // …strictly before run2's run_started (the C1 ordering pin)
+        "message_delta",
+        "message_completed",
+        "run_completed",
+      ]);
+      expect(evts[1]!.payload).toEqual({ runId: two.newer });
+      expect(evts[4]!.payload).toEqual({ runId: two.newer });
+      expect(await readMirror(two.sessionId)).toEqual(evts);
+      expect(await runRow(two.newer)).toMatchObject({ status: "completed", attempts: 1 });
+      expect(await runRow(two.older)).toMatchObject({ status: "completed" });
+    });
+
+    it("C1: older run still active at the wait cap → run_failed(run_queue_wait_timeout), run terminalized from 'queued', model never called", async () => {
+      const two = await seedTwoRuns();
+      const { transport, calls } = stubTransport([{ kind: "ok", deltas: ["never"] }]);
+
+      await createAgentRunProcessor(makeDeps(transport, { runQueueWaitMs: 0 }))({
+        data: { runId: two.newer, sessionId: two.sessionId, userId: two.uid, prompt: "p" },
+      });
+
+      const evts = await readEvents(two.sessionId);
+      expect(types(evts)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toEqual({ code: "run_queue_wait_timeout" });
+      expect(await readMirror(two.sessionId)).toEqual(evts);
+      expect(calls).toHaveLength(0); // the model call is never started
+      expect(sleeps).toEqual([]); // cap 0 → immediate refusal, no poll wait
+      expect(await runRow(two.newer)).toMatchObject({
+        status: "failed",
+        attempts: 0,
+        lastError: "run_queue_wait_timeout",
+      });
+      // The OLDER run is untouched — the refusal only concerns the wait-capped run.
+      expect(await runRow(two.older)).toMatchObject({ status: "running" });
+      // Hygiene: don't leave the seeded 'running' row stranded.
+      await runs.finish(db, two.older, "failed", "test cleanup");
+    });
+
     it("history reaches the transport oldest-first, ends with the prompt, tool rows skipped defensively", async () => {
       const seeded = await seedRun({
         prompt: "the-new-prompt",

@@ -63,6 +63,10 @@ import { createAgentRunProcessor, createOpenAiTransport } from "@ovid/worker";
  *      redis-q URL at a closed port → health 503 {db:true, redisQ:false}.
  *   d. per-user boundaries — B subscribe → forbidden frame; B GET session /
  *      messages → 404.
+ *   e. single-active-run ordering (C1) — two rapid sends to ONE session with
+ *      a gated first run: run2's run_started arrives strictly AFTER run1's
+ *      run_completed, no interleaved deltas, final transcript order
+ *      user1, user2, assistant1, assistant2.
  *
  * Heartbeat e2e is explicitly OUT of scope (Task 8 minor: pingIntervalMs seam
  * is not plumbed through buildGateway).
@@ -309,6 +313,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         defaultModel: "e2e-model",
         sleep: async (ms) => {
           sleeps.push(ms);
+          await sleep(ms); // REALLY wait: the C1 same-session wait loop polls on this
         },
       });
       worker = createAgentRunsWorker(connection, processor, { prefix: QUEUE_PREFIX });
@@ -880,5 +885,120 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       await clientB.close();
     });
+
+    // ---- Flow e: single-active-run ordering (C1) ---------------------------
+
+    it("flow e — two rapid sends to one session: run2's run_started strictly AFTER run1's run_completed; no interleaved deltas; transcript user1,user2,assistant1,assistant2", async () => {
+      const user = uid("e2e-e");
+      // The gate parks run1's stream after 1 delta: run1 is provably mid-run
+      // (no completion events can exist) while run2 is enqueued.
+      const gate = armSse({ deltas: ["first ", "reply"], chunkDelayMs: 30, gateAfterDeltas: 1 });
+
+      const sessionId = await createSession(user);
+      const client = await openSubscribedClient(user, sessionId, null);
+      const sent1 = await sendMessage(user, sessionId, "message one");
+
+      // Run1 is mid-stream: run_started + the pre-gate delta, nothing more.
+      await client.waitFor(
+        () => client.events().length >= 2,
+        "run1 run_started + first delta",
+      );
+      expect(typesOf(client.events())).toEqual(["run_started", "message_delta"]);
+
+      // Second rapid send WHILE run1 is parked at the gate. Worker concurrency
+      // is 8, so run2's job is picked up immediately — the C1 wait loop must
+      // hold it: nothing of run2's may appear on the wire yet.
+      const sent2 = await sendMessage(user, sessionId, "message two");
+      await sleep(400); // settle window: any (wrongly) started run2 event lands here
+      expect(
+        client.events().filter((e) => e.payload.runId === sent2.runId),
+      ).toEqual([]);
+      expect((await runRow(sent2.runId)).status).toBe("queued"); // waiting, not running
+
+      gate.release();
+
+      await client.waitFor(
+        () =>
+          client.events().filter((e) => e.type === "run_completed").length === 2,
+        "both runs completed",
+        25_000,
+      );
+      await sleep(300); // settle window: no frame may arrive after the tail
+
+      const evts = client.events();
+      // The C1 ordering pin: run2's run_started STRICTLY after run1's
+      // run_completed — both in arrival order and by stream seq.
+      const completed1 = evts.findIndex(
+        (e) => e.type === "run_completed" && e.payload.runId === sent1.runId,
+      );
+      const started2 = evts.findIndex(
+        (e) => e.type === "run_started" && e.payload.runId === sent2.runId,
+      );
+      expect(completed1).toBeGreaterThanOrEqual(0);
+      expect(started2).toBeGreaterThan(completed1);
+      expect(compareSeq(evts[started2]!.seq, evts[completed1]!.seq)).toBe(1);
+      expectSeqsStrictlyMonotonic(evts.map((e) => e.seq));
+
+      // No interleaving: run1's deltas form one contiguous block, run2's
+      // another, and run2's block starts only after run1's run_completed.
+      const deltaRunIds = evts
+        .filter((e) => e.type === "message_delta")
+        .map((e) => e.payload.runId);
+      expect(deltaRunIds).toEqual([sent1.runId, sent1.runId, sent2.runId, sent2.runId]);
+      // run1's LAST delta precedes run2's run_started: nothing of run2's
+      // stream can precede its own start.
+      const lastRun1Delta = evts.reduce(
+        (acc, e, i) => (e.type === "message_delta" && e.payload.runId === sent1.runId ? i : acc),
+        -1,
+      );
+      expect(lastRun1Delta).toBeLessThan(started2);
+
+      // run2's model call saw the serialized context: user1, user2,
+      // assistant1 — the prompt of run2 ("message two") exactly once, last.
+      const run2Request = sse.requests.at(-1);
+      const run2Body = run2Request?.body as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(run2Body.messages).toEqual([
+        { role: "user", content: "message one" },
+        { role: "user", content: "message two" },
+        { role: "assistant", content: "first reply" },
+      ]);
+
+      // Final transcript: user1, user2, assistant1, assistant2 (page is
+      // newest-first; chronological is the reverse).
+      const pageRes = await api(baseUrl, "GET", `/cloud/v1/sessions/${sessionId}/messages`, {
+        uid: user,
+      });
+      expect(pageRes.status).toBe(200);
+      const page = pageSchema(messageDtoSchema).parse(pageRes.body);
+      const chronological = [...page.items].reverse();
+      expect(chronological.map((m) => m.role)).toEqual([
+        "user",
+        "user",
+        "assistant",
+        "assistant",
+      ]);
+      expect(chronological.map((m) => m.content)).toEqual([
+        "message one",
+        "message two",
+        "first reply",
+        "first reply",
+      ]);
+      expect(chronological[0]!.id).toBe(sent1.userMessageId);
+      expect(chronological[1]!.id).toBe(sent2.userMessageId);
+
+      // Both run rows completed, one model attempt each, no job failures.
+      expect(await runRow(sent1.runId)).toEqual({ status: "completed", attempts: 1 });
+      expect(await runRow(sent2.runId)).toEqual({ status: "completed", attempts: 1 });
+      expect(workerFailures).toEqual([]);
+      expect(workerErrors).toEqual([]);
+      // No transient-failure backoff sleeps: the ONLY sleeps are C1 poll
+      // intervals (250 ms) while run2 waited behind the gated run1.
+      expect(sleeps.length).toBeGreaterThan(0);
+      expect(sleeps.filter((s) => s !== 250)).toEqual([]);
+
+      await client.close();
+    }, 30_000);
   },
 );
