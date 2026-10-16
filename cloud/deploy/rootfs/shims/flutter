@@ -1,0 +1,13 @@
+#!/bin/sh
+# flutter — blocks `flutter build apk|appbundle|ios` only (spec §7); analyze,
+# test and every other subcommand pass through.
+if [ "${1:-}" = "build" ]; then
+  case "${2:-}" in
+    apk|appbundle|ios)
+      echo "Heavy native compilation (APK/Gradle/Kotlin builds) is disabled on live cloud workspaces. Use GitHub Actions CI or syntax/lint preview mode instead."
+      exit 126
+      ;;
+  esac
+fi
+for d in /usr/bin /bin; do [ -x "$d/flutter" ] && exec "$d/flutter" "$@"; done
+echo "flutter: not installed in cloud workspaces" >&2; exit 127

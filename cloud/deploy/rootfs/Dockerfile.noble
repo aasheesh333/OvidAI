@@ -1,0 +1,71 @@
+# syntax=docker/dockerfile:1
+# Ubuntu-noble-based rootfs for Ovid cloud workspaces, exported to a tarball
+# by build.sh (docker export | zstd) and extracted to /opt/ovid-rootfs.
+#
+# Deliberately NO java/gcc/make toolchain (spec §7): the PATH shims copied to
+# /usr/local/bin refuse the blocked commands, and gradlew has no JDK to run.
+# All toolchain versions arrive as build-args from versions.env; node and uv
+# downloads are checksum-verified inline — a mismatch fails the build.
+
+ARG UBUNTU_IMAGE=ubuntu:24.04
+FROM ${UBUNTU_IMAGE}
+
+ARG NODE_VERSION=v22.20.0
+ARG PNPM_VERSION=10.34.0
+ARG UV_VERSION=0.13.1
+ARG APT_PACKAGES="ca-certificates curl git openssh-client procps python3 python3-venv xz-utils"
+
+# --- apt: the pinned package set from versions.env -------------------------
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ${APT_PACKAGES}; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- node: official nodejs.org tarball (never apt node, research §6),
+# --- verified against the published SHASUMS256.txt before extraction -------
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) narch=x64 ;; \
+      arm64) narch=arm64 ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLO "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${narch}.tar.xz"; \
+    curl -fsSLO "https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt"; \
+    grep " node-${NODE_VERSION}-linux-${narch}.tar.xz\$" SHASUMS256.txt | sha256sum -c -; \
+    tar -xJf "node-${NODE_VERSION}-linux-${narch}.tar.xz" -C /usr/local --strip-components=1; \
+    rm -f "node-${NODE_VERSION}-linux-${narch}.tar.xz" SHASUMS256.txt; \
+    [ "$(node --version)" = "${NODE_VERSION}" ]
+
+# --- pnpm: corepack (bundled with node) pinned via prepare + activate ------
+RUN set -eux; \
+    corepack enable; \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare "pnpm@${PNPM_VERSION}" --activate; \
+    [ "$(pnpm --version)" = "${PNPM_VERSION}" ]
+
+# --- uv: GitHub release tarball, sha256 verified against the release's
+# --- per-artifact checksum file --------------------------------------------
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) uarch=x86_64-unknown-linux-gnu ;; \
+      arm64) uarch=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLO "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uarch}.tar.gz"; \
+    curl -fsSLO "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uarch}.tar.gz.sha256"; \
+    sha256sum -c "uv-${uarch}.tar.gz.sha256"; \
+    tar -xzf "uv-${uarch}.tar.gz" -C /tmp; \
+    mv "/tmp/uv-${uarch}/uv" "/tmp/uv-${uarch}/uvx" /usr/local/bin/; \
+    rm -rf "/tmp/uv-${uarch}" "uv-${uarch}.tar.gz" "uv-${uarch}.tar.gz.sha256"; \
+    [ "$(uv --version | awk '{print $2}')" = "${UV_VERSION}" ]
+
+# --- PATH shims (spec §7 layer 2): baked at /usr/local/bin, ahead of
+# --- /usr/bin in the jail PATH ----------------------------------------------
+COPY shims/ /usr/local/bin/
+RUN set -eux; \
+    chmod 755 /usr/local/bin/gcc /usr/local/bin/g++ /usr/local/bin/make \
+      /usr/local/bin/gradle /usr/local/bin/gradlew /usr/local/bin/kotlinc \
+      /usr/local/bin/javac /usr/local/bin/sdkmanager /usr/local/bin/ndk-build \
+      /usr/local/bin/cargo /usr/local/bin/docker /usr/local/bin/flutter \
+      /usr/local/bin/ovid

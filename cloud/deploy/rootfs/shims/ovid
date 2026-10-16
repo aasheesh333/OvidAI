@@ -1,0 +1,38 @@
+#!/bin/sh
+# ovid — v1 CLI dispatch for jailed workspaces: package installs go through
+# pnpm (package.json) or uv (pyproject.toml), never a native toolchain.
+# Task 10 extends this dispatcher; keep v1 behavior intact.
+case "${1:-}" in
+  install)
+    shift
+    if [ -f package.json ]; then
+      if [ "$#" -gt 0 ]; then
+        exec pnpm add "$@"
+      fi
+      exec pnpm install --prefer-offline
+    elif [ -f pyproject.toml ]; then
+      if [ "$#" -gt 0 ]; then
+        exec uv add "$@"
+      fi
+      exec uv sync
+    fi
+    echo "ovid install: no package.json or pyproject.toml in $(pwd)" >&2
+    exit 2
+    ;;
+  --help|-h|help)
+    cat <<'EOF'
+ovid — package installs for cloud workspaces
+
+usage:
+  ovid install [pkgs...]   add packages to package.json (pnpm) or
+                           pyproject.toml (uv); with no packages, install
+                           everything already declared (pnpm install
+                           --prefer-offline / uv sync)
+  ovid --help              this help
+EOF
+    ;;
+  *)
+    echo "ovid: unknown command '${1:-}' (try ovid --help)" >&2
+    exit 2
+    ;;
+esac

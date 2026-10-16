@@ -1,0 +1,5 @@
+# The build context only needs Dockerfile.noble and shims/; dist/ would drag
+# previously built (multi-hundred-MB) tarballs into every build otherwise.
+*
+!Dockerfile.noble
+!shims/

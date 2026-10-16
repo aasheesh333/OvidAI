@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@ovid/db": "workspace:*",
-    "@ovid/shared": "workspace:*"
+    "@ovid/shared": "workspace:*",
+    "zod": "^3.25.76"
   }
 }

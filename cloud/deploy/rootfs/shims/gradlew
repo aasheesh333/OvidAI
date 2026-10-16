@@ -1,0 +1,6 @@
+#!/bin/sh
+# gradlew (Gradle/JVM builds) — unconditional PATH shim (spec §7 layer 2). The rootfs ships no
+# such toolchain; this shim refuses every invocation with the exact §7 copy
+# so interactive terminals and indirect invocations match the interceptor.
+echo "Heavy native compilation (APK/Gradle/Kotlin builds) is disabled on live cloud workspaces. Use GitHub Actions CI or syntax/lint preview mode instead."
+exit 126

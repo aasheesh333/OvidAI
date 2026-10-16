@@ -2,3 +2,7 @@
 .env
 .env.*
 !.env.example
+
+# Built rootfs tarballs (docker-export output) are artifacts, not source:
+# multi-hundred-MB zstd archives + per-build manifests and checksums.
+rootfs/dist/
