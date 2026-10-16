@@ -345,13 +345,18 @@ describe("gateway /cloud/ws (stub EventLog — deterministic replay/live race)",
   /**
    * sessions.get runs db.select().from(…).where(…).limit(1) → rows; this fake
    * "owns" every session, so a forbidden answer can only come from the guard.
+   * `onQuery` (optional) counts ownership queries so tests can prove the db
+   * was never touched.
    */
-  function fakeDb(): Db {
+  function fakeDb(onQuery?: () => void): Db {
     return {
       select: () => ({
         from: () => ({
           where: () => ({
-            limit: () => Promise.resolve([{ id: RACE_SID }]),
+            limit: () => {
+              onQuery?.();
+              return Promise.resolve([{ id: RACE_SID }]);
+            },
           }),
         }),
       }),
@@ -412,12 +417,17 @@ describe("gateway /cloud/ws (stub EventLog — deterministic replay/live race)",
     };
   }
 
-  async function makeStubApp(stubEvents: EventLog, tickets: TicketStub): Promise<string> {
+  async function makeStubApp(
+    stubEvents: EventLog,
+    tickets: TicketStub,
+    db: Db = fakeDb(),
+    ticketStoreOverride?: TicketStore,
+  ): Promise<string> {
     const app = buildGateway({
-      db: fakeDb(),
+      db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),
-      tickets,
+      tickets: ticketStoreOverride ?? tickets,
       keys: stubKeys(),
       mint: stubMint(),
       events: stubEvents,
@@ -492,6 +502,46 @@ describe("gateway /cloud/ws (stub EventLog — deterministic replay/live race)",
     });
     expect(stub.calls).toEqual([]); // event log never touched
   }, 15_000);
+
+  it("client dropping during the ticket verify never creates a subscription (no leaked redis subscriber)", async () => {
+    // Deterministic race (review Important #1): verify is gated; a subscribe
+    // frame is queued pre-auth; the client is TERMINATED; only then does
+    // verify resolve. A buggy handler drains the queue for a socket whose
+    // 'close' already fired (unheard — no listener was registered yet) and
+    // builds a subscription holding a real redis pub/sub connection forever.
+    let resolveVerify!: (result: { uid: string } | null) => void;
+    const verifyGate = new Promise<{ uid: string } | null>((resolve) => {
+      resolveVerify = resolve;
+    });
+    let verifyCalls = 0;
+    const gatedTickets: TicketStore = {
+      mint: async () => "unused-in-this-test",
+      verify: async () => {
+        verifyCalls += 1;
+        return verifyGate;
+      },
+    };
+
+    const stub = raceStubEventLog(); // subscribe/readSince spies (its replay gate stays shut)
+    let dbQueries = 0;
+    const wsBase = await makeStubApp(stub.events, stubTickets(), fakeDb(() => dbQueries++), gatedTickets);
+
+    const client = await connectClient(wsBase, "gated-ticket");
+    clients.push(client);
+    await waitFor(() => verifyCalls === 1, "server started ticket verify");
+
+    // The subscribe frame lands in the server's pre-auth queue…
+    client.send({ op: "subscribe", sessionId: RACE_SID });
+    await sleep(100); // loopback: make sure the frame reached the server
+    // …then the peer drops abruptly, and only AFTER that does verify resolve.
+    client.socket.terminate();
+    await sleep(50); // let the server observe the TCP reset and emit 'close'
+    resolveVerify({ uid: "racer" });
+
+    await sleep(300); // give a buggy drain every chance to build the subscription
+    expect(stub.calls).toEqual([]); // events.subscribe never ran → nothing to leak
+    expect(dbQueries).toBe(0); // ownership query never ran either
+  }, 20_000);
 });
 
 describe("compareSeq", () => {

@@ -88,6 +88,32 @@ export async function handleWsConnection(
   // 'error' with no listener throws. Teardown happens in the 'close' handler.
   socket.on("error", () => {});
 
+  // ---- Teardown bookkeeping — registered BEFORE any await ----
+  // 'close' is never replayed to a late listener: if the peer drops during
+  // the (async) ticket verify below, a listener attached afterwards would
+  // never fire, `closed` would stay false, and the pre-auth drain would build
+  // subscriptions (each holding a dedicated redis pub/sub connection) that
+  // nothing can ever reclaim. Registering first closes that window; the
+  // readyState re-check after verify backs it up (everything from there to
+  // the drain is synchronous, so no new window opens).
+  const subs = new Map<string, Subscription>();
+  let closed = false;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+  const teardownAll = async (): Promise<void> => {
+    if (heartbeat !== null) clearInterval(heartbeat);
+    const all = [...subs.values()];
+    subs.clear();
+    // EVERY subscription must be torn down: each holds a dedicated redis
+    // pub/sub connection (Task 4 duplicates the client), so a leak here is a
+    // leaked connection per session per reconnect.
+    await Promise.all(all.map((sub) => sub.unsubscribe().catch(() => {})));
+  };
+  socket.on("close", () => {
+    closed = true;
+    void teardownAll();
+  });
+
   // ---- Ticket handshake (single-use; the ticket IS the auth) ----
   // Frames can arrive while the async verify is in flight: queue them and
   // drain after auth succeeds; on rejection they die with the socket. The
@@ -117,16 +143,21 @@ export async function handleWsConnection(
   }
   const uid: string = verified.uid;
 
+  // The peer may have dropped while verify was in flight — 'close' already
+  // ran teardown above. Setting anything up now (or draining queued frames)
+  // would do db/redis work for a dead socket and leak whatever it created.
+  if (closed || socket.readyState !== socket.OPEN) return;
+
   // ---- Heartbeat: protocol-level ping every 30 s, close after 2 misses ----
   let unansweredPings = 0;
   socket.on("pong", () => {
     unansweredPings = 0;
   });
-  const heartbeat = setInterval(() => {
+  heartbeat = setInterval(() => {
     if (unansweredPings >= MAX_UNANSWERED_PINGS) {
       // Two pings went unanswered: the peer is dead, don't wait for a close
       // frame that will never come.
-      clearInterval(heartbeat);
+      if (heartbeat !== null) clearInterval(heartbeat);
       socket.terminate();
       return;
     }
@@ -134,24 +165,6 @@ export async function handleWsConnection(
     socket.ping();
   }, opts.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS);
   heartbeat.unref?.(); // never hold the process (or a test runner) open by itself
-
-  // ---- Per-connection subscription table ----
-  const subs = new Map<string, Subscription>();
-  let closed = false;
-
-  const teardownAll = async (): Promise<void> => {
-    clearInterval(heartbeat);
-    const all = [...subs.values()];
-    subs.clear();
-    // EVERY subscription must be torn down: each holds a dedicated redis
-    // pub/sub connection (Task 4 duplicates the client), so a leak here is a
-    // leaked connection per session per reconnect.
-    await Promise.all(all.map((sub) => sub.unsubscribe().catch(() => {})));
-  };
-  socket.on("close", () => {
-    closed = true;
-    void teardownAll();
-  });
 
   /** Dedupe + emit one event for a subscription (replay, buffered, and live paths). */
   function sendEvent(sub: Subscription, event: SessionEvent): void {
@@ -259,6 +272,9 @@ export async function handleWsConnection(
   }
 
   async function processFrame(raw: string): Promise<void> {
+    // Defense in depth for the chained-queue path: a frame that was still
+    // waiting its turn when the socket died must not start db/redis work.
+    if (closed) return;
     let msg;
     try {
       // Unparseable JSON and off-contract shapes are the same client error.
