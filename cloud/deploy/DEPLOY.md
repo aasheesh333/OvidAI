@@ -197,9 +197,12 @@ curl -sf https://api.ovidsi.com/v1/models >/dev/null && echo "live stack OK"
 
 ## 7. Functional smoke (manual, owner)
 
-1. From a real app build (Firebase token + App Check): create session →
-   POST message → watch WS `/cloud/v1/ws?ticket=…` replay + live deltas →
-   run completes. (Ticket flow: `POST /cloud/v1/ws/tickets` first.)
+1. From a real app build (Firebase token + App Check): mint a WS ticket
+   (`POST /cloud/v1/auth/ticket`, Firebase-authenticated → `{"ticket":…}`) →
+   create session → POST message → connect WS `GET /cloud/ws?ticket=…` →
+   watch replay + live deltas → run completes. (The WS path is deliberately
+   NOT under `/cloud/v1` — `apps/gateway/src/routes/wsRoute.ts`; the Caddy
+   `/cloud/*` handle covers both.)
 2. Degradation spot-check (optional): `docker compose stop worker` → message
    accepted, run stays `queued` (503-style behaviours documented in the P0
    plan); `docker compose start worker` → run picked up and processed.

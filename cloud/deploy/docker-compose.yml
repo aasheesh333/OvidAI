@@ -35,14 +35,20 @@ volumes:
 
 services:
   # Queue + session-event-log Redis, owned by ovid-cloud (never shared with
-  # the live stack's redis). noeviction: queue writes must fail loudly when
-  # full, never silently evict jobs/events. AOF everysec: survives restarts.
+  # the live stack's redis). Guarantee (spec AG3): a full queue fails LOUDLY
+  # — maxmemory 1400mb gives redis a real write ceiling BELOW mem_limit
+  # 1536m (headroom for buffers/AOF-fork COW so the kernel OOM-killer never
+  # fires first), and noeviction turns writes at that ceiling into OOM
+  # errors instead of silently evicting jobs/events. AOF everysec: survives
+  # restarts.
   redis-q:
     image: redis:7-alpine
     restart: unless-stopped
     command:
       [
         "redis-server",
+        "--maxmemory",
+        "1400mb",
         "--maxmemory-policy",
         "noeviction",
         "--appendonly",
