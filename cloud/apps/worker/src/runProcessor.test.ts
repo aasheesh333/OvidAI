@@ -395,6 +395,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(calls).toHaveLength(0);
       expect(sleeps).toEqual([]);
       expect(await runRow(seeded.runId)).toMatchObject({ status: "running", attempts: 0 });
+      // Hygiene: don't leave a stranded 'running' row behind — that is exactly
+      // the pathology the stale-run sweeper (staleRuns.ts) exists to fix.
+      await runs.finish(db, seeded.runId, "failed", "test cleanup");
     });
 
     it("history reaches the transport oldest-first, ends with the prompt, tool rows skipped defensively", async () => {

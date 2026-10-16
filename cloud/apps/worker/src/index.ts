@@ -3,3 +3,4 @@
 // repo scaffold is dropped: nothing ever imported it.
 export * from "./liteLlm.js";
 export * from "./runProcessor.js";
+export * from "./staleRuns.js";

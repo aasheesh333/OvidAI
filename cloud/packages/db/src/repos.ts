@@ -254,6 +254,23 @@ export const runs = {
       .where(eq(runsTable.id, runId));
   },
 
+  /**
+   * Runs stuck in 'running' whose startedAt is older than the cutoff, oldest
+   * first, capped at 100 per call (one sweeper batch). With BullMQ attempts:1
+   * a failed or crashed job is NEVER redelivered, so its run row would strand
+   * in 'running' forever; the worker's stale-run sweeper (apps/worker
+   * staleRuns.ts) uses this to terminalize them. NULL startedAt rows (cannot
+   * exist for 'running', but SQL semantics hold) are excluded by the `<`.
+   */
+  async listStaleRunning(db: Db, staleBefore: Date): Promise<RunRow[]> {
+    return db
+      .select()
+      .from(runsTable)
+      .where(and(eq(runsTable.status, "running"), lt(runsTable.startedAt, staleBefore)))
+      .orderBy(asc(runsTable.startedAt))
+      .limit(100);
+  },
+
   /** Atomically increments attempts and returns the new value (0 if run unknown). */
   async bumpAttempt(db: Db, runId: string): Promise<number> {
     const rows = await db

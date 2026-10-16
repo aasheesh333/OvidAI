@@ -15,9 +15,10 @@ import {
  * One BullMQ job = one run. The processor NEVER throws for run-level failures
  * (missing key, model errors): those are terminal run states, emitted as
  * events and recorded on the run row, and the job must COMPLETE (attempts: 1 —
- * the retry ladder lives here, not in BullMQ; stalled redelivery covers
- * crashes). Only infrastructure errors (db/redis down) propagate and fail the
- * job loudly.
+ * the retry ladder lives here, not in BullMQ). Crashed/failed jobs are never
+ * redelivered; the stale-run sweeper (staleRuns.ts) terminalizes runs they
+ * strand in 'running'. Only infrastructure errors (db/redis down) propagate
+ * and fail the job loudly.
  *
  * Event contract (every append is also mirrored to Postgres via
  * eventMirror.put — history beyond the stream's trim window):
@@ -29,6 +30,8 @@ import {
  * - run_completed      {runId}
  * - run_failed         {code: "key_not_minted" | "model_transient_exhausted"}
  *                      | {code: "model_terminal", message}
+ *   (the stale-run sweeper emits a third variant, {runId, code:"run_lost"} —
+ *   see staleRuns.ts)
  */
 
 export interface RunDeps {
@@ -168,7 +171,12 @@ export function createAgentRunProcessor(
         }
 
         // Unknown/infra error (db or redis down, consumer bug): fail the job
-        // loudly — BullMQ marks it failed and stalled-job recovery can redeliver.
+        // loudly. With attempts:1 the job stays FAILED — BullMQ never
+        // redelivers it (failed ≠ stalled; stalled handling with attempts:1
+        // also fails rather than redelivers), and claimNext claims 'queued'
+        // rows only, so even a redelivery would no-op. Recovery is the
+        // stale-run sweeper's job (staleRuns.ts): it terminalizes runs
+        // stranded in 'running' with run_failed {code:"run_lost"}.
         throw err;
       }
     }

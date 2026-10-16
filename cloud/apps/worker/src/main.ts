@@ -6,6 +6,7 @@ import { createAgentRunsWorker } from "@ovid/queue";
 import type { KeyProvider } from "@ovid/shared";
 import { createOpenAiTransport } from "./liteLlm.js";
 import { createAgentRunProcessor } from "./runProcessor.js";
+import { sweepStaleRuns } from "./staleRuns.js";
 
 export interface WorkerEnv {
   nodeEnv: string;
@@ -14,7 +15,13 @@ export interface WorkerEnv {
   redisMintUrl: string;
   litellmBaseUrl: string;
   defaultModel: string;
+  runStaleMs: number;
 }
+
+/** A 'running' run older than this is considered stranded (sweeper threshold). */
+const DEFAULT_RUN_STALE_MS = 600_000;
+/** How often the stale-run sweeper re-checks after the boot pass. */
+const STALE_SWEEP_INTERVAL_MS = 60_000;
 
 /**
  * Validate the worker environment — same production-safety mindset as the
@@ -30,6 +37,22 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     if (value === "") throw new Error(`${name} is required`);
     return value;
   };
+
+  // Optional, but if set at all it must be a positive integer (ms) — an empty
+  // or malformed value is a deployment misconfiguration and fails loudly at
+  // startup (same mindset as the gateway's PORT validation).
+  let runStaleMs = DEFAULT_RUN_STALE_MS;
+  const staleRaw = raw.OVID_RUN_STALE_MS;
+  if (staleRaw !== undefined) {
+    const parsed = Number(staleRaw.trim());
+    if (staleRaw.trim() === "" || !Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error(
+        `OVID_RUN_STALE_MS must be a positive integer (milliseconds), got: ${staleRaw}`,
+      );
+    }
+    runStaleMs = parsed;
+  }
+
   return {
     nodeEnv: raw.NODE_ENV?.trim() || "development",
     databaseUrl: required("DATABASE_URL"),
@@ -37,6 +60,7 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     redisMintUrl: required("REDIS_MINT_URL"),
     litellmBaseUrl: required("OVID_LITELLM_BASE"),
     defaultModel: required("OVID_DEFAULT_MODEL"),
+    runStaleMs,
   };
 }
 
@@ -68,10 +92,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // visible to subscribed clients.
   const redisQ = new Redis(cfg.redisQUrl);
   const redisMint = new Redis(cfg.redisMintUrl);
+  const events = createRedisEventLog(redisQ);
 
   const processor = createAgentRunProcessor({
     db,
-    events: createRedisEventLog(redisQ),
+    events,
     keys: createMintRedisKeyProvider(redisMint),
     transport: createOpenAiTransport(),
     litellmBaseUrl: cfg.litellmBaseUrl,
@@ -88,9 +113,34 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     `[worker] consuming agent-runs (env=${cfg.nodeEnv}, model=${cfg.defaultModel}, litellm=${cfg.litellmBaseUrl})`,
   );
 
+  // Stale-run sweeper (fix-round ruling): with attempts:1, failed jobs are
+  // never redelivered and a mid-run crash strands the run row in 'running'
+  // forever — the sweeper terminalizes those (run_failed {code:"run_lost"}).
+  // Once at boot, then every 60 s; sweep errors are logged, never fatal (the
+  // next pass retries), and the interval must never hold the process open.
+  const sweep = async (label: string): Promise<void> => {
+    try {
+      const swept = await sweepStaleRuns(
+        { db, events },
+        { staleAfterMs: cfg.runStaleMs },
+      );
+      if (swept > 0) {
+        console.log(`[worker] stale-run sweep (${label}): terminalized ${swept} stranded run(s)`);
+      }
+    } catch (err) {
+      console.error(`[worker] stale-run sweep (${label}) failed`, err);
+    }
+  };
+  await sweep("boot");
+  const sweeper = setInterval(() => {
+    void sweep("interval");
+  }, STALE_SWEEP_INTERVAL_MS);
+  sweeper.unref();
+
   let shuttingDown: Promise<void> | null = null;
   const shutdown = (): Promise<void> => {
     shuttingDown ??= (async () => {
+      clearInterval(sweeper);
       // Drains in-flight jobs and stops fetching new ones (force=false).
       await worker.close();
       redisQ.disconnect();

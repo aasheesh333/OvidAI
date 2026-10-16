@@ -249,6 +249,44 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     expect(r2!.lastError).toBeNull();
   });
 
+  it("runs.listStaleRunning: only 'running' rows with startedAt older than the cutoff, oldest first", async () => {
+    const uid = await seedUser();
+    const s = await sessions.create(db, uid, "stale sweep");
+    const m = await messages.append(db, { sessionId: s.id, role: "user", content: "go" });
+
+    const stale = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
+    const fresh = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
+    const queued = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
+    const finished = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
+    expect(await runs.claimNext(db, stale.id)).toBe(true);
+    expect(await runs.claimNext(db, fresh.id)).toBe(true);
+    expect(await runs.claimNext(db, finished.id)).toBe(true);
+    await runs.finish(db, finished.id, "completed");
+
+    // Age the stale runner's started_at; make the QUEUED row ancient too
+    // (createdAt must never matter — only status + startedAt do).
+    await db.update(runsTable).set({ startedAt: new Date(BASE) }).where(eq(runsTable.id, stale.id));
+    await db.update(runsTable).set({ createdAt: new Date(BASE) }).where(eq(runsTable.id, queued.id));
+
+    // Cutoff an hour after the aged start but far before fresh's (now).
+    const found = await runs.listStaleRunning(db, new Date(BASE + 3_600_000));
+    expect(found.map((r) => r.id)).toEqual([stale.id]);
+
+    // Cutoff = now → both running rows, oldest startedAt first.
+    const both = await runs.listStaleRunning(db, new Date());
+    expect(both.map((r) => r.id)).toEqual([stale.id, fresh.id]);
+
+    // Cutoff before every startedAt → empty.
+    expect(await runs.listStaleRunning(db, new Date(BASE - 1))).toEqual([]);
+
+    // Leave NO running rows behind: the worker's staleRuns suite reads this
+    // same dev Postgres later in the monorepo run, and a leftover 'running'
+    // row with an aged started_at would be counted by its sweep.
+    await runs.finish(db, stale.id, "failed", "test cleanup");
+    await runs.finish(db, fresh.id, "failed", "test cleanup");
+    expect(await runs.listStaleRunning(db, new Date())).toEqual([]);
+  });
+
   it("eventMirror: put idempotent on (sessionId, seq); readSince numeric-seq order + exclusivity", async () => {
     const sessionId = newId();
     const ev = (seq: string, n: number): SessionEvent => ({
