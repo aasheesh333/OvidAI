@@ -4,6 +4,12 @@
 # revisions and runs smoke-jail.sh against the freshly activated tree.
 # Never run this from a task agent — it mutates the host.
 #
+# REFUSES to install over an existing revision directory: with GNU mv
+# semantics `mv tmp target` would NEST the new tree inside the old one and
+# leave the stale rootfs active while smoke-jail passes against it. If
+# $OPT_ROOT/$NAME already exists, install.sh exits non-zero — bump REVISION
+# (rebuild) or remove the old directory deliberately, then retry.
+#
 # Usage: sudo bash cloud/deploy/rootfs/install.sh [dist/<name>.tar.zst]
 #        (no argument: the newest tarball in dist/)
 set -euo pipefail
@@ -46,13 +52,20 @@ echo "==> verifying checksums for $(basename "$ARTIFACT")"
 # --- extract to a tmp dir, then mv into place (same fs => atomic) -----------
 mkdir -p "$OPT_ROOT"
 TARGET="$OPT_ROOT/$NAME"
+if [ -e "$TARGET" ]; then
+  die "revision already installed: $TARGET — bump REVISION and rebuild, or remove the old directory deliberately (GNU mv would nest the new tree inside the old one)"
+fi
 TMP="$OPT_ROOT/$NAME.tmp"
 rm -rf "$TMP"
 mkdir "$TMP"
+# Extraction failure must not leave a $NAME.tmp skeleton behind; the trap is
+# disarmed as soon as the tree has been moved into place.
+trap 'rm -rf "$TMP"' EXIT
 echo "==> extracting to $TMP"
 zstd -dc "$ARTIFACT" | tar -x -C "$TMP"
 [ -f "$TMP/manifest.json" ] || die "tarball has no /manifest.json"
 mv "$TMP" "$TARGET"
+trap - EXIT
 
 # --- atomically flip the `current` symlink ----------------------------------
 echo "==> activating $NAME as $OPT_ROOT/current"

@@ -22,6 +22,8 @@ NAME="ubuntu-noble-min-$(date -u +%Y%m%d)-r${REVISION}"
 DIST_DIR="$ROOTFS_DIR/dist"
 BUILD_TAG="ovid-rootfs-build:$NAME"
 CTR="ovid-rootfs-build-$NAME"
+TARBALL="$DIST_DIR/$NAME.tar.zst"
+MANIFEST_TMP="$(mktemp /tmp/ovid-rootfs-manifest.XXXXXX)"
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 
@@ -30,6 +32,18 @@ for cmd in docker zstd sha256sum sed awk git; do
 done
 
 mkdir -p "$DIST_DIR"
+
+# Failure path leaves no residue: the build container, the build tag and any
+# partial tarball in dist/ are removed whenever the script exits non-zero
+# before the success path disarms the trap at the end. (The dist manifest and
+# SHA256SUMS of an earlier successful build with the same name are NOT
+# touched — they are only written after the tarball passes zstd -t, so a
+# failed re-run never leaves them half-made.)
+trap '
+  docker rm -f "$CTR" >/dev/null 2>&1 || true
+  docker rmi -f "$BUILD_TAG" >/dev/null 2>&1 || true
+  rm -f "$MANIFEST_TMP" "$TARBALL"
+' EXIT
 
 # --- 1. Base image: pull and resolve the repo digest -----------------------
 echo "==> pulling $UBUNTU_IMAGE"
@@ -73,9 +87,7 @@ APT_JSON="$(
     | awk 'BEGIN { sep = "" } { for (i = 1; i <= NF; i++) { printf "%s\"%s\"", sep, $i; sep = ", " } }'
 )"
 
-MANIFEST_TMP="$(mktemp /tmp/ovid-rootfs-manifest.XXXXXX)"
 docker create --name "$CTR" "$BUILD_TAG" >/dev/null
-trap 'docker rm -f "$CTR" >/dev/null 2>&1 || true; rm -f "$MANIFEST_TMP"' EXIT
 
 {
   printf '{\n'
@@ -100,7 +112,6 @@ docker run --rm -i "$BUILD_TAG" node -e \
 docker cp "$MANIFEST_TMP" "$CTR:/manifest.json"
 
 # --- 5. Export the filesystem and compress ----------------------------------
-TARBALL="$DIST_DIR/$NAME.tar.zst"
 echo "==> docker export | zstd -19 -> $TARBALL"
 docker export "$CTR" | zstd -19 -T0 -f -o "$TARBALL"
 zstd -t "$TARBALL"
