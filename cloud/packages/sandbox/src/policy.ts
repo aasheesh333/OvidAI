@@ -85,6 +85,12 @@ function substitutionOutputWords(inner: Segment[]): string[] {
 // Here-doc operator: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, `<<-'EOF'`.
 const HEREDOC_RE = /^<<-?(['"]?)([A-Za-z0-9_]+)\1?/;
 
+// A pending word that is exactly an assignment prefix (`X=`) — the
+// tokenizer joins unquoted substitution output into such a word instead of
+// splicing it into head position (real shells do not word-split the
+// right-hand side of an assignment; review F2).
+const ASSIGNMENT_PREFIX_RE = /^[A-Za-z_][A-Za-z0-9_]*=$/;
+
 /**
  * Single-pass, quote/escape-aware tokenizer. Splits `command` into segments
  * at `;`, `&&`, `||`, `|`, `&`, `(`, `)`, newlines and here-doc bodies;
@@ -231,16 +237,25 @@ function tokenize(command: string): Segment[] {
         let bodyEnd = pos;
         let after = command.length;
         for (;;) {
-          let eol = command.indexOf("\n", pos);
-          if (eol === -1) eol = command.length;
-          const line = command.slice(pos, eol);
+          const eol = command.indexOf("\n", pos);
+          const atEof = eol === -1;
+          const lineEnd = atEof ? command.length : eol;
+          const line = command.slice(pos, lineEnd);
           const candidate = stripTabs ? line.replace(/^\t+/, "") : line;
-          if (candidate === delim || eol >= command.length) {
+          if (candidate === delim) {
+            // Closed: the body ends before the delimiter line.
             bodyEnd = pos;
-            after = eol < command.length ? eol + 1 : command.length;
+            after = lineEnd < command.length ? lineEnd + 1 : command.length;
             break;
           }
-          pos = eol + 1;
+          if (atEof) {
+            // Unterminated here-doc (F1): a real shell executes the body to
+            // EOF, so the REMAINDER is body content, not dropped text.
+            bodyEnd = command.length;
+            after = command.length;
+            break;
+          }
+          pos = lineEnd + 1;
         }
         const body = command.slice(nl + 1, bodyEnd);
         if (body.trim().length > 0) out.push(...tokenize(body));
@@ -256,9 +271,17 @@ function tokenize(command: string): Segment[] {
       const close = findMatchingParen(command, open);
       const inner = tokenize(command.slice(open + 1, close));
       out.push(...inner);
-      // Unquoted context: the approximated output becomes separate words.
-      endWord();
-      for (const w of substitutionOutputWords(inner)) words.push(w);
+      const output = substitutionOutputWords(inner);
+      if (hasWord && ASSIGNMENT_PREFIX_RE.test(word)) {
+        // Assignment RHS (F2): real shells do not word-split substitution
+        // output in an assignment — join it into the pending word so it
+        // never lands in head position after assignment stripping.
+        word += output.join(" ");
+      } else {
+        // Fresh word: the output word-splits into the parent segment.
+        endWord();
+        for (const w of output) words.push(w);
+      }
       i = Math.min(close + 1, command.length);
       continue;
     }
@@ -310,6 +333,9 @@ const C_FLAG_RE = /^-[A-Za-z]*c/;
 
 // Fork bombs (spec §7) — they span operator boundaries, so they are matched
 // on raw text, not on tokenized segments. Both shapes verbatim from the plan.
+// Known limitation (review note F4): raw-text matching cannot see quotes, so
+// quoted text shaped like a fork bomb (e.g. `echo "f(){ f | f & }; f"`) is
+// also refused — contrived input, over-blocking direction, accepted.
 const FORK_BOMB_RE = /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/;
 const FORK_BOMB_GENERAL_RE = /(\w+)\s*\(\)\s*\{\s*\1\s*\|\s*\1\s*&\s*\}\s*;\s*\1/;
 
@@ -360,6 +386,12 @@ function matchSegment(segment: Segment): PolicyVerdict | null {
   }
   if ((head === "cargo" || head === "docker") && rest[0] === "build") {
     return { allowed: false, matched: `${head} build`, segment: text };
+  }
+  // `docker image build` — the word[2] alias of `docker build` (review F3;
+  // the brief's "positional: word[1]/word[2]" pinned to mean build at
+  // either of the first two post-head positions).
+  if (head === "docker" && rest[1] === "build") {
+    return { allowed: false, matched: "docker build", segment: text };
   }
 
   // Gradle task names as any word of the segment.

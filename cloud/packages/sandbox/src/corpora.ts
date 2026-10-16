@@ -59,6 +59,12 @@ export const BLOCKED_COMMAND_CORPUS: BlockedCorpusEntry[] = [
   { command: "sh <<'EOF'\nmake\nEOF", expect: "layer1" },
   { command: "cd app && ./gradlew assembleRelease", expect: "layer1" },
   { command: '"g""cc" x.c', expect: "layer1" },
+  // Unclosed here-doc: a real shell executes the body to EOF (review F1).
+  { command: "bash <<'EOF'\nmake", expect: "layer1" },
+  { command: "sh <<EOF\ngcc x.c", expect: "layer1" },
+  { command: "bash <<'EOF'\ngradle build", expect: "layer1" },
+  // `docker image build` — the word[2] alias of `docker build` (review F3).
+  { command: "docker image build .", expect: "layer1" },
   // Layer-1 boundary: only the base64/gcc shims (layer 2) refuse this.
   { command: "echo Z3JhZGxlIHg= | base64 -d | sh", expect: "shim" },
 ];
@@ -86,6 +92,10 @@ export const ALLOWED_COMMAND_CORPUS: string[] = [
   "cat makefile",
   'echo "gcc is great"',
   "touch gradlew.txt",
+  // Benign unclosed here-doc: the body must parse but contains no rule match.
+  "cat <<'EOF'\necho hi",
+  // word[2] alias shape with a pass-through subcommand (review F3).
+  "docker image pull x",
 ];
 
 /**

@@ -47,8 +47,8 @@ function runShim(name: string, args: string[]): { status: number | null; stdout:
 }
 
 describe("corpus contract (shared with Tasks 12 and 15)", () => {
-  it("BLOCKED has ≥ 25 entries, all classified, unique", () => {
-    expect(BLOCKED_COMMAND_CORPUS.length).toBeGreaterThanOrEqual(25);
+  it("BLOCKED has ≥ 35 entries, all classified, unique", () => {
+    expect(BLOCKED_COMMAND_CORPUS.length).toBeGreaterThanOrEqual(35);
     expect(new Set(BLOCKED_COMMAND_CORPUS.map((e) => e.command)).size).toBe(
       BLOCKED_COMMAND_CORPUS.length,
     );
@@ -126,6 +126,11 @@ describe("splitShellSegments", () => {
   it("here-doc with <<- strips leading tabs from the delimiter line", () => {
     const segs = splitShellSegments("bash <<-X\n\tmake\n\tX\necho ok");
     expect(segs).toEqual([["bash"], ["make"], ["echo", "ok"]]);
+  });
+
+  it("unterminated here-doc: the body still becomes segments (F1 — a real shell executes it to EOF)", () => {
+    expect(splitShellSegments("bash <<'EOF'\nmake")).toEqual([["bash"], ["make"]]);
+    expect(splitShellSegments("cat <<'EOF'\necho hi")).toEqual([["cat"], ["echo", "hi"]]);
   });
 
   it("$( ) subshell content is parsed as segments", () => {
@@ -226,6 +231,32 @@ describe("checkCommandPolicy — pinned matching rules", () => {
     expect(checkCommandPolicy(":(){ :|:& };:").allowed).toBe(false);
     expect(checkCommandPolicy("f(){ f | f & }; f").allowed).toBe(false);
     expect(checkCommandPolicy(":() { : | : & } ; :").allowed).toBe(false);
+  });
+
+  it("blocks unclosed here-doc bodies, allows the benign ones (F1)", () => {
+    // Deleting the closing delimiter must not delete the body: the shell
+    // feeds everything after the operator to the receiving command.
+    expect(checkCommandPolicy("bash <<'EOF'\nmake").allowed).toBe(false);
+    expect(checkCommandPolicy("sh <<EOF\ngcc x.c").allowed).toBe(false);
+    expect(checkCommandPolicy("bash <<'EOF'\ngradle build").allowed).toBe(false);
+    // A benign unclosed here-doc still passes the policy.
+    expect(checkCommandPolicy("cat <<'EOF'\necho hi")).toEqual({ allowed: true });
+  });
+
+  it("unquoted substitution output does not land in head position (F2)", () => {
+    // Assignment RHS: no word splitting — the output joins the pending word.
+    expect(checkCommandPolicy("X=$(which make)")).toEqual({ allowed: true });
+    expect(checkCommandPolicy('X="$(which make)"')).toEqual({ allowed: true });
+    // But a fresh-word substitution still splices (output word-splits).
+    expect(checkCommandPolicy("$(gradle build)").allowed).toBe(false);
+    // And an argument substitution to a denylisted head stays blocked.
+    expect(checkCommandPolicy("gcc $(echo -O2) x.c").allowed).toBe(false);
+  });
+
+  it("docker build is also matched at word[2] — docker image build (F3)", () => {
+    expect(checkCommandPolicy("docker image build .").allowed).toBe(false);
+    expect(checkCommandPolicy("docker image pull x")).toEqual({ allowed: true });
+    expect(checkCommandPolicy("docker image rm x").allowed).toBe(true);
   });
 
   it("first match wins and reports the offending segment text", () => {
