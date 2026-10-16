@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable, type Writable } from "node:stream";
@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { createCgroupManager, type CgroupManager } from "./cgroups.js";
 import { DEFAULT_SANDBOX_LIMITS, loadSandboxConfig, type SandboxConfig } from "./config.js";
 import { execOnce, makeJailContext } from "./exec.js";
-import type { ChildProcessLike, JailLauncher } from "./launcher.js";
+import { createSetuidLauncher, type ChildProcessLike, type JailLauncher } from "./launcher.js";
 import { REFUSAL_MESSAGE } from "./policy.js";
 
 /**
@@ -200,6 +200,41 @@ describe("execOnce — happy path", () => {
     expect(rec.child.stdinData).toEqual(["hello\n"]);
     expect((rec.child.stdin as PassThrough).writableEnded).toBe(true);
   });
+
+  it("swallows an async stdin error instead of crashing (I-2)", async () => {
+    // A stdin that errors on write — the shape of EPIPE from a child that
+    // exits without reading. execOnce attaches a no-op 'error' handler, so
+    // this must resolve normally, not become an uncaught exception.
+    const root = mkdtempSync(join(tmpdir(), "ovid-exec-test-"));
+    roots.push(root);
+    const mgr = createCgroupManager({ cgroupRoot: root, cgroupBase: CGROUP_BASE });
+    await mgr.createEnv(TEST_UID, DEFAULT_SANDBOX_LIMITS);
+    const hostileStdin = new PassThrough();
+    const launcher: JailLauncher = {
+      spawn(): ChildProcessLike {
+        const child = new StubChild({ exitCode: 0 });
+        Object.defineProperty(child, "stdin", { value: hostileStdin });
+        hostileStdin.on("data", () => hostileStdin.emit("error", new Error("EPIPE")));
+        return child;
+      },
+      spawnPty(): never {
+        throw new Error("no pty");
+      },
+    };
+    const ctx = makeJailContext({
+      config: loadSandboxConfig({}),
+      cgroups: mgr,
+      launcher,
+      uid: TEST_UID,
+      rootfs: "/tmp/x",
+      workspaceDir: "/tmp/ws",
+      homeDir: "/tmp/home",
+      etcDir: "/tmp/etc",
+    });
+    const res = await execOnce(ctx, { command: "cat", stdin: "bye\n" });
+    expect(res.exitCode).toBe(0);
+    expect(res.blocked).toBe(false);
+  });
 });
 
 describe("execOnce — blocked commands (Review Focus #1: zero side effects)", () => {
@@ -375,6 +410,54 @@ describe("execOnce — request validation", () => {
     const fx = await freshFixture({});
     await expect(fx.run({ command: "" })).rejects.toThrow(/non-empty/);
     await expect(fx.run({ argv: [] })).rejects.toThrow(/non-empty/);
+  });
+});
+
+describe("createSetuidLauncher — scratch lifecycle", () => {
+  it("does not leak the argv scratch dir when spawn prep throws synchronously (M-1)", () => {
+    const before = new Set(readdirSync(tmpdir()).filter((e) => e.startsWith("ovid-enter-")));
+    const launcher = createSetuidLauncher({ launcherPath: "/nonexistent/launcher" });
+    // A Symbol in the argv makes the NUL join throw synchronously inside the
+    // launcher — after the mkdtemp, before any child exists to clean up.
+    // (A bad cwd only errors ASYNC via the child's 'error' event — verified —
+    // so it is not a sync-throw vector.)
+    expect(() =>
+      launcher.spawn([Symbol("x") as unknown as string], {
+        uid: TEST_UID,
+        gid: TEST_UID,
+        cgroupProcsFile: "/tmp/none/cgroup.procs",
+        cwd: tmpdir(),
+      }),
+    ).toThrow();
+    const after = readdirSync(tmpdir()).filter(
+      (e) => e.startsWith("ovid-enter-") && !before.has(e),
+    );
+    expect(after).toEqual([]);
+  });
+
+  it("cleans the argv scratch dir on the async error path too", async () => {
+    const before = new Set(readdirSync(tmpdir()).filter((e) => e.startsWith("ovid-enter-")));
+    const launcher = createSetuidLauncher({ launcherPath: "/nonexistent/launcher" });
+    const child = launcher.spawn(["/usr/bin/true"], {
+      uid: TEST_UID,
+      gid: TEST_UID,
+      cgroupProcsFile: "/tmp/none/cgroup.procs",
+      cwd: tmpdir(),
+    });
+    // bash exists, so the child spawns and the sync-throw path is NOT taken;
+    // cleanup must instead ride the child's exit/error listeners.
+    expect(child.pid).toBeGreaterThan(0);
+    await new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+      child.once("error", () => resolve());
+    });
+    // rmSync runs synchronously in the exit/error listener — a macrotask
+    // suffices before the leftovers check.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const after = readdirSync(tmpdir()).filter(
+      (e) => e.startsWith("ovid-enter-") && !before.has(e),
+    );
+    expect(after).toEqual([]);
   });
 });
 

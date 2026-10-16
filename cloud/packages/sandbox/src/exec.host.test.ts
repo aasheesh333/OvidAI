@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -147,6 +148,8 @@ async function removeCgroupTree(path: string): Promise<void> {
  * bash sandbox-enter.sh <procs> <uid> <gid> <argvfile>). Kept dependency-free
  * on purpose — the child must not import the (possibly stale) dist build.
  */
+// The argv file is NUL-separated with a trailing NUL — exactly the format
+// sandbox-enter.sh's `read -r -d ''` loop consumes (fix-round M-2).
 const DWP_SCRIPT = `
 const { spawn } = require("node:child_process");
 const { mkdtempSync, writeFileSync, rmSync } = require("node:fs");
@@ -155,7 +158,7 @@ const { join } = require("node:path");
 const spec = JSON.parse(process.env.OVID_DWP_SPEC);
 const scratch = mkdtempSync(join(tmpdir(), "ovid-dwp-"));
 const argvFile = join(scratch, "argv");
-writeFileSync(argvFile, spec.bwrapArgv.join("\\0") + "\\n", { mode: 0o600 });
+writeFileSync(argvFile, spec.bwrapArgv.join("\\0") + "\\0", { mode: 0o600 });
 const child = spawn("bash", [spec.launcherPath, spec.procsFile, String(spec.uid), String(spec.gid), argvFile], { cwd: spec.cwd, stdio: ["ignore", "pipe", "pipe"] });
 child.stdout.resume();
 child.stderr.resume();
@@ -184,6 +187,10 @@ describe.skipIf(!hostTestsAvailable() || !jailMechanismAvailable(cfg))(
       const workspacesRoot = mkdtempSync(join(tmpdir(), "ovid-exec-ws-"));
       scratchDirs.push(workspacesRoot);
       workspaceDir = join(workspacesRoot, String(UID), "sessions", "probe");
+      // The launcher spawns with cwd=workspaceDir: node spawn against a
+      // nonexistent cwd emits an async ENOENT with NO exit event, which would
+      // wedge every spawning test. The dir must exist (fix-round I-1).
+      mkdirSync(workspaceDir, { recursive: true });
       homeDir = mkdtempSync(join(tmpdir(), "ovid-exec-home-"));
       etcDir = mkdtempSync(join(tmpdir(), "ovid-exec-etc-"));
       scratchDirs.push(homeDir, etcDir);

@@ -96,24 +96,33 @@ export function createSetuidLauncher(config: Pick<SandboxConfig, "launcherPath">
     spawn(bwrapArgv, opts) {
       const scratch = mkdtempSync(join(tmpdir(), "ovid-enter-"));
       const argvFile = join(scratch, "argv");
-      writeFileSync(argvFile, bwrapArgv.join("\0") + "\0", { mode: 0o600 });
-      const child = spawn(
-        "bash",
-        [
-          config.launcherPath,
-          opts.cgroupProcsFile,
-          String(opts.uid),
-          String(opts.gid),
-          argvFile,
-        ],
-        {
-          cwd: opts.cwd,
-          // Minimal host env for bash/setpriv/bwrap resolution — the jail
-          // payload environment is --clearenv'd and rebuilt by bwrap itself.
-          env: opts.env ?? { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" },
-          stdio: ["pipe", "pipe", "pipe"],
-        },
-      );
+      let child: ChildProcess;
+      try {
+        writeFileSync(argvFile, bwrapArgv.join("\0") + "\0", { mode: 0o600 });
+        child = spawn(
+          "bash",
+          [
+            config.launcherPath,
+            opts.cgroupProcsFile,
+            String(opts.uid),
+            String(opts.gid),
+            argvFile,
+          ],
+          {
+            cwd: opts.cwd,
+            // Minimal host env for bash/setpriv/bwrap resolution — the jail
+            // payload environment is --clearenv'd and rebuilt by bwrap itself.
+            env: opts.env ?? { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" },
+            stdio: ["pipe", "pipe", "pipe"],
+          },
+        );
+      } catch (err) {
+        // fix-round M-1: a sync throw during prep (malformed argv, ENOSPC on
+        // the argv write, …) must not leak the scratch dir — no child exists
+        // to clean it up. Async failures go through the listeners below.
+        rmSync(scratch, { recursive: true, force: true });
+        throw err;
+      }
       const cleanup = () => rmSync(scratch, { recursive: true, force: true });
       child.once("exit", cleanup);
       child.once("error", cleanup);

@@ -52,7 +52,18 @@ async function removeLeafQuietly(ctx: JailContext, leaf: string): Promise<void> 
   try {
     await ctx.cgroups.remove(leaf);
   } catch (err) {
-    if (!isErrnoException(err) || err.code !== "ENOENT") throw err;
+    if (isErrnoException(err) && err.code === "ENOENT") return;
+    // EBUSY etc. (fix-round M-3): a payload that daemonized a descendant may
+    // still hold the leaf. Tree-kill it, retry the removal once…
+    await ctx.cgroups.kill(leaf).catch(() => {});
+    try {
+      await ctx.cgroups.remove(leaf);
+    } catch (retryErr) {
+      if (isErrnoException(retryErr) && retryErr.code === "ENOENT") return;
+      // …and if it STILL fails, log and continue: teardown must never
+      // replace a valid ExecResult with a rejection.
+      console.error(`execOnce: leaf teardown failed for ${leaf}:`, retryErr);
+    }
   }
 }
 
@@ -163,11 +174,17 @@ export async function execOnce(ctx: JailContext, req: ExecRequest): Promise<Exec
     });
 
     if (req.stdin !== undefined && child.stdin !== null) {
+      // EPIPE etc. must be swallowed deliberately (fix-round I-2): stdin
+      // delivery is best-effort — a child that exits without reading its
+      // stdin raises an async 'error' on the socket, and an unhandled one is
+      // an uncaught exception in the worker. The child's exit code is the
+      // contract, not stdin delivery.
+      child.stdin.on("error", () => {});
       try {
         child.stdin.write(req.stdin);
         child.stdin.end();
       } catch {
-        // EPIPE — the child is already gone; its exit/error settles the run.
+        // Synchronous throw (already-destroyed stream) — same reasoning.
       }
     }
 
