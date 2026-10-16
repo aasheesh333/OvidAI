@@ -74,13 +74,19 @@ describe("AGENT_RUN_JOB_DEFAULTS", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Real-redis behavior. The queue name is pinned to AGENT_RUNS by the brief's
-// createQueues signature, so uniqueness comes from per-run job ids plus
-// obliterating our own queue keys before each test and in afterAll (shared dev
-// redis — FLUSHDB and other suites' keys are off-limits).
+// Real-redis behavior. Parallel test suites share the dev redis, so this suite
+// scopes ALL its BullMQ keys behind a suite-unique prefix
+// (OVID_TEST_QUEUE_PREFIX + "-queue"; default "ovid-test-queue") — its
+// obliterate calls can then never wipe another suite's agent-runs queue. Job
+// uniqueness comes from per-run job ids; our own keys are obliterated before
+// each test and in afterAll (shared dev redis — FLUSHDB and other suites'
+// keys are off-limits).
 // ---------------------------------------------------------------------------
 
 describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
+  const QUEUE_PREFIX = process.env.OVID_TEST_QUEUE_PREFIX
+    ? `${process.env.OVID_TEST_QUEUE_PREFIX}-queue`
+    : "ovid-test-queue";
   const connection: ConnectionOptions = { url: TEST_REDIS_URL! };
   let queues: QueueServices;
   const openWorkers: Worker<AgentRunJob>[] = [];
@@ -92,18 +98,18 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
 
   async function closeWorker(w: Worker<AgentRunJob>): Promise<void> {
     const i = openWorkers.indexOf(w);
-    if (i >= 0) openWorkers.splice(i, 1);
+    if (i >= 0) openWorkers.splice(i, i + 1);
     await w.close();
   }
 
   beforeAll(() => {
-    queues = createQueues(connection);
+    queues = createQueues(connection, { prefix: QUEUE_PREFIX });
     expect(AGENT_RUNS).toBe("agent-runs");
   });
 
   beforeEach(async () => {
-    // Deterministic job counts: wipe only this queue's keys (also shields the
-    // suite from leftovers of a previously crashed run).
+    // Deterministic job counts: wipe only this suite's prefixed keys (also
+    // shields the suite from leftovers of a previously crashed run).
     await queues.agentRuns.obliterate({ force: true });
   });
 
@@ -117,6 +123,28 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
       await queues.agentRuns.obliterate({ force: true });
       await queues.agentRuns.close();
     }
+  });
+
+  it("prefix option scopes the queue keys: default 'bull' (production layout), custom prefix applies to queue and worker", async () => {
+    // Default must stay BullMQ's own "bull" — production key layout is a
+    // contract with the deploy (compose env, monitoring, restore drills).
+    const unscoped = createQueues(connection);
+    expect(unscoped.agentRuns.opts.prefix).toBe("bull");
+    await unscoped.agentRuns.close();
+
+    const scoped = createQueues(connection, { prefix: "t:iso" });
+    expect(scoped.agentRuns.opts.prefix).toBe("t:iso");
+    await scoped.agentRuns.obliterate({ force: true }); // only "t:iso" keys
+    await scoped.agentRuns.close();
+
+    const worker = trackWorker(
+      createAgentRunsWorker(connection, async () => undefined, { prefix: "t:iso" }),
+    );
+    expect(worker.opts.prefix).toBe("t:iso"); // must match the add side or jobs never meet
+    await closeWorker(worker);
+
+    // And this suite's own queues are prefixed.
+    expect(queues.agentRuns.opts.prefix).toBe(QUEUE_PREFIX);
   });
 
   it("adding the same jobId twice dedupes: same job id, one job in the queue", async () => {
@@ -154,7 +182,7 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
     const worker = trackWorker(
       createAgentRunsWorker(connection, async (job) => {
         processed.push(job.data);
-      }),
+      }, { prefix: QUEUE_PREFIX }),
     );
 
     // Plan-pinned worker configuration: default concurrency 8; stalled-job
@@ -193,6 +221,7 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
     const worker = trackWorker(
       createAgentRunsWorker(connection, async () => undefined, {
         concurrency: 3,
+        prefix: QUEUE_PREFIX,
       }),
     );
     expect(worker.opts.concurrency).toBe(3);

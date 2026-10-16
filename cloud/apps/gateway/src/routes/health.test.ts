@@ -112,8 +112,12 @@ describe("GET /cloud/v1/health", () => {
   it.skipIf(!TEST_REDIS_URL)("redisQ check passes against a real BullMQ queue connection", async () => {
     // NOTE: createQueues takes a connection OPTIONS OBJECT ({url}) — a bare
     // string would be spread into garbage opts by withBlockingSafeRetries
-    // (same shape Task 5's queues.test.ts uses).
-    const queues = createQueues({ url: TEST_REDIS_URL! });
+    // (same shape Task 5's queues.test.ts uses). Suite-unique prefix so the
+    // shared dev redis stays clean for parallel suites.
+    const prefix = process.env.OVID_TEST_QUEUE_PREFIX
+      ? `${process.env.OVID_TEST_QUEUE_PREFIX}-gateway`
+      : "ovid-test-gateway";
+    const queues = createQueues({ url: TEST_REDIS_URL! }, { prefix });
     try {
       const res = await getHealth(okDb, queues);
       expect(res.statusCode).toBe(200);

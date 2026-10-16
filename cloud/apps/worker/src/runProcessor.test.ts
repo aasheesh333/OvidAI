@@ -455,6 +455,11 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     // -------------------------------------------------------------------------
 
     describe("integration: real BullMQ worker + real Queue + real SSE transport", () => {
+      // Suite-unique BullMQ prefix: parallel suites share the dev redis, so
+      // this suite's obliterate calls can only ever wipe its OWN keys.
+      const QUEUE_PREFIX = process.env.OVID_TEST_QUEUE_PREFIX
+        ? `${process.env.OVID_TEST_QUEUE_PREFIX}-worker`
+        : "ovid-test-worker";
       let server: Server | undefined;
       let queues: ReturnType<typeof createQueues> | undefined;
       let worker: ReturnType<typeof createAgentRunsWorker> | undefined;
@@ -514,9 +519,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
         // Task 7 lesson, pinned: factories take an OPTIONS OBJECT { url }.
         const connection = { url: TEST_REDIS_URL! };
-        queues = createQueues(connection);
-        await queues.agentRuns.obliterate({ force: true }); // deterministic counts
-        worker = createAgentRunsWorker(connection, processor);
+        queues = createQueues(connection, { prefix: QUEUE_PREFIX });
+        await queues.agentRuns.obliterate({ force: true }); // deterministic counts (our keys only)
+        worker = createAgentRunsWorker(connection, processor, { prefix: QUEUE_PREFIX });
 
         const settled = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(

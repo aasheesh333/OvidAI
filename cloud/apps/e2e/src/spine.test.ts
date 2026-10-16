@@ -274,6 +274,13 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     const sleeps: number[] = [];
     /** Released defensively in afterAll so worker.close() can never hang. */
     let activeGate: SseArm | null = null;
+    /**
+     * Suite-unique BullMQ prefix: parallel suites share the dev redis, so
+     * this suite's obliterate call can only ever wipe its OWN queue keys.
+     */
+    const QUEUE_PREFIX = process.env.OVID_TEST_QUEUE_PREFIX
+      ? `${process.env.OVID_TEST_QUEUE_PREFIX}-e2e`
+      : "ovid-test-e2e";
 
     // Mint/key stubs per the binding decision: the mock LiteLLM ignores key
     // validity, so a constant "test-key" is enough end to end.
@@ -290,7 +297,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       // OBJECT form mandatory — a bare URL string is spread into garbage opts
       // by withBlockingSafeRetries and hangs (Task 7 lesson, Task 9 carry-over).
       const connection = { url: TEST_REDIS_URL! };
-      queues = createQueues(connection);
+      queues = createQueues(connection, { prefix: QUEUE_PREFIX });
 
       sse = await startSseMock();
       const processor = createAgentRunProcessor({
@@ -304,7 +311,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
           sleeps.push(ms);
         },
       });
-      worker = createAgentRunsWorker(connection, processor);
+      worker = createAgentRunsWorker(connection, processor, { prefix: QUEUE_PREFIX });
       worker.on("failed", (job, err) => {
         workerFailures.push({ jobId: job?.id, message: err.message });
       });
@@ -786,14 +793,17 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(okRes.body).toEqual({ status: "ok", checks: { db: true, redisQ: true } });
 
       const deadPort = await reserveThenReleasePort();
-      const deadRealQueues = createQueues({
-        url: `redis://127.0.0.1:${deadPort}`,
-        // Bounded retries: once ioredis stops retrying it flushes queued
-        // commands with errors, so the probe's ping() rejects fast instead of
-        // leaning solely on the 1 s probe timeout — and no reconnect timer
-        // outlives the test.
-        retryStrategy: (times: number) => (times >= 3 ? null : 50),
-      });
+      const deadRealQueues = createQueues(
+        {
+          url: `redis://127.0.0.1:${deadPort}`,
+          // Bounded retries: once ioredis stops retrying it flushes queued
+          // commands with errors, so the probe's ping() rejects fast instead of
+          // leaning solely on the 1 s probe timeout — and no reconnect timer
+          // outlives the test.
+          retryStrategy: (times: number) => (times >= 3 ? null : 50),
+        },
+        { prefix: QUEUE_PREFIX },
+      );
       extraQueues.push(deadRealQueues);
       deadRealQueues.agentRuns.on("error", () => {}); // expected ECONNREFUSED noise
       const degradedApp = buildGateway({
