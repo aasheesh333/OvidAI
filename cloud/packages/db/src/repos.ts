@@ -242,16 +242,26 @@ export const runs = {
     return claimed.length > 0;
   },
 
+  /**
+   * CONDITIONAL terminal transition (I4b): UPDATE … WHERE id AND
+   * status IN ('queued','running') — a run already terminalized by the
+   * processor or the stale-run sweeper is never overwritten, so the two can
+   * never clobber each other's verdicts. true = this call terminalized the
+   * run (from 'queued' — the C1 queue-wait timeout path — or 'running');
+   * false = already terminal (or unknown id), nothing written.
+   */
   async finish(
     db: Db,
     runId: string,
     status: "completed" | "failed" | "cancelled",
     lastError?: string | null,
-  ): Promise<void> {
-    await db
+  ): Promise<boolean> {
+    const finished = await db
       .update(runsTable)
       .set({ status, lastError: lastError ?? null, finishedAt: new Date() })
-      .where(eq(runsTable.id, runId));
+      .where(and(eq(runsTable.id, runId), inArray(runsTable.status, [...ACTIVE_RUN_STATUSES])))
+      .returning({ id: runsTable.id });
+    return finished.length > 0;
   },
 
   /**

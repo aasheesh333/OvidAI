@@ -249,6 +249,39 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     expect(r2!.lastError).toBeNull();
   });
 
+  it("runs.finish is conditional: a late finish on an already-terminal run is a no-op (returns false, keeps the first terminal state)", async () => {
+    const uid = await seedUser();
+    const s = await sessions.create(db, uid, "terminal guard");
+    const m = await messages.append(db, { sessionId: s.id, role: "user", content: "go" });
+    const run = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
+    expect(await runs.claimNext(db, run.id)).toBe(true);
+
+    // The processor's terminal transition wins first.
+    expect(await runs.finish(db, run.id, "completed")).toBe(true);
+    const [after] = await db.select().from(runsTable).where(eq(runsTable.id, run.id));
+    expect(after!.status).toBe("completed");
+    expect(after!.finishedAt).toBeInstanceOf(Date);
+
+    // The stale-run sweeper racing in late must NOT overwrite the verdict:
+    // false, and status/lastError/finishedAt all keep the processor's values.
+    expect(await runs.finish(db, run.id, "failed", "run_lost: stale sweep")).toBe(false);
+    const [kept] = await db.select().from(runsTable).where(eq(runsTable.id, run.id));
+    expect(kept!.status).toBe("completed");
+    expect(kept!.lastError).toBeNull();
+    expect(kept!.finishedAt).toEqual(after!.finishedAt);
+
+    // Also from 'queued': the queue-wait timeout path terminalizes a queued
+    // run (I4b + C1), but a run already terminalized by someone else refuses.
+    const queued = await runs.create(db, { sessionId: s.id, promptMessageId: m.id });
+    expect(await runs.finish(db, queued.id, "failed", "run_queue_wait_timeout")).toBe(true);
+    expect(await runs.finish(db, queued.id, "cancelled")).toBe(false);
+    const [q] = await db.select().from(runsTable).where(eq(runsTable.id, queued.id));
+    expect(q!.status).toBe("failed");
+    expect(q!.lastError).toBe("run_queue_wait_timeout");
+
+    expect(await runs.finish(db, newId(), "failed", "unknown")).toBe(false); // unknown id
+  });
+
   it("runs.listStaleRunning: only 'running' rows with startedAt older than the cutoff, oldest first", async () => {
     const uid = await seedUser();
     const s = await sessions.create(db, uid, "stale sweep");
