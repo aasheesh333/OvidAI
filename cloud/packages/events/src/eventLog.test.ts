@@ -181,4 +181,52 @@ describe.skipIf(!TEST_REDIS_URL)("eventLog against real redis", () => {
     expect(all.length).toBeGreaterThanOrEqual(5); // a no-trim implementation fails here
     expect(all[all.length - 1].payload).toEqual({ i: 11 }); // newest survives
   });
+
+  // Task 4 review carry-over, promoted into Task 8: the pub/sub listener must
+  // never let a malformed published payload or a throwing consumer callback
+  // escape — an exception thrown inside an EventEmitter listener surfaces as
+  // an uncaughtException and kills the host process (gateway/worker).
+
+  it("malformed payload on the live channel is skipped; later events still delivered", async () => {
+    const log = createRedisEventLog(redis);
+    const s = newSid();
+    const got: SessionEvent[] = [];
+
+    const unsub = await log.subscribe(s, (e) => got.push(e));
+    try {
+      // Raw garbage straight onto the channel (bypasses append's JSON).
+      await redis.publish(`sess:${s}:live`, "{{{ not json at all");
+      await redis.publish(`sess:${s}:live`, "");
+      await redis.publish(`sess:${s}:live`, '["truncated"');
+
+      // The listener must still be alive and delivering afterwards.
+      const e1 = await log.append(s, "message_delta", { text: "after-garbage" });
+      await waitFor(() => got.length === 1);
+      expect(got[0]).toEqual(e1);
+    } finally {
+      await unsub();
+    }
+  });
+
+  it("an onEvent that throws on one event still receives the next", async () => {
+    const log = createRedisEventLog(redis);
+    const s = newSid();
+    const got: SessionEvent[] = [];
+
+    const unsub = await log.subscribe(s, (e) => {
+      got.push(e);
+      if (got.length === 1) throw new Error("consumer boom");
+    });
+    try {
+      const e1 = await log.append(s, "message_delta", { text: "first" });
+      await waitFor(() => got.length === 1);
+
+      // The throwing consumer must not have knocked out the listener:
+      const e2 = await log.append(s, "message_delta", { text: "second" });
+      await waitFor(() => got.length === 2);
+      expect(got).toEqual([e1, e2]);
+    } finally {
+      await unsub();
+    }
+  });
 });

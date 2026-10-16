@@ -3,7 +3,9 @@ import Fastify, {
   type FastifyInstance,
   type FastifyServerOptions,
 } from "fastify";
+import websocket from "@fastify/websocket";
 import type { Db } from "@ovid/db";
+import type { EventLog } from "@ovid/events";
 import type { QueueServices } from "@ovid/queue";
 import type { KeyProvider, MintProvisioner } from "@ovid/shared";
 import type { ApiError } from "@ovid/shared";
@@ -11,6 +13,7 @@ import { authHook, type Verifier } from "./auth.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
+import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
 
 export interface GatewayDeps {
@@ -20,6 +23,8 @@ export interface GatewayDeps {
   tickets: TicketStore;
   keys: KeyProvider;
   mint: MintProvisioner;
+  /** Session event log (Task 4) — the WS channel's replay + live source. */
+  events: EventLog;
   /**
    * Reserved for time-sensitive logic (Task 8 WS heartbeats, TTL math); the
    * REST routes deliberately use DB time (repos) so pagination and ordering
@@ -101,6 +106,14 @@ export function buildGateway(
     },
     { prefix: API_PREFIX },
   );
+
+  // WS scope: GET /cloud/ws, public by design — no authHook here, the
+  // single-use ?ticket= query param IS the auth (verified in the handshake).
+  // The websocket plugin must be loaded in the same scope before the route.
+  app.register(async (scope) => {
+    await scope.register(websocket);
+    registerWsRoute(scope, deps);
+  });
 
   return app;
 }

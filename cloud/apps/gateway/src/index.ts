@@ -8,6 +8,7 @@ import { initializeApp } from "firebase-admin/app";
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
 import { createDb } from "@ovid/db";
+import { createRedisEventLog } from "@ovid/events";
 import { createQueues } from "@ovid/queue";
 import { buildGateway } from "./app.js";
 import { createFirebaseVerifier, createTestVerifier } from "./auth.js";
@@ -45,6 +46,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       tickets: createTicketStore(redisQ),
       keys: createMintRedisKeyProvider(redisMint),
       mint: createHttpMintProvisioner(cfg.mintBaseUrl),
+      // Session event log shares the queue Redis; the worker (Task 9) appends
+      // to the same instance, so gateway replay/live sees every event.
+      events: createRedisEventLog(redisQ),
     },
     { logger: true },
   );

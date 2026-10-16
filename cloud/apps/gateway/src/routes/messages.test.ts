@@ -14,6 +14,7 @@ import { MintHttpError } from "../keys.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
+  noopEvents,
   stubKeys,
   stubMint,
   stubQueues,
@@ -60,6 +61,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       tickets: stubTickets(),
       keys: stubKeys(),
       mint,
+      events: noopEvents,
     });
     const handle = { app, adds, mint };
     built.push(handle);

@@ -7,6 +7,7 @@ import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
   noopDb,
+  noopEvents,
   stubKeys,
   stubMint,
   stubQueues,
@@ -36,6 +37,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
       tickets: stubTickets(),
       keys: stubKeys(),
       mint: stubMint(),
+      events: noopEvents,
     });
   }, 60_000);
 
@@ -289,6 +291,7 @@ describe("gateway session routes without a database", () => {
       tickets: stubTickets(),
       keys: stubKeys(),
       mint: stubMint(),
+      events: noopEvents,
     });
     try {
       const res = await app.inject({

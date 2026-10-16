@@ -4,7 +4,7 @@ import type { QueueServices } from "@ovid/queue";
 import { createQueues } from "@ovid/queue";
 import { buildGateway } from "../app.js";
 import { openTestDb, closeDb, TEST_DATABASE_URL, } from "../test/db.js";
-import { stubKeys, stubMint, stubTickets, stubVerifier } from "../test/stubs.js";
+import { noopEvents, stubKeys, stubMint, stubTickets, stubVerifier } from "../test/stubs.js";
 
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
 
@@ -48,6 +48,7 @@ function healthApp(db: Db, queues: QueueServices) {
     tickets: stubTickets(),
     keys: stubKeys(),
     mint: stubMint(),
+    events: noopEvents,
   });
 }
 

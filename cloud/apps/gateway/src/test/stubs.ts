@@ -1,4 +1,5 @@
 import type { Db } from "@ovid/db";
+import type { EventLog } from "@ovid/events";
 import type { AgentRunJob, QueueServices } from "@ovid/queue";
 import type { KeyProvider, MintProvisioner } from "@ovid/shared";
 import type { Verifier } from "../auth.js";
@@ -101,3 +102,10 @@ export function stubTickets(behavior: { failMint?: boolean } = {}): TicketStub {
 
 /** Minimal non-db-touching Db stand-in for tests that never hit the database. */
 export const noopDb = {} as unknown as Db;
+
+/**
+ * EventLog stand-in for REST-only tests: buildGateway registers the WS route
+ * unconditionally, but inject() tests never upgrade a socket, so the log is
+ * never touched.
+ */
+export const noopEvents = {} as unknown as EventLog;

@@ -4,7 +4,7 @@ import type { SessionEvent, SessionEventType } from "@ovid/shared";
 export interface EventLog {
   append(sessionId: string, type: SessionEventType, payload: Record<string, unknown>): Promise<SessionEvent>; // XADD + PUBLISH
   readSince(sessionId: string, lastSeq: string | null, limit: number): Promise<SessionEvent[]>; // XRANGE
-  subscribe(sessionId: string, onEvent: (e: SessionEvent) => void): Promise<() => Promise<void>>; // PSUBSCRIBE; returns unsubscribe
+  subscribe(sessionId: string, onEvent: (e: SessionEvent) => void): Promise<() => Promise<void>>; // SUBSCRIBE (one channel per session); returns unsubscribe
 }
 
 const DEFAULT_MAX_LEN = 10_000;
@@ -79,7 +79,22 @@ export function createRedisEventLog(redis: Redis, opts?: { maxLen?: number }): E
       sub.on("error", () => {});
       const channel = liveChannel(sessionId);
       const listener = (_ch: string, message: string): void => {
-        onEvent(JSON.parse(message) as SessionEvent);
+        // Hardening (Task 4 review carry-over): this runs inside an
+        // EventEmitter listener — an exception thrown here escapes as an
+        // uncaughtException and kills the host process (gateway/worker).
+        // A malformed published payload is skipped; a throwing consumer loses
+        // that one event but the listener survives for the next.
+        let event: SessionEvent;
+        try {
+          event = JSON.parse(message) as SessionEvent;
+        } catch {
+          return; // garbage on the channel: skip, keep listening
+        }
+        try {
+          onEvent(event);
+        } catch {
+          // consumer bug: contained — never fatal to the pub/sub connection
+        }
       };
       sub.on("message", listener);
       try {
