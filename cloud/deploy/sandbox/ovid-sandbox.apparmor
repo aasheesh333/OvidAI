@@ -1,0 +1,27 @@
+# Ovid sandbox launcher profile — branch b artifact (Task 1, P2 sandbox-manager).
+#
+# Grants /usr/bin/bwrap permission to create an unprivileged user namespace on
+# hosts where kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu 24.04
+# default). Without a profile, the kernel transitions the bwrap process into
+# the restrictive `unprivileged_userns` profile at userns_create time, which
+# can deny the uid_map write (research p2-bubblewrap-feasibility.md §2.1).
+#
+# Modeled on the on-box /etc/apparmor.d/flatpak and /etc/apparmor.d/podman
+# precedents: a named, unconfined-flagged profile whose only grant is `userns`
+# (kernel `userns_create`). The kernel restriction stays ON for every other
+# unprivileged binary on the host.
+#
+# Installed by cloud/deploy/sandbox/sandbox-probe.sh (branch b only) as
+# /etc/apparmor.d/ovid-sandbox, loaded with:
+#   apparmor_parser -r /etc/apparmor.d/ovid-sandbox
+# and left in place (production prerequisite, recorded in MECHANISM.md).
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile ovid-sandbox /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/ovid-sandbox>
+}
