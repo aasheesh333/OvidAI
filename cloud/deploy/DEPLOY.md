@@ -163,6 +163,9 @@ cp Caddyfile "Caddyfile.bak-$(date -u +%Y%m%dT%H%M%S)"
 #    `handle /cloud/* { … }` block INTO the api.ovidsi.com site block,
 #    immediately AFTER the `import ovid_public` line. The file header
 #    explains placement, why `handle` (not handle_path), and the port.
+#    The comment-only section at the BOTTOM of that file documents the
+#    GLOBAL trusted_proxies block — already present in the live Caddyfile,
+#    do NOT copy it (verify per cloud/deploy/HARDENING.md item D).
 $EDITOR Caddyfile
 
 # 3. Validate with the container's own caddy binary (same version/config

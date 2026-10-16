@@ -128,3 +128,22 @@ docker rm -f ovid-restore-drill
 
 Run this drill after the first real backup, then quarterly — a backup that
 has never been restored is a hope, not a plan.
+
+## Verification log
+
+Proven restores are recorded here, newest first. A drill = the FOREIGN-postgres
+procedure above, run end-to-end on a scratch container, with cleanup verified.
+
+- **2026-10-16 — Task-11 scratch restore drill: PASS.** One live `pg_backup.sh`
+  run (read-only against the databases; dumps written to /tmp): discovered
+  `litellm`, `ovid_account_dev`, `postgres`; free-space gate OK (45057 MB ≥
+  2048); `zstd -t` → "3 files decompressed : 11388460 bytes total". Restore:
+  scratch `postgres:16-alpine` container on `127.0.0.1:5434`,
+  `CREATE ROLE litellm LOGIN`, then
+  `zstd -dc litellm.dump.zst | psql -U postgres -v ON_ERROR_STOP=1 -q` →
+  **exit 0**; `SELECT count(*) FROM pg_tables WHERE schemaname='public'` →
+  **88** (87 `LiteLLM_*`, incl. `LiteLLM_SpendLogs`, `LiteLLM_VerificationToken`).
+  Cleanup verified: scratch container removed, /tmp dumps deleted. Full detail:
+  `.superpowers/sdd/2026-10-15-ovid-cloud-p0-p1-spine/task-11-report.md` §7–8.
+- **Next:** re-run the drill after the first timer-produced backup
+  (install per `DEPLOY.md` §8), then quarterly. Record results here.
