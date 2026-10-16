@@ -1,10 +1,7 @@
-#!/usr/bin/env bash
-# sandbox-enter.sh — per-user bubblewrap sandbox entrypoint (P2 Task 7).
-#
-# Usage: sandbox-enter.sh <sandbox-uid> <workspace-path> <rootfs> <command> [args...]
-#
-# CONTRACT PLACEHOLDER — the body lands in Task 7 (bwrap invocation, cgroup
-# limits, uid mapping). Executing this file before then is an error.
+#!/bin/bash
+# usage: sandbox-enter.sh <cgroup-procs-file> <uid> <gid> <nul-separated-argv-file>
 set -euo pipefail
-echo "sandbox-enter.sh: not implemented yet (P2 Task 7)" >&2
-exit 1
+procs="$1"; uid="$2"; gid="$3"; argvfile="$4"
+echo $$ > "$procs"                       # attach BEFORE dropping privileges (research §3)
+args=(); while IFS= read -r -d '' a; do args+=("$a"); done < "$argvfile"
+exec setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "${args[@]}"
