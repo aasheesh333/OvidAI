@@ -1,0 +1,136 @@
+# Ovid Cloud (P0 spine) — gateway + worker + dedicated queue Redis.
+#
+# Runs ALONGSIDE the live ovid-gateway stack on the same VPS and joins its
+# internal network (external) to reach postgres / mint / mint-redis / litellm
+# by container DNS. redis-q is attached ONLY to the ovid-cloud network — the
+# live stack never sees it, and it never sees the live stack's redis.
+#
+# Activation is a manual, owner-run procedure: see DEPLOY.md (env authoring,
+# provisioning, compose up, Caddy route, backup timer). `docker compose
+# config -q` is the safe dry validation; NOTHING here touches the live stack
+# by itself.
+#
+# Host-port note: 127.0.0.1:8081 on this box is ALREADY the live Caddy's
+# admin-dashboard listener (see /opt/ovid-gateway/caddy/Caddyfile, last block).
+# The gateway therefore publishes on 127.0.0.1:${GATEWAY_HOST_PORT} (default
+# 8082), and caddy-snippet.conf proxies /cloud/* to that port. INSIDE its
+# container the gateway always listens on 0.0.0.0:8081 (HOST/PORT below —
+# 0.0.0.0 is required for the published port to be reachable at all).
+
+name: ovid-cloud
+
+networks:
+  internal:
+    # The live stack's network — postgres, mint, mint-redis, litellm live on
+    # it under their container-DNS names (ovid-gateway-postgres-1, …).
+    external: true
+    name: ovid-gateway_internal
+  ovid-cloud:
+    name: ovid-cloud
+    driver: bridge
+
+volumes:
+  redis-q-data:
+    name: ovid-cloud-redis-q-data
+
+services:
+  # Queue + session-event-log Redis, owned by ovid-cloud (never shared with
+  # the live stack's redis). noeviction: queue writes must fail loudly when
+  # full, never silently evict jobs/events. AOF everysec: survives restarts.
+  redis-q:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--maxmemory-policy",
+        "noeviction",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "everysec",
+        "--requirepass",
+        "${REDIS_Q_PASSWORD:?REDIS_Q_PASSWORD must be set in .env}",
+      ]
+    environment:
+      # Only so the healthcheck's in-container shell can interpolate it.
+      REDIS_Q_PASSWORD: ${REDIS_Q_PASSWORD:?REDIS_Q_PASSWORD must be set in .env}
+    volumes:
+      - redis-q-data:/data
+    mem_limit: 1536m
+    # ovid-cloud network ONLY — not reachable from the live stack.
+    networks: [ovid-cloud]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli --no-auth-warning -a \"$$REDIS_Q_PASSWORD\" ping | grep -q PONG",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      # Structural overrides (win over .env): the container listener MUST be
+      # 0.0.0.0 for the published port to be reachable; PORT is fixed at 8081
+      # inside the container — the HOST-side port is GATEWAY_HOST_PORT below.
+      HOST: 0.0.0.0
+      PORT: "8081"
+    ports:
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-8082}:8081"
+    volumes:
+      # Firebase Admin credentials — mount-vs-copy is an owner decision at
+      # activation (DEPLOY.md §3); the default bind-mounts the live box's
+      # file READ-ONLY. GOOGLE_APPLICATION_CREDENTIALS (from .env) points at
+      # the in-container path.
+      - ${FIREBASE_CREDENTIALS_HOST_PATH:-/opt/ovid-gateway/firebase-admin.json}:/etc/ovid/firebase-admin.json:ro
+    depends_on:
+      redis-q: { condition: service_healthy }
+    networks: [internal, ovid-cloud]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      # 200 = ok; 503 (degraded) makes wget exit nonzero → unhealthy.
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:8081/cloud/v1/health || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    restart: unless-stopped
+    env_file: [.env]
+    depends_on:
+      redis-q: { condition: service_healthy }
+      # Ordering only — the worker does not call the gateway, so its health
+      # is deliberately NOT a gate (a degraded gateway must not stop runs).
+      gateway: { condition: service_started }
+    networks: [internal, ovid-cloud]
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 256
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # The worker drains in-flight LiteLLM streams on SIGTERM — give it room.
+    stop_grace_period: 30s

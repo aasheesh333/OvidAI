@@ -1,6 +1,7 @@
 export interface GatewayEnv {
   nodeEnv: string;
   port: number;
+  host: string;
   authMode: "firebase" | "test";
   databaseUrl: string;
   redisQUrl: string;
@@ -9,6 +10,7 @@ export interface GatewayEnv {
 }
 
 const DEFAULT_PORT = 8081;
+const DEFAULT_HOST = "127.0.0.1";
 
 /**
  * Validate + default the gateway's environment.
@@ -41,6 +43,18 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
   }
   const authMode: GatewayEnv["authMode"] = authModeRaw;
 
+  // HOST defaults to loopback (bare-metal/dev: closed by default). The
+  // container deploy MUST set HOST=0.0.0.0 — docker-proxy forwards a
+  // published port to the container's bridge IP, so a loopback-bound
+  // listener is unreachable from the host's reverse proxy.
+  let host = DEFAULT_HOST;
+  if (raw.HOST !== undefined) {
+    host = raw.HOST.trim();
+    if (host === "") {
+      throw new Error("HOST must be a non-empty bind address when set");
+    }
+  }
+
   if (nodeEnv === "production" && authMode === "test") {
     throw new Error("OVID_AUTH_MODE=test is forbidden when NODE_ENV=production");
   }
@@ -56,6 +70,7 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
   return {
     nodeEnv,
     port,
+    host,
     authMode,
     databaseUrl: requiredUrl("DATABASE_URL"),
     redisQUrl: requiredUrl("REDIS_Q_URL"),

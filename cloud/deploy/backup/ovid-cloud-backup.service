@@ -1,0 +1,24 @@
+# Nightly Postgres backup run (all non-template DBs on ovid-gateway-postgres-1
+# → pg_dump | zstd -9 → /opt/ovid-backups/pg/<ts>/, optional R2 upload).
+# Install: see cloud/deploy/DEPLOY.md §8 (copy to /etc/systemd/system/,
+# daemon-reload, enable --now ovid-cloud-backup.timer). Adjust the paths below
+# if your checkout is NOT at /opt/ovid-cloud/repo.
+[Unit]
+Description=Ovid — Postgres backups (ovid-gateway-postgres-1 → zstd, optional R2)
+Documentation=file:/opt/ovid-cloud/repo/cloud/deploy/backup/README.md
+Wants=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+# Optional 0600 file with BACKUP_*/OVID_R2_*/AWS_* overrides (template in
+# cloud/deploy/.env.example, "Backups" section). Absent file is fine — the
+# script's defaults then apply (local-only backups).
+EnvironmentFile=-/opt/ovid-cloud/backup.env
+ExecStart=/opt/ovid-cloud/repo/cloud/deploy/backup/pg_backup.sh
+# Dumps share the disk with the live stack — keep them in the background.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Any nonzero exit (space guard, lock overlap, dump/upload failure) leaves the
+# unit failed: `systemctl status ovid-cloud-backup.service` / journalctl -u.

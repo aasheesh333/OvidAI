@@ -278,6 +278,7 @@ describe("loadGatewayEnv", () => {
   const fullRaw = {
     NODE_ENV: "production",
     PORT: "9001",
+    HOST: "0.0.0.0",
     OVID_AUTH_MODE: "firebase",
     DATABASE_URL: "postgres://db:5432/ovid",
     REDIS_Q_URL: "redis://q:6379",
@@ -291,7 +292,7 @@ describe("loadGatewayEnv", () => {
     ).toThrow(/production/);
   });
 
-  it("applies defaults (nodeEnv development, port 8081, authMode firebase)", () => {
+  it("applies defaults (nodeEnv development, port 8081, host 127.0.0.1, authMode firebase)", () => {
     const env = loadGatewayEnv({
       OVID_AUTH_MODE: "test",
       DATABASE_URL: "postgres://x",
@@ -301,6 +302,7 @@ describe("loadGatewayEnv", () => {
     });
     expect(env.nodeEnv).toBe("development");
     expect(env.port).toBe(8081);
+    expect(env.host).toBe("127.0.0.1");
     expect(env.authMode).toBe("test");
   });
 
@@ -323,6 +325,7 @@ describe("loadGatewayEnv", () => {
     expect(env).toEqual({
       nodeEnv: "production",
       port: 9001,
+      host: "0.0.0.0",
       authMode: "firebase",
       databaseUrl: "postgres://db:5432/ovid",
       redisQUrl: "redis://q:6379",
@@ -344,6 +347,18 @@ describe("loadGatewayEnv", () => {
       expect(() =>
         loadGatewayEnv({ OVID_AUTH_MODE: "test", PORT: bad }),
       ).toThrow(/PORT/);
+    }
+  });
+
+  // HOST exists for the container deploy: docker-proxy forwards a published
+  // port to the container's BRIDGE IP, so a gateway bound to loopback inside
+  // the container is unreachable from the host's Caddy. Compose sets
+  // HOST=0.0.0.0; the loopback default keeps bare-metal/dev runs closed.
+  it("throws on an empty HOST when set", () => {
+    for (const bad of ["", "   "]) {
+      expect(() => loadGatewayEnv({ OVID_AUTH_MODE: "test", HOST: bad })).toThrow(
+        /HOST/,
+      );
     }
   });
 

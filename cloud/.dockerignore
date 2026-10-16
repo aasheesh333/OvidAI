@@ -1,0 +1,10 @@
+# Docker build context hygiene: the builder installs and compiles INSIDE the
+# image, so host-side artifacts must never leak in (size + stale-code safety).
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+# The filled deploy environment holds production secrets — never let it into
+# an image layer, even though no Dockerfile COPYs it.
+deploy/.env
+deploy/.env.*
+!deploy/.env.example

@@ -18,7 +18,9 @@ import { createTicketStore } from "./tickets.js";
 
 /**
  * Composition root — intentionally untested-thin (Task 10's e2e exercises the
- * wiring): env → real deps → listen on 127.0.0.1:PORT. Not invoked at import.
+ * wiring): env → real deps → listen on HOST:PORT (defaults 127.0.0.1:8081;
+ * container deploys set HOST=0.0.0.0). Not invoked at import — main.ts is the
+ * process entry point.
  */
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<FastifyInstance> {
   const cfg = loadGatewayEnv(env);
@@ -61,6 +63,6 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     await db.$client.end({ timeout: 5 });
   });
 
-  await app.listen({ host: "127.0.0.1", port: cfg.port });
+  await app.listen({ host: cfg.host, port: cfg.port });
   return app;
 }

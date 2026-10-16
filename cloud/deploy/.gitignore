@@ -1,0 +1,4 @@
+# The filled deploy environment is production secrets — never commit it.
+.env
+.env.*
+!.env.example

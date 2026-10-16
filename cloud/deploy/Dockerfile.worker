@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+# Ovid Cloud worker image. Build context = the cloud/ monorepo root:
+#   docker build -f deploy/Dockerfile.worker <cloud-dir>
+# (docker compose does this automatically — context `..` in docker-compose.yml.)
+#
+# Same multi-stage shape as Dockerfile.gateway: full install + build, then a
+# slim runtime with ONLY dist output + production deps. No ports are published
+# for the worker (compose attaches it to both networks; nothing listens).
+
+FROM node:22-alpine AS build
+WORKDIR /repo
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+RUN pnpm install --frozen-lockfile
+RUN pnpm -r build
+
+FROM node:22-alpine
+ENV NODE_ENV=production
+WORKDIR /repo
+RUN corepack enable
+# Workspace manifests for EVERY importer in the lockfile (including e2e and
+# gateway — --frozen-lockfile validates the whole workspace layout), then a
+# prod-only install: devDeps never reach the runtime image.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY packages/events/package.json packages/events/
+COPY packages/queue/package.json packages/queue/
+COPY apps/gateway/package.json apps/gateway/
+COPY apps/worker/package.json apps/worker/
+COPY apps/e2e/package.json apps/e2e/
+# Built output the worker loads at runtime — dist trees plus the drizzle/
+# folder (@ovid/db resolves it relative to the package root).
+COPY --from=build /repo/packages/shared/dist ./packages/shared/dist
+COPY --from=build /repo/packages/db/dist ./packages/db/dist
+COPY --from=build /repo/packages/db/drizzle ./packages/db/drizzle
+COPY --from=build /repo/packages/events/dist ./packages/events/dist
+COPY --from=build /repo/packages/queue/dist ./packages/queue/dist
+COPY --from=build /repo/apps/worker/dist ./apps/worker/dist
+RUN pnpm install --frozen-lockfile --prod
+USER node
+# worker main.ts has the direct-run guard and its own SIGTERM drain logic.
+CMD ["node", "apps/worker/dist/main.js"]

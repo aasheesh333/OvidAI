@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+# Ovid Cloud gateway image. Build context = the cloud/ monorepo root:
+#   docker build -f deploy/Dockerfile.gateway <cloud-dir>
+# (docker compose does this automatically — context `..` in docker-compose.yml.)
+#
+# Multi-stage: full workspace install + tsc build, then a slim runtime with
+# ONLY dist output, the drizzle/ migrations folder and production deps.
+
+FROM node:22-alpine AS build
+WORKDIR /repo
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+RUN pnpm install --frozen-lockfile
+RUN pnpm -r build
+
+FROM node:22-alpine
+ENV NODE_ENV=production
+WORKDIR /repo
+RUN corepack enable
+# Workspace manifests for EVERY importer in the lockfile (including e2e —
+# --frozen-lockfile validates the whole workspace layout), then a prod-only
+# install: typescript/vitest/drizzle-kit never reach the runtime image.
+# allowBuilds from pnpm-workspace.yaml applies (firebase-admin needs
+# @firebase/util's postinstall; msgpackr-extract falls back to pure JS).
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY packages/events/package.json packages/events/
+COPY packages/queue/package.json packages/queue/
+COPY apps/gateway/package.json apps/gateway/
+COPY apps/worker/package.json apps/worker/
+COPY apps/e2e/package.json apps/e2e/
+# Built output the gateway loads at runtime — dist trees plus the drizzle/
+# folder (migrate() resolves it relative to the package root, client.ts).
+COPY --from=build /repo/packages/shared/dist ./packages/shared/dist
+COPY --from=build /repo/packages/db/dist ./packages/db/dist
+COPY --from=build /repo/packages/db/drizzle ./packages/db/drizzle
+COPY --from=build /repo/packages/events/dist ./packages/events/dist
+COPY --from=build /repo/packages/queue/dist ./packages/queue/dist
+COPY --from=build /repo/apps/gateway/dist ./apps/gateway/dist
+RUN pnpm install --frozen-lockfile --prod
+USER node
+# main.ts is the process entry (direct-run guard around main() from index.ts).
+CMD ["node", "apps/gateway/dist/main.js"]
