@@ -32,7 +32,9 @@
 #   0  — exactly one branch (a/b/c) succeeded and S5+S6 passed; the DECISION
 #        line for cloud/deploy/sandbox/MECHANISM.md is printed in the summary.
 #   1  — no branch succeeded (STOP: escalate to owner per Step 4), or a hard
-#        section (S0/S1/S5/S6) failed. Evidence is always printed before exit.
+#        section (S1/S5/S6) failed. Evidence is always printed before exit.
+#        (S0 is evidence-only: absent sysctls/aa-status log as <absent> and
+#        do not abort the probe.)
 
 set -euo pipefail
 
@@ -218,6 +220,8 @@ s3_apparmor_retry() {
   mut "apparmor_parser -r ${PROFILE_DST} (loads profile on the live host)"
   if ! apparmor_parser -r "$PROFILE_DST"; then
     log "FAIL: apparmor_parser -r failed (profile not loaded)"
+    mut "rm -f ${PROFILE_DST} (remove unloaded profile copy — no residue)"
+    rm -f "$PROFILE_DST"
     return 1
   fi
   PROFILE_INSTALLED=1
