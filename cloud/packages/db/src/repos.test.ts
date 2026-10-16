@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { SessionEvent } from "@ovid/shared";
 import { createDb, migrate, type Db } from "./client.js";
@@ -30,6 +30,10 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
       // Drop the drizzle journal schema too, so migrate() re-applies the
       // generated SQL from scratch on every run (idempotent across runs).
       await admin.unsafe(`DROP SCHEMA IF EXISTS drizzle CASCADE`);
+      // The sandbox-uid pool sequence (migration 0001) is NOT owned by the
+      // users table, so DROP TABLE users leaves it behind — drop it too, or
+      // the re-applied migration's CREATE SEQUENCE would collide with it.
+      await admin.unsafe(`DROP SEQUENCE IF EXISTS users_sandbox_uid_seq CASCADE`);
       await admin.unsafe(
         `DROP TABLE IF EXISTS session_event_mirror, runs, messages, sessions, users CASCADE`,
       );
@@ -400,5 +404,58 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     const afterTier = await usersRepo.ensure(db, uid, "third@test.local");
     expect(afterTier.tier).toBe("pro");
     expect(afterTier.email).toBe("third@test.local");
+  });
+
+  describe("users.allocateSandboxUid (sandbox uid pool)", () => {
+    // This suite owns exactly these rows and this sequence state; afterAll
+    // removes/resets them — never a shared truncate of other suites' data.
+    const createdUids: string[] = [];
+    const allocated: number[] = [];
+
+    afterAll(async () => {
+      if (!db) return;
+      if (createdUids.length > 0) {
+        await db.delete(users).where(inArray(users.uid, createdUids));
+      }
+      // Hand the pool back exactly as the migration created it:
+      // is_called=false → the next nextval returns 200000 again.
+      await db.execute(sql`SELECT setval('users_sandbox_uid_seq', 200000, false)`);
+    });
+
+    async function seedSandboxUser(): Promise<string> {
+      const uid = newId();
+      await usersRepo.ensure(db, uid, `sbx-${uid.slice(0, 8)}@test.local`);
+      createdUids.push(uid);
+      return uid;
+    }
+
+    it("idempotent: allocating twice for the same user returns the identical uid", async () => {
+      const uid = await seedSandboxUser();
+      const first = await usersRepo.allocateSandboxUid(db, uid);
+      const second = await usersRepo.allocateSandboxUid(db, uid);
+      expect(Number.isInteger(first)).toBe(true);
+      expect(second).toBe(first);
+      allocated.push(first);
+    });
+
+    it("two users → distinct uids; every allocated uid stays in the production pool [200000, 209999]", async () => {
+      const a = await seedSandboxUser();
+      const b = await seedSandboxUser();
+      const ua = await usersRepo.allocateSandboxUid(db, a);
+      const ub = await usersRepo.allocateSandboxUid(db, b);
+      expect(ua).not.toBe(ub);
+      allocated.push(ua, ub);
+      for (const v of allocated) {
+        expect(v, `allocated uid ${v}`).toBeGreaterThanOrEqual(200_000);
+        expect(v, `allocated uid ${v}`).toBeLessThanOrEqual(209_999);
+      }
+    });
+
+    it("pool exhaustion: setval to maxvalue → next allocation for a fresh user throws /pool exhausted/", async () => {
+      // last_value=209999, is_called=true → the next nextval cannot advance.
+      await db.execute(sql`SELECT setval('users_sandbox_uid_seq', 209999, true)`);
+      const uid = await seedSandboxUser();
+      await expect(usersRepo.allocateSandboxUid(db, uid)).rejects.toThrow(/pool exhausted/);
+    });
   });
 });

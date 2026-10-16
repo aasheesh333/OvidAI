@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { uuidv7 } from "uuidv7";
 import type { MessageDto, SessionEvent, SessionEventType } from "@ovid/shared";
 import type { Db } from "./client.js";
@@ -48,6 +48,59 @@ export const users = {
       })
       .returning();
     return row!;
+  },
+
+  /**
+   * Per-user sandbox uid from the users_sandbox_uid_seq pool — the production
+   * block 200000–209999 (spec §11; the sequence is pinned to that block in the
+   * migration). Idempotent by construction:
+   *
+   *   1. nextval once (a value may be burned even when the user already has
+   *      one — accepted: correctness over sequence thriftiness),
+   *   2. UPDATE … SET sandbox_uid = next WHERE uid = $1 AND sandbox_uid IS NULL
+   *      RETURNING — exactly one concurrent caller for a user wins the write,
+   *   3. no row → the user already had one (or is unknown): re-read and return
+   *      the stored value, so every caller observes the same uid.
+   *
+   * When the sequence is exhausted (nextval past MAXVALUE), throws
+   * Error("sandbox uid pool exhausted") — provisioning must stop there.
+   */
+  async allocateSandboxUid(db: Db, uid: string): Promise<number> {
+    let next: number;
+    try {
+      // ::int — nextval returns int8, which postgres.js hands back as a string.
+      const rows = (await db.execute(
+        sql`SELECT nextval('users_sandbox_uid_seq')::int AS v`,
+      )) as unknown as { v: number }[];
+      next = rows[0]!.v;
+    } catch (err) {
+      // drizzle wraps driver errors ("Failed query: …", original on .cause);
+      // PostgreSQL's exhaustion message is 'nextval: reached maximum value of
+      // sequence "users_sandbox_uid_seq" (209999)'.
+      let e: unknown = err;
+      let exhausted = false;
+      for (let depth = 0; e instanceof Error && depth < 5; depth++) {
+        if (/reached maximum value of sequence/i.test(e.message)) {
+          exhausted = true;
+          break;
+        }
+        e = (e as { cause?: unknown }).cause;
+      }
+      if (exhausted) throw new Error("sandbox uid pool exhausted");
+      throw err;
+    }
+    const claimed = await db
+      .update(usersTable)
+      .set({ sandboxUid: next })
+      .where(and(eq(usersTable.uid, uid), isNull(usersTable.sandboxUid)))
+      .returning({ sandboxUid: usersTable.sandboxUid });
+    if (claimed[0] !== undefined) return claimed[0].sandboxUid!;
+    const [existing] = await db
+      .select({ sandboxUid: usersTable.sandboxUid })
+      .from(usersTable)
+      .where(eq(usersTable.uid, uid));
+    if (existing?.sandboxUid != null) return existing.sandboxUid;
+    throw new Error(`users.allocateSandboxUid: unknown user ${uid}`);
   },
 };
 

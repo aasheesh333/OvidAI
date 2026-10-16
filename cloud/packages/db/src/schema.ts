@@ -19,6 +19,9 @@ export const users = pgTable("users", {
   uid: text("uid").primaryKey(),
   email: text("email"),
   tier: text("tier").notNull().default("free"),
+  // Per-user sandbox uid from the users_sandbox_uid_seq pool (production block
+  // 200000–209999, spec §11). Unique across users; NULL until first allocated.
+  sandboxUid: integer("sandbox_uid").unique(),
   bannedAt: timestamptz("banned_at"),
   createdAt: timestamptz("created_at").notNull().defaultNow(),
 });
