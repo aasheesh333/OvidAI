@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import Redis from "ioredis";
@@ -6,7 +7,7 @@ import WebSocket from "ws";
 import { sessions, users, type Db } from "@ovid/db";
 import { createRedisEventLog, type EventLog } from "@ovid/events";
 import { wsServerMsg, type SessionEvent, type WsServerMsg } from "@ovid/shared";
-import { buildGateway } from "./app.js";
+import { buildGateway, WS_MAX_PAYLOAD_BYTES } from "./app.js";
 import { createTicketStore, type TicketStore } from "./tickets.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "./test/db.js";
 import {
@@ -17,7 +18,7 @@ import {
   stubVerifier,
   type TicketStub,
 } from "./test/stubs.js";
-import { compareSeq } from "./ws.js";
+import { compareSeq, MAX_SUBSCRIPTIONS_PER_CONNECTION } from "./ws.js";
 
 /**
  * Gateway WS channel (Task 8). Review Focus #1 — the reconnect replay/live
@@ -322,6 +323,37 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
       // channel must disappear — no leaked subscriber connections.
       await waitForAsync(async () => (await channelCount()) === 0, "redis subscriber torn down");
     }, 20_000);
+
+    it("I2 — oversized frame (> 262144 bytes) kills the socket with 1009; normal-size frames keep working", async () => {
+      expect(WS_MAX_PAYLOAD_BYTES).toBe(262_144); // the pinned cap, not the 100 MiB ws default
+
+      const uid = testUid("ws8h");
+      const { wsBase } = await makeApp();
+      const client = await newClient(wsBase, await tickets.mint(uid));
+
+      // Control: a normal frame on THIS connection works.
+      client.send({ op: "ping" });
+      await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong before oversize");
+
+      // One 300 KiB single text frame — past maxPayload: the server must
+      // abort the connection instead of buffering it.
+      client.sendRaw("x".repeat(300_000));
+      await client.waitFor(
+        () => client.socket.readyState === WebSocket.CLOSED,
+        "socket closed after oversized frame",
+        10_000,
+      );
+      expect(await client.closeCode).toBe(1009); // ws "message too big"
+
+      // The kill is per-frame, not server-wide: a fresh connection works.
+      const sid = await createOwnedSession(uid);
+      const fresh = await newClient(wsBase, await tickets.mint(uid));
+      fresh.send({ op: "subscribe", sessionId: sid });
+      await fresh.waitFor(
+        () => fresh.messages.some((m) => m.op === "subscribed"),
+        "normal frames still work on a fresh connection",
+      );
+    }, 20_000);
   },
 );
 
@@ -503,8 +535,7 @@ describe("gateway /cloud/ws (stub EventLog — deterministic replay/live race)",
     expect(stub.calls).toEqual([]); // event log never touched
   }, 15_000);
 
-  it("client dropping during the ticket verify never creates a subscription (no leaked redis subscriber)", async () => {
-    // Deterministic race (review Important #1): verify is gated; a subscribe
+  it("client dropping during the ticket verify never creates a subscription (no leaked redis subscriber)", async () => {    // Deterministic race (review Important #1): verify is gated; a subscribe
     // frame is queued pre-auth; the client is TERMINATED; only then does
     // verify resolve. A buggy handler drains the queue for a socket whose
     // 'close' already fired (unheard — no listener was registered yet) and
@@ -541,6 +572,65 @@ describe("gateway /cloud/ws (stub EventLog — deterministic replay/live race)",
     await sleep(300); // give a buggy drain every chance to build the subscription
     expect(stub.calls).toEqual([]); // events.subscribe never ran → nothing to leak
     expect(dbQueries).toBe(0); // ownership query never ran either
+  }, 20_000);
+
+  it("I3 — subscription cap 64: 65th distinct session refused (too_many_subscriptions), re-subscribe replaces, unsubscribe frees a slot", async () => {
+    expect(MAX_SUBSCRIPTIONS_PER_CONNECTION).toBe(64); // the pinned cap
+
+    // Cheap stub: every subscribe succeeds immediately, replay is empty —
+    // the cap is the only thing that can refuse here (fakeDb owns everything).
+    const stub: EventLog = {
+      append: async () => {
+        throw new Error("append is unused in the cap test");
+      },
+      readSince: async () => [],
+      subscribe: async () => async () => {},
+    };
+    const tickets = stubTickets();
+    const wsBase = await makeStubApp(stub, tickets);
+    const client = await connectClient(wsBase, await tickets.mint("capper"));
+    clients.push(client);
+
+    // 64 distinct owned sessions: all subscribe (the cap allows exactly 64).
+    const sids = Array.from({ length: 65 }, () => randomUUID());
+    for (let i = 0; i < 64; i += 1) client.send({ op: "subscribe", sessionId: sids[i] });
+    await client.waitFor(
+      () => client.messages.filter((m) => m.op === "subscribed").length === 64,
+      "64 subscribed",
+      20_000,
+    );
+
+    // The 65th DISTINCT session: refused with the cap error frame; no
+    // subscribed ack follows and the connection survives.
+    client.send({ op: "subscribe", sessionId: sids[64] });
+    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "cap error frame");
+    const err = client.messages.find((m) => m.op === "error");
+    expect(err).toEqual({
+      op: "error",
+      code: "too_many_subscriptions",
+      message: expect.any(String),
+      sessionId: sids[64],
+    });
+    await sleep(150); // settle: no (wrongly granted) ack may follow
+    expect(client.messages.filter((m) => m.op === "subscribed")).toHaveLength(64);
+    expect(client.socket.readyState).toBe(WebSocket.OPEN);
+
+    // Re-subscribe to an EXISTING session at the cap: a replacement, not a
+    // net-new subscription — must be allowed (fresh ack for the same session).
+    client.send({ op: "subscribe", sessionId: sids[0] });
+    await client.waitFor(
+      () => client.messages.filter((m) => m.op === "subscribed").length === 65,
+      "re-subscribe at cap replaces",
+    );
+
+    // Unsubscribe frees a slot: a previously refused distinct session fits.
+    client.send({ op: "unsubscribe", sessionId: sids[0] });
+    await sleep(150); // let the teardown settle
+    client.send({ op: "subscribe", sessionId: sids[64] });
+    await client.waitFor(
+      () => client.messages.filter((m) => m.op === "subscribed").length === 66,
+      "freed slot accepts a new session",
+    );
   }, 20_000);
 });
 

@@ -12,6 +12,24 @@ export type WsServerMsg =
   | { op: "pong" }
   | { op: "error"; code: string; message: string; sessionId?: string };
 
+/**
+ * The error codes the WS server currently sends in `error` frames. The wire
+ * schema keeps `code` an open string (forward-compatible), so this union is
+ * documentation, not enforcement — extend it ADDITIVELY when a new refusal
+ * reason appears; existing codes never change meaning:
+ * - bad_message          — unparseable JSON or off-contract client frame
+ * - forbidden            — session unknown or not owned by this principal
+ * - internal             — server-side failure during a frame (db/redis)
+ * - too_many_subscriptions — per-connection subscription cap (64) exceeded
+ * - unauthenticated      — missing/invalid/reused ticket
+ */
+export type WsErrorCode =
+  | "bad_message"
+  | "forbidden"
+  | "internal"
+  | "too_many_subscriptions"
+  | "unauthenticated";
+
 const wsClientMsgSchema: z.ZodType<WsClientMsg> = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("subscribe"),

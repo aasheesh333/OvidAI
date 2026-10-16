@@ -41,6 +41,14 @@ export interface BuildGatewayOptions {
 export const API_PREFIX = "/cloud/v1";
 
 /**
+ * Capped WS frame size (I2): 256 KiB per frame. The @fastify/websocket (ws)
+ * default is 100 MiB per frame — with 32 pre-auth frames bufferable per
+ * connection that is a trivial pre-auth OOM vector. 256 KiB is orders above
+ * any legitimate client frame (subscribe/ping are < 200 bytes).
+ */
+export const WS_MAX_PAYLOAD_BYTES = 262_144;
+
+/**
  * Builds the gateway HTTP app: routes under /cloud/v1, everything except
  * /health behind the Task 6 authHook, one ApiError envelope for every
  * failure. Returns an unlistened instance — inject()-testable as-is.
@@ -110,8 +118,9 @@ export function buildGateway(
   // WS scope: GET /cloud/ws, public by design — no authHook here, the
   // single-use ?ticket= query param IS the auth (verified in the handshake).
   // The websocket plugin must be loaded in the same scope before the route.
+  // maxPayload caps every inbound frame BEFORE any handler sees it (I2).
   app.register(async (scope) => {
-    await scope.register(websocket);
+    await scope.register(websocket, { options: { maxPayload: WS_MAX_PAYLOAD_BYTES } });
     registerWsRoute(scope, deps);
   });
 

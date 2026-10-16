@@ -35,6 +35,15 @@ export const WS_CLOSE_UNAUTHENTICATED = 4401;
 /** Cap on events replayed to a client per subscribe (contract with the thin client). */
 export const REPLAY_LIMIT = 500;
 
+/**
+ * I3: cap on concurrent subscriptions per WS connection. Every subscription
+ * holds a dedicated redis pub/sub connection (Task 4 duplicates the client),
+ * so an unbounded per-connection multiplex is a server-resource DoS vector.
+ * A re-subscribe to an ALREADY-subscribed session replaces (no net growth)
+ * and is never refused; the cap applies to the 65th DISTINCT session.
+ */
+export const MAX_SUBSCRIPTIONS_PER_CONNECTION = 64;
+
 const DEFAULT_PING_INTERVAL_MS = 30_000;
 /** Close the socket once this many consecutive protocol pings went unanswered. */
 const MAX_UNANSWERED_PINGS = 2;
@@ -191,9 +200,22 @@ export async function handleWsConnection(
       return;
     }
 
+    // Per-connection subscription cap (I3) BEFORE any redis work: a client
+    // must not be able to open an unbounded fan of pub/sub connections. A
+    // re-subscribe (previous exists) replaces in place and bypasses the cap.
+    const previous = subs.get(sessionId);
+    if (previous === undefined && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+      send(socket, {
+        op: "error",
+        code: "too_many_subscriptions",
+        message: "Subscription limit reached for this connection.",
+        sessionId,
+      });
+      return;
+    }
+
     // A re-subscribe replaces the existing subscription; the old one is torn
     // down first so its redis listener can never leak.
-    const previous = subs.get(sessionId);
     if (previous !== undefined) {
       subs.delete(sessionId);
       await previous.unsubscribe().catch(() => {});
