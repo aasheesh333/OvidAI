@@ -52,8 +52,12 @@ import { createAgentRunProcessor, createOpenAiTransport } from "@ovid/worker";
  *   a. happy path — REST send → 202; WS ordered live events; deltas ==
  *      assistant content; GET messages user→assistant; users/runs rows.
  *   b. mid-run reconnect (Review Focus #1) — abrupt disconnect behind a gate,
- *      resume with lastEventId, remaining events exactly once, ground-truthed
- *      against events.readSince(null).
+ *      resume with lastEventId: a LIVE leg (B subscribes while the gate holds;
+ *      remaining events fan out live, exactly once, ground-truthed against
+ *      events.readSince(null)) AND a REPLAY leg (after run_completed, C
+ *      subscribes with the same cursor and must get the identical tail from
+ *      the replay read alone — pins replay-from-non-null-cursor, which B's
+ *      provably-empty replay cannot).
  *   c. degraded backend (Review Focus #5, two-part controller ruling) —
  *      queue add rejects → 503 unavailable + run row stays 'queued'; AND
  *      redis-q URL at a closed port → health 503 {db:true, redisQ:false}.
@@ -609,12 +613,14 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       expect(workerFailures).toEqual([]);
       expect(workerErrors).toEqual([]);
+      // Happy path: no transient-failure backoff sleeps may have happened.
+      expect(sleeps).toEqual([]);
       await client.close();
     });
 
     // ---- Flow b: mid-run reconnect (Review Focus #1) -----------------------
 
-    it("flow b — abrupt disconnect mid-run, resume with lastEventId: remaining events arrive exactly once, monotonic, no gaps vs readSince ground truth", async () => {
+    it("flow b — abrupt disconnect mid-run, resume with lastEventId: remaining events arrive exactly once (live leg) and replay-from-cursor returns the same tail post-completion (replay leg), monotonic, no gaps vs readSince ground truth", async () => {
       const user = uid("e2e-b");
       const pieces = ["alpha ", "beta ", "gamma ", "delta"];
       // The gate parks the SSE response after 2 deltas: the run is provably
@@ -689,7 +695,34 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
 
       expect(await runRow(sent.runId)).toEqual({ status: "completed", attempts: 1 });
       expect(workerFailures).toEqual([]);
+      // Happy path: no transient-failure backoff sleeps may have happened.
+      expect(sleeps).toEqual([]);
+
+      // ---- Post-completion resume leg (fix round 1, reviewer Important #1) ----
+      // The run is FINISHED: nothing more will ever be appended or published,
+      // so every frame client C receives must come from the REPLAY read with a
+      // non-null cursor. B's leg cannot exercise that path (its replay was
+      // provably empty; its events arrived live) — a gateway regression that
+      // skips or botches replay-from-cursor is invisible there and fatal here.
+      const clientC = await openSubscribedClient(user, sessionId, lastEventId);
+      await clientC.waitFor(() => clientC.events().length >= 4, "C replays the remaining 4 events");
+      await sleep(200); // settle: C must receive NO frame beyond the replay
+      const cEvents = clientC.events();
+      expect(typesOf(cEvents)).toEqual([
+        "message_delta",
+        "message_delta",
+        "message_completed",
+        "run_completed",
+      ]);
+      expect(clientC.messages.length).toBe(5); // ack + the 4 replayed events, nothing else
+      // Exactly the events after A's cursor, deep-equal against the ground truth…
+      expect(cEvents).toEqual(full.slice(3));
+      // …and identical to what B received live: replay and live fanout converge.
+      expect(cEvents).toEqual(bEvents);
+      expectSeqsStrictlyMonotonic(cEvents.map((e) => e.seq));
+
       await clientB.close();
+      await clientC.close();
     });
 
     // ---- Flow c: degraded backend (Review Focus #5, two-part ruling) -------
