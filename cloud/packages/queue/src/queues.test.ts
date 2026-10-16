@@ -98,7 +98,7 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
 
   async function closeWorker(w: Worker<AgentRunJob>): Promise<void> {
     const i = openWorkers.indexOf(w);
-    if (i >= 0) openWorkers.splice(i, i + 1);
+    if (i >= 0) openWorkers.splice(i, 1);
     await w.close();
   }
 
@@ -185,8 +185,10 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
       }, { prefix: QUEUE_PREFIX }),
     );
 
-    // Plan-pinned worker configuration: default concurrency 8; stalled-job
-    // recovery redelivers crashed runs every 30 s.
+    // Plan-pinned worker configuration: default concurrency 8; the stalled
+    // check moves a crashed job to FAILED every 30 s (attempts: 1 → never
+    // redelivered; the stale-run sweeper is the recovery mechanism — see
+    // queues.ts and apps/worker staleRuns.ts).
     expect(AGENT_RUNS_DEFAULT_CONCURRENCY).toBe(8);
     expect(worker.opts.concurrency).toBe(8);
     expect(AGENT_RUNS_STALLED_INTERVAL_MS).toBe(30_000);

@@ -535,7 +535,8 @@ describe("gateway /cloud/ws (stub EventLog — deterministic replay/live race)",
     expect(stub.calls).toEqual([]); // event log never touched
   }, 15_000);
 
-  it("client dropping during the ticket verify never creates a subscription (no leaked redis subscriber)", async () => {    // Deterministic race (review Important #1): verify is gated; a subscribe
+  it("client dropping during the ticket verify never creates a subscription (no leaked redis subscriber)", async () => {
+    // Deterministic race (review Important #1): verify is gated; a subscribe
     // frame is queued pre-auth; the client is TERMINATED; only then does
     // verify resolve. A buggy handler drains the queue for a socket whose
     // 'close' already fired (unheard — no listener was registered yet) and
