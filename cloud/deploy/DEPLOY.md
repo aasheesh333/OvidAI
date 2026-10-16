@@ -244,6 +244,12 @@ ovid_cloud) — 14-day local retention, optional R2 offsite.
 - [ ] Restore drill (§8) verified `\dt` count > 0 on a scratch postgres
 - [ ] No secrets committed: `cd /opt/ovid-cloud/repo && git status` clean
       (`.env`, `backup.env` are ignored / outside the repo)
+- [ ] WS maxPayload 262144 configured (I2)
+- [ ] per-connection subscription cap 64 (I3)
+- [ ] deferred: SIGTERM drain pending — gateway lacks a PID-1 signal handler
+- [ ] deferred: mint deadline pending — no deadline on the mint HTTP call
+- [ ] deferred: WS error logging pending — silently skipped errors have no
+      server-side log
 
 ## 10. Redeploys + decommission
 
