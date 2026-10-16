@@ -37,8 +37,8 @@ Reproduce any row with the command shown. All outputs below were captured on
 | novnc / vncserver@1 / vsftpd | **all three `enabled` + `active`** | `systemctl is-enabled novnc vncserver@1 vsftpd; systemctl is-active novnc vncserver@1 vsftpd` |
 | Internet-facing listeners | `0.0.0.0:22`+`[::]:22` (sshd), `0.0.0.0:21` (vsftpd), `0.0.0.0:5901`+`[::]:5901` (Xtigervnc, **root desktop**), `0.0.0.0:6080` (websockify/noVNC), `*:80`+`*:443` (Caddy). Everything else is loopback-only: `127.0.0.1:` 2019+8081 (caddy admin), 4000 (litellm), 8090 (mint), 8080 (account-dev), 5433 (postgres), 6390, 9222 (chrome devtools) | `ss -tlnp` |
 | ufw | `active`; ALLOW from Anywhere (v4+v6): **22, 443, 6080, 5901, 21, 40000:50000** (last = vsftpd passive range) | `ufw status numbered` |
-| sshd effective config | `passwordauthentication no` (drop-in `/etc/ssh/sshd_config.d/60-cloudimg-settings.conf` overrides `PasswordAuthentication yes` in the main file), **but `kbdinteractiveauthentication yes` + `usepam yes` ⇒ password login is effectively ON** via keyboard-interactive/PAM. `pubkeyauthentication yes`, `permitrootlogin yes`. Socket-activated (`ssh.socket` enabled). Hardening drop-in `50-ovid-limits.conf` present (`MaxAuthTries 4`, `LoginGraceTime 30`, `MaxStartups 10:30:60`) | `sshd -T \| grep -Ei 'passwordauth\|kbdinteractive\|permitroot\|usepam\|pubkey'` |
-| SSH keys | **`/root/.ssh/authorized_keys` is EMPTY (0 bytes) — no working key login exists today.** Journal (last 24 h): 6 × `Accepted keyboard-interactive/pam for root` from 4 distinct client IPs (= the owner's actual login path), ~310 failed/invalid-user lines | `wc -c /root/.ssh/authorized_keys`; `journalctl -u ssh --since -24h --no-pager \| grep -c Accepted` |
+| sshd effective config | **Corrected at re-check 2026-10-16 15:17 UTC: `passwordauthentication yes`** (the original audit row wrongly said `no`). Cause — include order: `/etc/ssh/sshd_config` line 12 is `Include /etc/ssh/sshd_config.d/*.conf`; drop-ins are read in lexicographic filename order *before* the rest of the main file, and sshd uses the **first obtained value** for a contested keyword. Full drop-in enumeration: `50-cloud-init.conf` (`PasswordAuthentication yes` — **rewritten by cloud-init on every boot**; observed: boot 07:11:33 today, file mtime 07:11:44) sorts BEFORE `50-ovid-limits.conf` (`MaxAuthTries 4`, `LoginGraceTime 30`, `MaxStartups 10:30:60` — no password directive) and `60-cloudimg-settings.conf` (`PasswordAuthentication no` — **dead letter, loses the ordering**), so the effective value is `yes`. The main file's own `yes` lines (57/79/83) come after the Include and are likewise irrelevant. Plus `kbdinteractiveauthentication yes` + `usepam yes` ⇒ **password login is fully ON for root and every account**. `pubkeyauthentication yes`, `permitrootlogin yes`. Socket-activated (`ssh.socket` enabled). | `sudo sshd -T \| grep -Ei 'passwordauth\|kbdinteractive\|permitroot\|usepam\|pubkey'`; `ls -la /etc/ssh/sshd_config.d/`; `grep -rn -i passwordauthentication /etc/ssh/sshd_config /etc/ssh/sshd_config.d/` |
+| SSH keys | At original audit (2026-10-16 early): `/root/.ssh/authorized_keys` was EMPTY (0 bytes). **Dated re-check 2026-10-16 15:17 UTC: file is 89 bytes / 1 line — one `ssh-ed25519` key, comment `migrate`, fingerprint `SHA256:I3UV3LF/wOmF95WGw9etXAj0481SWqKEmnpie7uN6Q8`, mtime 2026-10-16 11:30, perms 0600.** It is proven working: journal (last 24 h) shows 179 × `Accepted publickey for root` with exactly this fingerprint, all from a single source. **One `migrate` key ≠ all owner devices proven** — item B's per-device gate (step 2) remains mandatory. Password paths are also in active use: last 24 h = 11 × `Accepted password` (non-root `ubuntu`) + 4 × `Accepted keyboard-interactive/pam` (root and `ubuntu`), ~928 failed/invalid-user lines | `ls -la /root/.ssh/authorized_keys`; `wc -l /root/.ssh/authorized_keys`; `ssh-keygen -lf /root/.ssh/authorized_keys`; `journalctl -u ssh --since -24h --no-pager \| grep -c Accepted` |
 | fail2ban | `active` + `enabled` (jails `sshd`, `vsftpd`, `recidive` per the 2026-10-11 review) | `systemctl is-active fail2ban; systemctl is-enabled fail2ban` |
 | Docker logging | driver `json-file`, **`/etc/docker/daemon.json` does not exist** ⇒ no size cap (unbounded growth; a scratch container created 2026-10-16 got `LogConfig {"Type":"json-file","Config":{}}`). Current largest container log: 3.0 MB — small today, uncapped forever | `docker info --format '{{.LoggingDriver}}'; cat /etc/docker/daemon.json` |
 | litellm image | `/opt/ovid-gateway/docker-compose.yml` line 49: `image: ghcr.io/berriai/litellm:main-latest` — **floating tag, UNPINNED**. Running `ovid-gateway-litellm-1` (Up 12 h): image `sha256:a69f5f0c56b868d2fdfce7abfb037fed947b70ede202047ffc19c14dc96ab90a`, built `2026-09-30T08:33:20Z`, RepoDigest `ghcr.io/berriai/litellm@sha256:a69f5f0c…` (on this box the digest string equals the image ID) | `docker inspect ovid-gateway-litellm-1 --format '{{.Config.Image}}'`; `docker inspect ghcr.io/berriai/litellm:main-latest --format '{{.Id}} {{.Created}} {{json .RepoDigests}}'` |
@@ -117,19 +117,32 @@ the `ufw allow` rules.
 
 ## B. [OWNER DECISION] SSH key-only (after proving a key login works)
 
-**Why.** Effective sshd today: `passwordauthentication no` but
-`kbdinteractiveauthentication yes` + `usepam yes` ⇒ **root password login is
-effectively on** (journal: 6 successful `keyboard-interactive/pam` logins in
-the last 24 h, ~310 failed/invalid attempts — internet-wide brute force is
-constant; fail2ban mitigates but does not remove it). The 2026-10-11 review
+**Why.** Effective sshd today (re-checked 2026-10-16 15:17 UTC):
+**`passwordauthentication yes`** — `/etc/ssh/sshd_config.d/50-cloud-init.conf`
+(`PasswordAuthentication yes`, rewritten by cloud-init on every boot) sorts
+BEFORE `60-cloudimg-settings.conf` (`no`) in the lexicographic `Include`, and
+sshd uses the first obtained value, so the `no` never takes effect (full
+explanation in the "Current state" row). Together with
+`kbdinteractiveauthentication yes` + `usepam yes` ⇒ **password login is fully
+ON for root and every account** (journal, last 24 h: 11 × `Accepted password`
+for non-root `ubuntu` + 4 × `keyboard-interactive/pam` for root/`ubuntu`,
+~928 failed/invalid attempts — internet-wide brute force is constant;
+fail2ban mitigates but does not remove it). The 2026-10-11 review
 records this as an accepted risk because the owner connects from a phone and
 a PC with changing IPs; that decision pre-dates the sandbox-hosting plan and
 needs explicit re-confirmation.
 
-**Blocker observed 2026-10-16: `/root/.ssh/authorized_keys` is EMPTY.** There
-is no working key login today, so password auth **cannot** simply be switched
-off — that would lock the owner out (this VPS has no out-of-band console).
-The key-first order below is mandatory.
+**Blocker history (updated at re-check 2026-10-16 15:17 UTC).** At the original
+audit `/root/.ssh/authorized_keys` was **EMPTY (0 bytes)** — no working key
+login. Since then the file contains **1 `ssh-ed25519` key, comment `migrate`,
+fingerprint `SHA256:I3UV3LF/wOmF95WGw9etXAj0481SWqKEmnpie7uN6Q8`, installed
+2026-10-16 11:30** (file mtime), and the journal proves it works (179 ×
+`Accepted publickey for root` with exactly this fingerprint in the last 24 h,
+single source). **The gate is unchanged:** one `migrate` key is not proof for
+all owner devices, and until step 2 passes from EVERY device (phone included)
+password auth **cannot** simply be switched off — that would lock the owner
+out (this VPS has no out-of-band console). The key-first order below is
+mandatory.
 
 **Step 0 — decide.** Every device the owner uses (phone included — Termius,
 Blink, etc. all support ed25519 keys) must be able to authenticate with a
@@ -162,21 +175,91 @@ wc -l /root/.ssh/authorized_keys    # → ≥ one line per device
 open in a terminal until step 5 passes from a *second, new* connection. If
 anything goes wrong, that open session is the only way back in.
 
-**Step 4 — flip sshd to key-only:**
+**Step 4 — flip sshd to key-only.**
+
+**4a — enumerate every `PasswordAuthentication` source first (read-only):**
 
 ```bash
-sudo tee /etc/ssh/sshd_config.d/51-ovid-keyonly.conf >/dev/null <<'EOF'
+grep -rn -i passwordauthentication /etc/ssh/sshd_config /etc/ssh/sshd_config.d/
+```
+
+Output observed on this box (2026-10-16 15:17 UTC):
+
+```
+/etc/ssh/sshd_config:57:PasswordAuthentication yes
+/etc/ssh/sshd_config:79:PasswordAuthentication yes
+/etc/ssh/sshd_config:83:PasswordAuthentication yes
+/etc/ssh/sshd_config.d/50-cloud-init.conf:1:PasswordAuthentication yes
+/etc/ssh/sshd_config.d/60-cloudimg-settings.conf:1:PasswordAuthentication no
+```
+
+**The include order decides the winner:** the main file's line 12 is
+`Include /etc/ssh/sshd_config.d/*.conf`; drop-ins are read in lexicographic
+filename order *before* the rest of the main file, and sshd uses the **first
+obtained value** per keyword. That is why `50-cloud-init.conf` (`yes`)
+currently beats `60-cloudimg-settings.conf` (`no`) and `sshd -T` reports
+`passwordauthentication yes`. A new drop-in therefore **must sort BEFORE
+`50-cloud-init.conf`** to win. No main-file edit is needed: its `yes` lines
+come after the Include and lose to any drop-in value.
+
+**4b — write the key-only drop-in named `45-ovid-keyonly.conf` (`45-` sorts
+before `50-cloud-init.conf`):**
+
+```bash
+sudo tee /etc/ssh/sshd_config.d/45-ovid-keyonly.conf >/dev/null <<'EOF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 EOF
+```
+
+This file alone is the durable control: because it sorts first, its `no` is
+the first obtained value — even after a reboot in which cloud-init rewrites
+`50-cloud-init.conf` back to `yes`.
+
+**4c — [OWNER CHOICE, gated] neutralize the competing `yes` in
+`50-cloud-init.conf`** (belt-and-braces, so future 4a audits see no
+contradiction). **Warning: cloud-init rewrites this file on EVERY boot**
+(observed today: boot 07:11:33 → file rewritten 07:11:44), so choose with that
+in mind:
+
+- **Option A (durable, recommended): make cloud-init itself write `no`:**
+
+  ```bash
+  echo 'ssh_pwauth: false' | sudo tee /etc/cloud/cloud.cfg.d/99-ovid-no-pwauth.cfg
+  ```
+
+  Gate: takes effect at the **next boot / cloud-init run** — after the next
+  reboot, verify `grep -rn -i passwordauthentication /etc/ssh/sshd_config.d/`
+  shows `50-cloud-init.conf` with `no`. Until that reboot the file still says
+  `yes`; that is harmless because 4b already wins the ordering.
+
+- **Option B (immediate, NOT durable): documented in-place edit:**
+
+  ```bash
+  sudo sed -i.bak-ovid 's/^PasswordAuthentication yes/PasswordAuthentication no/' \
+    /etc/ssh/sshd_config.d/50-cloud-init.conf
+  ```
+
+  Gate: the 4a grep now shows
+  `50-cloud-init.conf:1:PasswordAuthentication no` immediately. **The next
+  boot rewrites it back to `yes`** — the 4b drop-in keeps the effective value
+  `no` regardless, but re-run 4a after every reboot, and prefer Option A if
+  this box reboots unattended.
+
+**4d — syntax gate + restart + immediate effective-config check:**
+
+```bash
 sudo sshd -t                      # GATE: no output = syntax OK. Any output: fix before continuing.
 sudo systemctl restart ssh.service   # socket-activated: listener stays up, your open session survives
+sudo sshd -T | grep -Ei 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin'
+# → passwordauthentication no / kbdinteractiveauthentication no / permitrootlogin prohibit-password
 ```
 
 (`PermitRootLogin prohibit-password` = root may log in **with keys only** —
-exactly what step 2 proved. `PasswordAuthentication no` here also normalizes
-the contradiction with the main `sshd_config`, which still says `yes`.)
+exactly what step 2 proved. `PasswordAuthentication no` in the `45-` drop-in
+genuinely takes effect because it is the *first obtained* value — unlike the
+dead-letter `no` in `60-cloudimg-settings.conf`, which loses the ordering.)
 
 **Step 5 — verify from a NEW session (old one still open):**
 
@@ -186,17 +269,34 @@ ssh -o PreferredAuthentications=publickey root@<SERVER_IP> 'echo KEY-LOGIN-OK'
 ssh -o PreferredAuthentications=password,keyboard-interactive \
     -o PubkeyAuthentication=no root@<SERVER_IP>
 # → Permission denied (publickey).        ← password path is closed
-sshd -T | grep -Ei 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin'
+sudo sshd -T | grep -Ei 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin'
 # → passwordauthentication no / kbdinteractiveauthentication no / permitrootlogin prohibit-password
+grep -rn -i passwordauthentication /etc/ssh/sshd_config /etc/ssh/sshd_config.d/
+# → first drop-in hit is 45-ovid-keyonly.conf:1:PasswordAuthentication no (first obtained
+#   value wins; any `yes` in 50-cloud-init.conf behind it is inert)
 ```
 
+**Post-reboot re-check (mandatory, once, after the next reboot):** cloud-init
+rewrites `50-cloud-init.conf` at boot. Re-run
+`sudo sshd -T | grep -i passwordauthentication` → must still print `no` (the
+`45-` drop-in survives reboots; with 4c Option A the file itself will also say
+`no` from that boot onward).
+
 **Rollback (from the open session only):**
-`sudo rm /etc/ssh/sshd_config.d/51-ovid-keyonly.conf && sudo systemctl restart ssh.service`.
+`sudo rm /etc/ssh/sshd_config.d/45-ovid-keyonly.conf && sudo systemctl restart ssh.service`.
+If 4c Option B was used, also restore the backup:
+`sudo mv /etc/ssh/sshd_config.d/50-cloud-init.conf.bak-ovid /etc/ssh/sshd_config.d/50-cloud-init.conf && sudo systemctl restart ssh.service`.
+If 4c Option A was used, remove the override (effective from the next boot):
+`sudo rm /etc/cloud/cloud.cfg.d/99-ovid-no-pwauth.cfg`.
 
 Notes: fail2ban + recidive should stay enabled (they now protect a
 key-only port — cheap insurance). If item A is *not* done, also set
 `ftpuser`'s shell to `/usr/sbin/nologin` (`sudo usermod -s /usr/sbin/nologin ftpuser`),
-otherwise the FTP account keeps a password SSH path.
+otherwise the FTP account keeps a password SSH path. Also note: the journal at
+re-check time showed the non-root `ubuntu` account actively logging in **by
+password** (11 × `Accepted password` in 24 h) — flipping to key-only closes
+that path too, so give whatever uses it a key (steps 1–2 against
+`ubuntu`'s `authorized_keys`) or knowingly accept the breakage before 4d.
 
 - [ ] Decision: ☐ key-only ☐ keep password (re-confirmed, reason: ＿＿＿) · date · by
 - [ ] Verified: step-2 gate on all devices + step-5 outputs recorded below.
@@ -469,7 +569,7 @@ and was already recommended by the 2026-10-11 review (top-10 fix #6).
 | Spec §11 hardening item | Where | State (2026-10-16) |
 |---|---|---|
 | Disable root VNC/noVNC + vsftpd | item A | **owner pending** (services enabled+active, ports open) |
-| Key-only SSH | item B | **owner pending — blocked: no keys installed** |
+| Key-only SSH | item B | **owner pending — per-device key-proof gate open** (1 `migrate` ed25519 key installed 2026-10-16 11:30, proven from a single source; step 2 must still pass on EVERY owner device; effective sshd is `passwordauthentication yes` today — see item B step 4 for the include-order fix) |
 | Cloudflare `trusted_proxies` in Caddy | item D | **DONE — already live, verified identical to official list** |
 | Container mem/cpu limits | `cloud/deploy/docker-compose.yml` (Task 11) | DONE for the cloud stack (gateway 1g/1cpu, worker 2g/2cpu, redis-q 1536m) |
 | Log rotation | item E | **owner pending** (no daemon.json, uncapped) |
