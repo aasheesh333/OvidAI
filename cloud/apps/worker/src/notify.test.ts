@@ -1,0 +1,311 @@
+/**
+ * Task 7 — the push notifier, against REAL Postgres (TEST_DATABASE_URL):
+ * Dart notification-copy ports (title/body/route/channel/data), the device
+ * fan-out (per-device send + inbox row), unregistered-token pruning, the
+ * zero-device skipped record, the never-throws contract, and the Q5
+ * key_not_minted push body. The PushSender is a capturing stub; the only
+ * firebase-adjacent test is the credentials-unset construction smoke.
+ */
+
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  createDb,
+  devices,
+  migrate,
+  schema,
+  users,
+  type Db,
+  type NotificationRow,
+} from "@ovid/db";
+import { notificationSummary } from "@ovid/shared";
+import {
+  createFcmPushSender,
+  createNotifier,
+  KEY_NOT_MINTED_PUSH_BODY,
+  type PushMessage,
+  type PushOutcome,
+  type PushSender,
+} from "./notify.js";
+
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+
+/** Capturing PushSender stub; `handler` decides the outcome per message. */
+function stubPush(
+  handler?: (msg: PushMessage) => Promise<PushOutcome>,
+): { sent: PushMessage[]; push: PushSender } {
+  const sent: PushMessage[] = [];
+  const push: PushSender = {
+    async send(msg) {
+      sent.push(msg);
+      return handler ? handler(msg) : { ok: true };
+    },
+  };
+  return { sent, push };
+}
+
+describe.skipIf(!TEST_DATABASE_URL)("createNotifier (real postgres)", () => {
+  let db: Db;
+
+  beforeAll(async () => {
+    await migrate(TEST_DATABASE_URL!);
+    db = createDb(TEST_DATABASE_URL!);
+  }, 60_000);
+
+  afterAll(async () => {
+    await db?.$client.end({ timeout: 5 });
+  });
+
+  /** Fresh user per test → inbox assertions stay exact on the shared dev DB. */
+  async function newUser(): Promise<string> {
+    const uid = `nt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    await users.ensure(db, uid, null);
+    return uid;
+  }
+
+  async function inbox(userId: string): Promise<NotificationRow[]> {
+    const rows = await db.select().from(schema.notifications);
+    return rows.filter((r) => r.userId === userId);
+  }
+
+  it("(a) success copy: Dart title/body, route, data, channel id; one sent row per device", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-a", userId: uid, platform: "android" });
+    await devices.upsert(db, { token: "tok-b", userId: uid, platform: "android" });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push, clock: () => new Date(1_700_000_000_000) });
+
+    await notifier.notifyScheduleSucceeded({
+      userId: uid,
+      scheduleId: "sch-1",
+      sessionId: "ses-1",
+      title: "Morning report",
+      summary: null,
+    });
+
+    expect(sent).toHaveLength(2);
+    for (const msg of sent) {
+      expect(msg.notification.title).toBe("Scheduled task done: Morning report");
+      expect(msg.notification.body).toBe("Tap to see the result.");
+      expect(msg.androidChannelId).toBe("ovid_scheduler_results.chime.v1");
+      expect(msg.data.kind).toBe("scheduleSucceeded");
+      expect(msg.data.channel).toBe("scheduler_results");
+      expect(msg.data.route).toBe("/schedule/ses-1");
+      expect(msg.data.sessionId).toBe("ses-1");
+      expect(msg.data.scheduleId).toBe("sch-1");
+      expect(msg.data.ts).toBe(new Date(1_700_000_000_000).toISOString());
+      expect(["tok-a", "tok-b"]).toContain(msg.token);
+    }
+    const rows = await inbox(uid);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.status === "sent" && r.deviceToken !== null)).toBe(true);
+    expect(new Set(rows.map((r) => r.deviceToken))).toEqual(new Set(["tok-a", "tok-b"]));
+  });
+
+  it("(a) 48-cap title and markdown-stripped summary", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-cap", userId: uid, platform: "android" });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    const longTitle = "W".repeat(60);
+    await notifier.notifyScheduleSucceeded({
+      userId: uid,
+      scheduleId: "sch-2",
+      sessionId: "ses-2",
+      title: longTitle,
+      summary: "**bold** _it_ `code`",
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.notification.title).toBe(
+      `Scheduled task done: ${notificationSummary(longTitle, { max: 48 })}`,
+    );
+    expect(sent[0]!.notification.title.endsWith("…")).toBe(true);
+    expect(sent[0]!.notification.body).toBe("bold it code");
+  });
+
+  it("(b) failure copy: key_not_minted swaps in the Q5 body; other codes summarize the error", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-f", userId: uid, platform: "android" });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyScheduleFailed({
+      userId: uid,
+      scheduleId: "sch-3",
+      sessionId: "ses-3",
+      title: "Morning report",
+      code: "key_not_minted",
+      error: "session key was never minted",
+    });
+    await notifier.notifyScheduleFailed({
+      userId: uid,
+      scheduleId: "sch-4",
+      sessionId: "ses-4",
+      title: "Evening report",
+      code: "model_transient_exhausted",
+      error: "boom **now**",
+    });
+    await notifier.notifyScheduleFailed({
+      userId: uid,
+      scheduleId: "sch-5",
+      sessionId: "ses-5",
+      title: "Night report",
+      code: "run_lost",
+      error: null,
+    });
+
+    expect(sent).toHaveLength(3);
+    const [minted, transient, lost] = sent;
+    expect(minted!.notification.title).toBe("Scheduled task failed: Morning report");
+    expect(minted!.notification.body).toBe(KEY_NOT_MINTED_PUSH_BODY);
+    expect(minted!.data.kind).toBe("scheduleFailed");
+    expect(minted!.data.channel).toBe("scheduler_results");
+    expect(minted!.androidChannelId).toBe("ovid_scheduler_results.chime.v1");
+    expect(transient!.notification.body).toBe("boom now");
+    expect(lost!.notification.body).toBe("Unknown error");
+  });
+
+  it("(c) unregistered token: pruned from devices, failed/unregistered row; the other device still sent", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "dead-token", userId: uid, platform: "android" });
+    await devices.upsert(db, { token: "live-token", userId: uid, platform: "android" });
+    const { sent, push } = stubPush((msg) =>
+      msg.token === "dead-token"
+        ? Promise.resolve({ ok: false, code: "unregistered", error: "registration-token-not-registered" })
+        : Promise.resolve({ ok: true }),
+    );
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyScheduleSucceeded({
+      userId: uid,
+      scheduleId: "sch-6",
+      sessionId: "ses-6",
+      title: "Report",
+      summary: "done",
+    });
+
+    expect(sent).toHaveLength(2);
+    const remaining = await devices.listForUser(db, uid);
+    expect(remaining.map((r) => r.token)).toEqual(["live-token"]);
+    const rows = await inbox(uid);
+    expect(rows).toHaveLength(2);
+    const failedRow = rows.find((r) => r.deviceToken === "dead-token");
+    const sentRow = rows.find((r) => r.deviceToken === "live-token");
+    expect(failedRow?.status).toBe("failed");
+    expect(failedRow?.error).toBe("unregistered");
+    expect(sentRow?.status).toBe("sent");
+  });
+
+  it("(d) zero devices: exactly one skipped_no_devices row with a null token, zero sends", async () => {
+    const uid = await newUser();
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyScheduleFailed({
+      userId: uid,
+      scheduleId: "sch-7",
+      sessionId: "ses-7",
+      title: "Report",
+      code: "run_lost",
+      error: "orphaned",
+    });
+
+    expect(sent).toHaveLength(0);
+    const rows = await inbox(uid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.deviceToken).toBeNull();
+    expect(rows[0]!.status).toBe("skipped_no_devices");
+  });
+
+  it("(e) push.send throwing: notifier resolves, record is failed, token never appears in the error", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-throw", userId: uid, platform: "android" });
+    const { sent, push } = stubPush(() => Promise.reject(new Error("fcm exploded")));
+    const notifier = createNotifier({ db, push });
+
+    await expect(
+      notifier.notifyScheduleSucceeded({
+        userId: uid,
+        scheduleId: "sch-8",
+        sessionId: "ses-8",
+        title: "Report",
+        summary: "done",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(sent).toHaveLength(1);
+    const rows = await inbox(uid);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("failed");
+    expect(rows[0]!.error).toContain("fcm exploded");
+    expect(rows[0]!.error).not.toContain("tok-throw");
+  });
+
+  it("(f) approval copy: question vs approval kinds, session-prefixed body, chat route", async () => {
+    const uid = await newUser();
+    await devices.upsert(db, { token: "tok-ap", userId: uid, platform: "android" });
+    const { sent, push } = stubPush();
+    const notifier = createNotifier({ db, push });
+
+    await notifier.notifyApprovalRequest({
+      userId: uid,
+      sessionId: "ses-9",
+      sessionTitle: "Sess",
+      summary: "Summ",
+      question: true,
+    });
+    await notifier.notifyApprovalRequest({
+      userId: uid,
+      sessionId: "ses-10",
+      sessionTitle: "Sess",
+      summary: "Summ",
+      question: false,
+    });
+    await notifier.notifyApprovalRequest({
+      userId: uid,
+      sessionId: "ses-11",
+      sessionTitle: "",
+      summary: "Summ",
+      question: false,
+    });
+
+    expect(sent).toHaveLength(3);
+    const [question, approval, untitled] = sent;
+    expect(question!.notification.title).toBe("Ovid has a question");
+    expect(question!.data.kind).toBe("agentNeedsInput");
+    expect(question!.data.channel).toBe("agent_updates");
+    expect(question!.androidChannelId).toBe("ovid_agent_updates.chime.v1");
+    expect(question!.notification.body).toBe("Sess — Summ");
+    expect(question!.data.route).toBe("/c/ses-9");
+    expect(question!.data.sessionId).toBe("ses-9");
+    expect(approval!.notification.title).toBe("Ovid needs your approval");
+    expect(approval!.data.kind).toBe("agentNeedsApproval");
+    expect(approval!.notification.body).toBe("Sess — Summ");
+    expect(untitled!.notification.body).toBe("Summ");
+  });
+});
+
+describe("createFcmPushSender (construction smoke)", () => {
+  it("resolves {ok:false,code:'error'} on every send when credentials are unset — never throws", async () => {
+    const prev = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    try {
+      const sender = createFcmPushSender();
+      const msg: PushMessage = {
+        token: "tok-smoke",
+        notification: { title: "t", body: "b" },
+        data: {},
+        androidChannelId: "ovid_agent_updates.chime.v1",
+      };
+      const first = await sender.send(msg);
+      const second = await sender.send(msg);
+      for (const out of [first, second]) {
+        expect(out.ok).toBe(false);
+        if (!out.ok) expect(out.code).toBe("error");
+      }
+    } finally {
+      if (prev !== undefined) process.env.GOOGLE_APPLICATION_CREDENTIALS = prev;
+    }
+  });
+});

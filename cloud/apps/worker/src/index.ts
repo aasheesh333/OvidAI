@@ -7,6 +7,7 @@
 export * from "./approvalBridge.js";
 export * from "./fileService.js";
 export * from "./liteLlm.js";
+export * from "./notify.js";
 export * from "./ptyBridge.js";
 export * from "./runProcessor.js";
 export * from "./sandboxAdapter.js";
@@ -18,3 +19,4 @@ export * from "./tools/registry.js";
 export * from "./tools/shellTool.js";
 export * from "./tools/systemPrompt.js";
 export * from "./tools/types.js";
+export * from "./unattended.js";
