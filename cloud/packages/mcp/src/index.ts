@@ -43,3 +43,32 @@ export {
   type SystemResponse,
   type UserSystemBus,
 } from "./systemBus.js";
+// P5 Task 12: plugin source contract + resolver and two-pass archive
+// validation. The contract module belongs in @ovid/shared once that package
+// split lands; exports here keep cross-package consumers on the barrel (the
+// exports map blocks deep imports).
+export * from "./plugins/input.js";
+export * from "./plugins/errors.js";
+export { validateAndExtractArchive } from "./plugins/archive.js";
+export {
+  createSourceResolver,
+  MAX_METADATA_BYTES,
+  MAX_PASTE_BYTES,
+  MAX_PAYLOAD_BYTES,
+  type PluginProvenance,
+  type ResolvedSource,
+  type SourceResolver,
+  type SourceResolverDeps,
+} from "./plugins/sources.js";
+// P5 Task 11: McpRouter (THE central P5 interface — curated singletons, the
+// Free/Pro gate at every dispatch point, mcp__ naming with never-guess
+// resolution, per-run stdio lifecycle). Tool 4's client-request handler is
+// re-exported here too because RunContext's sampler carries its types; the
+// explicit Sampling* re-exports shadow transports/native.js's permissive
+// forward-ref placeholders (explicit beats star — same discipline as
+// WorkspaceFiles/UserSystemBus above).
+export * from "./clientRequests.js";
+export type { SamplingRequest, SamplingResult } from "./clientRequests.js";
+export * from "./toolNames.js";
+export * from "./router.js";
+
