@@ -34,9 +34,9 @@ import {
 } from "@ovid/shared";
 
 import { createRedisBrowserBridge, type BrowserBridge } from "./bridge.js";
+import { acquireBrowserSuiteLock } from "./test/suiteLock.js";
 
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
-const SUITE_LOCK_KEY = "browser:test:suite-lock";
 const SUITE_LOCK_TTL_MS = 10_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -84,32 +84,6 @@ async function openTap(channel: string, binary: boolean): Promise<Tap> {
   };
 }
 
-async function acquireSuiteLock(redis: Redis): Promise<() => Promise<void>> {
-  const token = randomUUID();
-  const deadline = Date.now() + 8_000;
-  for (;;) {
-    const ok = await redis.set(SUITE_LOCK_KEY, token, "PX", SUITE_LOCK_TTL_MS, "NX");
-    if (ok === "OK") break;
-    if (Date.now() > deadline) throw new Error("browser suite lock not free within 8s");
-    await sleep(50);
-  }
-  let released = false;
-  return async () => {
-    if (released) return;
-    released = true;
-    // Release only OUR lock, atomically (a TTL expiry between GET and DEL
-    // could otherwise delete the next holder's key).
-    await redis
-      .eval(
-        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
-        1,
-        SUITE_LOCK_KEY,
-        token,
-      )
-      .catch(() => {});
-  };
-}
-
 /** The bridge under test + the connections its factory created (all tracked). */
 function mkBridge(
   handlers: Parameters<typeof createRedisBrowserBridge>[0]["handlers"],
@@ -133,15 +107,13 @@ const leave = (viewerId: string): string => JSON.stringify({ type: "viewer_leave
 const takeover = (enabled: boolean): string => JSON.stringify({ type: "takeover", enabled } satisfies BrowserCtlMsg);
 const noop = () => {};
 
-const tapConns: Redis[] = [];
-
-describe.skipIf(!TEST_REDIS_URL)("createRedisBrowserBridge (real redis, harness plays the gateway)", () => {
+const tapConns: Redis[] = [];describe.skipIf(!TEST_REDIS_URL)("createRedisBrowserBridge (real redis, harness plays the gateway)", () => {
   let gw: Redis; // the harness "gateway" publisher connection (command mode)
   let releaseSuiteLock: (() => Promise<void>) | null = null;
 
   beforeAll(async () => {
     gw = new IORedis(TEST_REDIS_URL!);
-    releaseSuiteLock = await acquireSuiteLock(gw);
+    releaseSuiteLock = await acquireBrowserSuiteLock(gw, { ttlMs: SUITE_LOCK_TTL_MS });
   });
 
   afterAll(async () => {

@@ -1,5 +1,6 @@
 export * from "./bridge.js";
 export * from "./config.js";
+export * from "./engine.js";
 export * from "./input.js";
 export * from "./lightpanda.js";
 export * from "./pool.js";

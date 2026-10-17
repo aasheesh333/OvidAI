@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@ovid/agent-core": "workspace:*",
+    "@ovid/browser": "workspace:*",
     "@ovid/db": "workspace:*",
     "@ovid/events": "workspace:*",
     "@ovid/queue": "workspace:*",

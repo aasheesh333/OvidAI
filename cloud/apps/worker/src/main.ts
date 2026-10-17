@@ -1,7 +1,15 @@
 import { pathToFileURL } from "node:url";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { Redis } from "ioredis";
 import { createDb, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, runs as runsRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
 import { createRedisEventLog } from "@ovid/events";
+import {
+  createBrowserEngine,
+  createLocalDiskBrowserStateStore,
+  createStorageStatePersistence,
+  loadBrowserEngineConfig,
+} from "@ovid/browser";
 import {
   createAgentRunsWorker,
   createHibernateWorker,
@@ -75,6 +83,14 @@ export interface WorkerEnv {
   inlineMaxBytes: number;
   /** P7 Task 10: the ONE warm-disk knob pair. */
   warmConfig: WarmConfig;
+  /** P6 Task 14: browser login-state persistence (null ⇒ off). */
+  browserStateDir: string | null;
+  /**
+   * P6 Task 14: the browser-state encryption key. REQUIRED non-empty when
+   * OVID_BROWSER_STATE_DIR is set (loadWorkerEnv refuses boot otherwise) —
+   * persisting logins unencrypted is not a mode we ship.
+   */
+  masterKey: string | null;
 }
 
 /** A 'running' run older than this is considered stranded (sweeper threshold). */
@@ -187,6 +203,19 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     diskAlertFraction: diskAlertFractionFromEnv(raw),
   };
 
+  // P6 Task 14: browser login-state persistence. A state dir without a
+  // master key would mean persisting logins unencrypted — refuse to boot,
+  // naming the missing variable (same loud-failure mindset as the rest of
+  // this loader).
+  const browserStateDir = raw.OVID_BROWSER_STATE_DIR?.trim() || null;
+  const masterKeyRaw = raw.OVID_MASTER_KEY?.trim() ?? "";
+  if (browserStateDir !== null && masterKeyRaw === "") {
+    throw new Error(
+      "OVID_MASTER_KEY is required (non-empty) when OVID_BROWSER_STATE_DIR is set — refusing to persist browser login state unencrypted",
+    );
+  }
+  const masterKey = masterKeyRaw === "" ? null : masterKeyRaw;
+
   return {
     nodeEnv: raw.NODE_ENV?.trim() || "development",
     databaseUrl: required("DATABASE_URL"),
@@ -205,6 +234,8 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
     hydrateTimeoutMs,
     inlineMaxBytes,
     warmConfig,
+    browserStateDir,
+    masterKey,
   };
 }
 
@@ -335,6 +366,31 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // runs BEFORE manager.close() in shutdown() (the manager's env teardown
   // kills every live pty leaf; the bridge itself never kills ptys).
   const stopPtyBridge = await startWorkerPtyBridge({ sandbox: manager, redis: redisQ });
+
+  // ---- P6 Task 14: the browser engine facade. -----------------------------
+  // Config comes from the same env (every knob fails fast inside
+  // loadBrowserEngineConfig, naming its variable). Persistence only when BOTH
+  // the state dir and the master key are present — loadWorkerEnv already
+  // refused the dir-without-key combination. The engine's bridge connections
+  // ride redis-q per the P6-Q6 ruling (ephemeral pub/sub, AG3-safe).
+  const browserEngineCfg = loadBrowserEngineConfig(env);
+  const browserPersistence =
+    cfg.browserStateDir !== null && cfg.masterKey !== null
+      ? createStorageStatePersistence(createLocalDiskBrowserStateStore(cfg.browserStateDir), cfg.masterKey)
+      : null;
+  const browser = await createBrowserEngine({
+    cfg: browserEngineCfg,
+    redisFactory: () => new Redis(cfg.redisQUrl),
+    persistence: browserPersistence,
+    // P2's resolved root (OVID_WORKSPACES_ROOT) — the same layout the
+    // SandboxManager and the hydrator engines use, so browser artifacts land
+    // inside the session's workspace jail.
+    workspaceDir: async (userId: string, sessionId: string) => {
+      const dir = join(sandboxConfig.workspacesRoot, userId, "sessions", sessionId);
+      await mkdir(dir, { recursive: true });
+      return dir;
+    },
+  });
 
   // ---- P7 Task 8/9/10: state-hydrator engines + internal file service. ----
   // workspacesRoot is P2's resolved root (OVID_WORKSPACES_ROOT,
@@ -549,6 +605,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       // P2 Task 12 pin: manager.close() BEFORE the drain — sandbox envs (their
       // cgroup trees, live leaves and admission slots) tear down first.
       await manager.close();
+      // P6 Task 14 pin: browser state is flushed BEFORE the run worker drains
+      // — close() releases every live session (capture → persistence.flush →
+      // context close) so logins survive the restart, then tears down the
+      // bridge, research and pool in order.
+      await browser.close();
       // Drains in-flight jobs and stops fetching new ones (force=false).
       await worker.close();
       // P7 Task 11: stop storage consumers before their producer queues.
