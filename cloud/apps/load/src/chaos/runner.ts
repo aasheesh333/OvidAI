@@ -108,7 +108,12 @@ export interface ChaosScenario<P = unknown> {
   gate(ctx: ChaosContext, prepared: P): Promise<GateResult>;
   inject(ctx: ChaosContext, prepared: P): Promise<void>;
   verify(ctx: ChaosContext, prepared: P): Promise<Assertion[]>;
-  cleanup?(ctx: ChaosContext, prepared: P): Promise<void>;
+  /**
+   * Called even when `prepare` throws (with `prepared === undefined`), so a
+   * partial prepare cannot leave the staging worker stopped or the mock gate
+   * held. Implementations MUST be idempotent and tolerate partial state.
+   */
+  cleanup?(ctx: ChaosContext, prepared: P | undefined): Promise<void>;
 }
 
 type AnyScenario = ChaosScenario<unknown>;
@@ -128,6 +133,14 @@ export function registeredScenarios(): AnyScenario[] {
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * A scenario passes when at least one assertion ran and every assertion
+ * passed. An injected scenario with an empty `verify()` cannot pass.
+ */
+export function scenarioAssertionsPass(assertions: Assertion[]): boolean {
+  return assertions.length > 0 && assertions.every((assertion) => assertion.passed);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +341,7 @@ export async function runChaosScenario(
   const assertions: Assertion[] = [];
   const result = (): ScenarioResult => ({
     name: scenario.name,
-    passed: assertions.length > 0 && assertions.every((assertion) => assertion.passed),
+    passed: scenarioAssertionsPass(assertions),
     precondition: scenario.precondition,
     assertions,
     durationMs: Date.now() - startedMs,
@@ -369,49 +382,64 @@ export async function runChaosScenario(
       passed: false,
       detail: errorText(err),
     });
+    // Partial state must be unwound too: a prepare that stopped the worker or
+    // armed the gate and then threw would otherwise poison later scenarios.
+    await cleanupScenario(scenario, ctx, undefined, assertions);
     return finalize(scenario, ctx, assertions, liveBefore, startedMs);
   }
 
-  let gate: GateResult;
   try {
-    gate = await scenario.gate(ctx, prepared);
-  } catch (err) {
-    gate = { ok: false, detail: `gate threw: ${errorText(err)}` };
-  }
-  assertions.push({ name: "precondition", passed: gate.ok, detail: gate.detail });
-
-  if (gate.ok) {
-    let injected = false;
+    let gate: GateResult;
     try {
-      await scenario.inject(ctx, prepared);
-      injected = true;
-      assertions.push({
-        name: "inject",
-        passed: true,
-        detail: "failure injected after the precondition gate passed",
-      });
+      gate = await scenario.gate(ctx, prepared);
     } catch (err) {
-      assertions.push({ name: "inject", passed: false, detail: errorText(err) });
+      gate = { ok: false, detail: `gate threw: ${errorText(err)}` };
     }
+    assertions.push({ name: "precondition", passed: gate.ok, detail: gate.detail });
 
-    if (injected) {
+    if (gate.ok) {
+      let injected = false;
       try {
-        assertions.push(...(await scenario.verify(ctx, prepared)));
+        await scenario.inject(ctx, prepared);
+        injected = true;
+        assertions.push({
+          name: "inject",
+          passed: true,
+          detail: "failure injected after the precondition gate passed",
+        });
       } catch (err) {
-        assertions.push({ name: "verify", passed: false, detail: errorText(err) });
+        assertions.push({ name: "inject", passed: false, detail: errorText(err) });
+      }
+
+      if (injected) {
+        try {
+          assertions.push(...(await scenario.verify(ctx, prepared)));
+        } catch (err) {
+          assertions.push({ name: "verify", passed: false, detail: errorText(err) });
+        }
       }
     }
-  }
-
-  if (scenario.cleanup !== undefined) {
-    try {
-      await scenario.cleanup(ctx, prepared);
-    } catch (err) {
-      assertions.push({ name: "cleanup", passed: false, detail: errorText(err) });
-    }
+  } finally {
+    // Always, on every path (failed gate, inject throw, verify throw): restore
+    // the staging composition to its pre-run state.
+    await cleanupScenario(scenario, ctx, prepared, assertions);
   }
 
   return finalize(scenario, ctx, assertions, liveBefore, startedMs);
+}
+
+async function cleanupScenario(
+  scenario: AnyScenario,
+  ctx: ChaosContext,
+  prepared: unknown,
+  assertions: Assertion[],
+): Promise<void> {
+  if (scenario.cleanup === undefined) return;
+  try {
+    await scenario.cleanup(ctx, prepared);
+  } catch (err) {
+    assertions.push({ name: "cleanup", passed: false, detail: errorText(err) });
+  }
 }
 
 function unhealthyUnknown(): LiveSnapshot {
@@ -449,7 +477,7 @@ async function finalize(
 
   const result: ScenarioResult = {
     name: scenario.name,
-    passed: assertions.length > 0 && assertions.every((assertion) => assertion.passed),
+    passed: scenarioAssertionsPass(assertions),
     precondition: scenario.precondition,
     assertions,
     durationMs: Date.now() - startedMs,

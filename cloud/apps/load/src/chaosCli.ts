@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   registeredScenarios,
@@ -117,6 +118,14 @@ export async function runChaosCli(argv: string[]): Promise<number> {
   });
 
   const failures: string[] = [];
+  // M7: a SIGINT/SIGTERM during a scenario must still restore the displaced
+  // staging mock (and the worker, via the scenario's own cleanup on the next
+  // iteration). close() is idempotent.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    void ctx.close().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   try {
     for (const name of selected) {
       const result = await runChaosScenario(name, ctx);
@@ -131,6 +140,8 @@ export async function runChaosCli(argv: string[]): Promise<number> {
       if (!result.passed) failures.push(result.name);
     }
   } finally {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
     await ctx.close();
   }
 

@@ -9,15 +9,15 @@ import type {
   GateResult,
 } from "../runner.js";
 import {
+  aggregateEventCounts,
   closeClients,
   createGroundTruth,
   deliveredSeqs,
+  errorText,
   groundTruthSeqs,
   mirrorSeqs,
   openClients,
   readHealth,
-  receivedEvents,
-  runEventCounts,
   sendRuns,
   sleep,
   waitFor,
@@ -42,6 +42,27 @@ const CLIENTS = 10;
 const RUNS_PER_CLIENT = 2;
 /** AOF everysec: enqueues must be at least this old before the restart. */
 const AOF_SETTLE_MS = 2_000;
+
+/**
+ * The queue prefix the staging gateway and worker actually use.
+ *
+ * Their mains call `createQueues`/`createAgentRunsWorker` with NO `prefix`
+ * option (`apps/gateway/src/index.ts`, `apps/worker/src/main.ts`), so BullMQ's
+ * default `"bull"` applies. `BULL_PREFIX` in `.env.staging` is still
+ * `bull:staging`, but it is NOT threaded into those calls (P10 Task 3 surface),
+ * so reading it here would inspect `bull:staging:agent-runs`, where no job
+ * ever lands. `queuePrefix.test.ts` pins this against the mains' real calls.
+ */
+export const STAGING_QUEUE_PREFIX = "bull";
+
+/**
+ * Construct the scenario's queues exactly like the gateway/worker mains: no
+ * prefix option. This is the derivation — do not add `prefix` here unless the
+ * mains do too.
+ */
+export function createScenarioQueues(redisQUrl: string): QueueServices {
+  return createQueues({ url: redisQUrl });
+}
 
 export interface RedisQGateState {
   waitingCount: number;
@@ -86,8 +107,25 @@ interface Prepared {
   redis: ReturnType<typeof createGroundTruth>["redis"];
   log: ReturnType<typeof createGroundTruth>["log"];
   enqueuedAtMs: number;
+  /** Pre-run worker liveness — cleanup restores exactly this state. */
+  workerWasAlive: boolean;
   sawDegraded: boolean;
   recoveryMs: number;
+}
+
+/** Idempotently restore the worker to the liveness it had before prepare. */
+async function restoreWorker(ctx: ChaosContext, wasAlive: boolean): Promise<void> {
+  let alive = false;
+  try {
+    alive = await ctx.staging.workerAlive();
+  } catch {
+    alive = false;
+  }
+  if (wasAlive && !alive) {
+    await ctx.staging.workerStart();
+  } else if (!wasAlive && alive) {
+    await ctx.staging.workerStopGraceful();
+  }
 }
 
 export const redisQRestartScenario: ChaosScenario<Prepared> = {
@@ -99,43 +137,66 @@ export const redisQRestartScenario: ChaosScenario<Prepared> = {
     const baseUrl = ctx.env.STAGING_GATEWAY_URL ?? "";
     const redisQUrl = ctx.env.STAGING_REDIS_Q_URL ?? "";
     const databaseUrl = ctx.env.STAGING_DATABASE_URL ?? "";
-    const queuePrefix = ctx.env.BULL_PREFIX ?? "bull:staging";
     const tag = `redisq-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
 
+    // Record the pre-run state so cleanup restores it (never leave the
+    // staging worker stopped for the next scenario in `--scenario all`).
+    const workerWasAlive = await ctx.staging.workerAlive();
     // The worker must be down so the 20 runs cannot drain. This is setup, not
     // injection; the gate re-proves it immediately before the restart.
     await ctx.staging.workerStopGraceful();
 
-    const clients = await openClients({ baseUrl, count: CLIENTS, tag });
-    for (const entry of clients) {
-      await sendRuns(entry, RUNS_PER_CLIENT, (index) => `${tag} queued run ${index}`);
+    const clients: ChaosClient[] = [];
+    let queues: QueueServices | undefined;
+    let db: Db | undefined;
+    let ground: ReturnType<typeof createGroundTruth> | undefined;
+    try {
+      clients.push(...(await openClients({ baseUrl, count: CLIENTS, tag })));
+      for (const entry of clients) {
+        await sendRuns(entry, RUNS_PER_CLIENT, (index) => `${tag} queued run ${index}`);
+      }
+
+      queues = createScenarioQueues(redisQUrl);
+      // The redis restart below intentionally breaks these connections; without
+      // an error listener BullMQ's EventEmitter 'error' would crash the runner.
+      for (const queue of Object.values(queues)) {
+        queue?.on("error", () => {});
+      }
+      db = createDb(databaseUrl);
+      ground = createGroundTruth(redisQUrl);
+
+      // AOF everysec: the gate requires the enqueues to be >2 s old before the
+      // restart. Wait here so the gate observes a settled queue rather than
+      // failing on a freshly-enqueued one.
+      const enqueuedAtMs = Date.now();
+      await sleep(AOF_SETTLE_MS + 250);
+
+      return {
+        clients,
+        queues,
+        db,
+        redis: ground.redis,
+        log: ground.log,
+        enqueuedAtMs,
+        workerWasAlive,
+        sawDegraded: false,
+        recoveryMs: 0,
+      };
+    } catch (err) {
+      // Partial prepare: close everything opened and let the runner's cleanup
+      // (prepared === undefined) restore the worker. Close first, then throw.
+      await closeClients(clients);
+      if (queues !== undefined) {
+        await Promise.allSettled(
+          Object.values(queues)
+            .filter((queue): queue is NonNullable<typeof queue> => queue !== undefined)
+            .map((queue) => queue.close()),
+        );
+      }
+      await ground?.redis.quit().catch(() => {});
+      await db?.$client.end({ timeout: 5 }).catch(() => {});
+      throw err;
     }
-
-    const queues = createQueues({ url: redisQUrl }, { prefix: queuePrefix });
-    // The redis restart below intentionally breaks these connections; without
-    // an error listener BullMQ's EventEmitter 'error' would crash the runner.
-    for (const queue of Object.values(queues)) {
-      queue?.on("error", () => {});
-    }
-    const db = createDb(databaseUrl);
-    const { log, redis } = createGroundTruth(redisQUrl);
-
-    // AOF everysec: the gate requires the enqueues to be >2 s old before the
-    // restart. Wait here so the gate observes a settled queue rather than
-    // failing on a freshly-enqueued one.
-    const enqueuedAtMs = Date.now();
-    await sleep(AOF_SETTLE_MS + 250);
-
-    return {
-      clients,
-      queues,
-      db,
-      redis,
-      log,
-      enqueuedAtMs,
-      sawDegraded: false,
-      recoveryMs: 0,
-    };
   },
 
   async gate(ctx: ChaosContext, prepared: Prepared): Promise<GateResult> {
@@ -257,6 +318,7 @@ export const redisQRestartScenario: ChaosScenario<Prepared> = {
 
     // Mirror writes race the client delivery by a few ms; poll briefly.
     const integrity = { lost: 0, duplicate: 0, mirrorGaps: 0 };
+    const integrityErrors: string[] = [];
     for (const entry of prepared.clients) {
       let truth: string[] = [];
       let mirror: string[] = [];
@@ -271,8 +333,11 @@ export const redisQRestartScenario: ChaosScenario<Prepared> = {
           10_000,
           100,
         );
-      } catch {
-        // keep whatever was read; the diff below records the gap
+      } catch (err) {
+        // M1: a failed read must fail the integrity assertion, not yield a
+        // vacuous 0/0/0 pass.
+        integrityErrors.push(`${entry.sessionId}: ${errorText(err)}`);
+        continue;
       }
       const diff = diffIntegrity(deliveredSeqs(entry), truth, mirror);
       integrity.lost += diff.lostEvents;
@@ -282,35 +347,47 @@ export const redisQRestartScenario: ChaosScenario<Prepared> = {
     assertions.push({
       name: "ledger-integrity",
       passed:
-        integrity.lost === 0 && integrity.duplicate === 0 && integrity.mirrorGaps === 0,
-      detail: `lost ${integrity.lost}, duplicate ${integrity.duplicate}, mirror gaps ${integrity.mirrorGaps}`,
+        integrityErrors.length === 0 &&
+        integrity.lost === 0 &&
+        integrity.duplicate === 0 &&
+        integrity.mirrorGaps === 0,
+      detail:
+        integrityErrors.length > 0
+          ? `ground-truth read failed: ${integrityErrors.join("; ")}`
+          : `lost ${integrity.lost}, duplicate ${integrity.duplicate}, mirror gaps ${integrity.mirrorGaps}`,
     });
 
-    // Keep the run events observable for the report before teardown.
-    const terminalEvents = prepared.clients
-      .flatMap((entry) => receivedEvents(entry))
-      .filter((event) => event.type === "run_completed" || event.type === "run_failed");
-    const counts = runEventCounts(terminalEvents);
+    const counts = aggregateEventCounts(prepared.clients);
     assertions.push({
       name: "exactly-one-terminal-per-run",
       passed:
         counts.completed.size + counts.failed.size === EXPECTED_WAITING &&
-        terminalEvents.length === EXPECTED_WAITING,
-      detail: `${terminalEvents.length} terminal event(s) for ${EXPECTED_WAITING} run(s)`,
+        counts.terminalEvents === EXPECTED_WAITING &&
+        counts.unattributedTerminal === 0,
+      detail:
+        `${counts.terminalEvents} terminal event(s) for ${EXPECTED_WAITING} run(s); ` +
+        `completed ${counts.completed.size}, failed ${counts.failed.size}, ` +
+        `unattributed ${counts.unattributedTerminal}`,
     });
 
     return assertions;
   },
 
-  async cleanup(_ctx: ChaosContext, prepared: Prepared): Promise<void> {
-    await closeClients(prepared.clients);
-    await Promise.allSettled(
-      Object.values(prepared.queues)
-        .filter((queue): queue is NonNullable<typeof queue> => queue !== undefined)
-        .map((queue) => queue.close()),
-    );
-    await prepared.redis.quit().catch(() => {});
-    await prepared.db.$client.end({ timeout: 5 }).catch(() => {});
+  async cleanup(ctx: ChaosContext, prepared: Prepared | undefined): Promise<void> {
+    if (prepared !== undefined) {
+      await closeClients(prepared.clients);
+      await Promise.allSettled(
+        Object.values(prepared.queues)
+          .filter((queue): queue is NonNullable<typeof queue> => queue !== undefined)
+          .map((queue) => queue.close()),
+      );
+      await prepared.redis.quit().catch(() => {});
+      await prepared.db.$client.end({ timeout: 5 }).catch(() => {});
+    }
+    // H4: ALWAYS restore the worker — even when the gate/inject/verify failed
+    // and even when prepare threw before returning (prepared === undefined;
+    // the pre-run state is then unknown, so starting is the safe default).
+    await restoreWorker(ctx, prepared?.workerWasAlive ?? true);
     await sleep(0);
   },
 };

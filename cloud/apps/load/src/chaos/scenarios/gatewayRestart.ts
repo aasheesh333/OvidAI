@@ -1,6 +1,11 @@
 import WebSocket from "ws";
 import { createDb, type Db } from "@ovid/db";
-import { percentile, diffIntegrity } from "../../metrics.js";
+import {
+  WS_RESTART_CLOSE_CODE,
+  WS_RESTART_CLOSE_REASON,
+} from "@ovid/gateway";
+import { AGENT_RUNS_DEFAULT_CONCURRENCY } from "@ovid/queue";
+import { compareSeq, percentile, diffIntegrity } from "../../metrics.js";
 import type {
   Assertion,
   ChaosContext,
@@ -8,9 +13,11 @@ import type {
   GateResult,
 } from "../runner.js";
 import {
+  aggregateEventCounts,
   closeClients,
   createGroundTruth,
   deliveredSeqs,
+  errorText,
   groundTruthSeqs,
   isMonotonic,
   mirrorSeqs,
@@ -37,8 +44,18 @@ import {
  * duplicate, monotonic seqs); replay p95 recorded.
  */
 
-const CLIENTS = 10;
+/**
+ * The staging worker runs `createAgentRunsWorker` with no concurrency override,
+ * so it holds exactly AGENT_RUNS_DEFAULT_CONCURRENCY runs. The mock gate holds
+ * every started run after its first delta, so a larger client count would leave
+ * the excess runs queued forever and the gate could never observe them.
+ */
+export const CLIENTS = AGENT_RUNS_DEFAULT_CONCURRENCY;
 const RECONNECT_DEADLINE_MS = 15_000;
+
+/** P10 Task 2 drain contract (re-exported by @ovid/gateway). */
+export const EXPECTED_CLOSE_CODE = WS_RESTART_CLOSE_CODE;
+export const EXPECTED_CLOSE_REASON = WS_RESTART_CLOSE_REASON;
 
 export interface GatewayClientState {
   runStarted: boolean;
@@ -48,6 +65,8 @@ export interface GatewayClientState {
 
 export interface GatewayGateState {
   clients: GatewayClientState[];
+  /** The exact client count the scenario prepared (worker concurrency bound). */
+  expectedClients: number;
   gateReleased: boolean;
   healthStatus: "ok" | "degraded" | "unreachable";
 }
@@ -55,8 +74,10 @@ export interface GatewayGateState {
 /** Pure gate logic (unit-tested). */
 export function evaluateGatewayGate(state: GatewayGateState): GateResult {
   const problems: string[] = [];
-  if (state.clients.length === 0) {
-    problems.push("no clients prepared");
+  if (state.clients.length !== state.expectedClients) {
+    problems.push(
+      `prepared ${state.clients.length} client(s), expected exactly ${state.expectedClients}`,
+    );
   }
   state.clients.forEach((client, index) => {
     if (!client.runStarted) problems.push(`client ${index} has no run_started`);
@@ -71,17 +92,29 @@ export function evaluateGatewayGate(state: GatewayGateState): GateResult {
   if (state.healthStatus !== "ok") {
     problems.push(`gateway health is '${state.healthStatus}', expected 'ok'`);
   }
+  // The positive in-flight count the gate actually observed. With the worker
+  // concurrency bound above, this is the strongest statement available from
+  // client-observed events: every worker slot is occupied by a held run.
+  const inFlight = state.clients.filter(
+    (client) => client.runStarted && client.deltaSeen && !client.terminal,
+  ).length;
+  if (inFlight !== state.expectedClients) {
+    problems.push(
+      `observed ${inFlight} in-flight run(s), expected exactly ${state.expectedClients}`,
+    );
+  }
   if (problems.length > 0) {
     return { ok: false, detail: problems.join("; ") };
   }
   return {
     ok: true,
-    detail: `${state.clients.length} run(s) provably in-flight (run_started + delta seen, no terminal) with the mock gate held`,
+    detail: `${inFlight} run(s) provably in-flight (run_started + delta seen, no terminal) with the mock gate held`,
   };
 }
 
 interface CloseObserver {
   code: Promise<number>;
+  reason: Promise<string>;
   stop(): void;
 }
 
@@ -122,8 +155,17 @@ async function openCloseObserver(
   }
 
   const socket = new WebSocket(`${wsBaseFor(baseUrl)}?ticket=${encodeURIComponent(ticket)}`);
+  let resolveCode!: (code: number) => void;
+  let resolveReason!: (reason: string) => void;
   const code = new Promise<number>((resolve) => {
-    socket.once("close", (closeCode) => resolve(closeCode));
+    resolveCode = resolve;
+  });
+  const reason = new Promise<string>((resolve) => {
+    resolveReason = resolve;
+  });
+  socket.once("close", (closeCode, closeReason) => {
+    resolveCode(closeCode);
+    resolveReason(closeReason.toString());
   });
   await withTimeout(
     new Promise<void>((resolve, reject) => {
@@ -147,6 +189,7 @@ async function openCloseObserver(
   await withTimeout(subscribed, 10_000, "close observer subscribe ack");
   return {
     code,
+    reason,
     stop: () => socket.terminate(),
   };
 }
@@ -160,14 +203,61 @@ interface Prepared {
   redis: ReturnType<typeof createGroundTruth>["redis"];
   log: ReturnType<typeof createGroundTruth>["log"];
   closeCodes: number[];
+  closeReasons: string[];
   reconnectLatencies: number[];
+  /** subscribe → last replayed event (only when the outage produced events). */
+  replayLatencies: number[];
   reconnectFailures: string[];
+}
+
+/**
+ * M5: measure subscribe → last replayed event, not just the `subscribed` ack.
+ *
+ * The gateway sends `subscribed` BEFORE replaying (`ws.ts`), so the ack time is
+ * a reconnect metric. After the ack, replay frames are already past
+ * `lastEventId`; wait for the burst to go quiet (or a bounded timeout) and take
+ * the last such frame's receipt time. With the mock gate held, no events are
+ * emitted during the outage, so this legitimately yields no sample — the
+ * assertion records that explicitly instead of calling reconnect latency
+ * "replay".
+ */
+async function measureReplayLatency(
+  entry: ChaosClient,
+  beforeCount: number,
+  lastSeq: string | null,
+  subscribeAt: number,
+  quietMs = 250,
+  timeoutMs = 1_500,
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  let lastAt: number | null = null;
+  let seen = entry.client.received.length;
+  let quietSince = Date.now();
+  for (;;) {
+    const replayed = entry.client.received
+      .slice(beforeCount)
+      .filter((item) => lastSeq === null || compareSeq(item.event.seq, lastSeq) > 0);
+    if (replayed.length > 0) {
+      lastAt = replayed[replayed.length - 1]!.receivedAtMs;
+    }
+    const now = Date.now();
+    const current = entry.client.received.length;
+    if (current !== seen) {
+      seen = current;
+      quietSince = now;
+    }
+    if (now >= deadline) break;
+    if (lastAt !== null && now - quietSince >= quietMs) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return lastAt === null ? null : Math.max(0, lastAt - subscribeAt);
 }
 
 export const gatewayRestartScenario: ChaosScenario<Prepared> = {
   name: "gateway-restart",
   precondition:
-    "10 runs provably held mid-stream (run_started + streamed delta, no terminal) by the deferred mock gate; gateway health ok",
+    `${CLIENTS} runs (the worker's concurrency) provably held mid-stream ` +
+    "(run_started + streamed delta, no terminal) by the deferred mock gate; gateway health ok",
 
   async prepare(ctx: ChaosContext): Promise<Prepared> {
     const baseUrl = ctx.env.STAGING_GATEWAY_URL ?? "";
@@ -182,29 +272,45 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
       gateAfterDeltas: 1,
     });
 
-    const clients = await openClients({ baseUrl, count: CLIENTS, tag });
+    const clients: ChaosClient[] = [];
     const observers: CloseObserver[] = [];
-    for (const entry of clients) {
-      observers.push(await openCloseObserver(baseUrl, entry.uid, entry.sessionId));
-    }
-    for (const entry of clients) {
-      await sendRuns(entry, 1, () => `${tag} held run`);
-    }
+    let db: Db | undefined;
+    let ground: ReturnType<typeof createGroundTruth> | undefined;
+    try {
+      clients.push(...(await openClients({ baseUrl, count: CLIENTS, tag })));
+      for (const entry of clients) {
+        observers.push(await openCloseObserver(baseUrl, entry.uid, entry.sessionId));
+      }
+      for (const entry of clients) {
+        await sendRuns(entry, 1, () => `${tag} held run`);
+      }
 
-    const db = createDb(databaseUrl);
-    const { log, redis } = createGroundTruth(redisQUrl);
-    return {
-      clients,
-      observers,
-      gate,
-      gateReleased: false,
-      db,
-      redis,
-      log,
-      closeCodes: [],
-      reconnectLatencies: [],
-      reconnectFailures: [],
-    };
+      db = createDb(databaseUrl);
+      ground = createGroundTruth(redisQUrl);
+      return {
+        clients,
+        observers,
+        gate,
+        gateReleased: false,
+        db,
+        redis: ground.redis,
+        log: ground.log,
+        closeCodes: [],
+        closeReasons: [],
+        reconnectLatencies: [],
+        replayLatencies: [],
+        reconnectFailures: [],
+      };
+    } catch (err) {
+      // Unwind a partial prepare: release the held streams (they would
+      // otherwise occupy every worker slot) and close every opened socket.
+      gate.release();
+      for (const observer of observers) observer.stop();
+      await closeClients(clients);
+      await ground?.redis.quit().catch(() => {});
+      await db?.$client.end({ timeout: 5 }).catch(() => {});
+      throw err;
+    }
   },
 
   async gate(ctx: ChaosContext, prepared: Prepared): Promise<GateResult> {
@@ -217,7 +323,7 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
       const health = await readHealth(ctx.env.STAGING_GATEWAY_URL ?? "");
       const clientStates: GatewayClientState[] = prepared.clients.map((entry) => {
         const events = receivedEvents(entry);
-        const counts = runEventCounts(events);
+        const counts = runEventCounts(events, entry.runIds);
         const runIds = new Set(entry.runIds);
         return {
           runStarted: [...runIds].some((runId) => counts.started.has(runId)),
@@ -234,6 +340,7 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
       });
       last = evaluateGatewayGate({
         clients: clientStates,
+        expectedClients: CLIENTS,
         gateReleased: prepared.gateReleased,
         healthStatus: health.status,
       });
@@ -246,17 +353,26 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
     const restartAt = Date.now();
     await ctx.staging.restart("gateway");
 
-    // Task-2 drain contract: every live socket closes with 1001.
-    prepared.closeCodes = await Promise.all(
-      prepared.observers.map((observer) =>
-        Promise.race([
+    // P10 Task 2 drain contract: every live socket closes 1001
+    // "server restarting" (installShutdownHandlers in the gateway).
+    const closed = await Promise.all(
+      prepared.observers.map(async (observer) => ({
+        code: await Promise.race([
           observer.code,
           new Promise<number>((resolve) =>
             setTimeout(() => resolve(-1), RECONNECT_DEADLINE_MS).unref(),
           ),
         ]),
-      ),
+        reason: await Promise.race([
+          observer.reason,
+          new Promise<string>((resolve) =>
+            setTimeout(() => resolve(""), RECONNECT_DEADLINE_MS).unref(),
+          ),
+        ]),
+      })),
     );
+    prepared.closeCodes = closed.map((entry) => entry.code);
+    prepared.closeReasons = closed.map((entry) => entry.reason);
 
     const baseUrl = ctx.env.STAGING_GATEWAY_URL ?? "";
     await waitFor(
@@ -274,6 +390,9 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
       prepared.clients.map(async (entry) => {
         try {
           const remaining = Math.max(1_000, RECONNECT_DEADLINE_MS - (Date.now() - restartAt));
+          const beforeCount = entry.client.received.length;
+          const lastSeq = entry.client.lastEventId();
+          const subscribeAt = Date.now();
           await waitFor(
             `reconnect ${entry.uid}`,
             async () => {
@@ -288,6 +407,13 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
             250,
           );
           prepared.reconnectLatencies.push(Date.now() - restartAt);
+          const replayLatency = await measureReplayLatency(
+            entry,
+            beforeCount,
+            lastSeq,
+            subscribeAt,
+          );
+          if (replayLatency !== null) prepared.replayLatencies.push(replayLatency);
         } catch (err) {
           prepared.reconnectFailures.push(
             `${entry.uid}: ${err instanceof Error ? err.message : String(err)}`,
@@ -305,11 +431,17 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
 
     const all1001 =
       prepared.closeCodes.length === CLIENTS &&
-      prepared.closeCodes.every((code) => code === 1001);
+      prepared.closeCodes.every((code) => code === EXPECTED_CLOSE_CODE);
+    const allRestartReason =
+      prepared.closeReasons.length === CLIENTS &&
+      prepared.closeReasons.every((reason) => reason === EXPECTED_CLOSE_REASON);
     assertions.push({
       name: "drain-close-1001",
-      passed: all1001,
-      detail: `close codes: ${prepared.closeCodes.join(", ")} (expected ${CLIENTS} × 1001)`,
+      passed: all1001 && allRestartReason,
+      detail:
+        `close codes: ${prepared.closeCodes.join(", ") || "none"} (expected ${CLIENTS} × ` +
+        `${EXPECTED_CLOSE_CODE}); reasons: ${prepared.closeReasons.join(", ") || "none"} ` +
+        `(expected ${CLIENTS} × '${EXPECTED_CLOSE_REASON}')`,
     });
 
     assertions.push({
@@ -332,6 +464,7 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
     });
 
     const integrity = { lost: 0, duplicate: 0, mirrorGaps: 0 };
+    const integrityErrors: string[] = [];
     let monotonic = true;
     for (const entry of prepared.clients) {
       const delivered = deliveredSeqs(entry);
@@ -350,8 +483,12 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
           10_000,
           100,
         );
-      } catch {
-        // the diff below records the gap
+      } catch (err) {
+        // M1: a swallowed ground-truth read would make diffIntegrity(delivered,
+        // [], []) report 0/0/0 and turn the core replay assertion vacuously
+        // green. Record the failure and fail the assertion instead.
+        integrityErrors.push(`${entry.sessionId}: ${errorText(err)}`);
+        continue;
       }
       const diff = diffIntegrity(delivered, truth, mirror);
       integrity.lost += diff.lostEvents;
@@ -359,11 +496,18 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
       integrity.mirrorGaps += diff.gapsVsMirror;
     }
 
+    const integrityPassed =
+      integrityErrors.length === 0 &&
+      integrity.lost === 0 &&
+      integrity.duplicate === 0 &&
+      integrity.mirrorGaps === 0;
     assertions.push({
       name: "replay-integrity",
-      passed:
-        integrity.lost === 0 && integrity.duplicate === 0 && integrity.mirrorGaps === 0,
-      detail: `lost ${integrity.lost}, duplicate ${integrity.duplicate}, mirror gaps ${integrity.mirrorGaps}`,
+      passed: integrityPassed,
+      detail:
+        integrityErrors.length > 0
+          ? `ground-truth read failed: ${integrityErrors.join("; ")}`
+          : `lost ${integrity.lost}, duplicate ${integrity.duplicate}, mirror gaps ${integrity.mirrorGaps}`,
     });
     assertions.push({
       name: "monotonic-seqs",
@@ -371,32 +515,58 @@ export const gatewayRestartScenario: ChaosScenario<Prepared> = {
       detail: "delivered seqs are strictly increasing across the reconnect union",
     });
 
-    const p95 =
+    // M5: the ack latency is a RECONNECT metric (the gateway acks before it
+    // replays), so it is labelled as such.
+    const reconnectP95 =
       prepared.reconnectLatencies.length === 0
         ? -1
         : percentile(prepared.reconnectLatencies, 95);
     assertions.push({
-      name: "replay-p95-recorded",
-      passed: p95 >= 0,
-      detail: `reconnect (restart→subscribed) p95 ${p95}ms across ${prepared.reconnectLatencies.length} reconnect(s); the gated window had no missed events to replay beyond lastEventId`,
+      name: "reconnect-p95-recorded",
+      passed: reconnectP95 >= 0,
+      detail: `reconnect (restart→subscribed ack) p95 ${reconnectP95}ms across ${prepared.reconnectLatencies.length} reconnect(s)`,
     });
 
-    const terminalEvents = prepared.clients
-      .flatMap((entry) => receivedEvents(entry))
-      .filter((event) => event.type === "run_completed" || event.type === "run_failed");
-    const counts = runEventCounts(terminalEvents);
+    // A separate replay measurement: subscribe → last replayed event. The
+    // gated window emits no events, so a zero sample is expected; in that case
+    // replay correctness is carried by `replay-integrity`, never by this row.
+    const replayP95 =
+      prepared.replayLatencies.length === 0
+        ? -1
+        : percentile(prepared.replayLatencies, 95);
+    assertions.push({
+      name: "replay-latency-recorded",
+      passed:
+        prepared.replayLatencies.length > 0
+          ? replayP95 <= RECONNECT_DEADLINE_MS
+          : integrityPassed,
+      detail:
+        prepared.replayLatencies.length === 0
+          ? "0 events replayed (the gated window emitted nothing between lastEventId and reconnect); replay correctness is asserted by replay-integrity"
+          : `subscribe→last replayed event p95 ${replayP95}ms across ${prepared.replayLatencies.length} session(s)`,
+    });
+
+    const counts = aggregateEventCounts(prepared.clients);
     assertions.push({
       name: "exactly-one-terminal-per-run",
       passed:
         counts.completed.size + counts.failed.size === CLIENTS &&
-        terminalEvents.length === CLIENTS,
-      detail: `${terminalEvents.length} terminal event(s) for ${CLIENTS} run(s)`,
+        counts.terminalEvents === CLIENTS &&
+        counts.unattributedTerminal === 0,
+      detail:
+        `${counts.terminalEvents} terminal event(s) for ${CLIENTS} run(s) ` +
+        `(completed ${counts.completed.size}, failed ${counts.failed.size}, ` +
+        `unattributed ${counts.unattributedTerminal})`,
     });
 
     return assertions;
   },
 
-  async cleanup(_ctx: ChaosContext, prepared: Prepared): Promise<void> {
+  async cleanup(_ctx: ChaosContext, prepared: Prepared | undefined): Promise<void> {
+    if (prepared === undefined) return;
+    // M9: idempotent release — a failed inject must not leave every worker
+    // slot occupied by a held stream for the next scenario.
+    prepared.gate.release();
     for (const observer of prepared.observers) observer.stop();
     await closeClients(prepared.clients);
     await prepared.redis.quit().catch(() => {});

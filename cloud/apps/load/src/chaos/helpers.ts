@@ -15,6 +15,10 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** Poll until `probe` returns a non-null/undefined/false value. */
 export async function waitFor<T>(
   label: string,
@@ -64,17 +68,23 @@ export interface OpenClientsOptions {
 
 export async function openClients(opts: OpenClientsOptions): Promise<ChaosClient[]> {
   const clients: ChaosClient[] = [];
-  for (let index = 0; index < opts.count; index += 1) {
-    const uid = `chaos-${opts.tag}-u${index}`;
-    const client = await createLoadClient({
-      baseUrl: opts.baseUrl,
-      wsBase: wsBaseFor(opts.baseUrl),
-      uid,
-      authMode: "test",
-    });
-    const sessionId = await client.createSession();
-    await client.subscribe(sessionId, null);
-    clients.push({ client, sessionId, uid, runIds: [] });
+  try {
+    for (let index = 0; index < opts.count; index += 1) {
+      const uid = `chaos-${opts.tag}-u${index}`;
+      const client = await createLoadClient({
+        baseUrl: opts.baseUrl,
+        wsBase: wsBaseFor(opts.baseUrl),
+        uid,
+        authMode: "test",
+      });
+      const sessionId = await client.createSession();
+      await client.subscribe(sessionId, null);
+      clients.push({ client, sessionId, uid, runIds: [] });
+    }
+  } catch (err) {
+    // A partially-opened set must not leak sockets into the next scenario.
+    await closeClients(clients);
+    throw err;
   }
   return clients;
 }
@@ -140,20 +150,81 @@ export interface EventCounts {
   started: Set<string>;
   completed: Set<string>;
   failed: Set<string>;
+  /**
+   * Terminal events (`run_completed`/`run_failed`) that carried no
+   * `payload.runId` and could not be attributed to exactly one still-open
+   * expected run. They are counted here instead of being silently dropped.
+   */
+  unattributedTerminal: number;
+  /** Every terminal event observed, attributed or not (duplicate detection). */
+  terminalEvents: number;
 }
 
-export function runEventCounts(events: SessionEvent[]): EventCounts {
+/**
+ * Attribute run events to runIds.
+ *
+ * Most failure paths emit `run_failed` WITHOUT `payload.runId`
+ * (`run_queue_wait_timeout`, `model_terminal`, `key_not_minted`, …). Dropping
+ * those made `waitForTerminalRuns` time out and let the postgres scenario's
+ * "run_failed accepted" branch go unimplemented. When `expectedRunIds` is
+ * supplied, an unlabelled terminal event is attributed to the single expected
+ * run that has not reached a terminal state yet; if that is ambiguous it is
+ * still counted (`unattributedTerminal`) so the exactly-one-terminal checks
+ * cannot pass vacuously.
+ */
+export function runEventCounts(
+  events: SessionEvent[],
+  expectedRunIds: string[] = [],
+): EventCounts {
   const started = new Set<string>();
   const completed = new Set<string>();
   const failed = new Set<string>();
+  let unattributedTerminal = 0;
+  let terminalEvents = 0;
   for (const event of events) {
     const runId = event.payload.runId;
-    if (typeof runId !== "string") continue;
-    if (event.type === "run_started") started.add(runId);
-    else if (event.type === "run_completed") completed.add(runId);
-    else if (event.type === "run_failed") failed.add(runId);
+    if (event.type === "run_started") {
+      if (typeof runId === "string") started.add(runId);
+      continue;
+    }
+    if (event.type !== "run_completed" && event.type !== "run_failed") continue;
+    terminalEvents += 1;
+    if (typeof runId === "string") {
+      if (event.type === "run_completed") completed.add(runId);
+      else failed.add(runId);
+      continue;
+    }
+    const open = expectedRunIds.filter(
+      (expected) => !completed.has(expected) && !failed.has(expected),
+    );
+    if (open.length === 1) {
+      if (event.type === "run_completed") completed.add(open[0]!);
+      else failed.add(open[0]!);
+    } else {
+      unattributedTerminal += 1;
+    }
   }
-  return { started, completed, failed };
+  return { started, completed, failed, unattributedTerminal, terminalEvents };
+}
+
+/** Merge per-client counts (session-scoped attribution) across the scenario. */
+export function aggregateEventCounts(clients: ChaosClient[]): EventCounts {
+  const aggregate: EventCounts = {
+    started: new Set(),
+    completed: new Set(),
+    failed: new Set(),
+    unattributedTerminal: 0,
+    terminalEvents: 0,
+  };
+  for (const entry of clients) {
+    const counts = runEventCounts(receivedEvents(entry), entry.runIds);
+    for (const runId of counts.started) aggregate.started.add(runId);
+    for (const runId of counts.completed) aggregate.completed.add(runId);
+    for (const runId of counts.failed) aggregate.failed.add(runId);
+    aggregate.unattributedTerminal += counts.unattributedTerminal;
+    aggregate.terminalEvents += counts.terminalEvents;
+  }
+  return aggregate;
 }
 
 export function receivedEvents(entry: ChaosClient): SessionEvent[] {
@@ -164,14 +235,21 @@ export function receivedEvents(entry: ChaosClient): SessionEvent[] {
 export async function waitForTerminalRuns(
   clients: ChaosClient[],
   timeoutMs: number,
-): Promise<{ completed: Set<string>; failed: Set<string>; terminal: Set<string> }> {
+): Promise<{
+  completed: Set<string>;
+  failed: Set<string>;
+  terminal: Set<string>;
+  unattributedTerminal: number;
+}> {
   return waitFor(
     "runs terminal",
     async () => {
       const completed = new Set<string>();
       const failed = new Set<string>();
+      let unattributedTerminal = 0;
       for (const entry of clients) {
-        const counts = runEventCounts(receivedEvents(entry));
+        const counts = runEventCounts(receivedEvents(entry), entry.runIds);
+        unattributedTerminal += counts.unattributedTerminal;
         for (const runId of entry.runIds) {
           if (counts.completed.has(runId)) completed.add(runId);
           if (counts.failed.has(runId)) failed.add(runId);
@@ -179,7 +257,9 @@ export async function waitForTerminalRuns(
       }
       const terminal = new Set([...completed, ...failed]);
       const expected = clients.reduce((sum, entry) => sum + entry.runIds.length, 0);
-      return terminal.size >= expected ? { completed, failed, terminal } : null;
+      return terminal.size >= expected
+        ? { completed, failed, terminal, unattributedTerminal }
+        : null;
     },
     timeoutMs,
     250,

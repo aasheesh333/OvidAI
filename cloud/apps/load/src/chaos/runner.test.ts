@@ -88,12 +88,18 @@ function fakeContext(snapshots: LiveSnapshot[] = []): {
 function fakeScenario(
   gateOk: boolean,
   counters: { injected: number },
-  options: { injectThrows?: boolean; verifyFails?: boolean } = {},
+  options: {
+    injectThrows?: boolean;
+    verifyFails?: boolean;
+    prepareThrows?: boolean;
+    cleanupCalls?: Array<unknown>;
+  } = {},
 ): ChaosScenario {
   return {
     name: "redis-q-restart",
     precondition: "20 runs waiting in the queue and the worker stopped",
     async prepare() {
+      if (options.prepareThrows === true) throw new Error("prepare exploded");
       return {};
     },
     async gate() {
@@ -107,6 +113,9 @@ function fakeScenario(
       return [
         { name: "recovered", passed: options.verifyFails !== true, detail: "detail" },
       ];
+    },
+    async cleanup(_ctx, prepared) {
+      options.cleanupCalls?.push(prepared);
     },
   };
 }
@@ -183,6 +192,58 @@ describe("runChaosScenario — precondition gate (Review Focus #3)", () => {
     expect(report.scenarios).toHaveLength(1);
     expect(report.scenarios[0]!.liveBefore.healthzStatus).toBe(200);
     expect(report.scenarios[0]!.liveAfter?.healthzStatus).toBe(200);
+  });
+});
+
+describe("runChaosScenario — cleanup always runs (H4)", () => {
+  it("runs cleanup when prepare throws, with undefined prepared state", async () => {
+    const counters = { injected: 0 };
+    const cleanupCalls: Array<unknown> = [];
+    const { ctx } = fakeContext();
+    const result = await runChaosScenario("redis-q-restart", ctx, [
+      fakeScenario(false, counters, { prepareThrows: true, cleanupCalls }),
+    ]);
+
+    expect(counters.injected).toBe(0);
+    expect(result.passed).toBe(false);
+    expect(result.assertions.find((a) => a.name === "prepare")?.passed).toBe(false);
+    // Partial state is unknown: cleanup must still be invoked so a scenario
+    // that stopped the worker before throwing can restore it.
+    expect(cleanupCalls).toEqual([undefined]);
+  });
+
+  it("runs cleanup when the gate fails", async () => {
+    const counters = { injected: 0 };
+    const cleanupCalls: Array<unknown> = [];
+    const { ctx } = fakeContext();
+    await runChaosScenario("redis-q-restart", ctx, [
+      fakeScenario(false, counters, { cleanupCalls }),
+    ]);
+    expect(cleanupCalls).toHaveLength(1);
+  });
+
+  it("runs cleanup when inject throws", async () => {
+    const counters = { injected: 0 };
+    const cleanupCalls: Array<unknown> = [];
+    const { ctx } = fakeContext();
+    await runChaosScenario("redis-q-restart", ctx, [
+      fakeScenario(true, counters, { injectThrows: true, cleanupCalls }),
+    ]);
+    expect(cleanupCalls).toHaveLength(1);
+  });
+
+  it("fails the scenario when cleanup itself throws", async () => {
+    const counters = { injected: 0 };
+    const { ctx } = fakeContext();
+    const scenario = fakeScenario(true, counters);
+    scenario.cleanup = async () => {
+      throw new Error("cleanup exploded");
+    };
+    const result = await runChaosScenario("redis-q-restart", ctx, [scenario]);
+    expect(result.passed).toBe(false);
+    expect(result.assertions.find((a) => a.name === "cleanup")).toMatchObject({
+      passed: false,
+    });
   });
 });
 

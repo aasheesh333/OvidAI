@@ -1,13 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { evaluateGatewayGate } from "./gatewayRestart.js";
-import { evaluatePostgresGate } from "./postgresRestart.js";
+import { AGENT_RUNS_DEFAULT_CONCURRENCY } from "@ovid/queue";
+import { CLIENTS as GATEWAY_CLIENTS, evaluateGatewayGate } from "./gatewayRestart.js";
+import {
+  CLIENTS as POSTGRES_CLIENTS,
+  crossCheckRunStatuses,
+  evaluatePostgresGate,
+} from "./postgresRestart.js";
 import { evaluateRedisQGate } from "./redisQRestart.js";
 
 /**
  * Scenario precondition units (fakes, no staging): Review Focus #3 pins that
  * each gate rejects the vacuous case — an empty queue, a run that already
- * finished, or a released mock gate.
+ * finished, or a released mock gate. H1 pins the client count to the worker's
+ * real concurrency so a gate can never demand more in-flight runs than the
+ * worker can hold.
  */
+
+describe("client count vs worker concurrency (H1)", () => {
+  it("gateway-restart prepares exactly the worker's concurrency", () => {
+    expect(GATEWAY_CLIENTS).toBe(AGENT_RUNS_DEFAULT_CONCURRENCY);
+  });
+
+  it("postgres-restart prepares exactly the worker's concurrency", () => {
+    expect(POSTGRES_CLIENTS).toBe(AGENT_RUNS_DEFAULT_CONCURRENCY);
+  });
+});
 
 describe("evaluateRedisQGate", () => {
   const healthy = {
@@ -45,21 +62,35 @@ describe("evaluateRedisQGate", () => {
 
 describe("evaluateGatewayGate", () => {
   const client = { runStarted: true, deltaSeen: true, terminal: false };
+  const clients = Array.from({ length: GATEWAY_CLIENTS }, () => ({ ...client }));
   const healthy = {
-    clients: Array.from({ length: 10 }, () => ({ ...client })),
+    clients,
+    expectedClients: GATEWAY_CLIENTS,
     gateReleased: false,
     healthStatus: "ok" as const,
   };
 
   it("passes with every run held mid-stream and the gate held", () => {
-    expect(evaluateGatewayGate(healthy).ok).toBe(true);
+    const result = evaluateGatewayGate(healthy);
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain(`${GATEWAY_CLIENTS} run(s) provably in-flight`);
+  });
+
+  it("rejects a client count that does not match the worker concurrency", () => {
+    const short = {
+      ...healthy,
+      clients: clients.slice(0, GATEWAY_CLIENTS - 1),
+    };
+    const result = evaluateGatewayGate(short);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain(`expected exactly ${GATEWAY_CLIENTS}`);
   });
 
   it("rejects a run that already finished before the restart", () => {
-    const clients = healthy.clients.map((entry, index) =>
+    const withTerminal = clients.map((entry, index) =>
       index === 3 ? { ...entry, terminal: true } : entry,
     );
-    const result = evaluateGatewayGate({ ...healthy, clients });
+    const result = evaluateGatewayGate({ ...healthy, clients: withTerminal });
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("client 3");
   });
@@ -69,17 +100,24 @@ describe("evaluateGatewayGate", () => {
   });
 
   it("rejects a client that has not seen a streamed delta", () => {
-    const clients = healthy.clients.map((entry, index) =>
+    const withoutDelta = clients.map((entry, index) =>
       index === 0 ? { ...entry, deltaSeen: false } : entry,
     );
-    expect(evaluateGatewayGate({ ...healthy, clients }).ok).toBe(false);
+    expect(evaluateGatewayGate({ ...healthy, clients: withoutDelta }).ok).toBe(false);
+  });
+
+  it("rejects zero in-flight even when the array has the expected length", () => {
+    const allFinished = clients.map((entry) => ({ ...entry, terminal: true }));
+    expect(evaluateGatewayGate({ ...healthy, clients: allFinished }).ok).toBe(false);
   });
 });
 
 describe("evaluatePostgresGate", () => {
   const client = { runStarted: true, deltaSeen: true, terminal: false };
+  const clients = Array.from({ length: POSTGRES_CLIENTS }, () => ({ ...client }));
   const healthy = {
-    clients: Array.from({ length: 10 }, () => ({ ...client })),
+    clients,
+    expectedClients: POSTGRES_CLIENTS,
     gateReleased: false,
     healthStatus: "ok" as const,
     workerAlive: true,
@@ -98,9 +136,48 @@ describe("evaluatePostgresGate", () => {
   });
 
   it("rejects a run that already reached a terminal event", () => {
-    const clients = healthy.clients.map((entry, index) =>
-      index === 9 ? { ...entry, terminal: true } : entry,
+    const withTerminal = clients.map((entry, index) =>
+      index === POSTGRES_CLIENTS - 1 ? { ...entry, terminal: true } : entry,
     );
-    expect(evaluatePostgresGate({ ...healthy, clients }).ok).toBe(false);
+    expect(evaluatePostgresGate({ ...healthy, clients: withTerminal }).ok).toBe(false);
+  });
+
+  it("rejects a prepared client count that exceeds worker concurrency", () => {
+    const tooMany = [...clients, { ...client }];
+    expect(evaluatePostgresGate({ ...healthy, clients: tooMany }).ok).toBe(false);
+  });
+});
+
+describe("crossCheckRunStatuses (M4)", () => {
+  it("passes when terminal events match the durable run rows", () => {
+    const statuses = new Map([
+      ["run-1", "completed"],
+      ["run-2", "failed"],
+    ]);
+    expect(crossCheckRunStatuses(statuses, ["run-1"], ["run-2"])).toEqual([]);
+  });
+
+  it("flags a run_completed whose row is still running (torn status flip)", () => {
+    const mismatches = crossCheckRunStatuses(
+      new Map([["run-1", "running"]]),
+      ["run-1"],
+      [],
+    );
+    expect(mismatches).toHaveLength(1);
+    expect(mismatches[0]).toContain("run_completed but row=running");
+  });
+
+  it("flags a run_failed whose row is completed", () => {
+    const mismatches = crossCheckRunStatuses(
+      new Map([["run-1", "completed"]]),
+      [],
+      ["run-1"],
+    );
+    expect(mismatches[0]).toContain("run_failed but row=completed");
+  });
+
+  it("flags a missing row", () => {
+    const mismatches = crossCheckRunStatuses(new Map(), ["run-1"], []);
+    expect(mismatches[0]).toContain("row=missing");
   });
 });

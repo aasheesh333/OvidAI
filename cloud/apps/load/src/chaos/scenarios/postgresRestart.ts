@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createDb, type Db } from "@ovid/db";
+import { AGENT_RUNS_DEFAULT_CONCURRENCY } from "@ovid/queue";
 import { diffIntegrity } from "../../metrics.js";
 import type {
   Assertion,
@@ -8,9 +9,11 @@ import type {
   GateResult,
 } from "../runner.js";
 import {
+  aggregateEventCounts,
   closeClients,
   createGroundTruth,
   deliveredSeqs,
+  errorText,
   groundTruthSeqs,
   mirrorSeqs,
   openClients,
@@ -36,7 +39,13 @@ import {
  * release or is terminalized with `run_failed`, and both counts are recorded.
  */
 
-const CLIENTS = 10;
+/**
+ * The staging worker runs `createAgentRunsWorker` with no concurrency override,
+ * so it holds exactly AGENT_RUNS_DEFAULT_CONCURRENCY runs. A larger client
+ * count leaves the excess runs queued forever while the mock gate holds every
+ * started run, so the gate could never observe them.
+ */
+export const CLIENTS = AGENT_RUNS_DEFAULT_CONCURRENCY;
 const LEGAL_RUN_STATES = new Set(["queued", "running", "completed", "failed"]);
 
 export interface PostgresClientState {
@@ -47,6 +56,8 @@ export interface PostgresClientState {
 
 export interface PostgresGateState {
   clients: PostgresClientState[];
+  /** The exact client count the scenario prepared (worker concurrency bound). */
+  expectedClients: number;
   gateReleased: boolean;
   healthStatus: "ok" | "degraded" | "unreachable";
   workerAlive: boolean;
@@ -55,7 +66,11 @@ export interface PostgresGateState {
 /** Pure gate logic (unit-tested). */
 export function evaluatePostgresGate(state: PostgresGateState): GateResult {
   const problems: string[] = [];
-  if (state.clients.length === 0) problems.push("no clients prepared");
+  if (state.clients.length !== state.expectedClients) {
+    problems.push(
+      `prepared ${state.clients.length} client(s), expected exactly ${state.expectedClients}`,
+    );
+  }
   state.clients.forEach((client, index) => {
     if (!client.runStarted) problems.push(`client ${index} has no run_started`);
     if (!client.deltaSeen) problems.push(`client ${index} has <2 events (no streamed delta)`);
@@ -68,13 +83,48 @@ export function evaluatePostgresGate(state: PostgresGateState): GateResult {
     problems.push(`gateway health is '${state.healthStatus}', expected 'ok'`);
   }
   if (!state.workerAlive) problems.push("staging worker is not running");
+  const inFlight = state.clients.filter(
+    (client) => client.runStarted && client.deltaSeen && !client.terminal,
+  ).length;
+  if (inFlight !== state.expectedClients) {
+    problems.push(
+      `observed ${inFlight} in-flight run(s), expected exactly ${state.expectedClients}`,
+    );
+  }
   if (problems.length > 0) {
     return { ok: false, detail: problems.join("; ") };
   }
   return {
     ok: true,
-    detail: `${state.clients.length} gated run(s) in flight, worker alive, health ok`,
+    detail: `${inFlight} gated run(s) in flight, worker alive, health ok`,
   };
+}
+
+/**
+ * M4: cross-check the durable run row against the terminal event the clients
+ * observed. A `running` row whose `run_completed`/`run_failed` event was
+ * delivered is exactly the torn state the restart is supposed to catch.
+ * Pure (unit-tested).
+ */
+export function crossCheckRunStatuses(
+  statuses: Map<string, string>,
+  completed: Iterable<string>,
+  failed: Iterable<string>,
+): string[] {
+  const mismatches: string[] = [];
+  for (const runId of completed) {
+    const status = statuses.get(runId);
+    if (status !== "completed") {
+      mismatches.push(`${runId}: run_completed but row=${status ?? "missing"}`);
+    }
+  }
+  for (const runId of failed) {
+    const status = statuses.get(runId);
+    if (status !== "failed") {
+      mismatches.push(`${runId}: run_failed but row=${status ?? "missing"}`);
+    }
+  }
+  return mismatches;
 }
 
 interface Prepared {
@@ -92,7 +142,8 @@ interface Prepared {
 export const postgresRestartScenario: ChaosScenario<Prepared> = {
   name: "postgres-restart",
   precondition:
-    "10 gated runs provably in flight, staging worker alive, gateway health ok",
+    `${CLIENTS} gated runs (the worker's concurrency) provably in flight, ` +
+    "staging worker alive, gateway health ok",
 
   async prepare(ctx: ChaosContext): Promise<Prepared> {
     const baseUrl = ctx.env.STAGING_GATEWAY_URL ?? "";
@@ -105,24 +156,37 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
       chunkDelayMs: 0,
       gateAfterDeltas: 1,
     });
-    const clients = await openClients({ baseUrl, count: CLIENTS, tag });
-    for (const entry of clients) {
-      await sendRuns(entry, 1, () => `${tag} held run`);
-    }
+    const clients: ChaosClient[] = [];
+    let db: Db | undefined;
+    let ground: ReturnType<typeof createGroundTruth> | undefined;
+    try {
+      clients.push(...(await openClients({ baseUrl, count: CLIENTS, tag })));
+      for (const entry of clients) {
+        await sendRuns(entry, 1, () => `${tag} held run`);
+      }
 
-    const db = createDb(databaseUrl);
-    const { log, redis } = createGroundTruth(redisQUrl);
-    return {
-      clients,
-      gate,
-      gateReleased: false,
-      db,
-      redis,
-      log,
-      sawDegraded: false,
-      workerAliveAfter: false,
-      recoveryMs: 0,
-    };
+      db = createDb(databaseUrl);
+      ground = createGroundTruth(redisQUrl);
+      return {
+        clients,
+        gate,
+        gateReleased: false,
+        db,
+        redis: ground.redis,
+        log: ground.log,
+        sawDegraded: false,
+        workerAliveAfter: false,
+        recoveryMs: 0,
+      };
+    } catch (err) {
+      // Release the held streams (they would occupy every worker slot) and
+      // close a partially-opened set of clients.
+      gate.release();
+      await closeClients(clients);
+      await ground?.redis.quit().catch(() => {});
+      await db?.$client.end({ timeout: 5 }).catch(() => {});
+      throw err;
+    }
   },
 
   async gate(ctx: ChaosContext, prepared: Prepared): Promise<GateResult> {
@@ -132,7 +196,7 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
       const health = await readHealth(ctx.env.STAGING_GATEWAY_URL ?? "");
       const clientStates: PostgresClientState[] = prepared.clients.map((entry) => {
         const events = receivedEvents(entry);
-        const counts = runEventCounts(events);
+        const counts = runEventCounts(events, entry.runIds);
         const runIds = new Set(entry.runIds);
         return {
           runStarted: [...runIds].some((runId) => counts.started.has(runId)),
@@ -149,6 +213,7 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
       });
       last = evaluatePostgresGate({
         clients: clientStates,
+        expectedClients: CLIENTS,
         gateReleased: prepared.gateReleased,
         healthStatus: health.status,
         workerAlive: await ctx.staging.workerAlive(),
@@ -243,7 +308,9 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
     assertions.push({
       name: "every-run-terminal",
       passed: terminal.terminal.size === CLIENTS,
-      detail: `terminal ${terminal.terminal.size}/${CLIENTS} — completed ${terminal.completed.size}, failed ${terminal.failed.size}`,
+      detail:
+        `terminal ${terminal.terminal.size}/${CLIENTS} — completed ${terminal.completed.size}, ` +
+        `failed ${terminal.failed.size}, unattributed ${terminal.unattributedTerminal}`,
     });
 
     // ---- DB consistency (staging Postgres) --------------------------------
@@ -281,7 +348,7 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
           const present = new Set(messageRows.map((row) => row.id));
           missingMessages = messageIds.filter((id) => !present.has(id));
         }
-        return { runRows, illegal, missingRuns, messageIds, missingMessages };
+        return { runRows, statuses, illegal, missingRuns, messageIds, missingMessages };
       },
       30_000,
       250,
@@ -296,18 +363,39 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
           : `illegal: ${dbState.illegal.map((row) => `${row.id}=${row.status}`).join(", ") || "none"}; missing: ${dbState.missingRuns.join(", ") || "none"}`,
     });
 
+    // M4: a `running` row whose terminal event was already delivered is a
+    // torn state — the database restart lost the status flip.
+    const statusMismatches = crossCheckRunStatuses(
+      dbState.statuses,
+      terminal.completed,
+      terminal.failed,
+    );
+    assertions.push({
+      name: "run-status-matches-terminal",
+      passed: statusMismatches.length === 0,
+      detail:
+        statusMismatches.length === 0
+          ? `every observed terminal event has a matching run row (${terminal.completed.size} completed, ${terminal.failed.size} failed)`
+          : `mismatches: ${statusMismatches.join("; ")}`,
+    });
+
     assertions.push({
       name: "no-torn-writes",
-      passed: dbState.missingMessages.length === 0,
+      // M3: zero message_completed events makes this check vacuous — the
+      // write path would prove nothing. Require a positive sample.
+      passed: dbState.messageIds.length > 0 && dbState.missingMessages.length === 0,
       detail:
-        dbState.missingMessages.length === 0
-          ? `${dbState.messageIds.length} mirrored message_completed event(s), every one has a messages row`
-          : `missing messages rows for: ${dbState.missingMessages.join(", ")}`,
+        dbState.messageIds.length === 0
+          ? "no mirrored message_completed events observed — the write-path leg proves nothing"
+          : dbState.missingMessages.length === 0
+            ? `${dbState.messageIds.length} mirrored message_completed event(s), every one has a messages row`
+            : `missing messages rows for: ${dbState.missingMessages.join(", ")}`,
     });
 
     // Ledger integrity is secondary here (the database was restarted); record
     // it so a silent event-log loss cannot hide behind the DB assertions.
     const integrity = { lost: 0, duplicate: 0, mirrorGaps: 0 };
+    const integrityErrors: string[] = [];
     for (const entry of prepared.clients) {
       let truth: string[] = [];
       let mirror: string[] = [];
@@ -322,8 +410,10 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
           10_000,
           100,
         );
-      } catch {
-        // recorded by the diff below
+      } catch (err) {
+        // M1: never let a failed read masquerade as a clean 0/0/0 diff.
+        integrityErrors.push(`${entry.sessionId}: ${errorText(err)}`);
+        continue;
       }
       const diff = diffIntegrity(deliveredSeqs(entry), truth, mirror);
       integrity.lost += diff.lostEvents;
@@ -333,26 +423,37 @@ export const postgresRestartScenario: ChaosScenario<Prepared> = {
     assertions.push({
       name: "ledger-integrity",
       passed:
-        integrity.lost === 0 && integrity.duplicate === 0 && integrity.mirrorGaps === 0,
-      detail: `lost ${integrity.lost}, duplicate ${integrity.duplicate}, mirror gaps ${integrity.mirrorGaps}`,
+        integrityErrors.length === 0 &&
+        integrity.lost === 0 &&
+        integrity.duplicate === 0 &&
+        integrity.mirrorGaps === 0,
+      detail:
+        integrityErrors.length > 0
+          ? `ground-truth read failed: ${integrityErrors.join("; ")}`
+          : `lost ${integrity.lost}, duplicate ${integrity.duplicate}, mirror gaps ${integrity.mirrorGaps}`,
     });
 
-    const terminalEvents = prepared.clients
-      .flatMap((entry) => receivedEvents(entry))
-      .filter((event) => event.type === "run_completed" || event.type === "run_failed");
-    const counts = runEventCounts(terminalEvents);
+    const counts = aggregateEventCounts(prepared.clients);
     assertions.push({
       name: "exactly-one-terminal-per-run",
       passed:
         counts.completed.size + counts.failed.size === CLIENTS &&
-        terminalEvents.length === CLIENTS,
-      detail: `${terminalEvents.length} terminal event(s) for ${CLIENTS} run(s); completed ${counts.completed.size}, failed ${counts.failed.size}`,
+        counts.terminalEvents === CLIENTS &&
+        counts.unattributedTerminal === 0,
+      detail:
+        `${counts.terminalEvents} terminal event(s) for ${CLIENTS} run(s); ` +
+        `completed ${counts.completed.size}, failed ${counts.failed.size}, ` +
+        `unattributed ${counts.unattributedTerminal}`,
     });
 
     return assertions;
   },
 
-  async cleanup(_ctx: ChaosContext, prepared: Prepared): Promise<void> {
+  async cleanup(_ctx: ChaosContext, prepared: Prepared | undefined): Promise<void> {
+    if (prepared === undefined) return;
+    // M9: idempotent release so a failed inject cannot starve the next
+    // scenario's worker slots.
+    prepared.gate.release();
     await closeClients(prepared.clients);
     await prepared.redis.quit().catch(() => {});
     await prepared.db.$client.end({ timeout: 5 }).catch(() => {});

@@ -241,6 +241,13 @@ export async function createStagingContext(
 
   let mock: MockLlmServer | undefined;
   let displacedStagingMock = false;
+  let closed = false;
+
+  async function restoreStagingMock(): Promise<void> {
+    if (!displacedStagingMock) return;
+    displacedStagingMock = false;
+    await execText("bash", [script, "mock-start"]).catch(() => {});
+  }
 
   async function ensureMock(): Promise<MockLlmServer> {
     if (mock !== undefined) return mock;
@@ -252,9 +259,17 @@ export async function createStagingContext(
     } catch {
       // no pidfile / already stopped — the port check below decides
     }
-    await waitForPortFree(mockPort, 10_000);
-    mock = await startMockLlmServer({ port: mockPort, bindHost: mockBindHost });
-    return mock;
+    try {
+      await waitForPortFree(mockPort, 10_000);
+      mock = await startMockLlmServer({ port: mockPort, bindHost: mockBindHost });
+      return mock;
+    } catch (err) {
+      // M7: never leave staging's own mock stopped because our replacement
+      // could not start. The context is never returned in this path, so
+      // close() would not run.
+      await restoreStagingMock();
+      throw err;
+    }
   }
 
   // Start eagerly: `mockArm` is synchronous by contract, and a gated run's
@@ -273,15 +288,16 @@ export async function createStagingContext(
     liveCheckPoint: opts.captureLive ?? (() => captureLiveSnapshot()),
     report,
     async close() {
+      // Idempotent: the CLI's finally and a SIGINT handler may both call it.
+      if (closed) return;
+      closed = true;
       if (mock !== undefined) {
         await mock.close().catch(() => {});
         mock = undefined;
       }
-      if (displacedStagingMock) {
-        displacedStagingMock = false;
-        // Restore the staging stack's own mock for later gates/runs.
-        await execText("bash", [script, "mock-start"]).catch(() => {});
-      }
+      // Restore the staging stack's own mock for later gates/runs, whether
+      // close was reached normally or from an exception path.
+      await restoreStagingMock();
     },
   };
 }
