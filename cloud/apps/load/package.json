@@ -15,6 +15,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "load": "node dist/cli.js",
+    "chaos": "node dist/chaosCli.js",
     "mock": "node dist/mockServer.js"
   },
   "devDependencies": {

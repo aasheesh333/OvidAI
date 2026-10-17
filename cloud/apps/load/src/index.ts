@@ -15,3 +15,6 @@ export * from "./metrics.js";
 export * from "./mockServer.js";
 export * from "./scenario.js";
 export * from "./thresholds.js";
+// P10 Task 6 — chaos runner/handles (Task 7 consumes these exact exports).
+export * from "./chaos/runner.js";
+export * from "./chaos/staging.js";
