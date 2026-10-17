@@ -22,3 +22,6 @@ export * from "./native/filesystem.js";
 export * from "./native/fetch.js";
 export * from "./native/memory.js";
 export * from "./configParse.js";
+// P5 Task 8: P9-aligned envelope crypto shim (deleted once P9's @ovid/escrow
+// lands and call sites swap imports — see crypto.ts header).
+export * from "./crypto.js";

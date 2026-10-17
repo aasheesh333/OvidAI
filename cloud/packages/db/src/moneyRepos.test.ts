@@ -52,7 +52,8 @@ describe.skipIf(!TEST_DATABASE_URL)("money repos against real postgres", () => {
         `DROP TABLE IF EXISTS attachments, session_event_mirror, runs, messages, sessions, users,` +
           ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
           ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
-          ` shares, share_forks, reports, account_deletions, byok_keys CASCADE`,
+          ` shares, share_forks, reports, account_deletions, byok_keys,` +
+          ` mcp_servers, mcp_oauth_tokens, mcp_oauth_flows, plugins, plugin_grants CASCADE`,
       );
     } finally {
       await admin.end({ timeout: 5 });

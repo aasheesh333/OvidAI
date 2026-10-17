@@ -43,6 +43,13 @@
       "when": 1792220376551,
       "tag": "0005_violet_moonstone",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792221897428,
+      "tag": "0006_free_rhino",
+      "breakpoints": true
     }
   ]
 }

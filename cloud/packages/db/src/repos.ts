@@ -1,10 +1,15 @@
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { uuidv7 } from "uuidv7";
 import type { MessageDto, SessionEvent, SessionEventType } from "@ovid/shared";
 import type { Db } from "./client.js";
 import {
   attachments as attachmentsTable,
   messages as messagesTable,
+  mcpOauthFlows as mcpOauthFlowsTable,
+  mcpOauthTokens as mcpOauthTokensTable,
+  mcpServers as mcpServersTable,
+  pluginGrants as pluginGrantsTable,
+  plugins as pluginsTable,
   runs as runsTable,
   sessions as sessionsTable,
   sessionEventMirror,
@@ -12,6 +17,7 @@ import {
   type AttachmentRow,
   type MessageRow,
   type RunRow,
+  type SealedEnvelope,
   type SessionEventMirrorRow,
   type SessionRow,
   type UserRow,
@@ -103,6 +109,19 @@ export const users = {
       .where(eq(usersTable.uid, uid));
     if (existing?.sandboxUid != null) return existing.sandboxUid;
     throw new Error(`users.allocateSandboxUid: unknown user ${uid}`);
+  },
+
+  /**
+   * The user's tier, defaulting to "free" when the row is missing — a missing
+   * user is Free (P5 G9 tier gate's single tier read; also used by the
+   * queue priority path). Callers must NOT cache: every gate point re-reads.
+   */
+  async getTier(db: Db, uid: string): Promise<string> {
+    const [row] = await db
+      .select({ tier: usersTable.tier })
+      .from(usersTable)
+      .where(eq(usersTable.uid, uid));
+    return row?.tier ?? "free";
   },
 };
 
@@ -646,5 +665,389 @@ export const eventMirror = {
       .orderBy(asc(seqMs), asc(seqSub))
       .limit(limit);
     return rows.map(toSessionEvent);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// MCP servers, OAuth tokens/flows, plugins, grants (P5 Task 8).
+//
+// Every read/write here is ownership-scoped (uid); a wrong owner is
+// indistinguishable from a missing row (null / false) — the gateway maps both
+// to the same 404, no existence leaks. Sealed columns pass through opaque
+// (this layer never encrypts or decrypts — that is EnvelopeCrypto's job at
+// the call site, with the pinned recordId conventions).
+// ---------------------------------------------------------------------------
+
+export type McpServerRow = typeof mcpServersTable.$inferSelect;
+export type McpOauthTokenRow = typeof mcpOauthTokensTable.$inferSelect;
+export type McpOauthFlowRow = typeof mcpOauthFlowsTable.$inferSelect;
+export type PluginRow = typeof pluginsTable.$inferSelect;
+export type PluginGrantRow = typeof pluginGrantsTable.$inferSelect;
+
+export interface McpServerCreate {
+  userId: string;
+  name: string;
+  transport: string;
+  curatedId?: string | null;
+  config?: Record<string, unknown> | null;
+  secretsSealed?: SealedEnvelope | null;
+  enabled?: boolean;
+}
+
+export interface McpServerPatch {
+  name?: string;
+  transport?: string;
+  curatedId?: string | null;
+  config?: Record<string, unknown> | null;
+  secretsSealed?: SealedEnvelope | null;
+  enabled?: boolean;
+}
+
+export const mcpServers = {
+  /**
+   * Insert a new server row. A duplicate (userId, name) raises the DB's
+   * UNIQUE violation (23505) — deliberately surfaced so the route can map it
+   * to 409 server_exists; this is NOT an upsert.
+   */
+  async create(db: Db, input: McpServerCreate): Promise<McpServerRow> {
+    const [row] = await db
+      .insert(mcpServersTable)
+      .values({
+        id: newId(),
+        userId: input.userId,
+        name: input.name,
+        transport: input.transport,
+        curatedId: input.curatedId ?? null,
+        config: input.config ?? null,
+        secretsSealed: input.secretsSealed ?? null,
+        ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+      })
+      .returning();
+    return row!;
+  },
+
+  /** The user's servers, insertion order (createdAt, id — both UUIDv7-time). */
+  async list(db: Db, uid: string): Promise<McpServerRow[]> {
+    return db
+      .select()
+      .from(mcpServersTable)
+      .where(eq(mcpServersTable.userId, uid))
+      .orderBy(asc(mcpServersTable.createdAt), asc(mcpServersTable.id));
+  },
+
+  /** Null on unknown id OR wrong owner. */
+  async get(db: Db, id: string, uid: string): Promise<McpServerRow | null> {
+    const [row] = await db
+      .select()
+      .from(mcpServersTable)
+      .where(and(eq(mcpServersTable.id, id), eq(mcpServersTable.userId, uid)))
+      .limit(1);
+    return row ?? null;
+  },
+
+  /** Ownership-scoped partial update; only keys present are written. Null = not found. */
+  async update(db: Db, id: string, uid: string, patch: McpServerPatch): Promise<McpServerRow | null> {
+    const set: McpServerPatch & { updatedAt: Date } = { updatedAt: new Date() };
+    if (patch.name !== undefined) set.name = patch.name;
+    if (patch.transport !== undefined) set.transport = patch.transport;
+    if (patch.curatedId !== undefined) set.curatedId = patch.curatedId;
+    if (patch.config !== undefined) set.config = patch.config;
+    if (patch.secretsSealed !== undefined) set.secretsSealed = patch.secretsSealed;
+    if (patch.enabled !== undefined) set.enabled = patch.enabled;
+    const rows = await db
+      .update(mcpServersTable)
+      .set(set)
+      .where(and(eq(mcpServersTable.id, id), eq(mcpServersTable.userId, uid)))
+      .returning();
+    return rows[0] ?? null;
+  },
+
+  /** true iff the row existed AND was owned by uid. */
+  async remove(db: Db, id: string, uid: string): Promise<boolean> {
+    const removed = await db
+      .delete(mcpServersTable)
+      .where(and(eq(mcpServersTable.id, id), eq(mcpServersTable.userId, uid)))
+      .returning({ id: mcpServersTable.id });
+    return removed.length > 0;
+  },
+
+  /** The user's server by (unique) display name, or null. */
+  async findByName(db: Db, uid: string, name: string): Promise<McpServerRow | null> {
+    const [row] = await db
+      .select()
+      .from(mcpServersTable)
+      .where(and(eq(mcpServersTable.userId, uid), eq(mcpServersTable.name, name)))
+      .limit(1);
+    return row ?? null;
+  },
+};
+
+export interface McpOauthTokenPut {
+  userId: string;
+  serverId: string;
+  tokensSealed: SealedEnvelope;
+}
+
+export const mcpOauthTokens = {
+  /**
+   * Upsert the live token set for a server (UNIQUE(server_id)): a refresh
+   * replaces the sealed tokens and bumps updatedAt; never a second row.
+   */
+  async put(db: Db, input: McpOauthTokenPut): Promise<void> {
+    await db
+      .insert(mcpOauthTokensTable)
+      .values({
+        id: newId(),
+        userId: input.userId,
+        serverId: input.serverId,
+        tokensSealed: input.tokensSealed,
+      })
+      .onConflictDoUpdate({
+        target: mcpOauthTokensTable.serverId,
+        set: {
+          userId: input.userId,
+          tokensSealed: input.tokensSealed,
+          updatedAt: new Date(),
+        },
+      });
+  },
+
+  /** Null on unknown server OR wrong owner. */
+  async get(db: Db, serverId: string, uid: string): Promise<McpOauthTokenRow | null> {
+    const [row] = await db
+      .select()
+      .from(mcpOauthTokensTable)
+      .where(and(eq(mcpOauthTokensTable.serverId, serverId), eq(mcpOauthTokensTable.userId, uid)))
+      .limit(1);
+    return row ?? null;
+  },
+
+  /** Ownership-scoped delete; unknown/wrong-owner is a silent no-op. */
+  async remove(db: Db, serverId: string, uid: string): Promise<void> {
+    await db
+      .delete(mcpOauthTokensTable)
+      .where(and(eq(mcpOauthTokensTable.serverId, serverId), eq(mcpOauthTokensTable.userId, uid)));
+  },
+};
+
+export interface McpOauthFlowCreate {
+  state: string;
+  userId: string;
+  serverId: string;
+  verifierSealed?: SealedEnvelope | null;
+  config?: Record<string, unknown> | null;
+  expiresAt: Date;
+}
+
+export const mcpOauthFlows = {
+  async create(db: Db, input: McpOauthFlowCreate): Promise<void> {
+    await db.insert(mcpOauthFlowsTable).values({
+      state: input.state,
+      userId: input.userId,
+      serverId: input.serverId,
+      verifierSealed: input.verifierSealed ?? null,
+      config: input.config ?? null,
+      expiresAt: input.expiresAt,
+    });
+  },
+
+  /**
+   * ATOMIC one-use consume:
+   *   UPDATE … SET used = true WHERE state = $1 AND used = false
+   *     AND expires_at > now() RETURNING *
+   * Exactly one concurrent caller can win a state; the loser (and any later
+   * replay, and any expired flow) gets null. No ownership scoping — the
+   * callback route validates the state itself (it is the bearer).
+   */
+  async consume(db: Db, state: string): Promise<McpOauthFlowRow | null> {
+    const rows = await db
+      .update(mcpOauthFlowsTable)
+      .set({ used: true })
+      .where(
+        and(
+          eq(mcpOauthFlowsTable.state, state),
+          eq(mcpOauthFlowsTable.used, false),
+          gt(mcpOauthFlowsTable.expiresAt, new Date()),
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  },
+};
+
+export interface PluginUpsert {
+  userId: string;
+  pluginId: string;
+  version: string;
+  source: Record<string, unknown>;
+  status?: string;
+  contentDir?: string | null;
+  manifest?: Record<string, unknown> | null;
+  probeFailures?: Record<string, unknown>[] | null;
+  configSealed?: SealedEnvelope | null;
+}
+
+export interface PluginStatusExtra {
+  contentDir?: string | null;
+  manifest?: Record<string, unknown> | null;
+  probeFailures?: Record<string, unknown>[] | null;
+  configSealed?: SealedEnvelope | null;
+}
+
+export const plugins = {
+  /**
+   * Insert or advance a plugin install on (userId, pluginId) conflict. The
+   * installer job is the only writer and owns every field it passes: keys
+   * present in `input` overwrite the stored row, absent keys are left
+   * untouched (a re-upsert never clobbers configSealed with null).
+   * installedAt keeps the FIRST install time across upserts.
+   */
+  async upsert(db: Db, input: PluginUpsert): Promise<PluginRow> {
+    const values = {
+      id: newId(),
+      userId: input.userId,
+      pluginId: input.pluginId,
+      version: input.version,
+      source: input.source,
+      status: input.status ?? "installing",
+      contentDir: input.contentDir ?? null,
+      manifest: input.manifest ?? null,
+      probeFailures: input.probeFailures ?? null,
+      configSealed: input.configSealed ?? null,
+    };
+    const set: Record<string, unknown> = {
+      version: input.version,
+      source: input.source,
+      status: input.status ?? "installing",
+      updatedAt: new Date(),
+    };
+    for (const key of ["contentDir", "manifest", "probeFailures", "configSealed"] as const) {
+      if (input[key] !== undefined) set[key] = input[key];
+    }
+    const [row] = await db
+      .insert(pluginsTable)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [pluginsTable.userId, pluginsTable.pluginId],
+        set,
+      })
+      .returning();
+    return row!;
+  },
+
+  /** The user's installs, insertion order. */
+  async list(db: Db, uid: string): Promise<PluginRow[]> {
+    return db
+      .select()
+      .from(pluginsTable)
+      .where(eq(pluginsTable.userId, uid))
+      .orderBy(asc(pluginsTable.installedAt), asc(pluginsTable.id));
+  },
+
+  /** Null on unknown id OR wrong owner. */
+  async get(db: Db, id: string, uid: string): Promise<PluginRow | null> {
+    const [row] = await db
+      .select()
+      .from(pluginsTable)
+      .where(and(eq(pluginsTable.id, id), eq(pluginsTable.userId, uid)))
+      .limit(1);
+    return row ?? null;
+  },
+
+  /** Null on unknown (uid, pluginId). */
+  async getByPluginId(db: Db, uid: string, pluginId: string): Promise<PluginRow | null> {
+    const [row] = await db
+      .select()
+      .from(pluginsTable)
+      .where(and(eq(pluginsTable.userId, uid), eq(pluginsTable.pluginId, pluginId)))
+      .limit(1);
+    return row ?? null;
+  },
+
+  /** Ownership-scoped status transition (installer/prober write path). */
+  async setStatus(
+    db: Db,
+    id: string,
+    uid: string,
+    status: string,
+    extra?: PluginStatusExtra,
+  ): Promise<void> {
+    const set: { status: string; updatedAt: Date } & PluginStatusExtra = {
+      status,
+      updatedAt: new Date(),
+    };
+    if (extra?.contentDir !== undefined) set.contentDir = extra.contentDir;
+    if (extra?.manifest !== undefined) set.manifest = extra.manifest;
+    if (extra?.probeFailures !== undefined) set.probeFailures = extra.probeFailures;
+    if (extra?.configSealed !== undefined) set.configSealed = extra.configSealed;
+    await db
+      .update(pluginsTable)
+      .set(set)
+      .where(and(eq(pluginsTable.id, id), eq(pluginsTable.userId, uid)));
+  },
+
+  /** true iff the row existed AND was owned by uid. */
+  async remove(db: Db, id: string, uid: string): Promise<boolean> {
+    const removed = await db
+      .delete(pluginsTable)
+      .where(and(eq(pluginsTable.id, id), eq(pluginsTable.userId, uid)))
+      .returning({ id: pluginsTable.id });
+    return removed.length > 0;
+  },
+};
+
+export interface PluginGrantPut {
+  userId: string;
+  pluginId: string;
+  capabilities: string[];
+  envNames: string[];
+  manifestDigest: string;
+  allowDependencyScripts?: boolean;
+}
+
+export const pluginGrants = {
+  /**
+   * Record or re-record the user's consent (UNIQUE(userId, pluginId)): a
+   * re-grant replaces capabilities/env/digest and refreshes grantedAt.
+   */
+  async put(db: Db, input: PluginGrantPut): Promise<void> {
+    await db
+      .insert(pluginGrantsTable)
+      .values({
+        id: newId(),
+        userId: input.userId,
+        pluginId: input.pluginId,
+        capabilities: input.capabilities,
+        envNames: input.envNames,
+        manifestDigest: input.manifestDigest,
+        allowDependencyScripts: input.allowDependencyScripts ?? false,
+      })
+      .onConflictDoUpdate({
+        target: [pluginGrantsTable.userId, pluginGrantsTable.pluginId],
+        set: {
+          capabilities: input.capabilities,
+          envNames: input.envNames,
+          manifestDigest: input.manifestDigest,
+          allowDependencyScripts: input.allowDependencyScripts ?? false,
+          grantedAt: new Date(),
+        },
+      });
+  },
+
+  /** Null on unknown (uid, pluginId). */
+  async get(db: Db, uid: string, pluginId: string): Promise<PluginGrantRow | null> {
+    const [row] = await db
+      .select()
+      .from(pluginGrantsTable)
+      .where(and(eq(pluginGrantsTable.userId, uid), eq(pluginGrantsTable.pluginId, pluginId)))
+      .limit(1);
+    return row ?? null;
+  },
+
+  /** Ownership-scoped delete (uninstall/revoke); unknown is a silent no-op. */
+  async remove(db: Db, uid: string, pluginId: string): Promise<void> {
+    await db
+      .delete(pluginGrantsTable)
+      .where(and(eq(pluginGrantsTable.userId, uid), eq(pluginGrantsTable.pluginId, pluginId)));
   },
 };

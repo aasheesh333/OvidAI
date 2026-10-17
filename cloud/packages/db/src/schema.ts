@@ -421,3 +421,131 @@ export const byokKeys = pgTable(
   },
   (t) => [index("byok_keys_user_id_idx").on(t.userId)],
 );
+
+// ---------------------------------------------------------------------------
+// P5 Task 8: MCP servers, OAuth (tokens + PKCE flows), plugins, grants.
+//
+// Sealed columns hold a structured envelope produced by @ovid/mcp's
+// EnvelopeCrypto shim (P9-aligned; @ovid/escrow will consolidate). The
+// dependency direction is @ovid/mcp → @ovid/db, so the envelope is typed
+// STRUCTURALLY here — SealedEnvelope is field-for-field EncryptedEnvelope.
+// recordId conventions (pinned, see the P5 plan):
+//   mcp_servers:{row.id} · mcp_oauth_tokens:{server_id} ·
+//   mcp_oauth_flows:{state} · plugins:{row.id}
+// ---------------------------------------------------------------------------
+
+/** Structural EncryptedEnvelope (@ovid/mcp crypto.ts) — all fields base64. */
+export type SealedEnvelope = {
+  wrappedDek: string;
+  iv: string;
+  ciphertext: string;
+  tag: string;
+};
+
+// A user-registered MCP server (custom, pasted-.mcp.json, or a curated entry
+// with user credentials). `config` is NON-secret ({url?, command?, args?,
+// cwd?, type?}); everything secret (env, headers, oauth credentials) lives in
+// `secrets_sealed` and is only ever decrypted by the runtime, never projected.
+export const mcpServers = pgTable(
+  "mcp_servers",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid),
+    name: text("name").notNull(),
+    transport: text("transport").notNull(), // "http" | "sse" | "stdio" | "native"
+    curatedId: text("curated_id"),
+    config: jsonb("config").$type<Record<string, unknown> | null>(),
+    secretsSealed: jsonb("secrets_sealed").$type<SealedEnvelope | null>(),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mcp_servers_user_name_idx").on(t.userId, t.name),
+    index("mcp_servers_user_id_idx").on(t.userId),
+  ],
+);
+
+// OAuth tokens for an MCP server (one live set per server — a refresh
+// replaces the row via UNIQUE(server_id)). `tokensSealed` is the envelope of
+// {accessToken, refreshToken?, expiresAt?, registration?}; recordId is
+// mcp_oauth_tokens:{server_id}.
+export const mcpOauthTokens = pgTable(
+  "mcp_oauth_tokens",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id").notNull(),
+    serverId: char("server_id", { length: 36 })
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    tokensSealed: jsonb("tokens_sealed").notNull().$type<SealedEnvelope>(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("mcp_oauth_tokens_server_id_idx").on(t.serverId)],
+);
+
+// In-flight OAuth authorization-code + PKCE flows. `state` is the CSRF/PKCE
+// state param; the PKCE verifier is sealed (recordId mcp_oauth_flows:{state}).
+// Rows are consumed atomically (repos.mcpOauthFlows.consume) or age out via
+// expires_at.
+export const mcpOauthFlows = pgTable(
+  "mcp_oauth_flows",
+  {
+    state: text("state").primaryKey(),
+    userId: text("user_id").notNull(),
+    serverId: char("server_id", { length: 36 }).notNull(),
+    verifierSealed: jsonb("verifier_sealed").$type<SealedEnvelope | null>(),
+    config: jsonb("config").$type<Record<string, unknown> | null>(),
+    expiresAt: timestamptz("expires_at").notNull(),
+    used: boolean("used").notNull().default(false),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("mcp_oauth_flows_expires_at_idx").on(t.expiresAt)],
+);
+
+// An installed plugin for a user. `pluginId` is the canonical
+// "publisher/name"; status is the install state machine
+// (installing|pending_grant|active|degraded|failed|uninstalling). User-supplied
+// plugin config values are sealed in `configSealed` (recordId plugins:{id});
+// `probeFailures` is the degraded-health log the prober appends to.
+export const plugins = pgTable(
+  "plugins",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id").notNull(),
+    pluginId: text("plugin_id").notNull(), // "publisher/name"
+    version: text("version").notNull(),
+    source: jsonb("source").notNull().$type<Record<string, unknown>>(),
+    status: text("status").notNull(),
+    contentDir: text("content_dir"),
+    manifest: jsonb("manifest").$type<Record<string, unknown> | null>(),
+    probeFailures: jsonb("probe_failures").$type<Record<string, unknown>[] | null>(),
+    configSealed: jsonb("config_sealed").$type<SealedEnvelope | null>(),
+    installedAt: timestamptz("installed_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("plugins_user_plugin_id_idx").on(t.userId, t.pluginId),
+    index("plugins_user_id_idx").on(t.userId),
+  ],
+);
+
+// The user's recorded consent for a plugin install: capability list, env var
+// names, manifest digest (re-verified on every activation), and the
+// dependency-scripts switch. One row per (user, plugin).
+export const pluginGrants = pgTable(
+  "plugin_grants",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id").notNull(),
+    pluginId: text("plugin_id").notNull(),
+    capabilities: jsonb("capabilities").notNull().$type<string[]>(),
+    envNames: jsonb("env_names").notNull().$type<string[]>(),
+    manifestDigest: text("manifest_digest").notNull(),
+    allowDependencyScripts: boolean("allow_dependency_scripts").notNull().default(false),
+    grantedAt: timestamptz("granted_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("plugin_grants_user_plugin_id_idx").on(t.userId, t.pluginId)],
+);
