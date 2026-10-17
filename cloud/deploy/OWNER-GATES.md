@@ -59,17 +59,15 @@ docker compose -p ovid-cloud ps
 curl -sf http://127.0.0.1:8082/cloud/v1/health
 ```
 
-**Four pre-flight conflicts to resolve before the first build.** All are real
-and all are in the repo's own documents:
+**Pre-flight conflicts before the first build.** Items 1 and 4 were fixed in
+the templates/docs (this audit); items 2 and 3 remain owner work:
 
-1. **Env-file path.** The compose file declares `env_file: [.env]` and
-   `provision.sh` requires `$SCRIPT_DIR/.env`, so the gateway's live env is
-   `/opt/ovid-cloud/repo/cloud/deploy/.env`. Several documents
-   (`DEPLOY.md` §12.2, `R2-PROVISIONING.md`, `RUNBOOKS.md` §0.2) call it
-   `/opt/ovid-cloud/.env`. **Do not fill two divergent copies.** Reconcile
-   the path first (one canonical file, or a symlink created deliberately), and
-   use the same file in every row below. This checklist names the compose
-   path as canonical and flags every `/opt/ovid-cloud/.env` command.
+1. **Env-file path — RESOLVED.** The canonical gateway env is
+   `/opt/ovid-cloud/repo/cloud/deploy/.env` (compose `env_file: [.env]`
+   resolved next to `docker-compose.yml`; `provision.sh` reads
+   `$SCRIPT_DIR/.env`). Every deploy doc now names that path. Do **not**
+   create `/opt/ovid-cloud/.env`. The host worker file is separate and
+   correct: `/opt/ovid-cloud/worker.env`.
 2. **Lockfile.** `DEPLOY.md` §1/§11 step 1 uses
    `pnpm install --frozen-lockfile`, but the binding wave-merger says a fresh
    checkout **fails by design** until the lockfile is regenerated. Complete
@@ -84,13 +82,13 @@ and all are in the repo's own documents:
    check and fails at the first storage call — only `verify-r2.mjs` (§5 step 5)
    proves the credentials. Complete R2 steps 1–5 before the first
    `docker compose up` and before enabling the worker.
-4. **`provision.sh` requires `OVID_DEFAULT_MODEL` in the gateway `.env`.**
-   `provision.sh` line 67 requires `DATABASE_URL`, `OVID_CLOUD_DB_PASSWORD`,
-   `REDIS_Q_PASSWORD` **and** `OVID_DEFAULT_MODEL`; the last one is absent
-   from `.env.example` because the template says worker vars moved to
-   `worker.env`. Put the same live LiteLLM alias in both files (or fix the
-   script) before running `./provision.sh`, or it dies with
-   `OVID_DEFAULT_MODEL missing/empty`.
+4. **`provision.sh` requires `OVID_DEFAULT_MODEL` in the gateway `.env` —
+   RESOLVED in the template.** `provision.sh` line 67 requires `DATABASE_URL`,
+   `OVID_CLOUD_DB_PASSWORD`, `REDIS_Q_PASSWORD` **and**
+   `OVID_DEFAULT_MODEL`; `.env.example` now carries
+   `OVID_DEFAULT_MODEL=CHANGE_ME` for that reason. Fill it with the SAME live
+   LiteLLM alias as `worker.env`'s `OVID_DEFAULT_MODEL` before running
+   `./provision.sh`, or it dies with `OVID_DEFAULT_MODEL missing/empty`.
 
 `[UNVERIFIED — confirm before running]` marks a command this checklist could
 not prove against the checkout. Every other command is copied from a repo
@@ -567,12 +565,12 @@ before writing any file.
 | Host worker (systemd) | `/opt/ovid-cloud/worker.env` | `systemd/ovid-worker.service` `EnvironmentFile=` |
 | Live Python stack | `/opt/ovid-gateway/.env` | **Read-only source** for `REDIS_PASSWORD` and `LITELLM_MASTER_KEY`; do not write cloud secrets here |
 
-**PATH CONFLICT:** `DEPLOY.md` §12.2, `R2-PROVISIONING.md` §4.1 and
-`RUNBOOKS.md` §0.2 call the gateway file `/opt/ovid-cloud/.env`. That path is
-not what compose reads. Reconcile it before filling (one canonical file, or a
-deliberate symlink), and use the same file everywhere. A split copy produces
-the classic failure: the gateway starts with one password while the worker
-uses another.
+**Canonical path:** `/opt/ovid-cloud/repo/cloud/deploy/.env` — the compose
+`env_file: [.env]` resolved next to `docker-compose.yml`, and
+`provision.sh`'s `$SCRIPT_DIR/.env`. It is the only gateway env file; do
+**not** create `/opt/ovid-cloud/.env`. A split copy produces the classic
+failure: the gateway starts with one password while the worker uses another.
+The host worker file is `/opt/ovid-cloud/worker.env`.
 
 Generation commands (all from the templates):
 
@@ -657,7 +655,8 @@ backend, so steps 1–5 below are a **hard prerequisite** for the first
 `docker compose up` and for enabling `ovid-worker` (see §3 Gate 2a). The
 "artifacts-only until approval" rule means the owner approves R2 *before*
 those boots — not that R2 can be skipped. `CHANGE_ME` is non-empty and passes
-the boot check; step 5's probe is what proves the credentials.
+the boot check; step 5's `verify-r2.mjs` (seven `[ok]` lines, exit 0) is the
+real gate.
 
 | Step | Action | Gate / detail | Owner |
 |---|---|---|---|
@@ -710,11 +709,9 @@ OVID_R2_BUCKET=ovid-cloud \
 pnpm --filter @ovid/storage exec vitest run src/r2.live.test.ts
 ```
 
-The R2-PROVISIONING step 2 command `sudo install -m 600 /dev/null
-/opt/ovid-cloud/.env` is `[UNVERIFIED — path conflicts with compose; reconcile
-§4.0 before running]`. Create the canonical gateway env at
-`/opt/ovid-cloud/repo/cloud/deploy/.env` instead (or make the symlink
-deliberate).
+R2-PROVISIONING step 2's `install -m 600 /dev/null` target is the canonical
+gateway env `/opt/ovid-cloud/repo/cloud/deploy/.env` (§4.0). Do not create
+`/opt/ovid-cloud/.env`.
 
 **Rollback.** Worker: stop it, restore the previous `worker.env`, start it.
 Compose: `docker compose stop redis-c` (the gateway falls back to
@@ -986,6 +983,17 @@ deliberately **not** `MAXLEN ~`. The spec (§6.2) says "24 h / 50 MB"; the code
 is the authority (`RUNBOOKS.md` §0.2). Do not silently "fix" one to match the
 other: the trim is exact and the queue Redis is `maxmemory 1400mb` +
 `noeviction`, so changing retention changes memory pressure.
+
+**This is an open owner decision, not a settled fact.** The spec and the code
+disagree, and only you can pick which is the product requirement:
+
+| Option | What it means | Consequence |
+|---|---|---|
+| **A. Accept the shipped value** | `MAXLEN 10000` is the contract; amend spec §6.2 to match | Cheapest. But a heavy session (many tool calls, long runs) can exceed 10 000 events, so an early part of a transcript is silently unavailable to replay. Check whether P8's transcript projection or P9's audit needs deep history. |
+| **B. Implement the spec** | Change `DEFAULT_MAX_LEN` to a 24 h / 50 MB policy | Needs a size- or age-based trim (not a fixed count) and a re-derived redis-q memory budget: at 50 MB × concurrent sessions the 1400 MB `noeviction` ceiling is the binding constraint. |
+| **C. Defer** | Ship A, revisit after the 100-user run produces real per-session event counts | Reasonable if the load run will answer it empirically. |
+
+`Answer: ______` (A / B / C — and if B, the memory budget owner)
 
 Manual trim (only if a stream family is at the memory ceiling; this mutates
 live data and must use the shipped retention):
