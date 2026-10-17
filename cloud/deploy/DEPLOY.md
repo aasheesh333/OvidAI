@@ -277,11 +277,14 @@ ovid_cloud) — 14-day local retention, optional R2 offsite.
       (`.env`, `worker.env`, `backup.env` are ignored / outside the repo)
 - [ ] WS maxPayload 262144 configured (I2)
 - [ ] per-connection subscription cap 64 (I3)
-- [ ] deferred: SIGTERM drain pending — **worker** has it (systemd unit
-      `TimeoutStopSec=35`), **gateway** lacks a PID-1 signal handler
-- [ ] deferred: mint deadline pending — no deadline on the mint HTTP call
-- [ ] deferred: WS error logging pending — silently skipped errors have no
-      server-side log
+- [x] SIGTERM drain landed (P10 Task 2) — gateway `installShutdownHandlers`
+      closes live WS with 1001 `"server restarting"`, drains via `app.close()`
+      and hard-exits after 10 s; **worker** keeps its systemd
+      `TimeoutStopSec=35`
+- [x] mint deadline landed (P10 Task 2) — `GatewayDeps.mintTimeoutMs`
+      (default 10000) bounds the internal-mint key-provisioning call
+- [x] WS error logging landed (P10 Task 2) — caught WS/event-listener errors
+      are logged `{err, sessionId, op}` through the gateway logger
 
 (P2 sandbox activation has its own checklist: §11 step 8.)
 
@@ -306,6 +309,10 @@ ovid_cloud) — 14-day local retention, optional R2 offsite.
   volume, units) → optionally `sudo systemctl disable --now
   ovid-cloud-backup.timer` → the `ovid_cloud` DB/role can stay dormant
   (backups keep covering it) or be dropped after a final manual dump.
+- **Rollout / cutover**: [`ROLLOUT.md`](./ROLLOUT.md) is the owner's
+  conditional cutover script (R0–R7) with the Q1/Q2/Q3 decision gates,
+  per-step go/no-go, time budgets and rollback. No rollout step executes
+  until its §0 decision log is dated and signed.
 - **Incident + ops procedures**: [`RUNBOOKS.md`](./RUNBOOKS.md) is the
   symptom → diagnose → act → verify playbook set for both stacks
   (worker/redis/Postgres/disk/sandbox/browser/R2/mint/LiteLLM) plus the ops
@@ -523,10 +530,10 @@ the WS event channel for the ordered `tool_started`/`tool_completed` events
       ticked if anything probed a blocked address; no unrelated table changed
 - [ ] HARDENING.md item H rows verified and dated
 
-**Known-deferred (carried, unchanged — see §9)**: gateway SIGTERM drain
-pending (the **worker** drains in ≤30 s — unit `TimeoutStopSec=35`), mint
-deadline pending, WS error logging pending; subscription cap 64 (I3) and WS
-maxPayload 262144 (I2) are done.
+**P10 Task 2 landed**: gateway SIGTERM drain (WS 1001 `"server restarting"`,
+≤10 s), mint deadline, and WS error logging are no longer deferred; the
+**worker** drains in ≤30 s (unit `TimeoutStopSec=35`). Subscription cap 64
+(I3) and WS maxPayload 262144 (I2) remain done.
 
 ## 12. P7 addendum — R2 storage, redis-c, /workspaces (owner-gated)
 
