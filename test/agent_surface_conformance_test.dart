@@ -40,6 +40,24 @@ void main() {
     );
     final AgentSurface surface = facade;
     expect(surface, isA<CloudAgentFacade>());
+
+    // Round 1 (I-1): the alias-only members chat_screen calls are on the
+    // surface too, and the facade's inert-by-design sections answer them.
+    expect(facade.queuedMessages, isEmpty);
+    expect(facade.queuedMessagesFor('s1'), isEmpty);
+    expect(facade.queuedMessageIdsFor('s1'), isEmpty);
+    expect(facade.sessionSystemTokens, 0);
+    expect(facade.sessionToolTokens, 0);
+    expect(facade.sessionMessageTokens, 0);
+    expect(facade.sessionCacheReadTokens, 0);
+    expect(facade.subagentsOf('s1'), isEmpty);
+    expect(facade.browserBusy, isFalse);
+    expect(facade.browserReady, isFalse);
+    expect(facade.jobsFor('s1'), isEmpty);
+    expect(facade.pendingApproval, isNull);
+    expect(facade.pendingApprovalsElsewhere, isEmpty);
+    facade.killJobFor('s1', 1); // P2 inert no-op
+
     facade.dispose();
   });
 

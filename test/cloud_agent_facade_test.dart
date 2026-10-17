@@ -23,6 +23,7 @@ import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
 import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/cloud/models.dart';
+import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ---------------------------------------------------------------------------
@@ -377,6 +378,69 @@ void main() {
       await h.ws.disconnect();
       h.facade.dispose();
     });
+
+    test('same-session FIFO: run-1 completing does not clear run-2 (I-2)', () async {
+      final h = await _build();
+      await h.facade.runTask('one', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+      expect(h.facade.busyFor('s1'), isTrue);
+
+      // The server accepts a second send while run-1 runs.
+      await h.facade.runTask('two', sessionId: 's1');
+      expect(h.facade.runStateFor('s1').runId, 'run-2');
+      expect(h.rest.sent, hasLength(2));
+
+      socket.server(_eventFrame('s1', '2-0', 'run_completed', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      expect(h.facade.busyFor('s1'), isTrue,
+          reason: 'run-1 terminalizing must not make run-2 look idle');
+      expect(h.facade.stopRequested(sessionId: 's1'), isTrue);
+      await pumpEventQueue();
+      expect(h.rest.cancelled, ['run-2'],
+          reason: 'run-2 stays cancellable across run-1\'s terminal');
+
+      // run-2's own terminal settles.
+      socket.server(_eventFrame('s1', '3-0', 'run_started', {'runId': 'run-2'}));
+      await pumpEventQueue();
+      socket.server(_eventFrame('s1', '4-0', 'run_completed', {'runId': 'run-2'}));
+      await pumpEventQueue();
+      expect(h.facade.busyFor('s1'), isFalse);
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('a 409 settle is not re-armed by a later projection change (I-2)',
+        () async {
+      final h = await _build();
+      await h.facade.runTask('hello', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      h.rest.cancelError = CloudApiException(
+        status: 409,
+        code: 'run_not_cancellable',
+        message: 'Run is already terminal.',
+      );
+      h.facade.hardStopAll();
+      await h.facade.hardStopSettledForTest;
+      expect(h.facade.busyFor('s1'), isFalse);
+
+      // The terminal event was missed, so the projection still says busy.
+      // Any later structural fold must not resurrect the dead run.
+      socket.server(_eventFrame('s1', '2-0', 'system_note', {'text': 'note'}));
+      await pumpEventQueue();
+      expect(h.facade.busyFor('s1'), isFalse);
+      expect(h.facade.runStateFor('s1').runId, isNull,
+          reason: 'a terminal run must not leave a live-looking runId');
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
   });
 
   group('hardStopAll / stopRequested', () {
@@ -478,6 +542,105 @@ void main() {
           reason: 'the failed pick must not stick');
       expect(h.facade.runStateFor('s1').lastErrorCode, 'internal');
 
+      h.facade.dispose();
+    });
+
+    test('reverts to the persisted pre-pick mode, not auto (I-3)', () async {
+      final h = await _build();
+      final session =
+          ChatSession(id: 's1', title: 'S', model: 'm', mode: 'studio');
+      AppState.I.sessions.add(session);
+      AppState.I.activeSessionId = 's1';
+      addTearDown(() {
+        AppState.I.sessions.remove(session);
+        AppState.I.activeSessionId = null;
+      });
+
+      // No prior explicit pick: the effective mode is the persisted studio.
+      expect(h.facade.modeForTest('s1'), AgentMode.studio);
+
+      h.rest.patchError = CloudApiException(
+        status: 500,
+        code: 'internal',
+        message: 'Could not update the session.',
+      );
+      h.facade.setMode(AgentMode.drive, sessionId: 's1');
+      expect(h.facade.modeForTest('s1'), AgentMode.drive,
+          reason: 'optimistic until the failure settles');
+
+      await h.facade.modePatchSettledForTest('s1');
+      expect(h.facade.modeForTest('s1'), AgentMode.studio,
+          reason: 'the failed pick must fall back to the persisted mode, '
+              'not shadow it with auto');
+
+      h.facade.dispose();
+    });
+  });
+
+  group('composer queue', () {
+    test('queues while busy, then sends the head when the run terminalizes',
+        () async {
+      final h = await _build();
+      await h.facade.runTask('first', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      h.facade.enqueueMessage('queued while busy', sessionId: 's1');
+      expect(h.facade.queuedMessagesFor('s1'), ['queued while busy']);
+      expect(h.facade.queuedMessageIdsFor('s1'), hasLength(1));
+      expect(h.rest.sent, hasLength(1), reason: 'not sent while busy');
+
+      socket.server(_eventFrame('s1', '2-0', 'run_completed', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      expect(h.rest.sent, hasLength(2));
+      expect(h.rest.sent.last.content, 'queued while busy');
+      expect(h.rest.sent.last.clientMsgId, matches(RegExp(r'^[0-9a-f]{32}$')));
+      expect(h.facade.queuedMessagesFor('s1'), isEmpty);
+
+      await h.ws.disconnect();
+      h.facade.dispose();
+    });
+
+    test('edit / remove / steer / take / restore operate on stable ids',
+        () async {
+      final h = await _build();
+      // The dock's per-row actions resolve the foreground session, exactly
+      // like AgentService's active-bucket semantics.
+      AppState.I.activeSessionId = 's1';
+      addTearDown(() => AppState.I.activeSessionId = null);
+      await h.facade.runTask('first', sessionId: 's1');
+      final socket = await h.socket();
+      socket.server(_eventFrame('s1', '1-0', 'run_started', {'runId': 'run-1'}));
+      await pumpEventQueue();
+
+      h.facade.enqueueMessage('a', sessionId: 's1');
+      h.facade.enqueueMessage('b', sessionId: 's1');
+      h.facade.enqueueMessage('c', sessionId: 's1');
+      final ids = h.facade.queuedMessageIdsFor('s1');
+      expect(h.facade.queuedMessagesFor('s1'), ['a', 'b', 'c']);
+
+      h.facade.editQueuedMessageById(ids[1], 'b-edited');
+      expect(h.facade.queuedMessagesFor('s1'), ['a', 'b-edited', 'c']);
+
+      h.facade.steerQueuedMessage(2);
+      expect(h.facade.queuedMessagesFor('s1'), ['c', 'a', 'b-edited']);
+
+      h.facade.removeQueuedMessageById(ids[0]);
+      expect(h.facade.queuedMessagesFor('s1'), ['c', 'b-edited']);
+
+      h.facade.removeQueuedMessage(0);
+      expect(h.facade.queuedMessagesFor('s1'), ['b-edited']);
+
+      final taken = h.facade.takeQueuedMessages('s1');
+      expect(taken, hasLength(1));
+      expect(taken.single.text, 'b-edited');
+      expect(h.facade.queuedMessagesFor('s1'), isEmpty);
+      expect(h.facade.restoreQueuedMessages('s1', taken), 1);
+      expect(h.facade.queuedMessagesFor('s1'), ['b-edited']);
+
+      await h.ws.disconnect();
       h.facade.dispose();
     });
   });

@@ -1674,9 +1674,11 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   }
 
   /// UI view: the ACTIVE session's queue (per-session isolation test).
+  @override
   List<String> get queuedMessages => List.unmodifiable(_run.queue);
 
   /// Queue snapshot for an explicitly rendered session.
+  @override
   List<String> queuedMessagesFor(String sessionId) =>
       List.unmodifiable(_runs[sessionId]?.queue ?? const <String>[]);
   Map<int, BgJob> get _jobs => _runResolved.jobs;
@@ -1703,6 +1705,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   }
 
   /// UI action: kill a job from the popover (same path as job_kill).
+  @override
   void killJobFor(String sessionId, int jobId) {
     final j = _runs[sessionId]?.jobs[jobId];
     if (j == null || j.finished) return;
@@ -1737,13 +1740,17 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   int get sessionTtftMs => _run.ttftMs;
   int get sessionDecodeTokens => _run.decodeTokens;
   int get sessionToolMs => _run.toolMs;
+  @override
   int get sessionSystemTokens => _run.systemTokens;
+  @override
   int get sessionToolTokens => _run.toolTokens;
+  @override
   int get sessionMessageTokens => _run.messageTokens;
 
   // PR18 metering views (stats line + usage panel).
   double get sessionDecodeTokPerSec => _run.decodeTokPerSec;
   int get sessionAvgTtftMs => _run.avgTtftMs;
+  @override
   int get sessionCacheReadTokens => _run.cacheReadTokens;
   int get sessionCacheWriteTokens => _run.cacheWriteTokens;
 
@@ -2603,6 +2610,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// (appended as a user turn after the current tool results) and leaves the
   /// queue at that point. If the run settles before another request, the
   /// queue starts the next run immediately ([_scheduleQueuedContinuation]).
+  @override
   void enqueueMessage(String text, {String? sessionId}) {
     if (_runChainStale || !AppState.I.sessionAccountReady) return;
     if (text.trim().isEmpty) return;
@@ -2748,6 +2756,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// Strict-steer (the message queue parity): pull queued row [index] to the FRONT so the
   /// current run injects it on the very next request — an implicit-AND
   /// steering affordance per row.
+  @override
   void steerQueuedMessage(int index) {
     final run = _runResolved;
     if (index < 0 || index >= run.queue.length) return;
@@ -2762,6 +2771,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
 
   /// Stable ids for [sessionId]'s queued messages (index-aligned with
   /// [queuedMessagesFor]). The queue dock keys its rows by these.
+  @override
   List<int> queuedMessageIdsFor(String sessionId) {
     final run = _runs[sessionId];
     if (run == null) return const [];
@@ -2778,6 +2788,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   }
 
   /// Delete the queued message with stable [id].
+  @override
   void removeQueuedMessageById(int id) {
     final run = _runResolved;
     final index = _queueIndexOfId(run.runKey ?? '', id);
@@ -2794,6 +2805,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   }
 
   /// Edit the queued message with stable [id].
+  @override
   void editQueuedMessageById(int id, String newText) {
     if (newText.trim().isEmpty) return;
     final run = _runResolved;
@@ -2829,6 +2841,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// immediately (Stop promotes the queue head). [sessionId] defaults to
   /// the resolved run's session key. Graceful no-op (never a crash) when
   /// the queue is empty, the id is unknown, or no session key is available.
+  @override
   void quickSendQueuedMessage(int id, {String? sessionId}) {
     final run = _runResolved;
     _syncQueueIds(run);
@@ -2848,6 +2861,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// Removes every queued message of [sessionId] and returns them (stable
   /// ids, flags and staged files) so the queue dock can offer Undo through
   /// [restoreQueuedMessages].
+  @override
   List<QueuedMessageSnapshot> takeQueuedMessages(String sessionId) {
     final run = _runs[sessionId];
     if (run == null || run.queue.isEmpty) return const [];
@@ -2876,6 +2890,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// Undo for [takeQueuedMessages]: puts [items] back at the FRONT of
   /// [sessionId]'s queue (ahead of anything queued since) with their
   /// original ids and files. Returns how many were restored.
+  @override
   int restoreQueuedMessages(
     String sessionId,
     List<QueuedMessageSnapshot> items,
@@ -2910,6 +2925,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
       _queueAdd(_runResolved, text, userReferences: true);
 
   /// Remove a message from the queue.
+  @override
   void removeQueuedMessage(int index) {
     if (index < 0 || index >= _queue.length) return;
     _queueRemoveAt(_runResolved, index);
@@ -3154,6 +3170,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   final Map<String, List<BrowserTab>> _sessionBrowsers = {};
   final Map<String, int> _sessionActiveTab = {};
 
+  @override
   bool browserBusy = false; // true while an agent browser tool is running
 
   /// Fires only when something the browser UI shows changed (tab list,
@@ -3264,6 +3281,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
       _browserBucketFor(sessionId);
 
   /// True once the browser has ever been opened/pre-warmed in this launch.
+  @override
   bool get browserReady => browserTabs.isNotEmpty;
 
   BrowserTab get _activeTab {
@@ -13415,6 +13433,7 @@ ${await _agentsMdBlock()}
 
   /// Force a fresh LLM title, overwriting even a user rename (explicit user
   /// action from the UI).
+  @override
   Future<void> regenerateSessionTitle(ChatSession s) async {
     final title = await _generateTitleFor(s);
     if (title == null) return;
@@ -23874,6 +23893,7 @@ ${await _agentsMdBlock()}
   }
 
   /// Subagent handles whose parent is [sessionId] (newest first).
+  @override
   List<SubagentInfo> subagentsOf(String sessionId) => _subagents.values
       .where((s) => s.parentSessionId == sessionId)
       .toList()

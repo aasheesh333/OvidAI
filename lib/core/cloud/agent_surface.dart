@@ -11,13 +11,20 @@
 /// Signatures are copied from the LIVE `agent_service.dart` members at the
 /// anchors the plan measured. The surface conforms to AgentService, not the
 /// other way around (plan Task 8 Step 4) — when they disagree, this file is
-/// wrong. The 21 members are the 20 surviving chat_screen call-site members
-/// (worklist §1C) plus [busyListenable] (sidebar.dart:1203, Task 10).
+/// wrong.
 ///
-/// Deliberately NOT on the surface (their call sites die in Tasks 10/13):
+/// COVERAGE (review round 1, I-1): the plan's "20 of the measured 26"
+/// premise counted only DIRECT `AgentService.I.<member>` chains. chat_screen
+/// also aliases the singleton at 9 sites and calls further members through
+/// those aliases (queue dock, context meter, @-mention subagents, browser
+/// header). Those are on this surface too, so Task 10's mechanical swap does
+/// not strand the queue/context/subagent paths on the local service.
+///
+/// Deliberately NOT on the surface (their call sites die in Tasks 10/13/18):
 /// `requestBatteryExemption`, `workspaceRootFor`, `skillUnavailableReason`,
-/// `sessionRepoFull`, `hostDirOf`, and the legacy no-arg `approve` (its two
-/// chat_screen sites are re-pointed onto [approveRequest] in Task 10).
+/// `sessionRepoFull`, `hostDirOf`, `isSkillAvailableForSession` (skills die
+/// in Task 18), and the legacy no-arg `approve` (its two chat_screen sites
+/// are re-pointed onto [approveRequest] in Task 10).
 library;
 
 import 'package:flutter/foundation.dart';
@@ -39,7 +46,10 @@ abstract class AgentSurface extends ChangeNotifier {
   /// Per-session busy flag for list rows.
   ValueListenable<bool> busyListenable(String sessionId);
 
-  /// Stops [sessionId]'s run; returns whether a queued continuation survived.
+  /// Stops [sessionId]'s run. AgentService returns whether a queued
+  /// continuation survived; the cloud facade returns whether a live run was
+  /// found and a cancel posted (queueing is server-side there). Callers that
+  /// only need the side effect can ignore the value.
   bool stopRequested({required String sessionId});
 
   /// Stops every live run everywhere.
@@ -103,6 +113,82 @@ abstract class AgentSurface extends ChangeNotifier {
   List<({int id, String name, String state, int elapsedSec, int outChars})>
       jobsFor(String sessionId);
 
+  /// Kills a job from the jobs popover.
+  void killJobFor(String sessionId, int jobId);
+
   /// Measured context tokens for [s] (0 on the facade until P3 usage lands).
   int measuredContextTokens(ChatSession s, {String systemPrompt = ''});
+
+  // -------------------------------------------------------------------------
+  // Composer queue (chat_screen's queue dock — reached through aliases, so
+  // absent from the map's direct-chain measurement)
+  // -------------------------------------------------------------------------
+
+  /// The foreground session's queued messages, oldest-first.
+  List<String> get queuedMessages;
+
+  /// Queue snapshot for an explicitly rendered session.
+  List<String> queuedMessagesFor(String sessionId);
+
+  /// Stable ids for [sessionId]'s queued messages (index-aligned with
+  /// [queuedMessagesFor]).
+  List<int> queuedMessageIdsFor(String sessionId);
+
+  /// Queues [text] for the session; starts it immediately when idle.
+  void enqueueMessage(String text, {String? sessionId});
+
+  /// Edits the queued message with stable [id].
+  void editQueuedMessageById(int id, String newText);
+
+  /// Removes the queued message at [index] in the foreground queue.
+  void removeQueuedMessage(int index);
+
+  /// Removes the queued message with stable [id].
+  void removeQueuedMessageById(int id);
+
+  /// Pulls the row to the front and stops the current run so it starts now.
+  void quickSendQueuedMessage(int id, {String? sessionId});
+
+  /// Pulls the row at [index] to the front of the foreground queue.
+  void steerQueuedMessage(int index);
+
+  /// Removes every queued message of [sessionId] and returns them for Undo.
+  List<QueuedMessageSnapshot> takeQueuedMessages(String sessionId);
+
+  /// Undo for [takeQueuedMessages]; returns how many were restored.
+  int restoreQueuedMessages(
+      String sessionId, List<QueuedMessageSnapshot> items);
+
+  // -------------------------------------------------------------------------
+  // Context-meter counters (chat_screen:623-626)
+  // -------------------------------------------------------------------------
+
+  int get sessionSystemTokens;
+  int get sessionToolTokens;
+  int get sessionMessageTokens;
+  int get sessionCacheReadTokens;
+
+  // -------------------------------------------------------------------------
+  // @-mention subagents (chat_screen:6692, 6769)
+  // -------------------------------------------------------------------------
+
+  /// Subagent handles whose parent is [sessionId], newest first.
+  List<SubagentInfo> subagentsOf(String sessionId);
+
+  // -------------------------------------------------------------------------
+  // Browser header status dot (chat_screen:1410-1412)
+  // -------------------------------------------------------------------------
+
+  /// True while an agent browser tool is running.
+  bool get browserBusy;
+
+  /// True once the browser has been opened/pre-warmed in this launch.
+  bool get browserReady;
+
+  // -------------------------------------------------------------------------
+  // Sidebar (sidebar.dart:1180)
+  // -------------------------------------------------------------------------
+
+  /// Forces a fresh LLM-generated title for [s].
+  Future<void> regenerateSessionTitle(ChatSession s);
 }
