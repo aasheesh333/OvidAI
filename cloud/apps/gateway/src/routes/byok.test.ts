@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { byokKeysRepo, type Db } from "@ovid/db";
+import { byokKeysRepo, users, type Db } from "@ovid/db";
 import { createEnvelopeCrypto, byokRecordId } from "@ovid/escrow";
 import { buildGateway } from "../app.js";
+import { MAX_BYOK_KEYS_PER_USER } from "./byok.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
@@ -287,7 +288,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
 
-    const targets: Array<{ endpoint: string; lookup?: string[] }> = [
+    const targets: Array<{ endpoint: string; lookup?: string[]; label?: string }> = [
       { endpoint: "https://127.0.0.1/v1" },
       { endpoint: "https://10.1.2.3/v1" },
       { endpoint: "https://169.254.169.254/latest" },
@@ -295,22 +296,55 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
       { endpoint: "https://api.example.com/v1", lookup: ["169.254.169.254"] },
       { endpoint: "https://api.example.com/v1", lookup: ["127.0.0.1"] },
       { endpoint: "https://api.example.com/v1", lookup: ["::1"] },
+      // M2 (fix round 1): forms the route's former string-shape classifier
+      // classified SAFE. Each must be rejected before any fetch.
+      { endpoint: "https://[64:ff9b::7f00:1]/v1", label: "NAT64 literal" },
+      { endpoint: "https://[2002:7f00:1::]/v1", label: "6to4 literal" },
+      { endpoint: "https://[::127.0.0.1]/v1", label: "IPv4-compatible literal" },
+      { endpoint: "https://[fec0::1]/v1", label: "site-local literal" },
+      { endpoint: "https://[ff02::1]/v1", label: "multicast literal" },
+      {
+        endpoint: "https://api.example.com/v1",
+        lookup: ["64:ff9b::7f00:1"],
+        label: "NAT64 DNS answer",
+      },
+      {
+        endpoint: "https://api.example.com/v1",
+        lookup: ["2002:7f00:1::"],
+        label: "6to4 DNS answer",
+      },
+      {
+        endpoint: "https://api.example.com/v1",
+        lookup: ["::7f00:1"],
+        label: "IPv4-compatible DNS answer",
+      },
+      {
+        endpoint: "https://api.example.com/v1",
+        lookup: ["fec0::1"],
+        label: "site-local DNS answer",
+      },
+      {
+        endpoint: "https://api.example.com/v1",
+        lookup: ["ff02::1"],
+        label: "multicast DNS answer",
+      },
     ];
 
     for (const target of targets) {
+      const label = target.label ?? target.endpoint;
       const app = makeApp({
         fetchImpl,
         lookupHost: async () => target.lookup ?? [],
       });
       const created = await createKey(app, uid, { endpoint: target.endpoint });
-      expect(created.statusCode, target.endpoint).toBe(201);
+      expect(created.statusCode, label).toBe(201);
       const id = created.body.id as string;
       const res = await app.inject({
         method: "POST",
         url: `/cloud/v1/byok/${id}/test`,
         headers: authHeaders(uid),
       });
-      expect(res.statusCode, target.endpoint).toBe(400);
+      expect(res.statusCode, label).toBe(400);
       expect((res.json() as { error: { code: string } }).error.code).toBe("endpoint_rejected");
     }
     expect(calls.length).toBe(0);
@@ -336,6 +370,76 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
     expect(res.statusCode).toBe(400);
     expect((res.json() as { error: { code: string } }).error.code).toBe("endpoint_rejected");
     expect(calls.length).toBe(0);
+  });
+
+  it("L4: the target is validated before decryption (corrupt envelope + private target → 400)", async () => {
+    // Without the ordering fix the corrupt envelope would throw first and the
+    // route would answer 500/internal. endpoint_rejected proves the SSRF gate
+    // ran before any plaintext materialized.
+    const uid = testUid("byok-order");
+    const app = makeApp({ lookupHost: async () => ["93.184.216.34"] });
+    await users.ensure(db, uid, null);
+    const row = await byokKeysRepo.create(db, {
+      userId: uid,
+      providerId: "openai",
+      endpoint: "https://127.0.0.1/v1",
+      wrappedDek: "00",
+      iv: "00",
+      ciphertext: "00",
+      tag: "00",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/byok/${row.id}/test`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe("endpoint_rejected");
+  });
+
+  it("L5: an endpoint already ending in /models is not doubled", async () => {
+    const uid = testUid("byok-models");
+    const calls: FetchCall[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    const app = makeApp({ fetchImpl, lookupHost: async () => ["93.184.216.34"] });
+
+    const created = await createKey(app, uid, {
+      endpoint: "https://api.example.com/v1/models",
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/cloud/v1/byok/${created.body.id as string}/test`,
+      headers: authHeaders(uid),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.url).toBe("https://api.example.com/v1/models");
+  });
+
+  it("L3: per-user BYOK row cap → 409 limit_reached with no extra row", async () => {
+    const uid = testUid("byok-cap");
+    const app = makeApp();
+    await users.ensure(db, uid, null);
+    for (let i = 0; i < MAX_BYOK_KEYS_PER_USER; i++) {
+      await byokKeysRepo.create(db, {
+        userId: uid,
+        providerId: "openai",
+        endpoint: `https://api${i}.example.com/v1`,
+        wrappedDek: "00",
+        iv: "00",
+        ciphertext: "00",
+        tag: "00",
+      });
+    }
+
+    const { statusCode, body } = await createKey(app, uid);
+    expect(statusCode).toBe(409);
+    expect((body.error as { code: string }).code).toBe("limit_reached");
+    expect((await byokKeysRepo.list(db, uid)).length).toBe(MAX_BYOK_KEYS_PER_USER);
   });
 
   it("crypto not wired → loud 503 (never stores unsealed keys)", async () => {

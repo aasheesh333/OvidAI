@@ -6,6 +6,7 @@ import { byokKeysRepo, newId, users, type ByokKeyRow, type Db } from "@ovid/db";
 import {
   byokRecordId,
   EndpointRejectedError,
+  isNonPublicAddress,
   validateEndpoint,
   type EnvelopeCrypto,
 } from "@ovid/escrow";
@@ -17,14 +18,17 @@ import { sendError, zodBadRequest } from "./http.js";
  *  - `POST /byok` validates + canonicalizes the provider endpoint (the Python
  *    sync contract, ported in @ovid/escrow) and envelope-encrypts the API key
  *    under the row's recordId (`byok_keys:{id}`). The plaintext is NEVER
- *    echoed, logged or stored.
+ *    echoed, logged or stored. The stored endpoint is UNTRUSTED at use time:
+ *    this route checks only its grammar (see the SECURITY note at the insert).
  *  - `GET /byok` projects metadata only — the four ciphertext columns never
  *    leave the DB.
  *  - `DELETE /byok/:id` is owner-scoped; unknown id and wrong owner are the
  *    same 404 (no existence leak).
- *  - `POST /byok/:id/test` decrypts, resolves the host, refuses private /
- *    link-local / loopback / metadata targets (SSRF), then probes the
- *    provider's `GET <endpoint>/models` with a 10 s timeout. Probe errors are
+ *  - `POST /byok/:id/test` validates the target (port allow-list + the
+ *    canonical `isNonPublicAddress` classifier), then decrypts and probes the
+ *    provider's `GET <endpoint>/models` with a 10 s timeout. The DNS check is
+ *    ADVISORY, not binding: `fetch` resolves again at connect time, so the
+ *    rebinding TOCTOU documented at the fetch below remains. Probe errors are
  *    sanitized; the result is persisted via byokKeysRepo.setTestResult.
  *
  * All routes sit behind the gateway authHook; `request.principal.uid` is the
@@ -56,6 +60,14 @@ const createBodySchema = z
 
 const PROBE_TIMEOUT_MS = 10_000;
 const ALLOWED_PROBE_PORTS = new Set([443, 80]);
+
+/**
+ * Row-growth hygiene (review L3): an authenticated account may store at most
+ * this many BYOK entries. The check is best-effort under concurrency (two
+ * simultaneous POSTs can land at cap+1); it exists to stop unbounded storage
+ * growth, not to enforce a billing quota.
+ */
+export const MAX_BYOK_KEYS_PER_USER = 20;
 
 /** Hostnames that are metadata services even before DNS resolution. */
 const METADATA_HOSTS = new Set([
@@ -112,6 +124,31 @@ export function registerByokRoutes(app: FastifyInstance, deps: ByokDeps): void {
     // authenticated routes do).
     await users.ensure(deps.db, uid, request.principal.email);
 
+    // L3 row cap. list() is metadata+ciphertext rows, but the bound is small
+    // and this avoids widening the repo surface for a hygiene check.
+    const existing = await byokKeysRepo.list(deps.db, uid);
+    if (existing.length >= MAX_BYOK_KEYS_PER_USER) {
+      return sendError(
+        reply,
+        409,
+        "limit_reached",
+        `At most ${MAX_BYOK_KEYS_PER_USER} BYOK keys may be stored per account.`,
+      );
+    }
+
+    // ── SECURITY: the stored endpoint is UNTRUSTED at use time ────────────
+    // validateEndpoint proves only that `endpoint` is a well-formed, canonical
+    // provider identity. It deliberately accepts private/loopback literals
+    // (https://127.0.0.1/v1, https://10.x, https://169.254.169.254) — the
+    // /test route applies the egress guard, but the dangerous consumer is the
+    // worker dialing this endpoint for a real run (P9 Task 9).
+    //
+    // Every consumer MUST send the decrypted endpoint through guarded egress
+    // (resolve + classify + refuse non-public answers). NEVER add a
+    // user-supplied endpoint to `createProviderEgress`'s trusted
+    // `providerBaseUrls`: only operator-configured origins (litellm /
+    // anthropic base URLs) may bypass that guard. This is a T9 requirement;
+    // do not relax it here.
     const id = newId();
     const envelope = deps.crypto.encrypt(body.apiKey, byokRecordId(id));
     // byokKeysRepo.create spreads the row over its generated id, so passing an
@@ -165,6 +202,27 @@ export function registerByokRoutes(app: FastifyInstance, deps: ByokDeps): void {
       return sendError(reply, 404, "not_found", "BYOK key not found.");
     }
 
+    // SSRF guard: validate the target BEFORE decrypting (review L4), so a
+    // request that can never be probed does not materialize the plaintext key
+    // at all. Resolve the canonical endpoint's host and refuse private,
+    // link-local, loopback, CGNAT and metadata targets before any fetch.
+    let target: { host: string; port: number };
+    try {
+      target = probeTarget(row.endpoint);
+      if (!ALLOWED_PROBE_PORTS.has(target.port)) throw new EndpointRejectedError();
+      const addresses = await resolveAddresses(target.host, deps.lookupHost);
+      if (addresses.some(isNonPublicAddress)) throw new EndpointRejectedError();
+    } catch (err) {
+      if (err instanceof EndpointRejectedError) {
+        await setTestResult(deps.db, row.id, false, request);
+        return endpointRejected(reply);
+      }
+      // DNS failure is a probe failure, not a contract rejection.
+      request.log.warn({ err, byokId: row.id }, "BYOK probe DNS resolution failed");
+      await setTestResult(deps.db, row.id, false, request);
+      return reply.code(200).send({ ok: false, error: "dns_resolution_failed" });
+    }
+
     let apiKey: string;
     try {
       apiKey = deps.crypto.decrypt(
@@ -182,25 +240,26 @@ export function registerByokRoutes(app: FastifyInstance, deps: ByokDeps): void {
       return sendError(reply, 500, "internal", "BYOK key could not be decrypted.");
     }
 
-    // SSRF guard: resolve the canonical endpoint's host and refuse private,
-    // link-local, loopback, CGNAT and metadata targets BEFORE any fetch.
-    let target: { host: string; port: number };
-    try {
-      target = probeTarget(row.endpoint);
-      if (!ALLOWED_PROBE_PORTS.has(target.port)) throw new EndpointRejectedError();
-      const addresses = await resolveAddresses(target.host, deps.lookupHost);
-      if (addresses.some(isUnsafeAddress)) throw new EndpointRejectedError();
-    } catch (err) {
-      if (err instanceof EndpointRejectedError) {
-        await setTestResult(deps.db, row.id, false, request);
-        return endpointRejected(reply);
-      }
-      // DNS failure is a probe failure, not a contract rejection.
-      request.log.warn({ err, byokId: row.id }, "BYOK probe DNS resolution failed");
-      await setTestResult(deps.db, row.id, false, request);
-      return reply.code(200).send({ ok: false, error: "dns_resolution_failed" });
-    }
-
+    // ── DNS-rebinding TOCTOU: accepted risk, documented (review M1) ───────
+    // The guard above resolves the host and refuses non-public answers, but
+    // `fetch` performs its OWN resolution at connect time. A resolver with a
+    // near-zero TTL (or an alternating answer set) can therefore return a
+    // public address to the check and a private/metadata address to the
+    // transport. This is the same remaining limit documented at the top of
+    // `@ovid/agent-core/src/ssrf.ts`; the resolution is advisory, not binding.
+    //
+    // Why the validated address is not pinned here: pinning needs a
+    // per-request DNS lookup (or connect-to-IP + Host/SNI split), which the
+    // WHATWG `fetch` surface does not expose. Doing it would require an
+    // undici Agent (not a gateway dependency) or node:https with a custom
+    // `lookup`, replacing the injectable `fetchImpl` seam the probe tests use
+    // and coupling the route to one transport. The exposure is bounded
+    // instead: the endpoint policy is HTTPS-ONLY (never widen it to http),
+    // TLS verification makes a rebind to an internal HTTP service
+    // (metadata/admin) fail the handshake unless it holds a certificate valid
+    // for the user's hostname, redirects are not followed, and the response
+    // body is cancelled unread below — only the status code is surfaced. The
+    // worst case is blind SSRF with no response or metadata read.
     const fetchImpl = deps.fetchImpl ?? fetch;
     let ok = false;
     let error: string | undefined;
@@ -247,12 +306,22 @@ async function setTestResult(
   }
 }
 
-/** `<endpoint>/models`, preserving any query string the endpoint carries. */
+/**
+ * `<endpoint>/models`, preserving any query string the endpoint carries.
+ * An endpoint already ending in the `/models` PATH segment is used as-is
+ * (review L5: do not produce `…/models/models`). The check looks at the path
+ * only, so a host literally named `models` is not mistaken for the segment.
+ */
 function modelsUrl(endpoint: string): string {
   const queryAt = endpoint.indexOf("?");
   const base = queryAt < 0 ? endpoint : endpoint.slice(0, queryAt);
   const query = queryAt < 0 ? "" : endpoint.slice(queryAt);
-  return `${base.replace(/\/+$/, "")}/models${query}`;
+  const trimmed = base.replace(/\/+$/, "");
+  const schemeEnd = trimmed.indexOf("://");
+  const pathStart = schemeEnd < 0 ? -1 : trimmed.indexOf("/", schemeEnd + 3);
+  const path = pathStart < 0 ? "" : trimmed.slice(pathStart);
+  const withModels = path.endsWith("/models") ? trimmed : `${trimmed}/models`;
+  return `${withModels}${query}`;
 }
 
 /** Extract host + port from an already-canonical endpoint. */
@@ -303,37 +372,4 @@ async function resolveAddresses(
   const addresses = await lookup(host);
   if (addresses.length === 0) throw new EndpointRejectedError();
   return addresses;
-}
-
-/** RFC1918 / loopback / link-local / CGNAT / multicast / ULA / metadata. */
-function isUnsafeAddress(address: string): boolean {
-  const family = isIP(address);
-  if (family === 4) {
-    const [a, b, c] = address.split(".").map(Number) as [number, number, number];
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 169 && b === 254) return true; // link-local + metadata
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-    if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
-    if (a === 198 && (b === 18 || b === 19)) return true;
-    if (a >= 224) return true; // multicast + reserved
-    return false;
-  }
-  if (family === 6) {
-    const lower = address.toLowerCase();
-    if (lower === "::" || lower === "::1") return true;
-    if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
-    if (/^f[cd]/.test(lower)) return true; // fc00::/7 unique-local
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-    if (mapped !== null) return isUnsafeAddress(mapped[1]!);
-    const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
-    if (mappedHex !== null) {
-      const hi = parseInt(mappedHex[1]!, 16);
-      const lo = parseInt(mappedHex[2]!, 16);
-      return isUnsafeAddress(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
-    }
-    return false;
-  }
-  return true; // unparseable → unsafe
 }
