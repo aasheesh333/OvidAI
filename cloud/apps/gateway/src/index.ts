@@ -17,6 +17,7 @@ import { loadGatewayEnv } from "./env.js";
 import { createHttpMintProvisioner, createMintRedisKeyProvider } from "./keys.js";
 import { createTicketStore } from "./tickets.js";
 import { createRedisPtyBridge } from "./wsPty.js";
+import { createRedisApprovalPublisher } from "./ws.js";
 
 /**
  * Composition root — intentionally untested-thin (Task 10's e2e exercises the
@@ -60,6 +61,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       // dedicated ctl/input publisher + frames/state subscriber on the queue
       // Redis (the worker's browser bridge subscribes the matching channels).
       browser: { redisFactory: () => new Redis(cfg.redisQUrl) },
+      // Approval responses (P3 Task 12): the ws dispatch publishes the
+      // client's approval_response frames to the queue Redis; the worker's
+      // approval bridge subscribes the same channel.
+      approvals: createRedisApprovalPublisher(redisQ),
     },
     { logger: true },
   );

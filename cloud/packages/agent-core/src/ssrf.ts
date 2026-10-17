@@ -334,11 +334,24 @@ export function createSsrfGuard(o?: {
  * clean. After maxRedirects (default 5) followed redirects, the next redirect
  * response throws SsrfBlockedError. The init (including any AbortSignal) is
  * passed through to the transport on every hop.
+ *
+ * onHop (P3 Task 12 carry, T10 review) restores Dart's per-hop host-GRANT
+ * re-check (agent_service.dart fetch_url's redirectGuard): the guarded egress
+ * re-runs the SSRF check on every hop but NOT the caller's grant, so a
+ * granted site could bounce the request to any other public host the user
+ * never approved. The hook runs for each REDIRECT hop (after that hop's
+ * SSRF check passes — a blocked host never reaches it); the INITIAL url is
+ * deliberately NOT passed, because the caller's own gate covered it (the
+ * same split as Dart). A throwing hook refuses the hop — fetch_url wires it
+ * to the grant store.
  */
+export type EgressHopHook = (url: URL) => Promise<void>;
+
 export function createGuardedEgressFetch(
   guard: SsrfGuard,
   fetchImpl: typeof fetch = fetch,
   maxRedirects: number = DEFAULT_MAX_REDIRECTS,
+  onHop?: EgressHopHook,
 ): EgressFetch {
   return async (url: string, init?: RequestInit): Promise<Response> => {
     let current = await guard.assertSafeUrl(url);
@@ -367,6 +380,9 @@ export function createGuardedEgressFetch(
         /* already released */
       }
       current = await guard.assertSafeUrl(next.toString());
+      // Per-hop grant re-check: runs only after the hop passed the SSRF
+      // check; a throw refuses the fetch (the caller surfaces it).
+      if (onHop !== undefined) await onHop(next);
     }
   };
 }

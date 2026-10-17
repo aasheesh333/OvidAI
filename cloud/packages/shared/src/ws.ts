@@ -17,7 +17,17 @@ export type WsClientMsg =
   | { op: "browser_attach"; sessionId: string }
   | { op: "browser_detach"; sessionId: string }
   | { op: "browser_input"; sessionId: string; input: BrowserInputEvent }
-  | { op: "browser_takeover"; sessionId: string; enabled: boolean };
+  | { op: "browser_takeover"; sessionId: string; enabled: boolean }
+  // P3 Task 12 (approvals over WS) — additive discriminants only. The
+  // client answers an approval_requested session event with this op; the
+  // gateway validates session ownership, publishes to the approval
+  // responses channel, and acks.
+  | {
+      op: "approval_response";
+      sessionId: string;
+      approvalId: string;
+      decision: "allow" | "deny" | "always";
+    };
 
 export type WsServerMsg =
   | { op: "subscribed"; sessionId: string }
@@ -30,7 +40,11 @@ export type WsServerMsg =
   | { op: "pty_output"; ptyId: string; data: string; offset: number }
   | { op: "pty_exit"; ptyId: string; exitCode: number | null }
   // P6 Task 2 (browser channel) — additive discriminants only.
-  | { op: "browser_state"; sessionId: string; state: BrowserStateDto };
+  | { op: "browser_state"; sessionId: string; state: BrowserStateDto }
+  // P3 Task 12 (approvals over WS) — additive discriminants only. Ack for a
+  // published approval_response: the gateway echoes the approvalId and the
+  // decision it forwarded to the worker bridge.
+  | { op: "approval_ack"; approvalId: string; decision: string };
 
 /**
  * The error codes the WS server currently sends in `error` frames. The wire
@@ -46,6 +60,8 @@ export type WsServerMsg =
  * - sandbox_unavailable  — pty_open: capacity/disk/rootfs unavailable
  * - pty_gone             — pty_attach: the terminal exited (or never existed)
  * - timeout              — the worker never answered a pty request in time
+ * - unavailable          — the composition wired no handler for the op
+ *                          (approval_response without a publisher; browser_*)
  */
 export type WsErrorCode =
   | "bad_message"
@@ -56,7 +72,19 @@ export type WsErrorCode =
   | "sandbox_busy"
   | "sandbox_unavailable"
   | "pty_gone"
-  | "timeout";
+  | "timeout"
+  // P3 Task 12: approval_response on a composition with no approval
+  // publisher wired (also sent by the browser channel's own fallback).
+  | "unavailable";
+
+/**
+ * Redis pub/sub channel carrying approval responses from the gateway to the
+ * worker's approval bridge (P3 Task 12). Lives on the QUEUE redis instance
+ * (noeviction) — messages are transient fire-and-forget payloads
+ * {approvalId, userId, decision}; a lost message degrades to the bridge's
+ * own timeout-deny, never to a stuck run.
+ */
+export const APPROVAL_RESPONSES_CHANNEL = "ovid:approval-responses";
 
 /** Terminal dimension bounds shared by pty_open/pty_resize (ints 1..500). */
 const dim = z
@@ -70,7 +98,12 @@ const offset = z.number().int().nonnegative();
 
 const ptyIdField = z.string().min(1);
 
-const wsClientMsgSchema: z.ZodType<WsClientMsg> = z.discriminatedUnion("op", [
+// The annotation is a CAST, not a plain type: the approval_response entry
+// keeps `decision` an open string on the wire while WsClientMsg documents
+// the enum — parse() therefore returns a wider shape than the declared
+// union and the gateway enforces the three values (bad_request). This is
+// the same documentation-vs-enforcement split as WsErrorCode above.
+const wsClientMsgSchema = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("subscribe"),
     sessionId: z.string().min(1),
@@ -127,7 +160,19 @@ const wsClientMsgSchema: z.ZodType<WsClientMsg> = z.discriminatedUnion("op", [
     sessionId: z.string().min(1),
     enabled: z.boolean(),
   }),
-]);
+  z.object({
+    op: z.literal("approval_response"),
+    sessionId: z.string().min(1),
+    approvalId: z.string().min(1),
+    // Open string ON PURPOSE (WsErrorCode discipline): the union in the type
+    // above is the documented contract, but a malformed decision must reach
+    // the GATEWAY so it can answer the specific `bad_request` refusal —
+    // z.enum here would collapse that into a generic bad_message. The
+    // gateway (and, defensively, the worker bridge) enforce the three
+    // values at the edge.
+    decision: z.string().min(1),
+  }),
+]) as unknown as z.ZodType<WsClientMsg>;
 
 const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
   z.object({
@@ -173,6 +218,11 @@ const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
     op: z.literal("browser_state"),
     sessionId: z.string().min(1),
     state: browserStateDtoSchema,
+  }),
+  z.object({
+    op: z.literal("approval_ack"),
+    approvalId: z.string().min(1),
+    decision: z.string().min(1),
   }),
 ]);
 

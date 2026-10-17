@@ -7,6 +7,7 @@ export * as schema from "./schema.js";
 export type {
   AttachmentRow,
   FileManifestRow,
+  GrantRow,
   MessageRow,
   RunRow,
   SessionEventMirrorRow,

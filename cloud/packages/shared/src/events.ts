@@ -14,7 +14,19 @@ export type SessionEventType =
   // the zod enum array below in the same order.
   | "artifact_created"
   | "workspace_hibernated"
-  | "workspace_hydrated";
+  | "workspace_hydrated"
+  // P3 Task 12 additions — the remaining nine P3-Q5 members (ruling R5:
+  // P2's Task 12 already landed tool_started/tool_completed above; P3
+  // appends only these). Additive ONLY: never reorder, never remove.
+  | "approval_requested"
+  | "approval_resolved"
+  | "todo_updated"
+  | "goal_updated"
+  | "plan_mode_changed"
+  | "run_cancelled"
+  | "subagent_started"
+  | "subagent_completed"
+  | "compaction_completed";
 
 export interface SessionEvent {
   sessionId: string;
@@ -42,6 +54,15 @@ export const sessionEventSchema: z.ZodType<SessionEvent> = z.object({
     "artifact_created",
     "workspace_hibernated",
     "workspace_hydrated",
+    "approval_requested",
+    "approval_resolved",
+    "todo_updated",
+    "goal_updated",
+    "plan_mode_changed",
+    "run_cancelled",
+    "subagent_started",
+    "subagent_completed",
+    "compaction_completed",
   ]),
   payload: z.record(z.string(), z.unknown()),
   ts: z.string().min(1),

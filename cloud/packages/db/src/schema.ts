@@ -630,3 +630,35 @@ export const workspaceObjects = pgTable(
 
 export type FileManifestRow = typeof fileManifests.$inferSelect;
 export type WorkspaceObjectRow = typeof workspaceObjects.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// P3 Task 12: hierarchical permission grants (port of grant_store.dart's
+// persistence, session-scoped only).
+//
+// A "path" pattern covers the folder itself + every child (never siblings);
+// a "host" pattern covers the host + child domains + every port/path. The
+// Dart GLOBAL scope is NOT ported ("the agent never consults them" — the
+// session's rows are the only authority). `mode` is audit metadata only:
+// decisions apply across modes (a Control grant carries into General).
+// ---------------------------------------------------------------------------
+
+export const grants = pgTable(
+  "grants",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid),
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id),
+    kind: text("kind").notNull(), // "path" | "host"
+    pattern: text("pattern").notNull(), // normalized by kind (grants.ts)
+    decision: text("decision").notNull(), // "allow" | "always" | "deny"
+    mode: text("mode"), // audit metadata only — decisions apply across modes
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("grants_user_id_session_id_idx").on(t.userId, t.sessionId)],
+);
+
+export type GrantRow = typeof grants.$inferSelect;

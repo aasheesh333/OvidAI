@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { wsClientMsg, wsServerMsg } from "./ws.js";
+import { APPROVAL_RESPONSES_CHANNEL, wsClientMsg, wsServerMsg } from "./ws.js";
 import type { WsClientMsg, WsServerMsg } from "./ws.js";
 import type { SessionEvent } from "./events.js";
 
@@ -144,5 +144,67 @@ describe("ws ops regression pin (P6)", () => {
     expect(wsClientMsg({ op: "ping" })).toEqual({ op: "ping" });
     expect(() => wsClientMsg({ op: "nope" })).toThrow();
     expect(() => wsServerMsg({ op: "nope" })).toThrow();
+  });
+});
+
+// P3 Task 12 — approval ops (additive discriminants only; all NEW cases).
+describe("wsClientMsg approval ops (P3)", () => {
+  it("pins the approval responses redis channel constant", () => {
+    expect(APPROVAL_RESPONSES_CHANNEL).toBe("ovid:approval-responses");
+  });
+
+  it("parses approval_response with each valid decision", () => {
+    for (const decision of ["allow", "deny", "always"] as const) {
+      const input = { op: "approval_response", sessionId: "s1", approvalId: "ap-1", decision };
+      expect(wsClientMsg(input)).toEqual(input);
+    }
+  });
+
+  it("keeps decision an OPEN string on the wire (gateway enforces the enum)", () => {
+    // WsErrorCode discipline: the TS union is the documented contract, the
+    // schema stays open so a malformed decision reaches the GATEWAY, which
+    // answers the specific `bad_request` refusal instead of a generic
+    // bad_message. The value must still be a nonempty string.
+    const parsed = wsClientMsg({
+      op: "approval_response",
+      sessionId: "s1",
+      approvalId: "ap-1",
+      decision: "maybe",
+    });
+    expect(parsed).toEqual({
+      op: "approval_response",
+      sessionId: "s1",
+      approvalId: "ap-1",
+      decision: "maybe",
+    });
+  });
+
+  it("rejects approval_response missing approvalId or with an empty decision", () => {
+    expect(() =>
+      wsClientMsg({ op: "approval_response", sessionId: "s1", decision: "allow" }),
+    ).toThrow();
+    expect(() =>
+      wsClientMsg({ op: "approval_response", sessionId: "s1", approvalId: "ap-1", decision: "" }),
+    ).toThrow();
+    expect(() =>
+      wsClientMsg({ op: "approval_response", sessionId: "", approvalId: "ap-1", decision: "allow" }),
+    ).toThrow();
+  });
+});
+
+describe("wsServerMsg approval ops (P3)", () => {
+  it("parses approval_ack", () => {
+    const input = { op: "approval_ack", approvalId: "ap-1", decision: "always" };
+    expect(wsServerMsg(input)).toEqual(input);
+  });
+
+  it("rejects approval_ack with an empty approvalId", () => {
+    expect(() => wsServerMsg({ op: "approval_ack", approvalId: "", decision: "allow" })).toThrow();
+    expect(() => wsServerMsg({ op: "approval_ack", decision: "allow" })).toThrow();
+  });
+
+  it("still rejects unknown ops after the additions", () => {
+    expect(() => wsClientMsg({ op: "approval_response2" })).toThrow();
+    expect(() => wsServerMsg({ op: "approval_ack2" })).toThrow();
   });
 });

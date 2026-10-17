@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { RawData, WebSocket } from "ws";
+import type { Redis } from "ioredis";
 import { sessions, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
-import { wsClientMsg, type PtyOutMsg, type SessionEvent, type WsClientMsg, type WsServerMsg } from "@ovid/shared";
+import {
+  APPROVAL_RESPONSES_CHANNEL,
+  wsClientMsg,
+  type PtyOutMsg,
+  type SessionEvent,
+  type WsClientMsg,
+  type WsServerMsg,
+} from "@ovid/shared";
 import { isUuid } from "./routes/http.js";
 import type { TicketStore } from "./tickets.js";
 import {
@@ -39,7 +47,33 @@ import { PTY_OPEN_TIMEOUT_MS, PTY_REPLY_TIMEOUT_MS, PtyBridgeError, type PtyBrid
  * state subscriber — a subscriber-mode connection cannot publish) and is
  * torn down on detach, replace, and socket close. Frames reach the client
  * as BINARY ws messages (image bytes only); state as browser_state ops.
+ *
+ * P3 Task 12 adds the approval op (approval_response): the client answers
+ * an approval_requested session event on the SAME multiplexed connection.
+ * Ownership is validated exactly like subscribe (sessions.get), then the
+ * response is published to the approval-responses redis channel for the
+ * worker's approval bridge and acked (approval_ack). The ack confirms
+ * PUBLICATION only — whether a pending approval was still waiting is the
+ * worker bridge's concern (a late answer after its timeout is a no-op
+ * there, by contract).
  */
+
+/**
+ * The gateway's side of the approval responses channel: publish one
+ * {approvalId, userId, decision} for the worker's bridge to resolve.
+ */
+export interface ApprovalPublisher {
+  publishResponse(response: { approvalId: string; userId: string; decision: string }): Promise<void>;
+}
+
+/** Redis-backed ApprovalPublisher (main wires it with the queue redisQ client). */
+export function createRedisApprovalPublisher(redis: Redis): ApprovalPublisher {
+  return {
+    async publishResponse(response) {
+      await redis.publish(APPROVAL_RESPONSES_CHANNEL, JSON.stringify(response));
+    },
+  };
+}
 
 export interface WsDeps {
   tickets: TicketStore;
@@ -54,6 +88,14 @@ export interface WsDeps {
    * answers a loud `unavailable` error frame instead of crashing.
    */
   browser?: BrowserChannelDeps;
+  /**
+   * Approval response publisher (P3 Task 12); main wires
+   * createRedisApprovalPublisher(redisQ). OPTIONAL so pre-P3 compositions
+   * stay source-compatible: when absent, approval_response answers a loud
+   * `unavailable` error frame instead of crashing (the same fallback
+   * discipline as browser above).
+   */
+  approvals?: ApprovalPublisher;
 }
 
 export interface WsConnectionOptions {
@@ -611,6 +653,65 @@ export async function handleWsConnection(
     await attach.detach().catch(() => {});
   }
 
+  // ---- Approval op (P3 Task 12) ---------------------------------------------
+
+  /**
+   * approval_response: ownership FIRST (the subscribe discipline — the uuid
+   * shape guard keeps client garbage away from the id column), then the
+   * decision enum (the shared schema keeps it an open string precisely so
+   * THIS arm can answer the specific bad_request instead of a generic
+   * bad_message), then publish + ack. The connection survives every refusal.
+   */
+  async function handleApprovalResponse(
+    msg: Extract<WsClientMsg, { op: "approval_response" }>,
+  ): Promise<void> {
+    if (deps.approvals === undefined) {
+      // Loud fallback for pre-P3 compositions (no publisher wired).
+      send(socket, {
+        op: "error",
+        code: "unavailable",
+        message: "Approval channel not configured.",
+        sessionId: msg.sessionId,
+      });
+      return;
+    }
+    const owned = isUuid(msg.sessionId) ? await sessions.get(deps.db, msg.sessionId, uid) : null;
+    if (owned === null) {
+      send(socket, {
+        op: "error",
+        code: "forbidden",
+        message: "Session not found.",
+        sessionId: msg.sessionId,
+      });
+      return;
+    }
+    if (msg.decision !== "allow" && msg.decision !== "deny" && msg.decision !== "always") {
+      send(socket, {
+        op: "error",
+        code: "bad_request",
+        message: "decision must be one of allow, deny, always.",
+        sessionId: msg.sessionId,
+      });
+      return;
+    }
+    try {
+      await deps.approvals.publishResponse({
+        approvalId: msg.approvalId,
+        userId: uid,
+        decision: msg.decision,
+      });
+    } catch {
+      send(socket, {
+        op: "error",
+        code: "internal",
+        message: "Approval response could not be published.",
+        sessionId: msg.sessionId,
+      });
+      return;
+    }
+    send(socket, { op: "approval_ack", approvalId: msg.approvalId, decision: msg.decision });
+  }
+
   async function processFrame(raw: string): Promise<void> {
     // Defense in depth for the chained-queue path: a frame that was still
     // waiting its turn when the socket died must not start db/redis work.
@@ -670,6 +771,9 @@ export async function handleWsConnection(
         if (attach !== null) attach.publishCtl({ type: "takeover", enabled: msg.enabled });
         return;
       }
+      case "approval_response":
+        await handleApprovalResponse(msg);
+        return;
     }
   }
 

@@ -19,7 +19,7 @@ import { registerRunRoutes } from "./routes/runs.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
-import type { WsDeps } from "./ws.js";
+import type { ApprovalPublisher, WsDeps } from "./ws.js";
 import type { BrowserChannelDeps } from "./browserChannel.js";
 import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
 
@@ -49,6 +49,16 @@ export interface GatewayDeps {
    * frame instead of crashing — the fallback is loud, never a silent no-op.
    */
   browser?: BrowserChannelDeps;
+  /**
+   * P3 Task 12: the approval-responses publisher (the ws dispatch's only
+   * view of the approval channel). main() always wires
+   * createRedisApprovalPublisher(redisQ). OPTIONAL only so pre-P3
+   * compositions (spine e2e + P1 suites) stay source-compatible; when
+   * absent, every approval_response frame answers a loud `unavailable`
+   * error frame instead of crashing — the fallback is loud, never a silent
+   * no-op.
+   */
+  approvals?: ApprovalPublisher;
   /**
    * P8 Task 3: presigned-PUT seam for attachment uploads (ruling P8-Q3 —
    * structurally @ovid/storage's StorageAdapter.presignPut, so the R2 adapter
@@ -167,6 +177,7 @@ export function buildGateway(
       events: deps.events,
       pty: deps.pty ?? unavailablePtyBridge(),
       browser: deps.browser,
+      approvals: deps.approvals,
     };
     registerWsRoute(scope, wsDeps);
   });

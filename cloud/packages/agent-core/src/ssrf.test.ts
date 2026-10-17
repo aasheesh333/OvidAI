@@ -329,3 +329,118 @@ describe("createGuardedEgressFetch — live redirect handling", () => {
     expect(source.requestCount()).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// P3 Task 12 carry (T10 review): the per-hop host-grant re-check hook.
+//
+// The guarded egress re-runs assertSafeUrl on every hop but NOT the host
+// GRANT — Dart re-checks _checkHostGrant per hop (agent_service.dart
+// fetch_url's redirectGuard), so a granted site could bounce the request to
+// any other public host the user never approved. The hook restores that
+// seam: fetch_url wires it to the grant store.
+// ---------------------------------------------------------------------------
+
+describe("createGuardedEgressFetch — onHop host-grant re-check hook", () => {
+  const stubGuard: SsrfGuard = {
+    async assertSafeUrl(rawUrl: string): Promise<URL> {
+      const url = new URL(rawUrl);
+      if (isMetadataOrLinkLocalAddress(url.hostname)) {
+        throw new SsrfBlockedError(`metadata/link-local host is always refused: ${url.hostname}`);
+      }
+      return url;
+    },
+    async checkHost(host: string): Promise<boolean> {
+      return !isMetadataOrLinkLocalAddress(host);
+    },
+  };
+
+  const openServers: Array<() => void> = [];
+  afterEach(() => {
+    for (const close of openServers.splice(0)) close();
+  });
+
+  function startServer(
+    handler: (req: IncomingMessage, res: ServerResponse) => void,
+  ): Promise<{ origin: string; requestCount: () => number }> {
+    let count = 0;
+    const server = createServer((req, res) => {
+      count += 1;
+      handler(req, res);
+    });
+    const ready = new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    openServers.push(() => {
+      server.closeAllConnections();
+      server.close();
+    });
+    return ready.then(() => {
+      const { port } = server.address() as AddressInfo;
+      return { origin: `http://127.0.0.1:${port}`, requestCount: () => count };
+    });
+  }
+
+  it("calls onHop with each REDIRECT hop URL (never the initial one); allowed hops pass", async () => {
+    const final = await startServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("end");
+    });
+    const middle = await startServer((_req, res) => {
+      res.writeHead(302, { location: `${final.origin}/deep` });
+      res.end();
+    });
+    const source = await startServer((_req, res) => {
+      res.writeHead(302, { location: `${middle.origin}/hop` });
+      res.end();
+    });
+
+    const hops: string[] = [];
+    const egress = createGuardedEgressFetch(stubGuard, fetch, 5, async (url) => {
+      hops.push(`${url.hostname}${url.pathname}`);
+    });
+    const res = await egress(`${source.origin}/start`);
+    expect(res.status).toBe(200);
+    // Exactly the two redirect hops, in order — the INITIAL url is NOT passed
+    // (the caller's own gate covered it: Dart's redirectGuard semantics).
+    expect(hops).toEqual([
+      `${new URL(middle.origin).hostname}/hop`,
+      `${new URL(final.origin).hostname}/deep`,
+    ]);
+    expect(middle.requestCount()).toBe(1);
+    expect(final.requestCount()).toBe(1);
+  });
+
+  it("a throwing onHop refuses the hop: the unapproved host is NEVER fetched", async () => {
+    const unapproved = await startServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("should-never-be-served");
+    });
+    const source = await startServer((_req, res) => {
+      res.writeHead(302, { location: `${unapproved.origin}/landing` });
+      res.end();
+    });
+
+    const egress = createGuardedEgressFetch(stubGuard, fetch, 5, async () => {
+      throw new Error("host not granted for this session");
+    });
+    const err = await egress(`${source.origin}/start`).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe("host not granted for this session");
+    expect(unapproved.requestCount()).toBe(0); // the hop never left the process
+    expect(source.requestCount()).toBe(1);
+  });
+
+  it("onHop runs AFTER the SSRF check of the hop (a blocked host never reaches the hook)", async () => {
+    const source = await startServer((_req, res) => {
+      res.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
+      res.end();
+    });
+    const hops: string[] = [];
+    const egress = createGuardedEgressFetch(stubGuard, fetch, 5, async (url) => {
+      hops.push(url.hostname);
+    });
+    await expect(egress(`${source.origin}/start`)).rejects.toBeInstanceOf(SsrfBlockedError);
+    expect(hops).toEqual([]); // SSRF refused the hop before the grant hook ran
+  });
+});

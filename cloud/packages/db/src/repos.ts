@@ -5,6 +5,7 @@ import type { Db } from "./client.js";
 import {
   attachments as attachmentsTable,
   fileManifests as fileManifestsTable,
+  grants as grantsTable,
   messages as messagesTable,
   mcpOauthFlows as mcpOauthFlowsTable,
   mcpOauthTokens as mcpOauthTokensTable,
@@ -18,6 +19,7 @@ import {
   workspaceObjects as workspaceObjectsTable,
   type AttachmentRow,
   type FileManifestRow,
+  type GrantRow,
   type MessageRow,
   type RunRow,
   type SealedEnvelope,
@@ -1436,5 +1438,69 @@ export const workspaceObjects = {
       .where(and(eq(workspaceObjectsTable.id, artifactId), eq(workspaceObjectsTable.userId, userId)))
       .limit(1);
     return row ?? null;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// grants (P3 Task 12 — hierarchical permission grants, session-scoped).
+//
+// The matching/normalization core lives in @ovid/agent-core's grants.ts;
+// this layer only persists and reads rows. Rows are written by the
+// approval gate (decision "always" + targets) and read on every approve()
+// call — listForSession is the gate's single read per request.
+// ---------------------------------------------------------------------------
+
+export interface GrantAdd {
+  userId: string;
+  sessionId: string;
+  /** "path" | "host" */
+  kind: string;
+  /** Normalized by kind (the gate normalizes before writing). */
+  pattern: string;
+  /** "allow" | "always" | "deny" */
+  decision: string;
+  /** Audit metadata only — decisions apply across modes. */
+  mode?: string | null;
+}
+
+export const grantsRepo = {
+  /**
+   * The session's grants, insertion order (createdAt then id — the
+   * messages-page convention; UUIDv7 ids make id order = insertion order).
+   * Scoped by BOTH userId and sessionId: no cross-user, no cross-session
+   * leakage.
+   */
+  async listForSession(db: Db, userId: string, sessionId: string): Promise<GrantRow[]> {
+    return db
+      .select()
+      .from(grantsTable)
+      .where(and(eq(grantsTable.userId, userId), eq(grantsTable.sessionId, sessionId)))
+      .orderBy(asc(grantsTable.createdAt), asc(grantsTable.id));
+  },
+
+  /** Plain insert — callers normalize patterns by kind before writing. */
+  async add(db: Db, g: GrantAdd): Promise<GrantRow> {
+    const [row] = await db
+      .insert(grantsTable)
+      .values({
+        id: newId(),
+        userId: g.userId,
+        sessionId: g.sessionId,
+        kind: g.kind,
+        pattern: g.pattern,
+        decision: g.decision,
+        mode: g.mode ?? null,
+      })
+      .returning();
+    return row!;
+  },
+
+  /** true iff the row existed AND was owned by userId. */
+  async remove(db: Db, grantId: string, userId: string): Promise<boolean> {
+    const removed = await db
+      .delete(grantsTable)
+      .where(and(eq(grantsTable.id, grantId), eq(grantsTable.userId, userId)))
+      .returning({ id: grantsTable.id });
+    return removed.length > 0;
   },
 };
