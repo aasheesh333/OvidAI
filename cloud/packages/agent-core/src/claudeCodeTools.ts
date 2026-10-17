@@ -10,9 +10,9 @@
 //     (CC name, permission-rule specifier, MCP pattern, prefix wildcard)
 //     grants. Used by roster.ts's activeSkillScopes step.
 //
-// Pure functions only. The hook payload-shaping halves of the Dart module
-// (ccToolInput / nativeToolInput) belong to the hooks task (T18) and are not
-// re-ported here.
+// Pure functions only. The payload-shaping halves of the Dart module
+// (ccMatcherNames / ccToolInput / nativeToolInput) are ported below — the
+// hooks task (T18) consumes them for the [CC] stdin/matcher contract.
 
 /// Native tools each [CC] tool name grants. EXACT port of Dart's
 /// `_ccToNative` (Bash's order pinned by the plan brief). `multi_edit` and
@@ -153,4 +153,148 @@ export function nativeToolsFor(entry: string): string[] {
   // concrete unless the roster happens to carry it — same as Dart's
   // `base == native` check).
   return [base];
+}
+
+/**
+ * Every [CC] name a hook matcher may use for [native] (Dart
+ * `ClaudeCodeTools.ccMatcherNames`). The subagent spawner is `Agent` in
+ * current [CC] and `Task` in older plugins — both must match. Tools with no
+ * [CC] equivalent (MCP tools, Ovid-only tools) return []: the native name
+ * still matches, the caller adds it separately.
+ */
+export function ccMatcherNames(
+  native: string,
+  input?: Readonly<Record<string, unknown>>,
+): string[] {
+  const primary = ccToolName(native, input);
+  if (primary === native && !isCcToolName(native)) return [];
+  if (primary === "Agent") return ["Agent", "Task"];
+  return [primary];
+}
+
+/**
+ * [input] reshaped for a [CC] hook (Dart `ccToolInput`): the native keys are
+ * kept (so an Ovid-aware hook still works) and the [CC] keys are ADDED
+ * (`file_path`, `old_string`, `new_string`, `content`, `glob`, `query`,
+ * `description`, ...). Never mutates [input].
+ */
+export function ccToolInput(
+  native: string,
+  input: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...input };
+  const alias = (from: string, to: string): void => {
+    if (from in input && !(to in out)) out[to] = input[from];
+  };
+
+  switch (native) {
+    case "file_read":
+    case "read_image":
+    case "file_write":
+      alias("path", "file_path");
+      break;
+    case "fs_edit":
+      alias("path", "file_path");
+      switch (input["command"]) {
+        case "create":
+          alias("file_text", "content");
+          break;
+        case "str_replace":
+          alias("old_str", "old_string");
+          alias("new_str", "new_string");
+          if (!("replace_all" in out)) out["replace_all"] = false;
+          break;
+        case "insert":
+          alias("new_str", "new_string");
+          break;
+      }
+      break;
+    case "multi_edit":
+      alias("path", "file_path");
+      break;
+    case "notebook_edit":
+      alias("path", "notebook_path");
+      break;
+    case "fs_grep":
+      alias("include", "glob");
+      break;
+    case "web_search": {
+      const queries = input["queries"];
+      if (Array.isArray(queries) && queries.length > 0 && !("query" in input)) {
+        out["query"] = queries[0];
+      }
+      break;
+    }
+    case "dispatch_agent":
+      alias("label", "description");
+      if (!("subagent_type" in out)) out["subagent_type"] = "general-purpose";
+      break;
+    case "fetch_url":
+      if (!("prompt" in out)) out["prompt"] = "";
+      break;
+  }
+  return out;
+}
+
+/**
+ * Translate a [CC]-shaped `updatedInput` back into native arguments for
+ * [native] (Dart `nativeToolInput`), given the [original] native args.
+ * Native keys in [updated] are honoured as-is; [CC] keys are renamed;
+ * Claude-Code-only bookkeeping keys are dropped so they never reach a native
+ * tool. The result is meant to be MERGED over [original].
+ */
+export function nativeToolInput(
+  native: string,
+  original: Readonly<Record<string, unknown>>,
+  updated: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const consumed = new Set<string>();
+  const take = (cc: string, nativeKey: string): void => {
+    if (!(cc in updated)) return;
+    consumed.add(cc);
+    // An explicit native key in the same rewrite wins.
+    if (nativeKey in updated && cc !== nativeKey) return;
+    out[nativeKey] = updated[cc];
+  };
+
+  switch (native) {
+    case "file_read":
+    case "read_image":
+    case "file_write":
+      take("file_path", "path");
+      break;
+    case "fs_edit": {
+      take("file_path", "path");
+      const op = updated["command"] ?? original["command"];
+      if (op === "create") {
+        take("content", "file_text");
+      } else {
+        take("old_string", "old_str");
+        take("new_string", "new_str");
+      }
+      consumed.add("replace_all");
+      break;
+    }
+    case "fs_grep":
+      take("glob", "include");
+      break;
+    case "web_search":
+      if (typeof updated["query"] === "string" && !("queries" in updated)) {
+        out["queries"] = [updated["query"]];
+      }
+      consumed.add("query");
+      break;
+    case "dispatch_agent":
+      take("description", "label");
+      break;
+    case "fetch_url":
+      consumed.add("prompt");
+      break;
+  }
+  for (const [key, value] of Object.entries(updated)) {
+    if (consumed.has(key)) continue;
+    out[key] = value;
+  }
+  return out;
 }
