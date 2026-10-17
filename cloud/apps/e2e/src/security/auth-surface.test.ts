@@ -22,8 +22,9 @@
  *     injected request logger (Task 2 seam) — diagnosable server-side,
  *     invisible to the client.
  *
- * Loud skip: without TEST_DATABASE_URL/TEST_REDIS_URL the ticket-race group
- * is skipped with a printed reason (never a silent green — Review Focus #4).
+ * Loud failure: without TEST_DATABASE_URL/TEST_REDIS_URL the ticket-race
+ * group FAILS in beforeAll with the missing env vars (never a silent green —
+ * Review Focus #4 / Finding 7).
  */
 
 import { createRequire } from "node:module";
@@ -54,9 +55,9 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
 
 if (!TEST_DATABASE_URL || !TEST_REDIS_URL) {
-  console.warn(
-    "[security] auth-surface SKIPPED: TEST_DATABASE_URL and/or TEST_REDIS_URL " +
-      "are unset — ticket-race coverage did NOT run.",
+  console.error(
+    "[security] auth-surface requires TEST_DATABASE_URL and TEST_REDIS_URL — " +
+      "refusing to skip green.",
   );
 }
 
@@ -84,7 +85,7 @@ const stubEvents: EventLog = {
   },
 };
 const stubKeys = { getKeyForUser: async () => "sk-test" };
-const stubMint = { ensureKey: async () => ({ key: "sk-test" }) };
+const stubMint = { ensureKeyForUid: async () => ({ key: "sk-test", tier: "free", baseUrl: "" }) };
 const stubTickets: TicketStore = {
   async mint() {
     return "unused";
@@ -174,7 +175,7 @@ function connectAndSubscribe(
   });
 }
 
-describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
+describe(
   "auth surface — single-use WS tickets (real Postgres + Redis)",
   () => {
     let db: Db;
@@ -188,9 +189,15 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
     let sessionB: string;
 
     beforeAll(async () => {
-      await migrate(TEST_DATABASE_URL!);
-      db = createDb(TEST_DATABASE_URL!);
-      redis = new Redis(TEST_REDIS_URL!);
+      if (!TEST_DATABASE_URL || !TEST_REDIS_URL) {
+        throw new Error(
+          "[security] auth-surface: TEST_DATABASE_URL and TEST_REDIS_URL " +
+            "must both be set — refusing to skip green.",
+        );
+      }
+      await migrate(TEST_DATABASE_URL);
+      db = createDb(TEST_DATABASE_URL);
+      redis = new Redis(TEST_REDIS_URL);
       tickets = createTicketStore(redis);
 
       const stamp = `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;

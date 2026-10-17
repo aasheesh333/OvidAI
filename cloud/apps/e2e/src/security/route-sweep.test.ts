@@ -5,13 +5,31 @@
  * table is parsed from `app.printRoutes()` at execution time, so a route added
  * by a later phase is swept automatically. The safety net for that dynamism:
  *
- *   - every parameterized route MUST have an ownership case in
- *     `OWNED_CASES` (or an explicit, justified entry in `EXEMPT_PARAM_ROUTES`)
- *     — a new `:param` route without one fails the suite;
- *   - every `OWNED_CASES` entry MUST still correspond to a registered route —
- *     a stale case (route removed/renamed) fails the suite;
+ *   - every PARAMETERIZED route MUST have an ownership case in `OWNED_CASES`
+ *     (or an explicit, justified entry in `EXEMPT_PARAM_ROUTES`) — a new
+ *     `:param` route without one fails the suite;
+ *   - every non-GET `/cloud/v1` route WITHOUT a `:param` MUST be in
+ *     `NO_PARAM_OWNERSHIP_CASES` (it is exercised cross-owner) or in the
+ *     exact-array-asserted `NO_PARAM_OWNERSHIP_EXEMPT` list with a reason — a
+ *     new body-scoped ownership route without one fails the suite;
+ *   - every case/exemption/public entry MUST still map to a registered route
+ *     — a stale entry (route removed/renamed) fails the suite;
  *   - every route not on `PUBLIC_ROUTES` MUST answer 401 without a ticket —
  *     a route accidentally registered public fails the suite.
+ *
+ * COVERAGE BOUNDARY (accurate, not absolute): the automatic anti-shrink
+ * heuristic covers parameterized routes and non-GET `/cloud/v1` routes.
+ * A new GET route whose ownership is scoped by a QUERY parameter (the
+ * `GET /cloud/v1/mcp/oauth/start?serverId=` pattern) is NOT auto-detected;
+ * it must be added to `NO_PARAM_OWNERSHIP_CASES` explicitly. That gap is
+ * documented here rather than claimed away.
+ *
+ * The composition is built WITH every registration-gating optional dep wired
+ * (`account`, `shares`, `reports`) and with the behavior-gating deps the
+ * owner-side positive controls need (`presigner`, `storage`, `worker`,
+ * `byok`), so routes registered behind an optional dep are enumerated. If a
+ * future dep cannot be wired, add it to `NOT_COVERED_OPTIONAL_DEPS` with a
+ * reason (exact-array asserted).
  *
  * For each ownership-gated route the sweep asserts, as a foreign user B:
  *   - a resource owned by A answers 404 (never 403) with the shared
@@ -19,11 +37,15 @@
  *     Python `{detail:"share_not_found"}` envelope);
  *   - an unknown id answers the same 404 shape;
  *   - a malformed id answers 404 (never a 500 from a uuid-column bind).
+ * A per-route positive control then proves the same route answers its OWNER
+ * with 2xx — an always-404 route cannot pass the sweep.
  *
- * `TIER_GATE_ALLOWLIST` is the ONLY place a literal 403 is permitted (P5/P4
- * tier gates). Ownership NEVER answers 403: every ownership failure is 404.
- * Today the only 403s are the P4 cron tier gates on schedule create/update;
- * every P5/P9 gate answers 402 `pro_required` (or 503 `unavailable`).
+ * `TIER_GATE_ALLOWLIST` is the ONLY place a literal 403 is permitted on an
+ * ownership route (the P4 cron tier gates). Ownership NEVER answers 403.
+ * Separate, non-ownership 403s exist in the production composition: the
+ * legacy `/account/*` lifecycle and the shares/reports account-admission
+ * seam. Both are asserted to carry their expected account-admission codes,
+ * never an ownership answer (Finding 3).
  */
 
 import { randomBytes } from "node:crypto";
@@ -31,6 +53,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   byokKeysRepo,
   createDb,
+  fileManifests,
   mcpServers,
   messages,
   migrate,
@@ -52,18 +75,24 @@ import {
   type ShareReceiptRow,
   type WorkspaceObjectRow,
 } from "@ovid/db";
+import { byokRecordId } from "@ovid/escrow";
 import type { EventLog, SystemBus } from "@ovid/events";
 import type { OAuthFlow } from "@ovid/mcp";
 import { createEnvelopeCrypto } from "@ovid/mcp";
 import type { QueueServices } from "@ovid/queue";
-import { buildGateway, createTestVerifier } from "@ovid/gateway";
+import { buildGateway, createTestVerifier, type GatewayDeps } from "@ovid/gateway";
+// The account lifecycle's AccountError class must be the SAME module instance
+// the gateway routes `instanceof`-check. Vitest inlines this workspace package
+// (the gateway resolves the same dist file), so a relative import keeps the
+// class identity shared; a createRequire/Node import would not.
+import { AccountError } from "../../../../packages/account/dist/index.js";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 if (!TEST_DATABASE_URL) {
-  console.warn(
-    "[security] route-sweep SKIPPED: TEST_DATABASE_URL is unset — the " +
-      "404-not-403 ownership sweep did NOT run.",
+  console.error(
+    "[security] route-sweep requires TEST_DATABASE_URL — refusing to skip " +
+      "green. Set it to a disposable Postgres and re-run.",
   );
 }
 
@@ -105,9 +134,9 @@ export function parsePrintRoutes(tree: string): RouteEntry[] {
 }
 
 /**
- * The ONLY routes permitted to answer a literal 403. Each entry carries its
- * one-line justification. Empty today — ownership failures are 404 and tier
- * gates are 402 `pro_required`.
+ * The ONLY ownership routes permitted to answer a literal 403. Each entry
+ * carries its one-line justification. Today both entries are the P4 cron tier
+ * gate (ownership is checked FIRST, so a foreign owner still gets 404).
  */
 export const TIER_GATE_ALLOWLIST: Array<{
   method: string;
@@ -115,14 +144,15 @@ export const TIER_GATE_ALLOWLIST: Array<{
   expected: 403;
 }> = [
   // P4 cron tier gate: creating a cron schedule as a Free user answers
-  // 403 tier_required (the one non-ownership 403 in the gateway).
+  // 403 tier_required.
   { method: "POST", path: "/cloud/v1/schedules", expected: 403 },
   // Same gate when an owner changes an existing schedule's trigger to cron.
   { method: "PATCH", path: "/cloud/v1/schedules/:id", expected: 403 },
 ];
 
 /** Unauthenticated-by-design routes (explicit; a new public route must be
- * added here or it fails the 401 sweep). */
+ * added here or it fails the 401 sweep). Bidirectionally checked: a stale
+ * entry (route removed/renamed) also fails the suite. */
 const PUBLIC_ROUTES = new Set([
   "GET /cloud/v1/health",
   "GET /cloud/v1/mcp/oauth/callback",
@@ -149,6 +179,129 @@ const EXEMPT_PARAM_ROUTES: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// Body/query-scoped ownership registry (Finding 1a)
+// ---------------------------------------------------------------------------
+
+/**
+ * Ownership routes WITHOUT a `:param`: the resource id travels in the body or
+ * the query string. These are exercised cross-owner below, and the staleness
+ * guard requires every entry to map to a registered route.
+ *
+ * A new route matching the automatic heuristic (non-GET, `/cloud/v1`, no
+ * `:param`, not public) must be added here or exempted below. A new GET
+ * query-scoped ownership route is NOT auto-detected and must be added here
+ * explicitly.
+ */
+export interface NoParamOwnershipCase {
+  /** Build the request that targets user A's resource as user B. */
+  request: (f: Fixtures) => { url: string; body?: unknown };
+}
+
+export const NO_PARAM_OWNERSHIP_CASES: Record<string, NoParamOwnershipCase> = {
+  "GET /cloud/v1/mcp/oauth/start": {
+    request: (f) => ({
+      url: `/cloud/v1/mcp/oauth/start?serverId=${f.mcpA.id}`,
+    }),
+  },
+  "POST /cloud/v1/mcp/oauth/disconnect": {
+    request: (f) => ({
+      url: "/cloud/v1/mcp/oauth/disconnect",
+      body: { serverId: f.mcpA.id },
+    }),
+  },
+  "POST /cloud/v1/import/sessions": {
+    request: (f) => ({
+      url: "/cloud/v1/import/sessions",
+      body: {
+        sessionId: f.sessionA.id,
+        messages: [
+          {
+            clientMsgId: "sweep-import-1",
+            role: "user",
+            content: "hello",
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      },
+    }),
+  },
+};
+
+/**
+ * Non-parameterized non-GET `/cloud/v1` routes that are NOT ownership-scoped.
+ * Exact-array asserted (like `TIER_GATE_ALLOWLIST`): adding an entry requires
+ * editing the assertion in the same file, so the exemption is visible in
+ * review. Every entry needs a real reason.
+ */
+export const NO_PARAM_OWNERSHIP_EXEMPT: Array<{
+  method: string;
+  path: string;
+  reason: string;
+}> = [
+  {
+    method: "POST",
+    path: "/cloud/v1/auth/ticket",
+    reason: "mints a WS ticket for the authenticated principal; no resource id.",
+  },
+  {
+    method: "POST",
+    path: "/cloud/v1/sessions",
+    reason: "creates a session owned by the caller; no existing-resource lookup.",
+  },
+  {
+    method: "POST",
+    path: "/cloud/v1/plugins/install",
+    reason: "installs for the authenticated uid; tier-gated, no foreign resource id.",
+  },
+  {
+    method: "POST",
+    path: "/cloud/v1/system/responses",
+    reason:
+      "forwards to systemHub.respond(principal.uid, …); the pending-request id " +
+      "is scoped to the caller's own channel.",
+  },
+  {
+    method: "POST",
+    path: "/cloud/v1/schedules",
+    reason: "creates a schedule owned by the caller; no existing-resource lookup.",
+  },
+  {
+    method: "POST",
+    path: "/cloud/v1/devices",
+    reason: "registers an FCM token for the authenticated uid.",
+  },
+  {
+    method: "DELETE",
+    path: "/cloud/v1/devices",
+    reason:
+      "deletes by token scoped to the authenticated uid; wrong owner is a " +
+      "silent 204 no-op at the repo (pinned by the devices route).",
+  },
+  {
+    method: "POST",
+    path: "/cloud/v1/byok",
+    reason: "creates a BYOK key owned by the caller; no existing-resource lookup.",
+  },
+  {
+    method: "POST",
+    path: "/cloud/v1/mcp/servers",
+    reason: "creates an MCP server owned by the caller; no existing-resource lookup.",
+  },
+];
+
+/**
+ * Optional `GatewayDeps` fields that gate ROUTE REGISTRATION and are not
+ * wired in this suite. Today the list is empty: `account`, `shares`, and
+ * `reports` are all wired in `beforeAll`. A future registration-gating field
+ * must be wired there or listed here with a reason; the exact-array
+ * assertion makes the omission visible in review.
+ */
+export const NOT_COVERED_OPTIONAL_DEPS: Array<{
+  dep: string;
+  reason: string;
+}> = [];
+
+// ---------------------------------------------------------------------------
 // Fixtures: one owned resource per family
 // ---------------------------------------------------------------------------
 
@@ -157,13 +310,24 @@ interface Fixtures {
   sessionB: SessionRow;
   runA: RunRow;
   scheduleA: ScheduleRow;
+  /** Dedicated to the DELETE positive control (not mutated by reads). */
+  scheduleDeleteA: ScheduleRow;
   pluginA: PluginRow;
+  /** Dedicated to the DELETE positive control. */
+  pluginDeleteA: PluginRow;
   mcpA: McpServerRow;
+  /** Dedicated to the DELETE positive control. */
+  mcpDeleteA: McpServerRow;
+  /** Envelope-encrypted with the suite's master key, so the owner probe works. */
   byokA: ByokKeyRow;
+  /** Dedicated to the DELETE positive control. */
+  byokDeleteA: ByokKeyRow;
   artifactA: WorkspaceObjectRow;
   /** A's artifact under B's session — exercises artifact-level ownership. */
   foreignArtifact: WorkspaceObjectRow;
   shareA: ShareReceiptRow;
+  /** Dedicated to the DELETE positive control. */
+  shareDeleteA: ShareReceiptRow;
 }
 
 interface Case {
@@ -171,6 +335,10 @@ interface Case {
   params: (f: Fixtures) => Record<string, string>;
   /** A valid body so only ownership (not validation) can reject. */
   body?: unknown;
+  /** Owner-side body when the cross-owner body is intentionally invalid. */
+  ownerBody?: unknown;
+  /** Owner-side query string (e.g. the workspace file path). */
+  ownerQuery?: Record<string, string>;
 }
 
 const shareBody = {
@@ -203,10 +371,12 @@ const OWNED_CASES: Record<string, Case> = {
   },
   "GET /cloud/v1/sessions/:id/workspace/file": {
     params: (f) => ({ id: f.sessionA.id }),
+    ownerQuery: { path: "notes.txt" },
   },
   "PUT /cloud/v1/sessions/:id/workspace/file": {
     params: (f) => ({ id: f.sessionA.id }),
     body: {},
+    ownerBody: { path: "notes.txt", contentUtf8: "hi" },
   },
   "POST /cloud/v1/sessions/:id/workspace/hydrate": {
     params: (f) => ({ id: f.sessionA.id }),
@@ -221,9 +391,13 @@ const OWNED_CASES: Record<string, Case> = {
     params: (f) => ({ id: f.scheduleA.id }),
     body: { title: "foreign edit" },
   },
-  "DELETE /cloud/v1/schedules/:id": { params: (f) => ({ id: f.scheduleA.id }) },
+  "DELETE /cloud/v1/schedules/:id": {
+    params: (f) => ({ id: f.scheduleDeleteA.id }),
+  },
   "GET /cloud/v1/plugins/:id": { params: (f) => ({ id: f.pluginA.id }) },
-  "DELETE /cloud/v1/plugins/:id": { params: (f) => ({ id: f.pluginA.id }) },
+  "DELETE /cloud/v1/plugins/:id": {
+    params: (f) => ({ id: f.pluginDeleteA.id }),
+  },
   "PATCH /cloud/v1/plugins/:id/config": {
     params: (f) => ({ id: f.pluginA.id }),
     body: { config: { token: "x" } },
@@ -233,15 +407,28 @@ const OWNED_CASES: Record<string, Case> = {
     params: (f) => ({ id: f.mcpA.id }),
     body: { enabled: false },
   },
-  "DELETE /cloud/v1/mcp/servers/:id": { params: (f) => ({ id: f.mcpA.id }) },
-  "DELETE /cloud/v1/byok/:id": { params: (f) => ({ id: f.byokA.id }) },
+  "DELETE /cloud/v1/mcp/servers/:id": {
+    params: (f) => ({ id: f.mcpDeleteA.id }),
+  },
+  "DELETE /cloud/v1/byok/:id": { params: (f) => ({ id: f.byokDeleteA.id }) },
   "POST /cloud/v1/byok/:id/test": { params: (f) => ({ id: f.byokA.id }) },
   // Legacy root routes (Python envelope): owner-scoped update/revoke.
   "PUT /shares/:token": {
     params: (f) => ({ token: f.shareA.token }),
     body: shareBody,
   },
-  "DELETE /shares/:token": { params: (f) => ({ token: f.shareA.token }) },
+  "DELETE /shares/:token": { params: (f) => ({ token: f.shareDeleteA.token }) },
+};
+
+/**
+ * Bodies that let the UNAUTHENTICATED sweep reach the auth check. Two legacy
+ * account routes validate their body BEFORE authentication (FastAPI param
+ * resolution order), so an empty body would answer 400/422 instead of 401.
+ * These are still auth-swept; only the body is supplied.
+ */
+const UNAUTH_SWEEP_BODIES: Record<string, unknown> = {
+  "POST /account/deletion": { request_id: "sweep-unauth-request" },
+  "POST /account/deletion/cancel": { consent: true },
 };
 
 function fillParams(pattern: string, values: Record<string, string>): string {
@@ -293,21 +480,36 @@ function authHeaders(uid: string): Record<string, string> {
   return { authorization: `Bearer test:${uid}` };
 }
 
+function splitRouteKey(key: string): { method: string; path: string } {
+  const space = key.indexOf(" ");
+  return { method: key.slice(0, space), path: key.slice(space + 1) };
+}
+
 // ---------------------------------------------------------------------------
 // Suite
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
+// Finding 7: a missing TEST_DATABASE_URL FAILS the suite (loud, never a
+// silent green). CI always provides it; a local `pnpm -r test` without the
+// dev services is meant to stop here and say why.
+describe("route sweep — 404 not 403", () => {
   let db: Db;
   let app: ReturnType<typeof buildGateway>;
   let routes: RouteEntry[];
   let fixtures: Fixtures;
   let userA: string;
   let userB: string;
+  let baseDeps: GatewayDeps;
 
   beforeAll(async () => {
-    await migrate(TEST_DATABASE_URL!);
-    db = createDb(TEST_DATABASE_URL!);
+    if (!TEST_DATABASE_URL) {
+      throw new Error(
+        "[security] route-sweep: TEST_DATABASE_URL is unset — refusing to " +
+          "skip green. Point it at a disposable Postgres and re-run.",
+      );
+    }
+    await migrate(TEST_DATABASE_URL);
+    db = createDb(TEST_DATABASE_URL);
 
     const stamp = `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
     userA = `sweep-a-${stamp}`;
@@ -317,6 +519,13 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
 
     const sessionA = await sessions.create(db, userA, "A session");
     const sessionB = await sessions.create(db, userB, "B session");
+    // Warm manifest so the workspace positive controls take the live path
+    // (worker stubs below) instead of the never-registered seams.
+    await fileManifests.upsertWarm(db, {
+      sessionId: sessionA.id,
+      userId: userA,
+      workspaceBytes: 0,
+    });
     const prompt = await messages.append(db, {
       sessionId: sessionA.id,
       role: "user",
@@ -336,11 +545,28 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
       maxRetries: 0,
       nextRunAt: new Date(Date.now() + 300_000),
     });
+    const scheduleDeleteA = await schedules.create(db, {
+      userId: userA,
+      sessionId: sessionA.id,
+      title: "A deletable schedule",
+      description: "sweep delete fixture",
+      trigger: { kind: "every", seconds: 300 },
+      autonomy: "safe",
+      maxRetries: 0,
+      nextRunAt: new Date(Date.now() + 300_000),
+    });
     const pluginA = await plugins.upsert(db, {
       userId: userA,
       pluginId: "@ovid/sweep-plugin",
       version: "1.0.0",
       source: { kind: "npm", label: "@ovid/sweep-plugin" },
+      status: "installed",
+    });
+    const pluginDeleteA = await plugins.upsert(db, {
+      userId: userA,
+      pluginId: "@ovid/sweep-delete-plugin",
+      version: "1.0.0",
+      source: { kind: "npm", label: "@ovid/sweep-delete-plugin" },
       status: "installed",
     });
     const mcpA = await mcpServers.create(db, {
@@ -349,7 +575,31 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
       transport: "http",
       config: { url: "https://mcp.example.test" },
     });
-    const byokA = await byokKeysRepo.create(db, {
+    const mcpDeleteA = await mcpServers.create(db, {
+      userId: userA,
+      name: "sweep-delete-server",
+      transport: "http",
+      config: { url: "https://mcp-delete.example.test" },
+    });
+    const crypto = createEnvelopeCrypto("11".repeat(32));
+    // byokA must be decryptable for the owner's /test positive control: bind
+    // the envelope AAD to the row id, exactly as POST /byok does.
+    const byokAId = newId();
+    const envelope = crypto.encrypt("sk-sweep", byokRecordId(byokAId));
+    const byokAInsert = {
+      id: byokAId,
+      userId: userA,
+      providerId: "openai",
+      endpoint: "https://api.openai.com/v1",
+      wrappedDek: envelope.wrappedDek,
+      iv: envelope.iv,
+      ciphertext: envelope.ciphertext,
+      tag: envelope.tag,
+    };
+    // The repo's declared insert type has no `id`; the route passes one the
+    // same way (the generated id is overridden by the spread).
+    const byokA = await byokKeysRepo.create(db, byokAInsert);
+    const byokDeleteA = await byokKeysRepo.create(db, {
       userId: userA,
       providerId: "openai",
       endpoint: "https://api.openai.com/v1",
@@ -382,8 +632,20 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
       db,
       userA,
       {
-        sessionId: sessionA.id,
+        // `shareBody.session_id` must match for the owner PUT positive
+        // control (the repo refuses a session mismatch as share_not_found).
+        sessionId: "shared-session",
         requestId: `sweep-share-${stamp}`,
+        messages: [{ role: "user", content: "public text" }],
+      },
+      { now: new Date(), ttlSeconds: 3_600 },
+    );
+    const shareDeleteA = await sharesRepo.create(
+      db,
+      userA,
+      {
+        sessionId: "shared-session",
+        requestId: `sweep-share-delete-${stamp}`,
         messages: [{ role: "user", content: "public text" }],
       },
       { now: new Date(), ttlSeconds: 3_600 },
@@ -394,16 +656,39 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
       sessionB,
       runA,
       scheduleA,
+      scheduleDeleteA,
       pluginA,
+      pluginDeleteA,
       mcpA,
+      mcpDeleteA,
       byokA,
+      byokDeleteA,
       artifactA,
       foreignArtifact,
       shareA,
+      shareDeleteA,
     };
 
+    // `remove` rejects so the cancel positive control takes the documented
+    // "cancelling" degrade (202) without needing a real event log append.
+    const noopQueue = {
+      async add() {
+        return {};
+      },
+    };
     const queues = {
-      agentRuns: { remove: async () => {} },
+      agentRuns: {
+        async add() {
+          return {};
+        },
+        async remove() {
+          throw new Error("sweep stub: job not in queue");
+        },
+      },
+      hydrate: noopQueue,
+      hibernate: noopQueue,
+      schedules: noopQueue,
+      pluginInstalls: noopQueue,
     } as unknown as QueueServices;
     const events: EventLog = {
       async append() {
@@ -435,7 +720,101 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
       },
     };
 
-    app = buildGateway({
+    // -- Optional deps wired so every registration/behavior seam is live ----
+    const presigner = {
+      async presignPut() {
+        return "https://upload.example.test/put";
+      },
+    };
+    const storage = {
+      kind: "fs" as const,
+      async put(): Promise<never> {
+        throw new Error("storage.put not expected in route sweep");
+      },
+      async get() {
+        return null;
+      },
+      async getBuffer() {
+        return null;
+      },
+      async head() {
+        return null;
+      },
+      async delete() {},
+      async presignGet() {
+        return "https://download.example.test/artifact";
+      },
+      async presignPut() {
+        return "https://upload.example.test/artifact";
+      },
+      async readerSpec() {
+        return null;
+      },
+    };
+    const worker = {
+      async getTree() {
+        return {
+          ok: true as const,
+          value: {
+            tree: {
+              version: 1 as const,
+              generatedAt: new Date().toISOString(),
+              truncated: false,
+              totals: { files: 0, dirs: 0, bytes: 0 },
+              roots: [],
+            },
+          },
+        };
+      },
+      async getFile(_uid: string, _sessionId: string, path: string) {
+        return {
+          ok: true as const,
+          value: {
+            kind: "content" as const,
+            path,
+            sizeBytes: 2,
+            sha256Hex: "c".repeat(64),
+            contentType: "text/plain",
+            contentBase64: Buffer.from("hi").toString("base64"),
+          },
+        };
+      },
+      async putFile(_uid: string, _sessionId: string, path: string) {
+        return {
+          ok: true as const,
+          value: { path, sizeBytes: 2, sha256: "d".repeat(64) },
+        };
+      },
+    };
+    // The account routes are registered at the ROOT with their own auth; the
+    // lifecycle stub supplies deterministic account-admission 403s.
+    const accountLifecycle = {
+      async request(): Promise<never> {
+        throw new AccountError("account_unavailable", 403);
+      },
+      async status(): Promise<never> {
+        throw new AccountError("account_unavailable", 403);
+      },
+      async login(): Promise<never> {
+        throw new AccountError("unsupported_identity", 403);
+      },
+      async cancel(): Promise<never> {
+        throw new AccountError("account_deletion_pending", 403);
+      },
+      async access<T>(): Promise<T> {
+        throw new AccountError("account_deletion_pending", 403);
+      },
+      async finalize(): Promise<never> {
+        throw new AccountError("deletion_in_progress", 409);
+      },
+    };
+    const accountVerify = async (token: string) => ({
+      uid: token.replace(/^test:/, ""),
+      auth_time: Math.floor(Date.now() / 1000),
+      firebase: { sign_in_provider: "google.com" },
+    });
+
+    baseDeps = {
       db,
       queues,
       verifier: createTestVerifier(),
@@ -445,15 +824,29 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
         verify: async () => null,
       },
       keys: { getKeyForUser: async () => "sk-test" },
-      mint: { ensureKey: async () => ({ key: "sk-test" }) },
+      mint: {
+        ensureKeyForUid: async () => ({ key: "sk-test", tier: "free", baseUrl: "" }),
+      },
       events,
-      crypto: createEnvelopeCrypto("11".repeat(32)),
+      crypto,
       oauth,
+      // Registration-gating optional deps: ALL wired (Finding 1b).
       // Legacy root routes included on purpose: the sweep must see every
       // registered route, not just the /cloud/v1 surface.
       shares: { baseUrl: "https://share.example.test" },
       reports: {},
-    });
+      account: { lifecycle: accountLifecycle, verify: accountVerify },
+      // Behavior-gating deps the owner-side positive controls exercise.
+      presigner,
+      storage,
+      worker,
+      byok: {
+        fetchImpl: async () => new Response(null, { status: 200 }),
+        lookupHost: async () => ["93.184.216.34"],
+      },
+    };
+
+    app = buildGateway(baseDeps);
     await app.ready();
     routes = parsePrintRoutes(app.printRoutes({ commonPrefix: false }));
   });
@@ -467,7 +860,29 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
     return `${route.method} ${route.path}`;
   }
 
-  it("parsed the route table (sanity: known routes are present)", () => {
+  /** Synthetic-input version of the parameterized guard (see the test below). */
+  function unaccountedParamRoutes(input: RouteEntry[]): string[] {
+    return input
+      .filter((route) => route.path.includes(":"))
+      .map(routeKey)
+      .filter((key) => !(key in OWNED_CASES) && !(key in EXEMPT_PARAM_ROUTES));
+  }
+
+  /** Synthetic-input version of the non-param ownership guard. */
+  function unaccountedNoParamOwnershipRoutes(input: RouteEntry[]): string[] {
+    const covered = new Set([
+      ...Object.keys(NO_PARAM_OWNERSHIP_CASES),
+      ...NO_PARAM_OWNERSHIP_EXEMPT.map((entry) => `${entry.method} ${entry.path}`),
+    ]);
+    return input
+      .filter((route) => route.method !== "GET")
+      .filter((route) => isCloudPath(route.path))
+      .filter((route) => !route.path.includes(":"))
+      .map(routeKey)
+      .filter((key) => !covered.has(key));
+  }
+
+  it("parsed the route table (sanity: known routes from every registration path)", () => {
     const keys = new Set(routes.map(routeKey));
     for (const expected of [
       "POST /cloud/v1/sessions",
@@ -476,25 +891,84 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
       "GET /cloud/v1/sessions/:id/artifacts/:artifactId/url",
       "POST /shares/:token/fork",
       "POST /v1/reports",
+      // Each registration-gating optional dep is actually wired.
+      "POST /account/deletion",
+      "GET /shares",
+      "POST /v1/reports",
     ]) {
       expect(keys.has(expected), `missing parsed route ${expected}`).toBe(true);
     }
   });
 
   it("every parameterized route has an ownership case or a documented exemption", () => {
-    const missing = routes
-      .filter((route) => route.path.includes(":"))
-      .map(routeKey)
-      .filter((key) => !(key in OWNED_CASES) && !(key in EXEMPT_PARAM_ROUTES));
-    expect(missing).toEqual([]);
+    expect(unaccountedParamRoutes(routes)).toEqual([]);
   });
 
-  it("every ownership/exemption case maps to a registered route (no silent shrink)", () => {
+  it("the parameterized anti-shrink guard flags a newly added :param route", () => {
+    // Probe with a synthetic registration: the guard is data-driven, so a new
+    // route must fail until it is seeded. (The same proof the reviewer ran
+    // against a live extra route, without touching gateway source.)
+    expect(
+      unaccountedParamRoutes([
+        ...routes,
+        { method: "GET", path: "/cloud/v1/newthing/:id" },
+      ]),
+    ).toEqual(["GET /cloud/v1/newthing/:id"]);
+  });
+
+  it("every non-GET /cloud/v1 route without a :param is owned or documented exempt", () => {
+    expect(unaccountedNoParamOwnershipRoutes(routes)).toEqual([]);
+  });
+
+  it("the non-param ownership guard flags a newly added body-scoped route", () => {
+    // Finding 1a probe: a new non-param ownership route (no `:param`) is
+    // otherwise only 401-checked. It must fail until registered or exempted.
+    expect(
+      unaccountedNoParamOwnershipRoutes([
+        ...routes,
+        { method: "POST", path: "/cloud/v1/newthing/transfer" },
+      ]),
+    ).toEqual(["POST /cloud/v1/newthing/transfer"]);
+  });
+
+  it("every case/exemption/public entry maps to a registered route (no silent shrink)", () => {
     const registered = new Set(routes.map(routeKey));
-    const stale = [...Object.keys(OWNED_CASES), ...Object.keys(EXEMPT_PARAM_ROUTES)].filter(
-      (key) => !registered.has(key),
-    );
+    const tracked = [
+      ...Object.keys(OWNED_CASES),
+      ...Object.keys(EXEMPT_PARAM_ROUTES),
+      ...Object.keys(NO_PARAM_OWNERSHIP_CASES),
+      ...NO_PARAM_OWNERSHIP_EXEMPT.map((entry) => `${entry.method} ${entry.path}`),
+      ...Object.keys(UNAUTH_SWEEP_BODIES),
+      ...PUBLIC_ROUTES,
+    ];
+    const stale = tracked.filter((key) => !registered.has(key));
     expect(stale).toEqual([]);
+  });
+
+  it("the non-param ownership exemption list is exact (no silent widening)", () => {
+    expect(NO_PARAM_OWNERSHIP_EXEMPT.map((entry) => `${entry.method} ${entry.path}`)).toEqual([
+      "POST /cloud/v1/auth/ticket",
+      "POST /cloud/v1/sessions",
+      "POST /cloud/v1/plugins/install",
+      "POST /cloud/v1/system/responses",
+      "POST /cloud/v1/schedules",
+      "POST /cloud/v1/devices",
+      "DELETE /cloud/v1/devices",
+      "POST /cloud/v1/byok",
+      "POST /cloud/v1/mcp/servers",
+    ]);
+    for (const entry of NO_PARAM_OWNERSHIP_EXEMPT) {
+      expect(entry.reason.length, `${entry.method} ${entry.path} needs a reason`).toBeGreaterThan(
+        10,
+      );
+    }
+  });
+
+  it("every registration-gating optional dep is wired or explicitly not covered", () => {
+    // `account`, `shares`, and `reports` are wired in beforeAll (their routes
+    // are asserted present in the sanity test). Anything that cannot be wired
+    // must be listed with a reason — exact-array asserted so it stays visible.
+    expect(NOT_COVERED_OPTIONAL_DEPS).toEqual([]);
   });
 
   it("every non-public route answers 401 without a ticket", async () => {
@@ -507,7 +981,7 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
         method: route.method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
         url,
         headers: {},
-        payload: bodyFor(route.method),
+        payload: UNAUTH_SWEEP_BODIES[key] ?? bodyFor(route.method),
       });
       if (res.statusCode !== 401) {
         failures.push(`${key} → ${res.statusCode} (expected 401)`);
@@ -628,48 +1102,27 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
     expect((res.json() as { error?: { code?: string } }).error?.code).toBe("not_found");
   });
 
-  it("body/query-scoped ownership also answers 404 cross-owner", async () => {
-    // MCP OAuth start (query) and disconnect (body).
-    const start = await app.inject({
-      method: "GET",
-      url: `/cloud/v1/mcp/oauth/start?serverId=${fixtures.mcpA.id}`,
-      headers: authHeaders(userB),
-    });
-    expect(start.statusCode).toBe(404);
-    expect((start.json() as { error?: { code?: string } }).error?.code).toBe("not_found");
-
-    const disconnect = await app.inject({
-      method: "POST",
-      url: "/cloud/v1/mcp/oauth/disconnect",
-      headers: authHeaders(userB),
-      payload: { serverId: fixtures.mcpA.id },
-    });
-    expect(disconnect.statusCode).toBe(404);
-    expect((disconnect.json() as { error?: { code?: string } }).error?.code).toBe(
-      "not_found",
-    );
-
-    // History import continuation targets a session id from the body.
-    const importRes = await app.inject({
-      method: "POST",
-      url: "/cloud/v1/import/sessions",
-      headers: authHeaders(userB),
-      payload: {
-        sessionId: fixtures.sessionA.id,
-        messages: [
-          {
-            clientMsgId: "sweep-import-1",
-            role: "user",
-            content: "hello",
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      },
-    });
-    expect(importRes.statusCode).toBe(404);
-    expect((importRes.json() as { error?: { code?: string } }).error?.code).toBe(
-      "not_found",
-    );
+  it("every body/query-scoped ownership route answers 404 cross-owner", async () => {
+    const failures: string[] = [];
+    for (const [key, ownershipCase] of Object.entries(NO_PARAM_OWNERSHIP_CASES)) {
+      const { method } = splitRouteKey(key);
+      const request = ownershipCase.request(fixtures);
+      const res = await app.inject({
+        method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+        url: request.url,
+        headers: authHeaders(userB),
+        payload: bodyFor(method, request.body),
+      });
+      if (res.statusCode !== 404) {
+        failures.push(`${key} → ${res.statusCode} (expected 404)`);
+        continue;
+      }
+      const error = (res.json() as { error?: { code?: string } }).error;
+      if (error?.code !== "not_found") {
+        failures.push(`${key} → 404 but code=${String(error?.code)}`);
+      }
+    }
+    expect(failures).toEqual([]);
   });
 
   it("legacy share fork is a public capability, not an ownership leak", async () => {
@@ -718,18 +1171,18 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
 
   it("tier gates answer 402/403 per their contract, and every 403 is allowlisted", async () => {
     // P5/P9 gates: 402 pro_required.
-    const plugins = await app.inject({
+    const pluginsRes = await app.inject({
       method: "POST",
       url: "/cloud/v1/plugins/install",
       headers: authHeaders(userA), // tier defaults to free
       payload: { source: { kind: "npm", package: "@ovid/sweep-plugin" } },
     });
-    expect(plugins.statusCode).toBe(402);
-    expect((plugins.json() as { error?: { code?: string } }).error?.code).toBe(
+    expect(pluginsRes.statusCode).toBe(402);
+    expect((pluginsRes.json() as { error?: { code?: string } }).error?.code).toBe(
       "pro_required",
     );
 
-    // P4 cron tier gate: the only 403 in the gateway, explicitly allowlisted.
+    // P4 cron tier gate: the only 403 on an ownership route, allowlisted.
     const cron = await app.inject({
       method: "POST",
       url: "/cloud/v1/schedules",
@@ -748,5 +1201,143 @@ describe.skipIf(!TEST_DATABASE_URL)("route sweep — 404 not 403", () => {
       { method: "POST", path: "/cloud/v1/schedules", expected: 403 },
       { method: "PATCH", path: "/cloud/v1/schedules/:id", expected: 403 },
     ]);
+  });
+
+  it("the allowlist's PATCH entry is a real tier gate (owner cron PATCH → 403)", async () => {
+    // Positive control for the allowlist itself: the same body that a foreign
+    // owner sends below must actually reach the tier gate for the OWNER.
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/schedules/${fixtures.scheduleA.id}`,
+      headers: authHeaders(userA),
+      payload: { trigger: { kind: "cron", expr: "*/5 * * * *", tz: "UTC" } },
+    });
+    expect(res.statusCode).toBe(403);
+    expect((res.json() as { error?: { code?: string } }).error?.code).toBe(
+      "tier_required",
+    );
+  });
+
+  it("foreign owner's cron PATCH answers 404, never 403 (ownership precedes the tier gate)", async () => {
+    // Finding 2 pin: if the cron tier check moved before the ownership check,
+    // a stranger would get 403 tier_required — an existence probe. It must
+    // stay 404 not_found even when the body would hit the gate.
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/schedules/${fixtures.scheduleA.id}`,
+      headers: authHeaders(userB),
+      payload: { trigger: { kind: "cron", expr: "*/5 * * * *", tz: "UTC" } },
+    });
+    expect(res.statusCode).toBe(404);
+    expect((res.json() as { error?: { code?: string } }).error?.code).toBe("not_found");
+  });
+
+  it("/account/* 403s are account-admission codes, not ownership leaks", async () => {
+    // Finding 3: the legacy lifecycle routes intentionally answer 403 for
+    // identity/lifecycle states. They are not ownership routes; assert the
+    // exact account codes so the report's "only cron 403s" claim is not
+    // silently relied on.
+    const cases = [
+      {
+        method: "POST" as const,
+        url: "/account/deletion",
+        payload: { request_id: "sweep-account-request" },
+        code: "account_unavailable",
+      },
+      {
+        method: "GET" as const,
+        url: "/account/deletion",
+        code: "account_unavailable",
+      },
+      {
+        method: "POST" as const,
+        url: "/account/login",
+        payload: {},
+        code: "unsupported_identity",
+      },
+      {
+        method: "POST" as const,
+        url: "/account/deletion/cancel",
+        payload: { consent: true },
+        code: "account_deletion_pending",
+      },
+    ];
+    for (const item of cases) {
+      const res = await app.inject({
+        method: item.method,
+        url: item.url,
+        headers: authHeaders(userA),
+        payload: item.payload,
+      });
+      expect(res.statusCode, item.url).toBe(403);
+      expect((res.json() as { detail?: string }).detail, item.url).toBe(item.code);
+    }
+  });
+
+  it("legacy shares/reports admission 403s are account-admission codes", async () => {
+    // Finding 3: in the production composition `accountAdmission` wraps the
+    // legacy shares and reports writes. Build that composition explicitly
+    // (the main sweep intentionally leaves admission off so ownership
+    // semantics are exercised) and assert the 403 is the admission code.
+    const admission = async (): Promise<never> => {
+      throw new AccountError("account_deletion_pending", 403);
+    };
+    const admissionApp = buildGateway({
+      ...baseDeps,
+      shares: { baseUrl: "https://share.example.test", admission },
+      reports: { admission },
+    });
+    try {
+      const sharesRes = await admissionApp.inject({
+        method: "GET",
+        url: "/shares",
+        headers: authHeaders(userA),
+      });
+      expect(sharesRes.statusCode).toBe(403);
+      expect((sharesRes.json() as { detail?: string }).detail).toBe(
+        "account_deletion_pending",
+      );
+
+      const reportsRes = await admissionApp.inject({
+        method: "POST",
+        url: "/v1/reports",
+        headers: authHeaders(userA),
+        payload: {
+          request_id: "sweep-report-request-1",
+          kind: "ai_output",
+          reason: "spam",
+        },
+      });
+      expect(reportsRes.statusCode).toBe(403);
+      expect((reportsRes.json() as { detail?: string }).detail).toBe(
+        "account_deletion_pending",
+      );
+    } finally {
+      await admissionApp.close();
+    }
+  });
+
+  it("every ownership route answers its OWNER with 2xx (positive control)", async () => {
+    // Finding 4: "foreign owner → 404" alone would pass for a route that
+    // unconditionally 404s. Every case must also succeed for its owner.
+    const failures: string[] = [];
+    for (const [key, ownershipCase] of Object.entries(OWNED_CASES)) {
+      const { method, path } = splitRouteKey(key);
+      let url = fillParams(path, ownershipCase.params(fixtures));
+      if (ownershipCase.ownerQuery !== undefined) {
+        const query = new URLSearchParams(ownershipCase.ownerQuery).toString();
+        url = `${url}?${query}`;
+      }
+      const res = await app.inject({
+        method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+        url,
+        headers: authHeaders(userA),
+        payload: bodyFor(method, ownershipCase.ownerBody ?? ownershipCase.body),
+      });
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        failures.push(`${key} → ${res.statusCode} (expected 2xx for the owner)`);
+      }
+    }
+    expect(failures).toEqual([]);
   });
 });
