@@ -63,7 +63,6 @@ void main() {
         'android.permission.READ_MEDIA_VIDEO',
         'android.permission.MANAGE_EXTERNAL_STORAGE',
         'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
-        'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
         'com.google.android.gms.permission.AD_ID',
       ]) {
         expect(
@@ -72,7 +71,6 @@ void main() {
           reason: permission,
         );
       }
-      expect(overlay, contains('android:foregroundServiceType="dataSync"'));
       // XML comments may not contain a double hyphen; the merger rejects it.
       final comments = RegExp(r'<!--([\s\S]*?)-->').allMatches(overlay);
       for (final c in comments) {

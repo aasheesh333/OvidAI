@@ -162,8 +162,9 @@ void main() {
       expect(i, greaterThan(-1));
       final region = src.substring(i - 200, i + 1800);
       expect(region, isNot(contains('AppState.I.selectSession(s.id)')));
-      expect(region, contains('reminder fired in'));
-      expect(region, contains('wasVisible'));
+      // Cloud runs deliver their result via FCM; the local notification
+      // service that used to announce the reminder no longer exists.
+      expect(region, contains('Background work stays session-owned'));
     });
 
     test('the schedule tick is no longer 1Hz for the app lifetime', () {
