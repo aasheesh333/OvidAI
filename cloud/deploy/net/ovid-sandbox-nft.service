@@ -17,7 +17,9 @@ Before=ovid-worker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /opt/ovid-cloud/nft/ovid-sandbox.nft
-ExecStop=/usr/sbin/nft delete table inet ovid_sandbox
+# "-" on ExecStop: stopping after the table is already gone (fresh boot
+# ordering, manual `nft delete table`, …) must not mark the unit failed.
+ExecStop=-/usr/sbin/nft delete table inet ovid_sandbox
 
 [Install]
 WantedBy=multi-user.target

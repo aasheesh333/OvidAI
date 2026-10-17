@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import {
   DEFAULT_BLOCKED_V4,
   DEFAULT_BLOCKED_V6,
+  isValidV6Cidr,
   parseBrowserEgressUid,
   renderNftRuleset,
   type EgressConfig,
@@ -216,6 +222,88 @@ describe("parseBrowserEgressUid", () => {
         /OVID_BROWSER_EGRESS_UID/,
       );
     }
+  });
+});
+
+describe("isValidV6Cidr (M1: strict — loose input must fail at render time, not load time)", () => {
+  it("accepts real v6 addresses and cidrs", () => {
+    for (const good of ["::1", "::1/128", "fe80::", "fe80::/10", "fc00::/7", "::ffff:1.2.3.4"]) {
+      expect(isValidV6Cidr(good), good).toBe(true);
+    }
+  });
+
+  it("rejects ':::', malformed/garbage, and bad prefixes", () => {
+    for (const bad of [
+      ":::",
+      ":/:",
+      "nope",
+      "fe80::/", // empty prefix
+      "fe80::/129",
+      "fe80::/ten",
+      "1.2.3.4/24", // v4 is not a v6 cidr
+    ]) {
+      expect(isValidV6Cidr(bad), bad).toBe(false);
+    }
+  });
+});
+
+describe("render-nft bin — invoked through a SYMLINK (pnpm node_modules/.bin layout, I1)", () => {
+  // The bin-level tests execute dist/renderNftCli.js, so build the package
+  // first — always, not only when dist is missing: a stale dist would let a
+  // regression hide behind old output.
+  const PKG_ROOT = fileURLToPath(new URL("..", import.meta.url));
+  const CLI_DIST = join(PKG_ROOT, "dist", "renderNftCli.js");
+  const tmp = mkdtempSync(join(tmpdir(), "ovid-nft-bin-"));
+  // pnpm installs package bins as symlinks into node_modules/.bin — this
+  // layout is exactly what the guard must survive (I1).
+  const link = join(tmp, "render-nft");
+
+  beforeAll(() => {
+    const build = spawnSync(join(PKG_ROOT, "node_modules", ".bin", "tsc"), ["-p", "tsconfig.json"], {
+      cwd: PKG_ROOT,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    if (build.status !== 0) {
+      throw new Error(`bin tests need a fresh build, tsc failed:\n${build.stderr}`);
+    }
+    symlinkSync(CLI_DIST, link);
+  }, 60_000);
+
+  afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+
+  it("missing OVID_PUBLIC_IP through a symlink → exit 1 + usage on stderr, NOT silent success", () => {
+    const r = spawnSync(process.execPath, [link], { encoding: "utf8", env: {} });
+    // Regression (I1): the old import.meta.url === pathToFileURL(argv[1])
+    // guard mismatched on symlinks → exit 0 with ZERO output — a silent
+    // empty "ruleset" from a security-adjacent tool.
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("OVID_PUBLIC_IP");
+    expect(r.stderr).toContain("usage:");
+  });
+
+  it("with OVID_PUBLIC_IP through a symlink → exit 0 + the real ruleset on stdout", () => {
+    const r = spawnSync(process.execPath, [link], {
+      encoding: "utf8",
+      env: { OVID_PUBLIC_IP: "203.0.113.7" },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toContain("meta skuid 200000-209999 ip daddr @blocked_v4 counter drop");
+    expect(r.stdout).toContain("meta skuid 200000-209999 ip daddr 203.0.113.7 counter drop");
+  });
+
+  it("direct (non-symlink) invocation still behaves identically", () => {
+    const r = spawnSync(process.execPath, [CLI_DIST], { encoding: "utf8", env: {} });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("usage:");
+    expect(
+      spawnSync(process.execPath, [CLI_DIST], {
+        encoding: "utf8",
+        env: { OVID_PUBLIC_IP: "198.51.100.9" },
+      }).stdout,
+    ).toContain("meta skuid 200000-209999 ip daddr 198.51.100.9 counter drop");
   });
 });
 

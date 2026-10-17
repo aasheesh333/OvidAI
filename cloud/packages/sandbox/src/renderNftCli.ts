@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { isIP } from "node:net";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { parseUidRange } from "./config.js";
 import {
   DEFAULT_BLOCKED_V4,
   DEFAULT_BLOCKED_V6,
@@ -21,42 +23,9 @@ export const RENDER_NFT_USAGE = [
   "  OVID_BROWSER_EGRESS_ALLOW   csv of internal-endpoint IPv4 cidrs the browser uid may reach",
 ].join("\n");
 
-// Mirror config.ts's parseUidRange rules so the CLI and SandboxConfig can
-// never disagree about the block (gap G4: the rules key on the CONFIGURED
-// range — prod 200000-209999 and P10 staging 220000-229999 both render).
-const UID_BASE_FLOOR = 100_000;
-const UID_RANGE_WIDTH = 9_999;
-
-function parseUidRange(env: NodeJS.ProcessEnv): [number, number] {
-  const baseRaw = env.OVID_SANDBOX_UID_BASE;
-  let uidBase = 200_000;
-  if (baseRaw !== undefined && baseRaw !== "") {
-    const n = Number(baseRaw);
-    if (!Number.isInteger(n) || n < UID_BASE_FLOOR) {
-      throw new Error(
-        `OVID config: OVID_SANDBOX_UID_BASE must be an integer >= ${UID_BASE_FLOOR}, got ${JSON.stringify(baseRaw)}`,
-      );
-    }
-    uidBase = n;
-  }
-  const maxRaw = env.OVID_SANDBOX_UID_MAX;
-  let uidMax = uidBase + UID_RANGE_WIDTH;
-  if (maxRaw !== undefined && maxRaw !== "") {
-    const n = Number(maxRaw);
-    if (!Number.isInteger(n)) {
-      throw new Error(
-        `OVID config: OVID_SANDBOX_UID_MAX must be an integer, got ${JSON.stringify(maxRaw)}`,
-      );
-    }
-    uidMax = n;
-  }
-  if (uidMax <= uidBase || uidMax > uidBase + UID_RANGE_WIDTH) {
-    throw new Error(
-      `OVID config: OVID_SANDBOX_UID_MAX must satisfy uidBase < OVID_SANDBOX_UID_MAX <= uidBase + ${UID_RANGE_WIDTH} (uidBase=${uidBase}), got ${uidMax}`,
-    );
-  }
-  return [uidBase, uidMax];
-}
+// The uid block comes from config.ts's validator — one parse for the whole
+// codebase, so the CLI and SandboxConfig can never disagree (M2: previously
+// a verbatim copy that could drift).
 
 function requiredPublicIp(env: NodeJS.ProcessEnv): string {
   const v = env.OVID_PUBLIC_IP;
@@ -90,7 +59,7 @@ function csvEnv(env: NodeJS.ProcessEnv, name: string): string[] {
  */
 export function renderCli(env: NodeJS.ProcessEnv): string {
   const ownPublicIp = requiredPublicIp(env);
-  const uidRange = parseUidRange(env);
+  const { uidBase, uidMax } = parseUidRange(env);
 
   const extra = csvEnv(env, "OVID_SANDBOX_EXTRA_BLOCKED");
   const extraV4 = extra.filter((e) => !e.includes(":"));
@@ -123,7 +92,7 @@ export function renderCli(env: NodeJS.ProcessEnv): string {
   // Overlap validation (and everything else structural) happens in
   // renderNftRuleset — it throws naming both ranges.
   return renderNftRuleset({
-    uidRange,
+    uidRange: [uidBase, uidMax],
     blockedV4: [...DEFAULT_BLOCKED_V4, ...extraV4],
     blockedV6: [...DEFAULT_BLOCKED_V6, ...extraV6],
     ownPublicIp,
@@ -147,8 +116,19 @@ function main(): void {
   }
 }
 
-// Run only when executed as the bin (`node dist/renderNftCli.js` / the
-// `render-nft` symlink) — importing this module for renderCli must be inert.
-const invoked =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+// Run only when executed as the bin — importing this module for renderCli
+// must be inert. Compare REALPATHS on both sides (I1): pnpm installs package
+// bins as symlinks into node_modules/.bin, and node leaves argv[1] as the
+// symlink path while the module resolves to its realpath, so a naive
+// import.meta.url === pathToFileURL(argv[1]) check mismatches and the bin
+// silently exits 0 with no output. realpathing both sides matches whether
+// either path is a symlink or not.
+const invoked = (() => {
+  if (process.argv[1] === undefined) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    return false; // argv[1] not on disk (e.g. `node -e`) — not a bin run
+  }
+})();
 if (invoked) main();

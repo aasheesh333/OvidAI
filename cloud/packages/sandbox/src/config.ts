@@ -109,7 +109,12 @@ function parseLaunch(raw: NodeJS.ProcessEnv): LaunchStrategy {
   return v;
 }
 
-function parseUidRange(raw: NodeJS.ProcessEnv): { uidBase: number; uidMax: number } {
+/**
+ * Parse OVID_SANDBOX_UID_BASE/OVID_SANDBOX_UID_MAX into the sandbox uid
+ * block. Exported for reuse (renderNftCli renders the egress rules keyed on
+ * the SAME block — one validator, no drift; Task 11 M2).
+ */
+export function parseUidRange(raw: NodeJS.ProcessEnv): { uidBase: number; uidMax: number } {
   const baseRaw = raw.OVID_SANDBOX_UID_BASE;
   let uidBase = DEFAULT_UID_BASE;
   if (baseRaw !== undefined && baseRaw !== "") {

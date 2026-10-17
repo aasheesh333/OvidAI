@@ -15,7 +15,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && chmod +x dist/renderNftCli.js",
     "test": "vitest run"
   },
   "devDependencies": {

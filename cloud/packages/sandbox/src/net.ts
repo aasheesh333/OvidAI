@@ -51,16 +51,25 @@ const UID_FLOOR = 100_000;
 
 const V4_CIDR =
   /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(\/([0-9]|[12]\d|3[0-2]))?$/;
-const V6_CIDR = /^[0-9a-fA-F:]+(\/([0-9]|[1-9]\d|1[01]\d|12[0-8]))?$/;
 
 /** Valid IPv4 address or cidr (a bare address is a /32). */
 export function isValidV4Cidr(v: string): boolean {
   return V4_CIDR.test(v);
 }
 
-/** Loosely valid IPv6 address or cidr (hex/colon groups, prefix ≤ 128). */
+/**
+ * Valid IPv6 address or cidr. Strict (M1): the address half is checked with
+ * isIP (so garbage like ":::" fails) and an optional numeric prefix must be
+ * 0-128 — a renderer-level reject beats rendering a ruleset that only fails
+ * at `nft -f` load time.
+ */
 export function isValidV6Cidr(v: string): boolean {
-  return V6_CIDR.test(v);
+  const slash = v.lastIndexOf("/");
+  if (slash === -1) return isIP(v) === 6;
+  const prefix = v.slice(slash + 1);
+  if (!/^\d+$/.test(prefix)) return false;
+  const n = Number(prefix);
+  return n <= 128 && isIP(v.slice(0, slash)) === 6;
 }
 
 function validateUidRange(label: string, range: [number, number]): void {
