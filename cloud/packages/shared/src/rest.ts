@@ -3,6 +3,8 @@ import { z } from "zod";
 export interface SessionDto {
   id: string;
   title: string | null;
+  /** Interaction mode. Spec D5: "safe" | "auto" | "drive" | "studio" — NO "control". */
+  mode: "safe" | "auto" | "drive" | "studio";
   createdAt: string;
   updatedAt: string;
 }
@@ -42,12 +44,29 @@ export interface ApiError {
   error: { code: string; message: string };
 }
 
+/** Session interaction mode (spec D5) — "control" was retired; never re-add it. */
+export const sessionModeSchema = z.enum(["safe", "auto", "drive", "studio"]);
+
 export const sessionDtoSchema: z.ZodType<SessionDto> = z.object({
   id: z.string().min(1),
   title: z.string().nullable(),
+  mode: sessionModeSchema,
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 });
+
+/** PATCH /cloud/v1/sessions/:id body — at least one field required, unknown keys rejected. */
+export const sessionPatchSchema = z
+  .object({
+    title: z.string().nullable().optional(),
+    mode: sessionModeSchema.optional(),
+  })
+  .strict()
+  .refine((body) => body.title !== undefined || body.mode !== undefined, {
+    message: "At least one of 'title' or 'mode' is required.",
+  });
+
+export type SessionPatch = { title?: string | null; mode?: SessionDto["mode"] };
 
 export const messageDtoSchema: z.ZodType<MessageDto> = z.object({
   id: z.string().min(1),

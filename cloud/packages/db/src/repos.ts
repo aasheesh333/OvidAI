@@ -199,6 +199,33 @@ export const sessions = {
       .set({ updatedAt: new Date() })
       .where(eq(sessionsTable.id, sessionId));
   },
+
+  /**
+   * Ownership-scoped partial update (P8 session PATCH): UPDATE … SET <fields>,
+   * updatedAt = now WHERE id AND userId RETURNING row. null = unknown id OR
+   * wrong owner (the gateway maps both to the same 404 — no existence leaks).
+   * Only keys present in `fields` are written; a key set to undefined is left
+   * untouched. The caller (gateway route) validates mode against the enum —
+   * this layer stores whatever it is given.
+   */
+  async update(
+    db: Db,
+    sessionId: string,
+    userId: string,
+    fields: { title?: string | null; mode?: string },
+  ): Promise<SessionRow | null> {
+    const set: { title?: string | null; mode?: string; updatedAt: Date } = {
+      updatedAt: new Date(),
+    };
+    if (fields.title !== undefined) set.title = fields.title;
+    if (fields.mode !== undefined) set.mode = fields.mode;
+    const rows = await db
+      .update(sessionsTable)
+      .set(set)
+      .where(and(eq(sessionsTable.id, sessionId), eq(sessionsTable.userId, userId)))
+      .returning();
+    return rows[0] ?? null;
+  },
 };
 
 // ---------------------------------------------------------------------------

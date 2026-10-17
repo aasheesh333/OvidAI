@@ -77,6 +77,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
     const dto = sessionDtoSchema.parse(res.json());
     expect(dto.id).toMatch(UUIDV7_RE);
     expect(dto.title).toBe("first");
+    // P8: every session route now carries mode; a fresh session is "auto"
+    // (schema default) — spec D5: never "control".
+    expect(dto.mode).toBe("auto");
     expect(Date.parse(dto.createdAt)).not.toBeNaN();
     expect(Date.parse(dto.updatedAt)).not.toBeNaN();
 
@@ -134,6 +137,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
     });
     expect(mine.statusCode).toBe(200);
     expect(sessionDtoSchema.parse(mine.json())).toEqual(created);
+    expect(sessionDtoSchema.parse(mine.json()).mode).toBe("auto");
 
     const theirs = await app.inject({
       method: "GET",
@@ -265,6 +269,165 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
     expect(sessionPage.parse(res.json()).items.map((s) => s.id)).toEqual([a.id]);
   });
 
+  it("PATCH /sessions/:id with a title-only body → 200, new title, mode unchanged", async () => {
+    const owner = testUid("sess-patch-title");
+    const created = await createSession(owner, "before");
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+      payload: { title: "after" },
+    });
+    expect(res.statusCode).toBe(200);
+    const dto = sessionDtoSchema.parse(res.json());
+    expect(dto.id).toBe(created.id);
+    expect(dto.title).toBe("after");
+    expect(dto.mode).toBe("auto"); // untouched by a title-only patch
+    expect(Date.parse(dto.updatedAt)).toBeGreaterThanOrEqual(Date.parse(created.updatedAt));
+
+    // Persisted, not just echoed: a fresh GET sees the new title.
+    const again = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+    });
+    expect(again.statusCode).toBe(200);
+    expect(sessionDtoSchema.parse(again.json()).title).toBe("after");
+  });
+
+  it("PATCH /sessions/:id title null clears the title", async () => {
+    const owner = testUid("sess-patch-null");
+    const created = await createSession(owner, "clear me");
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+      payload: { title: null },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(sessionDtoSchema.parse(res.json()).title).toBeNull();
+  });
+
+  it("PATCH /sessions/:id mode 'studio' → 200, persisted and returned", async () => {
+    const owner = testUid("sess-patch-mode");
+    const created = await createSession(owner);
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+      payload: { mode: "studio" },
+    });
+    expect(res.statusCode).toBe(200);
+    const dto = sessionDtoSchema.parse(res.json());
+    expect(dto.mode).toBe("studio");
+    expect(dto.title).toBeNull(); // mode-only patch leaves title alone
+
+    // Persisted.
+    const again = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+    });
+    expect(sessionDtoSchema.parse(again.json()).mode).toBe("studio");
+  });
+
+  it("PATCH /sessions/:id with both fields → 200 applies both", async () => {
+    const owner = testUid("sess-patch-both");
+    const created = await createSession(owner, "old");
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+      payload: { title: "new", mode: "safe" },
+    });
+    expect(res.statusCode).toBe(200);
+    const dto = sessionDtoSchema.parse(res.json());
+    expect(dto.title).toBe("new");
+    expect(dto.mode).toBe("safe");
+  });
+
+  it("PATCH /sessions/:id rejects {}, 'control', and unknown keys → 400 bad_request", async () => {
+    const owner = testUid("sess-patch-bad");
+    const created = await createSession(owner, "keep");
+    const payloads = [
+      {}, // at least one field required
+      { mode: "control" }, // retired value (spec D5)
+      { mode: "AUTO" }, // case-sensitive enum
+      { title: "t", extra: "x" }, // strict: unknown key
+      { title: 42 }, // non-string title
+      { mode: 7 },
+    ];
+    for (const payload of payloads) {
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/cloud/v1/sessions/${created.id}`,
+        headers: authHeaders(owner),
+        payload,
+      });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+      expect(res.json().error.code).toBe("bad_request");
+      expect(typeof res.json().error.message).toBe("string");
+    }
+
+    // Nothing was written by the rejected patches.
+    const after = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+    });
+    const dto = sessionDtoSchema.parse(after.json());
+    expect(dto.title).toBe("keep");
+    expect(dto.mode).toBe("auto");
+  });
+
+  it("PATCH /sessions/:id wrong owner, unknown id, and malformed id → 404 (never 403/500)", async () => {
+    const owner = testUid("sess-patch-404");
+    const stranger = testUid("sess-patch-stranger");
+    const created = await createSession(owner, "mine");
+
+    const theirs = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(stranger),
+      payload: { title: "hijack" },
+    });
+    expect(theirs.statusCode).toBe(404); // existence leak rule: 404, NOT 403
+    expect(theirs.json().error.code).toBe("not_found");
+
+    const unknown = await app.inject({
+      method: "PATCH",
+      url: `/cloud/v1/sessions/${newId()}`,
+      headers: authHeaders(owner),
+      payload: { title: "x" },
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json().error.code).toBe("not_found");
+
+    for (const bad of ["not-a-uuid", "1234567"]) {
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/cloud/v1/sessions/${bad}`,
+        headers: authHeaders(owner),
+        payload: { title: "x" },
+      });
+      expect(res.statusCode, bad).toBe(404);
+      expect(res.statusCode, `${bad} must never be a 500`).not.toBe(500);
+      expect(res.json().error.code).toBe("not_found");
+      // Route-level envelope, not Fastify's unmatched-route 404.
+      expect(res.json().error.message).toBe("Session not found.");
+    }
+
+    // Owner's session untouched by all the 404s above.
+    const after = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/sessions/${created.id}`,
+      headers: authHeaders(owner),
+    });
+    expect(sessionDtoSchema.parse(after.json()).title).toBe("mine");
+  });
+
   it("all session routes answer 401 unauthenticated with the Task 6 envelope", async () => {
     const uid = testUid("sess-401");
     const created = await createSession(uid);
@@ -272,6 +435,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
       { method: "POST" as const, url: "/cloud/v1/sessions", payload: {} },
       { method: "GET" as const, url: "/cloud/v1/sessions" },
       { method: "GET" as const, url: `/cloud/v1/sessions/${created.id}` },
+      { method: "PATCH" as const, url: `/cloud/v1/sessions/${created.id}`, payload: { title: "x" } },
     ];
     for (const req of requests) {
       const res = await app.inject({ ...req, headers: {} });

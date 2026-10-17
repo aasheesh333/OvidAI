@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { messageDtoSchema, pageSchema, runCancelResponseSchema, sessionDtoSchema } from "./rest.js";
+import {
+  messageDtoSchema,
+  pageSchema,
+  runCancelResponseSchema,
+  sessionDtoSchema,
+  sessionPatchSchema,
+} from "./rest.js";
 import type { MessageDto, SessionDto } from "./rest.js";
 
 const session: SessionDto = {
   id: "s1",
   title: null,
+  mode: "auto",
   createdAt: "2026-10-15T12:00:00.000Z",
   updatedAt: "2026-10-15T12:00:00.000Z",
 };
@@ -28,6 +35,39 @@ describe("rest schemas", () => {
 
   it("sessionDtoSchema rejects an invalid dto", () => {
     expect(() => sessionDtoSchema.parse({ ...session, id: 42 })).toThrow();
+  });
+
+  it("sessionDtoSchema requires mode and accepts every allowed value", () => {
+    expect(sessionDtoSchema.parse(session)).toEqual(session);
+    for (const mode of ["safe", "drive", "studio"] as const) {
+      expect(sessionDtoSchema.parse({ ...session, mode })).toEqual({ ...session, mode });
+    }
+  });
+
+  it("sessionDtoSchema rejects a missing mode and the retired 'control' value (spec D5)", () => {
+    const { mode: _omitted, ...withoutMode } = session;
+    expect(() => sessionDtoSchema.parse(withoutMode)).toThrow();
+    expect(() => sessionDtoSchema.parse({ ...session, mode: "control" })).toThrow();
+    expect(() => sessionDtoSchema.parse({ ...session, mode: 42 })).toThrow();
+  });
+
+  it("sessionPatchSchema parses title-only, mode-only, and both together", () => {
+    expect(sessionPatchSchema.parse({ title: "renamed" })).toEqual({ title: "renamed" });
+    expect(sessionPatchSchema.parse({ title: null })).toEqual({ title: null });
+    expect(sessionPatchSchema.parse({ mode: "studio" })).toEqual({ mode: "studio" });
+    expect(sessionPatchSchema.parse({ title: "t", mode: "safe" })).toEqual({
+      title: "t",
+      mode: "safe",
+    });
+  });
+
+  it("sessionPatchSchema rejects an empty body, 'control', and unknown keys", () => {
+    // At least one field required — PATCH {} must fail so the route 400s.
+    expect(() => sessionPatchSchema.parse({})).toThrow();
+    expect(() => sessionPatchSchema.parse({ mode: "control" })).toThrow();
+    expect(() => sessionPatchSchema.parse({ mode: "auto", extra: "x" })).toThrow();
+    expect(() => sessionPatchSchema.parse({ title: "t", nope: 1 })).toThrow();
+    expect(() => sessionPatchSchema.parse({ title: 42 })).toThrow();
   });
 
   it("messageDtoSchema parses a valid dto", () => {
