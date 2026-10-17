@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { RawData, WebSocket } from "ws";
 import type { Redis } from "ioredis";
 import { sessions, type Db } from "@ovid/db";
-import type { EventLog } from "@ovid/events";
+import type { EventLog, SystemBus } from "@ovid/events";
 import {
   APPROVAL_RESPONSES_CHANNEL,
   wsClientMsg,
   type PtyOutMsg,
   type SessionEvent,
+  type SystemEvent,
   type WsClientMsg,
   type WsServerMsg,
 } from "@ovid/shared";
@@ -116,6 +117,16 @@ export interface WsDeps {
    * the SAME field; no second alias).
    */
   systemHub?: SystemHub;
+  /**
+   * Scheduler system bus (P4 Task 12); the composition root wires
+   * createRedisSystemBus(redisQ). OPTIONAL so pre-P4 compositions (spine e2e +
+   * P1 suites) stay source-compatible: when absent, subscribe_system answers
+   * a loud `unavailable` error frame instead of crashing (the same fallback
+   * discipline as browser/approvals above). GatewayDeps satisfies this field
+   * structurally once Task 11 threads the bus through the composition root;
+   * nothing here depends on that wiring landing first.
+   */
+  system?: SystemBus;
 }
 
 export interface WsConnectionOptions {
@@ -184,6 +195,15 @@ interface Subscription {
 }
 
 /**
+ * One scheduler system-bus subscription held by this socket (P4 Task 12).
+ * At most ONE exists per connection: a re-subscribe replaces (the previous
+ * unsubscribe is awaited before the new bus subscribe is issued).
+ */
+interface SystemSubscription {
+  unsubscribe: () => Promise<void>;
+}
+
+/**
  * One terminal attached on this connection. `detach` only quits the bridge's
  * pty:out subscription — the PTY ITSELF SURVIVES (reconnect re-attaches; only
  * explicit pty_close or a worker shutdown kills it).
@@ -221,6 +241,10 @@ export async function handleWsConnection(
   // there is nothing to tear down (the attach itself happens after the
   // closed re-check below, synchronously, before any frame is drained).
   let detachSystem: (() => void) | null = null;
+  // Scheduler system-bus subscription (P4 Task 12): ONE per socket, replaced
+  // on re-subscribe and torn down in teardownAll. Declared here with the
+  // other bookkeeping so a close during the ticket verify finds it null.
+  let systemSub: SystemSubscription | null = null;
   let closed = false;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
 
@@ -236,10 +260,18 @@ export async function handleWsConnection(
     ptySubs.clear();
     const browser = browserAttach;
     browserAttach = null;
+    // Snapshot + null BEFORE the awaits: a close that races the async bus
+    // subscribe leaves the placeholder entry nulled here, and the handler's
+    // post-await identity check unsubscribes the freshly created listener.
+    const system = systemSub;
+    systemSub = null;
     // EVERY subscription must be torn down: each holds a dedicated redis
     // pub/sub connection (Task 4 duplicates the client), so a leak here is a
     // leaked connection per session per reconnect.
-    await Promise.all(all.map((sub) => sub.unsubscribe().catch(() => {})));
+    await Promise.all([
+      ...all.map((sub) => sub.unsubscribe().catch(() => {})),
+      ...(system !== null ? [system.unsubscribe().catch(() => {})] : []),
+    ]);
     // Terminal subs DETACH ONLY (ptys survive — never an implicit pty_close;
     // the reconnect's pty_attach picks the same pty back up).
     await Promise.all(ptyAll.map((p) => p.detach().catch(() => {})));
@@ -786,6 +818,73 @@ export async function handleWsConnection(
     }
   }
 
+  // ---- Scheduler system channel (P4 Task 12) --------------------------------
+
+  /**
+   * subscribe_system: attach THIS connection (for the ticket's uid — never a
+   * client-supplied id) to the user-scoped scheduler bus. At most one
+   * subscription per socket: a re-subscribe REPLACES the previous one (torn
+   * down first, so its bus listener cannot leak). The ack goes out only once
+   * the bus listener is live; every event then flows through the existing
+   * readyState-guarded send(). Bus failures are reported as an `internal`
+   * error frame — they never kill the connection.
+   */
+  async function handleSubscribeSystem(): Promise<void> {
+    const system = deps.system;
+    if (system === undefined) {
+      // Loud fallback for pre-P4 compositions (no bus wired).
+      send(socket, {
+        op: "error",
+        code: "unavailable",
+        message: "System channel not configured.",
+      });
+      return;
+    }
+
+    const previous = systemSub;
+    systemSub = null;
+    if (previous !== null) await previous.unsubscribe().catch(() => {});
+
+    // Pre-register a placeholder (the session-subscribe pattern): the live
+    // callback checks identity against it, and a close during the async bus
+    // subscribe finds an entry to null out — the post-await check below then
+    // unsubscribes the freshly created listener instead of leaking it.
+    const entry: SystemSubscription = { unsubscribe: async () => {} };
+    systemSub = entry;
+
+    let unsubscribe: () => Promise<void>;
+    try {
+      unsubscribe = await system.subscribe(uid, (event: SystemEvent) => {
+        if (systemSub !== entry) return; // replaced or torn down: ignore
+        send(socket, { op: "system", event });
+      });
+    } catch {
+      if (systemSub === entry) systemSub = null;
+      send(socket, {
+        op: "error",
+        code: "internal",
+        message: "System subscription failed.",
+      });
+      return;
+    }
+    if (closed || systemSub !== entry) {
+      // Socket died (or the subscription was replaced) mid-setup: don't leak
+      // the bus listener.
+      await unsubscribe().catch(() => {});
+      return;
+    }
+    entry.unsubscribe = unsubscribe;
+    send(socket, { op: "system_subscribed" });
+  }
+
+  /** unsubscribe_system: idempotent; the connection and other subs survive. */
+  async function handleUnsubscribeSystem(): Promise<void> {
+    const sub = systemSub;
+    if (sub === null) return; // idempotent: no system subscription is a no-op
+    systemSub = null;
+    await sub.unsubscribe().catch(() => {});
+  }
+
   async function processFrame(raw: string): Promise<void> {
     // Defense in depth for the chained-queue path: a frame that was still
     // waiting its turn when the socket died must not start db/redis work.
@@ -850,6 +949,12 @@ export async function handleWsConnection(
         return;
       case "system_response":
         await handleSystemResponse(msg);
+        return;
+      case "subscribe_system":
+        await handleSubscribeSystem();
+        return;
+      case "unsubscribe_system":
+        await handleUnsubscribeSystem();
         return;
     }
   }

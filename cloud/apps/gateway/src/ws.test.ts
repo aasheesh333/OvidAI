@@ -1,17 +1,20 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
-import type { FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
+import websocket from "@fastify/websocket";
 import Redis from "ioredis";
 import WebSocket from "ws";
 import { sessions, users, type Db } from "@ovid/db";
-import { createRedisEventLog, type EventLog } from "@ovid/events";
+import { createRedisEventLog, type EventLog, type SystemBus } from "@ovid/events";
 import {
   wsServerMsg,
   type SessionEvent,
+  type SystemEvent,
   type SystemEventEnvelope,
   type WsServerMsg,
 } from "@ovid/shared";
+import { registerWsRoute } from "./routes/wsRoute.js";
 import { buildGateway, WS_MAX_PAYLOAD_BYTES } from "./app.js";
 import { createTicketStore, type TicketStore } from "./tickets.js";
 import {
@@ -1151,6 +1154,363 @@ describe("gateway /cloud/ws system channel ops (stub SystemHub)", () => {
 
     await client.close();
     await waitFor(() => stub.detaches.includes(SYSTEM_UID), "systemHub detach on socket close");
+  }, 15_000);
+});
+
+// ---------------------------------------------------------------------------
+// P4 Task 12: scheduler system channel (stub SystemBus), no services needed.
+//
+// These cases register the WS route DIRECTLY (registerWsRoute) rather than
+// through buildGateway: GatewayDeps does not carry the P4 `system` bus yet
+// (Task 11 wires it), and Task 12 is scoped to ws.ts/ws.test.ts. The direct
+// composition is the same handler with the same frame chain; only the deps
+// object is assembled here so the bus can be stubbed.
+// ---------------------------------------------------------------------------
+
+describe("gateway /cloud/ws P4 system channel (stub SystemBus)", () => {
+  const apps: FastifyInstance[] = [];
+  const clients: TestClient[] = [];
+
+  afterEach(async () => {
+    while (clients.length > 0) await clients.pop()!.close().catch(() => {});
+    while (apps.length > 0) await apps.pop()!.close();
+  });
+
+  const SYS_UID = "p4sys-user";
+  const OTHER_UID = "p4sys-other";
+  const SESSION_ID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+
+  const SYS_EVENT: SystemEvent = {
+    type: "schedule_run_started",
+    scheduleId: "11111111-2222-3333-4444-555555555555",
+    ts: "2026-10-17T00:00:00.000Z",
+    payload: { runId: "run-1" },
+  };
+
+  const OTHER_EVENT: SystemEvent = {
+    type: "schedule_run_succeeded",
+    scheduleId: "99999999-8888-7777-6666-555555555555",
+    ts: "2026-10-17T00:00:01.000Z",
+    payload: { runId: "run-other" },
+  };
+
+  interface BusEntry {
+    uid: string;
+    onEvent: (e: SystemEvent) => void;
+    active: boolean;
+  }
+
+  interface SystemBusStub extends SystemBus {
+    subscribes: BusEntry[];
+    /** Every invocation of an unsubscribe function (idempotence is NOT hidden). */
+    unsubscribeCalls: number;
+    /** When set, the NEXT subscribe() rejects with it, then clears. */
+    failNext: Error | null;
+    /** Delivers an event to every ACTIVE subscription for that uid. */
+    push(uid: string, event: SystemEvent): void;
+  }
+
+  function stubSystemBus(): SystemBusStub {
+    const subscribes: BusEntry[] = [];
+    let unsubscribeCalls = 0;
+    const stub: SystemBusStub = {
+      subscribes,
+      get unsubscribeCalls(): number {
+        return unsubscribeCalls;
+      },
+      failNext: null,
+      publish: async () => {},
+      subscribe: async (uid, onEvent) => {
+        if (stub.failNext !== null) {
+          const err = stub.failNext;
+          stub.failNext = null;
+          throw err;
+        }
+        const entry: BusEntry = { uid, onEvent, active: true };
+        subscribes.push(entry);
+        return async () => {
+          unsubscribeCalls += 1;
+          entry.active = false;
+        };
+      },
+      push: (uid, event) => {
+        for (const entry of subscribes) {
+          if (entry.uid === uid && entry.active) entry.onEvent(event);
+        }
+      },
+    };
+    return stub;
+  }
+
+  /** sessions.get owns SESSION_ID; nothing else is touched. */
+  function fakeOwnedDb(): Db {
+    return {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{ id: SESSION_ID }],
+          }),
+        }),
+      }),
+    } as unknown as Db;
+  }
+
+  interface LiveEventStub {
+    events: EventLog;
+    deliver(e: SessionEvent): void;
+    unsubscribeCalls(): number;
+  }
+
+  function liveEventStub(): LiveEventStub {
+    let live: ((e: SessionEvent) => void) | null = null;
+    let unsubscribeCalls = 0;
+    return {
+      events: {
+        append: async () => {
+          throw new Error("append is unused in the P4 system channel tests");
+        },
+        readSince: async () => [],
+        subscribe: async (_sessionId, onEvent) => {
+          live = onEvent;
+          return async () => {
+            unsubscribeCalls += 1;
+          };
+        },
+      },
+      deliver: (e) => {
+        if (live === null) throw new Error("deliver() before subscribe() ran");
+        live(e);
+      },
+      unsubscribeCalls: () => unsubscribeCalls,
+    };
+  }
+
+  const noopPty: PtyBridge = {
+    open: async () => {},
+    attach: async () => ({
+      truncated: false,
+      chunks: [],
+      endOffset: 0,
+      detach: async () => {},
+    }),
+    send: async () => {},
+    lookup: async () => null,
+  };
+
+  async function makeSystemBusApp(
+    system: SystemBus | undefined,
+    tickets: TicketStub,
+    events: EventLog = liveEventStub().events,
+  ): Promise<string> {
+    const app = Fastify();
+    await app.register(websocket, { options: { maxPayload: WS_MAX_PAYLOAD_BYTES } });
+    registerWsRoute(app, {
+      db: fakeOwnedDb(),
+      tickets,
+      events,
+      pty: noopPty,
+      ...(system !== undefined ? { system } : {}),
+    });
+    apps.push(app);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const port = (app.server.address() as AddressInfo).port;
+    return `ws://127.0.0.1:${port}${WS_PATH}`;
+  }
+
+  async function newSystemBusClient(
+    wsBase: string,
+    busTickets: TicketStub,
+    uid = SYS_UID,
+  ): Promise<TestClient> {
+    const client = await connectClient(wsBase, await busTickets.mint(uid));
+    clients.push(client);
+    return client;
+  }
+
+  function systemOps(client: TestClient): SystemEvent[] {
+    return client.messages.flatMap((m) => (m.op === "system" ? [m.event] : []));
+  }
+
+  it("(a/b) subscribe_system → system_subscribed; bus events for the TICKET's uid arrive as system frames, other uids never do", async () => {
+    const bus = stubSystemBus();
+    const busTickets = stubTickets();
+    const wsBase = await makeSystemBusApp(bus, busTickets);
+    const client = await newSystemBusClient(wsBase, busTickets);
+
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(
+      () => client.messages.some((m) => m.op === "system_subscribed"),
+      "system_subscribed ack",
+    );
+    expect(client.messages[0]).toEqual({ op: "system_subscribed" });
+    // The bus is subscribed for the authenticated principal, never a client field.
+    expect(bus.subscribes).toHaveLength(1);
+    expect(bus.subscribes[0]!.uid).toBe(SYS_UID);
+
+    bus.push(SYS_UID, SYS_EVENT);
+    await client.waitFor(() => systemOps(client).length >= 1, "system event frame");
+    expect(systemOps(client)[0]).toEqual(SYS_EVENT); // deep-equal, frame shape {op:"system", event}
+
+    // Another uid's events are not on this socket's channel (the stub is
+    // uid-keyed, exactly like the redis bus).
+    bus.push(OTHER_UID, OTHER_EVENT);
+    await sleep(150);
+    expect(systemOps(client)).toEqual([SYS_EVENT]);
+  }, 15_000);
+
+  it("(c) unsubscribe_system → bus unsubscribe called; later publishes are not forwarded; connection survives", async () => {
+    const bus = stubSystemBus();
+    const busTickets = stubTickets();
+    const wsBase = await makeSystemBusApp(bus, busTickets);
+    const client = await newSystemBusClient(wsBase, busTickets);
+
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(
+      () => client.messages.some((m) => m.op === "system_subscribed"),
+      "system_subscribed ack",
+    );
+    client.send({ op: "unsubscribe_system" });
+    await waitFor(() => bus.unsubscribeCalls === 1, "bus unsubscribe called");
+
+    bus.push(SYS_UID, SYS_EVENT);
+    await sleep(150);
+    expect(systemOps(client)).toEqual([]); // no forward after unsubscribe
+
+    // The connection survives and can re-subscribe.
+    client.send({ op: "ping" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong");
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(
+      () => client.messages.filter((m) => m.op === "system_subscribed").length === 2,
+      "re-subscribed after unsubscribe",
+    );
+  }, 15_000);
+
+  it("(d) re-subscribe REPLACES: previous bus subscription torn down exactly once; frames not duplicated", async () => {
+    const bus = stubSystemBus();
+    const busTickets = stubTickets();
+    const wsBase = await makeSystemBusApp(bus, busTickets);
+    const client = await newSystemBusClient(wsBase, busTickets);
+
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(
+      () => client.messages.some((m) => m.op === "system_subscribed"),
+      "first ack",
+    );
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(
+      () => client.messages.filter((m) => m.op === "system_subscribed").length === 2,
+      "second ack",
+    );
+
+    expect(bus.subscribes).toHaveLength(2);
+    expect(bus.unsubscribeCalls).toBe(1); // old subscription torn down once
+    expect(bus.subscribes[0]!.active).toBe(false);
+    expect(bus.subscribes[1]!.active).toBe(true);
+
+    bus.push(SYS_UID, SYS_EVENT);
+    await client.waitFor(() => systemOps(client).length >= 1, "event on the new subscription");
+    await sleep(150);
+    expect(systemOps(client)).toEqual([SYS_EVENT]); // exactly once, no duplicate from the old one
+  }, 15_000);
+
+  it("(e) socket close tears the bus subscription down (no leaked connection)", async () => {
+    const bus = stubSystemBus();
+    const busTickets = stubTickets();
+    const wsBase = await makeSystemBusApp(bus, busTickets);
+    const client = await newSystemBusClient(wsBase, busTickets);
+
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(
+      () => client.messages.some((m) => m.op === "system_subscribed"),
+      "system_subscribed ack",
+    );
+    expect(bus.unsubscribeCalls).toBe(0);
+
+    await client.close();
+    await waitFor(() => bus.unsubscribeCalls === 1, "bus unsubscribe on socket close");
+    expect(bus.subscribes[0]!.active).toBe(false);
+  }, 15_000);
+
+  it("(f) regression — session subscribe/event/pong flows are untouched by the system channel", async () => {
+    const bus = stubSystemBus();
+    const live = liveEventStub();
+    const busTickets = stubTickets();
+    const wsBase = await makeSystemBusApp(bus, busTickets, live.events);
+    const client = await newSystemBusClient(wsBase, busTickets);
+
+    client.send({ op: "subscribe", sessionId: SESSION_ID });
+    await client.waitFor(
+      () => client.messages.some((m) => m.op === "subscribed"),
+      "session subscribed ack",
+    );
+    expect(client.messages[0]).toEqual({ op: "subscribed", sessionId: SESSION_ID });
+
+    const event: SessionEvent = {
+      sessionId: SESSION_ID,
+      seq: "100-0",
+      type: "message_delta",
+      payload: { text: "hi" },
+      ts: "2026-10-17T00:00:00.000Z",
+    };
+    live.deliver(event);
+    await client.waitFor(() => eventOps(client).length >= 1, "live session event");
+    expect(eventOps(client)).toEqual([event]);
+
+    client.send({ op: "ping" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong");
+  }, 15_000);
+
+  it("(g) unknown keys on subscribe_system are stripped (existing zod behavior); the ack still arrives", async () => {
+    const bus = stubSystemBus();
+    const busTickets = stubTickets();
+    const wsBase = await makeSystemBusApp(bus, busTickets);
+    const client = await newSystemBusClient(wsBase, busTickets);
+
+    client.send({ op: "subscribe_system", extra: 1 });
+    await client.waitFor(
+      () => client.messages.some((m) => m.op === "system_subscribed"),
+      "system_subscribed ack despite unknown key",
+    );
+    expect(client.messages[0]).toEqual({ op: "system_subscribed" });
+    expect(bus.subscribes[0]!.uid).toBe(SYS_UID);
+  }, 15_000);
+
+  it("bus subscribe failure → internal error frame; the connection survives (never fatal)", async () => {
+    const bus = stubSystemBus();
+    bus.failNext = new Error("redis down");
+    const busTickets = stubTickets();
+    const wsBase = await makeSystemBusApp(bus, busTickets);
+    const client = await newSystemBusClient(wsBase, busTickets);
+
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "internal error frame");
+    expect(client.messages[0]).toMatchObject({ op: "error", code: "internal" });
+    expect(systemOps(client)).toEqual([]);
+
+    client.send({ op: "ping" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong (connection survived)");
+
+    // A later subscribe (bus healthy again) works: the failure left no state.
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(
+      () => client.messages.some((m) => m.op === "system_subscribed"),
+      "recovered subscribe",
+    );
+    expect(bus.subscribes).toHaveLength(1);
+  }, 15_000);
+
+  it("pre-P4 composition (no system bus) → subscribe_system answers unavailable; connection survives", async () => {
+    const busTickets = stubTickets();
+    const wsBase = await makeSystemBusApp(undefined, busTickets);
+    const client = await newSystemBusClient(wsBase, busTickets);
+
+    client.send({ op: "subscribe_system" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "unavailable fallback");
+    expect(client.messages[0]).toMatchObject({ op: "error", code: "unavailable" });
+
+    client.send({ op: "ping" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong (connection survived)");
   }, 15_000);
 });
 
