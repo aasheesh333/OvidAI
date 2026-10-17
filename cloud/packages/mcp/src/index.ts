@@ -81,10 +81,14 @@ export * from "./router.js";
 // point; Task 14's installer consumes the registry and grant math from this
 // root (same barrel rule).
 export {
+  CLOUD_HOOK_EVENTS,
   ManifestError,
   adaptPlugin,
   canonicalContributionId,
+  canonicalHookEvent,
+  isCloudHookEvent,
   pluginManifestDigest,
+  type CloudHookEvent,
   type NormalizedPluginManifest,
   type PluginAgent,
   type PluginCapability,

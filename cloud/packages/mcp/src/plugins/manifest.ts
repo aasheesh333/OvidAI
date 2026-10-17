@@ -23,8 +23,20 @@ import {
   authorPublisher,
   canonicalPluginId,
   capabilitiesFromDeclaration,
-  readJsonMap,
+  readJsonMapResult,
 } from "./adapters/shared.js";
+
+// The complete raw→canonical hook-event resolver, ported from
+// agent-core's module-private normalizeEvent/EVENT_ALIASES so the manifest
+// layer, the canonical contribution ids and the P3 engine share ONE
+// mapping. Exported from the package barrel for the registry→engine wiring
+// (Task 14 / P3 seam).
+export {
+  CLOUD_HOOK_EVENTS,
+  canonicalHookEvent,
+  isCloudHookEvent,
+} from "./adapters/shared.js";
+export type { CloudHookEvent } from "./adapters/shared.js";
 
 /** Fixed capability vocabulary (spec §5.1, cloud/D5-reduced). */
 export type PluginCapability =
@@ -168,6 +180,15 @@ function projectMcp(c: PluginMcpServerContribution): unknown {
 }
 
 /**
+ * Digest schema version, folded into the hashed projection. Bump ONLY when
+ * the projection itself changes shape — and before the first real grants
+ * persist (now: v1), so a later projection change is detectable and
+ * migrateable instead of silently invalidating every stored approval
+ * (Dart kManifestDigestSchemaVersion parity).
+ */
+const DIGEST_SCHEMA_VERSION = 1;
+
+/**
  * sha256 over the canonical JSON of contributions + capabilities + envNames.
  * rootPath and version are EXCLUDED (the digest binds to plugin CONTENT, not
  * to where it currently lives or which version tag it carries — a grant
@@ -178,6 +199,7 @@ function projectMcp(c: PluginMcpServerContribution): unknown {
  */
 export function pluginManifestDigest(m: NormalizedPluginManifest): string {
   const projection = {
+    digestSchemaVersion: DIGEST_SCHEMA_VERSION,
     pluginId: m.pluginId,
     commands: m.commands.map((c) => [c.name, c.description ?? null, c.file]),
     skills: m.skills.map((s) => [s.name, s.description ?? null, s.file]),
@@ -201,7 +223,12 @@ export function pluginManifestDigest(m: NormalizedPluginManifest): string {
  * Claude-Code format).
  */
 async function adaptNative(root: string): Promise<NormalizedPluginManifest> {
-  const manifest = (await readJsonMap(join(root, "plugin.json"))) ?? {};
+  const warnings: string[] = [];
+  const manifestResult = await readJsonMapResult(join(root, "plugin.json"));
+  if (manifestResult.status === "corrupt") {
+    warnings.push("plugin.json is not valid JSON.");
+  }
+  const manifest = manifestResult.status === "ok" ? manifestResult.map : {};
 
   const name = typeof manifest.name === "string" ? manifest.name.trim() : "";
   const publisher = authorPublisher(manifest.author);
@@ -213,8 +240,7 @@ async function adaptNative(root: string): Promise<NormalizedPluginManifest> {
     );
   }
 
-  const declWarnings: string[] = [];
-  const declared = capabilitiesFromDeclaration(manifest.capabilities, declWarnings);
+  const declared = capabilitiesFromDeclaration(manifest.capabilities, warnings);
   const tree = await adaptStandardTree(root, manifest, declared);
 
   return {
@@ -228,7 +254,7 @@ async function adaptNative(root: string): Promise<NormalizedPluginManifest> {
     mcpServers: tree.mcpServers,
     capabilities: tree.capabilities,
     envNames: tree.envNames,
-    warnings: [...declWarnings, ...tree.warnings],
+    warnings: [...warnings, ...tree.warnings],
     rootPath: root,
   };
 }

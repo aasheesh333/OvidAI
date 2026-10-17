@@ -22,10 +22,11 @@ import {
   mcpFromFileContent,
   parseCodexInlineHooks,
   parseHooksEventMap,
-  readJsonMap,
+  readJsonMapResult,
   scanMarkdown,
   scanSkills,
   slug,
+  unquoteToml,
 } from "./shared.js";
 import type {
   PluginAgent,
@@ -34,21 +35,6 @@ import type {
   PluginMcpServerContribution,
   PluginSkill,
 } from "../manifest.js";
-
-/** Strip surrounding TOML quotes from a scalar value. */
-function unquoteToml(v: string): string {
-  let s = v.trim();
-  if (s.length >= 2) {
-    const f = s[0]!;
-    const l = s[s.length - 1]!;
-    if ((f === '"' && l === '"') || (f === "'" && l === "'")) {
-      s = s.slice(1, -1);
-    } else if (f === '"' || f === "'") {
-      s = s.slice(1);
-    }
-  }
-  return s;
-}
 
 /** A root-table scalar from config.toml (only the root table may name the plugin). */
 function tomlScalarAt(rootConfig: string, key: string): string {
@@ -86,9 +72,15 @@ export async function adaptCodex(root: string): Promise<NormalizedPluginManifest
 
   // .codex-plugin/plugin.json: read BEFORE building the identity so a
   // manifest-declared name/publisher wins over the config.toml fallback
-  // when config.toml names nothing.
-  const codexManifest =
-    (await readJsonMap(join(root, ".codex-plugin", "plugin.json"))) ?? {};
+  // when config.toml names nothing. A corrupt manifest is loud, then the
+  // config.toml fallbacks apply.
+  const codexManifestResult = await readJsonMapResult(
+    join(root, ".codex-plugin", "plugin.json"),
+  );
+  if (codexManifestResult.status === "corrupt") {
+    warnings.push(".codex-plugin/plugin.json is not valid JSON.");
+  }
+  const codexManifest = codexManifestResult.status === "ok" ? codexManifestResult.map : {};
   const manifestName =
     typeof codexManifest.name === "string" ? codexManifest.name.trim() : "";
   const manifestPublisher = authorPublisher(codexManifest.author);
@@ -151,11 +143,14 @@ export async function adaptCodex(root: string): Promise<NormalizedPluginManifest
 
   // Lifecycle hooks: inline [[hooks.<Event>]] tables, plugin-bundled
   // hooks/hooks.json, and the manifest-declared `hooks` map — all
-  // normalized through the shared event-map parser.
+  // normalized through the shared event-map parser. A corrupt hooks.json
+  // is loud, never a silently-disabled hook set.
   hooks.push(...parseHooksEventMap(parseCodexInlineHooks(config), warnings));
-  const hooksJson = await readJsonMap(join(root, "hooks", "hooks.json"));
-  if (hooksJson !== null) {
-    hooks.push(...parseHooksEventMap(hooksJson, warnings));
+  const hooksJsonResult = await readJsonMapResult(join(root, "hooks", "hooks.json"));
+  if (hooksJsonResult.status === "corrupt") {
+    warnings.push("hooks/hooks.json is not valid JSON — hooks were skipped.");
+  } else if (hooksJsonResult.status === "ok") {
+    hooks.push(...parseHooksEventMap(hooksJsonResult.map, warnings));
   }
   const manifestHooks = codexManifest.hooks;
   if (isRecord(manifestHooks) && Object.keys(manifestHooks).length > 0) {

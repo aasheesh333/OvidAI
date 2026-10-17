@@ -22,8 +22,12 @@ export interface ContributionRecord {
 export interface ContributionRegistry {
   /**
    * Register contributions. Existing canonicalIds are UPSERTED (replaced —
-   * reinstall/upgrade parity); a duplicate canonicalId within THIS call
-   * throws and nothing is written.
+   * reinstall/upgrade parity), and each plugin present in the batch has its
+   * PRIOR records not carried by the batch removed first
+   * (unregister-before-re-register guard): a re-register is a full
+   * per-plugin sync, so a REMOVED contribution never survives a bare
+   * upsert as a stale record. Plugins absent from the batch are untouched.
+   * A duplicate canonicalId within THIS call throws and nothing is written.
    */
   register(recs: ContributionRecord[]): void;
   /** Remove every record of one plugin; returns the removed count. */
@@ -71,6 +75,20 @@ export function createContributionRegistry(): ContributionRegistry {
           );
         }
         seen.add(r.canonicalId);
+      }
+      // Unregister-before-re-register guard: a re-register is a full
+      // per-plugin sync, so records of a batch plugin that the batch no
+      // longer carries are dropped before the upsert. Without this, a
+      // removed (or re-keyed) contribution survived a bare upsert as a
+      // stale record the engine would keep dispatching.
+      const batchPluginIds = new Set(recs.map((r) => r.pluginId));
+      for (let i = order.length - 1; i >= 0; i--) {
+        const id = order[i]!;
+        const existing = byId.get(id)!;
+        if (batchPluginIds.has(existing.pluginId) && !seen.has(id)) {
+          byId.delete(id);
+          order.splice(i, 1);
+        }
       }
       for (const r of recs) {
         if (!byId.has(r.canonicalId)) order.push(r.canonicalId);

@@ -102,6 +102,25 @@ describe("createContributionRegistry", () => {
     expect(r.get(id)?.data).toEqual({ version: 2 });
   });
 
+  it("re-registering a plugin drops its stale records (unregister-before-re-register guard)", () => {
+    const r = createContributionRegistry();
+    // v1 declares a command and a hook.
+    r.register([
+      rec("plugin:acme/demo/command:foo"),
+      rec("plugin:acme/demo/hook:pre_tool:0", { kind: "hook", name: "pre_tool" }),
+      rec("plugin:other/pkg/command:keep", { pluginId: "other/pkg" }),
+    ]);
+    // v2 of acme/demo drops the hook (or respelled it — ids are
+    // spelling-independent now, but a REMOVED contribution must not survive
+    // a bare upsert). A full-manifest re-register replaces the plugin's
+    // record set wholesale; other plugins are untouched.
+    r.register([rec("plugin:acme/demo/command:foo", { data: { v: 2 } })]);
+    expect(r.get("plugin:acme/demo/hook:pre_tool:0")).toBeUndefined();
+    expect(r.list({ pluginId: "acme/demo" })).toHaveLength(1);
+    expect(r.get("plugin:acme/demo/command:foo")?.data).toEqual({ v: 2 });
+    expect(r.list({ pluginId: "other/pkg" })).toHaveLength(1);
+  });
+
   it("a duplicate canonicalId within one register() call throws", () => {
     const r = createContributionRegistry();
     const id = "plugin:acme/demo/command:foo";

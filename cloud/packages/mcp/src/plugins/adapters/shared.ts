@@ -63,22 +63,42 @@ export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** Read a JSON object file; null when missing, {}-shaped when unparseable. */
-export async function readJsonMap(
-  file: string,
-): Promise<Record<string, unknown> | null> {
+/** Read-a-JSON-object-file outcome: missing, parsed, or present-but-corrupt. */
+export type JsonMapResult =
+  | { status: "missing" }
+  | { status: "ok"; map: Record<string, unknown> }
+  | { status: "corrupt" };
+
+/**
+ * Read a JSON object file, distinguishing MISSING from CORRUPT: a broken
+ * hooks.json or plugin manifest must be loud (a warning the installer
+ * surfaces), never a silently-disabled contribution set.
+ */
+export async function readJsonMapResult(file: string): Promise<JsonMapResult> {
   let text: string;
   try {
     text = await readFile(file, "utf8");
   } catch {
-    return null;
+    return { status: "missing" };
   }
   try {
     const decoded: unknown = JSON.parse(text);
-    return isRecord(decoded) ? decoded : {};
+    if (!isRecord(decoded)) return { status: "corrupt" };
+    return { status: "ok", map: decoded };
   } catch {
-    return {};
+    return { status: "corrupt" };
   }
+}
+
+/**
+ * Back-compat shim: the map, or null when missing OR corrupt (callers that
+ * need the distinction use readJsonMapResult and push their own warning).
+ */
+export async function readJsonMap(
+  file: string,
+): Promise<Record<string, unknown> | null> {
+  const r = await readJsonMapResult(file);
+  return r.status === "ok" ? r.map : null;
 }
 
 /**
@@ -239,40 +259,108 @@ export async function scanSkills(
 
 // ── hooks (hooks.json event-map normalization — Dart _addHooks parity) ──────
 
-/**
- * Events whose hooks may deny an action (§8.2). Both the canonical
- * (snake_case) and Claude-Code spellings are accepted because the cloud
- * model records the event name as declared (the brief pins
- * `plugin:<id>/hook:PreToolUse:0`).
- */
-const BLOCKING_EVENTS = new Set([
-  "pre_tool",
-  "permission_request",
-  "PreToolUse",
-  "PermissionRequest",
-]);
+// ── hook event normalization (ported from agent-core/src/hooks.ts so the
+// manifest layer and the P3 engine share ONE raw→canonical mapping) ─────────
 
-/** Alias map for the blocking check only (Dart canonicalHookEvent subset). */
-const BLOCKING_ALIASES: Record<string, string> = {
+/** The canonical hook events the P3 cloud engine dispatches on. */
+export const CLOUD_HOOK_EVENTS = [
+  "session_start",
+  "user_prompt_submit",
+  "pre_request",
+  "post_request",
+  "pre_tool",
+  "post_tool",
+  "stop",
+  "subagent_stop",
+  "notification",
+] as const;
+
+export type CloudHookEvent = (typeof CLOUD_HOOK_EVENTS)[number];
+
+const CLOUD_EVENT_SET: ReadonlySet<string> = new Set(CLOUD_HOOK_EVENTS);
+
+/**
+ * Dart `canonicalHookEvent` aliases accepted at the source layer, ported
+ * verbatim from agent-core's EVENT_ALIASES plus the Dart-canonical events
+ * the cloud engine cut (session_end, pre_compact, post_compact,
+ * subagent_start, permission_request) — those still RESOLVE so the adapter
+ * can skip them with a specific loud warning instead of a generic one.
+ */
+const EVENT_ALIASES: Readonly<Record<string, string>> = {
+  // Legacy Ovid aliases.
+  on_session_start: "session_start",
+  on_session_end: "session_end",
+  on_pre_request: "pre_request",
   on_pre_tool: "pre_tool",
+  on_post_tool: "post_tool",
+  on_turn_start: "user_prompt_submit",
+  on_turn_end: "stop",
+  // [CC] PascalCase names.
+  SessionStart: "session_start",
+  SessionEnd: "session_end",
+  UserPromptSubmit: "user_prompt_submit",
   PreToolUse: "pre_tool",
   PostToolUse: "post_tool",
   PostToolUseFailure: "post_tool",
+  Stop: "stop",
+  SubagentStart: "subagent_start",
+  SubagentStop: "subagent_stop",
+  Notification: "notification",
+  PreCompact: "pre_compact",
+  PostCompact: "post_compact",
   PermissionRequest: "permission_request",
-  on_permission_request: "permission_request",
+  // Dart canonical spellings for events the cloud renamed or kept.
+  subagent_end: "subagent_stop",
+  permission_request: "permission_request",
 };
 
-export function hookCanBlock(event: string): boolean {
-  const canonical = BLOCKING_ALIASES[event] ?? event;
-  return BLOCKING_EVENTS.has(canonical);
+const KNOWN_EVENTS: ReadonlySet<string> = new Set([
+  ...CLOUD_EVENT_SET,
+  "session_end",
+  "pre_compact",
+  "post_compact",
+  "subagent_start",
+  "permission_request",
+]);
+
+/**
+ * The complete raw→canonical hook-event resolver (the manifest layer's
+ * public port of agent-core's module-private normalizeEvent). Returns the
+ * canonical event name, or null when the name maps to nothing any Ovid
+ * runtime can fire. Canonical ids and the P3 engine both key on the
+ * CANONICAL form, so a respelled declaration yields the same id.
+ */
+export function canonicalHookEvent(raw: string): string | null {
+  const key = raw.trim();
+  if (key === "") return null;
+  if (CLOUD_EVENT_SET.has(key)) return key;
+  if (KNOWN_EVENTS.has(key)) return key;
+  return EVENT_ALIASES[key] ?? null;
+}
+
+/** True when the P3 cloud engine dispatches on this canonical event. */
+export function isCloudHookEvent(event: string): event is CloudHookEvent {
+  return CLOUD_EVENT_SET.has(event);
+}
+
+/**
+ * Events whose hooks may deny an action. The cloud engine cut
+ * permission_request, so `pre_tool` is the ONLY blocking gate — a hook
+ * deny still wins there (agent-core hooks.ts header).
+ */
+export function hookCanBlock(canonicalEvent: string): boolean {
+  return canonicalEvent === "pre_tool";
 }
 
 /**
  * Normalize a `{"hooks": {Event: …}}` map into ordered PluginHooks.
- * Handles the string shorthand, a single matcher-object (wrapped, not
- * dropped) and matcher-group arrays. Ordinals are the manifest-order index
- * WITHIN the event. Only `command` hooks survive into the cloud model;
- * prompt/agent hooks and malformed declarations are skipped with a warning.
+ * Event names are resolved to their CANONICAL form (canonicalHookEvent), so
+ * canonical ids and the P3 engine agree regardless of the declared
+ * spelling. Handles the string shorthand, a single matcher-object (wrapped,
+ * not dropped) and matcher-group arrays. Ordinals are the manifest-order
+ * index WITHIN the canonical event. Only `command` hooks survive into the
+ * cloud model; prompt/agent hooks, unsupported events and malformed
+ * declarations are skipped with a warning.
  */
 export function parseHooksEventMap(
   hooksJson: Record<string, unknown>,
@@ -296,14 +384,35 @@ export function parseHooksEventMap(
   };
 
   for (const [rawEvent, value] of Object.entries(events)) {
-    const event = rawEvent.trim();
-    if (event === "") {
-      warnings.push("Hook event with an empty name was skipped.");
+    const canonical = canonicalHookEvent(rawEvent);
+    if (canonical === null) {
+      warnings.push(
+        `Hook event "${rawEvent}" is not supported by Ovid and was skipped.`,
+      );
+      continue;
+    }
+    if (canonical === "permission_request") {
+      // The P3 cloud engine cut permission_request (agent-core hooks.ts):
+      // a declaration here would be approved as blocking and then silently
+      // never fire. The pre_tool gate is the supported alternative — a
+      // hook deny still wins there.
+      warnings.push(
+        `Hook event "${rawEvent}" (permission_request) is not fired by the ` +
+          "cloud engine and was skipped; declare a pre_tool hook instead — " +
+          "a hook deny still wins at the pre_tool gate.",
+      );
+      continue;
+    }
+    if (!isCloudHookEvent(canonical)) {
+      warnings.push(
+        `Hook event "${rawEvent}" (${canonical}) is not fired by the cloud ` +
+          "engine and was skipped.",
+      );
       continue;
     }
     // Shorthand: "event": "command string".
     if (typeof value === "string") {
-      if (value.trim() !== "") add(event, value);
+      if (value.trim() !== "") add(canonical, value);
       continue;
     }
     // A single matcher-object is wrapped rather than dropped.
@@ -368,7 +477,7 @@ export function parseHooksEventMap(
           warnings.push(`Hook on "${rawEvent}" has no payload and was skipped.`);
           continue;
         }
-        add(event, payload);
+        add(canonical, payload);
       }
     }
   }
@@ -378,7 +487,7 @@ export function parseHooksEventMap(
 // ── Codex inline hooks ([[hooks.<Event>]] TOML tables) ──────────────────────
 
 /** Strip surrounding TOML quotes from a scalar value. */
-function unquoteToml(v: string): string {
+export function unquoteToml(v: string): string {
   let s = v.trim();
   if (s.length >= 2) {
     const f = s[0]!;
@@ -632,10 +741,14 @@ export async function adaptStandardTree(
   await scanInto("skills", "skills");
   await scanInto("agents", "agents");
 
-  // hooks/hooks.json (the conventional location).
-  const hooksJson = await readJsonMap(join(root, "hooks", "hooks.json"));
-  if (hooksJson !== null) {
-    hooks.push(...parseHooksEventMap(hooksJson, warnings));
+  // hooks/hooks.json (the conventional location). A corrupt file is LOUD —
+  // hooks silently disabled is exactly the failure mode the installer must
+  // surface, not swallow.
+  const hooksJsonResult = await readJsonMapResult(join(root, "hooks", "hooks.json"));
+  if (hooksJsonResult.status === "corrupt") {
+    warnings.push("hooks/hooks.json is not valid JSON — hooks were skipped.");
+  } else if (hooksJsonResult.status === "ok") {
+    hooks.push(...parseHooksEventMap(hooksJsonResult.map, warnings));
   }
 
   // Root .mcp.json.
@@ -658,15 +771,22 @@ export async function adaptStandardTree(
     hooks.push(...parseHooksEventMap({ hooks: hooksDecl }, warnings));
   } else if (typeof hooksDecl === "string" && hooksDecl.trim() !== "") {
     const filePointer = cleanPointer(hooksDecl);
-    const asFile =
-      filePointer !== null
-        ? await readJsonMap(join(root, filePointer))
-        : null;
-    const asDir =
-      asFile === null && filePointer !== null
-        ? await readJsonMap(join(root, filePointer, "hooks.json"))
-        : null;
-    const loaded = asFile ?? asDir;
+    let loaded: Record<string, unknown> | null = null;
+    if (filePointer !== null) {
+      const asFile = await readJsonMapResult(join(root, filePointer));
+      if (asFile.status === "corrupt") {
+        warnings.push(`Hooks file "${filePointer}" is not valid JSON — hooks were skipped.`);
+      } else if (asFile.status === "ok") {
+        loaded = asFile.map;
+      } else {
+        const asDir = await readJsonMapResult(join(root, filePointer, "hooks.json"));
+        if (asDir.status === "corrupt") {
+          warnings.push(`Hooks file "${filePointer}/hooks.json" is not valid JSON — hooks were skipped.`);
+        } else if (asDir.status === "ok") {
+          loaded = asDir.map;
+        }
+      }
+    }
     if (loaded !== null) {
       hooks.push(...parseHooksEventMap(loaded, warnings));
     }

@@ -14,11 +14,18 @@ import {
   authorPublisher,
   canonicalPluginId,
   capabilitiesFromDeclaration,
-  readJsonMap,
+  readJsonMapResult,
 } from "./shared.js";
 
 export async function adaptClaudeCode(root: string): Promise<NormalizedPluginManifest> {
-  const manifest = (await readJsonMap(join(root, ".claude-plugin", "plugin.json"))) ?? {};
+  const warnings: string[] = [];
+  const manifestResult = await readJsonMapResult(
+    join(root, ".claude-plugin", "plugin.json"),
+  );
+  if (manifestResult.status === "corrupt") {
+    warnings.push(".claude-plugin/plugin.json is not valid JSON.");
+  }
+  const manifest = manifestResult.status === "ok" ? manifestResult.map : {};
 
   const name = typeof manifest.name === "string" ? manifest.name.trim() : "";
   const publisher = authorPublisher(manifest.author);
@@ -30,8 +37,7 @@ export async function adaptClaudeCode(root: string): Promise<NormalizedPluginMan
     );
   }
 
-  const declWarnings: string[] = [];
-  const declared = capabilitiesFromDeclaration(manifest.capabilities, declWarnings);
+  const declared = capabilitiesFromDeclaration(manifest.capabilities, warnings);
   const tree = await adaptStandardTree(root, manifest, declared);
 
   return {
@@ -45,7 +51,7 @@ export async function adaptClaudeCode(root: string): Promise<NormalizedPluginMan
     mcpServers: tree.mcpServers,
     capabilities: tree.capabilities,
     envNames: tree.envNames,
-    warnings: [...declWarnings, ...tree.warnings],
+    warnings: [...warnings, ...tree.warnings],
     rootPath: root,
   };
 }

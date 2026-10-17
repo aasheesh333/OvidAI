@@ -11,8 +11,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   ManifestError,
+  CLOUD_HOOK_EVENTS,
   adaptPlugin,
   canonicalContributionId,
+  canonicalHookEvent,
   pluginManifestDigest,
 } from "./manifest.js";
 import { inferRequestedCapabilities } from "./capabilities.js";
@@ -158,7 +160,7 @@ describe("adaptPlugin — Claude-Code bundles", () => {
 
     expect(m.hooks).toHaveLength(1);
     expect(m.hooks[0]).toMatchObject({
-      event: "PreToolUse",
+      event: "pre_tool",
       type: "command",
       command: "echo hi",
       canBlock: true,
@@ -170,7 +172,7 @@ describe("adaptPlugin — Claude-Code bundles", () => {
     const ids = contributionsFromManifest(m).map((r) => r.canonicalId);
     expect(ids).toContain("plugin:acme/demo/command:foo");
     expect(ids).toContain("plugin:acme/demo/mcp:bar");
-    expect(ids).toContain("plugin:acme/demo/hook:PreToolUse:0");
+    expect(ids).toContain("plugin:acme/demo/hook:pre_tool:0");
   });
 
   it("parses inline mcpServers and a './.mcp.json' pointer", async () => {
@@ -261,7 +263,7 @@ describe("adaptPlugin — Claude-Code bundles", () => {
     );
     const m = await adaptPlugin(root);
     expect(m.hooks).toHaveLength(1);
-    expect(m.hooks[0]?.event).toBe("PreToolUse");
+    expect(m.hooks[0]?.event).toBe("pre_tool");
     expect(m.hooks[0]?.command).toBe("echo hi");
   });
 
@@ -299,9 +301,9 @@ describe("adaptPlugin — Claude-Code bundles", () => {
     );
     const m = await adaptPlugin(root);
     expect(m.hooks.map((h) => `${h.event}:${h.ordinal}`)).toEqual([
-      "SessionStart:0",
-      "SessionStart:1",
-      "PreToolUse:0",
+      "session_start:0",
+      "session_start:1",
+      "pre_tool:0",
     ]);
   });
 
@@ -382,6 +384,112 @@ describe("adaptPlugin — Claude-Code bundles", () => {
   });
 });
 
+describe("canonicalHookEvent (full raw→canonical resolver)", () => {
+  it("resolves every cloud event, its CC/legacy spellings, and the Dart extras", () => {
+    for (const canonical of CLOUD_HOOK_EVENTS) {
+      expect(canonicalHookEvent(canonical)).toBe(canonical);
+    }
+    // [CC] PascalCase spellings.
+    expect(canonicalHookEvent("SessionStart")).toBe("session_start");
+    expect(canonicalHookEvent("UserPromptSubmit")).toBe("user_prompt_submit");
+    expect(canonicalHookEvent("PreToolUse")).toBe("pre_tool");
+    expect(canonicalHookEvent("PostToolUse")).toBe("post_tool");
+    expect(canonicalHookEvent("PostToolUseFailure")).toBe("post_tool");
+    expect(canonicalHookEvent("Stop")).toBe("stop");
+    expect(canonicalHookEvent("SubagentStop")).toBe("subagent_stop");
+    expect(canonicalHookEvent("Notification")).toBe("notification");
+    // Legacy Ovid aliases.
+    expect(canonicalHookEvent("on_session_start")).toBe("session_start");
+    expect(canonicalHookEvent("on_pre_request")).toBe("pre_request");
+    expect(canonicalHookEvent("on_pre_tool")).toBe("pre_tool");
+    expect(canonicalHookEvent("on_post_tool")).toBe("post_tool");
+    expect(canonicalHookEvent("on_turn_start")).toBe("user_prompt_submit");
+    expect(canonicalHookEvent("on_turn_end")).toBe("stop");
+    expect(canonicalHookEvent("subagent_end")).toBe("subagent_stop");
+    // Dart-canonical events the cloud engine cut (still resolvable, so the
+    // adapter can skip them with a specific loud warning).
+    expect(canonicalHookEvent("SessionEnd")).toBe("session_end");
+    expect(canonicalHookEvent("PreCompact")).toBe("pre_compact");
+    expect(canonicalHookEvent("PostCompact")).toBe("post_compact");
+    expect(canonicalHookEvent("SubagentStart")).toBe("subagent_start");
+    expect(canonicalHookEvent("permission_request")).toBe("permission_request");
+    expect(canonicalHookEvent("PermissionRequest")).toBe("permission_request");
+    // Unknown → null.
+    expect(canonicalHookEvent("Telepathy")).toBeNull();
+    expect(canonicalHookEvent("")).toBeNull();
+  });
+
+  it("hook canonical ids and digests are spelling-independent", async () => {
+    const bySpellings: Record<string, string> = {};
+    const digests: Record<string, string> = {};
+    for (const spelling of ["PreToolUse", "pre_tool", "on_pre_tool"]) {
+      const root = await makeTree(
+        ccTree({
+          "hooks/hooks.json": JSON.stringify({
+            hooks: { [spelling]: "echo hi" },
+          }),
+        }),
+      );
+      const m = await adaptPlugin(root);
+      expect(m.hooks).toHaveLength(1);
+      expect(m.hooks[0]?.event).toBe("pre_tool");
+      const ids = contributionsFromManifest(m)
+        .filter((r) => r.kind === "hook")
+        .map((r) => r.canonicalId);
+      expect(ids).toEqual(["plugin:acme/demo/hook:pre_tool:0"]);
+      digests[spelling] = pluginManifestDigest(m);
+    }
+    expect(digests.pre_tool).toBe(digests.PreToolUse);
+    expect(digests.on_pre_tool).toBe(digests.PreToolUse);
+  });
+
+  it("permission_request declarations are skipped with a loud pre_tool-gate warning", async () => {
+    const root = await makeTree(
+      ccTree({
+        "hooks/hooks.json": JSON.stringify({
+          hooks: { PermissionRequest: "echo gate" },
+        }),
+      }),
+    );
+    const m = await adaptPlugin(root);
+    expect(m.hooks).toHaveLength(0);
+    const w = m.warnings.find((x) => x.includes("permission_request"));
+    expect(w).toBeDefined();
+    expect(w).toMatch(/pre_tool/); // documents the alternative gate
+    expect(inferRequestedCapabilities(m).has("hooksBlock")).toBe(false);
+  });
+
+  it("cloud-unsupported events are skipped with a warning", async () => {
+    const root = await makeTree(
+      ccTree({
+        "hooks/hooks.json": JSON.stringify({
+          hooks: {
+            PreCompact: "echo compact",
+            Telepathy: "echo nope",
+          },
+        }),
+      }),
+    );
+    const m = await adaptPlugin(root);
+    expect(m.hooks).toHaveLength(0);
+    expect(m.warnings.some((x) => x.includes("PreCompact"))).toBe(true);
+    expect(m.warnings.some((x) => x.includes("Telepathy"))).toBe(true);
+  });
+
+  it("a corrupt hooks.json is loud, not silently disabled", async () => {
+    const root = await makeTree(
+      ccTree({
+        "hooks/hooks.json": "{ not json",
+      }),
+    );
+    const m = await adaptPlugin(root);
+    expect(m.hooks).toHaveLength(0);
+    expect(
+      m.warnings.some((x) => x.includes("hooks.json") && x.includes("valid JSON")),
+    ).toBe(true);
+  });
+});
+
 describe("adaptPlugin — Codex trees", () => {
   function codexTree(extra: Record<string, string> = {}): Record<string, string> {
     return {
@@ -430,7 +538,7 @@ describe("adaptPlugin — Codex trees", () => {
     expect(m.mcpServers[0]?.imported.transport).toBe("http");
     expect(m.hooks).toHaveLength(1);
     expect(m.hooks[0]).toMatchObject({
-      event: "SessionStart",
+      event: "session_start",
       command: "echo boot",
       canBlock: false,
     });
