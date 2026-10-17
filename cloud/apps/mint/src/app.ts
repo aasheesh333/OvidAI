@@ -3,6 +3,8 @@ import type { Db } from "@ovid/db";
 import type { Redis } from "ioredis";
 import type { Alerter } from "./alerts.js";
 import { registerAdminRoutes } from "./adminRoutes.js";
+import type { BillingService } from "./billing/service.js";
+import { registerBillingRoutes } from "./billing/routes.js";
 import type { MintEnv } from "./env.js";
 import type { LiteLlmAdmin } from "./litellmAdmin.js";
 import { registerMintRoutes } from "./mintRoutes.js";
@@ -65,6 +67,13 @@ export interface MintDeps {
    * route/key-mint tests can pin the 409 without a 5-second sleep.
    */
   mintLock?: { pollMs: number; polls: number };
+  /**
+   * Task 10: Play Billing. The composition root builds it with the real Play
+   * API (env-gated) and passes it here; tests inject a service with a fake
+   * Play client. Absent → /billing/* is not registered (the pre-billing
+   * scaffold contract) and /usage carries no billing fields.
+   */
+  billing?: BillingService;
 }
 
 /**
@@ -116,8 +125,14 @@ export function buildMintApps(deps: MintDeps): {
   publicApp.get("/healthz", async () => ({ ok: true }));
   // Task 5: the app-facing /usage contract. Task 6: /mint, /upgrade, /plans
   // and /v1/models. Later tasks register their own route groups here.
-  registerUsageRoutes(publicApp, deps);
+  registerUsageRoutes(publicApp, deps, deps.billing);
   registerMintRoutes(publicApp, deps);
+  // Task 10 wiring: /billing/verify + /billing/rtdn on the PUBLIC app (Caddy
+  // flips /billing/* here in Task 18). Only registered when the composition
+  // root supplied a service, so the scaffold's 404 contract still holds.
+  if (deps.billing !== undefined) {
+    registerBillingRoutes(publicApp, deps, deps.billing);
+  }
 
   const adminApp = Fastify({ logger: false });
   installErrorHandling(adminApp);

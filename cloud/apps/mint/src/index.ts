@@ -18,16 +18,26 @@ export * from "./mintRoutes.js";
 // Task 8: the owner admin console + /admin/* JSON API and audit trail.
 export * from "./adminAudit.js";
 export * from "./adminRoutes.js";
+// Task 10: Play Billing — verify/RTDN, the durable ledger, tier sink.
+export * from "./billing/domain.js";
+export * from "./billing/products.js";
+export * from "./billing/play.js";
+export * from "./billing/service.js";
+export * from "./billing/routes.js";
+// NOTE: billing/tierSink.ts is intentionally not star-exported — it declares
+// TIER_SKEW_SECONDS, which projection.ts already exports (the same constant).
 
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
 import { createDb } from "@ovid/db";
-import { buildMintApps } from "./app.js";
+import { buildMintApps, type MintDeps } from "./app.js";
 import { createAlerter } from "./alerts.js";
+import { createBillingService } from "./billing/service.js";
 import { loadMintEnv } from "./env.js";
 import { createLiteLlmAdmin } from "./litellmAdmin.js";
 import { createProjection } from "./projection.js";
 import { createMintVerifier } from "./verifier.js";
+import { reapplyUser } from "./windows.js";
 
 /**
  * Composition root — intentionally untested-thin (later e2e tasks exercise
@@ -44,15 +54,30 @@ export async function main(
   const redis = new Redis(cfg.redisDb2Url);
   const litellm = createLiteLlmAdmin(cfg.litellmBaseUrl, cfg.litellmMasterKey);
   const alerter = createAlerter(redis, cfg);
+  const projection = createProjection({ db, redis });
+  const verifyIdentity = createMintVerifier(cfg);
 
-  const { publicApp, adminApp } = buildMintApps({
+  // Task 10 wiring: build the billing service on the SAME deps and hand it to
+  // buildMintApps, which registers /billing/* and merges the billing fields
+  // into /usage. With no OVID_PLAY_SERVICE_ACCOUNT_FILE the service is
+  // unconfigured and answers 503 billing_unavailable (the intended gate).
+  const mintDeps: MintDeps = {
     db,
     redis,
     litellm,
     env: cfg,
     alerter,
-    verifyIdentity: createMintVerifier(cfg),
+    verifyIdentity,
+  };
+  mintDeps.billing = createBillingService({
+    db,
+    redis,
+    env: cfg,
+    projection,
+    reapplyUser: (uid: string) => reapplyUser(mintDeps, uid),
   });
+
+  const { publicApp, adminApp } = buildMintApps(mintDeps);
 
   // Owned connections close with the apps (deploy scripts call app.close()).
   publicApp.addHook("onClose", async () => {
