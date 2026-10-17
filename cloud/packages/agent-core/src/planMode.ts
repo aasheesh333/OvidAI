@@ -77,12 +77,19 @@ export const PLAN_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   "skill",
 ]);
 
-/// The harness itself — orchestration and session bookkeeping — stays
-/// available in every mode/preset (and therefore also survives the
-/// plan-mode projection and the !memoryEnabled drop, per the revised plan
-/// text: `memoryEnabled:false` drops memory_search but KEEPS memory_save).
-/// EXACT port of Dart's `PlanModePolicy.harnessTools`; presets re-export it
-/// as their always-allowed set.
+/// The harness itself — orchestration and session bookkeeping — survives the
+/// `!memoryEnabled` drop (memory_save is a member: `memoryEnabled:false`
+/// drops memory_search but KEEPS memory_save) and every preset-ALLOWLIST
+/// intersection (orchestration is the harness, not a capability being
+/// gated). It does NOT survive the plan-mode projection: while planning the
+/// roster is allowlist-only (Dart G4 — `dispatch_agent` is a deliberate
+/// escape hatch OUT of plan mode: a child session starts planMode:false and
+/// would get the full mutating roster, voiding the read-only contract; Dart
+/// pins the union as "the drift", plan_mode_policy_test.dart:362–367).
+/// Consequence (Dart parity, accepted): memory_save, update_goal and
+/// create_goal also drop while planning; report and get_goal stay — they are
+/// allowlist members. EXACT port of Dart's `PlanModePolicy.harnessTools`;
+/// presets re-export it as their always-allowed set.
 export const HARNESS_TOOLS: ReadonlySet<string> = new Set([
   "dispatch_agent",
   "report",
@@ -109,15 +116,14 @@ export const PLAN_ALIAS_TOOLS: ReadonlySet<string> = new Set([
   "grep_files",
 ]);
 
-/// The set the plan-mode projection keeps: allowlist ∪ harness ∪ the P2
-/// read-only aliases. (Dart's module defines rosterTools = allowed ∪ harness;
-/// the cloud plan text keeps that union — the harness is orchestration, not a
-/// capability being gated — and adds R1's aliases.)
+/// What the plan-mode projection keeps: the allowlist plus P2's read-only
+/// aliases (ruling R1) — and NOTHING else. Allowlist-only by design (Dart's
+/// shipped gate AND roster both refuse `dispatch_agent` while planning; the
+/// harness union is the drift Dart's G4 test explicitly rejects — cloud
+/// child sessions start planMode:false, so admitting the spawner would be a
+/// mutation escape hatch out of read-only planning). Harness members that
+/// are also allowlist members (`report`, `get_goal`) stay.
 export function planRosterAdmits(name: string): boolean {
   if (PLAN_HARD_DENIED_PREFIXES.some((p) => name.startsWith(p))) return false;
-  return (
-    PLAN_ALLOWED_TOOLS.has(name) ||
-    PLAN_ALIAS_TOOLS.has(name) ||
-    HARNESS_TOOLS.has(name)
-  );
+  return PLAN_ALLOWED_TOOLS.has(name) || PLAN_ALIAS_TOOLS.has(name);
 }

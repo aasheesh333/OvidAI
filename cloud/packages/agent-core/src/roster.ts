@@ -17,14 +17,22 @@
 //      harness, so `memoryEnabled:false` drops memory_search but KEEPS
 //      memory_save);
 //   3. drop repo_sync/repo_tree when !githubConnected;
-//   4. planMode → keep only PLAN_ALLOWED_TOOLS ∪ HARNESS_TOOLS ∪ the P2
-//      read-only aliases (R1), and never a PLAN_HARD_DENIED_PREFIXES match;
+//   4. planMode → keep only PLAN_ALLOWED_TOOLS ∪ the P2 read-only aliases
+//      (R1) — allowlist-ONLY, no harness union (C1 ruling: Dart's shipped
+//      gate and roster both refuse dispatch_agent while planning; the union
+//      is the drift Dart's G4 test rejects) — and never a
+//      PLAN_HARD_DENIED_PREFIXES match;
 //   5. isSubagent → drop CHILD_DENIED_TOOLS (layer 2 of 3: a child never
 //      even SEES the spawn tools; management tools stay so it can talk to
 //      its parent and coordinate with siblings);
 //   6. preset: allowedTools non-empty → intersection (harness always kept);
 //      else deniedTools → subtraction;
-//   7. activeSkillScopes non-empty → intersect through nativeToolsFor;
+//   7. activeSkillScopes non-empty → intersect through nativeToolsFor —
+//      a PLAIN intersect with no harness exemption (C2 ruling: that IS the
+//      allowed-tools contract), EXCEPT the `skill` tool itself (Dart
+//      parity: "always allowed so the model can load another skill (which
+//      replaces the scope)" — in cloud the scopes persist in session state,
+//      so without this a scoped skill would be an unescapable dead-end);
 //   8. canonicalTools sort (byte-stable order for the cache prefix, Task 3).
 
 import { nativeToolsFor } from "./claudeCodeTools.js";
@@ -105,8 +113,15 @@ export function isToolPermitted(name: string, ctx: RosterContext): boolean {
       return false;
     }
   }
-  // 7. Active skill scopes narrow the roster to what the skill grants.
-  if (ctx.activeSkillScopes.length > 0 && !scopeAdmits(name, ctx.activeSkillScopes)) {
+  // 7. Active skill scopes narrow the roster to what the skill grants — a
+  //    plain intersect (no harness exemption; C2 ruling) — except the skill
+  //    tool itself, which stays available so the model can load another
+  //    skill and REPLACE the scope (the only path that clears it).
+  if (
+    ctx.activeSkillScopes.length > 0 &&
+    name !== "skill" &&
+    !scopeAdmits(name, ctx.activeSkillScopes)
+  ) {
     return false;
   }
   return true;
@@ -232,8 +247,13 @@ export function createExitPlanModeTool(deps: {
       };
       const decision = await deps.approvals.approve(ctx, req);
       if (decision !== "allow" && decision !== "always") {
-        // Stay in plan mode. Applied immediately: the user answered a
-        // question about THIS tool result, not about a future turn.
+        // Stay in plan mode. Applied immediately (Dart `_applyPlanModeNow(
+        // session, true)` parity): the user answered a question about THIS
+        // tool result, not about a future turn — and a plan-off transition
+        // queued mid-review (the Plan chip toggled while the card was open)
+        // must NOT survive the deny and flip plan mode off at the next
+        // boundary.
+        await deps.state.patch(ctx.sessionId, { planMode: true, pendingPlanMode: null });
         return {
           content:
             "DENIED: the user did not approve — they chose to keep planning. " +

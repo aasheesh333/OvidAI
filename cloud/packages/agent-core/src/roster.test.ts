@@ -136,6 +136,10 @@ describe("computeToolRoster — plan-mode default-deny projection", () => {
       "generate_image",
       "browser_click",
       "browser_navigate",
+      // the spawner is a deliberate escape hatch OUT of plan mode (C1/Dart
+      // G4: a child session starts planMode:false and would get the full
+      // mutating roster — the union was the drift Dart's test rejects)
+      "dispatch_agent",
     ]) {
       expect(names.has(t), `${t} must not be offered while planning`).toBe(false);
     }
@@ -148,11 +152,23 @@ describe("computeToolRoster — plan-mode default-deny projection", () => {
     }
   });
 
-  it("offers the harness set while planning (kept in every mode/preset)", () => {
+  it("planning is allowlist-ONLY: harness members that are not allowlist members drop (C1)", () => {
     const names = rosterNames(plan);
-    for (const t of HARNESS_TOOLS) {
-      expect(names.has(t), t).toBe(true);
-    }
+    // report and get_goal stay — they are allowlist members.
+    expect(names.has("report")).toBe(true);
+    expect(names.has("get_goal")).toBe(true);
+    // The rest of the harness set is withheld while planning (accepted
+    // consequence of the C1 ruling; Dart parity).
+    expect(names.has("dispatch_agent")).toBe(false);
+    expect(names.has("memory_save")).toBe(false);
+    expect(names.has("update_goal")).toBe(false);
+    expect(names.has("create_goal")).toBe(false);
+    // The harness set still survives the OTHER gates it is mandated for:
+    // the !memoryEnabled drop and the preset allowlist intersection.
+    expect(isToolPermitted("memory_save", ctx({ memoryEnabled: false }))).toBe(true);
+    expect(
+      isToolPermitted("memory_save", ctx({ preset: preset({ allowedTools: ["file_read"] }) })),
+    ).toBe(true);
   });
 
   it("admits P2's read-only spellings alongside their P3 counterparts (R1)", () => {
@@ -276,9 +292,19 @@ describe("computeToolRoster — subagent projection", () => {
 // ── skill scoping (activeSkillScopes, ruling R4) ────────────────────────────
 
 describe("computeToolRoster — activeSkillScopes", () => {
-  it("scopes the roster through nativeToolsFor", () => {
+  it("scopes the roster through nativeToolsFor (skill itself stays — C2)", () => {
     const names = rosterNames(ctx({ activeSkillScopes: ["Edit", "Glob"] }));
-    expect([...names].sort()).toEqual(["fs_edit", "fs_glob"]);
+    // A plain intersect with NO harness exemption — but the skill tool is
+    // exempt so the model can load another skill, which REPLACES the scope
+    // (cloud's scopes persist in session state; without this, a scoped
+    // skill is an unescapable dead-end).
+    expect([...names].sort()).toEqual(["fs_edit", "fs_glob", "skill"]);
+  });
+
+  it("the skill-tool exemption holds under every scope shape", () => {
+    for (const scopes of [["Edit"], ["mcp__srv"], ["*"], ["Bash(git push *)"]] as const) {
+      expect(isToolPermitted("skill", ctx({ activeSkillScopes: [...scopes] }))).toBe(true);
+    }
   });
 
   it("a Bash specifier grant keeps the whole shell/job family", () => {
@@ -289,6 +315,7 @@ describe("computeToolRoster — activeSkillScopes", () => {
       "job_output",
       "job_start",
       "run_shell",
+      "skill", // C2 exemption: the scope-replacing tool survives
     ]);
   });
 
@@ -467,6 +494,30 @@ describe("createExitPlanModeTool", () => {
     const s = await state.get("s1");
     expect(s.planMode).toBe(true);
     expect(s.mode).toBe("safe");
+  });
+
+  it("deny nulls a plan-off queued mid-review (it must not survive the deny)", async () => {
+    // Dart parity (`_applyPlanModeNow(session, true)`): the user answered a
+    // question about THIS tool result, so a plan-off transition queued while
+    // the review card was open is discarded — the session keeps planning.
+    const state = createMemoryStateStore();
+    await state.patch("s1", {
+      planMode: true,
+      planPreMode: "auto",
+      mode: "safe",
+      pendingPlanMode: false,
+    });
+    const tool = createExitPlanModeTool({
+      state,
+      approvals: { approve: async () => "deny" },
+    });
+
+    const res = await tool.execute({ plan: "Do the thing" }, toolCtx());
+
+    expect(res.content.startsWith("DENIED")).toBe(true);
+    const s = await state.get("s1");
+    expect(s.planMode).toBe(true);
+    expect(s.pendingPlanMode).toBeNull();
   });
 
   it("releases to auto when no pre-mode was recorded (never leaves the session locked)", async () => {

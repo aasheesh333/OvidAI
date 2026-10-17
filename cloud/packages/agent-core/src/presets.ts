@@ -149,13 +149,13 @@ const plan: AgentPreset = {
   temperature: null,
 };
 
-export const BUILT_IN_PRESETS: readonly AgentPreset[] = [
+export const BUILT_IN_PRESETS: readonly AgentPreset[] = Object.freeze([
   standard,
   minimal,
   studio,
   code,
   plan,
-];
+].map((p) => Object.freeze(p)));
 
 /**
  * Look up a built-in preset by id. Null for a null/unknown id — callers
