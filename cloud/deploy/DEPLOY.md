@@ -510,3 +510,86 @@ pending (the **worker** drains in ≤30 s — unit `TimeoutStopSec=35`), mint
 deadline pending, WS error logging pending; subscription cap 64 (I3) and WS
 maxPayload 262144 (I2) are done.
 
+## 12. P7 addendum — R2 storage, redis-c, /workspaces (owner-gated)
+
+P7 adds workspace hibernation/hydration to R2, lazy per-file reads and an
+internal worker file service. **Everything in this section is artifacts-only
+until the owner explicitly approves activation.** The ordered, copy-paste
+runbook (bucket, token, lifecycle, env, verify, activation) is
+[`R2-PROVISIONING.md`](./R2-PROVISIONING.md). Do not create the bucket, mint
+the token, run `docker compose up`, or flip `OVID_STORAGE_BACKEND=r2` before
+that approval — same stop-condition precedent as §11 and the P1 activation.
+
+### 12.1 What changed in the deploy artifacts
+
+- **`docker-compose.yml`**
+  - New `redis-c` service (spec §10): `redis:7-alpine`, `maxmemory 256mb`,
+    `allkeys-lru`, AOF off, password `${REDIS_C_PASSWORD}`, `mem_limit 384m`,
+    `ovid-cloud` network only. It publishes a LOOPBACK port
+    (`127.0.0.1:${REDIS_C_HOST_PORT:-6393}`) so the host systemd worker can
+    reach it, exactly like redis-q. It carries session-activity keys only;
+    queue/event traffic stays on redis-q (`noeviction`).
+  - `gateway.depends_on` gains `redis-c: service_started` (never
+    `service_healthy`: activity bumps must not block REST — the tracker
+    falls back to `REDIS_Q_URL` when `REDIS_C_URL` is unset).
+  - `gateway.extra_hosts` gains `host.docker.internal:host-gateway`, so
+    `OVID_WORKER_INTERNAL_URL=http://host.docker.internal:8091` reaches the
+    HOST worker's file service.
+  - The compose-worker VARIANT (not the landed deployment) is documented
+    with its P7 needs: `${WORKSPACES_ROOT}:/workspaces` rw,
+    `UV_THREADPOOL_SIZE: "8"`, `depends_on redis-c`.
+- **`cloud/deploy/.env.example`** — new `# ── Storage (P7) ──` block:
+  `OVID_STORAGE_BACKEND`, `OVID_R2_*`, `OVID_MAX_WARM_GB`,
+  `OVID_DISK_ALERT_PCT`, `WORKSPACES_ROOT`, `OVID_INTERNAL_TOKEN`,
+  `OVID_WORKER_FILE_PORT`, `OVID_WORKER_INTERNAL_URL`, `REDIS_C_*`, and the
+  gateway caps. The INLINE CAP NAMES DIVERGE by design (P7 Task 12): the
+  gateway reads `OVID_FILE_INLINE_MAX_BYTES`, the worker reads
+  `OVID_INLINE_MAX_BYTES` — keep the values equal (default 1 MiB).
+- **`cloud/deploy/worker.env.example`** — matching `Storage (P7)` block for
+  the HOST worker (`/opt/ovid-cloud/worker.env`), including
+  `REDIS_C_URL=…@127.0.0.1:6393` and `UV_THREADPOOL_SIZE=8`.
+- **`cloud/scripts/verify-r2.mjs`** — owner-run, least-privilege probe
+  (put/head/get/presign/delete; no list, no admin). See the runbook step 5.
+
+### 12.2 Where the values go
+
+| Consumer | File on the box | Notes |
+| --- | --- | --- |
+| gateway (compose) | `/opt/ovid-cloud/.env` | `env_file: [.env]`; R2 + redis-c + token |
+| worker (systemd) | `/opt/ovid-cloud/worker.env` | `EnvironmentFile=`; R2 + redis-c + token |
+
+`OVID_R2_ACCOUNT_ID`, `OVID_R2_ACCESS_KEY_ID`,
+`OVID_R2_SECRET_ACCESS_KEY`, `OVID_R2_BUCKET`, `OVID_INTERNAL_TOKEN` and
+`REDIS_C_PASSWORD` must be IDENTICAL in both files. `chmod 600` both.
+Agents/containers see only these env vars — they never see Cloudflare
+credentials (spec §10/D7).
+
+### 12.3 `/workspaces`
+
+P2 already creates the XFS project-quota volume at `/workspaces`
+(`deploy/workspaces/setup-workspaces.sh`, §11 step 3). P7 needs no new mount
+for the host worker: warm session dirs live under
+`/workspaces/users/{uid}/sessions/{sid}` and `OVID_WORKSPACES_ROOT` is
+unchanged. `WORKSPACES_ROOT=/workspaces` in `.env.example` exists only for a
+restored compose-worker variant.
+
+### 12.4 Capacity note (owner decision at activation)
+
+`OVID_MAX_WARM_GB` defaults to **8 GB** — the ONE warm-disk knob (ledger
+ruling R2; P2's attach-guard reads the same variable, P7's LRU enforces it).
+The 8 → 12 GB retune consideration is documented in P7 Task 10 and is the
+owner's call at activation, coordinated with the backup free-space floor
+(`BACKUP_MIN_FREE_MB`) and the 80 % disk alert.
+
+### 12.5 Activation
+
+Follow `R2-PROVISIONING.md` steps 1–6. Step 6 (live-box side effects +
+credentials) is the explicit STOP: present the runbook to the owner and wait
+for approval. Autonomous dry validation is only:
+
+```bash
+cd /opt/ovid-cloud/repo/cloud/deploy
+docker compose config -q          # no side effects
+node --check ../scripts/verify-r2.mjs
+```
+

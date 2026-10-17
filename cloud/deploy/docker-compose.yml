@@ -44,6 +44,11 @@ networks:
 volumes:
   redis-q-data:
     name: ovid-cloud-redis-q-data
+  # P7: cache-class redis-c data dir. The instance runs with AOF OFF
+  # (allkeys-lru cache only), so nothing here is expected to survive a
+  # restart — the volume exists for parity with redis-q and future use.
+  redis-c-data:
+    name: ovid-cloud-redis-c-data
   # Mint's persistent state (audit JSONL + settings/limits mirrors —
   # MINT_STATE_DIR=/data). Owned by ovid-cloud, never shared.
   mintdata:
@@ -95,6 +100,53 @@ services:
         [
           "CMD-SHELL",
           "redis-cli --no-auth-warning -a \"$$REDIS_Q_PASSWORD\" ping | grep -q PONG",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ── Storage (P7) — cache-class Redis (spec §10 redis-c) ───────────────────
+  # Session-activity keys for the warm-workspace tracker/LRU. CACHE ONLY:
+  # allkeys-lru + no AOF, so a full instance evicts keys instead of failing
+  # writes, and nothing is expected to survive a restart (Postgres
+  # file_manifests.updated_at is the fallback authority — P7 Task 10).
+  # redis-q stays noeviction: it carries jobs/events and must never lose them.
+  # NEVER point queue/event traffic at redis-c.
+  #
+  # Loopback-only host port, mirroring redis-q: the HOST systemd worker (P2)
+  # reaches it at 127.0.0.1:${REDIS_C_HOST_PORT:-6393}; the live stack cannot
+  # (ovid-cloud network only).
+  redis-c:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+        "--appendonly",
+        "no",
+        "--requirepass",
+        "${REDIS_C_PASSWORD:?REDIS_C_PASSWORD must be set in .env}",
+      ]
+    environment:
+      # Only so the healthcheck's in-container shell can interpolate it.
+      REDIS_C_PASSWORD: ${REDIS_C_PASSWORD:?REDIS_C_PASSWORD must be set in .env}
+    ports:
+      - "127.0.0.1:${REDIS_C_HOST_PORT:-6393}:6379"
+    volumes:
+      - redis-c-data:/data
+    mem_limit: 384m
+    # ovid-cloud network ONLY — not reachable from the live stack.
+    networks: [ovid-cloud]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli --no-auth-warning -a \"$$REDIS_C_PASSWORD\" ping | grep -q PONG",
         ]
       interval: 10s
       timeout: 3s
@@ -171,8 +223,17 @@ services:
       # file READ-ONLY. GOOGLE_APPLICATION_CREDENTIALS (from .env) points at
       # the in-container path.
       - ${FIREBASE_CREDENTIALS_HOST_PATH:-/opt/ovid-gateway/firebase-admin.json}:/etc/ovid/firebase-admin.json:ro
+    # P7: the worker file service runs in the HOST systemd worker (P2), not a
+    # compose service. This alias lets OVID_WORKER_INTERNAL_URL reach it at
+    # http://host.docker.internal:8091. (The compose-worker variant would use
+    # the `worker` service name instead — see the P7 note further down.)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis-q: { condition: service_healthy }
+      # P7: activity bumps only. A degraded redis-c must NOT block REST —
+      # the tracker falls back to REDIS_Q_URL when REDIS_C_URL is unset.
+      redis-c: { condition: service_started }
     networks: [internal, ovid-cloud]
     mem_limit: 1g
     cpus: 1.0
@@ -218,6 +279,20 @@ services:
   #     declared next to redis-q-data/mintdata above). The same 4G split
   #     applies — never give the container less than 4 GB while the browser
   #     pool is enabled.
+  #
+  # ── Storage (P7) — compose-worker VARIANT requirements ───────────────────
+  # The landed worker is host systemd (P2). If the compose-worker variant is
+  # ever restored, it additionally needs (additive to the P6 block above):
+  #   volumes:
+  #     - ${WORKSPACES_ROOT:-/workspaces}:/workspaces        # rw — warm dirs
+  #   environment:
+  #     UV_THREADPOOL_SIZE: "8"   # libuv headroom: async zstd pack + fs
+  #   depends_on:
+  #     redis-c: { condition: service_healthy }
+  # Host-systemd equivalents (the landed deployment): /workspaces is already
+  # the XFS project-quota mount from deploy/workspaces/setup-workspaces.sh
+  # (P2, DEPLOY.md §11 step 3); UV_THREADPOOL_SIZE=8 and the P7 storage env
+  # live in /opt/ovid-cloud/worker.env (worker.env.example "Storage (P7)").
 
   # P9 Task 3: the mint REPLACEMENT app — the Node port of server/mint/mint.py
   # (cloud/apps/mint). BUILD-ONLY for now:
