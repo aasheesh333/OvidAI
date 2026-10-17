@@ -41,7 +41,14 @@ export const SCREENCAST_LADDER: readonly LadderStep[] = [
 export interface ScreencastHandle {
   format(): BrowserFrameFormat;
   framesSent(): number;
-  /** Stop + restart the cast with new quality/everyNthFrame (same format). */
+  /**
+   * Stop + restart the cast with new quality/everyNthFrame (same format).
+   *
+   * Throws `"Cannot adjust a stopped screencast."` on a stopped handle. If
+   * the restart command itself rejects, the handle is marked stopped before
+   * the error propagates (never left live-flagged with a dead cast) — call
+   * `stop()` afterwards to release the CDP session.
+   */
   adjust(step: LadderStep): Promise<void>;
   /** Page.stopScreencast + detach the CDP session; idempotent. */
   stop(): Promise<void>;
@@ -98,6 +105,11 @@ function startScreencastParams(format: BrowserFrameFormat, step: LadderStep, cfg
   };
 }
 
+/**
+ * Starts a CDP screencast on `page`. If the `Page.startScreencast` command
+ * rejects, the listener is removed and the CDP session detached before the
+ * error propagates — a rejected start never leaks a session.
+ */
 export async function startScreencast(
   page: Page,
   cfg: ScreencastConfig,
@@ -122,10 +134,23 @@ export async function startScreencast(
   };
   cdp.on("Page.screencastFrame", onFrameEvent);
 
-  await cdp.send(
-    "Page.startScreencast",
-    startScreencastParams(format, { quality: cfg.quality, everyNthFrame: cfg.everyNthFrame }, cfg),
-  );
+  try {
+    await cdp.send(
+      "Page.startScreencast",
+      startScreencastParams(format, { quality: cfg.quality, everyNthFrame: cfg.everyNthFrame }, cfg),
+    );
+  } catch (err) {
+    // No dangling CDP sessions on the start-reject path (Review Focus #2) —
+    // probeWebpSupport's declared false-path (a start rejected outright on a
+    // future chromium) hits exactly this.
+    cdp.off("Page.screencastFrame", onFrameEvent);
+    try {
+      await cdp.detach();
+    } catch {
+      /* session already gone — the original error is what matters */
+    }
+    throw err;
+  }
 
   async function stop(): Promise<void> {
     if (stopPromise) return stopPromise;
@@ -154,7 +179,15 @@ export async function startScreencast(
     async adjust(next: LadderStep): Promise<void> {
       if (stopped) throw new Error("Cannot adjust a stopped screencast.");
       await cdp.send("Page.stopScreencast");
-      await cdp.send("Page.startScreencast", startScreencastParams(format, next, cfg));
+      try {
+        await cdp.send("Page.startScreencast", startScreencastParams(format, next, cfg));
+      } catch (err) {
+        // The old cast is already stopped and the restart failed — no frames
+        // will ever flow, so the handle must not stay live-flagged. The
+        // caller gets the error and can still stop() to release the session.
+        stopped = true;
+        throw err;
+      }
     },
     stop,
   };

@@ -66,6 +66,72 @@ describe("frameMagicFormat + SCREENCAST_LADDER (unit — no chromium)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Failure-path unit leg — stubbed CDP session (no chromium): the start-reject
+// leak pin (I-1) and the adjust live-flag pin (M-2).
+// ---------------------------------------------------------------------------
+
+/** Minimal CDPSession stub: records on/off/detach, startScreencast fails on demand. */
+function stubCdpPage(): {
+  page: Page;
+  cdp: {
+    on: ReturnType<typeof vi.fn>;
+    off: ReturnType<typeof vi.fn>;
+    send: ReturnType<typeof vi.fn>;
+    detach: ReturnType<typeof vi.fn>;
+    failNextStart(): void;
+  };
+} {
+  let failStart = false;
+  const cdp = {
+    on: vi.fn(),
+    off: vi.fn(),
+    send: vi.fn(async (method: string) => {
+      if (method === "Page.startScreencast" && failStart) throw new Error("start rejected by stub");
+      return {};
+    }),
+    detach: vi.fn(async () => {}),
+    failNextStart(): void {
+      failStart = true;
+    },
+  };
+  const context = { newCDPSession: vi.fn(async () => cdp) };
+  const page = { context: () => context } as unknown as Page;
+  return { page, cdp };
+}
+
+describe("screencast failure paths (unit — stubbed CDP)", () => {
+  const cfg: ScreencastConfig = {
+    width: 400,
+    height: 300,
+    quality: 60,
+    everyNthFrame: 2,
+    maxFramesInFlight: 2,
+  };
+
+  it("startScreencast start-reject: listener removed + CDP session detached, original error rethrown (I-1)", async () => {
+    const { page, cdp } = stubCdpPage();
+    cdp.failNextStart();
+    await expect(startScreencast(page, cfg, () => {})).rejects.toThrow("start rejected by stub");
+    expect(cdp.off).toHaveBeenCalledWith("Page.screencastFrame", expect.any(Function));
+    expect(cdp.detach).toHaveBeenCalledTimes(1);
+  });
+
+  it("adjust() restart failure marks the handle stopped before rethrowing — no live-flagged dead cast (M-2)", async () => {
+    const { page, cdp } = stubCdpPage();
+    const handle = await startScreencast(page, cfg, () => {});
+    cdp.failNextStart();
+    await expect(handle.adjust({ quality: 40, everyNthFrame: 4 })).rejects.toThrow("start rejected by stub");
+    // The handle is dead: any further adjust is the stopped-handle error.
+    await expect(handle.adjust({ quality: 50, everyNthFrame: 3 })).rejects.toThrow(
+      "Cannot adjust a stopped screencast.",
+    );
+    // stop() still releases the session cleanly afterwards.
+    await expect(handle.stop()).resolves.toBeUndefined();
+    expect(cdp.detach).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Chromium-gated leg — real chromium against the fixture server. Screencast
 // is damage-driven, so every frame-producing test navigates to /animated
 // (the fixture that repaints every 100 ms; a static page yields 0 frames by
