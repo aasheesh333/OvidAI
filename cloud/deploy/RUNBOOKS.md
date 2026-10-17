@@ -72,6 +72,13 @@ and `R2-PROVISIONING.md`).
 
 ### 0.2 Facts about this box (verified 2026-10-17)
 
+**There is exactly ONE gateway env file:** `/opt/ovid-cloud/repo/cloud/deploy/.env`
+(the compose `env_file: [.env]` resolved next to `docker-compose.yml`, and the
+path `provision.sh` reads as `$SCRIPT_DIR/.env`). Do not create or source
+`/opt/ovid-cloud/.env` — any command naming it is stale. The host worker's
+environment is the separate `/opt/ovid-cloud/worker.env`
+(`EnvironmentFile=` in `systemd/ovid-worker.service`).
+
 - Cloud compose project: `ovid-cloud`; containers:
   `ovid-cloud-gateway-1`, `ovid-cloud-redis-q-1`, `ovid-cloud-redis-c-1`,
   `ovid-cloud-net-proxy-pg-1`, `ovid-cloud-net-proxy-mint-1`
@@ -88,7 +95,7 @@ and `R2-PROVISIONING.md`).
   `docker exec <container> redis-cli …` / `docker exec <container> psql …`
   (verified: redis-cli 7.4.11, psql 16.15 in the live containers). Do not
   invent a host binary.
-- Env files: `/opt/ovid-cloud/.env` (gateway; contains
+- Env files: `/opt/ovid-cloud/repo/cloud/deploy/.env` (gateway; contains
   `REDIS_Q_PASSWORD`, `REDIS_C_PASSWORD`, `OVID_MASTER_KEY`,
   `OVID_INTERNAL_TOKEN`, R2 credentials) and `/opt/ovid-cloud/worker.env`
   (host worker; loopback URLs). Both `chmod 600`.
@@ -115,7 +122,7 @@ and `R2-PROVISIONING.md`).
 
 ```bash
 # Gateway/cloud secrets (needed for docker exec passwords)
-set -a; . /opt/ovid-cloud/.env; set +a
+set -a; . /opt/ovid-cloud/repo/cloud/deploy/.env; set +a
 
 # Worker env — use this for HOST-side clients (it carries 127.0.0.1 URLs;
 # the gateway .env carries compose DNS names like redis-q, unusable on the
@@ -215,10 +222,10 @@ docker ps --filter name=ovid-gateway-postgres-1   # DB may still be healthy
 ```
 
 If the container is up but auth fails, the password in
-`/opt/ovid-cloud/.env` and `/opt/ovid-cloud/worker.env` diverged; do not
-rotate mid-incident — first confirm which value the container was started
-with (`docker inspect ovid-cloud-redis-q-1` shows the command, not the
-password; compare the two env files).
+`/opt/ovid-cloud/repo/cloud/deploy/.env` and `/opt/ovid-cloud/worker.env`
+diverged; do not rotate mid-incident — first confirm which value the container
+was started with (`docker inspect ovid-cloud-redis-q-1` shows the command, not
+the password; compare the two env files).
 
 **Act.**
 
@@ -746,7 +753,7 @@ sessions keep working; cold reads/hydration and backups to R2 do not.
 # Least-privilege probe (put/head/get/presign/delete; prints no secrets).
 # [OWNER] — uses live credentials and writes one probe object.
 cd /opt/ovid-cloud/repo
-set -a; . /opt/ovid-cloud/.env; set +a
+set -a; . /opt/ovid-cloud/repo/cloud/deploy/.env; set +a
 node cloud/scripts/verify-r2.mjs
 # expected: seven [ok] lines (config, put, head, get, presign, delete, gone), exit 0
 
@@ -765,8 +772,9 @@ journalctl -u ovid-cloud-backup.service -n 60 --no-pager | grep -i 'R2'
   it by design. If R2 is unavailable, degrade service (cold reads fail)
   rather than change the backend.
 - Credential failure (403/401): rotate the R2 token per **I-13**, update
-  **both** `/opt/ovid-cloud/.env` and `/opt/ovid-cloud/worker.env`, restart
-  the gateway and worker **[OWNER]**, re-run the probe.
+  **both** `/opt/ovid-cloud/repo/cloud/deploy/.env` and
+  `/opt/ovid-cloud/worker.env`, restart the gateway and worker **[OWNER]**,
+  re-run the probe.
 - Once workspaces have been hibernated, R2 is the authority. Do not roll
   back to `fs`; the warm dirs are gone (`R2-PROVISIONING.md` rollback).
 
@@ -944,11 +952,11 @@ env files first and validate before restart.
 |---|---|---|
 | Firebase service-account key | `/opt/ovid-gateway/firebase-admin.json` (mounted read-only into the cloud gateway) | HARDENING C #1: generate a new private key, replace `chmod 600`, restart consumers, verify sign-in, delete the old key. Brief auth failures during the swap. |
 | Android upload/signing key | owner secret store | HARDENING C #2 (Play App Signing / upload-key rotation). Not a server secret. |
-| `OVID_MASTER_KEY` (64 hex) | `/opt/ovid-cloud/.env` + `/opt/ovid-cloud/worker.env` | Envelope KEK for BYOK (`byok_keys`) **and** browser storageState (`KEK = sha256(OVID_MASTER_KEY)`). Rotating it makes existing BYOK rows undecryptable and browser logins unreadable. Procedure: stop gateway+worker, generate `openssl rand -hex 32`, update BOTH files, restart; users must re-enter BYOK keys; browser state starts fresh (loud log, never a crash). High effort — schedule, do not improvise. |
+| `OVID_MASTER_KEY` (64 hex) | `/opt/ovid-cloud/repo/cloud/deploy/.env` + `/opt/ovid-cloud/worker.env` | Envelope KEK for BYOK (`byok_keys`) **and** browser storageState (`KEK = sha256(OVID_MASTER_KEY)`). Rotating it makes existing BYOK rows undecryptable and browser logins unreadable. Procedure: stop gateway+worker, generate `openssl rand -hex 32`, update BOTH files, restart; users must re-enter BYOK keys; browser state starts fresh (loud log, never a crash). High effort — schedule, do not improvise. |
 | `OVID_INTERNAL_TOKEN` | both env files | Gateway↔worker file service. Update both, restart gateway+worker; brief 401s on file reads. |
-| `OVID_INTERNAL_API_SECRET` (≥32 bytes) | `/opt/ovid-cloud/.env` (gateway + mint profile) **and** `/opt/ovid-cloud/worker.env` | HMAC-SHA256 for the internal mint API (gateway/worker → mint). All three holders must carry the **same** value: gateway `cloud/apps/gateway/src/env.ts:167`, worker `cloud/apps/worker/src/main.ts:269`, mint `cloud/apps/mint/src/env.ts:255`. A mismatch makes key minting fail with 401/409 `key_not_minted` and unattended runs lose their key. Generate `openssl rand -hex 32`, update all three files, then restart worker+gateway+mint together; verify with a real send and an unattended run. |
-| `OVID_ADMIN_MASTER_KEY` | `/opt/ovid-cloud/.env` (mint profile) | Bearer token for mint's `/admin` console (`cloud/apps/mint/src/adminRoutes.ts:47,79`; required at `cloud/apps/mint/src/env.ts:254`). Rotating it invalidates admin clients only — no user data or provider keys are re-encrypted. Update `.env`, restart mint, update the admin client's stored token; verify `/admin` with the new key and 401 with the old. |
-| `REDIS_Q_PASSWORD` | `/opt/ovid-cloud/.env` (compose) + `worker.env` (host) | Recreate `redis-q` with the new password and restart gateway/worker. Queue data survives (AOF volume); expect a short write outage. |
+| `OVID_INTERNAL_API_SECRET` (≥32 bytes) | `/opt/ovid-cloud/repo/cloud/deploy/.env` (gateway + mint profile) **and** `/opt/ovid-cloud/worker.env` | HMAC-SHA256 for the internal mint API (gateway/worker → mint). All three holders must carry the **same** value: gateway `cloud/apps/gateway/src/env.ts:167`, worker `cloud/apps/worker/src/main.ts:269`, mint `cloud/apps/mint/src/env.ts:255`. A mismatch makes key minting fail with 401/409 `key_not_minted` and unattended runs lose their key. Generate `openssl rand -hex 32`, update all three files, then restart worker+gateway+mint together; verify with a real send and an unattended run. |
+| `OVID_ADMIN_MASTER_KEY` | `/opt/ovid-cloud/repo/cloud/deploy/.env` (mint profile) | Bearer token for mint's `/admin` console (`cloud/apps/mint/src/adminRoutes.ts:47,79`; required at `cloud/apps/mint/src/env.ts:254`). Rotating it invalidates admin clients only — no user data or provider keys are re-encrypted. Update `.env`, restart mint, update the admin client's stored token; verify `/admin` with the new key and 401 with the old. |
+| `REDIS_Q_PASSWORD` | `/opt/ovid-cloud/repo/cloud/deploy/.env` (compose) + `worker.env` (host) | Recreate `redis-q` with the new password and restart gateway/worker. Queue data survives (AOF volume); expect a short write outage. |
 | `REDIS_C_PASSWORD` | both env files | Recreate `redis-c`; cache loss is safe. |
 | R2 Access Key ID / Secret | both env files | Cloudflare R2 token (Object Read & Write on `ovid-cloud` only). Update both, restart gateway+worker, run `verify-r2.mjs` + `r2.live` suite. |
 | `LITELLM_MASTER_KEY` | `/opt/ovid-gateway/.env` | HARDENING C: new value → `docker compose up -d litellm` → update admin clients. Seconds of LiteLLM downtime. |
@@ -960,10 +968,10 @@ Commands common to every rotation:
 
 ```bash
 # 1. Timestamped backups (never skip)
-cp /opt/ovid-cloud/.env "/opt/ovid-cloud/.env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+cp /opt/ovid-cloud/repo/cloud/deploy/.env "/opt/ovid-cloud/repo/cloud/deploy/.env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 cp /opt/ovid-cloud/worker.env "/opt/ovid-cloud/worker.env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 # 2. Edit, keep 600
-sudo chmod 600 /opt/ovid-cloud/.env /opt/ovid-cloud/worker.env
+sudo chmod 600 /opt/ovid-cloud/repo/cloud/deploy/.env /opt/ovid-cloud/worker.env
 # 3. Validate the compose view before applying
 cd /opt/ovid-cloud/repo/cloud/deploy && docker compose -p ovid-cloud config -q
 # 4. Restart ONLY the consumers named in the table [OWNER]

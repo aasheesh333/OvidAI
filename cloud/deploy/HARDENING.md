@@ -47,7 +47,7 @@ Reproduce any row with the command shown. All outputs below were captured on
 | Caddy trusted_proxies | **ALREADY PRESENT** in the live Caddyfile global `servers` block: `trusted_proxies static` with all 15 IPv4 + 7 IPv6 Cloudflare CIDRs + `client_ip_headers CF-Connecting-IP X-Forwarded-For`. Fetched `cloudflare.com/ips-v4` + `/ips-v6` on 2026-10-16 → **identical** (item D). Caddy v2.11.4 (`caddy:2-alpine` container, host network) | see item D |
 | Public health | `https://api.ovidsi.com/healthz` → **HTTP 200** (0.55 s). `/cloud/v1/health` not yet routed (activation pending, `DEPLOY.md` §6) | `curl -sS -o /dev/null -w '%{http_code}\n' https://api.ovidsi.com/healthz` |
 | Public-repo exposure | Repo was flipped PUBLIC; HEAD is clean (`git ls-files` shows no keystore / `google-services.json` / firebase JSONs) but per `docs/HARDENING_TRACKER.md`: **signing key + Firebase config must be treated as exposed and rotated; git-history purge still pending** | `git ls-files \| grep -Ei 'keystore\|\.jks\|google-services\|firebase'` |
-| Server-side secret inventory (names only — values never leave the box) | `/opt/ovid-gateway/.env` (0600): `LITELLM_MASTER_KEY`, `LITELLM_SALT_KEY`, `POSTGRES_PASSWORD`, `DATABASE_URL`, `REDIS_PASSWORD`, `UI_PASSWORD`, `OVID_PROBE_KEY`, … plus `firebase-admin.json`, `caddy/origin.key`, `account.env`, `.db-password` (all 0600). Cloud secrets do not exist yet — placeholders in `cloud/deploy/.env.example`, filled at activation into `/opt/ovid-cloud/.env` | `cut -d= -f1 /opt/ovid-gateway/.env` |
+| Server-side secret inventory (names only — values never leave the box) | `/opt/ovid-gateway/.env` (0600): `LITELLM_MASTER_KEY`, `LITELLM_SALT_KEY`, `POSTGRES_PASSWORD`, `DATABASE_URL`, `REDIS_PASSWORD`, `UI_PASSWORD`, `OVID_PROBE_KEY`, … plus `firebase-admin.json`, `caddy/origin.key`, `account.env`, `.db-password` (all 0600). Cloud secrets do not exist yet — placeholders in `cloud/deploy/.env.example`, filled at activation into `/opt/ovid-cloud/repo/cloud/deploy/.env` (the compose `env_file: [.env]`; the host worker uses the separate `/opt/ovid-cloud/worker.env`) | `cut -d= -f1 /opt/ovid-gateway/.env` |
 
 **Prior owner decisions this checklist re-opens.** The 2026-10-11 security
 review (`docs/screen-review/10-vps-server.md`, deliberately untracked) records
@@ -266,10 +266,10 @@ dead-letter `no` in `60-cloudimg-settings.conf`, which loses the ordering.)
 **Step 5 — verify from a NEW session (old one still open):**
 
 ```bash
-ssh -o PreferredAuthentications=publickey root@<SERVER_IP> 'echo KEY-LOGIN-OK'
+ssh -o PreferredAuthentications=publickey root@"<SERVER_IP>" 'echo KEY-LOGIN-OK'
 # → KEY-LOGIN-OK
 ssh -o PreferredAuthentications=password,keyboard-interactive \
-    -o PubkeyAuthentication=no root@<SERVER_IP>
+    -o PubkeyAuthentication=no root@"<SERVER_IP>"
 # → Permission denied (publickey).        ← password path is closed
 sudo sshd -T | grep -Ei 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin'
 # → passwordauthentication no / kbdinteractiveauthentication no / permitrootlogin prohibit-password
@@ -349,7 +349,7 @@ scheduled window — each is service-affecting):**
 | `LITELLM_SALT_KEY` | same | **careful:** encrypts provider keys stored in the LiteLLM DB — rotating requires re-entering every provider credential afterwards. Rotate only if you believe it left the box | high effort |
 | `POSTGRES_PASSWORD` / `DATABASE_URL` | same | `ALTER ROLE … PASSWORD` inside the container → update `.env` → recreate dependents | brief DB-auth outage |
 | `REDIS_PASSWORD` (live) | same | update `.env` → recreate redis + dependents | brief |
-| `REDIS_Q_PASSWORD` (cloud) | `/opt/ovid-cloud/.env` at activation | **generate fresh at activation; never reuse an exposed value** | none (pre-launch) |
+| `REDIS_Q_PASSWORD` (cloud) | `/opt/ovid-cloud/repo/cloud/deploy/.env` at activation | **generate fresh at activation; never reuse an exposed value** | none (pre-launch) |
 | `UI_PASSWORD`, `OVID_PROBE_KEY`, `account.env`, `.db-password`, `caddy/origin.key` | `/opt/ovid-gateway/**` | regenerate + restart the one consumer | low |
 | VNC password / `ftpuser` password | VNC config / `/etc/passwd` | only relevant if item A keeps those services open | — |
 

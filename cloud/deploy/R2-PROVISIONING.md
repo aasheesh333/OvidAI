@@ -15,6 +15,12 @@ owner-run. Same precedent as the P1 Task 11 activation and `DEPLOY.md` §11.
 Related: `DEPLOY.md` §12 (what changed), `cloud/deploy/.env.example`,
 `cloud/deploy/worker.env.example`, `cloud/scripts/verify-r2.mjs`.
 
+**Env file paths (canonical).** The gateway env is
+`/opt/ovid-cloud/repo/cloud/deploy/.env` — the compose `env_file: [.env]`
+next to `docker-compose.yml`, which is also the `$SCRIPT_DIR/.env` that
+`provision.sh` reads. Do not create `/opt/ovid-cloud/.env`; that path is
+stale. The host worker env is `/opt/ovid-cloud/worker.env`.
+
 ---
 
 ## Step 1 — Create the bucket (LIVE, owner)
@@ -46,12 +52,12 @@ R2 → **Manage API Tokens** → **Create API Token**.
   secret **once**. (These are Cloudflare-generated; `openssl` is only used
   for the OTHER secrets below.)
 
-Store them in `/opt/ovid-cloud/.env` (gateway) and
+Store them in `/opt/ovid-cloud/repo/cloud/deploy/.env` (gateway) and
 `/opt/ovid-cloud/worker.env` (host worker), then `chmod 600` both:
 
 ```bash
-sudo install -m 600 /dev/null /opt/ovid-cloud/.env        # if not present
-sudo install -m 600 /dev/null /opt/ovid-cloud/worker.env  # if not present
+sudo install -m 600 /dev/null /opt/ovid-cloud/repo/cloud/deploy/.env   # if not present
+sudo install -m 600 /dev/null /opt/ovid-cloud/worker.env               # if not present
 ```
 
 **Agents and containers see only the environment variables** — they never
@@ -79,7 +85,7 @@ Bucket → **Settings → Object lifecycle rules**.
 
 Edit both files. The shared values must match.
 
-### 4.1 `/opt/ovid-cloud/.env` (gateway)
+### 4.1 `/opt/ovid-cloud/repo/cloud/deploy/.env` (gateway)
 
 Copy the `# ── Storage (P7) ──` block from
 `cloud/deploy/.env.example` and fill:
@@ -147,7 +153,7 @@ bucket, never the token or URL):
 
 ```bash
 cd /opt/ovid-cloud/repo
-set -a; . /opt/ovid-cloud/.env; set +a
+set -a; . /opt/ovid-cloud/repo/cloud/deploy/.env; set +a
 node cloud/scripts/verify-r2.mjs
 ```
 

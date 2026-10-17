@@ -13,6 +13,14 @@ verification gate and a rollback. Read §0 (facts + port collision) before
 starting. P2 (sandboxes) activation is §11 — it assumes the compose spine
 is already up (§4–§6).
 
+**There is exactly ONE gateway env file:**
+`/opt/ovid-cloud/repo/cloud/deploy/.env`. The compose `env_file: [.env]`
+resolves relative to `docker-compose.yml`, and `provision.sh` reads
+`$SCRIPT_DIR/.env` — both land on that path. Do not create or fill
+`/opt/ovid-cloud/.env`; any command naming it is stale. The host worker's
+environment is a separate file: `/opt/ovid-cloud/worker.env`
+(`EnvironmentFile=` in `systemd/ovid-worker.service`).
+
 ---
 
 ## 0. Facts about this box (verified 2026-10-16)
@@ -93,10 +101,11 @@ Fill every `CHANGE_ME` (the template comments explain each var):
 | everything else | template values are correct for this box |
 
 `OVID_AUTH_MODE` must stay `firebase` with `NODE_ENV=production` (the gateway
-refuses `test` auth in production). Worker vars (`OVID_DEFAULT_MODEL`,
-`OVID_LITELLM_BASE`, `OVID_RUN_STALE_MS`, …) moved to
-`/opt/ovid-cloud/worker.env` in P2 — see §11 step 7 and
-`worker.env.example`.
+refuses `test` auth in production). Most worker vars (`OVID_LITELLM_BASE`,
+`OVID_RUN_STALE_MS`, …) live in `/opt/ovid-cloud/worker.env` (P2 — see §11
+step 7 and `worker.env.example`). `OVID_DEFAULT_MODEL` is the exception:
+`provision.sh` validates it in THIS file, so fill the same live LiteLLM alias
+in both files.
 
 ## 3. GOOGLE_APPLICATION_CREDENTIALS — mount vs copy (owner decision)
 
@@ -338,6 +347,17 @@ was NEVER activated on this box (no `ovid-cloud-*` containers running) — in
 that case run §2–§8 first (P1 activation, owner-run), or activate P2-only
 with the gateway absent and **record that decision in the log below** (runs
 will queue, nothing consumes them until the gateway routes messages).
+
+**R2 is a BOOT dependency, not an optional later step.** Both
+`cloud/apps/gateway/src/index.ts` and `cloud/apps/worker/src/main.ts` call
+`createStorage(loadStorageEnv(env))` unconditionally at boot, and production
+refuses the `fs` backend. The templates ship `NODE_ENV=production` +
+`OVID_STORAGE_BACKEND=r2`, so a missing/empty `OVID_R2_*` block stops the
+process at boot. The trap: `CHANGE_ME` is **non-empty** and therefore PASSES
+the boot check, then fails at the first storage call. Only
+`cloud/scripts/verify-r2.mjs` (`R2-PROVISIONING.md` step 5, seven `[ok]`
+lines) proves the credentials. Complete R2 steps 1–5 before the first
+`docker compose up` and before enabling the worker in step 7.
 
 Each step has a gate; do not continue past a failed gate. Rollbacks are
 per-step and safe in reverse order.
@@ -602,7 +622,7 @@ that approval — same stop-condition precedent as §11 and the P1 activation.
 
 | Consumer | File on the box | Notes |
 | --- | --- | --- |
-| gateway (compose) | `/opt/ovid-cloud/.env` | `env_file: [.env]`; R2 + redis-c + token |
+| gateway (compose) | `/opt/ovid-cloud/repo/cloud/deploy/.env` | `env_file: [.env]`; R2 + redis-c + token |
 | worker (systemd) | `/opt/ovid-cloud/worker.env` | `EnvironmentFile=`; R2 + redis-c + token |
 
 `OVID_R2_ACCOUNT_ID`, `OVID_R2_ACCESS_KEY_ID`,
