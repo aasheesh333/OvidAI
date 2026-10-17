@@ -18,7 +18,7 @@ import {
   workspaceObjects,
   type Db,
 } from "@ovid/db";
-import { createRedisEventLog, type EventLog } from "@ovid/events";
+import { createRedisEventLog, createRedisSystemBus, type EventLog } from "@ovid/events";
 import {
   createHibernateWorker,
   createHydrateWorker,
@@ -458,6 +458,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       }`;
 
       app = buildGateway({
+
+        system: createRedisSystemBus(redis),
         db,
         queues,
         verifier: createTestVerifier(),

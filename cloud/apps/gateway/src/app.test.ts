@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildGateway } from "./app.js";
-import { authHeaders, noopDb, noopEvents, stubKeys, stubMint, stubQueues, stubTickets, stubVerifier, type TicketStub } from "./test/stubs.js";
+import { stubSystemBus, authHeaders, noopDb, noopEvents, stubKeys, stubMint, stubQueues, stubTickets, stubVerifier, type TicketStub } from "./test/stubs.js";
 
 /**
  * buildGateway-level behavior: the ticket route (registered in app.ts) and the
@@ -17,6 +17,7 @@ describe("buildGateway", () => {
   function makeApp(tickets: TicketStub = stubTickets()): { app: FastifyInstance; tickets: TicketStub } {
     const { queues } = stubQueues();
     const app = buildGateway({
+      system: stubSystemBus(),
       db: noopDb,
       queues,
       verifier: stubVerifier(),

@@ -1,7 +1,7 @@
 import type { Db } from "@ovid/db";
-import type { EventLog } from "@ovid/events";
+import type { EventLog, SystemBus } from "@ovid/events";
 import type { AgentRunJob, QueueServices } from "@ovid/queue";
-import type { KeyProvider, MintProvisioner } from "@ovid/shared";
+import type { KeyProvider, MintProvisioner, SystemEvent } from "@ovid/shared";
 import type { Verifier } from "../auth.js";
 import type { TicketStore } from "../tickets.js";
 
@@ -35,16 +35,25 @@ export interface QueueAdd {
   opts: { jobId?: string; priority?: number } & Record<string, unknown>;
 }
 
+export interface ScheduleQueueAdd {
+  name: string;
+  data: unknown;
+  opts: { jobId?: string } & Record<string, unknown>;
+}
+
 /**
  * QueueServices stub capturing every add(name, data, opts). `failAdd` makes
  * add() reject (503 path); the `client`/ping surface satisfies the health
- * route's redisQ probe.
+ * route's redisQ probe. `schedules` is a capture-only stub so the object
+ * stays assignable to the now-required QueueServices.schedules field.
  */
 export function stubQueues(behavior: { failAdd?: boolean } = {}): {
   queues: QueueServices;
   adds: QueueAdd[];
+  scheduleAdds: ScheduleQueueAdd[];
 } {
   const adds: QueueAdd[] = [];
+  const scheduleAdds: ScheduleQueueAdd[] = [];
   const queues = {
     agentRuns: {
       add: async (name: string, data: AgentRunJob, opts?: Record<string, unknown>) => {
@@ -54,8 +63,50 @@ export function stubQueues(behavior: { failAdd?: boolean } = {}): {
       },
       client: Promise.resolve({ ping: async () => "PONG" }),
     },
+    schedules: {
+      add: async (name: string, data: unknown, opts?: Record<string, unknown>) => {
+        if (behavior.failAdd) throw new Error("queue redis unreachable");
+        scheduleAdds.push({ name, data, opts: (opts ?? {}) as ScheduleQueueAdd["opts"] });
+        return { id: String(opts?.jobId ?? ""), name, data };
+      },
+      client: Promise.resolve({ ping: async () => "PONG" }),
+    },
   } as unknown as QueueServices;
-  return { queues, adds };
+  return { queues, adds, scheduleAdds };
+}
+
+export interface SystemPublish {
+  uid: string;
+  event: SystemEvent;
+}
+
+export interface SystemBusStub extends SystemBus {
+  published: SystemPublish[];
+  subscriptions: Array<{ uid: string; unsubscribed: boolean }>;
+}
+
+/**
+ * SystemBus stub: `publish` captures every (uid, event) pair so route tests
+ * can assert the scheduler lifecycle publishes; `subscribe` records the uid
+ * and returns an unsubscribe that flips the captured record.
+ */
+export function stubSystemBus(): SystemBusStub {
+  const published: SystemPublish[] = [];
+  const subscriptions: SystemBusStub["subscriptions"] = [];
+  return {
+    published,
+    subscriptions,
+    async publish(uid, event) {
+      published.push({ uid, event });
+    },
+    async subscribe(uid) {
+      const record = { uid, unsubscribed: false };
+      subscriptions.push(record);
+      return async () => {
+        record.unsubscribed = true;
+      };
+    },
+  };
 }
 
 export interface MintStub extends MintProvisioner {

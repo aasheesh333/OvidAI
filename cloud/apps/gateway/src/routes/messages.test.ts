@@ -23,6 +23,7 @@ import {
   stubVerifier,
   type MintStub,
   type QueueAdd,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 const UUIDV7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -58,6 +59,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     const { queues, adds } = stubQueues({ failAdd: behavior.failAdd });
     const mint = stubMint(behavior.mintThrows === undefined ? {} : { throws: behavior.mintThrows });
     const app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues,
       verifier: stubVerifier(),

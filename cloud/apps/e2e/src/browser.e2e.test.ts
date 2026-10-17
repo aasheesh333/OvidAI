@@ -8,7 +8,7 @@ import WebSocket, { type RawData } from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createDb, migrate, sessions, users, type Db } from "@ovid/db";
-import { createRedisEventLog, type EventLog } from "@ovid/events";
+import { createRedisEventLog, createRedisSystemBus, type EventLog } from "@ovid/events";
 import type { QueueServices } from "@ovid/queue";
 import {
   wsServerMsg,
@@ -371,6 +371,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL || !chromiumExecutableExis
       });
 
       app = buildGateway({
+
+        system: createRedisSystemBus(redis),
         db,
         queues: neverQueues,
         verifier: createTestVerifier(),

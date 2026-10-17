@@ -18,6 +18,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 // MCP OAuth endpoints (P5 Task 15): start (authed), callback (PUBLIC —
@@ -106,6 +107,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp oauth routes (real postgres)",
       redirectUri: REDIRECT_URI,
     });
     app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),
@@ -290,6 +292,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp oauth routes (real postgres)",
 
   it("oauth routes on a gateway composed WITHOUT the flow → 503 unavailable", async () => {
     const bare = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),

@@ -34,6 +34,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 // P7 Task 12 — gateway workspace routes against REAL dev Postgres + Redis,
@@ -252,6 +253,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       opts: { hydrateWaitMs?: number; putMaxBytes?: number; workerUrl?: string } = {},
     ): FastifyInstance {
       const app = buildGateway({
+        system: stubSystemBus(),
         db,
         queues,
         verifier: stubVerifier(),

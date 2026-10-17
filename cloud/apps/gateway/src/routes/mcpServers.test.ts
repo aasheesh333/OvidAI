@@ -14,6 +14,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 // MCP server CRUD routes (P5 Task 15). Real Postgres (Task 8 tables) + the
@@ -35,6 +36,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
   beforeAll(async () => {
     db = await openTestDb();
     app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),
@@ -281,6 +283,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
 
   it("POST/PATCH with secrets on a gateway composed WITHOUT crypto → 503 unavailable", async () => {
     const bare = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),

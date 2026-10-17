@@ -13,6 +13,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 // Curated catalog route (P5 Task 15): CURATED_MANIFEST served as pure data
@@ -29,6 +30,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp catalog route (real postgres)"
   beforeAll(async () => {
     db = await openTestDb();
     app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),

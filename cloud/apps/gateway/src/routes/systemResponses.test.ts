@@ -12,6 +12,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 // POST /cloud/v1/system/responses (P5 Task 15) — the REST answer path for
@@ -52,6 +53,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway system responses route (real postg
       keys: stubKeys(),
       mint: stubMint(),
       events: noopEvents,
+      system: stubSystemBus(),
       ...extra,
     });
     app = buildGateway(deps({ systemHub: hub }));

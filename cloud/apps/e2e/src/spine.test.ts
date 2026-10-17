@@ -5,7 +5,7 @@ import { Redis } from "ioredis";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, migrate, type Db } from "@ovid/db";
-import { createRedisEventLog, type EventLog } from "@ovid/events";
+import { createRedisEventLog, createRedisSystemBus, type EventLog } from "@ovid/events";
 import {
   createAgentRunsWorker,
   createQueues,
@@ -325,6 +325,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       });
 
       app = buildGateway({
+        system: createRedisSystemBus(redis),
         db,
         queues,
         verifier: createTestVerifier(),
@@ -750,6 +751,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         },
       } as unknown as QueueServices;
       const brokenApp = buildGateway({
+        system: createRedisSystemBus(redis),
         db,
         queues: deadQueues,
         verifier: createTestVerifier(),
@@ -812,6 +814,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       extraQueues.push(deadRealQueues);
       deadRealQueues.agentRuns.on("error", () => {}); // expected ECONNREFUSED noise
       const degradedApp = buildGateway({
+        system: createRedisSystemBus(redis),
         db,
         queues: deadRealQueues,
         verifier: createTestVerifier(),

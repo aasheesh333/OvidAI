@@ -16,6 +16,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 const UUIDV7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -67,6 +68,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway attachment routes (real postgres)",
     { app: FastifyInstance; presigner: AttachmentPresigner & { calls: PresignCall[] } } {
     const presigner = stubPresigner({ fail: opts.failPresign });
     const app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues(),
       verifier: stubVerifier(),

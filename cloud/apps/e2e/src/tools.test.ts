@@ -7,7 +7,7 @@ import { Redis } from "ioredis";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, migrate, type Db } from "@ovid/db";
-import { createRedisEventLog, type EventLog } from "@ovid/events";
+import { createRedisEventLog, createRedisSystemBus, type EventLog } from "@ovid/events";
 import {
   createAgentRunsWorker,
   createQueues,
@@ -438,6 +438,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       // No pty bridge here (GatewayDeps.pty optional): the tool flows never
       // send pty frames; the terminal chain is realjail.test.ts's scope.
       app = buildGateway({
+        system: createRedisSystemBus(redis),
         db,
         queues,
         verifier: createTestVerifier(),

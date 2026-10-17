@@ -5,7 +5,7 @@ import Fastify, {
 } from "fastify";
 import websocket from "@fastify/websocket";
 import type { Db } from "@ovid/db";
-import type { EventLog } from "@ovid/events";
+import type { EventLog, SystemBus } from "@ovid/events";
 import type { EnvelopeCrypto, OAuthFlow } from "@ovid/mcp";
 import type { QueueServices } from "@ovid/queue";
 import type { KeyProvider, MintProvisioner } from "@ovid/shared";
@@ -17,6 +17,7 @@ import { registerAttachmentRoutes } from "./routes/attachments.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerByokRoutes } from "./routes/byok.js";
 import type { ByokRouteOverrides } from "./routes/byok.js";
+import { registerDevicesRoutes } from "./routes/devices.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerImportRoutes } from "./routes/import.js";
 import { registerMcpCatalogRoutes } from "./routes/mcpCatalog.js";
@@ -29,6 +30,7 @@ import { registerMcpServerRoutes } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
 import { registerRunRoutes } from "./routes/runs.js";
+import { registerScheduleRoutes } from "./routes/schedules.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerSystemResponseRoutes } from "./routes/systemResponses.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
@@ -49,6 +51,15 @@ export interface GatewayDeps {
   mint: MintProvisioner;
   /** Session event log (Task 4) — the WS channel's replay + live source. */
   events: EventLog;
+  /**
+   * P4 Task 11: the per-user scheduler system bus. REST schedule mutations
+   * publish lifecycle events on `user:{uid}:system`; the WS system channel
+   * (Task 12) subscribes the same bus. The composition root wires
+   * createRedisSystemBus(redisQ). REQUIRED: the schedule routes have no
+   * silent no-op fallback — a composition without it must fail to typecheck
+   * rather than drop notifications.
+   */
+  system: SystemBus;
   /**
    * Terminal-over-WS bridge (Task 13). main() always wires
    * createRedisPtyBridge(redisQ). The field is OPTIONAL only so the P1
@@ -264,6 +275,10 @@ export function buildGateway(
       registerPluginRoutes(scope, deps);
       registerSystemResponseRoutes(scope, deps);
 
+      // P4 Task 11: schedule CRUD + runs feed + FCM device registration.
+      registerScheduleRoutes(scope, deps);
+      registerDevicesRoutes(scope, deps);
+
       // P9 Task 11: BYOK escrow CRUD + the SSRF-guarded provider probe.
       registerByokRoutes(scope, {
         db: deps.db,
@@ -291,6 +306,9 @@ export function buildGateway(
       browser: deps.browser,
       approvals: deps.approvals,
       systemHub: deps.systemHub,
+      // P4 Task 11/12: the scheduler system bus rides the SAME field REST
+      // publishes on, so WS subscribers see every lifecycle event.
+      system: deps.system,
     };
     registerWsRoute(scope, wsDeps);
   });

@@ -13,6 +13,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 const UUIDV7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -31,6 +32,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway session routes (real postgres)", ()
     db = await openTestDb();
     const { queues } = stubQueues();
     app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues,
       verifier: stubVerifier(),
@@ -449,6 +451,7 @@ describe("gateway session routes without a database", () => {
   it("POST /sessions with a malformed JSON body → 400 bad_request envelope (never reaches db)", async () => {
     const { queues } = stubQueues();
     const app = buildGateway({
+      system: stubSystemBus(),
       db: noopDb,
       queues,
       verifier: stubVerifier(),

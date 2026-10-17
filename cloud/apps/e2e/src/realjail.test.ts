@@ -16,7 +16,7 @@ import { Redis } from "ioredis";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, migrate, users, type Db } from "@ovid/db";
-import { createRedisEventLog, type EventLog } from "@ovid/events";
+import { createRedisEventLog, createRedisSystemBus, type EventLog } from "@ovid/events";
 import {
   createAgentRunsWorker,
   createQueues,
@@ -418,6 +418,7 @@ describe.skipIf(
       // Gateway main()'s pty wiring: the Redis pty bridge over the SAME redis
       // the worker bridge PSUBSCRIBEs.
       app = buildGateway({
+        system: createRedisSystemBus(redis),
         db,
         queues,
         verifier: createTestVerifier(),

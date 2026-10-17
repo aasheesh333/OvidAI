@@ -22,7 +22,7 @@ import type { PtyBridge } from "./wsPty.js";
 import { handleWsConnection, type WsConnectionOptions, type WsDeps } from "./ws.js";
 import { BROWSER_FRAME_HIGH_WATER, BROWSER_VIEWER_HEARTBEAT_MS } from "./browserChannel.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "./test/db.js";
-import { stubKeys, stubMint, stubQueues, stubTickets, stubVerifier } from "./test/stubs.js";
+import { stubSystemBus, stubKeys, stubMint, stubQueues, stubTickets, stubVerifier } from "./test/stubs.js";
 
 /**
  * Task 9 tests — the gateway `browser` WS channel, against real Redis + real
@@ -283,6 +283,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
     async function makeApp(withBrowser = true): Promise<{ wsBase: string; created: Redis[] }> {
       const created: Redis[] = [];
       const app = buildGateway({
+        system: stubSystemBus(),
         db,
         queues: stubQueues().queues,
         verifier: stubVerifier(),

@@ -4,7 +4,7 @@ import { messages, sessions, type Db } from "@ovid/db";
 import { importReportSchema, type ImportReport } from "@ovid/shared";
 import { buildGateway } from "../app.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
-import { authHeaders, noopEvents, stubKeys, stubMint, stubQueues, stubTickets, stubVerifier } from "../test/stubs.js";
+import { stubSystemBus, authHeaders, noopEvents, stubKeys, stubMint, stubQueues, stubTickets, stubVerifier } from "../test/stubs.js";
 
 const UUIDV7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -34,6 +34,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway import route (real postgres)", () =
   function makeApp(): FastifyInstance {
     const { queues } = stubQueues({});
     const app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues,
       verifier: stubVerifier(),

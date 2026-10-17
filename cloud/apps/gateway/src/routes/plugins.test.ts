@@ -19,6 +19,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 /**
@@ -131,6 +132,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
     db = await openTestDb();
     const queues = { ...stubQueues().queues, pluginInstalls: stubPluginInstalls(adds).queue };
     app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues,
       verifier: stubVerifier(),
@@ -142,6 +144,7 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway plugin routes (real postgres)", ()
     });
     // P1-only composition: no crypto, no pluginInstalls queue.
     bare = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),

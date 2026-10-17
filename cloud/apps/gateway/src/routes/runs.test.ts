@@ -13,6 +13,7 @@ import {
   stubMint,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 // Run-cancel routes (P8 Task 1). The harness mirrors messages.test.ts: real
@@ -102,6 +103,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway run-cancel routes (real postgres)",
     const { queues, removes } = stubQueuesWithRemove(behavior);
     const { events, appended } = recordingEvents();
     const app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues,
       verifier: stubVerifier(),
@@ -293,6 +295,7 @@ describe("gateway run-cancel routes without a database", () => {
     const { queues } = stubQueuesWithRemove();
     const { events } = recordingEvents();
     const app = buildGateway({
+      system: stubSystemBus(),
       db: neverDb,
       queues,
       verifier: stubVerifier(),
@@ -324,6 +327,7 @@ describe("gateway run-cancel routes without a database", () => {
     const { queues } = stubQueuesWithRemove();
     const { events } = recordingEvents();
     const app = buildGateway({
+      system: stubSystemBus(),
       db: {} as unknown as Db,
       queues,
       verifier: stubVerifier(),

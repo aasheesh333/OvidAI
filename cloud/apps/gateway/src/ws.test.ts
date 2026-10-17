@@ -31,6 +31,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus as sharedSystemBus,
   type TicketStub,
 } from "./test/stubs.js";
 import { compareSeq, MAX_SUBSCRIPTIONS_PER_CONNECTION } from "./ws.js";
@@ -159,6 +160,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
 
     async function makeApp(): Promise<{ app: FastifyInstance; wsBase: string }> {
       const app = buildGateway({
+        system: sharedSystemBus(),
         db,
         queues: stubQueues().queues,
         verifier: stubVerifier(),
@@ -473,6 +475,7 @@ describe("gateway /cloud/ws (stub EventLog — deterministic replay/live race)",
     ticketStoreOverride?: TicketStore,
   ): Promise<string> {
     const app = buildGateway({
+      system: sharedSystemBus(),
       db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),
@@ -753,6 +756,7 @@ describe("gateway /cloud/ws pty ops (stub PtyBridge)", () => {
       subscribe: async () => async () => {},
     };
     const app = buildGateway({
+      system: sharedSystemBus(),
       db,
       queues: stubQueues().queues,
       verifier: stubVerifier(),
@@ -1054,6 +1058,7 @@ describe("gateway /cloud/ws system channel ops (stub SystemHub)", () => {
       subscribe: async () => async () => {},
     };
     const app = buildGateway({
+      system: sharedSystemBus(),
       db: noopDb,
       queues: stubQueues().queues,
       verifier: stubVerifier(),

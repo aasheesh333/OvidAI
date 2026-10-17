@@ -23,6 +23,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 // P7 Task 12 — artifact routes. Artifacts are registered through the REAL
@@ -80,6 +81,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway artifact routes (real postgres)", (
 
   function makeApp(): FastifyInstance {
     const app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues(),
       verifier: stubVerifier(),

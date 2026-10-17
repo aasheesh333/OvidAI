@@ -9,7 +9,7 @@ import { initializeApp } from "firebase-admin/app";
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
 import { createDb, newId } from "@ovid/db";
-import { createRedisEventLog } from "@ovid/events";
+import { createRedisEventLog, createRedisSystemBus } from "@ovid/events";
 import {
   createEnvelopeCrypto,
   createOAuthFlow,
@@ -120,6 +120,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       // Session event log shares the queue Redis; the worker (Task 9) appends
       // to the same instance, so gateway replay/live sees every event.
       events: createRedisEventLog(redisQ),
+      // P4 Task 11: scheduler lifecycle events (REST publishes; WS Task 12
+      // subscribes) on the SAME queue Redis the worker's scheduler uses.
+      system: createRedisSystemBus(redisQ),
       // Terminal-over-WS bridge (Task 13): ctl/out pub-sub + the pty registry
       // all live on the same queue Redis the worker PSUBSCRIBEs.
       pty: createRedisPtyBridge(redisQ),

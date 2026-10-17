@@ -12,6 +12,7 @@ import {
   stubQueues,
   stubTickets,
   stubVerifier,
+  stubSystemBus,
 } from "../test/stubs.js";
 
 // BYOK escrow routes (P9 Task 11) — real Postgres, Fastify inject. The crypto
@@ -50,6 +51,7 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway BYOK routes (real postgres)", () =>
     noCrypto?: boolean;
   } = {}): FastifyInstance {
     const app = buildGateway({
+      system: stubSystemBus(),
       db,
       queues: stubQueues(),
       verifier: stubVerifier(),

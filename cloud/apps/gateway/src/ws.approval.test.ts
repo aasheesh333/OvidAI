@@ -15,6 +15,7 @@ import {
   stubTickets,
   stubVerifier,
   type TicketStub,
+  stubSystemBus,
 } from "./test/stubs.js";
 import { createRedisApprovalPublisher } from "./ws.js";
 
@@ -130,6 +131,7 @@ describe.skipIf(!TEST_REDIS_URL || !TEST_DATABASE_URL)(
         subscribe: async () => async () => {},
       };
       const app = buildGateway({
+        system: stubSystemBus(),
         db,
         queues: stubQueues().queues,
         verifier: stubVerifier(),

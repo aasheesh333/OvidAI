@@ -4,7 +4,7 @@ import type { QueueServices } from "@ovid/queue";
 import { createQueues } from "@ovid/queue";
 import { buildGateway } from "../app.js";
 import { openTestDb, closeDb, TEST_DATABASE_URL, } from "../test/db.js";
-import { noopEvents, stubKeys, stubMint, stubTickets, stubVerifier } from "../test/stubs.js";
+import { stubSystemBus, noopEvents, stubKeys, stubMint, stubTickets, stubVerifier } from "../test/stubs.js";
 
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
 
@@ -42,6 +42,7 @@ const hangQueues = {
 
 function healthApp(db: Db, queues: QueueServices) {
   return buildGateway({
+    system: stubSystemBus(),
     db,
     queues,
     verifier: stubVerifier(),
