@@ -109,3 +109,22 @@ export {
 } from "./plugins/registry.js";
 
 
+// P5 Task 14: the atomic plugin install transaction (worker processor and
+// the plugin-installs queue lane consume it from this root — same barrel
+// rule; PluginInstallJob mirrors the @ovid/queue contract member-for-member,
+// SandboxFiles/SandboxSpawner are @ovid/sandbox structural mirrors until the
+// workspace dependency can be declared).
+export {
+  createPluginInstaller,
+  pluginDir,
+  pluginStagingDir,
+  NPM_INSTALL_TIMEOUT_MS,
+  MV_TIMEOUT_MS,
+  type InstallPhase,
+  type PluginInstallOutcome,
+  type InstallerDeps,
+  type PluginInstallJob,
+  type SandboxFiles,
+  type SandboxExecRequest,
+  type SandboxExecResult,
+} from "./plugins/install.js";
