@@ -21,6 +21,7 @@ import {
   type BrowserChannelDeps,
 } from "./browserChannel.js";
 import { PTY_OPEN_TIMEOUT_MS, PTY_REPLY_TIMEOUT_MS, PtyBridgeError, type PtyBridge } from "./wsPty.js";
+import type { SystemHub } from "./systemChannel.js";
 
 /**
  * The thin client's live event channel: one multiplexed WS connection carries
@@ -56,6 +57,16 @@ import { PTY_OPEN_TIMEOUT_MS, PTY_REPLY_TIMEOUT_MS, PtyBridgeError, type PtyBrid
  * PUBLICATION only — whether a pending approval was still waiting is the
  * worker bridge's concern (a late answer after its timeout is a no-op
  * there, by contract).
+ *
+ * P5 Task 10 adds the system channel: after the ticket verify the
+ * connection attaches its uid to deps.systemHub (ONE shared sys:{uid}:out
+ * subscription per uid across that uid's sockets — events fan out to every
+ * attached socket as system_event frames). A client's system_response frame
+ * is forwarded to sys:{uid}:in for the worker's pending request; there is
+ * deliberately no ack frame (the request resolving IS the confirmation).
+ * The hub is OPTIONAL: a composition without it never attaches and answers
+ * system_response with `bad_message` (the frame could only be meaningful
+ * after an attach this composition never made).
  */
 
 /**
@@ -96,6 +107,15 @@ export interface WsDeps {
    * discipline as browser above).
    */
   approvals?: ApprovalPublisher;
+  /**
+   * System channel hub (P5 Task 10); main wires createSystemHub(redisQ).
+   * OPTIONAL so pre-P5 compositions (spine e2e + P1 suites) stay
+   * source-compatible: when absent, the connection never attaches and an
+   * incoming system_response answers a `bad_message` error frame instead
+   * of crashing (R5: this is THE canonical field name — Task 15 consumes
+   * the SAME field; no second alias).
+   */
+  systemHub?: SystemHub;
 }
 
 export interface WsConnectionOptions {
@@ -195,11 +215,21 @@ export async function handleWsConnection(
   // ONE browser attach per socket (Task 9): holds the dedicated redis
   // publisher + subscriber; torn down on detach, replace, and socket close.
   let browserAttach: BrowserAttach | null = null;
+  // System channel detach (P5 Task 10): declared HERE (same teardown
+  // bookkeeping block as session subs) but only SET after the ticket verify
+  // proves the uid — a close that fires during the verify finds it null and
+  // there is nothing to tear down (the attach itself happens after the
+  // closed re-check below, synchronously, before any frame is drained).
+  let detachSystem: (() => void) | null = null;
   let closed = false;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
 
   const teardownAll = async (): Promise<void> => {
     if (heartbeat !== null) clearInterval(heartbeat);
+    // Sync and first: the system attach holds a slot in the uid's SHARED
+    // per-uid subscription (its release may quit a redis connection, which
+    // is awaited inside the hub — no await needed here).
+    detachSystem?.();
     const all = [...subs.values()];
     subs.clear();
     const ptyAll = [...ptySubs.values()];
@@ -255,6 +285,14 @@ export async function handleWsConnection(
   // ran teardown above. Setting anything up now (or draining queued frames)
   // would do db/redis work for a dead socket and leak whatever it created.
   if (closed || socket.readyState !== socket.OPEN) return;
+
+  // System channel attach (P5 Task 10): synchronous, BEFORE the heartbeat
+  // setup and the pre-auth drain at the end of this function — no frame can
+  // arrive between here and the drain, and the hub's shared per-uid
+  // subscription is live (or opening) before the first system_response.
+  detachSystem = deps.systemHub?.attach(uid, (event) => {
+    send(socket, { op: "system_event", event });
+  }) ?? null;
 
   // ---- Heartbeat: protocol-level ping every 30 s, close after 2 misses ----
   let unansweredPings = 0;
@@ -712,6 +750,42 @@ export async function handleWsConnection(
     send(socket, { op: "approval_ack", approvalId: msg.approvalId, decision: msg.decision });
   }
 
+  // ---- System channel op (P5 Task 10) ----------------------------------------
+
+  /**
+   * system_response: the payload was zod-validated by the shared
+   * wsClientMsg parse above; the uid IS this connection's authenticated
+   * principal, so no ownership check applies (the channel itself is
+   * uid-scoped). Forwarded to sys:{uid}:in; NO ack frame by contract — the
+   * worker's pending request resolving is the confirmation, a late answer
+   * is a no-op there. The connection survives every refusal.
+   */
+  async function handleSystemResponse(
+    msg: Extract<WsClientMsg, { op: "system_response" }>,
+  ): Promise<void> {
+    if (deps.systemHub === undefined) {
+      // Pre-P5 composition: no attach was ever made on this gateway, so the
+      // client can only hold a system_event it never received here — the
+      // frame is off-contract for THIS composition (bad_message, not
+      // unavailable; R5 revision).
+      send(socket, {
+        op: "error",
+        code: "bad_message",
+        message: "System channel not configured.",
+      });
+      return;
+    }
+    try {
+      await deps.systemHub.respond(uid, msg.id, msg.payload);
+    } catch {
+      send(socket, {
+        op: "error",
+        code: "internal",
+        message: "System response could not be published.",
+      });
+    }
+  }
+
   async function processFrame(raw: string): Promise<void> {
     // Defense in depth for the chained-queue path: a frame that was still
     // waiting its turn when the socket died must not start db/redis work.
@@ -773,6 +847,9 @@ export async function handleWsConnection(
       }
       case "approval_response":
         await handleApprovalResponse(msg);
+        return;
+      case "system_response":
+        await handleSystemResponse(msg);
         return;
     }
   }

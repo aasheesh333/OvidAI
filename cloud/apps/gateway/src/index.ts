@@ -18,6 +18,7 @@ import { createHttpMintProvisioner, createMintRedisKeyProvider } from "./keys.js
 import { createTicketStore } from "./tickets.js";
 import { createRedisPtyBridge } from "./wsPty.js";
 import { createRedisApprovalPublisher } from "./ws.js";
+import { createSystemHub } from "./systemChannel.js";
 
 /**
  * Composition root — intentionally untested-thin (Task 10's e2e exercises the
@@ -43,6 +44,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       ? createFirebaseVerifier(initializeApp()) // ADC / GOOGLE_APPLICATION_CREDENTIALS
       : createTestVerifier();
 
+  // System channel hub (P5 Task 10): ONE shared sys:{uid}:out subscription
+  // per uid across that uid's sockets; closed with the app below so every
+  // per-uid subscriber is released on shutdown.
+  const systemHub = createSystemHub(redisQ);
+
   const app = buildGateway(
     {
       db,
@@ -65,6 +71,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       // client's approval_response frames to the queue Redis; the worker's
       // approval bridge subscribes the same channel.
       approvals: createRedisApprovalPublisher(redisQ),
+      // System channel (P5 Task 10): ONE shared sys:{uid}:out subscription
+      // per uid across that uid's sockets (mcp approvals / elicitation /
+      // plugin progress / oauth notices); client responses go back on
+      // sys:{uid}:in.
+      systemHub,
     },
     { logger: true },
   );
@@ -72,6 +83,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   // Owned connections close with the app (deploy scripts call app.close()).
   app.addHook("onClose", async () => {
     await queues.agentRuns.close();
+    await systemHub.close();
     redisQ.disconnect();
     redisMint.disconnect();
     await db.$client.end({ timeout: 5 });

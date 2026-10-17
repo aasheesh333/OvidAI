@@ -2,6 +2,7 @@ import { z } from "zod";
 import { sessionEventSchema, type SessionEvent } from "./events.js";
 import { ptyBase64Data } from "./pty.js";
 import { browserInputEventSchema, type BrowserInputEvent, browserStateDtoSchema, type BrowserStateDto } from "./browser.js";
+import { systemEventEnvelopeSchema, type SystemEventEnvelope } from "./system.js";
 
 export type WsClientMsg =
   | { op: "subscribe"; sessionId: string; lastEventId?: string | null }
@@ -27,7 +28,13 @@ export type WsClientMsg =
       sessionId: string;
       approvalId: string;
       decision: "allow" | "deny" | "always";
-    };
+    }
+  // P5 Task 10 (system channel) — additive discriminant only. The client
+  // answers a requiresResponse system_event envelope by its `id`; the
+  // gateway forwards the payload to sys:{uid}:in for the worker's pending
+  // request. There is deliberately no ack frame — the request itself
+  // resolving IS the confirmation (a late answer is a no-op on the worker).
+  | { op: "system_response"; id: string; payload: Record<string, unknown> };
 
 export type WsServerMsg =
   | { op: "subscribed"; sessionId: string }
@@ -44,7 +51,11 @@ export type WsServerMsg =
   // P3 Task 12 (approvals over WS) — additive discriminants only. Ack for a
   // published approval_response: the gateway echoes the approvalId and the
   // decision it forwarded to the worker bridge.
-  | { op: "approval_ack"; approvalId: string; decision: string };
+  | { op: "approval_ack"; approvalId: string; decision: string }
+  // P5 Task 10 (system channel) — additive discriminant only. A system event
+  // pushed to this uid's sockets via the gateway's system hub (worker bus or
+  // gateway-originated, e.g. the MCP OAuth callback).
+  | { op: "system_event"; event: SystemEventEnvelope };
 
 /**
  * The error codes the WS server currently sends in `error` frames. The wire
@@ -172,6 +183,11 @@ const wsClientMsgSchema = z.discriminatedUnion("op", [
     // values at the edge.
     decision: z.string().min(1),
   }),
+  z.object({
+    op: z.literal("system_response"),
+    id: z.string().min(1),
+    payload: z.record(z.string(), z.unknown()),
+  }),
 ]) as unknown as z.ZodType<WsClientMsg>;
 
 const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
@@ -223,6 +239,10 @@ const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
     op: z.literal("approval_ack"),
     approvalId: z.string().min(1),
     decision: z.string().min(1),
+  }),
+  z.object({
+    op: z.literal("system_event"),
+    event: systemEventEnvelopeSchema,
   }),
 ]);
 

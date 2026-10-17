@@ -22,6 +22,7 @@ import type { TicketStore } from "./tickets.js";
 import type { ApprovalPublisher, WsDeps } from "./ws.js";
 import type { BrowserChannelDeps } from "./browserChannel.js";
 import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
+import type { SystemHub } from "./systemChannel.js";
 
 export interface GatewayDeps {
   db: Db;
@@ -59,6 +60,17 @@ export interface GatewayDeps {
    * no-op.
    */
   approvals?: ApprovalPublisher;
+  /**
+   * P5 Task 10: the system channel hub (the ws dispatch's only view of the
+   * system events channel). main() always wires createSystemHub(redisQ).
+   * R5 (binding): this is the ONE canonical field name for the dependency —
+   * Task 15 consumes the SAME `systemHub` field; no second `system:`/`hub:`
+   * alias is ever added. OPTIONAL only so pre-P5 compositions (spine e2e +
+   * P1 suites) stay source-compatible; when absent, every connection skips
+   * the system attach and an incoming system_response answers a loud
+   * `bad_message` error frame instead of crashing.
+   */
+  systemHub?: SystemHub;
   /**
    * P8 Task 3: presigned-PUT seam for attachment uploads (ruling P8-Q3 —
    * structurally @ovid/storage's StorageAdapter.presignPut, so the R2 adapter
@@ -178,6 +190,7 @@ export function buildGateway(
       pty: deps.pty ?? unavailablePtyBridge(),
       browser: deps.browser,
       approvals: deps.approvals,
+      systemHub: deps.systemHub,
     };
     registerWsRoute(scope, wsDeps);
   });

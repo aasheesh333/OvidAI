@@ -30,3 +30,16 @@ export * from "./crypto.js";
 // createOAuthFlow from this root; the exports map blocks deep imports).
 export * from "./oauth/discovery.js";
 export * from "./oauth/flow.js";
+// P5 Task 10: worker-side system bus (the gateway hub's counterpart on the
+// sys:{uid}:out / sys:{uid}:in channels; Task 15/16 consume it from this
+// root — same barrel rule). UserSystemBus is declared ONCE, here (F9):
+// Task 3's permissive forward-ref placeholder in transports/native.js is
+// shadowed by this EXPLICIT re-export (explicit beats star — the same
+// discipline as WorkspaceFiles above; the worker seam adapts the cast).
+export {
+  APPROVAL_TIMEOUT_MS,
+  createRedisSystemBus,
+  type SystemEventKind,
+  type SystemResponse,
+  type UserSystemBus,
+} from "./systemBus.js";

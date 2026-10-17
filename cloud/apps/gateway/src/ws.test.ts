@@ -6,7 +6,12 @@ import Redis from "ioredis";
 import WebSocket from "ws";
 import { sessions, users, type Db } from "@ovid/db";
 import { createRedisEventLog, type EventLog } from "@ovid/events";
-import { wsServerMsg, type SessionEvent, type WsServerMsg } from "@ovid/shared";
+import {
+  wsServerMsg,
+  type SessionEvent,
+  type SystemEventEnvelope,
+  type WsServerMsg,
+} from "@ovid/shared";
 import { buildGateway, WS_MAX_PAYLOAD_BYTES } from "./app.js";
 import { createTicketStore, type TicketStore } from "./tickets.js";
 import {
@@ -19,6 +24,7 @@ import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "./test/db.js";
 import {
   stubKeys,
   stubMint,
+  noopDb,
   stubQueues,
   stubTickets,
   stubVerifier,
@@ -26,6 +32,7 @@ import {
 } from "./test/stubs.js";
 import { compareSeq, MAX_SUBSCRIPTIONS_PER_CONNECTION } from "./ws.js";
 import type { PtyOutMsg, RingChunkWire } from "@ovid/shared";
+import type { SystemHub } from "./systemChannel.js";
 
 /**
  * Gateway WS channel (Task 8). Review Focus #1 — the reconnect replay/live
@@ -963,6 +970,187 @@ describe("gateway /cloud/ws pty ops (stub PtyBridge)", () => {
     await waitFor(() => stub.detached.includes(p3), "p3 detached");
     // …and no pty_close was ever SENT — the ptys survive for re-attach.
     expect(stub.sends.filter((s) => s.msg.type === "close")).toHaveLength(0);
+  }, 15_000);
+});
+
+// ---------------------------------------------------------------------------
+// System channel ops (P5 Task 10): stub SystemHub, no services needed. All
+// cases here are ADDITIVE — nothing above this block changed with Task 10.
+// ---------------------------------------------------------------------------
+
+describe("gateway /cloud/ws system channel ops (stub SystemHub)", () => {
+  const apps: FastifyInstance[] = [];
+  const clients: TestClient[] = [];
+
+  afterEach(async () => {
+    while (clients.length > 0) await clients.pop()!.close().catch(() => {});
+    while (apps.length > 0) await apps.pop()!.close();
+  });
+
+  const SYSTEM_UID = "syschan-user";
+
+  const SYSTEM_EVENT: SystemEventEnvelope = {
+    id: "018f1e2a-7b1c-7abc-8def-0123456789ab",
+    kind: "mcp_sampling_approval",
+    requiresResponse: true,
+    payload: { tool: "read_file", serverId: "srv-1" },
+    ts: "2026-10-17T00:00:00.000Z",
+  };
+
+  interface SystemHubStub {
+    hub: SystemHub;
+    attaches: Array<{ uid: string; send: (e: SystemEventEnvelope) => void }>;
+    detaches: string[];
+    responses: Array<{ uid: string; id: string; payload: Record<string, unknown> }>;
+    published: Array<{ uid: string; event: SystemEventEnvelope }>;
+    /** Delivers an envelope to every attached send for that uid. */
+    push(uid: string, event: SystemEventEnvelope): void;
+  }
+
+  function stubSystemHub(): SystemHubStub {
+    const attaches: SystemHubStub["attaches"] = [];
+    const detaches: string[] = [];
+    const responses: SystemHubStub["responses"] = [];
+    const published: SystemHubStub["published"] = [];
+    const hub: SystemHub = {
+      attach: (uid, send) => {
+        attaches.push({ uid, send });
+        return () => {
+          detaches.push(uid);
+        };
+      },
+      publishOut: async (uid, event) => {
+        published.push({ uid, event });
+      },
+      respond: async (uid, id, payload) => {
+        responses.push({ uid, id, payload });
+      },
+      close: async () => {},
+    };
+    return {
+      hub,
+      attaches,
+      detaches,
+      responses,
+      published,
+      push: (uid, event) => {
+        for (const a of attaches) if (a.uid === uid) a.send(event);
+      },
+    };
+  }
+
+  async function makeSystemApp(
+    systemHub: SystemHub | undefined,
+    tickets: TicketStub,
+  ): Promise<string> {
+    const events: EventLog = {
+      append: async () => {
+        throw new Error("append is unused in the system channel tests");
+      },
+      readSince: async () => [],
+      subscribe: async () => async () => {},
+    };
+    const app = buildGateway({
+      db: noopDb,
+      queues: stubQueues().queues,
+      verifier: stubVerifier(),
+      tickets,
+      keys: stubKeys(),
+      mint: stubMint(),
+      events,
+      ...(systemHub !== undefined ? { systemHub } : {}),
+    });
+    apps.push(app);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const port = (app.server.address() as AddressInfo).port;
+    return `ws://127.0.0.1:${port}${WS_PATH}`;
+  }
+
+  async function newSystemClient(wsBase: string, hubTickets: TicketStub): Promise<TestClient> {
+    const client = await connectClient(wsBase, await hubTickets.mint(SYSTEM_UID));
+    clients.push(client);
+    return client;
+  }
+
+  it("authenticated socket receives system_event frames pushed via systemHub", async () => {
+    const stub = stubSystemHub();
+    const hubTickets = stubTickets();
+    const wsBase = await makeSystemApp(stub.hub, hubTickets);
+    const client = await newSystemClient(wsBase, hubTickets);
+
+    await waitFor(() => stub.attaches.some((a) => a.uid === SYSTEM_UID), "systemHub attach");
+
+    stub.push(SYSTEM_UID, SYSTEM_EVENT);
+    await client.waitFor(
+      () => client.messages.some((m) => m.op === "system_event"),
+      "system_event frame",
+    );
+    expect(client.messages[0]).toEqual({ op: "system_event", event: SYSTEM_EVENT });
+  }, 15_000);
+
+  it("system_response frame from client reaches systemHub.respond with the ticket's uid", async () => {
+    const stub = stubSystemHub();
+    const hubTickets = stubTickets();
+    const wsBase = await makeSystemApp(stub.hub, hubTickets);
+    const client = await newSystemClient(wsBase, hubTickets);
+    await waitFor(() => stub.attaches.some((a) => a.uid === SYSTEM_UID), "systemHub attach");
+
+    client.send({ op: "system_response", id: SYSTEM_EVENT.id, payload: { decision: "allow" } });
+    await waitFor(() => stub.responses.length === 1, "hub.respond called");
+    expect(stub.responses[0]).toEqual({
+      uid: SYSTEM_UID,
+      id: SYSTEM_EVENT.id,
+      payload: { decision: "allow" },
+    });
+  }, 15_000);
+
+  it("unparseable system_response → bad_message error frame; the connection survives", async () => {
+    const stub = stubSystemHub();
+    const hubTickets = stubTickets();
+    const wsBase = await makeSystemApp(stub.hub, hubTickets);
+    const client = await newSystemClient(wsBase, hubTickets);
+
+    // Empty id fails the shared schema; a string payload fails it too. Both
+    // must answer bad_message (the generic off-contract refusal) WITHOUT
+    // closing the socket.
+    client.send({ op: "system_response", id: "", payload: {} });
+    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "bad_message (empty id)");
+    expect(client.messages[0]).toMatchObject({ op: "error", code: "bad_message" });
+
+    client.send({ op: "system_response", id: "evt-9", payload: "not-an-object" });
+    await client.waitFor(
+      () => client.messages.filter((m) => m.op === "error").length === 2,
+      "bad_message (payload not a record)",
+    );
+    expect(client.messages[1]).toMatchObject({ op: "error", code: "bad_message" });
+
+    client.send({ op: "ping" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong (connection survived)");
+    expect(stub.responses).toEqual([]); // nothing was published for either bad frame
+  }, 15_000);
+
+  it("pre-P5 composition (no systemHub wired) → system_response answers bad_message; connection survives", async () => {
+    const hubTickets = stubTickets();
+    const wsBase = await makeSystemApp(undefined, hubTickets); // NO systemHub in the composition
+    const client = await newSystemClient(wsBase, hubTickets);
+
+    client.send({ op: "system_response", id: "evt-1", payload: { decision: "allow" } });
+    await client.waitFor(() => client.messages.some((m) => m.op === "error"), "bad_message fallback");
+    expect(client.messages[0]).toMatchObject({ op: "error", code: "bad_message" });
+
+    client.send({ op: "ping" });
+    await client.waitFor(() => client.messages.some((m) => m.op === "pong"), "pong (connection survived)");
+  }, 15_000);
+
+  it("socket close detaches the system channel (same teardown bookkeeping as session subs)", async () => {
+    const stub = stubSystemHub();
+    const hubTickets = stubTickets();
+    const wsBase = await makeSystemApp(stub.hub, hubTickets);
+    const client = await newSystemClient(wsBase, hubTickets);
+    await waitFor(() => stub.attaches.some((a) => a.uid === SYSTEM_UID), "systemHub attach");
+
+    await client.close();
+    await waitFor(() => stub.detaches.includes(SYSTEM_UID), "systemHub detach on socket close");
   }, 15_000);
 });
 
