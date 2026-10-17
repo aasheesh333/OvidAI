@@ -85,14 +85,18 @@ function normalizeMcpTransport(raw: string): string {
  * ConfigParseError, as is any entry that declares neither a command nor a
  * url. Parsing is atomic: a ConfigParseError means nothing was imported.
  *
- * `opts.env` supplies `${VAR}` / `${VAR:-default}` values; it defaults to
- * the process environment.
+ * `opts.env` supplies `${VAR}` / `${VAR:-default}` values. It defaults to an
+ * EMPTY map — NEVER the process environment: a caller-supplied config must
+ * never be able to resolve the host process's secrets (gateway master key,
+ * database/redis URLs, …). Callers that legitimately own an interpolation
+ * environment pass it explicitly; unresolved references stay literal so the
+ * credential gate can still detect them.
  */
 export function parseMcpConfig(
   raw: string,
-  opts?: { env?: Record<string, string> },
+  opts: { env?: Record<string, string> } = {},
 ): ImportedMcp[] {
-  const env = opts?.env ?? defaultEnv();
+  const env = opts.env ?? {};
   const trimmed = raw.trim();
   if (trimmed === "") return [];
   if (trimmed.startsWith("{")) return parseJsonConfig(trimmed, env);
@@ -107,12 +111,6 @@ export function parseMcpConfig(
     return parseJsonConfig(trimmed, env);
   }
   return parseTomlConfig(trimmed, env);
-}
-
-function defaultEnv(): Record<string, string> {
-  return typeof process !== "undefined" && process.env
-    ? (process.env as Record<string, string>)
-    : {};
 }
 
 // ── JSON path ─────────────────────────────────────────────────────────────

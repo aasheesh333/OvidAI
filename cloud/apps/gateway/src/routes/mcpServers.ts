@@ -4,6 +4,7 @@ import {
   mcpOauthTokens,
   mcpServers as mcpServersRepo,
   users,
+  type Db,
   type McpServerRow,
 } from "@ovid/db";
 import {
@@ -174,25 +175,28 @@ async function createCustom(
 
   let row: McpServerRow;
   try {
-    row = await mcpServersRepo.create(deps.db, {
-      userId: uid,
-      name: imported.name,
-      transport: imported.transport,
-      curatedId: null,
-      config,
-      // The recordId needs the generated row id: create, then seal.
-      secretsSealed: null,
+    // Create + seal in ONE transaction: a sealing failure must not leave a
+    // secrets_sealed = null row behind (a retry would then hit server_exists).
+    // The recordId needs the generated row id: create, then seal.
+    row = await deps.db.transaction(async (tx) => {
+      const db = tx as unknown as Db;
+      const created = await mcpServersRepo.create(db, {
+        userId: uid,
+        name: imported.name,
+        transport: imported.transport,
+        curatedId: null,
+        config,
+        secretsSealed: null,
+      });
+      if (Object.keys(secrets).length === 0) return created;
+      // Caller guaranteed deps.crypto (the route refuses loudly otherwise).
+      const sealed = deps.crypto!.encrypt(JSON.stringify(secrets), `mcp_servers:${created.id}`);
+      const updated = await mcpServersRepo.update(db, created.id, uid, { secretsSealed: sealed });
+      return updated ?? created;
     });
   } catch (err) {
     if (isUniqueViolation(err)) throw new Error("server_exists");
     throw err;
-  }
-
-  if (Object.keys(secrets).length > 0) {
-    // Caller guaranteed deps.crypto (the route refuses loudly otherwise).
-    const sealed = deps.crypto!.encrypt(JSON.stringify(secrets), `mcp_servers:${row.id}`);
-    const updated = await mcpServersRepo.update(deps.db, row.id, uid, { secretsSealed: sealed });
-    if (updated !== null) row = updated;
   }
   return row;
 }
@@ -215,25 +219,27 @@ async function createCurated(
 
   let row: McpServerRow;
   try {
-    row = await mcpServersRepo.create(deps.db, {
-      userId: uid,
-      name,
-      transport: "native",
-      curatedId,
-      config: null,
-      secretsSealed: null,
+    // Create + seal in ONE transaction (see createCustom).
+    row = await deps.db.transaction(async (tx) => {
+      const db = tx as unknown as Db;
+      const created = await mcpServersRepo.create(db, {
+        userId: uid,
+        name,
+        transport: "native",
+        curatedId,
+        config: null,
+        secretsSealed: null,
+      });
+      if (secrets === undefined) return created;
+      // Curated credential rows seal the FLAT credential map — the router's
+      // ctx.secrets contract (Task 11).
+      const sealed = deps.crypto!.encrypt(JSON.stringify(secrets), `mcp_servers:${created.id}`);
+      const updated = await mcpServersRepo.update(db, created.id, uid, { secretsSealed: sealed });
+      return updated ?? created;
     });
   } catch (err) {
     if (isUniqueViolation(err)) throw new Error("server_exists");
     throw err;
-  }
-
-  if (secrets !== undefined) {
-    // Curated credential rows seal the FLAT credential map — the router's
-    // ctx.secrets contract (Task 11).
-    const sealed = deps.crypto!.encrypt(JSON.stringify(secrets), `mcp_servers:${row.id}`);
-    const updated = await mcpServersRepo.update(deps.db, row.id, uid, { secretsSealed: sealed });
-    if (updated !== null) row = updated;
   }
   return row;
 }
@@ -260,7 +266,11 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
 
       let imported: ImportedMcp[];
       try {
-        imported = parseMcpConfig(parsed.data.pasted);
+        // C1: NEVER interpolate against the gateway process env — a pasted
+        // config is caller-controlled, and the gateway env holds
+        // OVID_MASTER_KEY / DATABASE_URL / redis URLs. Unresolved `${VAR}`
+        // stays literal for the credential gate.
+        imported = parseMcpConfig(parsed.data.pasted, { env: {} });
       } catch {
         // ConfigParseError messages are value-free; never echo config bytes.
         return badRequest(reply, "The pasted MCP configuration could not be parsed.");
@@ -359,14 +369,16 @@ export function registerMcpServerRoutes(app: FastifyInstance, deps: GatewayDeps)
     const { id } = request.params as { id: string };
     if (!isUuid(id)) return mcpNotFound(reply);
 
+    // Ownership FIRST: a foreign/unknown id is always the same 404, even
+    // when the body is malformed (the 404 must not depend on body validity).
+    const row = await mcpServersRepo.get(deps.db, id, uid);
+    if (row === null) return mcpNotFound(reply);
+
     const parsed = patchBodySchema.safeParse(request.body);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
     if (parsed.data.secrets !== undefined && deps.crypto === undefined) {
       return sendError(reply, 503, "unavailable", "MCP secret sealing is not configured.");
     }
-
-    const row = await mcpServersRepo.get(deps.db, id, uid);
-    if (row === null) return mcpNotFound(reply);
 
     const patch: { enabled?: boolean; secretsSealed?: ReturnType<NonNullable<GatewayDeps["crypto"]>["encrypt"]> } = {};
     if (parsed.data.enabled !== undefined) patch.enabled = parsed.data.enabled;

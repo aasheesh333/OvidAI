@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { mcpServers as mcpServersRepo } from "@ovid/db";
 import type { GatewayDeps } from "../app.js";
@@ -97,34 +97,57 @@ export function registerMcpOauthRoutes(app: FastifyInstance, deps: GatewayDeps):
  * Ovid credentials; `state` is the one-use bearer the flow validates.
  */
 export function registerMcpOauthCallbackRoutes(app: FastifyInstance, deps: GatewayDeps): void {
-  app.get("/mcp/oauth/callback", async (request, reply) => {
-    if (deps.oauth === undefined) {
-      return html(
-        reply,
-        503,
-        "<!doctype html><html><body><p>MCP OAuth is not configured.</p></body></html>",
-      );
-    }
+  app.get("/mcp/oauth/callback", (request, reply) =>
+    handleOauthCallback(deps, request, reply),
+  );
+}
 
-    const query = request.query as Record<string, string | string[] | undefined>;
-    const state = queryValue(query.state) ?? "";
-    const code = queryValue(query.code);
-    const error = queryValue(query.error);
-    const iss = queryValue(query.iss);
+/**
+ * The canonical PUBLIC redirect path pinned by OVID_MCP_REDIRECT_URI's
+ * default (`https://ovidsi.com/oauth/callback`). It is registered at the
+ * gateway ROOT so Caddy can proxy that exact path verbatim (no rewrite);
+ * same no-auth handler as the API-prefixed route above.
+ */
+export function registerMcpOauthPublicCallbackRoute(
+  app: FastifyInstance,
+  deps: GatewayDeps,
+): void {
+  app.get("/oauth/callback", (request, reply) =>
+    handleOauthCallback(deps, request, reply),
+  );
+}
 
-    let ok = false;
-    try {
-      const result = await deps.oauth.handleCallback({
-        state,
-        ...(code !== null ? { code } : {}),
-        ...(error !== null ? { error } : {}),
-        ...(iss !== null ? { iss } : {}),
-      });
-      ok = result.ok;
-    } catch {
-      ok = false;
-    }
+async function handleOauthCallback(
+  deps: GatewayDeps,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<FastifyReply> {
+  if (deps.oauth === undefined) {
+    return html(
+      reply,
+      503,
+      "<!doctype html><html><body><p>MCP OAuth is not configured.</p></body></html>",
+    );
+  }
 
-    return ok ? html(reply, 200, SUCCESS_HTML) : html(reply, 400, FAILURE_HTML);
-  });
+  const query = request.query as Record<string, string | string[] | undefined>;
+  const state = queryValue(query.state) ?? "";
+  const code = queryValue(query.code);
+  const error = queryValue(query.error);
+  const iss = queryValue(query.iss);
+
+  let ok = false;
+  try {
+    const result = await deps.oauth.handleCallback({
+      state,
+      ...(code !== null ? { code } : {}),
+      ...(error !== null ? { error } : {}),
+      ...(iss !== null ? { iss } : {}),
+    });
+    ok = result.ok;
+  } catch {
+    ok = false;
+  }
+
+  return ok ? html(reply, 200, SUCCESS_HTML) : html(reply, 400, FAILURE_HTML);
 }

@@ -34,7 +34,9 @@ export interface GatewayEnv {
   masterKey: string;
   /**
    * P5 Task 15: the MCP OAuth redirect URI registered with authorization
-   * servers (default `https://ovidsi.com/oauth/callback`).
+   * servers (default `https://ovidsi.com/oauth/callback`). The gateway serves
+   * this exact public path at its ROOT (`registerMcpOauthPublicCallbackRoute`);
+   * the Caddy snippet proxies it verbatim — no rewrite.
    */
   mcpRedirectUri: string;
 }
@@ -48,7 +50,7 @@ const DEFAULT_PRESIGN_TTL_SECONDS = 3600;
 const PRESIGN_TTL_MIN_SECONDS = 60;
 const PRESIGN_TTL_MAX_SECONDS = 86_400;
 const DEFAULT_HYDRATE_WAIT_MS = 20_000;
-const DEFAULT_MCP_REDIRECT_URI = "https://ovidsi.com/oauth/callback";
+export const DEFAULT_MCP_REDIRECT_URI = "https://ovidsi.com/oauth/callback";
 const MASTER_KEY_HEX_RE = /^[0-9a-fA-F]{64}$/;
 
 /**

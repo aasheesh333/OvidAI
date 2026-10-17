@@ -169,17 +169,20 @@ export function registerPluginRoutes(app: FastifyInstance, deps: GatewayDeps): v
 
   app.post("/plugins/install", async (request, reply) => {
     const { uid } = request.principal;
-    const queue = deps.queues.pluginInstalls;
-    if (queue === undefined) {
-      return sendError(reply, 503, "unavailable", "Plugin installs are not configured.");
-    }
 
     const parsed = installBodySchema.safeParse(request.body);
     if (!parsed.success) return zodBadRequest(reply, parsed.error);
 
+    // Tier gate FIRST: cheaper than the queue lookup and it never reveals
+    // the composition's queue state to a Free caller.
     const tier = await users.getTier(deps.db, uid);
     if (tier === "free") {
       return sendError(reply, 402, "pro_required", PRO_REQUIRED_MESSAGE);
+    }
+
+    const queue = deps.queues.pluginInstalls;
+    if (queue === undefined) {
+      return sendError(reply, 503, "unavailable", "Plugin installs are not configured.");
     }
 
     const source = parsed.data.source;
@@ -232,10 +235,15 @@ export function registerPluginRoutes(app: FastifyInstance, deps: GatewayDeps): v
       JSON.stringify(parsed.data.config),
       `plugins:${row.id}`,
     );
-    await pluginsRepo.setStatus(deps.db, row.id, uid, row.status, { configSealed: sealed });
+    // Re-read the CURRENT status immediately before the write: the worker
+    // owns status transitions, so writing the status read above could clobber
+    // one (e.g. queued → installing) that landed while we sealed.
+    const current = await pluginsRepo.get(deps.db, row.id, uid);
+    if (current === null) return pluginNotFound(reply);
+    await pluginsRepo.setStatus(deps.db, row.id, uid, current.status, { configSealed: sealed });
 
     const updated = await pluginsRepo.get(deps.db, row.id, uid);
-    return toDto(updated ?? row);
+    return toDto(updated ?? current);
   });
 
   app.delete("/plugins/:id", async (request, reply) => {

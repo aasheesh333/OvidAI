@@ -330,6 +330,12 @@ describe("loadGatewayEnv", () => {
     expect(() => loadGatewayEnv(noToken)).toThrow(/OVID_INTERNAL_TOKEN/);
   });
 
+  it("requires OVID_MASTER_KEY in firebase mode and names the variable", () => {
+    const raw = { ...fullRaw, NODE_ENV: "development" };
+    delete raw.OVID_MASTER_KEY;
+    expect(() => loadGatewayEnv(raw)).toThrow(/OVID_MASTER_KEY/);
+  });
+
   it("respects explicit values", () => {
     const env = loadGatewayEnv(fullRaw);
     expect(env).toEqual({

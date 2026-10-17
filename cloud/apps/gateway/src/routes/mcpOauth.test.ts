@@ -8,6 +8,7 @@ import {
   type SystemEventPublisher,
 } from "@ovid/mcp";
 import { buildGateway } from "../app.js";
+import { DEFAULT_MCP_REDIRECT_URI } from "../env.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
   authHeaders,
@@ -200,6 +201,47 @@ describe.skipIf(!TEST_DATABASE_URL_)("gateway mcp oauth routes (real postgres)",
     expect(res.statusCode).toBe(400);
     expect(res.headers["content-type"]).toContain("text/html");
     expect(res.body).toContain("Authorization failed");
+  });
+
+  it("the configured public redirect path resolves on the gateway (I1, not 404)", async () => {
+    // OVID_MCP_REDIRECT_URI's default is what the AS redirects the browser to
+    // (https://ovidsi.com/oauth/callback). Caddy proxies that path verbatim,
+    // so the gateway itself must serve it — no /cloud/v1 prefix, no rewrite.
+    expect(DEFAULT_MCP_REDIRECT_URI).toBe(REDIRECT_URI);
+    const path = new URL(DEFAULT_MCP_REDIRECT_URI).pathname;
+    expect(path).toBe("/oauth/callback");
+
+    // Public: no auth headers. An unknown state proves the handler ran
+    // (400 HTML), never the 404 envelope.
+    const res = await app.inject({
+      method: "GET",
+      url: `${path}?state=bogus-state&code=whatever`,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(res.body).toContain("Authorization failed");
+  });
+
+  it("the public redirect path completes a valid flow (200 HTML)", async () => {
+    const uid = testUid("oau-pub");
+    const serverId = await seedServer(uid);
+    const start = await app.inject({
+      method: "GET",
+      url: `/cloud/v1/mcp/oauth/start?serverId=${serverId}`,
+      headers: authHeaders(uid),
+    });
+    const state = new URL((start.json() as { authorizeUrl: string }).authorizeUrl).searchParams.get(
+      "state",
+    )!;
+    const path = new URL(DEFAULT_MCP_REDIRECT_URI).pathname;
+    const res = await app.inject({
+      method: "GET",
+      url: `${path}?state=${encodeURIComponent(state)}&code=fixture-code-pub`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(res.body).toContain("close this window");
+    expect(res.body.toLowerCase()).not.toContain(ACCESS_TOKEN);
   });
 
   it("start for an unknown or foreign server → 404 (never 403)", async () => {

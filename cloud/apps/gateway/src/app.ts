@@ -18,7 +18,11 @@ import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerImportRoutes } from "./routes/import.js";
 import { registerMcpCatalogRoutes } from "./routes/mcpCatalog.js";
-import { registerMcpOauthCallbackRoutes, registerMcpOauthRoutes } from "./routes/mcpOauth.js";
+import {
+  registerMcpOauthCallbackRoutes,
+  registerMcpOauthPublicCallbackRoute,
+  registerMcpOauthRoutes,
+} from "./routes/mcpOauth.js";
 import { registerMcpServerRoutes } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
@@ -210,6 +214,12 @@ export function buildGateway(
   // NO-auth: the orchestrator probes health, and the authorization server's
   // browser redirect carries no Ovid credentials — the one-use `state` IS
   // the bearer (validated atomically by the Task-9 flow).
+  //
+  // The canonical PUBLIC redirect path (OVID_MCP_REDIRECT_URI default
+  // `https://ovidsi.com/oauth/callback`) is served at the gateway ROOT so
+  // Caddy can proxy that exact path verbatim (no rewrite); the API-prefixed
+  // route below stays for direct/internal callers.
+  registerMcpOauthPublicCallbackRoute(app, deps);
   app.register(
     async (scope) => {
       registerHealthRoutes(scope, deps);
