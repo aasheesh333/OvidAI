@@ -25,6 +25,7 @@ export {
   type ToolResult as McpToolResult,
 } from "./mcpTools.js";
 export * from "./notify.js";
+export * from "./pluginInstallProcessor.js";
 export * from "./ptyBridge.js";
 export * from "./runProcessor.js";
 export * from "./sandboxAdapter.js";

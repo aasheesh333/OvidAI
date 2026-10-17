@@ -12,10 +12,12 @@
  * fetch/REST/GitHub servers keep working; stdio/filesystem/memory tools and
  * plugin installs fail cleanly with `sandbox_unavailable`.
  *
- * The runtime deliberately does NOT start the plugin-installs queue worker —
- * the Task 14 scope ruling deferred that lane (see the Task 16 report's
- * "deferred queue+processor" section). `installer` is the transaction; the
- * deferred processor will call it per job.
+ * The runtime deliberately does NOT start the plugin-installs queue worker:
+ * `installer` is the transaction, and main.ts composes the consumer around
+ * this SAME instance (`mcpRuntime.installer`) with
+ * `createPluginInstallProcessor` + `createPluginInstallsWorker`. Keeping the
+ * worker out of the runtime means there is exactly one installer (and one
+ * ContributionRegistry) per worker process.
  */
 
 import type { Redis } from "ioredis";

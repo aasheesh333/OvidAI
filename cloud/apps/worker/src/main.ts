@@ -14,6 +14,7 @@ import {
   createAgentRunsWorker,
   createHibernateWorker,
   createHydrateWorker,
+  createPluginInstallsWorker,
   createQueues,
   hibernateJobSchema,
   hydrateJobSchema,
@@ -56,6 +57,7 @@ import type { KeyProvider } from "@ovid/shared";
 import { createFullAgentRunProcessor } from "./runProcessor.js";
 import { buildFileService } from "./fileService.js";
 import { createMcpRuntime } from "./mcpRuntime.js";
+import { createPluginInstallProcessor } from "./pluginInstallProcessor.js";
 import { startWorkerPtyBridge } from "./ptyBridge.js";
 import { createSandboxPort } from "./sandboxAdapter.js";
 import { createSandboxSeam } from "./sandboxSeam.js";
@@ -336,7 +338,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   }
   const activity = createActivityTracker(redisC);
   // Connection OPTIONS OBJECT (Task 7 lesson): a bare URL string hangs.
-  const queues = createQueues({ url: cfg.redisQUrl });
+  // P5 Task 14: opt in to the plugin-installs queue (additive; the other
+  // queues' key layout is unchanged).
+  const queues = createQueues(
+    { url: cfg.redisQUrl },
+    { withPluginInstalls: true },
+  );
 
   // ---- P2 Task 12: the SandboxManager chain (pinned composition order). ----
   // Every step fails LOUDLY at boot: a worker without a rootfs must never run
@@ -395,6 +402,34 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       "[worker] OVID_MASTER_KEY is not set — MCP servers/plugins are disabled " +
         "(curated fetch/REST tools are unavailable in this process)",
     );
+  }
+
+  // ---- P5 Task 14: the plugin-installs consumer. --------------------------
+  // Wired to the SAME installer the MCP runtime uses: a second
+  // createPluginInstaller() would build a second ContributionRegistry, and
+  // installs would register into state the router never reads. The runtime
+  // is null only without OVID_MASTER_KEY (the installer needs the envelope
+  // crypto to seal plugin credentials), so skip the consumer in that mode
+  // rather than start a worker whose every job would fail.
+  let pluginInstallsWorker: ReturnType<typeof createPluginInstallsWorker> | null =
+    null;
+  if (mcpRuntime === null) {
+    console.warn(
+      "[worker] plugin-installs worker not started — OVID_MASTER_KEY is not set",
+    );
+  } else {
+    const processPluginInstall = createPluginInstallProcessor({
+      db,
+      installer: mcpRuntime.installer,
+    });
+    pluginInstallsWorker = createPluginInstallsWorker(
+      { url: cfg.redisQUrl },
+      processPluginInstall,
+    );
+    pluginInstallsWorker.on("error", (err) => {
+      console.error("[worker] plugin-installs worker error", err);
+    });
+    console.log("[worker] consuming plugin-installs");
   }
 
   // P2 Task 13: the terminal-over-WS worker bridge. Started AFTER recovery —
@@ -635,6 +670,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       // then the sandbox manager — manager.close() kills every live pty leaf,
       // and each pty's onExit publishes its `exit` + HDELs its registry key.
       await stopPtyBridge();
+      // P5 Task 14: drain in-flight install transactions BEFORE the runtime
+      // closes the system bus / router they report through.
+      await pluginInstallsWorker?.close();
       // P5 Task 16: stop the MCP router (closes live MCP clients and the
       // system bus; pending approvals deny) BEFORE the sandbox manager kills
       // the jailed stdio processes they ride on.
@@ -656,6 +694,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       await queues.agentRuns.close();
       await queues.hibernate.close();
       await queues.hydrate.close();
+      await queues.pluginInstalls?.close();
       // Reap the approval bridge's subscription (pending asks fail closed).
       await processor.close();
       if (redisC !== redisQ) redisC.disconnect();
