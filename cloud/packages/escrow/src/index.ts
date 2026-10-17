@@ -4,3 +4,4 @@
 export * from "./envelope.js";
 export * from "./endpoints.js";
 export * from "./provider.js";
+export * from "./rotateMasterKey.js";

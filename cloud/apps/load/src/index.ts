@@ -18,3 +18,5 @@ export * from "./thresholds.js";
 // P10 Task 6 — chaos runner/handles (Task 7 consumes these exact exports).
 export * from "./chaos/runner.js";
 export * from "./chaos/staging.js";
+// P10 Task 10 — canary leak sweep.
+export * from "./canarySweep.js";

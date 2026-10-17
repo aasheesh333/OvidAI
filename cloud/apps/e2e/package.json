@@ -25,6 +25,7 @@
   "dependencies": {
     "@ovid/browser": "workspace:*",
     "@ovid/db": "workspace:*",
+    "@ovid/escrow": "workspace:*",
     "@ovid/events": "workspace:*",
     "@ovid/gateway": "workspace:*",
     "@ovid/mcp": "workspace:*",
