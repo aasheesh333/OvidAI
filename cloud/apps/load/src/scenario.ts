@@ -61,20 +61,43 @@ export interface LoadReport {
   runsStarted: number;
   runsCompleted: number;
   runsFailed: number;
+  /**
+   * Additive positive-data gate (T6 review): `runIds` attributes a failure by
+   * `payload.runId`; an unattributed `run_failed` would otherwise vanish from
+   * `runsFailed` and let a broken run read as 0 failures. Must be 0.
+   */
+  runsFailedUnattributed: number;
   eventDelivery: EventDeliveryStats;
-  replay: { p95Ms: number; maxMs: number; reconnects: number };
+  replay: { p95Ms: number; maxMs: number; reconnects: number; samples: number };
   integrity: { lostEvents: number; duplicateEvents: number; gapsVsMirror: number };
   admission: {
     maxObservedActiveSandboxes: number;
     queuedAtCap: number;
     rejectedAtCap: number;
+    /** Additive: spike-end → last queued spike run started (Task 5 ≤600 s). */
+    spikeDrainMs?: number;
+    /**
+     * Additive positive-data gate (T6 review): spike sends that were accepted
+     * by the gateway. `spikeDrainMs` reads 0 when no spike ever fired, so the
+     * drain threshold alone is vacuous; this must be > 0.
+     */
+    spikeRuns: number;
   };
   memory: {
     gatewayMaxRssMb: number;
     hostMemAvailableMinMb: number;
     workerMaxRssMb: number;
   };
-  harness: { maxPendingFrames: number; latencyFloorP95Ms: number };
+  harness: {
+    maxPendingFrames: number;
+    latencyFloorP95Ms: number;
+    /**
+     * Additive positive-data gate (T6 review): off-contract server frames the
+     * client rejected. A harness that silently accepts drift is not measuring
+     * the real wire contract; must be 0.
+     */
+    invalidFrames: number;
+  };
   scheduleRuns: { fired: number; duplicated: number; missed: number };
   thresholdFailures: string[];
   /** Additive: loud "NOT EXERCISED" notes (browser tier, schedule tier, …). */
@@ -196,18 +219,27 @@ function runIds(events: SessionEvent[]): {
   started: Set<string>;
   completed: Set<string>;
   failed: Set<string>;
+  unattributedFailed: number;
 } {
   const started = new Set<string>();
   const completed = new Set<string>();
   const failed = new Set<string>();
+  let unattributedFailed = 0;
   for (const event of events) {
+    if (event.type === "run_failed") {
+      // Never drop a failure on the floor: a `run_failed` without a string
+      // runId cannot be attributed, but it is still counted (and gated).
+      const runId = event.payload.runId;
+      if (typeof runId !== "string" || runId === "") unattributedFailed += 1;
+      else failed.add(runId);
+      continue;
+    }
     const runId = event.payload.runId;
     if (typeof runId !== "string") continue;
     if (event.type === "run_started") started.add(runId);
     else if (event.type === "run_completed") completed.add(runId);
-    else if (event.type === "run_failed") failed.add(runId);
   }
-  return { started, completed, failed };
+  return { started, completed, failed, unattributedFailed };
 }
 
 export async function runScenario(
@@ -241,6 +273,8 @@ export async function runScenario(
   let reconnects = 0;
   let maxPendingFrames = 0;
   let browserAttached = 0;
+  const spikeRunIds: string[] = [];
+  let spikeEndedAt: number | undefined;
 
   // ---- Ground truth (read-only) -------------------------------------------
   let groundTruth: EventLog | undefined = target.eventLog;
@@ -398,7 +432,8 @@ export async function runScenario(
       }
       const chosen = live[i % live.length]!;
       try {
-        await chosen.client.sendMessage(chosen.sessionId, `${runTag} spike ${i}`);
+        const sent = await chosen.client.sendMessage(chosen.sessionId, `${runTag} spike ${i}`);
+        spikeRunIds.push(sent.runId);
         sends += 1;
       } catch (err) {
         sendFailures += 1;
@@ -406,6 +441,7 @@ export async function runScenario(
       }
       await sleep(Math.max(1, Math.floor(5_000 / Math.max(1, spike.extraConcurrentRuns))));
     }
+    spikeEndedAt = Date.now();
   }
   if (profile.spike !== undefined) {
     spikeTimer = setTimeout(() => {
@@ -570,6 +606,25 @@ export async function runScenario(
     (error) => error.code === "sandbox_unavailable",
   ).length;
 
+  // Spike drain: from the end of the spike burst to the last spike run's
+  // run_started. 0 when no spike ran; a value only appears once every spike
+  // run has started (Task 5 gates this at ≤600 s).
+  let spikeDrainMs = 0;
+  if (spikeRunIds.length > 0 && spikeEndedAt !== undefined) {
+    let lastStartedAt = 0;
+    for (const client of clients) {
+      if (client === undefined) continue;
+      for (const item of client.received) {
+        if (item.event.type !== "run_started") continue;
+        const runId = item.event.payload.runId;
+        if (typeof runId === "string" && spikeRunIds.includes(runId)) {
+          lastStartedAt = Math.max(lastStartedAt, item.receivedAtMs);
+        }
+      }
+    }
+    if (lastStartedAt > 0) spikeDrainMs = Math.max(0, lastStartedAt - spikeEndedAt);
+  }
+
   // Schedules: best-effort claim-ledger read (needs staging Postgres).
   let fired = 0;
   let duplicated = 0;
@@ -622,10 +677,22 @@ export async function runScenario(
     runsStarted: counts.started.size,
     runsCompleted: counts.completed.size,
     runsFailed: counts.failed.size,
+    runsFailedUnattributed: counts.unattributedFailed,
     eventDelivery: eventDeliveryStats(allReceived),
-    replay: { p95Ms: replayP95, maxMs: replayMax, reconnects },
+    replay: {
+      p95Ms: replayP95,
+      maxMs: replayMax,
+      reconnects,
+      samples: replaySamples.length,
+    },
     integrity: { lostEvents, duplicateEvents, gapsVsMirror },
-    admission: { maxObservedActiveSandboxes, queuedAtCap, rejectedAtCap },
+    admission: {
+      maxObservedActiveSandboxes,
+      queuedAtCap,
+      rejectedAtCap,
+      spikeDrainMs,
+      spikeRuns: spikeRunIds.length,
+    },
     memory: {
       gatewayMaxRssMb: Math.round(memory.gatewayMaxRssMb),
       hostMemAvailableMinMb: Math.round(memory.hostMemAvailableMinMb),
@@ -635,6 +702,10 @@ export async function runScenario(
       maxPendingFrames,
       latencyFloorP95Ms:
         dispatchSamples.length === 0 ? 0 : percentile(dispatchSamples, 95),
+      invalidFrames: clients.reduce(
+        (sum, client) => sum + (client?.invalidFrames() ?? 0),
+        0,
+      ),
     },
     scheduleRuns: { fired, duplicated, missed },
     thresholdFailures: [],

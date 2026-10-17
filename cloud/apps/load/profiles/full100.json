@@ -1,0 +1,15 @@
+{
+  "users": 100,
+  "durationMs": 1800000,
+  "rampMs": 300000,
+  "runsPerUserEveryMs": 90000,
+  "sandboxDutyCycle": 0.35,
+  "browserUsers": 4,
+  "schedules": 10,
+  "reconnectEveryMs": 60000,
+  "spike": {
+    "atMs": 900000,
+    "extraConcurrentRuns": 16,
+    "durationMs": 300000
+  }
+}

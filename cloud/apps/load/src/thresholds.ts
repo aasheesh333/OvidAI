@@ -77,6 +77,34 @@ export const SMOKE_THRESHOLDS: LoadThreshold[] = [
     value: 50,
     rationale: "Review Focus #2 — the harness is not the bottleneck",
   },
+  // ---- Positive-data gates (T6 review) ------------------------------------
+  // These are not performance limits: they prove the run produced the data
+  // the limits above are evaluated against. A dead, unconnected or
+  // misconfigured run reports zeros, and zeros must never read as PASS.
+  {
+    metric: "eventDelivery.samples",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: at least one delivered event was measured",
+  },
+  {
+    metric: "runsStarted",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: the scenario actually started runs",
+  },
+  {
+    metric: "runsCompleted",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: runs reached a terminal completed event",
+  },
+  {
+    metric: "harness.invalidFrames",
+    op: "eq",
+    value: 0,
+    rationale: "positive data: no off-contract server frames were accepted",
+  },
 ];
 
 /** Full 100-user acceptance (Task 5 table, all mandatory). */
@@ -95,6 +123,12 @@ export const FULL_THRESHOLDS: LoadThreshold[] = [
     op: "gt",
     value: 0,
     rationale: "the spike must actually hit the cap (precondition, not just a limit)",
+  },
+  {
+    metric: "admission.spikeDrainMs",
+    op: "lte",
+    value: 600_000,
+    rationale: "all queued runs started after the spike ends (§9)",
   },
   {
     metric: "memory.gatewayMaxRssMb",
@@ -137,6 +171,53 @@ export const FULL_THRESHOLDS: LoadThreshold[] = [
     op: "lte",
     value: 50,
     rationale: "Review Focus #2 — the harness is not the bottleneck at 100 users",
+  },
+  // ---- Positive-data gates specific to the full profile (T6 review) -------
+  // `replay.p95Ms`, `admission.spikeDrainMs`, the schedule counters and the
+  // memory metrics all default to 0. Without these gates a run that never
+  // reconnected, never spiked, never scheduled, or never sampled a container
+  // would satisfy every limit above vacuously.
+  {
+    metric: "replay.samples",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: reconnect+replay produced measured samples",
+  },
+  {
+    metric: "admission.spikeRuns",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: the spike burst actually fired",
+  },
+  {
+    metric: "scheduleRuns.fired",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: schedules fired and the claim ledger was read",
+  },
+  {
+    metric: "runsFailedUnattributed",
+    op: "eq",
+    value: 0,
+    rationale: "every run_failed carried a payload.runId (no dropped failures)",
+  },
+  {
+    metric: "memory.gatewayMaxRssMb",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: the gateway RSS sampler observed the container",
+  },
+  {
+    metric: "memory.workerMaxRssMb",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: the worker RSS sampler observed the process",
+  },
+  {
+    metric: "memory.hostMemAvailableMinMb",
+    op: "gt",
+    value: 0,
+    rationale: "positive data: /proc/meminfo was sampled",
   },
 ];
 
