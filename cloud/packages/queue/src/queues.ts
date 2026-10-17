@@ -5,6 +5,10 @@ import type {
   RedisOptions,
 } from "bullmq";
 import { z } from "zod";
+import {
+  pluginSourceInputSchema,
+  type PluginSourceInput,
+} from "@ovid/shared";
 
 /** Queue name — pinned by the plan; `createQueues` offers no override. */
 export const AGENT_RUNS = "agent-runs";
@@ -29,6 +33,12 @@ export const SCHEDULES = "schedules";
 
 /** Job name callers pass to `schedules.add(SCHEDULE_FIRE_JOB_NAME, payload, …)`. */
 export const SCHEDULE_FIRE_JOB_NAME = "schedule-fire";
+
+/** Queue name — P5 plugin install/uninstall transactions. */
+export const PLUGIN_INSTALLS = "plugin-installs";
+
+/** Job name callers pass to `pluginInstalls.add(PLUGIN_INSTALL_JOB_NAME, …)`. */
+export const PLUGIN_INSTALL_JOB_NAME = "plugin-install";
 
 export interface AgentRunJob {
   runId: string;
@@ -155,6 +165,42 @@ export const scheduleFireJobSchema: z.ZodType<ScheduleFireJob> = z.object({
   scheduleId: z.string().min(1),
   scheduledFor: z.string().min(1),
 });
+
+/**
+ * P5 Task 14 — one plugin install/uninstall transaction. Pinned
+ * member-for-member with `PluginInstallJob` in `@ovid/mcp`
+ * (`packages/mcp/src/plugins/install.ts`): `source` is the canonical
+ * @ovid/shared source contract, never a second shape.
+ *
+ * Length caps are the row-write / path-segment bounds (M5): a multi-KB
+ * `installId` or `pluginId` would otherwise only fail deep in the sandbox
+ * seam (ENAMETOOLONG) or create absurd jail paths.
+ */
+export interface PluginInstallJob {
+  installId: string;
+  userId: string;
+  pluginId: string;
+  mode: "install" | "uninstall";
+  source?: PluginSourceInput;
+}
+
+export const pluginInstallJobSchema: z.ZodType<PluginInstallJob> = z.object({
+  installId: z.string().min(1).max(100),
+  userId: z.string().min(1).max(200),
+  pluginId: z.string().min(1).max(200),
+  mode: z.enum(["install", "uninstall"]),
+  source: pluginSourceInputSchema.optional(),
+});
+
+/**
+ * Package-level default job options for plugin-installs — callers must not
+ * drift. `attempts: 1` mirrors the P1 ruling pattern: the installer owns
+ * rollback (registry restore + row restore + staging cleanup), so a queue
+ * retry would re-run a rollback against an already-terminal row. A crashed
+ * job is never redelivered; the processor terminalizes the row it can, and
+ * the gateway's status surface is the recovery signal.
+ */
+export const PLUGIN_INSTALL_JOB_DEFAULTS = { attempts: 1 } as const;
 
 /**
  * P4 Task 6 — the scheduler's back-reference riding an agent-run job: which
@@ -290,6 +336,15 @@ export interface QueuePrefixOptions {
   prefix?: string;
 }
 
+/**
+ * `createQueues` options. `withPluginInstalls` is additive and defaults OFF
+ * so P1 consumers keep byte-identical behavior (the queue is created only
+ * when the worker composition opts in).
+ */
+export interface QueueServicesOptions extends QueuePrefixOptions {
+  withPluginInstalls?: boolean;
+}
+
 export interface QueueServices {
   agentRuns: Queue<AgentRunJob>;
   /** P7: hibernate jobs (warm → cold). */
@@ -298,6 +353,8 @@ export interface QueueServices {
   hydrate: Queue<HydrateJob>;
   /** P4: delayed mirror of upcoming schedule occurrences. */
   schedules: Queue<ScheduleFireJob>;
+  /** P5 Task 14: plugin install/uninstall transactions (opt-in). */
+  pluginInstalls?: Queue<PluginInstallJob>;
 }
 
 /**
@@ -317,7 +374,7 @@ function withBlockingSafeRetries(connection: ConnectionOptions): ConnectionOptio
 
 export function createQueues(
   connection: ConnectionOptions,
-  opts: QueuePrefixOptions = {},
+  opts: QueueServicesOptions = {},
 ): QueueServices {
   // The two storage queues share one construction shape: same prefix
   // threading (P1 discipline — EVERY queue in createQueues scopes with the
@@ -332,7 +389,7 @@ export function createQueues(
       defaultJobOptions: { ...STORAGE_JOB_DEFAULTS },
     });
 
-  return {
+  const services: QueueServices = {
     agentRuns: new Queue<AgentRunJob>(
       AGENT_RUNS,
       // No prefix key at all when unset → BullMQ default ("bull"):
@@ -365,6 +422,19 @@ export function createQueues(
       },
     ),
   };
+
+  // P5 Task 14 (ADDITIVE): opt-in only — existing consumers never see the
+  // extra queue, and no redis keys are created unless the worker opts in.
+  if (opts.withPluginInstalls === true) {
+    services.pluginInstalls = new Queue<PluginInstallJob>(PLUGIN_INSTALLS, {
+      connection: withBlockingSafeRetries(connection),
+      ...(opts.prefix !== undefined ? { prefix: opts.prefix } : {}),
+      // attempts: 1 — the installer owns rollback (see the ruling above).
+      defaultJobOptions: { ...PLUGIN_INSTALL_JOB_DEFAULTS },
+    });
+  }
+
+  return services;
 }
 
 export function createAgentRunsWorker(
@@ -449,6 +519,31 @@ export function createScheduleFireWorker(
 ): Worker<ScheduleFireJob> {
   return new Worker<ScheduleFireJob>(
     SCHEDULES,
+    processor,
+    {
+      connection: withBlockingSafeRetries(connection),
+      // must match the add-side queue's prefix or jobs never meet
+      ...(opts.prefix !== undefined ? { prefix: opts.prefix } : {}),
+      ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
+    },
+  );
+}
+
+/**
+ * P5 Task 14 — worker for the plugin-installs queue. The prefix MUST equal
+ * the add-side createQueues({withPluginInstalls:true, prefix}) or jobs never
+ * meet (P1 mechanism). The processor is the worker's
+ * `createPluginInstallProcessor` (apps/worker): it claims the row, calls the
+ * installer, and terminalizes run-level failures; `attempts: 1` means a
+ * thrown error is never redelivered into a second rollback.
+ */
+export function createPluginInstallsWorker(
+  connection: ConnectionOptions,
+  processor: Processor<PluginInstallJob>,
+  opts: { concurrency?: number } & QueuePrefixOptions = {},
+): Worker<PluginInstallJob> {
+  return new Worker<PluginInstallJob>(
+    PLUGIN_INSTALLS,
     processor,
     {
       connection: withBlockingSafeRetries(connection),

@@ -14,7 +14,7 @@
  * implementations.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -27,6 +27,7 @@ import type { UserSystemBus } from "../systemBus.js";
 import { adaptPlugin, pluginManifestDigest } from "./manifest.js";
 import { inferRequestedCapabilities } from "./capabilities.js";
 import { createContributionRegistry } from "./registry.js";
+import type { ContributionRegistry } from "./registry.js";
 import {
   createPluginInstaller,
   pluginDir,
@@ -125,6 +126,10 @@ class FakeFiles implements SandboxFiles {
   execHandler: ((call: FakeExecCall) => ExecResult | undefined) | undefined;
   /** When set, uploadDir silently drops this workspace-relative file. */
   dropFile: string | undefined;
+  /** When set, uploadDir throws (M4 failure injection). */
+  uploadError: Error | undefined;
+  /** When set and it returns an Error for a path, stat() throws (M4). */
+  statHandler: ((path: string) => Error | undefined) | undefined;
 
   private touch(path: string, type: "file" | "dir", content?: string): void {
     this.remote.set(path, {
@@ -141,6 +146,7 @@ class FakeFiles implements SandboxFiles {
   }
 
   async uploadDir(uid: string, localDir: string, remoteDir: string): Promise<void> {
+    if (this.uploadError !== undefined) throw this.uploadError;
     const walk = async (abs: string, rel: string): Promise<void> => {
       for (const ent of await readdir(abs, { withFileTypes: true })) {
         const childRel = rel === "" ? ent.name : `${rel}/${ent.name}`;
@@ -182,6 +188,8 @@ class FakeFiles implements SandboxFiles {
   }
 
   async stat(uid: string, path: string) {
+    const thrown = this.statHandler?.(path);
+    if (thrown !== undefined) throw thrown;
     const e = this.remote.get(path);
     return e === undefined ? null : { type: e.type, size: e.size, mtime: e.mtime };
   }
@@ -276,7 +284,10 @@ class FakeBus implements UserSystemBus {
 }
 
 /** Serves fixture trees into fresh mkdtemp stagings; discard rm -rf's. */
-function fakeResolver(serve: () => string): {
+function fakeResolver(
+  serve: () => string,
+  opts: { discardError?: Error } = {},
+): {
   resolver: { resolve(input: PluginSourceInput, onProgress?: (bytes: number) => void): Promise<ResolvedSource> };
   stagings: string[];
 } {
@@ -292,7 +303,10 @@ function fakeResolver(serve: () => string): {
           stagingDir: staging,
           bytes: 4096,
           provenance: { kind: input.kind },
-          discard: () => rm(staging, { recursive: true, force: true }),
+          discard: async () => {
+            await rm(staging, { recursive: true, force: true });
+            if (opts.discardError !== undefined) throw opts.discardError;
+          },
         };
       },
     },
@@ -346,6 +360,11 @@ async function makeHarness(
     tier?: "free" | "pro";
     busAnswer?: (payload: Record<string, unknown>) => Record<string, unknown> | null;
     execHandler?: FakeFiles["execHandler"];
+    uploadError?: Error;
+    statHandler?: FakeFiles["statHandler"];
+    discardError?: Error;
+    registry?: ContributionRegistry;
+    registryWrapper?: (base: ContributionRegistry) => ContributionRegistry;
   } = {},
 ): Promise<Harness> {
   const fixture = typeof files === "string" ? files : await writeFixture(files);
@@ -360,14 +379,27 @@ async function makeInstallerFor(
   over: {
     busAnswer?: (payload: Record<string, unknown>) => Record<string, unknown> | null;
     execHandler?: FakeFiles["execHandler"];
+    uploadError?: Error;
+    statHandler?: FakeFiles["statHandler"];
+    discardError?: Error;
+    registry?: ContributionRegistry;
+    registryWrapper?: (base: ContributionRegistry) => ContributionRegistry;
   } = {},
 ): Promise<Harness> {
-  const { resolver } = fakeResolver(serve);
+  const { resolver } = fakeResolver(serve, {
+    ...(over.discardError !== undefined ? { discardError: over.discardError } : {}),
+  });
   const files = new FakeFiles();
   if (over.execHandler !== undefined) files.execHandler = over.execHandler;
+  if (over.uploadError !== undefined) files.uploadError = over.uploadError;
+  if (over.statHandler !== undefined) files.statHandler = over.statHandler;
   const bus = new FakeBus();
   if (over.busAnswer !== undefined) bus.answer = over.busAnswer;
-  const registry = createContributionRegistry();
+  const baseRegistry = over.registry ?? createContributionRegistry();
+  const registry =
+    over.registryWrapper !== undefined
+      ? over.registryWrapper(baseRegistry)
+      : baseRegistry;
   const installer = createPluginInstaller({
     db,
     crypto,
@@ -704,13 +736,34 @@ describe.skipIf(!TEST_DATABASE_URL)("plugin installer (atomic transaction)", () 
     const restored = w.registry.list({ pluginId: "acme/demo" });
     expect(restored.length).toBe(v1Records.length);
     for (const r of restored) expect(r.rootPath).toBe(pluginDir("acme/demo", "1.0.0"));
-    // …row failed, and no staging or backup leftovers.
+    // …row restored to the prior version verbatim (I4): the DB now matches
+    // what is live on disk instead of claiming a failed 2.0.0 install whose
+    // contentDir does not exist.
     const row = await plugins.getByPluginId(db, uid, "acme/demo");
-    expect(row!.status).toBe("failed");
+    expect(row!.version).toBe("1.0.0");
+    expect(row!.status).toBe("active");
+    expect(row!.contentDir).toBe(pluginDir("acme/demo", "1.0.0"));
     for (const key of w.files.paths()) {
       expect(key.includes(".staging-")).toBe(false);
       expect(key.includes(".backup-")).toBe(false);
     }
+  });
+
+  it("rename failure on a FRESH install → row failed (nothing prior to restore)", async () => {
+    const w = await makeHarness(BASE_FILES, {
+      execHandler: (call) =>
+        call.command === "mv" && call.args[0]!.includes(".staging-")
+          ? { exitCode: 1, stdout: "", stderr: "rename failed" }
+          : undefined,
+    });
+
+    const out = await w.install();
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("rename_failed");
+    const row = await plugins.getByPluginId(db, w.uid, "acme/demo");
+    expect(row!.status).toBe("failed");
+    expect(w.registry.list({ pluginId: "acme/demo" })).toEqual([]);
+    expect(w.files.hasPrefix(pluginDir("acme/demo", "1.0.0"))).toBe(false);
   });
 
   it("uninstall removes dir, rows, registry entries", async () => {
@@ -727,8 +780,256 @@ describe.skipIf(!TEST_DATABASE_URL)("plugin installer (atomic transaction)", () 
     expect(w.registry.list({ pluginId: "acme/demo" })).toEqual([]);
   });
 
-  it("user_config substitution: sealed config resolves ${user_config.x} at activation; unresolved stays literal", async () => {
+  it("I3: a foreign/no-row uninstall is a no-op; registry entries are user-scoped", async () => {
     const fixture = await writeFixture(BASE_FILES);
+    const registry = createContributionRegistry();
+    const uidA = await seedUser("pro");
+    const uidB = await seedUser("pro");
+    const a = await makeInstallerFor(uidA, () => fixture, { registry });
+    const b = await makeInstallerFor(uidB, () => fixture, { registry });
+
+    expect((await a.install()).status).toBe("active");
+    const aRecords = registry.list({ pluginId: "acme/demo", userId: uidA });
+    expect(aRecords.length).toBeGreaterThan(0);
+
+    // B never installed: the uninstall must not touch A's row, content or
+    // registration (the pre-fix code unregistered the shared pluginId first).
+    await b.uninstall();
+    expect(registry.list({ pluginId: "acme/demo", userId: uidA })).toEqual(aRecords);
+    expect(await plugins.getByPluginId(db, uidA, "acme/demo")).not.toBeNull();
+    expect(a.files.hasPrefix(pluginDir("acme/demo", "1.0.0"))).toBe(true);
+
+    // Both users install the same plugin: records coexist under per-user keys.
+    expect((await b.install()).status).toBe("active");
+    expect(registry.list({ pluginId: "acme/demo" }).length).toBe(aRecords.length * 2);
+
+    // B's real uninstall removes ONLY B's records/row.
+    await b.uninstall();
+    expect(registry.list({ pluginId: "acme/demo", userId: uidA })).toEqual(aRecords);
+    expect(registry.list({ pluginId: "acme/demo", userId: uidB })).toEqual([]);
+    expect(await plugins.getByPluginId(db, uidA, "acme/demo")).not.toBeNull();
+    expect(await plugins.getByPluginId(db, uidB, "acme/demo")).toBeNull();
+  });
+
+  it("M4: uploadDir throws → fresh row failed, no registry entries, staging discarded", async () => {
+    const w = await makeHarness(BASE_FILES, { uploadError: new Error("upload boom") });
+
+    await expect(w.install()).rejects.toThrow("upload boom");
+
+    const row = await plugins.getByPluginId(db, w.uid, "acme/demo");
+    expect(row!.status).toBe("failed");
+    expect(w.registry.list({ pluginId: "acme/demo" })).toEqual([]);
+    expect(w.files.remote.size).toBe(0);
+  });
+
+  it("I2: a post-commit resolved.discard() failure never rolls the committed install back", async () => {
+    const w = await makeHarness(BASE_FILES, { discardError: new Error("discard boom") });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const out = await w.install();
+
+      // The install committed despite the cleanup failure.
+      expect(out.status).toBe("active");
+      const row = await plugins.getByPluginId(db, w.uid, "acme/demo");
+      expect(row!.status).toBe("active");
+      expect(row!.contentDir).toBe(pluginDir("acme/demo", "1.0.0"));
+      expect(w.files.hasPrefix(pluginDir("acme/demo", "1.0.0"))).toBe(true);
+      expect(w.registry.list({ pluginId: "acme/demo", userId: w.uid }).length).toBeGreaterThan(0);
+      // …and the cleanup failure was logged, not silently swallowed.
+      expect(
+        errors.mock.calls.some((c) => String(c[0]).includes("discarding local staging")),
+      ).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("I4: registry.register throws after step ⑦'s upsert on an upgrade → prior row + records restored", async () => {
+    const fixtureV1 = await writeFixture(BASE_FILES);
+    const fixtureV2 = await writeFixture({
+      ...BASE_FILES,
+      ".claude-plugin/plugin.json": ccManifest({ version: "2.0.0" }),
+    });
+    const uid = await seedUser("pro");
+    let resolveCount = 0;
+    const w = await makeInstallerFor(uid, () => (resolveCount += 1) > 1 ? fixtureV2 : fixtureV1, {
+      registryWrapper: (inner) => ({
+        register(recs) {
+          if (recs.some((r) => r.rootPath.includes("/2.0.0"))) {
+            throw new Error("register boom");
+          }
+          inner.register(recs);
+        },
+        unregisterPlugin: (pluginId, userId) => inner.unregisterPlugin(pluginId, userId),
+        list: (filter) => inner.list(filter),
+        get: (canonicalId, userId) => inner.get(canonicalId, userId),
+      }),
+    });
+
+    expect((await w.install()).status).toBe("active");
+    const v1Records = w.registry.list({ pluginId: "acme/demo", userId: uid });
+
+    await expect(w.install()).rejects.toThrow("register boom");
+
+    // Prior row restored verbatim; the failed 2.0.0 row does not survive.
+    const row = await plugins.getByPluginId(db, uid, "acme/demo");
+    expect(row!.version).toBe("1.0.0");
+    expect(row!.status).toBe("active");
+    expect(row!.contentDir).toBe(pluginDir("acme/demo", "1.0.0"));
+    expect(w.registry.list({ pluginId: "acme/demo", userId: uid })).toEqual(v1Records);
+    expect(w.files.hasPrefix(pluginDir("acme/demo", "1.0.0"))).toBe(true);
+    expect(w.files.hasPrefix(pluginDir("acme/demo", "2.0.0"))).toBe(false);
+    for (const key of w.files.paths()) expect(key.includes(".staging-")).toBe(false);
+  });
+
+  it("I4: files.stat throws after step ⑦'s upsert on an upgrade → prior row + records restored", async () => {
+    const fixtureV1 = await writeFixture(BASE_FILES);
+    const fixtureV2 = await writeFixture({
+      ...BASE_FILES,
+      ".claude-plugin/plugin.json": ccManifest({ version: "2.0.0" }),
+    });
+    const uid = await seedUser("pro");
+    let resolveCount = 0;
+    const w = await makeInstallerFor(uid, () => (resolveCount += 1) > 1 ? fixtureV2 : fixtureV1, {
+      statHandler: (path) =>
+        path === pluginDir("acme/demo", "2.0.0") ? new Error("stat boom") : undefined,
+    });
+
+    expect((await w.install()).status).toBe("active");
+    const v1Records = w.registry.list({ pluginId: "acme/demo", userId: uid });
+
+    await expect(w.install()).rejects.toThrow("stat boom");
+
+    const row = await plugins.getByPluginId(db, uid, "acme/demo");
+    expect(row!.version).toBe("1.0.0");
+    expect(row!.status).toBe("active");
+    expect(w.registry.list({ pluginId: "acme/demo", userId: uid })).toEqual(v1Records);
+    expect(w.files.hasPrefix(pluginDir("acme/demo", "1.0.0"))).toBe(true);
+    expect(w.files.hasPrefix(pluginDir("acme/demo", "2.0.0"))).toBe(false);
+  });
+
+  it("I4/M4: the aside mv failing on a same-version reinstall restores the prior row + registry", async () => {
+    const fixtureV1 = await writeFixture(BASE_FILES);
+    const fixtureV2 = await writeFixture(EXTRA_ENV_FILES); // same 1.0.0, new digest
+    const uid = await seedUser("pro");
+    let resolveCount = 0;
+    const w = await makeInstallerFor(uid, () => (resolveCount += 1) > 1 ? fixtureV2 : fixtureV1, {
+      execHandler: (call) =>
+        call.command === "mv" && call.args[1]!.includes(".backup-")
+          ? { exitCode: 1, stdout: "", stderr: "aside failed" }
+          : undefined,
+    });
+
+    expect((await w.install()).status).toBe("active");
+    const v1Records = w.registry.list({ pluginId: "acme/demo", userId: uid });
+
+    const out = await w.install();
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("rename_failed");
+
+    const row = await plugins.getByPluginId(db, uid, "acme/demo");
+    expect(row!.version).toBe("1.0.0");
+    expect(row!.status).toBe("active");
+    expect(row!.contentDir).toBe(pluginDir("acme/demo", "1.0.0"));
+    expect(w.registry.list({ pluginId: "acme/demo", userId: uid })).toEqual(v1Records);
+    // The aside failed, so the prior content never moved.
+    expect(w.files.hasPrefix(pluginDir("acme/demo", "1.0.0"))).toBe(true);
+    for (const key of w.files.paths()) expect(key.includes(".staging-")).toBe(false);
+  });
+
+  it("M3: a double failure (commit mv + backup restore) is logged loudly, not swallowed", async () => {
+    const fixtureV1 = await writeFixture(BASE_FILES);
+    const fixtureV2 = await writeFixture(EXTRA_ENV_FILES); // same 1.0.0
+    const uid = await seedUser("pro");
+    let resolveCount = 0;
+    let commitCount = 0;
+    const w = await makeInstallerFor(uid, () => (resolveCount += 1) > 1 ? fixtureV2 : fixtureV1, {
+      execHandler: (call) => {
+        if (call.command !== "mv") return undefined;
+        // Fail the SECOND transaction's commit rename AND its backup
+        // restore (the first install must commit normally).
+        if (call.args[0]!.includes(".staging-")) {
+          commitCount += 1;
+          return commitCount > 1
+            ? { exitCode: 1, stdout: "", stderr: "mv failed" }
+            : undefined;
+        }
+        if (call.args[0]!.includes(".backup-")) {
+          return { exitCode: 1, stdout: "", stderr: "mv failed" };
+        }
+        return undefined;
+      },
+    });
+
+    expect((await w.install()).status).toBe("active");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const out = await w.install({ installId: "inst-double-fail" });
+      expect(out.reason).toBe("rename_failed");
+      expect(
+        errors.mock.calls.some((c) => String(c[0]).includes("CRITICAL: backup restore failed")),
+      ).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+
+    // DB still describes the prior install (what the operator expects live);
+    // the prior content is stranded at the backup dir — the logged CRITICAL.
+    const row = await plugins.getByPluginId(db, uid, "acme/demo");
+    expect(row!.version).toBe("1.0.0");
+    expect(row!.status).toBe("active");
+    const backupDir = `${pluginDir("acme/demo", "1.0.0")}.backup-inst-double-fail`;
+    expect(w.files.hasPrefix(backupDir)).toBe(true);
+    expect(w.files.hasPrefix(pluginDir("acme/demo", "1.0.0"))).toBe(false);
+  });
+
+  it("M5: an over-long installId is rejected before the transaction", async () => {
+    const w = await makeHarness(BASE_FILES);
+    const out = await w.install({ installId: "i".repeat(101) });
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("invalid_install_id");
+    expect(await plugins.getByPluginId(db, w.uid, "acme/demo")).toBeNull();
+    expect(w.files.remote.size).toBe(0);
+  });
+
+  it("M5: an over-long manifest version is rejected before any remote write", async () => {
+    const w = await makeHarness({
+      ...BASE_FILES,
+      ".claude-plugin/plugin.json": ccManifest({ version: "1".repeat(101) }),
+    });
+    const out = await w.install();
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("invalid_plugin");
+    expect(await plugins.getByPluginId(db, w.uid, "acme/demo")).toBeNull();
+    expect(w.files.remote.size).toBe(0);
+    expect(w.registry.list({ pluginId: "acme/demo" })).toEqual([]);
+  });
+
+  it("user_config substitution is SEALED: refs persisted in the row, values only in the runtime view (env + headers)", async () => {
+    // A stdio server (env ref) + an HTTP server (header ref — M2 ruling).
+    const fixture = await writeFixture({
+      ".claude-plugin/plugin.json": ccManifest(),
+      "commands/foo.md": "# foo\n",
+      ".mcp.json": JSON.stringify({
+        mcpServers: {
+          bar: {
+            command: "node",
+            args: ["server.js"],
+            env: {
+              API_KEY: "${user_config.api_key}",
+              OTHER: "${user_config.missing_key}",
+            },
+          },
+          web: {
+            url: "https://example.com/mcp",
+            headers: {
+              Authorization: "Bearer ${user_config.api_key}",
+              "X-Static": "literal",
+            },
+          },
+        },
+      }),
+    });
     const uid = await seedUser("pro");
     await seedSealedConfig(uid, { api_key: "sk-live-test-123" });
     await seedCoveringGrant(uid, fixture);
@@ -737,20 +1038,36 @@ describe.skipIf(!TEST_DATABASE_URL)("plugin installer (atomic transaction)", () 
     const out = await w.install();
     expect(out.status).toBe("active");
 
+    // C1: the DB row keeps the REFS — no resolved secret anywhere in the
+    // row's JSON serialization (the negative probe).
     const row = await plugins.getByPluginId(db, uid, "acme/demo");
     const servers = (row!.manifest as {
-      mcpServers: { name: string; imported: { env: Record<string, string> } }[];
+      mcpServers: {
+        name: string;
+        imported: {
+          env?: Record<string, string>;
+          headers?: Record<string, string>;
+        };
+      }[];
     }).mcpServers;
     const bar = servers.find((s) => s.name === "bar")!;
-    expect(bar.imported.env.API_KEY).toBe("sk-live-test-123");
-    expect(bar.imported.env.OTHER).toBe("${user_config.missing_key}");
+    expect(bar.imported.env!.API_KEY).toBe("${user_config.api_key}");
+    expect(bar.imported.env!.OTHER).toBe("${user_config.missing_key}");
+    const web = servers.find((s) => s.name === "web")!;
+    expect(web.imported.headers!.Authorization).toBe("Bearer ${user_config.api_key}");
+    expect(web.imported.headers!["X-Static"]).toBe("literal");
+    expect(JSON.stringify(row)).not.toContain("sk-live-test-123");
 
-    // Registry records carry the substituted env too.
-    const mcpRecord = w.registry.get("plugin:acme/demo/mcp:bar");
+    // The runtime view (registry) IS substituted — env and headers.
+    const mcpRecord = w.registry.get("plugin:acme/demo/mcp:bar", uid);
     expect(mcpRecord).toBeDefined();
     const data = mcpRecord!.data as { imported?: { env?: Record<string, string> } };
     expect(data.imported?.env?.API_KEY).toBe("sk-live-test-123");
     expect(data.imported?.env?.OTHER).toBe("${user_config.missing_key}");
+    const webRecord = w.registry.get("plugin:acme/demo/mcp:web", uid);
+    const webData = webRecord!.data as { imported?: { headers?: Record<string, string> } };
+    expect(webData.imported?.headers?.Authorization).toBe("Bearer sk-live-test-123");
+    expect(webData.imported?.headers?.["X-Static"]).toBe("literal");
 
     // The sealed config survived the reinstall (carried over).
     expect(row!.configSealed).not.toBeNull();
@@ -790,6 +1107,10 @@ describe.skipIf(!TEST_DATABASE_URL)("plugin installer (atomic transaction)", () 
       expect(json.includes("FIXTURE-SECRET-abc123")).toBe(false);
       expect(json.includes("sk-hygiene-999")).toBe(false);
     }
+    // C1 negative probe: the sealed config value is nowhere in the DB row
+    // (the manifest keeps `${user_config.api_key}`; config_sealed is opaque).
+    const row = await plugins.getByPluginId(db, uid, "acme/demo");
+    expect(JSON.stringify(row)).not.toContain("sk-hygiene-999");
     // The approval sheet carried explanations for every requested capability.
     const req = w.bus.requests[0]!;
     const capabilities = req.payload.capabilities as { name: string; explanation: string }[];

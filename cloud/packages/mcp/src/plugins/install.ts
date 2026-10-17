@@ -22,7 +22,19 @@
  * removed, registry entries added by this transaction are unregistered (the
  * prior version's records restored verbatim), and the row ends
  * `rolled_back`/`failed` — or is restored to the prior version's exact state
- * when the failure preceded activation.
+ * when a prior install exists.
+ *
+ * SECRETS (P5 plan invariant, "Secrets NEVER in … plaintext columns"):
+ * `plugins.manifest` persists the manifest with `${user_config.x}` REFS
+ * INTACT; the resolved values are substituted only into the in-memory
+ * runtime view handed to `registry.register` (and, at spawn time, the
+ * sandbox env). User values live at rest only in `config_sealed`.
+ *
+ * STATUS VOCABULARY (plugins.status): `queued` (gateway-created, awaiting a
+ * worker), `installing` (processor claim), `pending_grant`, `active`,
+ * `degraded`, `failed`, `rolled_back`, `uninstalling`. Terminal states are
+ * `active`, `degraded`, `failed`, `rolled_back` — a replayed job whose row is
+ * already terminal must no-op (see apps/worker/src/pluginInstallProcessor.ts).
  *
  * Structural declarations (wave-merger carries, frozen lockfile):
  * - `Db` + the plugins/pluginGrants/users repo surface mirror @ovid/db
@@ -164,6 +176,16 @@ const SAFE_PLUGIN_ID = /^[a-z0-9][a-z0-9-_.]*\/[a-z0-9][a-z0-9-_.]*$/;
 const SAFE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_INSTALL_ID = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
 
+/**
+ * Length bounds for values that become jail path segments or row keys (M5).
+ * The regexes above are unbounded, so a multi-KB id would otherwise only
+ * fail deep in the seam (ENAMETOOLONG) — or create absurd paths. These are
+ * the same caps @ovid/queue's pluginInstallJobSchema enforces.
+ */
+const MAX_PLUGIN_ID_LENGTH = 200;
+const MAX_VERSION_LENGTH = 100;
+const MAX_INSTALL_ID_LENGTH = 100;
+
 // ---------------------------------------------------------------------------
 // ${user_config.x} substitution (Dart plugin_user_config.dart parity)
 // ---------------------------------------------------------------------------
@@ -176,23 +198,38 @@ function substituteUserConfigValue(value: string, config: Record<string, string>
 }
 
 /**
- * Returns a manifest whose MCP server env values and hook commands have
- * `${user_config.x}` resolved from the user's sealed config. Unresolved
- * references stay literal so the credential gate can still detect them.
+ * Returns a manifest whose MCP server env values, MCP server header values
+ * and hook commands have `${user_config.x}` resolved from the user's sealed
+ * config. Unresolved references stay literal so the credential gate can
+ * still detect them.
+ *
+ * This is the RUNTIME view only. The manifest persisted in
+ * `plugins.manifest` keeps the refs intact (P5 secret invariant, C1); an
+ * HTTP MCP server commonly carries its key in a header, so headers are
+ * substituted here with the same refs-in-DB rule (M2 ruling).
  */
 function substituteUserConfig(
   manifest: NormalizedPluginManifest,
   config: Record<string, string>,
 ): NormalizedPluginManifest {
   const needsIt = (v: string): boolean => v.includes("${user_config.");
+  const resolveMap = (values: Record<string, string>): Record<string, string> => {
+    const next: Record<string, string> = {};
+    for (const [key, value] of Object.entries(values)) {
+      next[key] = needsIt(value) ? substituteUserConfigValue(value, config) : value;
+    }
+    return next;
+  };
   const mcpServers = manifest.mcpServers.map((server) => {
     const env = server.imported.env;
-    if (env === undefined || !Object.values(env).some(needsIt)) return server;
-    const nextEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(env)) {
-      nextEnv[key] = needsIt(value) ? substituteUserConfigValue(value, config) : value;
-    }
-    return { ...server, imported: { ...server.imported, env: nextEnv } };
+    const headers = server.imported.headers;
+    const envNeeds = env !== undefined && Object.values(env).some(needsIt);
+    const headersNeed = headers !== undefined && Object.values(headers).some(needsIt);
+    if (!envNeeds && !headersNeed) return server;
+    const imported = { ...server.imported };
+    if (envNeeds) imported.env = resolveMap(env);
+    if (headersNeed) imported.headers = resolveMap(headers);
+    return { ...server, imported };
   });
   const hooks = manifest.hooks.map((hook) =>
     needsIt(hook.command)
@@ -332,6 +369,20 @@ async function swallow(p: Promise<unknown>): Promise<void> {
   }
 }
 
+/**
+ * Best-effort cleanup that is NOT allowed to fail the caller, but must not
+ * disappear silently either. Used after the commit point (I2): once the
+ * content is live, a cleanup failure is logged and swallowed — it must never
+ * roll a committed install back.
+ */
+async function swallowLogged(context: string, p: Promise<unknown>): Promise<void> {
+  try {
+    await p;
+  } catch (err) {
+    console.error(`[plugin-install] ${context} failed after commit; continuing:`, err);
+  }
+}
+
 /** Exit code helper: null (killed) reads as failure. */
 function failed(res: SandboxExecResult): boolean {
   return (res.exitCode ?? -1) !== 0;
@@ -423,7 +474,10 @@ export function createPluginInstaller(deps: InstallerDeps): {
     if (job.source === undefined) {
       return { status: "failed", pluginId: job.pluginId, probeFailures: [], reason: "missing_source" };
     }
-    if (!SAFE_INSTALL_ID.test(job.installId)) {
+    if (
+      !SAFE_INSTALL_ID.test(job.installId) ||
+      job.installId.length > MAX_INSTALL_ID_LENGTH
+    ) {
       return { status: "failed", pluginId: job.pluginId, probeFailures: [], reason: "invalid_install_id" };
     }
 
@@ -435,7 +489,35 @@ export function createPluginInstaller(deps: InstallerDeps): {
     let prevRow: PluginDbRow | null = null;
     let prevRecords: ContributionRecord[] = []; // registry snapshot before ⑦
     let registered = false; // this transaction's ⑦ register happened
-    let activated = false; // ⑦'s upsert happened (row now describes THIS version)
+
+    /**
+     * Restore the row to the prior install's exact state when there was one;
+     * otherwise terminalize this transaction's row. This is the ONE restore
+     * path used by every failure — including failures AFTER step ⑦'s upsert
+     * (I4), so the DB always describes what is live on disk (an upgrade that
+     * dies in the activate/commit window leaves the prior version running,
+     * so its row comes back verbatim rather than being clobbered to `failed`
+     * pointing at a version dir that does not exist).
+     */
+    const restoreRow = async (rowStatus: "rolled_back" | "failed"): Promise<void> => {
+      if (rowId === undefined) return;
+      if (prevRow !== null) {
+        // Prior active install survives: restore its row exactly.
+        await r.plugins.upsert(db, {
+          userId: uid,
+          pluginId: prevRow.pluginId,
+          version: prevRow.version,
+          source: prevRow.source,
+          status: prevRow.status,
+          contentDir: prevRow.contentDir,
+          manifest: prevRow.manifest,
+          probeFailures: prevRow.probeFailures,
+          configSealed: prevRow.configSealed,
+        });
+      } else {
+        await r.plugins.setStatus(db, rowId, uid, rowStatus);
+      }
+    };
 
     /**
      * Failure cleanup for everything before the commit rename: local staging
@@ -446,32 +528,13 @@ export function createPluginInstaller(deps: InstallerDeps): {
      */
     const rollback = async (reason: string, rowStatus: "rolled_back" | "failed"): Promise<PluginInstallOutcome> => {
       if (registered) {
-        registry.unregisterPlugin(pluginId);
+        registry.unregisterPlugin(pluginId, uid);
         if (prevRecords.length > 0) registry.register(prevRecords);
         registered = false;
       }
       if (resolved !== undefined) await swallow(resolved.discard());
       if (remoteStaging !== "") await swallow(files.remove(uid, remoteStaging));
-      if (rowId !== undefined && !activated) {
-        if (prevRow !== null) {
-          // Prior active install survives: restore its row exactly.
-          await r.plugins.upsert(db, {
-            userId: uid,
-            pluginId,
-            version: prevRow.version,
-            source: prevRow.source,
-            status: prevRow.status,
-            contentDir: prevRow.contentDir,
-            manifest: prevRow.manifest,
-            probeFailures: prevRow.probeFailures,
-            configSealed: prevRow.configSealed,
-          });
-        } else {
-          await r.plugins.setStatus(db, rowId, uid, rowStatus);
-        }
-      } else if (rowId !== undefined && activated) {
-        await r.plugins.setStatus(db, rowId, uid, "failed");
-      }
+      await restoreRow(rowStatus);
       await progress(uid, job.installId, pluginId, rowStatus, reason);
       return { status: "failed", pluginId, version: version || undefined, probeFailures: [], reason };
     };
@@ -490,7 +553,12 @@ export function createPluginInstaller(deps: InstallerDeps): {
         await progress(uid, job.installId, pluginId, "failed", "plugin_id_mismatch");
         return { status: "failed", pluginId, version, probeFailures: [], reason: "plugin_id_mismatch" };
       }
-      if (!SAFE_PLUGIN_ID.test(pluginId) || !SAFE_VERSION.test(version)) {
+      if (
+        !SAFE_PLUGIN_ID.test(pluginId) ||
+        !SAFE_VERSION.test(version) ||
+        pluginId.length > MAX_PLUGIN_ID_LENGTH ||
+        version.length > MAX_VERSION_LENGTH
+      ) {
         await swallow(resolved.discard());
         await progress(uid, job.installId, pluginId, "failed", "invalid_plugin");
         return { status: "failed", pluginId, version, probeFailures: [], reason: "invalid_plugin" };
@@ -502,9 +570,11 @@ export function createPluginInstaller(deps: InstallerDeps): {
       remoteStaging = pluginStagingDir(pluginId, version, job.installId);
       const backupDir = pluginBackupDir(pluginId, version, job.installId);
 
-      // Snapshot the prior install (row + registration) before touching it.
+      // Snapshot the prior install (row + this user's registration) before
+      // touching it. The registry is worker-global; the userId scope keeps
+      // another user's records out of this transaction's snapshot/restore.
       prevRow = await r.plugins.getByPluginId(db, uid, pluginId);
-      prevRecords = registry.list({ pluginId });
+      prevRecords = registry.list({ pluginId, userId: uid });
 
       // ③ Grant gate — NEVER auto-approved (Dart plugin_permissions parity).
       const requested = inferRequestedCapabilities(manifest);
@@ -595,10 +665,15 @@ export function createPluginInstaller(deps: InstallerDeps): {
         }
       }
 
-      // ⑦ Activate: user_config substitution, row upsert, registry register.
+      // ⑦ Activate: row upsert (REFS intact) + registry register (resolved
+      // runtime view).
       const config = await sealedUserConfig(prevRow);
-      const activatedManifest = substituteUserConfig(manifest, config);
-      activatedManifest.rootPath = activeDir;
+      // C1 (P5 secret invariant): persist the manifest with `${user_config.x}`
+      // REFS INTACT — the resolved values never touch a plaintext column.
+      // Substitution happens only in this process's runtime view, which is
+      // what the registry (and later the sandbox env at spawn time) sees.
+      const persistedManifest: NormalizedPluginManifest = { ...manifest, rootPath: activeDir };
+      const runtimeManifest = substituteUserConfig(persistedManifest, config);
       const row = await r.plugins.upsert(db, {
         userId: uid,
         pluginId,
@@ -606,17 +681,17 @@ export function createPluginInstaller(deps: InstallerDeps): {
         source: { ...resolved.provenance } as Record<string, unknown>,
         status: probeFailures.length > 0 ? "degraded" : "active",
         contentDir: activeDir,
-        manifest: activatedManifest as unknown as Record<string, unknown>,
+        manifest: persistedManifest as unknown as Record<string, unknown>,
         probeFailures: probeRecords,
         // Sealed user config carries over from the previous install (an
         // absent key leaves the stored envelope untouched — repos contract).
         configSealed: prevRow?.configSealed,
       });
       rowId = row.id;
-      activated = true;
       // IDEMPOTENT UPSERT (Task 13): reinstalling/upgrade re-registers the
-      // same version-independent canonicalIds and never throws.
-      registry.register(contributionsFromManifest(activatedManifest));
+      // same version-independent canonicalIds and never throws. Records are
+      // user-scoped (I3) so two users installing the same plugin coexist.
+      registry.register(contributionsFromManifest(runtimeManifest, uid));
       registered = true;
       await progress(uid, job.installId, pluginId, "activate", "activated");
 
@@ -641,27 +716,67 @@ export function createPluginInstaller(deps: InstallerDeps): {
         timeoutMs: MV_TIMEOUT_MS,
       });
       if (failed(commit)) {
+        // RULING / DEVIATION (M6): the brief's test line says "registry
+        // emptied" on a rename failure. That is only correct for a FRESH
+        // install. On an upgrade the prior active version is untouched (and
+        // was restored above when the backup dance moved it aside), so
+        // emptying the registry would take a working install offline. We
+        // therefore restore this user's prior records verbatim — the
+        // "prior active version untouched" guarantee from the brief's step
+        // ⑧ wins over its test-line shorthand. The fresh-install case does
+        // end with no records (there is nothing to restore).
         if (activeExists !== null) {
           // Restore the prior active version, then clean this transaction.
-          await swallow(files.exec(uid, { command: "mv", args: [backupDir, activeDir], timeoutMs: MV_TIMEOUT_MS }));
+          // M3: a double failure (rename AND restore) must never disappear
+          // silently — the prior version is then stranded at backupDir while
+          // the row/registry describe activeDir, so shout about it.
+          try {
+            const restored = await files.exec(uid, {
+              command: "mv",
+              args: [backupDir, activeDir],
+              timeoutMs: MV_TIMEOUT_MS,
+            });
+            if (failed(restored)) {
+              console.error(
+                `[plugin-install] CRITICAL: backup restore failed for ${pluginId} ` +
+                  `(${backupDir} -> ${activeDir}); prior version is stranded at the backup dir`,
+              );
+            }
+          } catch (err) {
+            console.error(
+              `[plugin-install] CRITICAL: backup restore threw for ${pluginId} ` +
+                `(${backupDir} -> ${activeDir}); prior version is stranded at the backup dir`,
+              err,
+            );
+          }
         }
-        registry.unregisterPlugin(pluginId);
+        registry.unregisterPlugin(pluginId, uid);
         if (prevRecords.length > 0) registry.register(prevRecords);
         registered = false;
         await swallow(files.remove(uid, remoteStaging));
         await swallow(resolved.discard());
-        await r.plugins.setStatus(db, rowId, uid, "failed");
+        // I4: the rename failed BEFORE the commit, so what is live on disk is
+        // the prior version (restored above) — restore its row verbatim
+        // rather than leaving a `failed` row pointing at a dir that does not
+        // exist. A fresh install (no prior row) terminalizes as `failed`.
+        await restoreRow("failed");
         await progress(uid, job.installId, pluginId, "failed", "rename_failed");
         return { status: "failed", pluginId, version, probeFailures, reason: "rename_failed" };
       }
 
       // Success: drop the backup, drop superseded version dirs, discard the
-      // local staging tree.
-      if (activeExists !== null) await swallow(files.remove(uid, backupDir));
-      if (prevRow !== null && prevRow.version !== version) {
-        await swallow(files.remove(uid, pluginDir(pluginId, prevRow.version)));
+      // local staging tree. The install is COMMITTED — a cleanup failure here
+      // is logged and swallowed (I2); it must never enter the rollback path.
+      if (activeExists !== null) {
+        await swallowLogged(`removing backup ${backupDir}`, files.remove(uid, backupDir));
       }
-      await resolved.discard();
+      if (prevRow !== null && prevRow.version !== version) {
+        await swallowLogged(
+          `removing previous version ${pluginDir(pluginId, prevRow.version)}`,
+          files.remove(uid, pluginDir(pluginId, prevRow.version)),
+        );
+      }
+      await swallowLogged("discarding local staging", resolved.discard());
       await progress(uid, job.installId, pluginId, "committed", "committed");
       return {
         status: probeFailures.length > 0 ? "degraded" : "active",
@@ -693,12 +808,18 @@ export function createPluginInstaller(deps: InstallerDeps): {
     const pluginId = job.pluginId;
     if (!SAFE_PLUGIN_ID.test(pluginId)) return; // nothing can exist at an unsafe path
 
-    // Registration first, then content, then rows — any order survives a
-    // retry because every step is idempotent.
-    registry.unregisterPlugin(pluginId);
-    await files.remove(uid, pluginRootDir(pluginId));
+    // I3: verify ownership/row existence FIRST. A foreign or replayed
+    // uninstall (no row for THIS user) must be a no-op — it must never
+    // unregister another user's live contribution records. Registry entries
+    // are also user-scoped, so even a row-owning uninstall only removes this
+    // user's records.
     const row = await r.plugins.getByPluginId(db, uid, pluginId);
-    if (row !== null) await r.plugins.remove(db, row.id, uid);
+    if (row === null) return;
+
+    // Every step below is idempotent, so a retry is safe.
+    registry.unregisterPlugin(pluginId, uid);
+    await files.remove(uid, pluginRootDir(pluginId));
+    await r.plugins.remove(db, row.id, uid);
     await r.pluginGrants.remove(db, uid, pluginId);
   }
 
