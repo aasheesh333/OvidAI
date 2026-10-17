@@ -132,19 +132,18 @@ void main() {
     expect(() => snapshot.clear(), throwsUnsupportedError);
   });
 
-  test('the sandbox requirement is named when a command hook cannot run',
+  test('a missing hook executable is named when a command hook cannot run',
       () async {
     register(PluginActivation.globalActive);
-    // No executor override: the real path reaches the sandbox guard, which is
-    // not installed in a unit test — exactly the owner's "never opened Studio"
-    // device state.
+    // No executor override: the real path spawns the host shell (the
+    // on-device sandbox was removed in P8 Task 13), and the fixture's
+    // command is not installed.
     HookService.I.executorForTest = null;
 
     await HookService.I.fire('pre_tool', 's1', payload: {'tool': 'file_read'});
 
     final reason = HookService.I.hookBlockerFor('acme/hooky');
     expect(reason, isNotNull);
-    expect(reason, contains('sandbox'));
-    expect(reason, contains('open Studio once'));
+    expect(reason, contains('executable or dependency unavailable'));
   });
 }

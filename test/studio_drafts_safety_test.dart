@@ -37,7 +37,6 @@ void main() {
     studioRepoSyncOverrideForTest = () async {};
     app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
-    app.sandboxInstalled = true;
     agent.debugPauseScheduleTimerForTest(true);
     agent.debugForgetStudioStateForTest();
     await GitHubService.I.initialize(

@@ -42,6 +42,21 @@ void main() {
 
       // Management UI
       'MCP Server Hub',
+
+      // P8 Task 13 removed the native misc/sandbox utility batches that
+      // backed these seeded capabilities. The local plugin catalog is dark
+      // until the cloud plugins screen lands (Task 17).
+      'Git Workbench',
+      'PDF Tools',
+      'Screen Awareness',
+      'Shell History',
+      'Audio Notes',
+      'QR Generator',
+      'SSH Key Manager',
+      'Mermaid Diagrams',
+      'Excalidraw Bridge',
+      'Icon Library',
+      'Font Preview',
     };
 
     final missing = <String>[];

@@ -90,18 +90,4 @@ void main() {
       },
     );
   }
-
-  test(
-    'Control publishes through frozen contract without an extra prompt',
-    () async {
-      session.mode = 'control';
-      final output = await http.runWithClient(
-        () => agent.dispatchForTest('commit', {'message': 'control message'}),
-        () => git.client,
-      );
-      expect(output, contains('single atomic commit'));
-      expect(agent.pendingApproval, isNull);
-      expect(git.requests.where((r) => r.method == 'PATCH').length, 1);
-    },
-  );
 }

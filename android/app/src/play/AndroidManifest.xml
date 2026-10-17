@@ -62,8 +62,5 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 tools:node="remove" />
         </service>
-        <service
-            android:name="com.dhanuk.ovidai.OvidAccessibilityService"
-            tools:node="remove" />
-    </application>
+</application>
 </manifest>

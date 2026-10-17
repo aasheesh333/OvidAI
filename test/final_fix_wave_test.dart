@@ -1,13 +1,9 @@
-import 'dart:async';
-import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
 
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
-import 'package:ovid_ai/core/presets.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqlite3/open.dart' show open, OperatingSystem;
@@ -49,7 +45,6 @@ void main() {
   tearDown(() {
     AgentService.I.clearBrowserTabsForTest();
     AgentService.setRunSessionForTest('');
-    AgentService.setOverlayChannelForTest(null);
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AgentNotificationService.I.resetForTest();
     BrowserTab.devW = 360;
@@ -77,34 +72,6 @@ void main() {
       app.sessions.removeWhere((x) => x.id == s.id);
     });
     return s;
-  }
-
-  List<MethodCall> mockOverlayChannel() {
-    final calls = <MethodCall>[];
-    const channel = MethodChannel('ovid/final-wave-overlay');
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (call) async {
-          calls.add(call);
-          return true;
-        });
-    AgentService.setOverlayChannelForTest(channel);
-    addTearDown(() {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, null);
-      AgentService.setOverlayChannelForTest(null);
-    });
-    return calls;
-  }
-
-  Future<void> waitForCall(List<MethodCall> calls, String method) async {
-    for (var i = 0; i < 200 && !calls.any((c) => c.method == method); i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    expect(
-      calls.any((c) => c.method == method),
-      isTrue,
-      reason: 'timed out waiting for channel call $method',
-    );
   }
 
   group('wave: browser_desktop zoom schema', () {
@@ -227,177 +194,4 @@ void main() {
     });
   });
 
-  group('wave: overlay lifecycle runtime hookup', () {
-    test('stopRequested hides the overlay (panic-stop path)', () async {
-      final calls = mockOverlayChannel();
-      final s = newSession('wave-stop-hide', mode: 'control');
-      AgentService.I.runBucketForTest(s.id)
-        ..queue.clear()
-        ..activeRunId = null
-        ..cancelRequested = false;
-      AgentService.I.stopRequested(sessionId: s.id);
-      await waitForCall(calls, 'deviceOverlayHide');
-    });
-
-    test('cancelAllRuns hides the overlay (panic-stop path)', () async {
-      final calls = mockOverlayChannel();
-      newSession('wave-cancel-hide', mode: 'control');
-      AgentService.I.cancelAllRuns();
-      await waitForCall(calls, 'deviceOverlayHide');
-    });
-
-    test('leaving Control mode hides the overlay; entering does not', () async {
-      final calls = mockOverlayChannel();
-      final s = newSession('wave-mode-hide', mode: 'control');
-      AgentService.I.setMode(AgentMode.auto);
-      await waitForCall(calls, 'deviceOverlayHide');
-      expect(s.mode, AgentMode.auto.name);
-
-      calls.clear();
-      AgentService.I.setMode(AgentMode.control);
-      await pumpEventQueue();
-      expect(
-        calls.any((c) => c.method == 'deviceOverlayHide'),
-        isFalse,
-        reason: 'entering Control must not hide',
-      );
-    });
-
-    test('leaving Control via the plan preset hides the overlay', () async {
-      final calls = mockOverlayChannel();
-      newSession('wave-preset-hide', mode: 'control');
-      await AgentService.I.applyPreset(PresetRegistry.byId('plan'));
-      await waitForCall(calls, 'deviceOverlayHide');
-    });
-
-    test('Control run shows the overlay at start and hides at end', () async {
-      final calls = mockOverlayChannel();
-      final provider = app.providerById('ollama-local')!;
-      final originals = ({
-        'baseUrl': provider.baseUrl,
-        'models': List<String>.of(provider.models),
-        'selectedModel': provider.selectedModel,
-      });
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['test-model']
-        ..selectedModel = 'test-model';
-      final serve = () async {
-        await for (final request in server) {
-          try {
-            request.response.headers.chunkedTransferEncoding = true;
-            request.response.add(
-              utf8.encode(
-                'data: ${jsonEncode({
-                  'choices': [
-                    {
-                      'delta': {'content': 'done '},
-                      'finish_reason': 'stop',
-                    },
-                  ],
-                })}\n\n',
-              ),
-            );
-            await request.response.flush();
-            await request.response.close();
-          } catch (_) {}
-        }
-      }();
-      unawaited(serve);
-      final s = ChatSession(
-        id: 'wave-ctl-run',
-        title: 'S',
-        providerId: provider.id,
-        model: 'test-model',
-        mode: 'control',
-      );
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      // Overlay shows only while the app is backgrounded.
-      await AgentService.I.setAppForegrounded(false);
-      try {
-        await AgentService.I
-            .runTask('wave hello', sessionId: s.id)
-            .timeout(const Duration(seconds: 20));
-        await pumpEventQueue();
-        await waitForCall(calls, 'deviceOverlayShow');
-        await waitForCall(calls, 'deviceOverlayHide');
-      } finally {
-        await AgentService.I.setAppForegrounded(true);
-        provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-        await server.close(force: true);
-        app.activeSessionId = null;
-        app.sessions.removeWhere((x) => x.id == s.id);
-      }
-    });
-
-    test('non-Control run never shows the overlay', () async {
-      final calls = mockOverlayChannel();
-      final provider = app.providerById('ollama-local')!;
-      final originals = ({
-        'baseUrl': provider.baseUrl,
-        'models': List<String>.of(provider.models),
-        'selectedModel': provider.selectedModel,
-      });
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      provider
-        ..baseUrl = 'http://${server.address.host}:${server.port}/v1'
-        ..models = ['test-model']
-        ..selectedModel = 'test-model';
-      final serve = () async {
-        await for (final request in server) {
-          try {
-            request.response.headers.chunkedTransferEncoding = true;
-            request.response.add(
-              utf8.encode(
-                'data: ${jsonEncode({
-                  'choices': [
-                    {
-                      'delta': {'content': 'done '},
-                      'finish_reason': 'stop',
-                    },
-                  ],
-                })}\n\n',
-              ),
-            );
-            await request.response.flush();
-            await request.response.close();
-          } catch (_) {}
-        }
-      }();
-      unawaited(serve);
-      final s = ChatSession(
-        id: 'wave-auto-run',
-        title: 'S',
-        providerId: provider.id,
-        model: 'test-model',
-        mode: 'auto',
-      );
-      app.sessions.insert(0, s);
-      app.activeSessionId = s.id;
-      try {
-        await AgentService.I
-            .runTask('wave hello', sessionId: s.id)
-            .timeout(const Duration(seconds: 20));
-        await pumpEventQueue();
-        expect(
-          calls.any((c) => c.method == 'deviceOverlayShow'),
-          isFalse,
-          reason: 'non-Control runs must never show the overlay',
-        );
-      } finally {
-        provider
-          ..baseUrl = originals['baseUrl'] as String
-          ..models = originals['models'] as List<String>
-          ..selectedModel = originals['selectedModel'] as String?;
-        await server.close(force: true);
-        app.activeSessionId = null;
-        app.sessions.removeWhere((x) => x.id == s.id);
-      }
-    });
-  });
 }

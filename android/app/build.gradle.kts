@@ -15,11 +15,10 @@ val ovidMinSdk = 23
 // below can never disagree. `-Povid.play=true` exists for Gradle-only tasks.
 // A Play build:
 //  * targets API 36 (Play's floor for new apps/updates since 2026-08-31);
-//  * ships no libovid_bootstrap.so (Termux userland that execs from app data,
-//    impossible at targetSdk >= 29 and "downloaded executable code" on Play);
-//  * merges src/play/AndroidManifest.xml, which removes the
-//    AccessibilityService (Play bans autonomous agents on that API) and every
-//    permission without a Play-approvable core use.
+//  * ships no on-device Linux userland (removed in P8 Task 13);
+//  * merges src/play/AndroidManifest.xml, which removes every permission
+//    without a Play-approvable core use. Control mode and the on-device
+//    sandbox are absent from every channel (spec D5).
 val ovidPlayBuild: Boolean = run {
     val defines = (project.findProperty("dart-defines") as String?).orEmpty()
         .split(",").filter { it.isNotBlank() }
@@ -114,21 +113,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    packaging {
-        jniLibs {
-            // libovid_bootstrap.so is NOT an ELF library — it is a zip archive
-            // of the Termux payload shipped with an .so name so Android
-            // packages it into jniLibs. This does not make extracted app-data
-            // code executable at targetSdk 29+. llvm-strip cannot parse
-            // it ("not recognized as a valid object file") and its retry loop
-            // ballooned the build dir until the runner hit "No space left on
-            // device". Keep its debug symbols so AGP skips the strip step.
-            keepDebugSymbols += "**/libovid_bootstrap.so"
-            // Play builds carry no on-device Linux userland at all.
-            if (ovidPlayBuild) excludes += "**/libovid_bootstrap.so"
-        }
-    }
-
     defaultConfig {
         applicationId = "com.dhanuk.ovidai"
         // Android 6.0 remains supported by the app shell.
@@ -185,10 +169,7 @@ android {
     }
 
     firebaseCrashlytics {
-        // The bundled libovid_bootstrap.so payloads are zip archives (not
-        // real ELF libs) — crashlytics symbol/mapping uploads 400 on them
-        // and break the CI build. Symbols aren't useful here anyway
-        // (Dart AOT obfuscates).
+        // Dart AOT obfuscates; native symbol/mapping uploads add nothing.
         nativeSymbolUploadEnabled = false
         mappingFileUploadEnabled = false
     }

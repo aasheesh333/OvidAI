@@ -7,19 +7,14 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/theme.dart';
+import '../core/distribution.dart';
 import '../core/state.dart';
 import '../core/github_service.dart';
 import '../core/global_repo_registry.dart';
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
-import '../core/sandbox_service.dart';
 import '../core/studio_drafts.dart';
 import 'github_login_sheet.dart';
-// Note: sandbox_setup.dart imports this file (for StudioScreen) — the
-// reverse import here is intentional so the not-installed banner routes
-// through the canonical openStudio() entry point. Dart resolves the
-// cycle; both files only reference each other's classes inside methods.
-import 'sandbox_setup.dart';
 import 'studio_editor.dart';
 import 'studio_errors.dart';
 import 'studio_file_tree.dart';
@@ -140,11 +135,9 @@ String? repoFullNameOf(Map<String, dynamic> repo) {
 /// folds secondary actions into a menu, and on a short viewport the terminal
 /// collapses rather than squeezing the editor below a usable height.
 class StudioScreen extends StatefulWidget {
-  /// Set when Studio is opened by the Studio first-open install flow
-  /// (openStudio → SandboxSetupScreen(studioFirstOpen: true) → here).
-  /// [_handleInitialAuth] then fires the one-time GitHub login prompt from
-  /// its own branch instead of the regular path, so the sheet can never
-  /// pop twice.
+  /// Set when Studio is opened by a setup flow. [_handleInitialAuth] then
+  /// fires the one-time GitHub login prompt from its own branch instead of
+  /// the regular path, so the sheet can never pop twice.
   final bool postInstallGithubPrompt;
   const StudioScreen({super.key, this.postInstallGithubPrompt = false});
   @override
@@ -458,13 +451,10 @@ class _StudioScreenState extends State<StudioScreen> {
     // SECURITY: hand the registry a secret-free auth env (a host-scoped
     // `store` helper naming a 0600 file) instead of letting it interpolate
     // the token into GIT_CONFIG_VALUE_0.
+    // P8 Task 13: the on-device sandbox git is gone. The registry keeps its
+    // default host runner; Studio is stubbed on the thin client.
     GlobalRepoRegistry.gitCredentialEnvProvider ??=
-        SandboxService.I.gitCredentialEnv;
-    // Android ships no usable system git — a host `git clone` dies with
-    // `ProcessException: Permission denied`. Route registry clones through
-    // the sandbox's git (same one the agent's git_clone tool uses), with
-    // the sandbox env (PATH, GIT_EXEC_PATH, GIT_SSL_CAINFO, HOME).
-    GlobalRepoRegistry.cloneRunnerOverride ??= _sandboxGitClone;
+        () => const <String, String>{};
     final reg = await GlobalRepoRegistry.instance();
     if (!mounted) return false;
     // Already working in the clone for THIS repo+branch? Then there is nothing
@@ -519,76 +509,6 @@ class _StudioScreenState extends State<StudioScreen> {
     }
   }
 
-  /// Sandbox-backed git clone for [GlobalRepoRegistry.cloneRunnerOverride].
-  ///
-  /// Runs `<prefix>/bin/git` with the full sandbox env — the only working
-  /// git on-device. Mirrors the token handling of the old host runner
-  /// (process-scoped credential helper; no `.git-credentials` file), and
-  /// fails fast with an actionable message when the sandbox or its git is
-  /// missing/broken instead of the cryptic host `Permission denied`.
-  static Future<void> _sandboxGitClone(
-    String repoFull,
-    String branch,
-    String dest,
-  ) async {
-    final svc = SandboxService.I;
-    final ready = svc.isInstalled || await svc.checkExisting();
-    if (!ready) {
-      throw Exception(
-        'Linux sandbox not installed — open Studio once to install it, '
-        'then retry the clone.',
-      );
-    }
-    // Fail fast when the sandbox git itself is broken.
-    try {
-      final (vCode, vOut) = await svc
-          .execChecked(['git', '--version'])
-          .timeout(const Duration(seconds: 30));
-      if (vCode != 0 || !vOut.contains('git version')) {
-        throw Exception(
-          'sandbox git is not working '
-          '(${vOut.trim().split('\n').last}); reinstall it from the Health '
-          'screen, then retry.',
-        );
-      }
-    } catch (e) {
-      if ('$e'.contains('sandbox git is not working')) rethrow;
-      throw Exception(
-        'could not run sandbox git (${e.toString().split('\n').first}); '
-        'reinstall the Linux sandbox from the Health screen, then retry.',
-      );
-    }
-    // SECURITY: secret-free auth env — git reads the token from the 0600
-    // credential store named by GIT_CONFIG_VALUE_0, never from the env value.
-    final env = <String, String>{
-      'GIT_TERMINAL_PROMPT': '0',
-      ...SandboxService.I.gitCredentialEnv(),
-    };
-    final parent = Directory(dest).parent;
-    await parent.create(recursive: true);
-    final (code, out) = await svc
-        .execChecked(
-          [
-            'git',
-            'clone',
-            '-b',
-            branch,
-            'https://github.com/$repoFull.git',
-            dest,
-          ],
-          hostWorkDir: parent,
-          env: env,
-        )
-        .timeout(const Duration(minutes: 10));
-    if (code != 0) {
-      throw Exception(
-        'git clone $repoFull@$branch failed (exit $code): ${out.trim()}',
-      );
-    }
-  }
-
-  /// Prepare the selected branch before publishing it to the session. Shared
-  /// clones stay in the registry; local clones stay under the chosen parent.
   /// The previous checkout (and its local work) is retained on either outcome.
   Future<void> _rebindCloneToBranch(ChatSession s, String repo, String branch) async {
     final sid = s.sandboxId ?? s.id;
@@ -955,7 +875,12 @@ class _StudioScreenState extends State<StudioScreen> {
   }
 
   @override
+  @override
   Widget build(BuildContext context) {
+    // P8 Task 13: the on-device sandbox that backed Studio was removed.
+    // Until the remote Studio client lands (Task 15) the thin channel shows
+    // a stub instead of a broken workspace.
+    if (Distribution.cloudStudio) return const _StudioMovesToCloud();
     return AnimatedBuilder(
       animation: _sessionSignals,
       builder: (context, _) {
@@ -992,23 +917,6 @@ class _StudioScreenState extends State<StudioScreen> {
                       ? StudioMetrics.collapsedBarHeight + StudioMetrics.commandRowHeight
                       : StudioMetrics.collapsedBarHeight)),
               chrome: [
-                // Graceful degradation: the sandbox may be missing here when
-                // the user skipped the first-open install or the prefix was
-                // wiped afterwards. Terminal commands already fail with a
-                // friendly "open Studio" error; this banner makes the fix one
-                // tap.
-                AnimatedBuilder(
-                  animation: AppState.I,
-                  builder: (context, _) {
-                    if (AppState.I.sandboxInstalled ||
-                        AppState.I.sandboxSkipped) {
-                      return const SizedBox.shrink();
-                    }
-                    return _SandboxMissingBanner(
-                      onInstall: () => openStudio(context),
-                    );
-                  },
-                ),
                 _RepoBar(
                   repo: repo,
                   branch: _branch,
@@ -1704,50 +1612,28 @@ class _OverflowRow extends StatelessWidget {
   }
 }
 
-class _SandboxMissingBanner extends StatelessWidget {
-  final VoidCallback onInstall;
-  const _SandboxMissingBanner({required this.onInstall});
+class _StudioMovesToCloud extends StatelessWidget {
+  const _StudioMovesToCloud();
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      color: Aether.warn.withValues(alpha: 0.10),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: Row(
-        children: [
-          Icon(Icons.terminal_outlined, size: 16, color: Aether.warn),
-          const SizedBox(width: 8),
-          const Expanded(
-            child: Text(
-              'Sandbox not installed — the terminal needs the one-time setup.',
-              style: TextStyle(fontSize: 12),
-            ),
+    return Scaffold(
+      backgroundColor: Aether.bg,
+      appBar: AppBar(title: const Text('Studio')),
+      body: const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Studio moves to the cloud in this build.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 15),
           ),
-          // 44dp target: the old compact TextButton measured ~26dp.
-          SizedBox(
-            height: kStudioTapTarget,
-            child: TextButton(
-              style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-              ),
-              onPressed: onInstall,
-              child: const Text('Install', style: TextStyle(fontSize: 12.5)),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
 }
 
-/// Repo + branch binding bar.
-///
-/// Takes a nullable [repo]: the old version was handed `_repo ?? 'Connect a
-/// repo'` and then compared against that literal to decide styling and
-/// behaviour, so a repository actually named "Connect a repo" would have
-/// rendered as the disconnected state.
 class _RepoBar extends StatelessWidget {
   final String? repo;
   final String? branch;

@@ -14,7 +14,6 @@ import 'hook_context_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_registry.dart';
 import 'plugin_user_config.dart';
-import 'sandbox_service.dart';
 import 'session_ledger.dart';
 import 'state.dart';
 import 'diag.dart';
@@ -1550,7 +1549,7 @@ class HookService extends ChangeNotifier {
       }
       final sid = s?.sandboxId ?? s?.id ?? sessionId;
       if (sid.isEmpty) return null;
-      return await SandboxService.I.workDirFor(sid);
+      return await AppState.I.workspaceDirForSession(sid);
     } catch (_) {
       return null;
     }
@@ -1828,17 +1827,11 @@ class HookService extends ChangeNotifier {
     final runtime = HookExecutionScope.dependencyRoot(
       PluginContributionRegistry.I.manifestFor(pluginId),
     );
-    // pluginRuntimeEnv includes the installed shell directory in PATH. Resolve
-    // an existing prefix before building it, including on a cold process boot.
-    if (runtime != null && SandboxService.I.prefixPath == null) {
-      await SandboxService.I.checkExisting();
-    }
     // Plugin userConfig parity: saved settings as CLAUDE_PLUGIN_OPTION_<KEY>.
     final optionEnv = pluginId.startsWith('legacy:')
         ? const <String, String>{}
         : await pluginOptionEnvFor(pluginId);
     return {
-      if (runtime != null) ...SandboxService.pluginRuntimeEnv(runtime),
       if (runtime != null) 'NODE_PATH': '$runtime/node/node_modules',
       if (runtime != null) 'PYTHONPATH': '$runtime/python',
       ...sessionEnv,
@@ -2011,49 +2004,12 @@ class HookService extends ChangeNotifier {
     if (custom != null) return (0, await custom(command, env), '');
     final t = execTimeoutForTest;
     if (t != null) return (0, await t(timeout.inSeconds), '');
-    // The sandbox exec boundary — the hook env contract (CLAUDE_PLUGIN_ROOT,
-    // PLUGIN_ROOT, PLUGIN_SESSION, ...). When a test override stands in for
-    // the installed sandbox, route through `execChecked`, which consults it:
-    // the override observes the FULL env map exactly as the production spawn
-    // would receive it. Stdin delivery is additive — the stdin-aware seam
-    // above already serves stdin-capable tests, and production keeps the
-    // spawn path below. Without this, the spawn path bypassed the boundary
-    // the contract tests pin, so hooks never reached it.
-    if (SandboxService.hasExecOverride) {
-      final (code, out) = await SandboxService.I
-          .execChecked(
-            [_hookShell(hook), '-c', command],
-            hostWorkDir: cwd,
-            env: env,
-          )
-          .timeout(timeout);
-      return (code, out, '');
-    }
-    // Probe the existing sandbox, then verify the actual shell on disk. A stale
-    // installed flag must not claim that a missing interpreter is usable.
-    if (SandboxService.I.prefixPath == null) {
-      await SandboxService.I.checkExisting();
-    }
-    final prefix = SandboxService.I.prefixPath;
-    if (prefix == null ||
-        !File('$prefix/bin/${_hookShell(hook)}').existsSync()) {
-      // The single most common real reason "hooks don't work": hook commands
-      // execute inside the Studio sandbox, which only installs on first Studio
-      // open. Record the reason instead of failing invisibly three times and
-      // then tripping the circuit breaker with nothing to show for it.
-      _noteBlocker(
-        hook.pluginId,
-        prefix == null
-            ? 'hook commands need the on-device sandbox, which is not installed yet — open Studio once to install it'
-            : 'sandbox hook shell is missing — repair the Studio runtime and retry',
-      );
-      throw const HookRuntimeUnavailable();
-    }
-    // Spawn (not execChecked): the hook child MUST receive the full JSON
-    // payload on stdin — `SandboxService.spawn` (Process.start) is the only
-    // sandbox API exposing the stdin pipe. The UTF-8 bytes are written and
-    // the pipe closed before we wait for exit, exactly like Claude Code.
-    // The env map is the hook's ENTIRE runtime contract: [CC]/Codex plugins
+    // P8 Task 13: the on-device sandbox (and its hook shell) was removed.
+    // Hooks run through the host shell below until the server-side hook
+    // engine replaces this service in Task 18.
+    // The hook child receives the full JSON payload on stdin. The UTF-8
+    // bytes are written and the pipe closed before we wait for exit,
+    // exactly like [CC].
     // interpolate `${CLAUDE_PLUGIN_ROOT}` (and read `PLUGIN_PAYLOAD`,
     // `PLUGIN_SESSION`, `PLUGIN_MODEL`, ...) inside their commands. Dropping
     // it here left every variable unset, so `"${CLAUDE_PLUGIN_ROOT}/hooks/
@@ -2066,19 +2022,11 @@ class HookService extends ChangeNotifier {
     // open through the callers' normal error handling, same as any exec
     // failure.
     if (cwd == null) throw StateError('hook session workspace unavailable');
-    final scope = HookExecutionScope.roots(
-      manifest: PluginContributionRegistry.I.manifestFor(hook.pluginId),
-      workspace: cwd,
-      env: env,
-      inherited: Zone.current[SandboxService.allowedRootsZoneKey],
-    );
-    final proc = await runZoned(
-      () => SandboxService.I.spawn(
-        [_hookShell(hook), '-c', command],
-        hostWorkDir: cwd,
-        env: env,
-      ),
-      zoneValues: {SandboxService.allowedRootsZoneKey: scope},
+    final proc = await Process.start(
+      _hookShell(hook),
+      ['-c', command],
+      workingDirectory: cwd.path,
+      environment: env,
     );
     // Subscribe to stdout/stderr BEFORE touching stdin so a chatty hook
     // can never deadlock on a full pipe while we write.

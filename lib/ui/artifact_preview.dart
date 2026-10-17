@@ -11,10 +11,12 @@ import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
 import 'html_artifact_view.dart';
-import 'sandbox_setup.dart';
 import 'share_actions.dart';
 import 'widgets/aether_primitives.dart';
 import 'widgets/code_highlight.dart';
+
+const kStudioMovesToCloudMessage =
+    'Studio moves to the cloud in this build.';
 
 /// Largest text file the preview reads inline. Bigger files offer
 /// "Open with" instead of loading megabytes into a Text widget.
@@ -314,7 +316,11 @@ class _ArtifactPreviewScreenState extends State<ArtifactPreviewScreen> {
       messenger.showSnackBar(SnackBar(content: Text(l10n.artifactNotOnDevice)));
       return;
     }
-    openStudio(context);
+    // P8 Task 13: Studio is down until the remote Studio client lands
+    // (Task 15); the on-device sandbox that backed it was removed.
+    messenger.showSnackBar(
+      const SnackBar(content: Text(kStudioMovesToCloudMessage)),
+    );
   }
 
   @override

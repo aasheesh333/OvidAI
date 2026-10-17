@@ -639,26 +639,6 @@ void main() {
   });
 
   test(
-    'startup mounts skills between plugin activation and session restore',
-    () async {
-      SharedPreferences.setMockInitialValues({});
-      AppState.resetTestInstance();
-      final app = AppState.createForTest();
-      addTearDown(AppState.resetTestInstance);
-
-      final ids = (await app.buildReadinessTasks())
-          .map((task) => task.id)
-          .toList();
-
-      expect(ids.indexOf('skill.mount'), ids.indexOf('plugin.activate') + 1);
-      expect(
-        ids.indexOf('skill.mount'),
-        lessThan(ids.indexOf('session.restore')),
-      );
-    },
-  );
-
-  test(
     'explicit unknown session publishes no workspace or plugin fallback',
     () async {
       SharedPreferences.setMockInitialValues({});

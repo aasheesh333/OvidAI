@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ovid_ai/core/diag.dart';
 import 'package:ovid_ai/core/secret_scrub.dart';
-import 'package:ovid_ai/core/startup_coordinator.dart';
+import 'package:ovid_ai/core/plugin_runtime.dart';
 
 /// M4: MCP args/url secrets never reach logs, diagnostics or the UI.
 void main() {

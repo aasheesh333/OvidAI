@@ -41,4 +41,3 @@
 # Protect sensitive security check classes
 -keep class com.dhanuk.ovidai.SecurityCheck { *; }
 -keep class com.dhanuk.ovidai.MainActivity { *; }
--keep class com.dhanuk.ovidai.OvidAccessibilityService { *; }

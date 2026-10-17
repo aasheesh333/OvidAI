@@ -342,13 +342,9 @@ extension _SettingsStateIntegration on AppState {
     return result;
   }
 
-  /// Preferences that describe this device's runtime install, not the
-  /// user's data, and survive an all-data reset: the sandbox install/skip
-  /// markers (the sandbox itself is not removed) and the pending browser
-  /// profile deletions, whose retry must outlive the reset.
+  /// Preferences that survive an all-data reset: pending browser profile
+  /// deletions, whose retry must outlive the reset.
   static const _resetKeepPreferences = <String>{
-    AppState._kSandboxSkipped,
-    AppState._kStudioFirstOpenDone,
     'ovid_browser_profile_deletes',
   };
 

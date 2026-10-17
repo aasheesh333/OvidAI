@@ -9,10 +9,8 @@ import 'package:flutter/services.dart';
 
 import '../core/agent_service.dart';
 import '../core/repo_cache.dart';
-import '../core/sandbox_service.dart';
 import '../core/state.dart';
 import '../core/studio_drafts.dart';
-import '../core/workspace_files.dart';
 import '../core/theme.dart';
 import 'studio_layout.dart';
 import 'studio_errors.dart';
@@ -688,18 +686,18 @@ class _StudioEditorState extends State<StudioEditor> {
       final pinned = session.workspaceFolder;
       final root = pinned != null && Directory(pinned).existsSync()
           ? Directory(pinned)
-          : await SandboxService.I.workDirFor(session.sandboxId ?? session.id);
+          : await AppState.I.workspaceDirForSession(session.sandboxId ?? session.id);
       if (!mounted || binding != RepoCache.I.bindingGeneration ||
           key != _boundKey || edit != _edits[key] ||
           _conflict || ctrl.text != text ||
           !identical(key.$1, AgentService.I.fileBuffer)) {
         return;
       }
-      final safe = workspaceFilePath(root, path);
+      final safe = AgentService.containedPath(root, path);
       if (safe == null) throw StateError('Path escapes workspace or uses a symlink: $path');
       final file = File(safe);
       file.parent.createSync(recursive: true);
-      if (workspaceFilePath(root, path) != safe) throw StateError('Workspace path changed while saving');
+      if (AgentService.containedPath(root, path) != safe) throw StateError('Workspace path changed while saving');
       file.writeAsStringSync(text);
       final cache = RepoCache.I;
       if (binding == cache.bindingGeneration &&

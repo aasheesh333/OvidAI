@@ -13,9 +13,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart' show WebViewCookieManager;
 
-import 'agent_notification_service.dart';
-import 'background_notifications.dart';
-import 'device_control_service.dart';
 import 'agent_service.dart' show AgentService;
 import 'firebase_service.dart';
 import 'cloud_app_check.dart';
@@ -44,7 +41,6 @@ import 'plugin_source_resolver.dart';
 import 'secure_store.dart';
 import 'security_service.dart';
 import 'theme.dart';
-import 'sandbox_service.dart';
 import 'session_browser_profiles.dart';
 import 'session_data_sharing.dart';
 import 'conversation_share_service.dart';
@@ -59,12 +55,9 @@ import 'presets.dart';
 import 'reset_coordinator.dart';
 import 'distribution.dart';
 import 'collaboration/production.dart';
-import 'startup_coordinator.dart';
-import 'startup_tasks.dart';
 import 'native_plugin.dart';
 import 'native_plugins/data_utilities.dart';
 import 'native_plugins/dev_utilities.dart';
-import 'native_plugins/misc_utilities.dart';
 import 'native_plugins/prompt_dev.dart';
 import 'native_plugins/prompt_knowledge.dart';
 import 'native_plugins/rest_descriptors_aimedia.dart';
@@ -72,7 +65,6 @@ import 'native_plugins/rest_descriptors_backend.dart';
 import 'native_plugins/rest_descriptors_comms.dart';
 import 'native_plugins/rest_descriptors_dev.dart';
 import 'native_plugins/rest_descriptors_infra.dart';
-import 'native_plugins/sandbox_utilities.dart';
 import 'native_plugins/web_and_db_utilities.dart';
 import 'diag.dart';
 
@@ -118,157 +110,6 @@ bool modelSupportsReasoningEffort(String model) {
   if (colon >= 0) id = id.substring(0, colon);
   return _reasoningEffortFamilies.any((re) => re.hasMatch(id));
 }
-
-/// Sites Control mode never reads or acts on (matched as the host or any
-/// subdomain of it). Hosts with a `bank`/`netbanking` label are blocked as
-/// well by [DeviceControlService.isSensitiveTarget], so this list only needs
-/// brands whose domain does not say "bank".
-const kDeniedControlDomains = <String>[
-  // Global payments / wallets
-  'paypal.com',
-  'wise.com',
-  'venmo.com',
-  'cash.app',
-  'stripe.com',
-  'pay.google.com',
-  'wallet.google.com',
-  'revolut.com',
-  'klarna.com',
-  'coinbase.com',
-  'binance.com',
-  'kraken.com',
-  'metamask.io',
-  // US banks
-  'chase.com',
-  'bankofamerica.com',
-  'wellsfargo.com',
-  'citi.com',
-  'citigroup.com',
-  'capitalone.com',
-  'americanexpress.com',
-  'discover.com',
-  'usbank.com',
-  // UK / EU banks
-  'hsbc.co.uk',
-  'hsbc.com',
-  'barclays.co.uk',
-  'lloydsbank.com',
-  'natwest.com',
-  'santander.co.uk',
-  'monzo.com',
-  'starlingbank.com',
-  'n26.com',
-  'ing.com',
-  // India: UPI, wallets, banks, brokers
-  'phonepe.com',
-  'paytm.com',
-  'bhimupi.org.in',
-  'npci.org.in',
-  'mobikwik.com',
-  'freecharge.in',
-  'cred.club',
-  'onlinesbi.sbi',
-  'sbi.co.in',
-  'hdfcbank.com',
-  'icicibank.com',
-  'axisbank.com',
-  'kotak.com',
-  'pnbindia.in',
-  'bankofbaroda.in',
-  'canarabank.com',
-  'unionbankofindia.co.in',
-  'idfcfirstbank.com',
-  'yesbank.in',
-  'indusind.com',
-  'zerodha.com',
-  'groww.in',
-  'upstox.com',
-];
-
-/// Apps Control mode never reads or acts on. Packages whose name has a
-/// `bank`, `wallet`, `upi`, `paisa` or `*pay` segment are blocked as well by
-/// [DeviceControlService.isSensitiveTarget]; this list covers the finance
-/// apps whose package does not say so.
-const kDeniedControlPackages = <String>[
-  // Global payments / wallets / crypto
-  'com.paypal.android.p2pmobile',
-  'com.transferwise.android',
-  'com.venmo',
-  'com.squareup.cash',
-  'com.zellepay.zelle',
-  'com.google.android.apps.walletnfcrel',
-  'com.samsung.android.spay',
-  'com.revolut.revolut',
-  'com.myklarnamobile',
-  'com.coinbase.android',
-  'com.binance.dev',
-  'io.metamask',
-  'com.wallet.crypto.trustapp',
-  'com.eg.android.alipaygphone',
-  // US banks
-  'com.chase.sig.android',
-  'com.infonow.bofa',
-  'com.wf.wellsfargomobile',
-  'com.citi.citimobile',
-  'com.konylabs.capitalone',
-  'com.americanexpress.android.acctsvcs.us',
-  'com.discoverfinancial.mobile',
-  'com.usbank.mobilebanking',
-  // UK / EU banks
-  'uk.co.hsbc.hsbcukmobilebanking',
-  'com.barclays.android.barclaysmobilebanking',
-  'com.grppl.android.shell.cmblloydstsb73',
-  'com.rbs.mobile.android.natwest',
-  'uk.co.santander.santanderuk',
-  'co.uk.getmondo',
-  'com.starlingbank.android',
-  'de.number26.android',
-  // India: UPI apps and wallets
-  'com.phonepe.app',
-  'net.one97.paytm',
-  'com.google.android.apps.nbu.paisa.user', // Google Pay (India)
-  'in.org.npci.upiapp', // BHIM
-  'com.dreamplug.androidapp', // CRED
-  'com.mobikwik_new',
-  'com.freecharge.android',
-  'in.amazon.mshop.android.shopping', // Amazon India (Amazon Pay)
-  'com.whatsapp.payments',
-  // India: banks
-  'com.sbi.lotusintouch', // SBI YONO
-  'com.sbi.sbifreedomplus', // SBI YONO Lite
-  'com.snapwork.hdfc', // HDFC Bank
-  'com.enstage.wibmo.hdfc', // HDFC PayZapp
-  'com.csam.icici.bank.imobile', // ICICI iMobile Pay
-  'com.axis.mobile', // Axis Mobile
-  'com.msf.kbank.mobile', // Kotak
-  'com.pnb.pnbone', // PNB ONE
-  'com.bankofbaroda.mconnect', // bob World
-  'com.canarabank.mobility', // Canara ai1
-  'com.infrasofttech.uboi', // Union Bank Vyom
-  'com.idfcfirstbank.optimus', // IDFC FIRST
-  'com.yesbank', // YES Bank
-  'com.indusind.mobile', // IndusInd
-  // India: brokers
-  'com.zerodha.kite3',
-  'com.nextbillion.groww',
-  'in.upstox.app',
-];
-const kControlModeDisclosure =
-    'Control mode lets Ovid use your device the way you would. With your permission '
-    'it can read what is on screen and tap, type, swipe, and use Back / Home / Recents '
-    'in this app and in others, so it can finish tasks for you end to end.\n\n'
-    'Ovid reads the screen only while Control mode is on, and only to do what you asked. '
-    'Screen structure and screenshots may be stored in this chat or its workspace and '
-    'sent to the selected AI provider; provider retention follows their policy.\n\n'
-    'Ovid will not read or act on banking or payment screens it can recognise: '
-    'apps and sites on its built-in finance list (major banks, UPI apps such as '
-    'PhonePe, Paytm, Google Pay and BHIM, wallets, brokers and crypto apps), apps whose '
-    'name marks them as a bank, wallet or UPI app, and screens asking for a UPI PIN, '
-    'card number or CVV. The list cannot cover every app, so complete payments '
-    'yourself. In Ovid\'s own browser the page address is checked only while Ovid is '
-    'the foreground app. Password fields are always blocked. '
-    'Every action appears in this chat.\n\n'
-    'You turn this on yourself in Settings > Accessibility, and you can turn it off there at any time.';
 
 /// ---------- Models ----------
 
@@ -1898,199 +1739,44 @@ Future<List<ChatSession?>> _decodePersistedSessionsInIsolate(
   List<String> rows,
 ) => Isolate.run(() => _decodePersistedSessions(rows));
 
+/// Per-session local scratch directory.
+///
+/// The on-device Termux/proot sandbox was removed in P8 Task 13. Surviving
+/// local-only paths (the legacy agent loop until Task 19, hook execution,
+/// Studio drafts) still need a per-session working directory; this is
+/// app-cache scratch space, NOT a Linux userland.
+Directory localWorkspaceDirFor(String id) {
+  // A user-pinned working folder still wins (workspace authority): the
+  // on-device sandbox is gone, but the session's selected folder is a real
+  // path on disk and remains the single source of truth for tool cwd.
+  //
+  // The provider is installed by the AppState constructor. It is null during
+  // the very first AgentService construction (AppState's own singleton is
+  // still initializing), in which case scratch space is the only safe answer.
+  final pinned = AppState.workspaceDirProvider?.call(id);
+  if (pinned != null) return pinned;
+  final safe = id.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+  final dir = Directory('${Directory.systemTemp.path}/ovid_workspaces/$safe');
+  try {
+    dir.createSync(recursive: true);
+  } catch (_) {
+    // Best effort: callers surface their own filesystem errors.
+  }
+  return dir;
+}
+
+/// Default workspace deleter (the sandbox's userland deleter is gone).
+Future<void> _deleteLocalWorkspace(String id) async {
+  try {
+    final dir = localWorkspaceDirFor(id);
+    if (dir.existsSync()) await dir.delete(recursive: true);
+  } catch (_) {
+    // Reset must never fail on a missing/locked scratch dir.
+  }
+}
+
 String _sessionSourceFingerprint(String encoded) =>
     sha256.convert(utf8.encode(encoded)).toString();
-
-class _AppStartupTask implements StartupTask {
-  const _AppStartupTask({
-    required this.id,
-    required this.kind,
-    required this.label,
-    required this.timeout,
-    required this.runStage,
-  });
-
-  @override
-  final String id;
-  @override
-  final StartupItemKind kind;
-  @override
-  final String label;
-  @override
-  final Duration timeout;
-  final StartupStageDelegate runStage;
-
-  @override
-  StartupDisable? get onDisable => null;
-
-  @override
-  Future<StartupItemStatus> run() async {
-    await runStage();
-    return StartupItemStatus.ready(id, kind, label);
-  }
-}
-
-class _LocalHydrationStartupTask implements StartupTask {
-  const _LocalHydrationStartupTask(this.app);
-
-  final AppState app;
-
-  @override
-  String get id => 'local.hydrate';
-  @override
-  StartupItemKind get kind => StartupItemKind.localState;
-  @override
-  String get label => 'Load local data';
-  @override
-  Duration get timeout => app._startupTimeout(id, const Duration(seconds: 15));
-  @override
-  StartupDisable? get onDisable => null;
-
-  @override
-  Future<StartupItemStatus> run() async {
-    try {
-      await app._runStartupStage(id, app._hydrateRemainingLocalState);
-      app._localHydrationReady = app._unparsedSessionJson.isEmpty;
-    } finally {
-      app._localHydrationSettled = true;
-      await app._maybeFinishSessionRestore();
-    }
-    if (!app._localHydrationReady) {
-      return StartupItemStatus.degraded(
-        id,
-        kind,
-        label,
-        reason: 'Some saved sessions could not be read and were preserved',
-      );
-    }
-    return StartupItemStatus.ready(id, kind, label);
-  }
-}
-
-class _SessionRestoreStartupTask implements StartupTask {
-  const _SessionRestoreStartupTask(this.app);
-
-  final AppState app;
-
-  @override
-  String get id => 'session.restore';
-  @override
-  StartupItemKind get kind => StartupItemKind.sessionHook;
-  @override
-  String get label => 'Restore session runtime';
-  @override
-  Duration get timeout => app._startupTimeout(id, const Duration(seconds: 15));
-  @override
-  StartupDisable? get onDisable => null;
-
-  @override
-  Future<StartupItemStatus> run() async {
-    app._sessionRestoreRequested = true;
-    final restored = await app._maybeFinishSessionRestore();
-    if (!restored) {
-      final failure = app._skillMountFailureReason;
-      return StartupItemStatus.degraded(
-        id,
-        kind,
-        label,
-        reason: failure == null
-            ? 'Waiting for local hydration, plugin activation, and skills'
-            : '$failure; session runtime not restored',
-      );
-    }
-    return StartupItemStatus.ready(id, kind, label);
-  }
-}
-
-class _SkillMountStartupTask implements StartupTask {
-  const _SkillMountStartupTask(this.app);
-
-  final AppState app;
-
-  @override
-  String get id => 'skill.mount';
-  @override
-  StartupItemKind get kind => StartupItemKind.skillMount;
-  @override
-  String get label => 'Mount session skills';
-  @override
-  Duration get timeout => app._startupTimeout(id, const Duration(seconds: 15));
-  @override
-  StartupDisable? get onDisable => null;
-
-  @override
-  Future<StartupItemStatus> run() async {
-    app._skillMountSettled = false;
-    app._skillMountSucceeded = false;
-    app._skillMountFailureReason = null;
-    try {
-      await app._runStartupStage(id, app._mountRuntimeSkills);
-      app._skillMountSucceeded = true;
-      return StartupItemStatus.ready(id, kind, label);
-    } catch (_) {
-      // Scrubbed, non-secret reason: the raw error is already redacted by
-      // the coordinator's terminal status; this keeps the restore item
-      // honestly degraded and observable without leaking failure detail.
-      app._skillMountFailureReason = 'Session skill mounting failed';
-      rethrow;
-    } finally {
-      app._skillMountSettled = true;
-      await app._maybeFinishSessionRestore();
-    }
-  }
-}
-
-class _PluginSafetyStartupTask implements StartupTask {
-  const _PluginSafetyStartupTask(this.app);
-
-  final AppState app;
-
-  @override
-  String get id => 'localSafety.migrate';
-  @override
-  StartupItemKind get kind => StartupItemKind.localState;
-  @override
-  String get label => 'Check local plugin safety';
-  @override
-  Duration get timeout => const Duration(seconds: 15);
-  @override
-  StartupDisable? get onDisable => null;
-
-  @override
-  Future<StartupItemStatus> run() async {
-    await app._runStartupStage(id, app._reconcilePluginSafety);
-    final statuses = app.pluginSafetyStatuses;
-    if (statuses.isEmpty) return StartupItemStatus.ready(id, kind, label);
-    final aggregate = aggregateStartupStates(
-      statuses.map((status) => status.state),
-    );
-    // When a single row is responsible for the migration gate, carry its
-    // exact focus id so `Open Plugins` deep-links that row. When several are,
-    // carry the filter sentinel so the Plugins screen narrows to all
-    // migration-required rows instead of opening unfocused.
-    final migrationStatuses = statuses
-        .where((status) => status.state == StartupItemState.migrationRequired)
-        .toList();
-    final ownerId = migrationStatuses.length == 1
-        ? migrationStatuses.single.id
-        : migrationStatuses.isEmpty
-        ? null
-        : kMigrationRequiredFocusId;
-    return StartupItemStatus(
-      id: id,
-      kind: kind,
-      label: label,
-      state: aggregate,
-      reason: statuses
-          .where((status) => status.state == aggregate)
-          .map((status) => status.reason)
-          .whereType<String>()
-          .firstOrNull,
-      attempt: 1,
-      ownerId: ownerId,
-    );
-  }
-}
 
 /// Registers every in-process native plugin capability (NP1 framework +
 /// NP2 utility batches + NP4 leftover utilities: data, dev, web/db,
@@ -2106,10 +1792,8 @@ void registerAllNativePlugins() {
   registerDataUtilities();
   registerDevUtilities();
   registerWebAndDbUtilities();
-  registerSandboxUtilities();
   registerPromptDev();
   registerPromptKnowledge();
-  registerMiscUtilities();
   registerComms();
   registerDevPlatforms();
   registerBackend();
@@ -2117,12 +1801,12 @@ void registerAllNativePlugins() {
   registerAiMedia();
 }
 
-/// Lifecycle of the deferred first-launch runtime install
-/// (node/python toolchain). `idle` also covers "banner dismissed".
-enum RuntimeInstallState { idle, running, done, failed }
-
 /// Why [AppState.addMarketplaceChecked] refused an input.
 enum MarketplaceAddError { invalid, duplicate }
+
+/// Outcome of one marketplace sync (moved from the deleted startup_tasks in
+/// P8 Task 13).
+enum MarketplaceSyncOutcome { ready, degraded, failed }
 
 /// Prefix of the fetch message when no marketplace host could be reached.
 const kMarketplaceOfflinePrefix = "Couldn't reach GitHub for";
@@ -2145,6 +1829,10 @@ class MarketplaceSyncReport {
 class AppState extends ChangeNotifier {
   /// Singleton — everything is user-side / on-device.
   static AppState? _testInstance;
+
+  /// Resolves a session's pinned working folder for [localWorkspaceDirFor].
+  /// Installed by the constructor; null while the singleton is initializing.
+  static Directory? Function(String id)? workspaceDirProvider;
   static AppState get I => _testInstance ?? _singleton;
   static final AppState _singleton = AppState._();
 
@@ -2224,7 +1912,6 @@ class AppState extends ChangeNotifier {
     _testInstance?._cancelPersistDebounce();
     _testInstance = null;
     _singleton._bindSettingsActions();
-    StartupCoordinator.I.statusSink = null;
     PluginRuntimeStatusStore.I.resetForTest();
     // ignore: invalid_use_of_visible_for_testing_member
     ComposerDraftStore.I.resetForTest();
@@ -2265,7 +1952,7 @@ class AppState extends ChangeNotifier {
     _sessionBootstrapDecoder =
         sessionBootstrapDecoder ??
         (encoded) => jsonDecode(encoded) as Map<String, dynamic>;
-    _workspaceDeleter = workspaceDeleter ?? SandboxService.I.deleteWorkspace;
+    _workspaceDeleter = workspaceDeleter ?? _deleteLocalWorkspace;
     _accountLifecycle =
         accountLifecycle ?? AccountLifecycleIntegration.production();
     _seed();
@@ -2274,11 +1961,17 @@ class AppState extends ChangeNotifier {
     registerAllNativePlugins();
     _ensureActiveSession();
     _bindSettingsActions();
-    SandboxService.sessionWorkspaceProvider = (id) {
+    workspaceDirProvider = (id) {
       final session = sessions
           .where((s) => (s.sandboxId ?? s.id) == id)
           .firstOrNull;
-      return session == null ? null : (folder: session.workspaceFolder);
+      final pinned = session?.workspaceFolder;
+      if (pinned != null &&
+          pinned.trim().isNotEmpty &&
+          Directory(pinned).existsSync()) {
+        return Directory(pinned);
+      }
+      return null;
     };
   }
 
@@ -2414,211 +2107,6 @@ class AppState extends ChangeNotifier {
     if (value) _queueProductionAccountBind();
   }
 
-  /// Durable, secret-scrubbed startup status per canonical plugin/MCP id
-  /// (Task 7, spec §5.8). Shared process-wide store.
-  PluginRuntimeStatusStore get runtimeStatusStore => PluginRuntimeStatusStore.I;
-
-  /// The persisted terminal status for [canonicalId], or null.
-  PluginRuntimeStatus? statusFor(String canonicalId) =>
-      runtimeStatusStore.statusFor(canonicalId);
-
-  /// Loads the durable status map during local hydration.
-  Future<void> hydrateRuntimeStatuses() => runtimeStatusStore.hydrate();
-
-  /// Records one terminal startup status through the durable store.
-  Future<void> recordStartupStatus(
-    StartupItemStatus status, {
-    String? ownerId,
-    bool revive = false,
-  }) {
-    final id = ownerId ?? status.id;
-    if (id.isEmpty) return Future<void>.value();
-    // Spec §5.3 (Task 3): MCP ready/disabled records always carry their
-    // canonical reason, even when the coordinator emits them without one
-    // (task `ready` has no reason slot; disable emits reason-null after
-    // `_disableMcpForStartup` already recorded the reasoned write, and the
-    // later sink write must not clobber it back to null).
-    final effective =
-        status.kind == StartupItemKind.mcp &&
-            (status.reason == null || status.reason!.isEmpty)
-        ? switch (status.state) {
-            StartupItemState.ready => StartupItemStatus(
-              id: status.id,
-              kind: status.kind,
-              label: status.label,
-              state: status.state,
-              reason: 'connected',
-              updatedAt: status.updatedAt,
-              attempt: status.attempt,
-              ownerId: status.ownerId,
-              canDisable: status.canDisable,
-            ),
-            StartupItemState.disabled => StartupItemStatus(
-              id: status.id,
-              kind: status.kind,
-              label: status.label,
-              state: status.state,
-              reason: 'disconnected — tap Connect to start',
-              updatedAt: status.updatedAt,
-              attempt: status.attempt,
-              ownerId: status.ownerId,
-              canDisable: status.canDisable,
-            ),
-            _ => status,
-          }
-        : status;
-    return runtimeStatusStore.record(
-      PluginRuntimeStatus(
-        pluginId: id,
-        state: effective.state,
-        reason: effective.reason,
-        updatedAt: effective.updatedAt,
-      ),
-      revive: revive,
-    );
-  }
-
-  /// Recomputes the truthful capability probe for one canonical runtime id and
-  /// records it durably. Used after activation and after each owned-MCP
-  /// outcome settles, so a `ready` status is never persisted before the
-  /// plugin's real capability is active (C1). [revive] clears an uninstall
-  /// tombstone for a same-session reinstall / marketplace re-add.
-  Future<void> recordTruthfulPluginStatus(
-    String pluginId, {
-    bool revive = false,
-  }) async {
-    final row = plugins.where((p) => p.runtimeId == pluginId).firstOrNull;
-    if (row == null) return;
-    final health = await pluginHealthFor(row);
-    if (!health.state.isTerminal) return;
-    await recordStartupStatus(health, ownerId: pluginId, revive: revive);
-  }
-
-  /// Recomputes and records the truthful probe for every runtime row. Called
-  /// when the `plugin.activate` item reaches terminal.
-  Future<void> recordTruthfulPluginStatuses() async {
-    for (final row in List<PluginItem>.of(plugins)) {
-      final id = row.runtimeId;
-      if (id == null) continue;
-      final health = await pluginHealthFor(row);
-      if (!health.state.isTerminal) continue;
-      await recordStartupStatus(health, ownerId: id);
-    }
-  }
-
-  /// Serializes truthful probes so an earlier (pre-MCP) probe can never be
-  /// computed AFTER a later (post-handshake) probe and overwrite it with a
-  /// stale degraded state. The tail is created lazily in the caller's zone so
-  /// it never captures a widget-test fake-async future.
-  Future<void>? _probeTail;
-
-  Future<void> _enqueueProbe(Future<void> Function() probe) {
-    final previous = _probeTail;
-    final pending = previous == null
-        ? probe()
-        : previous.catchError((Object _) {}).then((_) => probe());
-    _probeTail = pending.catchError((Object _) {});
-    return pending;
-  }
-
-  /// Waits for every enqueued truthful probe to settle (no-op when none).
-  Future<void> whenStatusProbesSettled() async {
-    final pending = _probeTail;
-    if (pending != null) await pending;
-  }
-
-  /// Coordinator sink adapter: durable status for plugin/MCP-owned items.
-  /// Owned-MCP terminal outcomes also refresh the owning plugin's aggregate
-  /// probe; the `plugin.activate` terminal refreshes every runtime row.
-  void _onStartupStatus(StartupItemStatus status, String? ownerId) {
-    if (ownerId != null && ownerId.isNotEmpty) {
-      unawaited(
-        _enqueueProbe(() => recordStartupStatus(status, ownerId: ownerId)),
-      );
-      final ownerPluginId = _mcpServerByCanonicalId(ownerId)?.ownerPluginId;
-      if (ownerPluginId != null) {
-        unawaited(
-          _enqueueProbe(() => recordTruthfulPluginStatus(ownerPluginId)),
-        );
-      }
-      return;
-    }
-    if (status.id == 'plugin.activate' && status.state.isTerminal) {
-      unawaited(_enqueueProbe(recordTruthfulPluginStatuses));
-    }
-    // Failure cooldown for the two noisy environment tasks: a failed or
-    // degraded terminal outcome memoizes now(), so the next launch skips
-    // fast instead of failing again; a ready outcome clears the memo.
-    // Manual Retry clears it too (coordinator onBeforeRetry), so a tap
-    // always runs for real.
-    if (status.id == 'marketplace.refresh' || status.id == 'sandbox.selfHeal') {
-      // A coordinator deadline ABANDONED the work; it is not proof the work
-      // failed. Arming the cooldown on `timedOut` made one slow boot hide
-      // sandbox maintenance for the next 12 hours ("Skipped — maintenance
-      // failed recently") while the job itself usually completed seconds
-      // later — and `_reconcileLateResult` then had a memo to undo.
-      final abandoned = status.timedOut;
-      if (!abandoned &&
-          (status.state == StartupItemState.failed ||
-              status.state == StartupItemState.degraded)) {
-        unawaited(_writeStartupFailureMemo(status.id, DateTime.now()));
-      } else if (!abandoned && status.state == StartupItemState.ready) {
-        unawaited(_clearStartupFailureMemo(status.id));
-      }
-    }
-  }
-
-  /// Truthful health for one plugin row. Runtime rows probe their declared
-  /// capability surface (roster tools, registered hooks, owned MCP); legacy
-  /// rows fall back to the roster probe. Hooks are never executed.
-  Future<StartupItemStatus> pluginHealthFor(PluginItem row) async {
-    final label = row.name.isNotEmpty ? row.name : (row.runtimeId ?? 'Plugin');
-    if (row.migrationRequired) {
-      return StartupItemStatus.migrationRequired(
-        row.runtimeId ?? label,
-        StartupItemKind.plugin,
-        label,
-        reason: row.runtimeReason ?? 'Re-approve this plugin before it can run',
-      );
-    }
-    final id = row.runtimeId;
-    if (id == null) {
-      final tools = AgentService.I.pluginToolNames(row);
-      // Hook-only / MCP-only legacy rows contribute real capability too.
-      final hasHooks = row.hooks.isNotEmpty || row.pluginHooks.isNotEmpty;
-      final hasMcp = mcpServers.any(
-        (s) => s.ownerPluginId == null && s.source == 'plugin:${row.name}',
-      );
-      if (tools.isNotEmpty || hasHooks || hasMcp) {
-        return StartupItemStatus.ready(label, StartupItemKind.plugin, label);
-      }
-      return StartupItemStatus.failed(
-        label,
-        StartupItemKind.plugin,
-        label,
-        reason:
-            'probe failed: installed+enabled but contributes no agent '
-            'tools, skills, hooks, or MCP servers',
-      );
-    }
-    return PluginRuntimeManager.I.probeNormalizedHealth(id, label: label);
-  }
-
-  /// Short capability label for a Ready plugin's status detail.
-  String _healthCapabilityDetail(PluginItem row) {
-    final id = row.runtimeId;
-    final manifest = id == null
-        ? null
-        : PluginContributionRegistry.I.manifestFor(id);
-    if (manifest != null && manifest.mcpServers.isNotEmpty) {
-      return 'mcp connected';
-    }
-    if (manifest != null && manifest.hooks.isNotEmpty) {
-      return 'hooks registered';
-    }
-    return 'capability active';
-  }
-
   Future<void> setPluginInstalled(
     String name,
     bool installed, {
@@ -2749,15 +2237,6 @@ class AppState extends ChangeNotifier {
       await persistPluginState();
       await persistMergedMarketplaceCatalog();
       await PluginRuntimeManager.I.persistRuntimeRow(result.manifest!.id);
-      // A same-session reinstall / marketplace re-add must revive the
-      // uninstall tombstone and persist the fresh truthful probe (M5).
-      try {
-        await _enqueueProbe(
-          () => recordTruthfulPluginStatus(result.manifest!.id, revive: true),
-        );
-      } catch (e) {
-        Diag.swallow('state', e);
-      }
       try {
         await onRefreshSkills?.call(result.manifest!.id);
       } catch (e) {
@@ -2956,7 +2435,7 @@ class AppState extends ChangeNotifier {
       plugin.enabled = current?.enabled ?? false;
       if (error == null &&
           (!plugin.enabled || plugin.activation == PluginActivation.failed)) {
-        final reason = plugin.runtimeReason ?? statusFor(runtimeId!)?.reason;
+        final reason = plugin.runtimeReason;
         error = reason == null || reason.isEmpty
             ? 'activation failed'
             : reason;
@@ -3045,10 +2524,7 @@ class AppState extends ChangeNotifier {
   static const _providerKeyPrefix = 'ovid_provider_key_';
   Future<void>? _initialization;
   Future<void>? _firstFrameInitialization;
-  Future<List<StartupTask>>? _readinessTasks;
   Future<void>? _readinessInitialization;
-  Future<List<StartupItemStatus>>? _pluginSafetyReconciliation;
-  List<StartupItemStatus> _pluginSafetyStatuses = const [];
   var _pluginSafetyReconciled = false;
   Future<void>? _pluginBootActivation;
   var _pluginBootActivated = false;
@@ -3345,7 +2821,6 @@ class AppState extends ChangeNotifier {
   var _sessionRestoreRequested = false;
   var _skillMountSettled = false;
   var _skillMountSucceeded = false;
-  String? _skillMountFailureReason;
   var _pendingActiveRootReason = SessionStartReason.implicit;
   String? _pendingActiveRootId;
   final List<Future<void>> _pendingSessionLifecycles = [];
@@ -3397,9 +2872,6 @@ class AppState extends ChangeNotifier {
     return future;
   }
 
-  List<StartupItemStatus> get pluginSafetyStatuses =>
-      List.unmodifiable(_pluginSafetyStatuses);
-
   bool get legacyPluginExecutionAllowed => _pluginSafetyReconciled;
 
   /// Test seam: mark the plugin-safety reconciliation as done so tests can
@@ -3418,203 +2890,6 @@ class AppState extends ChangeNotifier {
     await _loadSessionsForFirstFrame();
     await _loadLastSelection();
     await _loadShellPreferences();
-    await loadStudioFirstOpenFlag();
-    sandboxInstalled = await SandboxService.I.checkExisting();
-  }
-
-  Future<List<StartupTask>> buildReadinessTasks() =>
-      _readinessTasks ??= _buildReadinessTasks();
-
-  /// Cooldown memo so a startup task that failed recently skips fast
-  /// instead of failing again every launch (12h). Only the two noisy
-  /// environment tasks use it — never MCP/plugin rows.
-  static String startupFailureMemoKey(String id) => 'startup_last_failure_$id';
-
-  /// In-memory copy of the failure memos, loaded once per task build so
-  /// manual Retry can clear them without waiting on prefs.
-  final Map<String, DateTime> _startupFailureMemos = {};
-
-  Future<DateTime?> _readStartupFailureMemo(String id) async {
-    final cached = _startupFailureMemos[id];
-    if (cached != null) return cached;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(startupFailureMemoKey(id));
-      final at = raw == null ? null : DateTime.tryParse(raw);
-      if (at != null) _startupFailureMemos[id] = at;
-      return at;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<void> _writeStartupFailureMemo(String id, DateTime at) async {
-    _startupFailureMemos[id] = at;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(startupFailureMemoKey(id), at.toIso8601String());
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  Future<void> _clearStartupFailureMemo(String id) async {
-    _startupFailureMemos.remove(id);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(startupFailureMemoKey(id));
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  Future<List<StartupTask>> _buildReadinessTasks() async {
-    StartupCoordinator.I.statusSink = _onStartupStatus;
-    StartupCoordinator.I.onBeforeRetry = (id) => _clearStartupFailureMemo(id);
-    final mcpTasks = await _buildMcpReadinessTasks();
-    final pluginTasks = await _buildPluginReadinessTasks();
-    final marketplaceMemo = await _readStartupFailureMemo(
-      'marketplace.refresh',
-    );
-    return [
-      _LocalHydrationStartupTask(this),
-      _PluginSafetyStartupTask(this),
-      ...pluginTasks,
-      _SkillMountStartupTask(this),
-      _SessionRestoreStartupTask(this),
-      MarketplaceRefreshTask(
-        id: 'marketplace.refresh',
-        label: 'Refresh plugin marketplaces',
-        timeout: _startupTimeout(
-          'marketplace.refresh',
-          const Duration(seconds: 20),
-        ),
-        repos: () => List.of(marketplaces),
-        refresh: _refreshMarketplaceForStartup,
-        lastFailedAt: marketplaceMemo,
-      ),
-      // Accessibility binding probe. MUST run on cold start: the only other
-      // trigger was AppLifecycleState.resumed, which Android dispatches from
-      // FlutterActivity.onResume() BEFORE runApp — i.e. before the shell
-      // registers its observer — so on a cold start it never fired at all and
-      // a stale bind stayed invisible until the user tried to use Control mode.
-      // Kind is localState (one method-channel read) so the coordinator can
-      // never deadline-skip it.
-      _startupTask(
-        id: 'device.serviceBinding',
-        kind: StartupItemKind.localState,
-        label: 'Check device-control service',
-        timeout: const Duration(seconds: 10),
-        body: DeviceControlService.I.refreshServiceBinding,
-      ),
-      _startupTask(
-        id: 'github.initialize',
-        // Deliberately `marketplace`, NOT `localState`. The kind decides two
-        // things in StartupCoordinator.start(): `localState` tasks are hoisted
-        // into a first group that runs sequentially BEFORE `plugin.activate`
-        // and `session.restore`, and only `localState` degrades at the
-        // deadline instead of being marked `skipped`. This task reads a token
-        // back out of secure storage and then may hit the network on a 20s
-        // timeout — hoisting it would let a slow GitHub restore eat the whole
-        // readiness budget ahead of plugin activation and session restore,
-        // which is a worse failure than the skip it would prevent.
-        //
-        // The skip itself needs no extra recovery: `StudioScreen.initState`
-        // already calls `GitHubService.retryRestoreFromUi()`, which restores
-        // the stored token independently of this task. What made a skip fatal
-        // was `GitHubService._isInitializing` defaulting to true and never
-        // clearing — see the note on that field.
-        kind: StartupItemKind.marketplace,
-        label: 'Restore GitHub connection',
-        timeout: const Duration(seconds: 20),
-        body: GitHubService.I.initialize,
-      ),
-      _startupTask(
-        id: 'session.shareOnRestart',
-        kind: StartupItemKind.sessionHook,
-        label: 'Share session data across restarts',
-        timeout: const Duration(seconds: 15),
-        body: SessionDataSharing.I.runOnStartup,
-      ),
-      ...mcpTasks,
-      FirebaseStartupTask(
-        id: 'firebase.initialize',
-        label: 'Initialize optional services',
-        timeout: _startupTimeout(
-          'firebase.initialize',
-          const Duration(seconds: 10),
-        ),
-        initialize: _initializeFirebaseForStartup,
-      ),
-    ];
-  }
-
-  /// One plugin startup item per persisted normalized runtime (spec §5.7),
-  /// ordered by canonical id. Each item shares the coalesced boot activation
-  /// through the base `plugin.activate` stage, so stage-delegate tests keep
-  /// working while the epoch still advances exactly once. With zero runtimes
-  /// the aggregate boot item preserves the epoch/barrier behavior.
-  Future<List<StartupTask>> _buildPluginReadinessTasks() async {
-    final runtimes = await PluginRuntimeManager.I.bootRuntimeItems();
-    if (runtimes.isEmpty) {
-      return [
-        PluginActivationTask(
-          id: 'plugin.activate',
-          label: 'Activate plugins',
-          timeout: _startupTimeout(
-            'plugin.activate',
-            const Duration(seconds: 15),
-          ),
-          activate: () =>
-              _runStartupStage('plugin.activate', _activatePluginsForBoot),
-        ),
-      ];
-    }
-    return [
-      for (final runtime in runtimes)
-        PluginActivationTask(
-          id: 'plugin.activate:${runtime.id}',
-          label: runtime.label,
-          ownerId: runtime.id,
-          timeout: _startupTimeout(
-            'plugin.activate',
-            const Duration(seconds: 15),
-          ),
-          activate: () =>
-              _runStartupStage('plugin.activate', _ensureBootActivation),
-          probe: () => _pluginHealthByRuntimeId(runtime.id, runtime.label),
-          onDisable: () => _disablePluginByRuntimeId(runtime.id),
-        ),
-    ];
-  }
-
-  /// One MCP child item per canonical id the user asked to keep connected.
-  /// The ids are read from the persisted intent so custom servers are queued
-  /// before local hydration has populated `mcpServers`.
-  Future<List<StartupTask>> _buildMcpReadinessTasks() async {
-    final intent = await _mcpConnectedIntent();
-    // An injected `mcp.connect` stage stands in for a real handshake, so the
-    // honesty check treats the stubbed connection as live.
-    final stageOverridden = _startupStageDelegates.containsKey('mcp.connect');
-    final tasks = <StartupTask>[];
-    final seen = <String>{};
-    for (final name in intent) {
-      if (!seen.add(name)) continue;
-      final server = _mcpServerByCanonicalId(name);
-      tasks.add(
-        McpConnectTask(
-          canonicalId: name,
-          label: 'Connect ${server?.name ?? name}',
-          resolveBudget: () => McpConnectTask.budgetFor(
-            _mcpServerByCanonicalId(name)?.startupTimeoutS ?? 30,
-          ),
-          connect: (budget) => _connectMcpForStartup(name, budget),
-          isConnected: () => stageOverridden || McpService.I.isConnected(name),
-          onDisable: () => _disableMcpForStartup(name),
-        ),
-      );
-    }
-    return tasks;
   }
 
   Future<List<String>> _mcpConnectedIntent() async {
@@ -3834,30 +3109,53 @@ class AppState extends ChangeNotifier {
     // effort and non-blocking for the rest of readiness — a missing native
     // handler degrades to an empty result, never a failure.
     unawaited(refreshDeviceSecurity());
-    final tasks = await buildReadinessTasks();
+    // P8 Task 13: the StartupCoordinator/task dashboard was removed with the
+    // on-device runtime install. The boot stages it orchestrated are still
+    // required by the local plugin/MCP/skill stack (until Task 17), so they
+    // now run sequentially here, honouring the same stage seams.
     try {
-      await StartupCoordinator.I.start(tasks);
-      // Let the post-activation capability probes settle so the durable store
-      // reflects the truthful final state when readiness completes (C1).
-      await whenStatusProbesSettled();
+      await _runStartupStage('local.hydrate', _hydrateRemainingLocalState);
+      _localHydrationSettled = true;
+      _localHydrationReady = _unparsedSessionJson.isEmpty;
+      try {
+        await _runStartupStage('plugin.activate', _ensureBootActivation);
+      } finally {
+        if (!_bootActivationSettled.isCompleted) {
+          _bootActivationSettled.complete();
+        }
+      }
+      _skillMountSettled = false;
+      _skillMountSucceeded = false;
+      try {
+        await _runStartupStage('skill.mount', _mountRuntimeSkills);
+        _skillMountSucceeded = true;
+      } catch (_) {
+      } finally {
+        _skillMountSettled = true;
+      }
+      _sessionRestoreRequested = true;
+      await _maybeFinishSessionRestore();
+      for (final repo in List<String>.of(marketplaces)) {
+        await _refreshMarketplaceForStartup(repo);
+      }
+      await _runStartupStage('github.initialize', GitHubService.I.initialize);
+      await _runStartupStage(
+        'session.shareOnRestart',
+        SessionDataSharing.I.runOnStartup,
+      );
+      for (final name in await _mcpConnectedIntent()) {
+        final server = _mcpServerByCanonicalId(name);
+        final timeoutS = server?.startupTimeoutS ?? 30;
+        await _connectMcpForStartup(
+          name,
+          Duration(seconds: timeoutS < 30 ? timeoutS : 30),
+        );
+      }
+      await _initializeFirebaseForStartup();
     } finally {
       _readinessComplete = true;
     }
   }
-
-  StartupTask _startupTask({
-    required String id,
-    required StartupItemKind kind,
-    required String label,
-    required Duration timeout,
-    required StartupStageDelegate body,
-  }) => _AppStartupTask(
-    id: id,
-    kind: kind,
-    label: label,
-    timeout: _startupTimeout(id, timeout),
-    runStage: () => _runStartupStage(id, body),
-  );
 
   Duration _startupTimeout(String id, Duration fallback) =>
       _startupStageTimeouts[id] ?? fallback;
@@ -3904,31 +3202,11 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _reconcilePluginSafety() async {
-    final existing = _pluginSafetyReconciliation;
-    if (existing != null) {
-      await existing;
-      return;
-    }
-    late final Future<List<StartupItemStatus>> attempt;
-    attempt = PluginRuntimeManager.I.reconcileRowsAndGrants().catchError((
-      Object error,
-      StackTrace stack,
-    ) {
-      if (identical(_pluginSafetyReconciliation, attempt)) {
-        _pluginSafetyReconciliation = null;
-      }
-      Error.throwWithStackTrace(error, stack);
-    });
-    _pluginSafetyReconciliation = attempt;
-    _pluginSafetyStatuses = await attempt;
-    for (final status in _pluginSafetyStatuses) {
-      if (!status.state.isTerminal) continue;
-      // Reconcile's `ready` only means "valid grant + committed content" — it
-      // is NOT truthful until the plugin is actually registered/activated.
-      // The post-activation capability probe records the durable `ready` (C1).
-      if (status.state == StartupItemState.ready) continue;
-      unawaited(recordStartupStatus(status, ownerId: status.id));
-    }
+    if (_pluginSafetyReconciled) return;
+    // The durable readiness dashboard was removed with the startup
+    // coordinator (P8 Task 13); reconciliation itself is still required
+    // before the legacy plugin dispatcher runs.
+    await PluginRuntimeManager.I.reconcileRowsAndGrants();
     _pluginSafetyReconciled = true;
   }
 
@@ -3965,48 +3243,6 @@ class AppState extends ChangeNotifier {
   Duration get _activationBudget =>
       _startupTimeout('plugin.activate', const Duration(seconds: 15));
 
-  /// Aggregate boot activation used when there are zero normalized runtimes:
-  /// it still advances the epoch and settles the session-restore barrier
-  /// exactly once.
-  Future<void> _activatePluginsForBoot() async {
-    try {
-      await _ensureBootActivation();
-    } finally {
-      if (!_bootActivationSettled.isCompleted) {
-        _bootActivationSettled.complete();
-      }
-    }
-    await _maybeFinishSessionRestore();
-  }
-
-  /// Truthful terminal status for one normalized runtime after activation.
-  Future<StartupItemStatus> _pluginHealthByRuntimeId(
-    String runtimeId,
-    String label,
-  ) async {
-    final row = plugins
-        .where((plugin) => plugin.runtimeId == runtimeId)
-        .firstOrNull;
-    if (row == null) {
-      return StartupItemStatus.failed(
-        runtimeId,
-        StartupItemKind.plugin,
-        label,
-        reason: 'Plugin is not registered',
-      );
-    }
-    return pluginHealthFor(row);
-  }
-
-  /// Disables one normalized runtime by canonical id (dashboard action).
-  Future<void> _disablePluginByRuntimeId(String runtimeId) async {
-    final row = plugins
-        .where((plugin) => plugin.runtimeId == runtimeId)
-        .firstOrNull;
-    if (row == null) return;
-    await disablePlugin(row);
-  }
-
   Future<void> _mountRuntimeSkills() async {
     for (final session in List<ChatSession>.of(sessions)) {
       await AgentService.I.refreshSkills(sessionId: session.id);
@@ -4040,8 +3276,7 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
-  bool get startupSafeToReconnect =>
-      _readinessComplete && !StartupCoordinator.I.hasActiveInvocations;
+  bool get startupSafeToReconnect => _readinessComplete;
 
   Future<void> reconnectServicesAfterResume() {
     if (startupSafeToReconnect) return _runResumeReconnect();
@@ -4052,9 +3287,6 @@ class AppState extends ChangeNotifier {
     try {
       if (!_readinessStarted) await _readinessStartedSignal.future;
       await (_readinessInitialization ?? Future<void>.value());
-      while (!startupSafeToReconnect) {
-        await StartupCoordinator.I.whenInvocationsSettled();
-      }
       await _runResumeReconnect();
     } finally {
       _pendingResumeReconnect = null;
@@ -4122,14 +3354,10 @@ class AppState extends ChangeNotifier {
       }
       sendWhileBusy = prefs.getString(_kSendWhileBusy) ?? 'queue';
       conversationDisplay = prefs.getString(_kConversationDisplay) ?? 'compact';
-      sandboxSkipped = prefs.getBool(_kSandboxSkipped) ?? false;
       localePref = prefs.getString(_kLocale) ?? 'system';
       seenWelcomeVersion = prefs.getString(_kWelcome) ?? '';
       _keepAliveEnabled = prefs.getBool(_kKeepAlivePref) ?? true;
       _notificationsEnabled = prefs.getBool(_kNotificationsPref) ?? true;
-      _controlDisclosureAccepted = prefs.getBool(_kControlDisclosure) ?? false;
-      controlBatteryPromptShown =
-          prefs.getBool(_kControlBatteryPrompt) ?? false;
       chatFontScale = (prefs.getDouble(_kChatFontScale) ?? 1.0).clamp(
         chatFontScaleMin,
         chatFontScaleMax,
@@ -5518,7 +4746,7 @@ class AppState extends ChangeNotifier {
       _clearDeferredSessions();
       for (final s in List.of(sessions)) {
         final sid = s.sandboxId;
-        if (sid != null) unawaited(SandboxService.I.deleteWorkspace(sid));
+        if (sid != null) unawaited(_deleteLocalWorkspace(sid));
       }
       sessions.clear();
       activeSessionId = null;
@@ -5563,59 +4791,6 @@ class AppState extends ChangeNotifier {
   }
 
   int navIndex = 0; // 0 Chat, 1 Studio, 2 Browser, 3 Plugins, 4 Settings
-  bool sandboxInstalled = false; // native bionic sandbox on-device
-
-  /// User chose to run WITHOUT the sandbox (device can't support it) —
-  /// the first-launch gate must not trap them out of the app. Cleared
-  /// automatically when an install later succeeds.
-  bool sandboxSkipped = false;
-  static const _kSandboxSkipped = 'ovid_sandbox_skipped';
-
-  /// The Studio first-open mandatory install has run (full install: core
-  /// phases 0–6 + runtimes). Until this is set, opening Studio routes to
-  /// the mandatory install screen instead of Studio itself — first launch
-  /// goes straight to the chat shell, so the Studio flow owns the apt
-  /// path now (the old first-launch gate is gone).
-  bool studioFirstOpenDone = false;
-  static const _kStudioFirstOpenDone = 'studio_first_open_done';
-
-  Future<void> setStudioFirstOpenDone(bool v) async {
-    studioFirstOpenDone = v;
-    refresh();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_kStudioFirstOpenDone, v);
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  /// Loads the persisted first-open flag. Called during first-frame init;
-  /// tests call it directly after [resetTestInstance].
-  Future<void> loadStudioFirstOpenFlag() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      studioFirstOpenDone = prefs.getBool(_kStudioFirstOpenDone) ?? false;
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
-  Future<void> setSandboxSkipped(bool v) async {
-    sandboxSkipped = v;
-    refresh();
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (v) {
-        await prefs.setBool(_kSandboxSkipped, true);
-      } else {
-        await prefs.remove(_kSandboxSkipped);
-      }
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
-  }
-
   /// Share memory across sessions (persisted, default OFF).
   ///
   /// OFF → the AI only sees the current session's messages/workspace.
@@ -5817,9 +4992,8 @@ class AppState extends ChangeNotifier {
   static const _kNotificationsPref = 'ovid_notifications_enabled';
   bool _notificationsEnabled = true;
 
-  /// Master switch for the agent status notification. OFF means Ovid never
-  /// posts it — no foreground-service presence, so background runs may be
-  /// stopped by the system.
+  /// Master switch for result notifications. OFF means the app never posts
+  /// them (FCM delivery is still received; it is simply not surfaced).
   bool get notificationsEnabled => _notificationsEnabled;
   Future<void> setNotificationsEnabled(bool v) async {
     if (_notificationsEnabled == v) return;
@@ -5831,10 +5005,6 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       Diag.swallow('state', e);
     }
-    if (!v) {
-      AgentNotificationService.I.agentIdle();
-    }
-    unawaited(BackgroundNotifier.I.syncKeepActive());
   }
 
   static const _kKeepAlivePref = 'ovid_keep_alive';
@@ -5844,9 +5014,6 @@ class AppState extends ChangeNotifier {
     if (_keepAliveEnabled == v) return;
     _keepAliveEnabled = v;
     unawaited(_saveKeepAlivePref(v));
-    unawaited(BackgroundNotifier.I.syncKeepActive());
-    // ON starts the "Ovid is active" presence now; OFF stops an idle service.
-    AgentNotificationService.I.agentIdle();
     notifyListeners();
   }
 
@@ -6972,12 +6139,30 @@ class AppState extends ChangeNotifier {
     return imported;
   }
 
+  /// Async workspace resolution used by surviving local-only paths (hooks,
+  /// Studio drafts, legacy agent loop). Honours a pinned folder first, then
+  /// the app-documents `workspaces/ws_<id>` layout, falling back to scratch
+  /// space when path_provider is unavailable (unit tests without a mock).
+  Future<Directory> workspaceDirForSession(String id) async {
+    final pinned = workspaceDirProvider?.call(id);
+    if (pinned != null) return pinned;
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final safe = id.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+      final dir = Directory('${docs.path}/workspaces/ws_$safe');
+      await dir.create(recursive: true);
+      return dir;
+    } catch (_) {
+      return localWorkspaceDirFor(id);
+    }
+  }
+
   /// Ensure a session's workspace dir exists (mention menu + agent runs
   /// both rely on it). Best-effort + async — never blocks UI.
   void _warmWorkspace(String sessionId) {
     unawaited(() async {
       try {
-        await SandboxService.I.workDirFor(sessionId);
+        await workspaceDirForSession(sessionId);
       } catch (e) {
         Diag.swallow('state', e);
       }
@@ -7920,139 +7105,6 @@ class AppState extends ChangeNotifier {
   }
 
   /// ---------- Marketplaces (git-repo plugin catalogs) ----------
-
-  void sandboxReady() {
-    sandboxInstalled = SandboxService.I.isInstalled;
-    // A successful install revokes any earlier "continue without sandbox".
-    if (sandboxInstalled && sandboxSkipped) {
-      sandboxSkipped = false;
-      unawaited(setSandboxSkipped(false));
-    }
-    refresh();
-  }
-
-  // ── Studio first-open runtime install ─────────────────────────────
-  //
-  // Install ownership moved to Studio first-open: the mandatory full
-  // install (core phases 0–6 + runtimes) runs from openStudio(), and the
-  // apt path NEVER runs from a startup/background trigger anymore. The
-  // shell still kicks off this job after first frame, but it is now
-  // verify-only unless the user explicitly retries: cheap disk probes
-  // mark it done, a Studio install in flight is left alone, and missing
-  // runtimes surface as a failed banner whose Retry is the explicit
-  // user-initiated apt path. Idempotent and cheap when there is nothing
-  // to do (pure disk probe, no processes spawned).
-
-  /// Lifecycle of the deferred background runtime install.
-  RuntimeInstallState runtimeInstallState = RuntimeInstallState.idle;
-
-  /// Most recent progress line from the background installer (for the banner).
-  String runtimeInstallLine = '';
-
-  /// 0..1 progress of the background installer, -1 when indeterminate.
-  double runtimeInstallProgress = -1;
-
-  bool _bgRuntimeInstallStarted = false;
-
-  /// Starts the deferred runtime install unless it already ran. Safe to
-  /// call on every shell open: when the runtimes are present it returns
-  /// after a cheap disk check. The apt path only runs when [userInitiated]
-  /// (the banner's Retry) — a startup/background call never apt-updates;
-  /// it verifies cheaply and reports. Never throws.
-  Future<void> maybeStartBackgroundRuntimeInstall({
-    bool userInitiated = false,
-  }) async {
-    if (_bgRuntimeInstallStarted) return;
-    _bgRuntimeInstallStarted = true;
-    if (!sandboxInstalled) return;
-    // Never race the Studio first-open full install: it owns phases 0–7
-    // including the dpkg lock, and sets the first-open flag + sandboxReady
-    // on success — there is nothing for the background job to do.
-    if (SandboxService.I.installInFlight) return;
-    // Cheap path first: pure disk probe, no process spawns.
-    if (SandboxService.I.runtimesPresentOnDisk() ||
-        await SandboxService.I.runtimesVerified()) {
-      runtimeInstallState = RuntimeInstallState.done;
-      refresh();
-      return;
-    }
-    // Runtimes are missing. The background job must not apt-update at
-    // startup — that belongs to the Studio first-open install. Only an
-    // explicit user retry runs the apt path below.
-    if (!userInitiated) {
-      if (studioFirstOpenDone) {
-        // The full install completed before, so missing runtimes are a
-        // real regression — surface it; the banner's Retry is the explicit
-        // user action that runs the apt path.
-        runtimeInstallState = RuntimeInstallState.failed;
-        runtimeInstallLine =
-            'Node/Python runtimes are missing — tap Retry to reinstall, '
-            'or open Studio to run the full setup again.';
-      }
-      // First-open hasn't run yet: stay quiet (idle). Opening Studio runs
-      // the mandatory full install, which is the retry path.
-      refresh();
-      return;
-    }
-    runtimeInstallState = RuntimeInstallState.running;
-    runtimeInstallLine = 'Installing Node.js + Python in the background…';
-    runtimeInstallProgress = -1;
-    refresh();
-    try {
-      await SandboxService.I.installCoreRuntimes((phase, progress, line) {
-        runtimeInstallLine = line;
-        // Phase 7 reports 0.05 (apt update) / 0.4 (apt install) weights;
-        // surface them directly as the banner's determinate progress.
-        runtimeInstallProgress = progress.clamp(0.0, 1.0);
-        refresh();
-      });
-      runtimeInstallState = await SandboxService.I.runtimesVerified()
-          ? RuntimeInstallState.done
-          : RuntimeInstallState.failed;
-      if (runtimeInstallState == RuntimeInstallState.failed) {
-        runtimeInstallLine =
-            'Runtime install did not complete — tap Retry. '
-            'Node/Python tools will install on demand instead.';
-      }
-    } catch (e) {
-      runtimeInstallState = RuntimeInstallState.failed;
-      runtimeInstallLine = 'Runtime install failed: $e';
-    }
-    refresh();
-  }
-
-  /// Retry entry point for the banner's Retry button. This is the explicit
-  /// user-initiated apt path — the only background trigger allowed to run
-  /// installCoreRuntimes.
-  Future<void> retryBackgroundRuntimeInstall() {
-    _bgRuntimeInstallStarted = false;
-    _runtimeInstallBannerDismissed = false;
-    return maybeStartBackgroundRuntimeInstall(userInitiated: true);
-  }
-
-  /// Dismisses the banner. The install keeps running when it is active;
-  /// a failed install stays failed until Retry.
-  void dismissRuntimeInstallBanner() {
-    if (runtimeInstallState == RuntimeInstallState.running) {
-      // Keep the state machine; the banner just hides itself via this flag.
-      _runtimeInstallBannerDismissed = true;
-    } else {
-      runtimeInstallState = RuntimeInstallState.idle;
-    }
-    refresh();
-  }
-
-  bool _runtimeInstallBannerDismissed = false;
-
-  /// Whether the background-install banner should be visible right now.
-  bool get showRuntimeInstallBanner {
-    if (_runtimeInstallBannerDismissed &&
-        runtimeInstallState == RuntimeInstallState.running) {
-      return false;
-    }
-    return runtimeInstallState == RuntimeInstallState.running ||
-        runtimeInstallState == RuntimeInstallState.failed;
-  }
 
   static const _kMarketplaces = 'ovid_marketplaces_v1';
 
@@ -9685,6 +8737,18 @@ class AppState extends ChangeNotifier {
 
   /// ---------- MCP servers ----------
 
+  /// Durable, secret-scrubbed startup status per canonical plugin/MCP id.
+  /// Shared process-wide store (the readiness dashboard was removed in P8
+  /// Task 13; the store survives until Task 17 deletes the plugin runtime).
+  PluginRuntimeStatusStore get runtimeStatusStore => PluginRuntimeStatusStore.I;
+
+  /// The persisted terminal status for [canonicalId], or null.
+  PluginRuntimeStatus? statusFor(String canonicalId) =>
+      runtimeStatusStore.statusFor(canonicalId);
+
+  /// Loads the durable status map during local hydration.
+  Future<void> hydrateRuntimeStatuses() => runtimeStatusStore.hydrate();
+
   /// Durable MCP outcome recording (spec §5.3, Task 3). Every live MCP
   /// outcome path records the canonical store under the server's canonical
   /// id so the UI can render durable-only status + reason. Never throws:
@@ -9696,21 +8760,9 @@ class AppState extends ChangeNotifier {
     String? reason, {
     String? label,
   }) async {
-    if (canonicalId.isEmpty) return;
-    try {
-      await recordStartupStatus(
-        StartupItemStatus(
-          id: canonicalId,
-          kind: StartupItemKind.mcp,
-          label: label ?? canonicalId,
-          state: state,
-          reason: reason,
-        ),
-        ownerId: canonicalId,
-      );
-    } catch (e) {
-      Diag.swallow('state', e);
-    }
+    // The durable readiness dashboard was removed with the startup
+    // coordinator in P8 Task 13; live serviceStatus still carries the
+    // user-visible state until Task 17.
   }
 
   Future<void> _recordMcpReady(McpServer s) => _recordMcpStatus(
@@ -9992,58 +9044,18 @@ class AppState extends ChangeNotifier {
     // report working from their real active capability. Non-ready states map
     // to an accurate scrubbed detail (never the misleading "no agent tools").
     for (final p in plugins.where((p) => p.installed && p.enabled)) {
-      await probePluginServiceStatus(p);
-    }
-    refresh();
-  }
-
-  /// Stamp `plugin:<name>` service status from a real capability probe of
-  /// [p]: roster tools first, else the full health probe (registered hooks,
-  /// owned MCP, skills/commands), so hook-only and MCP-only plugins are not
-  /// reported as failed. Returns the stamped health.
-  Future<ServiceHealth> probePluginServiceStatus(PluginItem p) async {
-    final tools = AgentService.I.pluginToolNames(p);
-    if (tools.isNotEmpty) {
+      // P8 Task 13: the durable readiness probe died with the startup
+      // dashboard. The roster-tool check is the surviving local signal.
+      final tools = AgentService.I.pluginToolNames(p);
       updateServiceStatus(
         'plugin:${p.name}',
-        ServiceHealth.working,
-        detail: 'probe ok · tools: ${tools.join(', ')}',
+        tools.isNotEmpty ? ServiceHealth.working : ServiceHealth.failed,
+        detail: tools.isNotEmpty
+            ? 'probe ok · tools: ${tools.join(', ')}'
+            : 'probe failed: installed+enabled but contributes no agent tools',
       );
-      return ServiceHealth.working;
     }
-    final health = await pluginHealthFor(p);
-    final stamped = health.state == StartupItemState.ready
-        ? ServiceHealth.working
-        : ServiceHealth.failed;
-    updateServiceStatus(
-      'plugin:${p.name}',
-      stamped,
-      detail: _serviceDetailForHealth(p, health),
-    );
-    return stamped;
-  }
-
-  /// Accurate, scrubbed ServiceHealth detail for a plugin probe outcome.
-  /// Needs-setup/unsupported/migration/degraded are honest about WHY the
-  /// plugin is not working instead of blaming a missing roster tool.
-  String _serviceDetailForHealth(PluginItem row, StartupItemStatus health) {
-    final reason = health.reason;
-    return switch (health.state) {
-      StartupItemState.ready => 'probe ok · ${_healthCapabilityDetail(row)}',
-      StartupItemState.needsSetup =>
-        'Needs setup: ${reason ?? 'configuration required'}',
-      StartupItemState.unsupported =>
-        'Unsupported on this device: ${reason ?? 'not supported here'}',
-      StartupItemState.migrationRequired =>
-        'Migration required: ${reason ?? 're-approve this plugin'}',
-      StartupItemState.degraded =>
-        'Degraded: ${reason ?? 'capability not ready'}',
-      StartupItemState.disabled => 'Disabled',
-      _ =>
-        reason ??
-            'probe failed: installed+enabled but contributes no agent '
-                'tools, skills, hooks, or MCP servers',
-    };
+    refresh();
   }
 
   /// Reconnect every server the user had connected (app resume/launch).

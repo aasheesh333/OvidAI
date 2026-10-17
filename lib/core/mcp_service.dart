@@ -14,7 +14,7 @@ import 'mcp_client_requests.dart';
 import 'mcp_config_parse.dart';
 import 'mcp_oauth_discovery.dart';
 import 'native_mcp.dart';
-import 'sandbox_service.dart';
+import 'hook_execution_scope.dart';
 import 'secure_store.dart';
 import 'plugin_manifest.dart';
 import 'plugin_permissions.dart';
@@ -635,8 +635,8 @@ class _SseMcpChannel {
 /// sandbox needed), discovers tools via `tools/list`, and bridges
 /// `tools/call` for the agent.
 ///
-/// Process model (stdio): one Process per connected server, started via
-/// SandboxService.spawn — servers run inside the native sandbox env.
+/// Process model (stdio): one Process per connected server, started
+/// directly on the host (the native sandbox was removed in P8 Task 13).
 /// Lifecycle is lazy — `connect()` spawns/dials + handshakes, `disconnect()`
 /// kills/drops.
 ///
@@ -927,10 +927,8 @@ class McpService {
       connectPhaseTimeoutRecorderForTest?.call(phase, timeout);
 
   /// Test seam: when set, [_connectStdio] spawns the server through this
-  /// instead of [SandboxService.spawn] and skips the sandbox-installed
-  /// gate plus the lazy runtime ensure. Lets a test drive a REAL
-  /// subprocess MCP server on the host (no Android sandbox present).
-  /// Null in production — the sandbox path is untouched.
+  /// instead of the production spawn path. Lets a test drive a REAL
+  /// subprocess MCP server on the host. Null in production.
   @visibleForTesting
   static Future<Process> Function(
     List<String> argv, {
@@ -1185,8 +1183,8 @@ class McpService {
     McpServer server,
   ) => _missingCredentials(server);
 
-  /// Test seam: overrides the runtime probe in connect paths so tests
-  /// never touch the real sandbox. Null in production.
+  /// Test seam: overrides the runtime probe in connect paths. Null in
+  /// production.
   @visibleForTesting
   static Future<String?> Function(McpServer server)?
   missingRuntimeOverrideForTest;
@@ -1226,9 +1224,11 @@ class McpService {
     if (server.transport != 'stdio') return null;
     final kind = runtimeKindForCommand(server.command);
     if (kind == null) return null;
-    if (!(sandboxInstalled ?? SandboxService.I.isInstalled)) return null;
+    // P8 Task 13: the on-device sandbox is gone. There is no local runtime
+    // to probe; cloud MCP servers run server-side.
+    if (!(sandboxInstalled ?? false)) return null;
     try {
-      final probe = hasRuntime ?? SandboxService.I.hasRuntime;
+      final probe = hasRuntime ?? (_) async => false;
       if (await probe(server.command)) return null;
     } catch (_) {
       return kind;
@@ -2829,21 +2829,10 @@ class McpService {
           '(e.g. "npx", "uvx" or "python") to its config.',
         );
       }
-      // Spawn inside the native sandbox — servers are trusted code the
-      // user explicitly connected, same trust level as MCP defaults.
-      // A test spawn override bypasses the sandbox entirely (host CI has
-      // no Android sandbox); production always takes the sandbox path.
-      final sandbox = SandboxService.I;
+      // P8 Task 13: the native sandbox is gone. A test spawn override still
+      // runs the command on the host; production stdio MCP is dark until the
+      // cloud MCP router (P5) replaces it in Task 17.
       final testSpawn = spawnProcessForTest;
-      if (testSpawn == null) {
-        if (!sandbox.isInstalled || sandbox.prefixPath == null) {
-          throw Exception(
-            'MCP servers need the sandbox. Open Studio once to initialize it '
-            '(fast native setup), then retry. If the sandbox is already '
-            'initialized, this is a bug — report it.',
-          );
-        }
-      }
       // WS2: no silent runtime installs on the MCP path — the eager
       // `missingRuntimeFor` gate in `connect`/`connectOutcome` already
       // reports "needs runtime (<kind>) — install runtimes, then
@@ -2855,12 +2844,10 @@ class McpService {
       final cmd = server.command;
       final kind = runtimeKindForCommand(cmd);
       if (kind != null && testSpawn == null) {
-        if (!await sandbox.hasRuntime(cmd)) {
-          throw Exception(
-            '"${server.name}" needs runtime ($kind) — install runtimes, '
-            'then reconnect',
-          );
-        }
+        throw Exception(
+          '"${server.name}" needs runtime ($kind) — on-device runtimes were '
+          'removed; use a cloud MCP server',
+        );
       }
       // Per-server env vars (API keys etc.) from secure storage. A
       // plugin-owned server's env can come from the plugin's own config, so
@@ -2881,15 +2868,12 @@ class McpService {
           );
         }
       }
-      final runtimeRoot = _runtimeRoot(server);
       // Plugin userConfig parity: saved plugin settings reach the server as
       // CLAUDE_PLUGIN_OPTION_<KEY> and through `${user_config.<key>}`.
       final userConfig = server.ownerPluginId == null
           ? const <String, String>{}
           : await pluginUserConfigValues(server.ownerPluginId!);
       final env = {
-        if (runtimeRoot != null)
-          ...SandboxService.pluginRuntimeEnv(runtimeRoot),
         if (server.ownerPluginId != null)
           ..._pluginRootEnv(server.ownerPluginId!),
         ...pluginOptionEnv(userConfig),
@@ -2901,21 +2885,21 @@ class McpService {
       ];
       // Optional working directory for the spawned server (best-effort:
       // only used when the resolved directory actually exists).
-      final cwdDir = _resolveWorkingDirectory(server, sandbox.prefixPath);
+      final cwdDir = _resolveWorkingDirectory(server, null);
       _requireCurrent(rs);
-      // Native exec — the server command runs through the sandbox env
-      // (PATH/LD_LIBRARY_PATH/LD_PRELOAD set by SandboxService.spawn).
-      // A test spawn override runs the command directly on the host.
+      // The native sandbox was removed in P8 Task 13; production spawns the
+      // command directly on the host. A test spawn override also does.
       final proc = testSpawn != null
           ? await testSpawn(
               [server.command, ...spawnArgs],
               env: env.isEmpty ? null : env,
               hostWorkDir: cwdDir,
             )
-          : await sandbox.spawn(
-              [server.command, ...spawnArgs],
-              env: env.isEmpty ? null : env,
-              hostWorkDir: cwdDir,
+          : await Process.start(
+              server.command,
+              spawnArgs,
+              environment: env.isEmpty ? null : env,
+              workingDirectory: cwdDir?.path,
             );
       rs.process = proc;
 

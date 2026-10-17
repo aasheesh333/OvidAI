@@ -35,7 +35,6 @@ void main() {
     studioLoginPromptOverrideForTest = (_) {};
     studioRepoSyncOverrideForTest = () async {};
     final app = AppState.createForTest();
-    app.sandboxInstalled = true;
     AgentService.I.debugPauseScheduleTimerForTest(true);
     await GitHubService.I.initialize(client: MockClient((request) async =>
         request.url.path == '/user'

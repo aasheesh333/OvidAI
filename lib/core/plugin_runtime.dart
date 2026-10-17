@@ -48,9 +48,292 @@ import 'plugin_registry.dart';
 import 'plugin_source_resolver.dart';
 import 'hook_service.dart';
 import 'mcp_service.dart';
-import 'startup_coordinator.dart';
 import 'state.dart';
 import 'diag.dart';
+import 'secret_scrub.dart';
+
+// ── Startup readiness status models ────────────────────────────────────
+// Moved here from the deleted startup_coordinator.dart (P8 Task 13): the
+// plugin/MCP runtime (dies Task 17) is the only surviving consumer of the
+// readiness status shape. The coordinator/task orchestration is gone.
+enum StartupItemKind {
+  localState,
+  plugin,
+  skillMount,
+  sessionHook,
+  marketplace,
+  mcp,
+  firebase,
+  sandbox,
+}
+
+enum StartupItemState {
+  queued,
+  running,
+  ready,
+  needsSetup,
+  migrationRequired,
+  unsupported,
+  degraded,
+  failed,
+  disabled,
+  skipped,
+}
+
+extension StartupItemStateTerminal on StartupItemState {
+  bool get isTerminal =>
+      this != StartupItemState.queued && this != StartupItemState.running;
+}
+
+class StartupItemStatus {
+  StartupItemStatus({
+    required this.id,
+    required this.kind,
+    required this.label,
+    required this.state,
+    this.reason,
+    DateTime? updatedAt,
+    this.attempt = 0,
+    this.ownerId,
+    this.canDisable = false,
+    this.timedOut = false,
+  }) : updatedAt = updatedAt ?? DateTime.now();
+
+  factory StartupItemStatus.queued(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    int attempt = 0,
+    String? ownerId,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.queued,
+    attempt: attempt,
+    ownerId: ownerId,
+  );
+
+  factory StartupItemStatus.running(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    required int attempt,
+    String? ownerId,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.running,
+    attempt: attempt,
+    ownerId: ownerId,
+  );
+
+  factory StartupItemStatus.ready(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    int attempt = 1,
+    String? ownerId,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.ready,
+    attempt: attempt,
+    ownerId: ownerId,
+  );
+
+  factory StartupItemStatus.needsSetup(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    String? reason,
+    int attempt = 1,
+    String? ownerId,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.needsSetup,
+    reason: reason,
+    attempt: attempt,
+    ownerId: ownerId,
+  );
+
+  factory StartupItemStatus.migrationRequired(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    String? reason,
+    int attempt = 1,
+    String? ownerId,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.migrationRequired,
+    reason: reason,
+    attempt: attempt,
+    ownerId: ownerId,
+  );
+
+  factory StartupItemStatus.unsupported(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    String? reason,
+    int attempt = 1,
+    String? ownerId,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.unsupported,
+    reason: reason,
+    attempt: attempt,
+    ownerId: ownerId,
+  );
+
+  factory StartupItemStatus.degraded(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    String? reason,
+    int attempt = 1,
+    String? ownerId,
+    bool canDisable = false,
+    bool timedOut = false,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.degraded,
+    reason: reason,
+    attempt: attempt,
+    ownerId: ownerId,
+    canDisable: canDisable,
+    timedOut: timedOut,
+  );
+
+  factory StartupItemStatus.failed(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    String? reason,
+    int attempt = 1,
+    String? ownerId,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.failed,
+    reason: reason,
+    attempt: attempt,
+    ownerId: ownerId,
+  );
+
+  factory StartupItemStatus.disabled(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    String? reason,
+    int attempt = 1,
+    String? ownerId,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.disabled,
+    reason: reason,
+    attempt: attempt,
+    ownerId: ownerId,
+  );
+
+  factory StartupItemStatus.skipped(
+    String id,
+    StartupItemKind kind,
+    String label, {
+    String? reason,
+    int attempt = 0,
+    String? ownerId,
+    bool canDisable = false,
+  }) => StartupItemStatus(
+    id: id,
+    kind: kind,
+    label: label,
+    state: StartupItemState.skipped,
+    reason: reason,
+    attempt: attempt,
+    ownerId: ownerId,
+    canDisable: canDisable,
+  );
+
+  final String id;
+  final StartupItemKind kind;
+  final String label;
+  final StartupItemState state;
+  final String? reason;
+  final DateTime updatedAt;
+  final int attempt;
+
+  /// Canonical plugin/MCP id this item owns, when it is a per-runtime item.
+  /// Supplied by [StartupOwnedTask] implementations so the startup dashboard
+  /// can deep-link `Open Plugins` by canonical id instead of display name.
+  final String? ownerId;
+
+  /// True only when the backing [StartupTask] exposes a real `onDisable`
+  /// callback. The dashboard uses this instead of the item kind so aggregate
+  /// rows (for example a boot-level `plugin.activate`) never offer Disable.
+  final bool canDisable;
+
+  /// True when this terminal status came from the coordinator's own
+  /// per-item deadline rather than from the task's verdict. The work was
+  /// ABANDONED, not proven broken: it may still be running and may still
+  /// succeed (see [_reconcileLateResult]). Producers must not treat it as a
+  /// durable failure — notably it must not arm a failure cooldown memo.
+  final bool timedOut;
+}
+
+
+
+/// Conservative secret-safe scrubber for startup reasons and status details.
+/// Shared by producers that write service status directly (e.g. the MCP
+/// startup connect). Moved from the deleted startup coordinator in P8 Task 13.
+String redactStartupError(String value) {
+  var scrubbed = scrubSecretsInText(value)
+      .replaceAllMapped(
+        RegExp(
+          r'(["\x27]?(?:authorization|api[_-]?key|token|password|secret)["\x27]?\s*:\s*["\x27])[^"\x27]*',
+          caseSensitive: false,
+        ),
+        (match) => '${match.group(1)}[REDACTED]',
+      )
+      .replaceAllMapped(
+        RegExp(
+          r'(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+',
+          caseSensitive: false,
+        ),
+        (match) => '${match.group(1)}[REDACTED]',
+      )
+      .replaceAllMapped(
+        RegExp(
+          r'((?:api[_-]?key|token|password|secret)\s*[:=]\s*)[^\s,;]+',
+          caseSensitive: false,
+        ),
+        (match) => '${match.group(1)}[REDACTED]',
+      )
+      .replaceAll(
+        RegExp(r'bearer\s+[a-z0-9._~+/=-]+', caseSensitive: false),
+        'Bearer [REDACTED]',
+      )
+      .replaceAll(RegExp(r'\bsk-[A-Za-z0-9_-]+\b'), '[REDACTED]');
+  const maxLength = 500;
+  if (scrubbed.length > maxLength) {
+    scrubbed = '${scrubbed.substring(0, maxLength - 3)}...';
+  }
+  return scrubbed;
+}
 
 /// Preferences key for the persisted install map (plugin id → entry
 /// JSON). Deliberately separate from `ovid_plugin_state_v1` (catalog

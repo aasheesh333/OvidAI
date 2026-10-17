@@ -47,12 +47,6 @@ void main() {
   });
 
   group('inbuilt plugin install routing', () {
-    test('detail install routes inbuilt rows to a direct install', () {
-      final src = File('lib/ui/plugins_screen.dart').readAsStringSync();
-      expect(src.contains('installBuiltinPlugin'), isTrue);
-      expect(src.contains('_isInbuiltPlugin'), isTrue);
-    });
-
     test('installBuiltinPlugin marks a row installed and enabled', () {
       final src = File('lib/core/state.dart').readAsStringSync();
       final idx = src.indexOf('Future<void> installBuiltinPlugin');

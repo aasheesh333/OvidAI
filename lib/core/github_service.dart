@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'github_http_error.dart';
 import 'repo_cache.dart';
-import 'sandbox_service.dart';
 import 'secure_store.dart';
 
 class GitHubDeviceAuthorization {
@@ -105,12 +104,9 @@ class GitHubService extends ChangeNotifier {
   String? get name => _user?['name'] as String?;
   String? get token => _token;
 
-  /// Single write point for the auth token: keeps the sandbox's git
-  /// credential channel in lockstep. The token reaches spawned git only
-  /// through `SandboxService._sandboxEnv`, and is never persisted there.
+  /// Single write point for the auth token.
   void _setToken(String? value) {
     _token = value;
-    SandboxService.I.gitCredentialToken = value;
   }
 
   /// Sign out — clear token + profile, disconnect repo cache.

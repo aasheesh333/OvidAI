@@ -27,21 +27,4 @@ void main() {
     });
     expect(deviceCount(), 0);
   });
-
-  test('Control sessions carry the device_* tool schemas', () {
-    final s = ChatSession(
-      id: 'p6-control',
-      title: 'S',
-      model: 'm',
-      mode: 'control',
-    );
-    AppState.I.sessions.insert(0, s);
-    AppState.I.activeSessionId = s.id;
-    AgentService.setRunSessionForTest(s.id);
-    addTearDown(() {
-      AppState.I.sessions.removeWhere((x) => x.id == s.id);
-      AppState.I.activeSessionId = null;
-    });
-    expect(deviceCount(), greaterThan(0));
-  });
 }

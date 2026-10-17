@@ -11,7 +11,6 @@ import 'package:ovid_ai/core/composer_drafts.dart';
 import 'package:ovid_ai/core/mcp_service.dart';
 import 'package:ovid_ai/core/memory_store.dart';
 import 'package:ovid_ai/core/presets.dart';
-import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/secure_store.dart';
 import 'package:ovid_ai/core/settings_actions.dart';
 import 'package:ovid_ai/core/settings_backup_service.dart';
@@ -89,9 +88,15 @@ void main() {
     // Await that real path before snapshotting existing files: rollback owns
     // only the new import directories, not this already-created workspace.
     final provisional = app.activeSession!.sandboxId!;
-    final workspace = await SandboxService.I.workDirFor(provisional);
+    final workspace = localWorkspaceDirFor(provisional);
     existingWorkspaceFile = File('${workspace.path}/keep.txt');
     await existingWorkspaceFile.writeAsString('pre-existing workspace data');
+    // P8 Task 13: the local workspace now lives in app-cache scratch space,
+    // so this test root may not have a workspaces/ directory at all.
+    Directory('${root.path}/workspaces').createSync(recursive: true);
+    // The constructor warms its provisional workspace asynchronously; let it
+    // land before snapshotting so rollback comparisons see a stable set.
+    await Future<void>.delayed(const Duration(milliseconds: 20));
     originalWorkspacePaths = Directory('${root.path}/workspaces')
         .listSync().map((entry) => entry.path).toSet();
     await app.loadSessions();
@@ -108,7 +113,15 @@ void main() {
         .setMockMethodCallHandler(
           const MethodChannel('plugins.flutter.io/path_provider'), null,
         );
-    await root.delete(recursive: true);
+    // A late workspace warm may still be creating a directory; retry once.
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await root.delete(recursive: true);
+        break;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+    }
   });
 
   Future<List<int>> archive({bool attachment = false}) async {
@@ -144,7 +157,7 @@ void main() {
     expect(imported.messages.single.content, 'Imported transcript');
     final path = imported.messages.single.attachments.single.path!;
     expect(await File(path).readAsString(), 'portable');
-    expect(path, contains('/workspaces/'));
+    expect(path, contains('workspaces'));
     expect(path, contains('/ws_${imported.sandboxId}/'));
     expect(root.listSync().whereType<Directory>().where(
       (d) => d.path.split('/').last.startsWith('ovid-restore-')), isEmpty);
@@ -532,8 +545,7 @@ void main() {
     expect(PresetRegistry.customPresets, isEmpty);
     expect(app.globalPermissionGrants, isEmpty);
     await prefs.reload();
-    expect(prefs.getKeys(), {'ovid_sandbox_skipped'});
-    expect(prefs.getBool('ovid_sandbox_skipped'), isTrue);
+    expect(prefs.getKeys(), isEmpty);
     expect(skill.existsSync(), isFalse);
     expect(export.existsSync(), isFalse);
     expect(backupDir.existsSync(), isFalse);

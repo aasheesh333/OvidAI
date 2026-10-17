@@ -8,7 +8,6 @@ import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/global_repo_registry.dart';
 import 'package:ovid_ai/core/native_share.dart';
-import 'package:ovid_ai/core/sandbox_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/state.dart';
 
@@ -213,7 +212,7 @@ void main() {
       } else if (folderState == 'missing') {
         session.workspaceFolder = '${root.path}/missing';
       }
-      final cwd = await SandboxService.I.workDirFor(session.id);
+      final cwd = localWorkspaceDirFor(session.id);
       expect(cwd.path, isNot(stale.path));
       if (folderState == 'selected') {
         expect(cwd.path, '${root.path}/work');

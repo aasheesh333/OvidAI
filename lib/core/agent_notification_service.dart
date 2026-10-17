@@ -284,9 +284,6 @@ class AgentNotificationService {
   /// app startup (main.dart).
   Future<void> init() async {
     _channel.setMethodCallHandler((call) async {
-      if (await AgentService.I.handleDeviceOverlayMethodCall(call)) {
-        return null;
-      }
       if (call.method == 'onAgentStop') {
         await stopBackground();
       } else if (call.method == 'onAgentExit') {

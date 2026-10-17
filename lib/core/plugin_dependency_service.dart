@@ -30,7 +30,6 @@ import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'plugin_manifest.dart';
-import 'sandbox_service.dart';
 import 'diag.dart';
 
 /// Outcome of one dependency (and of the install as a whole).
@@ -110,9 +109,8 @@ class PluginDependencyResult {
   });
 }
 
-/// The injected runner seam: same shape as
-/// `SandboxService.I.execChecked` so tests can record command shape
-/// without executing anything.
+/// The injected runner seam so tests can record command shape without
+/// executing anything.
 typedef PluginDependencyRunner = Future<(int, String)> Function(
   List<String> args, {
   String? cwd,
@@ -124,8 +122,8 @@ class PluginDependencyService {
     this.runtimeRootOverride,
     PluginDependencyRunner? runner,
     Future<bool> Function(String kind)? ensureRuntime,
-  }) : runner = runner ?? _sandboxRunner,
-       ensureRuntime = ensureRuntime ?? SandboxService.I.ensureRuntime;
+  }) : runner = runner ?? _hostRunner,
+       ensureRuntime = ensureRuntime ?? ((_) async => false);
 
   /// Base directory that will contain `plugin-runtime/`. Defaults to
   /// the app documents directory (system temp when unavailable — unit
@@ -133,7 +131,7 @@ class PluginDependencyService {
   /// staging-root seam.
   final Directory? runtimeRootOverride;
 
-  /// Exec seam — defaults to the sandbox's exit-honest `execChecked`.
+  /// Exec seam — defaults to an exit-honest host process run.
   final PluginDependencyRunner runner;
 
   /// Runtime-ensure seam — defaults to the sandbox's lazy runtime
@@ -153,11 +151,22 @@ class PluginDependencyService {
   /// Per-line cap (chatty npm/pip output must not blow memory).
   static const int kMaxLogLineLength = 2000;
 
-  static Future<(int, String)> _sandboxRunner(
+  static Future<(int, String)> _hostRunner(
     List<String> args, {
     String? cwd,
     Map<String, String>? env,
-  }) => SandboxService.I.execChecked(args, cwd: cwd, env: env);
+  }) async {
+    // P8 Task 13: the native sandbox is gone. Host execution keeps the
+    // dependency-install seam testable until Task 17 deletes this service.
+    final result = await Process.run(
+      args.first,
+      args.skip(1).toList(),
+      workingDirectory: cwd,
+      environment: env,
+    );
+    final out = '${result.stdout}${result.stderr}';
+    return (result.exitCode, out);
+  }
 
   Future<Directory> _root() async {
     if (runtimeRootOverride != null) return runtimeRootOverride!;
@@ -204,20 +213,7 @@ class PluginDependencyService {
     PluginPermissionGrant? grant, {
     void Function(String line)? onProgress,
   }) async {
-    // Tag every process this install spawns under one run key so a
-    // session Stop cascades into it (SandboxService.killRunProcesses).
-    // SAVE the previously-active key: the sandbox keeps a single
-    // global slot, so clearing to null in `finally` would clobber an
-    // OUTER run's tag (its later processes would go untagged) —
-    // restore instead.
-    final runKey = 'plugin-deps-${manifest.id}@${manifest.version}';
-    final previousRunKey = SandboxService.I.activeRunKey;
-    SandboxService.I.tagRun(runKey);
-    try {
-      return await _install(manifest, grant, onProgress: onProgress);
-    } finally {
-      SandboxService.I.tagRun(previousRunKey);
-    }
+    return _install(manifest, grant, onProgress: onProgress);
   }
 
   Future<PluginDependencyResult> _install(
@@ -253,7 +249,7 @@ class PluginDependencyService {
     // deliberately NEVER called from this path.
     final availability = await probe(cwd: rt.path);
 
-    final env = SandboxService.pluginRuntimeEnv(rt.path);
+    final env = <String, String>{};
     final entries = <PluginDependencyResultEntry>[];
     var anyFailed = false;
     var requiredFailed = false;
@@ -522,7 +518,7 @@ class PluginDependencyService {
           '--json',
         ],
         cwd: rt.path,
-        env: SandboxService.pluginRuntimeEnv(rt.path),
+        env: const <String, String>{},
       );
       if (exit != 0) return const {};
       final decoded = jsonDecode(out);
@@ -555,7 +551,7 @@ class PluginDependencyService {
           out.contains('no index') ||
           out.contains('download failed')) {
         return 'package "${dep.name}" is not available for device ABI '
-            '${SandboxService.I.deviceArch} through the Ovid sandbox '
+            'this device through the Ovid package manager '
             'package manager ($tail)';
       }
     }
@@ -572,7 +568,7 @@ class PluginDependencyService {
           l.contains('invalid elf header') ||
           l.contains('cannot open shared object')) {
         return 'package "${dep.name}" needs a native addon that cannot run '
-            'on Android/${SandboxService.I.deviceArch} (bionic, not glibc). '
+            'on Android (bionic, not glibc). '
             'This plugin is desktop-only for that dependency ($tail)';
       }
     }

@@ -621,7 +621,6 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.textContaining("isn't available"), findsOneWidget);
-    expect(find.widgetWithText(SnackBarAction, 'Plugins'), findsOneWidget);
     expect(draft(tester), '/zz-unavailable-skill');
   });
 

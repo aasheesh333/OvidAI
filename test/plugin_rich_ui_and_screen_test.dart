@@ -26,19 +26,6 @@ void main() {
     AppState.resetTestInstance();
   });
 
-  test('Screen Awareness capability is registered and handles read_screen', () async {
-    expect(NativePluginRegistry.I.has('Screen Awareness'), isTrue);
-    final cap = NativePluginRegistry.I.capabilityFor('Screen Awareness')!;
-    expect(cap.tools.map((t) => t.name), contains('read_screen'));
-
-    // Calling tool without live accessibility service returns honest message
-    final result = await cap.callTool('read_screen', {'full': false});
-    expect(
-      result.contains('screen') || result.contains('Accessibility'),
-      isTrue,
-    );
-  });
-
   testWidgets('_ModelCompareView renders model choices and displays selected response', (tester) async {
     const content = '''
 ## GPT-4o

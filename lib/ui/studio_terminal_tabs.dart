@@ -3,7 +3,6 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import '../core/sandbox_service.dart';
 import '../core/state.dart';
 import '../core/studio_terminal.dart';
 import '../core/theme.dart';
@@ -11,9 +10,8 @@ import 'studio_errors.dart';
 import 'studio_layout.dart';
 import 'widgets/aether_primitives.dart';
 
-/// Test seam: replaces the sandbox spawner for the Studio terminal so host
-/// widget tests can drive a real host shell without a native sandbox.
-/// Production is null (commands run through [SandboxService.spawn]).
+/// Test seam: replaces the Studio terminal spawner so host widget tests can
+/// drive a real host shell. Production spawns the platform shell directly.
 ///
 /// Re-exported from `studio_screen.dart` so existing tests keep importing it
 /// from there.
@@ -316,17 +314,22 @@ class _TerminalPaneState extends State<_TerminalPane> {
     // the sandbox is unavailable.
     final override = studioPtySpawnerOverrideForTest;
     try {
+      final workDir = await AppState.I.workspaceDirForSession(sessionId);
+      final platformShell = Platform.isAndroid ? '/system/bin/sh' : 'bash';
       final spawner =
           override ??
           () async {
-            final workDir = await SandboxService.I.workDirFor(sessionId);
-            return SandboxService.I.spawn(['bash'], hostWorkDir: workDir);
+            return Process.start(
+              platformShell,
+              const [],
+              workingDirectory: workDir.path,
+            );
           };
       if (await shell.runPersistent(
         c,
         sid: sessionId,
         spawner: spawner,
-        workspace: SandboxService.I.workDirForSync(sessionId).path,
+        workspace: workDir.path,
       )) {
         return;
       }
@@ -335,12 +338,17 @@ class _TerminalPaneState extends State<_TerminalPane> {
     }
 
     try {
-      final workDir = await SandboxService.I.workDirFor(sessionId);
-      final out = await SandboxService.I.exec(
-        ['bash', '-c', c],
-        hostWorkDir: workDir,
-        onLine: shell.addOutput,
+      final workDir = await AppState.I.workspaceDirForSession(sessionId);
+      final platformShell = Platform.isAndroid ? '/system/bin/sh' : 'bash';
+      final result = await Process.run(
+        platformShell,
+        ['-c', c],
+        workingDirectory: workDir.path,
       );
+      final out = '${result.stdout}${result.stderr}';
+      for (final line in out.split('\n')) {
+        if (line.isNotEmpty) shell.addOutput(line);
+      }
       if (out.trim().isEmpty) shell.addOutput('(no output)');
     } catch (e) {
       // Terminal output is a developer surface, but a raw Dart exception is

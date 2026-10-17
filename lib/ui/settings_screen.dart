@@ -23,14 +23,12 @@ import 'settings_backup_screen.dart';
 import 'settings_health_screen.dart';
 import '../core/theme.dart';
 import 'auth_screen.dart';
-import 'background_reliability_card.dart';
 import 'profile_avatar.dart';
 import 'share_actions.dart';
 import 'billing_screen.dart';
 import 'memory_screen.dart';
 import 'permissions_screen.dart';
 import 'providers_screen.dart';
-import 'plugins_screen.dart';
 import 'usage_screen.dart';
 import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
@@ -260,14 +258,6 @@ class SettingsScreen extends StatelessWidget {
               children: [
                 _navTile(
                   context,
-                  Icons.extension_outlined,
-                  'Plugins',
-                  'Agents, MCP servers, tools',
-                  const PluginsScreen(),
-                ),
-                _hairline(),
-                _navTile(
-                  context,
                   Icons.auto_fix_high_outlined,
                   'Skills',
                   'Upload .md skill files the agent uses in chat',
@@ -286,13 +276,7 @@ class SettingsScreen extends StatelessWidget {
           const SizedBox(height: 10),
           AetherCard(
             padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                const _NotificationsTile(),
-                _hairline(),
-                const BackgroundReliabilityCard(),
-              ],
-            ),
+            child: const _NotificationsTile(),
           ),
 
           // ── Advanced ──────────────────────────────────────────────────
@@ -300,7 +284,7 @@ class SettingsScreen extends StatelessWidget {
           const AetherSectionTitle(
             eyebrow: 'Advanced',
             subtitle:
-                'Device health, browser viewport and device integrity.',
+                'Cloud health, browser viewport and device integrity.',
           ),
           const SizedBox(height: 10),
           AetherCard(
@@ -311,7 +295,7 @@ class SettingsScreen extends StatelessWidget {
                   context,
                   Icons.monitor_heart_outlined,
                   'Device health',
-                  'Per-runtime probes · configuration and repair availability',
+                  'Ovid Cloud service status',
                   const SettingsHealthScreen(),
                   actionLabel: 'Health',
                 ),

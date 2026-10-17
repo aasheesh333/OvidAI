@@ -65,11 +65,12 @@ class Distribution {
   /// BYOK escrow is dark until the P9 escrow endpoints.
   static bool get cloudByok => false;
 
-  /// Accessibility-driven Control mode (sideload builds only).
-  static bool get controlModeAvailable => !play;
+  /// Accessibility-driven Control mode. Removed entirely in P8 Task 13
+  /// (spec D5): false for every channel, not just Play.
+  static bool get controlModeAvailable => false;
 
-  /// Termux-style on-device Linux sandbox (sideload builds only).
-  static bool get onDeviceSandboxAvailable => !play;
+  /// Termux-style on-device Linux sandbox. Removed entirely in P8 Task 13.
+  static bool get onDeviceSandboxAvailable => false;
 
   /// Idle "Ready & Listening" foreground presence after a run ends.
   static bool get idleKeepAliveAvailable => !play;

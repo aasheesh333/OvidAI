@@ -29,12 +29,10 @@ import 'usage_attempt_recorder.dart';
 import 'grant_store.dart';
 import 'global_repo_registry.dart';
 import 'distribution.dart';
-import 'sandbox_service.dart';
 import 'webview_pool.dart';
 import 'github_service.dart';
 import 'repo_cache.dart';
 import 'studio_drafts.dart';
-import 'workspace_files.dart';
 import 'mcp_service.dart';
 import 'mcp_catalog_tools.dart';
 import 'session_ledger.dart';
@@ -63,7 +61,6 @@ import 'commands.dart';
 import 'compaction/compaction_checkpoint.dart';
 import 'compaction/compaction_ledger.dart';
 import 'compaction/compaction_policy.dart';
-import 'device_control_service.dart';
 import 'model_limits.dart';
 import 'prompt_cache.dart';
 import 'diag.dart';
@@ -305,8 +302,9 @@ extension AgentModeX on AgentMode {
 /// pick: the read-only policy is selected through the `plan` preset.
 List<AgentMode> modeOptionsForPicker() => AgentMode.values
     .where((m) => m != AgentMode.safe)
-    // Play builds ship without the AccessibilityService (Distribution).
-    .where((m) => m != AgentMode.control || Distribution.controlModeAvailable)
+    // Control mode was removed entirely (P8 Task 13 / spec D5); the enum
+    // value survives until Task 19's type move.
+    .where((m) => m != AgentMode.control)
     .toList(growable: false);
 
 /// Live event jisse screens subscribe hote hain.
@@ -1108,8 +1106,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     };
     // Composer commands + skills catalog.
     CommandService.I.registerBuiltins();
-    // Warm the sync workspace root for the @file picker.
-    unawaited(SandboxService.I.warmSyncRoot());
     // Plugin/MCP parity wiring (once at init):
     // 1. Prompt-type hooks are evaluated through the agent's own model —
     //    a quiet, non-streaming completion (never touches the transcript).
@@ -1208,17 +1204,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   }
 
   void _writeMode(ChatSession s, AgentMode m) {
-    final wasControl = s.mode == AgentMode.control.name;
     s.mode = m.name;
-    if (wasControl && m != AgentMode.control) {
-      stopRequested(sessionId: s.id);
-      // Control-mode exit must never leave the floating overlay behind.
-      // Hide is unguarded by design: it removes the window even when no
-      // session is active, so no invisible touch target survives.
-      unawaited(hideDeviceOverlay());
-      unawaited(setOverlayLive(false));
-      unawaited(setOverlayState(overlayStateIdle));
-    }
     // An explicit mode set means the plan preset no longer owns the
     // session's read-only mode: clear the remembered pre-plan mode so a
     // later plan exit cannot override the user's choice (e.g. `/permission
@@ -1277,9 +1263,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
 
   /// Tools that execute a shell command, and therefore need the sandbox's
   /// target jail scoped to what this session may actually reach.
-  static bool _isShellLikeTool(String name) =>
-      name == 'run_shell' || name == 'run_code' || name == 'job_start';
-
   /// Roots the sandbox may reach for this dispatch: the session workspace plus
   /// every path grant that applies in this session and mode — intersected with
   /// the plan-mode jail while planning, so the target jail and the plan gate
@@ -1290,8 +1273,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// hard-denied at the sandbox layer after the user had said yes.
   Future<List<String>> _sandboxAllowedRoots() async {
     if (mode == AgentMode.drive && !planMode) {
-      final policyRoots = SandboxService.I.policy.allowedRoots;
-      return policyRoots.isEmpty ? ['/'] : List.of(policyRoots);
+      return ['/'];
     }
     final roots = <String>[];
     try {
@@ -1330,7 +1312,7 @@ class AgentService extends ChangeNotifier implements AgentSurface {
         if (jail.isNotEmpty) {
           final narrowed = <String>{jail};
           narrowed.addAll(
-            roots.where((r) => SandboxService.isPathContained(jail, r)),
+            roots.where((r) => containedPath(Directory(jail), r) != null),
           );
           // The jail root is always reachable: planning is DEFINED as working
           // inside it, and an empty intersection just means the session
@@ -1433,20 +1415,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   set pendingApproval(ApprovalRequest? v) {
     _runResolved.pendingApproval = v;
     if (v != null && !v.completer.isCompleted) _notifyNeedsInput(v);
-    if (!_runResolved.controlRun) return;
-    // The corner glow must read "waiting on you" the moment a card
-    // is raised, and go back to running the moment it is answered. Hooked here
-    // rather than at the three `pendingApproval = req` sites so a new prompt
-    // path cannot forget it — an unanswered approval with a green glow looks
-    // exactly like a run that is still making progress.
-    final next = v != null
-        ? overlayStatePermission
-        : (_runResolved.activeRunId != null
-              ? overlayStateRunning
-              : overlayStateIdle);
-    if (!_runChainStale && next != _overlayState) {
-      unawaited(setOverlayState(next));
-    }
   }
 
   /// Approvals waiting in sessions OTHER than the foreground one.
@@ -1791,16 +1759,8 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     }
     final r = _runs[sessionId];
     if (r == null) return false;
-    final isControl =
-        r.controlRun || AppState.I.sessionById(sessionId)?.mode == 'control';
-    if (isControl) {
-      unawaited(VoiceInputService.I.cancel());
-      _queueClear(r);
-      DeviceControlService.I.cancelDeviceActions();
-      unawaited(hideDeviceOverlay());
-      unawaited(setOverlayLive(false));
-      unawaited(setOverlayState(overlayStateIdle));
-    }
+    // Control mode was removed in P8 Task 13; no overlay/device-action
+    // teardown remains.
     // Only a RUNNING session promotes its queue on Stop; an idle session
     // with queued text must keep it (nothing to interrupt).
     final wasActive = r.activeRunId != null;
@@ -1891,13 +1851,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   @override
   void hardStopAll() {
     unawaited(VoiceInputService.I.cancel());
-    // Invalidate every in-flight device_* call first so no stale native
-    // result lands after the stop.
-    DeviceControlService.I.cancelDeviceActions();
-    // The floating overlay must come down with the runs.
-    unawaited(hideDeviceOverlay());
-    unawaited(setOverlayLive(false));
-    unawaited(setOverlayState(overlayStateIdle));
     // Mark every live subagent interrupted so parents settle them as
     // stopped instead of waiting for reports that will never come.
     for (final sub in _subagents.values) {
@@ -1935,13 +1888,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// process. Instant, regardless of which session the UI is on.
   void cancelAllRuns() {
     unawaited(VoiceInputService.I.cancel());
-    // Global panic Stop invalidates every in-flight device_* call first —
-    // queued work is cleared below, so no new device work can start stale.
-    DeviceControlService.I.cancelDeviceActions();
-    // Panic-stop path: the floating overlay must come down with the runs.
-    unawaited(hideDeviceOverlay());
-    unawaited(setOverlayLive(false));
-    unawaited(setOverlayState(overlayStateIdle));
     // Cancellation releases each run's finally block. Clear continuations
     // first so no bucket can restart queued work during a global panic.
     for (final r in _runs.values) {
@@ -1949,12 +1895,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
     }
     for (final r in _runs.values.toList()) {
       _cancelBucket(r);
-    }
-    // Buckets outside the map (rare) + processes no run claims.
-    try {
-      SandboxService.I.killAllProcesses();
-    } catch (e) {
-      Diag.swallow('agent_service', e);
     }
     // PR46: any live PTY shells must die too — they're long-lived by
     // design, which makes them a panic-stop leak without this.
@@ -1964,49 +1904,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
 
   /// PR32: is ANY run active across all sessions (lifecycle keep-alive)?
   bool get anyRunActive => _runs.values.any((r) => r.activeRunId != null);
-
-  // ── Floating device overlay (spec §5.1, Task 4) ─────────────────────
-  // A small draggable textbox living outside Ovid while Control mode drives
-  // the device. Channel contract on ovid/native: Dart->native
-  // deviceOverlayShow/deviceOverlayHide; native->Dart
-  // deviceOverlayText(text) on send, deviceOverlayStop() on X.
-  // Send is EXACTLY the composer send (idle starts a run, busy joins the
-  // per-session queue); X uses the persistent global background-stop contract.
-  static const String deviceOverlayShowMethod = 'deviceOverlayShow';
-  static const String deviceOverlayHideMethod = 'deviceOverlayHide';
-  static const String deviceOverlayTextMethod = 'deviceOverlayText';
-  static const String deviceOverlayStopMethod = 'deviceOverlayStop';
-  static const String deviceOverlayMicMethod = 'deviceOverlayMic';
-  static const String deviceOverlaySetTextMethod = 'deviceOverlaySetText';
-  static const String deviceOverlayMicListeningMethod =
-      'deviceOverlayMicListening';
-  static const String deviceOverlaySetPromptMethod = 'deviceOverlaySetPrompt';
-  static const String deviceOverlayLiveMethod = 'deviceOverlayLive';
-  static const String deviceOverlayStateMethod = 'deviceOverlayState';
-
-  /// Run-state colours for the four screen-corner glows.
-  static const overlayStateIdle = 'idle';
-  static const overlayStateRunning = 'running';
-  static const overlayStatePermission = 'permission';
-  static const overlayStateError = 'error';
-
-  static const _overlayNativeChannel = MethodChannel('ovid/native');
-  static MethodChannel? _overlayChannelOverrideForTest;
-
-  MethodChannel get _overlayChannel =>
-      _overlayChannelOverrideForTest ?? _overlayNativeChannel;
-
-  @visibleForTesting
-  static void setOverlayChannelForTest(MethodChannel? channel) {
-    _overlayChannelOverrideForTest = channel;
-  }
-
-  /// Test seam: replaces the run start for idle overlay sends (no provider
-  /// in unit tests). Null in production, where the real runTask runs.
-  /// Signature: (text, target session).
-  @visibleForTesting
-  Future<void> Function(String text, ChatSession session)?
-  overlayRunStarterForTest;
 
   /// Test seam: replaces the actual run start for a queued continuation.
   /// Signature: (sessionId, text). Null in production.
@@ -2028,290 +1925,20 @@ class AgentService extends ChangeNotifier implements AgentSurface {
   /// double-promote when Stop and the run's finally both try to schedule.
   final Set<String> _continuationScheduled = {};
 
-  /// Show the floating overlay. Guarded: with no active Control session the
-  /// overlay is never shown, and it is only visible while the app is
-  /// backgrounded (the overlay exists to steer a minimized app).
-  /// Re-applies the current live state so a re-show mid-run restores the pop.
-  Future<void> showDeviceOverlay() async {
-    final s = _controlOverlaySession ?? AppState.I.activeSession;
-    if (s == null || s.mode != AgentMode.control.name) return;
-    if (_appForegrounded) return;
-    try {
-      await _overlayChannel.invokeMethod(deviceOverlayShowMethod);
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-    await setOverlayLive(_overlayLive);
-    await setOverlayState(_overlayState);
-  }
-
-  /// Hide the floating overlay. Unguarded by design: hiding must always
-  /// remove the window so no invisible touch target survives.
-  Future<void> hideDeviceOverlay() async {
-    try {
-      await _overlayChannel.invokeMethod(deviceOverlayHideMethod);
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-  }
-
-  bool _overlayLive = false;
-
-  /// The shell reveals the chat route only for a naturally completed task.
-  void Function(String sessionId)? onControlTaskCompleted;
-
-  /// The device is shared; steering follows its live Control owner, never a
-  /// foreground chat selected while that task is running.
-  ChatSession? get _controlOverlaySession {
-    for (final entry in _runs.entries) {
-      if (entry.value.controlRun && entry.value.activeRunId != null) {
-        final session = AppState.I.sessionById(entry.key);
-        if (session != null) return session;
-      }
-    }
-    return null;
-  }
-
-  @visibleForTesting
-  bool get overlayLiveForTest => _overlayLive;
-
   /// Per-session context produced by a `user_prompt_submit` hook for the
-  /// CURRENT prompt (Claude Code additionalContext parity). Overwritten at each
+  /// CURRENT prompt ([CC] additionalContext parity). Overwritten at each
   /// run entry, injected ahead of every turn's request while the run lasts.
   final Map<String, String> _userPromptContext = {};
-
-  String _overlayState = overlayStateIdle;
-
-  @visibleForTesting
-  String get overlayStateForTest => _overlayState;
-
-  /// Push Control status to four non-touchable screen-corner glows: green =
-  /// working, yellow = awaiting approval, red = error, idle = removed.
-  /// The floating circle remains plain.
-  ///
-  /// Recorded even with no window, so a re-show mid-run restores the colour.
-  Future<void> setOverlayState(String state) async {
-    _overlayState = state;
-    try {
-      await _overlayChannel.invokeMethod(deviceOverlayStateMethod, {
-        'state': state,
-      });
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-  }
-
-  /// Mark the overlay live (run active) or idle. The native side shows a
-  /// subtle always-on pulse while live. Safe to call with no window: native
-  /// no-ops, the flag is still recorded so the next show restores it.
-  Future<void> setOverlayLive(bool live) async {
-    _overlayLive = live;
-    try {
-      await _overlayChannel.invokeMethod(deviceOverlayLiveMethod, {
-        'live': live,
-      });
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-  }
 
   bool _appForegrounded = true;
 
   @visibleForTesting
   bool get appForegroundedForTest => _appForegrounded;
 
-  /// Track app foreground state. The control overlay appears only when the
-  /// app is backgrounded and hides when it returns to the foreground.
+  /// Track app foreground state. Control mode's overlay was removed in P8
+  /// Task 13; the flag survives as lifecycle telemetry.
   Future<void> setAppForegrounded(bool foreground) async {
     _appForegrounded = foreground;
-    if (foreground) {
-      await hideDeviceOverlay();
-      return;
-    }
-    final s = _controlOverlaySession ?? AppState.I.activeSession;
-    if (s != null && s.mode == AgentMode.control.name) {
-      await showDeviceOverlay();
-    }
-  }
-
-  /// Overlay send: the composer send on the active session. A busy session
-  /// queues the text into its run; an idle session appends it and starts a
-  /// run. Blank text is ignored. If the AI is waiting on a question, the
-  /// overlay text answers it instead (so control mode stays usable while the
-  /// app is minimized).
-  Future<void> handleDeviceOverlayText(String text) async {
-    if (text.trim().isEmpty) return;
-    final s = _controlOverlaySession ?? AppState.I.activeSession;
-    if (s == null) return;
-    final pending = _runFor(s.id).pendingApproval;
-    if (pending != null &&
-        pending.questions != null &&
-        pending.questions!.isNotEmpty) {
-      for (final q in pending.questions!) {
-        pending.answers[q.id] = text.trim();
-      }
-      _runFor(s.id).pendingApproval = null;
-      if (!pending.completer.isCompleted) pending.completer.complete(true);
-      unawaited(setOverlayState(overlayStateRunning));
-      notifyListeners();
-      return;
-    }
-    if (busyFor(s.id)) {
-      enqueueMessage(text, sessionId: s.id);
-      return;
-    }
-    AppState.I.sendMessage(text);
-    final starter = overlayRunStarterForTest;
-    if (starter != null) {
-      await starter(text, s);
-    } else {
-      unawaited(runTask(text, sessionId: s.id, expandRefsFor: s));
-    }
-  }
-
-  /// Overlay X persists global background stop, including while idle, and
-  /// cancels all runs, queued continuations, schedules and device actions.
-  /// Returns false because global Stop never preserves a continuation.
-  Future<bool> handleDeviceOverlayStop() async {
-    // stopBackground pauses schedules and calls cancelAllRuns synchronously
-    // before persisting the native/Dart latch. cancelAllRuns never calls back
-    // here, so overlay and notification Stop share one non-recursive path.
-    await AgentNotificationService.I.stopBackground();
-    return false; // Global Stop never promotes queued work.
-  }
-
-  /// Native->Dart dispatcher for overlay events. Chainable: returns true
-  /// when the call was an overlay event, false otherwise so a shared
-  /// ovid/native handler can fall through to other methods.
-  Future<bool> handleDeviceOverlayMethodCall(MethodCall call) async {
-    if (call.method == 'deviceControlStopped') {
-      for (final entry in _runs.entries.toList()) {
-        if (entry.value.controlRun && entry.value.activeRunId != null) {
-          stopRequested(sessionId: entry.key);
-        }
-      }
-      return true;
-    }
-    if (call.method == deviceOverlayTextMethod) {
-      await handleDeviceOverlayText(call.arguments as String? ?? '');
-      return true;
-    }
-    if (call.method == deviceOverlayStopMethod) {
-      await handleDeviceOverlayStop();
-      return true;
-    }
-    if (call.method == deviceOverlayMicMethod) {
-      await handleDeviceOverlayMic();
-      return true;
-    }
-    return false;
-  }
-
-  /// Overlay mic: toggle on-device dictation; partial transcripts are pushed
-  /// straight into the overlay field, and the mic button reflects the state.
-  Future<void> handleDeviceOverlayMic() async {
-    final generation = DeviceControlService.I.generation;
-    bool stopped() => generation != DeviceControlService.I.generation;
-    final voice = VoiceInputService.I;
-    if (voice.isListening) {
-      await voice.stop();
-      try {
-        await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
-          'listening': false,
-        });
-      } catch (e) {
-        Diag.swallow('agent_service', e);
-      }
-      return;
-    }
-    // Explicit mic permission first: the overlay only exists while the
-    // app is backgrounded, where the STT plugin's implicit permission
-    // prompt never surfaces — without this every tap silently dies.
-    if (!await voice.ensureMicrophonePermission()) {
-      await _overlayMicError(
-        'Microphone permission needed — allow it in Settings to dictate.',
-      );
-      return;
-    }
-    if (stopped()) return;
-    if (!await voice.isAvailable()) {
-      await _overlayMicError(
-        'Speech recognition is not available on this device.',
-      );
-      return;
-    }
-    if (stopped()) return;
-    final started = await voice.start((text, isFinal) async {
-      if (stopped()) return;
-      final t = text.trim();
-      if (t.isEmpty) return;
-      if (isFinal) {
-        // Dictation ended: release the service AND reset the overlay mic
-        // button (otherwise it stays stuck "on" and the next tap stops a
-        // dead session instead of starting a new one). Then send like
-        // overlay-typed text and clear the field.
-        await voice.stop();
-        if (stopped()) return;
-        try {
-          await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
-            'listening': false,
-          });
-        } catch (e) {
-          Diag.swallow('agent_service', e);
-        }
-        await handleDeviceOverlayText(t);
-        try {
-          await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
-            'text': '',
-          });
-        } catch (e) {
-          Diag.swallow('agent_service', e);
-        }
-        return;
-      }
-      try {
-        await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
-          'text': text,
-        });
-      } catch (e) {
-        Diag.swallow('agent_service', e);
-      }
-    });
-    if (stopped()) {
-      await voice.cancel();
-      return;
-    }
-    if (!started) {
-      await _overlayMicError('Could not start dictation — try again.');
-      return;
-    }
-    try {
-      await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
-        'listening': started,
-      });
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-  }
-
-  /// Overlay mic failure feedback: reset the mic button and explain why in
-  /// the overlay field. A silent return leaves the user tapping a dead
-  /// button with no idea what is wrong.
-  Future<void> _overlayMicError(String message) async {
-    try {
-      await _overlayChannel.invokeMethod(deviceOverlayMicListeningMethod, {
-        'listening': false,
-      });
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
-    try {
-      await _overlayChannel.invokeMethod(deviceOverlaySetTextMethod, {
-        'text': message,
-      });
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
   }
 
   /// Resolve the running session represented by foreground-notification
@@ -2505,11 +2132,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
             .key;
     if (runKey.isNotEmpty) {
       try {
-        SandboxService.I.killRunProcesses(runKey);
-      } catch (e) {
-        Diag.swallow('agent_service', e);
-      }
-      try {
         UtilityCancellationBridge.I.signalStop(runKey);
       } catch (e) {
         Diag.swallow('agent_service', e);
@@ -2587,11 +2209,6 @@ class AgentService extends ChangeNotifier implements AgentSurface {
       } catch (e) {
         Diag.swallow('agent_service', e);
       }
-    }
-    try {
-      SandboxService.I.killRunProcesses(sessionId);
-    } catch (e) {
-      Diag.swallow('agent_service', e);
     }
     for (final job in r.jobs.values) {
       if (!job.finished) {
@@ -5415,13 +5032,13 @@ if (!window.__ovidBlankHooked) {
         (repoOwns && RepoCache.I.files[path] != cacheBefore)) {
       throw StateError('Studio save superseded by an edit or workspace change');
     }
-    final safe = workspaceFilePath(work, path);
+    final safe = _workspaceFilePath(work, path);
     if (safe == null) {
       throw StateError('Path escapes workspace or uses a symlink: $path');
     }
     final file = File(safe);
     file.parent.createSync(recursive: true);
-    if (workspaceFilePath(work, path) != safe) {
+    if (_workspaceFilePath(work, path) != safe) {
       throw StateError('Workspace path changed while saving: $path');
     }
     file.writeAsStringSync(content);
@@ -5959,7 +5576,7 @@ if (!window.__ovidBlankHooked) {
       );
     }
     final sid = s?.sandboxId ?? s?.id ?? 'default';
-    return SandboxService.I.workDirFor(sid);
+    return AppState.I.workspaceDirForSession(sid);
   }
 
   /// The directory this session works in, resolved per access mode — Studio's
@@ -6023,25 +5640,9 @@ if (!window.__ovidBlankHooked) {
   /// (the only working git on-device). Returns the combined output, or a
   /// user-facing error string when the sandbox/git is unavailable.
   Future<String> _sandboxGit(List<String> args) async {
-    late final Directory work;
-    try {
-      work = await _sessionWorkDir();
-    } catch (e) {
-      return 'git ${args.join(' ')} failed: $e';
-    }
-    final ready =
-        SandboxService.I.isInstalled || await SandboxService.I.checkExisting();
-    if (!ready) {
-      return 'sandbox not installed yet. Tell the user: "Open Studio and '
-          'install the sandbox (one-time, ~320 MB), then retry."';
-    }
-    try {
-      return await SandboxService.I
-          .exec(['git', ...args], hostWorkDir: work)
-          .timeout(const Duration(minutes: 5));
-    } catch (e) {
-      return 'git ${args.join(' ')} failed: $e';
-    }
+    // P8 Task 13: the on-device sandbox git is gone. Server-side git tools
+    // replace it on the thin client (P2/P3).
+    return 'git ${args.join(' ')} is not available on-device in this build.';
   }
 
   /// Resolve the ACTIVE session's workspace directory (also used by the
@@ -6081,7 +5682,7 @@ user which one instead of assuming this one.''';
       final d = Directory(pinned);
       if (d.existsSync()) return d;
     }
-    return SandboxService.I.workDirForSync(s.sandboxId ?? s.id);
+    return localWorkspaceDirFor(s.sandboxId ?? s.id);
   }
 
   /// Expand `@name` / `@session:id` references in a composer message into
@@ -6287,13 +5888,13 @@ user which one instead of assuming this one.''';
   /// skipped silently; the repo cache stays the source for those).
   Future<void> _mirrorToDisk(String path, String content) async {
     final work = await _sessionWorkDir();
-    final safe = workspaceFilePath(work, path);
+    final safe = _workspaceFilePath(work, path);
     if (safe == null) {
       throw StateError('Path escapes workspace or uses a symlink: $path');
     }
     final f = File(safe);
     f.parent.createSync(recursive: true);
-    if (workspaceFilePath(work, path) != safe) {
+    if (_workspaceFilePath(work, path) != safe) {
       throw StateError('Workspace path changed while saving: $path');
     }
     f.writeAsStringSync(content);
@@ -6309,7 +5910,7 @@ user which one instead of assuming this one.''';
       }
       final work = _runSession == null ? null : _workspaceRootMaybe();
       if (work != null) {
-        final safe = containedPath(work, path);
+        final safe = _workspaceFilePath(work, path);
         if (safe != null && File(safe).existsSync()) {
           return File(safe).readAsStringSync();
         }
@@ -6535,7 +6136,7 @@ user which one instead of assuming this one.''';
       // chat switch must never redirect a selected file into another chat.
       // Use the same authority as shell cwd: explicit folders (including a
       // clear or missing-folder fallback) take precedence over stale bindings.
-      final work = await SandboxService.I.workDirFor(s.sandboxId ?? s.id);
+      final work = await AppState.I.workspaceDirForSession(s.sandboxId ?? s.id);
       final safeName = fileName.replaceAll('\\', '/').split('/').last;
       if (safeName.isEmpty || safeName == '.' || safeName == '..') {
         return 'Invalid attachment filename.';
@@ -6791,8 +6392,6 @@ user which one instead of assuming this one.''';
     }
     if (wasControl && s.mode != AgentMode.control.name) {
       stopRequested(sessionId: s.id);
-      // Leaving Control via presets must not strand the overlay either.
-      unawaited(hideDeviceOverlay());
     }
     await AppState.I.persistSessions();
     AppState.I.refresh();
@@ -6825,15 +6424,6 @@ user which one instead of assuming this one.''';
       run.statusLine = text;
     } else if (kind == 'done') {
       run.statusLine = null;
-    }
-    // Interim tool 'done' events are not task completion. Only the owning
-    // Control run may recolour the glow; finally owns terminal cleanup.
-    if (run.controlRun &&
-        run.activeRunId != null &&
-        _overlayState != overlayStatePermission) {
-      if (kind == 'err') {
-        unawaited(setOverlayState(overlayStateError));
-      }
     }
     // Mirror into the session event log (session_search queries this).
     // Tag with the RUNNING session so parallel sessions' events stay
@@ -11604,9 +11194,6 @@ user which one instead of assuming this one.''';
     // @file/@session expansion: the transcript row keeps the raw text the
     // user typed; the MODEL receives the expanded blocks. Runs after the
     // row was appended by sendMessage, so the chat UI stays clean.
-    final controlAdmissionGeneration = s.mode == AgentMode.control.name
-        ? DeviceControlService.I.generation
-        : null;
     final atts = List<({String name, String path, int size})>.of(
       attachments ?? (freshTurn ? _attachmentsFor(s.id) : const []),
     );
@@ -11680,11 +11267,6 @@ user which one instead of assuming this one.''';
     if (scheduledTask != null &&
         (schedules.stopped || scheduledTask['status'] != 'running')) {
       throw StateError('Scheduled execution stopped during preparation');
-    }
-    // Stop during reference expansion or a submit hook must not re-arm Control.
-    if (controlAdmissionGeneration != null &&
-        controlAdmissionGeneration != DeviceControlService.I.generation) {
-      return;
     }
     if (ctx.route.temperature != null) {
       _emitToRun(
@@ -11859,17 +11441,7 @@ can drive there yourself with the device_* tools):
     if (_runChainStale || ctx.run.activeRunId != ctx.ownedRunId) return;
     final runId = ctx.ownedRunId!;
     ctx.run.runKey = s.id;
-    // Admit the owner before showing steering: the selected chat may differ.
-    // Keep its device generation through the asynchronous return-to-Ovid path.
-    if (ctx.run.controlRun) {
-      DeviceControlService.I.beginDeviceGeneration();
-      unawaited(setOverlayLive(true));
-      unawaited(setOverlayState(overlayStateRunning));
-      unawaited(showDeviceOverlay());
-    }
-    final controlGeneration = DeviceControlService.I.generation;
     unawaited(checkpointRunStart(s.id, runId, owner: ctx.accountToken));
-    SandboxService.I.tagRun(s.id);
     // Warm the hook transcript path (session ledger JSONL) so
     // `transcript_path` is present in hook payloads fired during the run.
     _warmTranscriptPath(s.id);
@@ -12183,7 +11755,6 @@ ${await _agentsMdBlock()}
     final msgs = requestMessages();
 
     final attachmentsToAcknowledge = List.of(atts);
-    var completedNaturally = false;
     try {
       var overflowRecovered = false;
       // ── NEVER-STOP LOOP (the agent loop parity) ─────────────────────────────────
@@ -12199,11 +11770,6 @@ ${await _agentsMdBlock()}
         if (_cancelRequested) {
           _emit('done', 'stopped by user');
           break;
-        }
-        if (ctx.run.controlRun &&
-            !_runChainStale &&
-            _overlayState == overlayStateError) {
-          unawaited(setOverlayState(overlayStateRunning));
         }
         _resetLiveBuffers();
         // G2 turn boundary: a plan-mode transition the user requested while the
@@ -12628,7 +12194,6 @@ ${await _agentsMdBlock()}
             });
             continue;
           }
-          completedNaturally = !_cancelRequested;
           _emit('done', 'completed');
           break;
         }
@@ -12691,42 +12256,15 @@ ${await _agentsMdBlock()}
               // one invocation, so the timeout kills exactly what it started.
               // Killing by RUN key would also take down legitimate background
               // `job_start` work that is meant to outlive the call.
-              final callKey = 'toolcall-${++_toolCallSeq}';
-              final zoneValues = <Object, Object>{
-                SandboxService.callZoneKey: callKey,
-              };
-              // Shell-like tools also get the sandbox's allowed ROOTS: the
-              // session workspace plus every path granted in this session+mode,
-              // so checkPolicy can refuse a TARGET outside them (relative
-              // escapes and `$VAR` paths that the agent-level token gate never
-              // sees) while still permitting an approved outside path.
-              if (_isShellLikeTool(name)) {
-                final roots = await _sandboxAllowedRoots();
-                if (roots.isNotEmpty) {
-                  zoneValues[SandboxService.allowedRootsZoneKey] =
-                      SandboxRootScope(
-                        roots,
-                        decisions: planMode || mode == AgentMode.drive
-                            ? const []
-                            : _grantStoreFor(s.id).grantsFor(s.id),
-                      );
-                }
-              }
-              result =
-                  await runZoned(
-                    () => _dispatch(name, args),
-                    zoneValues: zoneValues,
-                  ).timeout(
-                    budget,
-                    onTimeout: () {
-                      SandboxService.I.killCallProcesses(callKey);
-                      return 'Error: tool "$name" timed out after '
-                          '${budget.inSeconds}s and its processes were KILLED. It '
-                          'may have partially completed — check the current state '
-                          '(read the file, `git status`) before doing anything '
-                          'else, and do NOT re-run it blindly.';
-                    },
-                  );
+              result = await _dispatch(name, args).timeout(
+                budget,
+                onTimeout: () {
+                  return 'Error: tool "$name" timed out after '
+                      '${budget.inSeconds}s. It may have partially completed — '
+                      'check the current state (read the file, `git status`) '
+                      'before doing anything else, and do NOT re-run it blindly.';
+                },
+              );
             }
             if (toolMsg != null) {
               _toolFinish(
@@ -12883,17 +12421,7 @@ ${await _agentsMdBlock()}
               ? sys
               : '$sys\n\n$volatileCtx';
         }
-        // Capture BEFORE the reset below: a user-cancelled run must not yank
-        // the user back to Ovid (they stopped to take over themselves).
-        final userStopped =
-            ctx.run.cancelRequested || ctx.epoch != ctx.run.runEpoch;
-        // Run end always clears the live pop (stream over → overlay idle).
-        if (ctx.run.controlRun && ownsRun) {
-          unawaited(setOverlayLive(false));
-          unawaited(setOverlayState(overlayStateIdle));
-        }
         unawaited(checkpointRunEnd(s.id, owner: ctx.accountToken));
-        SandboxService.I.tagRun(null);
         if (ownsRun) _cancelRequested = false;
         // The Zone exits with this function — there is nothing to pop.
         // The queue auto-continue continues on THIS run's session, captured
@@ -12921,64 +12449,6 @@ ${await _agentsMdBlock()}
         // where no 'done'/'err' event ever fires).
         AgentNotificationService.I.agentIdle(sessionId: pinnedSessionId);
         _startScheduleTimer();
-        // When a Control run completes, bring Ovid AI back to foreground
-        // so the user sees the final response immediately. Request the
-        // return BEFORE hiding the overlay: the visible overlay carries
-        // the foreground privilege the return relies on, and hiding first
-        // can drop it. Skipped for user-stopped runs (the user stopped to
-        // take over themselves) and non-Control runs. A failed return
-        // surfaces as a think row instead of vanishing silently.
-        if (ctx.run.controlRun &&
-            ownsRun &&
-            completedNaturally &&
-            !userStopped) {
-          // Pin the task session first (own try block): a selection-side
-          // failure must never skip the launch, and a failed launch must
-          // never roll the selection back — a manual tap still lands on the
-          // right session either way.
-          try {
-            // Select session in AppState so UI and transcript stay on current task session
-            AppState.I.selectSession(pinnedSessionId);
-            onControlTaskCompleted?.call(pinnedSessionId);
-          } catch (e) {
-            _emit(
-              'think',
-              'could not switch to the task session: '
-                  '${e.toString().split('\n').first}',
-            );
-          }
-          try {
-            await DeviceControlService.I.openApp(
-              'com.dhanuk.ovidai',
-              sessionId: pinnedSessionId,
-            );
-          } catch (e) {
-            // Native reports LAUNCH_BLOCKED when the OS swallows the launch
-            // without throwing: name the tap-back path instead of going
-            // silent (the notification lands on the pinned session above).
-            var msg =
-                'could not return to Ovid: ${e.toString().split('\n').first}';
-            if (e is PlatformException && e.code == 'LAUNCH_BLOCKED') {
-              final detail = (e.message ?? '').trim();
-              msg = detail.isNotEmpty
-                  ? '$detail Tap the Ovid notification to return to the task session.'
-                  : 'Ovid could not come to the foreground. Tap the Ovid '
-                        'notification to return to the task session.';
-            }
-            _emit('think', msg);
-          }
-        }
-        // Overlay lifecycle: run end brings the floating overlay down.
-        // Unguarded hide only removes the window; non-Control runs never
-        // showed one, so this is a no-op for them.
-        if (ctx.run.controlRun &&
-            ownsRun &&
-            ctx.epoch == ctx.run.runEpoch &&
-            controlGeneration == DeviceControlService.I.generation) {
-          DeviceControlService.I.cancelDeviceActions();
-          unawaited(VoiceInputService.I.cancel());
-          unawaited(hideDeviceOverlay());
-        }
         notifyListeners();
         // Queue auto-continue. On a Stop the scheduler already promoted the
         // next message (idempotent, so this is a no-op then); on a normal
@@ -15369,198 +14839,11 @@ ${await _agentsMdBlock()}
       if (hostDenial != null) return hostDenial;
     }
     switch (name) {
-      case 'device_read':
-      case 'device_tap':
-      case 'device_type':
-      case 'device_swipe':
-      case 'device_double_tap':
-      case 'device_drag':
-      case 'device_pinch':
-      case 'device_two_finger_swipe':
-      case 'device_system_nav':
-      case 'device_open_app':
-      case 'device_screenshot':
-      case 'device_key':
-      case 'device_long_press':
-      case 'device_scroll':
-        if (_runSession?.isSubagent == true) {
-          return 'DENIED: Subagents cannot control the device.';
-        }
-        if (mode != AgentMode.control) {
-          return 'DENIED: Tool "$name" requires Control mode.';
-        }
-        return _handleDeviceControlTool(name, args);
       case 'run_shell':
-        final rawCmd = args['command'] as String;
-        final cmd = sanitizeShellCommand(rawCmd);
-        // Intercept raw Android activity launch commands (e.g. `am start -n ...`).
-        // Shell execution runs inside an unprivileged app UID or sandbox where
-        // `am start` triggers: SecurityException: Permission Denial: startActivityAsUser asks to run as user -2
-        // Instruct the agent to use the native `device_open_app` tool instead.
-        if (RegExp(r'\bam\s+start\b').hasMatch(cmd)) {
-          return 'SHELL_RESTRICTION: Do not use `am start` in shell. Android forbids unprivileged shell processes from launching activities (startActivityAsUser permission denial). Use the native `device_open_app(package: "...")` tool instead to launch apps directly!';
-        }
-        // Strict permission model FIRST (2026-09-24): absolute paths in the
-        // command that fall outside the session workspace need a grant — one
-        // combined approval card for all of them, pre-execution.
-        //
-        // This MUST run before the sandbox policy check. `checkPolicy` now jails
-        // command TARGETS, not just the cwd, so it would hard-deny an outside
-        // path before the user was ever asked — and an approved path could never
-        // run. Prompting first means the grant is recorded and passed to
-        // `checkPolicy` as an allowed root for this dispatch.
-        final pathDenial = await _checkCommandPaths(cmd, tool: 'run_shell');
-        if (pathDenial != null) return pathDenial;
-        final isSubagent = _runSession?.isSubagent ?? false;
-        if (!isSubagent) {
-          final work = await _sessionWorkDir();
-          final policyCheck = SandboxService.I.checkPolicy([
-            'bash',
-            '-c',
-            cmd,
-          ], hostWorkDir: work);
-          if (policyCheck != null) {
-            _emit('shell', 'command blocked by sandbox policy');
-            return policyCheck;
-          }
-        }
-        // Route through the native Linux sandbox whenever it is installed —
-        // in EVERY access mode (not just Studio).  The sandbox provides
-        // bash/python/node/git via apt; the phone terminal (toybox) is only
-        // the fallback when the sandbox isn't installed on this device yet.
-        final useSandbox =
-            SandboxService.I.isInstalled ||
-            await SandboxService.I.checkExisting();
-        final ok = await _maybeApprove(
-          'run_shell',
-          cmd,
-          'Command will run in ${useSandbox ? "the native sandbox" : "the phone terminal (device shell)"}:\n\$ $cmd',
-        );
-        if (!ok) return 'DENIED by user';
-        _emit('shell', cmd);
-        // PR46/F1: persistent session shell — `cd`, `export` and shell
-        // functions carry over between commands (the persistent shell
-        // parity). The pool keyed by session lives in this service and out-
-        // lives a single run; the separate `job_start` lane stays event-
-        // sourced as ever. Falls back to the fresh bash -c path when the
-        // sandbox is unavailable or the pool fails to spawn.
-        final usePty = (args['persistent'] as bool?) ?? false;
-        if (usePty && useSandbox) {
-          _emit('shell', '(persistent shell)');
-        }
-        try {
-          final work = await _sessionWorkDir();
-          // Workspace resolution and sandbox provisioning are asynchronous.
-          // Revalidate the dispatch owner at the last boundary before any
-          // process is spawned, so an account handoff cannot run the command
-          // under the replacement account.
-          if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
-            return 'Cancelled: session account changed.';
-          }
-          if (useSandbox) {
-            if (usePty) {
-              final shell = await PtyPool.I.getOrCreate(
-                _runSession?.id ?? 'default',
-                () async => SandboxService.I.spawn(['bash'], hostWorkDir: work),
-              );
-              if (shell != null) {
-                final out = await shell.run(cmd, timeoutSeconds: 600);
-                for (final l in const LineSplitter().convert(out.trim())) {
-                  _emit('shellOut', l);
-                }
-                unawaited(syncOpenFilesFromDisk());
-                return out.isEmpty ? '(no output)' : out;
-              }
-            }
-            // PR47/K5: an echo-only placeholder is fake work — warn the
-            // agent (AND the model, via tool output) that the sandbox
-            // reported the command did nothing real.
-            if (_isEchoPlaceholder(cmd)) {
-              _emit('shell', 'placeholder detected — avoiding fake work');
-              return 'note: the command was a bare echo placeholder '
-                  '(_echo/fake-work); no real sandbox work was done. If the '
-                  'shell ran command strings, that\'s a sandbox/runtime '
-                  'failure on this device. Check Settings → Device health '
-                  '→ Repair sandbox.';
-            }
-            // PR38: a command that can trigger a native npm/node-gyp build
-            // (install/rebuild) needs a C/C++ compiler that is NOT part of
-            // the eager sandbox install (clang is ~60 MB — installed lazily
-            // on exactly this trigger, same pattern as ensureRuntime for
-            // node/python). Best-effort: a failed compiler install doesn't
-            // block the command — most npm installs need no native build.
-            if (_looksLikeNativeBuildCommand(cmd)) {
-              await SandboxService.I.ensureCompiler(
-                onLine: (l) => _emit('shellOut', l),
-              );
-            }
-            // JVM toolchains provision lazily like the compiler above: java
-            // needs the JDK, kotlin needs JDK + compiler (pure JVM, runs
-            // natively), flutter needs proot Ubuntu (glibc-only, large —
-            // storage-gated inside ensureFlutter). Best-effort: a failed
-            // provision doesn't block the command itself.
-            if (_looksLikeJvmCommand(cmd)) {
-              await SandboxService.I.ensureJdk(
-                onLine: (l) => _emit('shellOut', l),
-              );
-              if (_looksLikeKotlinCommand(cmd)) {
-                await SandboxService.I.ensureKotlin(
-                  onLine: (l) => _emit('shellOut', l),
-                );
-              }
-            }
-            if (_looksLikeFlutterCommand(cmd)) {
-              await SandboxService.I.ensureFlutter(
-                onLine: (l) => _emit('shellOut', l),
-              );
-            }
-            // Native bionic sandbox (bash/python/node/apt) — full tooling.
-            // 10-minute cap: builds/installs/test-suites need real time
-            // (60s used to kill them mid-run). Longer work → the model
-            // already has job_start (background jobs, unbounded).
-            if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
-              return 'Cancelled: session account changed.';
-            }
-            final out = await SandboxService.I
-                .exec(['bash', '-c', cmd], hostWorkDir: work)
-                .timeout(const Duration(minutes: 10));
-            for (final l in const LineSplitter().convert(out.trim())) {
-              _emit('shellOut', l);
-            }
-            // Live file follow: shell may have edited open studio tabs.
-            unawaited(syncOpenFilesFromDisk());
-            var finalOut = out.isEmpty ? '(no output)' : out;
-            if (_looksLikeNativeModuleError(finalOut)) {
-              finalOut +=
-                  '\n\n[sandbox notice: this command failed to load a native compiled Node module (glibc/x86_64 or mismatched ABI). '
-                  'The native sandbox runs on Android bionic ARM64; precompiled Linux glibc binary addons (.node) cannot be loaded directly. '
-                  'Use pure JS packages or compile them with npm rebuild / node-gyp if sources are available.]';
-            }
-            return finalOut;
-          }
-          // Phone terminal tier — device shell, no install needed.
-          if (!(_permissionDispatchCtx?.accountCurrent ?? false)) {
-            return 'Cancelled: session account changed.';
-          }
-          final out = await SandboxService.I
-              .execHost(cmd, hostWorkDir: work)
-              .timeout(const Duration(minutes: 10));
-          for (final l in const LineSplitter().convert(out.trim())) {
-            _emit('shellOut', l);
-          }
-          final hint = out.contains('not found') || out.contains('not: found')
-              ? '\n\n[phone terminal: only Android toybox commands here — '
-                    'run the one-time native sandbox setup (Studio screen) for '
-                    'python/node/git/apt]\n'
-              : '';
-          return (out.isEmpty ? '(no output)' : out) + hint;
-        } catch (e) {
-          // Friendly actionable message — the model relays this to the user.
-          if ('$e'.contains('not installed')) {
-            return 'sandbox not installed yet. Tell the user: "Open Studio and install the sandbox (one-time, ~320 MB), then the command will work."';
-          }
-          return '${useSandbox ? "sandbox" : "phone terminal"} error: $e';
-        }
+        // P8 Task 13: on-device execution was removed with the Termux/proot
+        // sandbox. Cloud runs execute tools in the server sandbox.
+        return 'On-device shell execution is not available in this build. '
+            'Ovid Cloud runs shell commands in the server sandbox.';
 
       case 'request_permission':
         final perm = args['permission'] as String;
@@ -15928,37 +15211,10 @@ ${await _agentsMdBlock()}
           return 'fetch failed: $e';
         }
       case 'run_code':
-        final code = args['code'] as String;
-        final lang = args['lang'] as String? ?? 'python';
-        if (lang != 'python' && lang != 'javascript') {
-          return 'Unsupported language: $lang. Use python or javascript.';
-        }
-        // Strict permission model: absolute paths referenced by the code
-        // that fall outside the session workspace need a grant — one
-        // combined approval card, pre-execution.
-        final codePathDenial = await _checkCommandPaths(code, tool: 'run_code');
-        if (codePathDenial != null) return codePathDenial;
-        final ok2 = await _maybeApprove(
-          'run_code',
-          code,
-          'Code will run in sandbox:\n$lang\n$code',
-        );
-        if (!ok2) return 'DENIED by user';
-        _emit('shell', 'run_code ($lang)');
-        try {
-          final work = await _sessionWorkDir();
-          final out = await SandboxService.I
-              .exec([
-                lang == 'python' ? 'python3' : 'node',
-                lang == 'python' ? '-c' : '-e',
-                code,
-              ], hostWorkDir: work)
-              .timeout(const Duration(seconds: 60));
-          _emit('shellOut', out);
-          return out;
-        } catch (e) {
-          return 'exec error: $e';
-        }
+        // P8 Task 13: the local Python/Node runtimes died with the sandbox.
+        return 'On-device code execution is not available in this build. '
+            'Ovid Cloud runs code in the server sandbox.';
+
       case 'dispatch_agent':
         return await _handleDispatchAgent(args);
 
@@ -18165,33 +17421,11 @@ ${await _agentsMdBlock()}
             return 'git clone failed: $e';
           }
         }
-        _emit('shell', 'git clone${branch.isEmpty ? '' : ' -b $branch'} $url');
-        try {
-          final work = await _sessionWorkDir();
-          // argv form — no shell, so branch/URL can never inject commands.
-          final cmd = <String>['git', 'clone'];
-          if (branch.isNotEmpty) cmd.addAll(['-b', branch]);
-          cmd.add(url);
-          if (dest.isNotEmpty) cmd.add(dest);
-          final useSandbox =
-              SandboxService.I.isInstalled ||
-              await SandboxService.I.checkExisting();
-          if (!useSandbox) {
-            return 'sandbox not installed yet. Tell the user: "Open Studio '
-                'and install the sandbox (one-time, ~320 MB), then the '
-                'clone will work."';
-          }
-          final out = await SandboxService.I
-              .exec(cmd, hostWorkDir: work)
-              .timeout(const Duration(minutes: 10));
-          for (final l in const LineSplitter().convert(out.trim())) {
-            _emit('shellOut', l);
-          }
-          unawaited(syncOpenFilesFromDisk());
-          return out.isEmpty ? 'cloned $url ✓' : out;
-        } catch (e) {
-          return 'git clone failed: $e';
-        }
+        // P8 Task 13: the raw per-session clone needed the on-device git
+        // from the sandbox. The registry path above still works when the
+        // repo is already cloned.
+        return 'git clone is not available on-device in this build. '
+            'Ovid Cloud clones repositories in the server workspace.';
 
       case 'git_push':
         final pushRemote = ((args['remote'] as String?) ?? 'origin').trim();
@@ -18358,7 +17592,16 @@ ${await _agentsMdBlock()}
   /// is the app's own SharedPreferences dir, holding every session, setting and
   /// grant — ran in General mode with no prompt at all.
   static const _destructivePatterns = [
-    ...SandboxService.defaultDeniedCommands,
+    // Catastrophic set formerly shared with the sandbox hard-deny list.
+    r'\brm\s+(-{1,2}[a-zA-Z-]*[rf][a-zA-Z-]*\s+)+(/[^\s]*|\$HOME\b|\$PREFIX\b|~)',
+    r'\bdd\s+[^|]*if=/dev/(block|zero|random)',
+    r'\bmkfs(\.\w+)?\s',
+    r':\s*\(\s*\)\s*\{.*\}\s*;\s*:',
+    r'\bchmod\s+-R\s+777\s+/',
+    r'\bchown\s+-R\s+\S+\s+/\s*$',
+    r'\b(reboot|shutdown|halt)\b',
+    r'>\s*/dev/sd[a-z]',
+    r'\bfind\s+/[^|;&]*-delete\b',
     // Recursive/forced delete that leaves the workspace RELATIVELY. It never
     // names `/`, so the absolute-target pattern above cannot see it.
     r'\brm\s+(-{1,2}[a-zA-Z-]*[rf][a-zA-Z-]*\s+)+\.\./',
@@ -18808,9 +18051,6 @@ ${await _agentsMdBlock()}
       // the command still came back DENIED.
       // These exact tokens passed the gate. Never re-infer a broader grant
       // from a file that has since been replaced by a directory.
-      SandboxService.addApprovedPaths({
-        for (final path in granted.values.toSet()) path: false,
-      });
       return null;
     }
     return _accessDeniedMessage(tokens, noun: 'path');
@@ -19362,20 +18602,6 @@ ${await _agentsMdBlock()}
       case 'browser_select':
       case 'browser_desktop':
       case 'browser_hover':
-      case 'device_read':
-      case 'device_tap':
-      case 'device_type':
-      case 'device_swipe':
-      case 'device_double_tap':
-      case 'device_drag':
-      case 'device_pinch':
-      case 'device_two_finger_swipe':
-      case 'device_system_nav':
-      case 'device_open_app':
-      case 'device_screenshot':
-      case 'device_key':
-      case 'device_long_press':
-      case 'device_scroll':
       case 'memory_save':
       case 'create_goal':
       case 'update_goal':
@@ -19783,14 +19009,6 @@ ${await _agentsMdBlock()}
   bool _looksTransientProviderError(String err) =>
       isTransientProviderError(err);
 
-  bool _looksLikeNativeModuleError(String text) {
-    final l = text.toLowerCase();
-    return l.contains('failed to load native module') ||
-        l.contains('mismatched native koffi') ||
-        l.contains('could not load the "sharp" module') ||
-        (l.contains('node_modules') && l.contains('.node'));
-  }
-
   /// Heuristic: tool result text that reads as a failure → error state dot.
   bool _looksLikeToolError(String result) {
     final l = result.toLowerCase();
@@ -20023,6 +19241,40 @@ ${await _agentsMdBlock()}
   /// used to walk out of the per-session workspace that the system prompt
   /// promises is isolated. Returns null when the path escapes; the caller
   /// turns that into a tool error.
+  /// Resolve a file under an existing workspace and refuse symlink
+  /// components (including dangling links and links in not-yet-created parent
+  /// paths). Inlined from the deleted `workspace_files.dart` in P8 Task 13;
+  /// this file dies with the local agent loop in Task 19.
+  static String? _workspaceFilePath(Directory workspace, String path) {
+    if (path.trim().isEmpty) return null;
+    String normalize(String value) {
+      final parts = <String>[];
+      for (final part in value.split('/')) {
+        if (part == '..') {
+          if (parts.isNotEmpty) parts.removeLast();
+        } else if (part.isNotEmpty && part != '.') {
+          parts.add(part);
+        }
+      }
+      return '/${parts.join('/')}';
+    }
+
+    final root = normalize(workspace.absolute.path);
+    final target = normalize(path.startsWith('/') ? path : '$root/$path');
+    final prefix = root == '/' ? root : '$root/';
+    if (!target.startsWith(prefix) || target == root) return null;
+    final canonical = workspace.resolveSymbolicLinksSync();
+    var current = canonical;
+    for (final segment in target.substring(prefix.length).split('/')) {
+      current = '$current/$segment';
+      if (FileSystemEntity.typeSync(current, followLinks: false) ==
+          FileSystemEntityType.link) {
+        return null;
+      }
+    }
+    return current;
+  }
+
   static String? containedPath(Directory work, String rel) {
     if (rel.trim().isEmpty) return null;
     final root = _normalizeSegments(work.path.split('/'));
@@ -21125,478 +20377,6 @@ ${await _agentsMdBlock()}
   /// Parenthesized native narration for honest device results: a non-empty
   /// native string (scroll fallback, gesture detail) is surfaced verbatim,
   /// otherwise nothing is appended.
-  static String _nativeNarration(Object? result) {
-    if (result is String && result.trim().isNotEmpty) {
-      return ' (${result.trim()})';
-    }
-    return '';
-  }
-
-  /// Returns the superseded-generation marker when [result] is one, else
-  /// null — every device_* tool result is checked through this before any
-  /// success string is built, so a Stop/new-run never reports stale native
-  /// work as done.
-  static String? _cancelledDeviceResult(Object? result) =>
-      DeviceControlService.isCancelledResult(result)
-      ? DeviceControlService.cancelledSupersededMessage
-      : null;
-
-  /// Honest submit contract (overlay spec §5.4): surfaces the native
-  /// typed/submitted/message split verbatim. `typed=true` only when the
-  /// native map says SET_TEXT was accepted; `submitted=true` only when the
-  /// IME action was accepted (submit on API < 30 lands as typed=true,
-  /// submitted=false with the API-floor message). Opaque truthy results
-  /// (legacy mocks — real native always returns the map) count as typed
-  /// with submit unconfirmed, never as submitted.
-  static String _formatDeviceTypeResult({
-    required String text,
-    required int? node,
-    required Object? result,
-  }) {
-    var typed = false;
-    var submitted = false;
-    var message = '';
-    if (result is Map) {
-      typed = result['typed'] == true;
-      submitted = result['submitted'] == true;
-      message = result['message']?.toString() ?? '';
-    } else if (result == true) {
-      typed = true;
-    }
-    final base =
-        'typed ${text.length} characters${node == null ? '' : ' into node $node'}'
-        ' (typed=$typed, submitted=$submitted)';
-    if (message.trim().isEmpty) return base;
-    return '$base: $message';
-  }
-
-  /// Test seam for the honest-submit matrix.
-  @visibleForTesting
-  static String formatDeviceTypeResultForTest({
-    required String text,
-    required int? node,
-    required Object? result,
-  }) => _formatDeviceTypeResult(text: text, node: node, result: result);
-
-  Future<String> _handleDeviceControlTool(
-    String name,
-    Map<String, dynamic> args,
-  ) async {
-    final device = DeviceControlService.I;
-    try {
-      if (name == 'device_read') {
-        final raw = await device.readRaw(full: args['mode'] == 'full');
-        var packageName = raw['package']?.toString();
-        // PACKAGE-LESS READ GUARD (audit 2026-09-25): a delta/`unchanged` read
-        // can come back without a `package` field. Keying the sensitive-target
-        // check only on that field meant `null` -> not sensitive -> the read
-        // slipped through, while the ACTION path right below fails closed on the
-        // same missing information. Ask the cheap probe (one node's package, no
-        // tree walk) and deny when nothing can confirm the foreground app.
-        if (packageName == null || packageName.trim().isEmpty) {
-          packageName = await device.foregroundPackage();
-          if (packageName == null || packageName.trim().isEmpty) {
-            return 'DENIED: Ovid could not verify the live foreground app. '
-                'Retry device_read before acting.';
-          }
-        }
-        if (_isSensitiveDeviceTarget(packageName)) {
-          return _sensitiveDeviceDenial(packageName);
-        }
-        final result = DeviceControlService.formatReadResultForTest(raw);
-        // Payment-step guard: a checkout, card form, UPI PIN pad or purchase
-        // sheet inside an app that is NOT on the finance list. The screen is
-        // withheld and every action in that app is refused until a clean
-        // full read (or a different foreground app) shows the step is over.
-        final pkg = packageName.trim().toLowerCase();
-        final ownApp =
-            pkg == 'com.dhanuk.ovidai' || pkg.startsWith('com.dhanuk.ovidai:');
-        if (!ownApp && DeviceControlService.looksLikePaymentScreen(result)) {
-          _paymentScreenPackage = pkg;
-          return _sensitiveDeviceDenial(packageName);
-        }
-        if (_paymentScreenPackage != null &&
-            (_paymentScreenPackage != pkg ||
-                (raw['status'] == 'ok' && raw['full'] == true))) {
-          _paymentScreenPackage = null;
-        }
-        if (raw['status'] == 'ok' || raw['status'] == 'unchanged') {
-          _emit(
-            'shell',
-            'device_read: ${args['mode'] == 'full' ? 'full' : 'delta'}',
-          );
-        }
-        return result;
-      }
-
-      // Sensitive-target guard, WITHOUT a tree walk (2026-09-25).
-      //
-      // This used to call `device.readRaw()` before every single action. On an
-      // animated screen the native node cache is dirtied by every
-      // TYPE_WINDOW_CONTENT_CHANGED event, so the "verification" was a full
-      // 300-node binder walk on the main thread ahead of each tap — and the walk
-      // serialized against the action itself, since both are @Synchronized. That
-      // is the largest avoidable slice of the "control mode is very slow" report.
-      // The guard only ever needed the package name, so ask for exactly that.
-      final packageName = await device.foregroundPackage();
-      if (_runChainStale) {
-        return DeviceControlService.cancelledSupersededMessage;
-      }
-      if (packageName == null || packageName.trim().isEmpty) {
-        return 'DENIED: Ovid could not verify the live foreground app. Retry device_read before acting.';
-      }
-      if (_isSensitiveDeviceTarget(packageName)) {
-        return _sensitiveDeviceDenial(packageName);
-      }
-      final flagged = _paymentScreenPackage;
-      if (flagged != null) {
-        if (flagged == packageName.trim().toLowerCase()) {
-          return 'DENIED: the last screen read in $packageName was a payment '
-              'step (PIN, card or purchase confirmation). Please complete it '
-              'yourself, then call device_read with mode "full" before acting.';
-        }
-        _paymentScreenPackage = null;
-      }
-
-      switch (name) {
-        case 'device_tap':
-          final node = (args['node'] as num?)?.toInt();
-          final x = args['x'] as num?;
-          final y = args['y'] as num?;
-          if (node == null && (x == null || y == null)) {
-            return 'device_tap requires node or both x and y.';
-          }
-          final tapResult = await device.tap(node: node, x: x, y: y);
-          final tapCancelled = _cancelledDeviceResult(tapResult);
-          if (tapCancelled != null) return tapCancelled;
-          final detail = node != null ? 'tapped node $node' : 'tapped ($x, $y)';
-          _emit('shell', 'device_tap: $detail');
-          return detail;
-        case 'device_type':
-          final text = args['text'] as String?;
-          if (text == null) return 'device_type requires text.';
-          final node = (args['node'] as num?)?.toInt();
-          final submit = args['submit'] == true;
-          final typeResult = await device.type(
-            node: node,
-            text: text,
-            submit: submit,
-          );
-          final typeCancelled = _cancelledDeviceResult(typeResult);
-          if (typeCancelled != null) return typeCancelled;
-          final detail = _formatDeviceTypeResult(
-            text: text,
-            node: node,
-            result: typeResult,
-          );
-          _emit('shell', 'device_type: $detail');
-          return detail;
-        case 'device_swipe':
-          final fromX = args['from_x'] as num?;
-          final fromY = args['from_y'] as num?;
-          final toX = args['to_x'] as num?;
-          final toY = args['to_y'] as num?;
-          if (fromX == null || fromY == null || toX == null || toY == null) {
-            return 'device_swipe requires from_x, from_y, to_x, and to_y.';
-          }
-          final swipeResult = await device.swipe(
-            fromX: fromX,
-            fromY: fromY,
-            toX: toX,
-            toY: toY,
-            durationMs: (args['duration_ms'] as num?)?.toInt(),
-          );
-          final swipeCancelled = _cancelledDeviceResult(swipeResult);
-          if (swipeCancelled != null) return swipeCancelled;
-          final detail = 'swiped ($fromX, $fromY) to ($toX, $toY)';
-          _emit('shell', 'device_swipe: $detail');
-          return detail;
-        case 'device_double_tap':
-          final mtX = args['x'] as num?;
-          final mtY = args['y'] as num?;
-          if (mtX == null || mtY == null) {
-            return 'device_double_tap requires x and y.';
-          }
-          final taps = (args['count'] as num?)?.toInt() ?? 2;
-          final mtResult = await device.multiTap(
-            x: mtX,
-            y: mtY,
-            count: taps,
-            intervalMs: (args['interval_ms'] as num?)?.toInt(),
-          );
-          final mtCancelled = _cancelledDeviceResult(mtResult);
-          if (mtCancelled != null) return mtCancelled;
-          final mtDetail = '$taps-tap at ($mtX, $mtY)';
-          _emit('shell', 'device_double_tap: $mtDetail');
-          return mtDetail;
-        case 'device_drag':
-          final dFromX = args['from_x'] as num?;
-          final dFromY = args['from_y'] as num?;
-          final dToX = args['to_x'] as num?;
-          final dToY = args['to_y'] as num?;
-          if (dFromX == null ||
-              dFromY == null ||
-              dToX == null ||
-              dToY == null) {
-            return 'device_drag requires from_x, from_y, to_x, and to_y.';
-          }
-          final dragResult = await device.drag(
-            fromX: dFromX,
-            fromY: dFromY,
-            toX: dToX,
-            toY: dToY,
-            holdMs: (args['hold_ms'] as num?)?.toInt(),
-            durationMs: (args['duration_ms'] as num?)?.toInt(),
-          );
-          final dragCancelled = _cancelledDeviceResult(dragResult);
-          if (dragCancelled != null) return dragCancelled;
-          final dragDetail =
-              'held then dragged ($dFromX, $dFromY) to ($dToX, $dToY)';
-          _emit('shell', 'device_drag: $dragDetail');
-          return dragDetail;
-        case 'device_pinch':
-          final pX = args['x'] as num?;
-          final pY = args['y'] as num?;
-          final pFrom = args['from_radius'] as num?;
-          final pTo = args['to_radius'] as num?;
-          if (pX == null || pY == null || pFrom == null || pTo == null) {
-            return 'device_pinch requires x, y, from_radius, and to_radius.';
-          }
-          final pinchResult = await device.pinch(
-            x: pX,
-            y: pY,
-            fromRadius: pFrom,
-            toRadius: pTo,
-            durationMs: (args['duration_ms'] as num?)?.toInt(),
-          );
-          final pinchCancelled = _cancelledDeviceResult(pinchResult);
-          if (pinchCancelled != null) return pinchCancelled;
-          final pinchDetail = pTo < pFrom
-              ? 'pinched in at ($pX, $pY) radius $pFrom to $pTo'
-              : 'spread out at ($pX, $pY) radius $pFrom to $pTo';
-          _emit('shell', 'device_pinch: $pinchDetail');
-          return pinchDetail;
-        case 'device_two_finger_swipe':
-          final tFromX = args['from_x'] as num?;
-          final tFromY = args['from_y'] as num?;
-          final tToX = args['to_x'] as num?;
-          final tToY = args['to_y'] as num?;
-          if (tFromX == null ||
-              tFromY == null ||
-              tToX == null ||
-              tToY == null) {
-            return 'device_two_finger_swipe requires from_x, from_y, to_x, and to_y.';
-          }
-          final tfsResult = await device.twoFingerSwipe(
-            fromX: tFromX,
-            fromY: tFromY,
-            toX: tToX,
-            toY: tToY,
-            durationMs: (args['duration_ms'] as num?)?.toInt(),
-            separation: args['separation'] as num?,
-          );
-          final tfsCancelled = _cancelledDeviceResult(tfsResult);
-          if (tfsCancelled != null) return tfsCancelled;
-          final tfsDetail =
-              'two-finger swipe ($tFromX, $tFromY) to ($tToX, $tToY)';
-          _emit('shell', 'device_two_finger_swipe: $tfsDetail');
-          return tfsDetail;
-        case 'device_system_nav':
-          final action = args['action'] as String? ?? '';
-          if (action == 'settings') {
-            final settingsResult = await device.openSettings();
-            final settingsCancelled = _cancelledDeviceResult(settingsResult);
-            if (settingsCancelled != null) return settingsCancelled;
-            _emit('shell', 'device_system_nav: opened settings');
-            return 'opened Android Settings directly';
-          }
-          const actions = {
-            'back',
-            'home',
-            'recents',
-            'notifications',
-            'quick_settings',
-            'settings',
-          };
-          if (!actions.contains(action)) {
-            return 'device_system_nav requires action: ${actions.join('|')}.';
-          }
-          final navResult = await device.systemNav(action);
-          final navCancelled = _cancelledDeviceResult(navResult);
-          if (navCancelled != null) return navCancelled;
-          _emit('shell', 'device_system_nav: $action');
-          return 'system navigation: $action';
-        case 'device_open_app':
-          final package = args['package'] as String?;
-          if (package == null || package.trim().isEmpty) {
-            return 'device_open_app requires package.';
-          }
-          final cleanPkg = package.trim();
-          if (_isSensitiveDeviceTarget(cleanPkg)) {
-            return _sensitiveDeviceDenial(cleanPkg);
-          }
-          final openResult = await device.openApp(cleanPkg);
-          final openCancelled = _cancelledDeviceResult(openResult);
-          if (openCancelled != null) return openCancelled;
-          _emit('shell', 'device_open_app: $cleanPkg');
-          return 'launched app: $cleanPkg';
-        case 'device_key':
-          final key = args['key'] as String?;
-          const keys = {
-            'enter',
-            'volume_up',
-            'volume_down',
-            'volume_mute',
-            'media_play_pause',
-            'media_next',
-            'media_previous',
-          };
-          if (key == null || !keys.contains(key)) {
-            return 'BAD_KEY: device_key requires key: ${keys.join('|')}. '
-                'Android does not allow apps to inject arbitrary keycodes.';
-          }
-          final keyResult = await device.key(key);
-          final keyCancelled = _cancelledDeviceResult(keyResult);
-          if (keyCancelled != null) return keyCancelled;
-          final keyDetail = 'pressed $key${_nativeNarration(keyResult)}';
-          _emit('shell', 'device_key: $keyDetail');
-          return keyDetail;
-        case 'device_long_press':
-          final pressNode = (args['node'] as num?)?.toInt();
-          final pressX = args['x'] as num?;
-          final pressY = args['y'] as num?;
-          if (pressNode == null && (pressX == null || pressY == null)) {
-            return 'device_long_press requires node or both x and y.';
-          }
-          final duration = ((args['duration_ms'] as num?)?.toInt() ?? 600)
-              .clamp(200, 3000);
-          final pressResult = await device.longPress(
-            node: pressNode,
-            x: pressX,
-            y: pressY,
-            durationMs: duration,
-          );
-          final pressCancelled = _cancelledDeviceResult(pressResult);
-          if (pressCancelled != null) return pressCancelled;
-          final pressDetail = pressNode != null
-              ? 'long-pressed node $pressNode${_nativeNarration(pressResult)}'
-              : 'long-pressed ($pressX, $pressY) for ${duration}ms${_nativeNarration(pressResult)}';
-          _emit('shell', 'device_long_press: $pressDetail');
-          return pressDetail;
-        case 'device_scroll':
-          final scrollNode = (args['node'] as num?)?.toInt();
-          if (scrollNode == null) {
-            return 'device_scroll requires node.';
-          }
-          final direction = args['direction'] as String? ?? '';
-          const directions = {
-            'forward',
-            'backward',
-            'up',
-            'down',
-            'left',
-            'right',
-          };
-          if (!directions.contains(direction)) {
-            return 'device_scroll requires direction: ${directions.join('|')}.';
-          }
-          final scrollResult = await device.scroll(
-            node: scrollNode,
-            direction: direction,
-          );
-          final scrollCancelled = _cancelledDeviceResult(scrollResult);
-          if (scrollCancelled != null) return scrollCancelled;
-          final scrollDetail =
-              'scrolled node $scrollNode $direction${_nativeNarration(scrollResult)}';
-          _emit('shell', 'device_scroll: $scrollDetail');
-          return scrollDetail;
-        case 'device_screenshot':
-          final nativePath = await device.screenshot();
-          final shotCancelled = _cancelledDeviceResult(nativePath);
-          if (shotCancelled != null) return shotCancelled;
-          if (nativePath.trim().isEmpty) {
-            return 'device_screenshot returned no file.';
-          }
-          final source = File(nativePath);
-          if (!await source.exists()) {
-            return 'device_screenshot file was not found: $nativePath';
-          }
-          final copied = File(
-            await device.copyScreenshotIntoWorkspace(
-              source.path,
-              await _sessionWorkDir(),
-            ),
-          );
-          final bytes = await copied.readAsBytes();
-          // PRIVACY + STORAGE (2026-09-24): the native capture also stays in
-          // `cacheDir/device-captures` and was NEVER deleted, so every Control
-          // run accumulated full-screen PNGs OF OTHER APPS — whatever happened
-          // to be on screen, including banking and messages — indefinitely and
-          // unencrypted. The workspace copy is the one the model and the user
-          // see; the cache original is redundant the moment it lands.
-          try {
-            if (await copied.exists()) await source.delete();
-          } catch (e) {
-            Diag.swallow('agent_service', e);
-          }
-          _recordProduced(copied.path, bytes.length);
-          _emit('shell', 'device_screenshot: ${copied.path}');
-          if (!_stageVisionImage(
-            path: copied.path,
-            bytes: bytes,
-            extension: 'png',
-            reason: 'device_screenshot',
-          )) {
-            return 'Screenshot saved to ${copied.path}, but the current model '
-                'is not marked vision-capable. Switch to a vision model, '
-                'enable "Supports images" for this model in Settings → '
-                'Providers, or use device_read/device_system_nav to act '
-                'without the image.';
-          }
-          return 'Screenshot saved to ${copied.path} and attached to the next model request. '
-              'The image pixels are available before choosing coordinates.';
-      }
-      return 'unknown device tool';
-    } on PlatformException catch (error) {
-      if (error.code == 'SERVICE_DISABLED') {
-        return 'Control mode needs the Ovid accessibility service. Enable it in Settings > Accessibility > Ovid AI.';
-      }
-      return '$name failed: ${error.message ?? error.code}';
-    } catch (error) {
-      return '$name failed: $error';
-    }
-  }
-
-  /// Foreground package whose last `device_read` showed a payment step;
-  /// actions there are refused until a clean full read clears it.
-  String? _paymentScreenPackage;
-
-  @visibleForTesting
-  String? get paymentScreenPackageForTest => _paymentScreenPackage;
-
-  @visibleForTesting
-  set paymentScreenPackageForTest(String? v) => _paymentScreenPackage = v;
-
-  bool _isSensitiveDeviceTarget(String? packageName) {
-    String? url;
-    final package = packageName?.trim().toLowerCase() ?? '';
-    if (package == 'com.dhanuk.ovidai' ||
-        package.startsWith('com.dhanuk.ovidai:')) {
-      final tabs = browserTabs;
-      if (tabs.isNotEmpty) {
-        url = tabs[activeTabIndex.clamp(0, tabs.length - 1)].url;
-      }
-    }
-    return DeviceControlService.isSensitiveTarget(
-      packageName: packageName,
-      url: url,
-    );
-  }
-
-  String _sensitiveDeviceDenial(String? packageName) =>
-      'DENIED: Ovid will not read or act on this sensitive banking or payment screen '
-      '(${packageName?.trim().isEmpty ?? true ? 'current target' : packageName}). Please complete this step yourself.';
-
   String _numberedLines(String content, int max) {
     final lines = content.split('\n');
     final buf = StringBuffer();
@@ -21907,45 +20687,9 @@ ${await _agentsMdBlock()}
     required String? include,
     required Directory work,
   }) async {
-    if (SandboxService.I.prefixPath == null) return null;
-    try {
-      final (code, out) = await SandboxService.I
-          .execChecked([
-            'rg',
-            '-i',
-            '-n',
-            '--no-heading',
-            '--color',
-            'never',
-            '--hidden',
-            '--no-ignore',
-            '--max-filesize',
-            '2M',
-            '--max-count-total',
-            '$remaining',
-            if (ctxLines > 0) ...['-C', '$ctxLines'],
-            if (include != null && include.isNotEmpty) ...['--glob', include],
-            '-e',
-            pattern,
-            relRoot,
-          ], hostWorkDir: work)
-          .timeout(const Duration(seconds: 45));
-      if (code == 0 || code == 1) {
-        // execChecked merges stderr into the returned output. On devices
-        // where the LD_PRELOAD termux-exec shim is SELinux-blocked (the
-        // documented PR22 condition), every sandbox process's stderr
-        // carries an "ERROR: ld.so: … cannot be preloaded" warning —
-        // strip that known loader noise so it can never pollute grep
-        // results. rg's own errors ride exit 2, handled below.
-        return out
-            .split('\n')
-            .where((l) => !l.startsWith('ERROR: ld.so:'))
-            .join('\n');
-      }
-      return null; // exit 2 = error (pattern/path) → Dart fallback
-    } catch (_) {
-      return null;
-    }
+    // P8 Task 13: the sandbox ripgrep binary is gone; callers fall back to
+    // the pure-Dart walk.
+    return null;
   }
 
   Future<String> _handleTodoWrite(Map<String, dynamic> args) async {
@@ -22102,28 +20846,9 @@ ${await _agentsMdBlock()}
     notifyListeners();
     // Control mode + backgrounded: surface the question in the overlay so the
     // user can answer without returning to the app.
-    unawaited(_pushQuestionToOverlayIfNeeded(questions));
     final ok = await req.completer.future;
     if (!ok) return null;
     return req.answers;
-  }
-
-  Future<void> _pushQuestionToOverlayIfNeeded(
-    List<UserQuestion> questions,
-  ) async {
-    final s = AppState.I.activeSession;
-    if (s == null || s.mode != AgentMode.control.name) return;
-    if (_appForegrounded) return;
-    final prompt = questions.length == 1
-        ? questions.first.question
-        : '${questions.length} questions — ${questions.first.question}';
-    try {
-      await _overlayChannel.invokeMethod(deviceOverlaySetPromptMethod, {
-        'prompt': prompt,
-      });
-    } catch (e) {
-      Diag.swallow('agent_service', e);
-    }
   }
 
   /// Test seam: drive ask_user_question's handler directly (no LLM).
@@ -22228,9 +20953,7 @@ ${await _agentsMdBlock()}
   Future<List<String>> _ownAppPrivateRoots() async {
     final s = _runSession;
     if (s == null) return const [];
-    final raw = await SandboxService.I.defaultWorkDirPathFor(
-      s.sandboxId ?? s.id,
-    );
+    final raw = (await AppState.I.workspaceDirForSession(s.sandboxId ?? s.id)).path;
     final canonical = await _canonicalFsPath(normalizeGrantPath(raw));
     // A workspace dir that resolves to an install root itself (or above it)
     // would exempt everything — never honor that.
@@ -22574,14 +21297,6 @@ ${await _agentsMdBlock()}
   /// Heuristic, not exhaustive — a false negative just means the compiler
   /// installs lazily on the NEXT matching command instead of this one;
   /// a false positive costs one harmless `command -v clang` check.
-  static final RegExp _nativeBuildCommandRe = RegExp(
-    r'\b(npm|yarn|pnpm)\s+(i|install|ci|rebuild|add)\b|'
-    r'\bnode-gyp\b|\bmake\b|\bcmake\b|\bcc\b|\bgcc\b|\bclang\b|'
-    r'\bpip3?\s+install\b',
-  );
-  bool _looksLikeNativeBuildCommand(String cmd) =>
-      _nativeBuildCommandRe.hasMatch(cmd);
-
   /// JVM + Flutter command detection for lazy toolchain provisioning. Only
   /// the leading tool of each shell segment counts, so `echo java` or
   /// `myjavascript` never trigger a JDK download.
@@ -22594,9 +21309,6 @@ ${await _agentsMdBlock()}
     'gradlew',
     'mvn',
   };
-  static const _kotlinTools = {'kotlin', 'kotlinc'};
-  static const _flutterTools = {'flutter', 'dart'};
-
   static String? _firstCommandToken(String segment) {
     var t = segment.trim();
     if (t.startsWith('./')) t = t.substring(2);
@@ -22613,14 +21325,6 @@ ${await _agentsMdBlock()}
     }
     return false;
   }
-
-  bool _looksLikeJvmCommand(String cmd) => _commandUsesTools(cmd, _jvmTools);
-
-  bool _looksLikeKotlinCommand(String cmd) =>
-      _commandUsesTools(cmd, _kotlinTools);
-
-  bool _looksLikeFlutterCommand(String cmd) =>
-      _commandUsesTools(cmd, _flutterTools);
 
   @visibleForTesting
   static bool looksLikeJvmCommandForTest(String cmd) =>
@@ -23122,7 +21826,7 @@ ${await _agentsMdBlock()}
               pinned.trim().isNotEmpty &&
               Directory(pinned).existsSync()
           ? Directory(pinned)
-          : await SandboxService.I.workDirFor(session.sandboxId ?? session.id);
+          : await AppState.I.workspaceDirForSession(session.sandboxId ?? session.id);
       roots.addAll([
         '${work.path}/.dsh/skills',
         '${work.path}/.agents/skills',
@@ -25191,24 +23895,13 @@ ${await _agentsMdBlock()}
     _jobs[id] = job;
     _emit('shell', 'job #$id started: $name');
     try {
-      if (SandboxService.I.isInstalled) {
-        // Sandbox spawn — _sandboxEnv() provides the full env set
-        // (PATH, GIT_EXEC_PATH, NODE_PATH, npm_config_*, PYTHONPATH, TLS,
-        // TMPDIR/HOME — without them Termux-built node/npm fall back to
-        // /data/data/com.termux/... cross-app paths → EACCES everywhere).
-        // ANY mode: a non-studio job with the sandbox installed must run
-        // inside it too — /system/bin/sh has no node at all.
-        job.process = await SandboxService.I.spawn([
-          'bash',
-          '-c',
-          cmd,
-        ], hostWorkDir: work);
-      } else {
-        job.process = await Process.start('/system/bin/sh', [
-          '-c',
-          cmd,
-        ], workingDirectory: work.path);
-      }
+      // P8 Task 13: the native sandbox is gone; background jobs use the
+      // platform shell (Android toybox on device, `sh` in host tests).
+      final shell = Platform.isAndroid ? '/system/bin/sh' : 'sh';
+      job.process = await Process.start(shell, [
+        '-c',
+        cmd,
+      ], workingDirectory: work.path);
       job.started = true;
       // Stream output into a buffer (capped at 10K chars). Dev-server
       // detection runs on every chunk: vite/next/serve/python http.server

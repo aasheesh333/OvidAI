@@ -43,7 +43,7 @@ import 'utility_limits.dart';
 ///    (`case String() when name.startsWith('plugin__')`), open a token for the
 ///    running session, pass it through, and always close it. The session id is
 ///    the same run key the Stop path already uses for
-///    `SandboxService.I.killRunProcesses(runKey)`:
+///    process cancellation:
 ///
 ///    ```dart
 ///    final runKey = _runSession?.id ?? '';
@@ -60,7 +60,7 @@ import 'utility_limits.dart';
 ///    ```
 ///
 /// 3. In `AgentService._cancelBucket(AgentRun r)`, after `runKey` is computed
-///    (the `SandboxService.I.killRunProcesses(runKey)` site), signal the
+///    (the process-cancellation site), signal the
 ///    bridge:
 ///
 ///    ```dart
@@ -73,7 +73,7 @@ import 'utility_limits.dart';
 class UtilityCancellationBridge {
   UtilityCancellationBridge._();
 
-  /// Process-wide bridge, mirroring `SandboxService.I`/`NativePluginRegistry.I`.
+  /// Process-wide bridge, mirroring `NativePluginRegistry.I`.
   static final UtilityCancellationBridge I = UtilityCancellationBridge._();
 
   final Map<String, Set<UtilityCancellation>> _inFlight = {};

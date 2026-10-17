@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'grant_store.dart';
 import 'plugin_manifest.dart';
-import 'sandbox_service.dart';
 
 /// Invocation-local access to committed plugin content and its dependencies.
 /// Registry activation is checked by HookService before constructing this.
@@ -25,36 +24,6 @@ class HookExecutionScope {
     return Directory(root).parent.path;
   }
 
-  static SandboxRootScope roots({
-    required NormalizedPluginManifest? manifest,
-    required Directory workspace,
-    required Map<String, String> env,
-    Object? inherited,
-  }) {
-    final runtime = dependencyRoot(manifest);
-    final paths = <String>[
-      workspace.path,
-      if (manifest != null) manifest.rootPath,
-      if (runtime != null)
-        for (final sub in ['node', 'python', 'bin', 'cache', 'storage'])
-          '$runtime/$sub',
-      env['PLUGIN_STORAGE'] ?? '',
-    ];
-    final envFile = env['CLAUDE_ENV_FILE'] ?? '';
-    return SandboxRootScope(
-      paths.where(
-        (path) => path.startsWith('/') && normalizeGrantPath(path) != '/',
-      ),
-      // An enclosing session denial still wins; unrelated allowed roots do not
-      // become plugin permissions.
-      decisions: [
-        if (envFile.startsWith('/') && normalizeGrantPath(envFile) != '/')
-          PermissionGrant.path(envFile, recursive: false),
-        if (inherited is SandboxRootScope)
-          ...inherited.decisions.where((decision) => decision.isDeny),
-      ],
-    );
-  }
 }
 
 /// Readiness failure: retry after provisioning, without consuming a breaker.
@@ -63,4 +32,29 @@ class HookRuntimeUnavailable implements Exception {
 
   @override
   String toString() => 'hook runtime unavailable; provision it and retry';
+}
+
+/// Environment names plugin-supplied env may never set (M1): a hook's
+/// `CLAUDE_ENV_FILE` exports and a plugin-owned MCP server's env. Each one
+/// steers which binaries, modules, libraries or credentials a process
+/// resolves — `PATH`/`HOME`, `NODE_PATH`/`PYTHONPATH` module injection,
+/// `LD_*`/`DYLD_*` preloads, `GIT_*` (e.g. `GIT_SSH_COMMAND`,
+/// `GIT_CONFIG_*`) and `npm_config_*` (npm reads the prefix
+/// case-insensitively, so the check does too).
+bool isProtectedRuntimeEnvName(String name) {
+  final upper = name.toUpperCase();
+  for (final prefix in const ['LD_', 'DYLD_', 'GIT_', 'NPM_CONFIG_']) {
+    if (upper.startsWith(prefix)) return true;
+  }
+  return const {
+    'PATH',
+    'HOME',
+    'NODE_PATH',
+    'NODE_OPTIONS',
+    'PYTHONPATH',
+    'PYTHONHOME',
+    'PYTHONSTARTUP',
+    'BASH_ENV',
+    'ENV',
+  }.contains(upper);
 }

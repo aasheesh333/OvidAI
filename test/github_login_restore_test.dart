@@ -245,19 +245,17 @@ void main() {
       );
     });
 
-    test('github.initialize stays out of the hoisted localState group', () {
-      // localState tasks are ordered FIRST and awaited sequentially. This one
-      // can hit the network on a 20s timeout, so hoisting it would let a slow
-      // GitHub restore eat the readiness budget ahead of plugin.activate and
-      // session.restore — a worse failure than the skip it would prevent.
-      // Skips are already covered lazily by retryRestoreFromUi().
+    test('github.initialize runs after local hydration and session restore', () {
+      // P8 Task 13 replaced the coordinator task list with a sequential boot.
+      // The GitHub restore may hit the network, so it must never run before
+      // local hydration, plugin activation, skills and session restore.
       final src = File('lib/core/state.dart').readAsStringSync();
-      final id = src.indexOf("id: 'github.initialize'");
-      expect(id, greaterThan(-1));
-      final kindAt = src.indexOf('kind: StartupItemKind.', id);
-      expect(kindAt, greaterThan(id));
-      final kindLine = src.substring(kindAt, src.indexOf('\n', kindAt));
-      expect(kindLine, isNot(contains('localState')));
+      final init = src.indexOf('Future<void> _initializeReadiness()');
+      expect(init, greaterThan(-1));
+      final restore = src.indexOf('_maybeFinishSessionRestore()', init);
+      final github = src.indexOf("'github.initialize'", init);
+      expect(restore, greaterThan(init));
+      expect(github, greaterThan(restore));
     });
   });
 }

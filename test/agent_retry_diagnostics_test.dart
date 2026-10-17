@@ -5,7 +5,6 @@ import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
-import 'package:ovid_ai/core/device_control_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -250,34 +249,6 @@ void main() {
       ], s);
       expect(result!['content'], '(10,20) (10,20) done');
       expect(s.messages.last.content, '(10,20) (10,20) done');
-    },
-  );
-
-  test(
-    'native accessibility evidence has one four-coordinate rectangle per node',
-    () {
-      final output = DeviceControlService.formatReadResultForTest({
-        'full': true,
-        'status': 'ok',
-        'package': 'example.app',
-        'added': [
-          {
-            'handle': 1,
-            'text': 'Button',
-            'bounds': [10, 20, 30, 40],
-          },
-          {
-            'handle': 2,
-            'text': 'Container',
-            'bounds': [10, 20, 30, 40],
-          },
-        ],
-      });
-      expect('bounds=(10,20,30,40)'.allMatches(output).length, 2);
-      expect(
-        output.split('\n').where((line) => line.contains('bounds=')).length,
-        2,
-      );
     },
   );
 

@@ -4,8 +4,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
-import 'package:ovid_ai/core/device_control_service.dart';
-import 'package:ovid_ai/core/schedule_coordinator.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -143,45 +141,5 @@ void main() {
     await resuming;
     expect(notifier.backgroundStopped, isTrue);
     expect(AgentService.I.schedules.stopped, isTrue);
-  });
-
-  test('pausing a running Control schedule cancels pending native work immediately', () async {
-    final agent = AgentService.I;
-    final task = agent.schedules.create({'prompt': 'tap', 'after_seconds': 10});
-    task['status'] = 'running';
-    final session = ChatSession(id: 'scheduled-control', title: 'Control',
-        model: 'm', mode: 'control', schedules: [task]);
-    app.sessions.add(session);
-    app.activeSessionId = session.id;
-    final bucket = agent.runBucketForTest(session.id)
-      ..activeRunId = 'scheduled-run'
-      ..controlRun = true;
-    final entered = Completer<void>();
-    final reply = Completer<bool>();
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (call) async {
-      calls.add(call.method);
-      if (call.method == 'deviceTap') {
-        entered.complete();
-        return reply.future;
-      }
-      return true;
-    });
-    DeviceControlService.I.beginDeviceGeneration();
-    final tap = DeviceControlService.I.tap(x: 10, y: 20);
-    await entered.future;
-    agent.enqueueMessage('tap again', sessionId: session.id);
-    try {
-      await agent.schedules.cancelTask(ScheduleEntry(session.id, task), pause: true);
-      expect(await tap.timeout(const Duration(seconds: 1)),
-          DeviceControlService.cancelledSupersededMessage);
-      expect(task['status'], 'paused');
-      expect(bucket.activeRunId, isNull);
-      expect(bucket.queue, isEmpty);
-      expect(calls, contains('deviceCancelActions'));
-    } finally {
-      reply.complete(true);
-      agent.dropSessionRun(session.id);
-    }
   });
 }

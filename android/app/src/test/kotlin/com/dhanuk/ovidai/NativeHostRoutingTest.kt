@@ -14,22 +14,18 @@ class NativeHostRoutingTest {
     @After fun cleanup() {
         AgentNotificationBridge.stopHandler = null
         AgentNotificationBridge.exitHandler = null
-        deviceActions.begin()
     }
 
     @Test fun refreshedNotificationCallbacksTargetNewHostAndCancelBeforeDart() {
-        deviceActions.begin()
         var oldExit = false
         var newExit = false
         val events = mutableListOf<String>()
         bindNotificationHostCallbacks({ fail("Old host received $it") }, { oldExit = true })
         bindNotificationHostCallbacks({
-            assertTrue(deviceActions.isStopped())
             events.add(it)
         }, { newExit = true })
         AgentNotificationBridge.stopHandler!!.invoke()
         assertEquals(listOf("onAgentStop"), events)
-        deviceActions.begin()
         AgentNotificationBridge.exitHandler!!.invoke()
         assertEquals(listOf("onAgentStop", "onAgentExit"), events)
         assertFalse(oldExit)

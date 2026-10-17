@@ -66,7 +66,6 @@ void main() {
     voice.stopOverrideForTest = null;
     voice.ensureMicrophonePermissionForTest = null;
     AgentService.llmOnceForTest = null;
-    AgentService.I.overlayRunStarterForTest = null;
     AgentService.setRunSessionForTest('');
     AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
@@ -156,34 +155,6 @@ void main() {
           .controller!
           .text,
       'hello world',
-    );
-  });
-
-  test('overlay mic final transcript auto-sends', () async {
-    final s = ChatSession(
-      id: 'mic-ptt-overlay',
-      title: 'S',
-      model: 'm',
-      mode: 'auto',
-    );
-    app.sessions.add(s);
-    app.activeSessionId = s.id;
-    voice.availabilityOverrideForTest = true;
-    voice.startOverrideForTest = (onResult) {
-      onResult('partial', false);
-      onResult('do the thing', true);
-    };
-    String? sentText;
-    AgentService.I.overlayRunStarterForTest = (text, session) async {
-      sentText = text;
-    };
-
-    await AgentService.I.handleDeviceOverlayMic();
-
-    expect(
-      sentText,
-      'do the thing',
-      reason: 'overlay final transcript must send via the overlay send path',
     );
   });
 }

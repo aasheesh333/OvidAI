@@ -20,7 +20,7 @@ typedef GitCloneRunner =
 ///       (repoFull, branch) → local path, plus sessionId → binding
 ///
 /// Sessions bind to a registry folder via [bindSession]; the workspace read
-/// path ([SandboxService.workDirFor]/[workDirForSync]) consults
+/// path (the per-session workspace resolver) consults
 /// [boundWorkspaceFor] first and falls back to the per-session `ws_<id>`
 /// folder when there is no binding, so general mode keeps its isolation.
 ///
@@ -40,8 +40,7 @@ class GlobalRepoRegistry {
   /// cycle with the GitHub/sandbox services). Null → anonymous clone.
   static String? Function()? gitTokenProvider;
 
-  /// Supplies the git auth **env** for a clone, wired by the sandbox layer:
-  /// `GlobalRepoRegistry.gitCredentialEnvProvider = SandboxService.I.gitCredentialEnv;`
+  /// Supplies the git auth **env** for a clone, wired by the UI layer.
   /// SECURITY (2026-09-24): clones must not interpolate the token into an env
   /// value — the provider returns a host-scoped `store` helper that names a
   /// 0600 credential file instead. Null → anonymous clone (tests, host git).

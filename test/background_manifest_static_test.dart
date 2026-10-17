@@ -105,10 +105,12 @@ void main() {
     final activity = kt('MainActivity');
     expect(activity, contains('routeNotificationIntent'));
     expect(activity, contains('"onOpenRoute"'));
-    final dart = File('lib/core/agent_notification_service.dart').readAsStringSync();
-    expect(dart, contains("call.method == 'onOpenRoute'"));
+    // P8 Task 12: tap routing is re-fed from FCM (PushService) instead of
+    // the local run-state notification service.
+    final dart = File('lib/core/cloud/push_service.dart').readAsStringSync();
+    expect(dart, contains('onOpenRoute'));
     expect(File('lib/main.dart').readAsStringSync(),
-        contains('openRouteHandler = _openRouteFromNotification'));
+        contains('PushService.I.onOpenRoute = _openRouteFromNotification'));
   });
 
   test('notification resources: original chime and a monochrome status icon', () {

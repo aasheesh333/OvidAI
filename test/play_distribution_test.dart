@@ -3,39 +3,19 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/distribution.dart';
-import 'package:ovid_ai/core/sandbox_service.dart';
 
 /// Google Play build gates (docs/play/PLAY_COMPLIANCE_AUDIT.md).
 void main() {
   tearDown(() => Distribution.playOverrideForTest = null);
 
-  test('sideload builds keep every capability', () {
-    Distribution.playOverrideForTest = false;
-    expect(Distribution.controlModeAvailable, isTrue);
-    expect(Distribution.onDeviceSandboxAvailable, isTrue);
-    expect(Distribution.idleKeepAliveAvailable, isTrue);
-    expect(modeOptionsForPicker(), contains(AgentMode.control));
-    expect(Distribution.agentPermissions, Distribution.allAgentPermissions);
-    expect(sandboxPreflightGate(sdkInt: 34, dataExecAllowed: true), isNull);
-  });
-
-  test('Play builds drop Control mode, the sandbox and idle keep-alive', () {
-    Distribution.playOverrideForTest = true;
-    expect(Distribution.controlModeAvailable, isFalse);
-    expect(Distribution.onDeviceSandboxAvailable, isFalse);
-    expect(Distribution.idleKeepAliveAvailable, isFalse);
-    expect(modeOptionsForPicker(), isNot(contains(AgentMode.control)));
-    expect(modeOptionsForPicker(), contains(AgentMode.auto));
-  });
-
-  test('Play preflight refuses the sandbox before any payload or download', () {
-    final gate = sandboxPreflightGate(
-      sdkInt: 36,
-      dataExecAllowed: true,
-      onDeviceSandboxAvailable: false,
-    );
-    expect(gate, isA<SandboxUnsupportedException>());
-    expect(gate!.message, Distribution.sandboxUnavailableMessage);
+  test('Control mode and the on-device sandbox are gone on every channel', () {
+    for (final play in [false, true]) {
+      Distribution.playOverrideForTest = play;
+      expect(Distribution.controlModeAvailable, isFalse);
+      expect(Distribution.onDeviceSandboxAvailable, isFalse);
+      expect(modeOptionsForPicker(), isNot(contains(AgentMode.control)));
+      expect(modeOptionsForPicker(), contains(AgentMode.auto));
+    }
   });
 
   test('Play agent permissions match the Play manifest', () {
@@ -64,25 +44,15 @@ void main() {
           'targetSdk = if (ovidPlayBuild) ovidPlayTargetSdk else ovidSideloadTargetSdk',
         ),
       );
-      expect(
-        gradle,
-        contains('if (ovidPlayBuild) excludes += "**/libovid_bootstrap.so"'),
-      );
+      // P8 Task 13 removed the bundled Termux userland from every build.
+      expect(gradle, isNot(contains('libovid_bootstrap.so')));
       expect(
         gradle,
         contains('addStaticManifestFile("src/play/AndroidManifest.xml")'),
       );
     });
 
-    test('the overlay removes the AccessibilityService and risky permissions', () {
-      expect(
-        overlay,
-        matches(
-          RegExp(
-            r'android:name="com\.dhanuk\.ovidai\.OvidAccessibilityService"\s+tools:node="remove"',
-          ),
-        ),
-      );
+    test('the overlay removes risky permissions', () {
       for (final permission in [
         'android.permission.SEND_SMS',
         'android.permission.CALL_PHONE',
@@ -110,11 +80,5 @@ void main() {
       }
     });
 
-    test('dataSync services stop when Android 15 exhausts the FGS budget', () {
-      final service = File(
-        'android/app/src/main/kotlin/com/dhanuk/ovidai/AgentForegroundService.kt',
-      ).readAsStringSync();
-      expect(service, contains('override fun onTimeout(startId: Int, fgsType: Int)'));
-    });
   });
 }

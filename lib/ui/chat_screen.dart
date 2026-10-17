@@ -22,10 +22,8 @@ import 'content_report_sheet.dart';
 import '../core/format.dart';
 import '../core/voice_input_service.dart';
 import '../core/state.dart';
-import '../core/studio_setup_coordinator.dart';
 import '../core/native_share.dart';
 import 'share_actions.dart';
-import 'sandbox_setup.dart';
 import 'browser_screen.dart';
 import 'sidebar.dart';
 import 'settings_screen.dart';
@@ -38,14 +36,10 @@ import '../core/url_safety.dart';
 import '../core/agent_service.dart';
 import '../core/connection_service.dart';
 import '../core/commands.dart';
-import '../core/device_control_service.dart';
 import '../core/mcp_service.dart';
 import '../core/plugin_registry.dart';
 import '../core/presets.dart';
 import '../core/skills.dart';
-import '../core/startup_coordinator.dart';
-import 'plugins_screen.dart';
-import 'startup_progress_panel.dart';
 import '../core/composer_drafts.dart';
 import '../core/diag.dart';
 import '../core/firebase_service.dart';
@@ -851,11 +845,7 @@ class _TurnProcessStripState extends State<_TurnProcessStrip> {
 }
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, this.startupCoordinator});
-
-  /// Startup coordinator rendered by the readiness dashboard. Defaults to
-  /// the process singleton; tests inject an isolated instance.
-  final StartupCoordinator? startupCoordinator;
+  const ChatScreen({super.key});
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -1040,7 +1030,6 @@ class _ChatScreenState extends State<ChatScreen>
     final reason = Distribution.cloudExecution
         ? null
         : AgentService.I.skillUnavailableReason(skill, sessionId);
-    final canonicalId = skill.canonicalId;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -1048,18 +1037,6 @@ class _ChatScreenState extends State<ChatScreen>
           '${reason == null ? '' : ' ($reason)'}.',
         ),
         behavior: SnackBarBehavior.floating,
-        action: SnackBarAction(
-          label: 'Plugins',
-          onPressed: () => _openPlugins(context, focusCanonicalId: canonicalId),
-        ),
-      ),
-    );
-  }
-
-  void _openPlugins(BuildContext context, {String? focusCanonicalId}) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => PluginsScreen(focusCanonicalId: focusCanonicalId),
       ),
     );
   }
@@ -1478,7 +1455,14 @@ class _ChatScreenState extends State<ChatScreen>
                 key: const ValueKey('chat-header-studio'),
                 tooltip: context.l10n.chatHeaderStudio,
                 icon: const Icon(Icons.code, size: 19),
-                onPressed: () => openStudio(context),
+                onPressed: () => ScaffoldMessenger.maybeOf(context)
+                    ?.showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Studio moves to the cloud in this build.',
+                        ),
+                      ),
+                    ),
               ),
               // Browser button with agent-activity status dot (top-right).
               // P8 Task 10: hidden on the thin client — the on-device WebView
@@ -1542,10 +1526,6 @@ class _ChatScreenState extends State<ChatScreen>
                 // the shell renders it (ChatScreen lives in the Expanded slot),
                 // so the shared axis is derived from the actual chat pane.
                 final layout = ChatLayout(viewportWidth: constraints.maxWidth);
-                // Reserve most of a short viewport for the composer/docks so
-                // an expanded dashboard can never crowd them off-screen at
-                // large text scales. The panel still scrolls internally.
-                final panelCap = math.min(240.0, constraints.maxHeight * 0.25);
                 // Docks share the same centered content column as the
                 // transcript so the whole chat reads as one axis.
                 final dockColumn = Column(
@@ -1603,37 +1583,6 @@ class _ChatScreenState extends State<ChatScreen>
                 );
                 return Column(
                   children: [
-                    // Non-blocking startup readiness dashboard, pinned just
-                    // below the app header. Its own AnimatedBuilder observes
-                    // the coordinator so startup transitions never rebuild the
-                    // transcript or the composer.
-                    //
-                    // P8 Task 10: the startup/sandbox-install apparatus is
-                    // on-device only — the whole panel (and the runtime
-                    // install banner below it, incl. `onInstallSandbox`) is
-                    // hidden on the thin client; it dies with wave 13.
-                    if (!Distribution.cloudExecution)
-                      ConstrainedBox(
-                        constraints: BoxConstraints(maxHeight: panelCap),
-                        child: SingleChildScrollView(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              StartupProgressPanel(
-                                coordinator: widget.startupCoordinator,
-                                onOpenPlugins: (canonicalId) => _openPlugins(
-                                  context,
-                                  focusCanonicalId: canonicalId,
-                                ),
-                                onInstallSandbox: () => openStudio(context),
-                                sandboxInstalled:
-                                    AppState.I.sandboxInstalled,
-                              ),
-                              const _RuntimeInstallBanner(),
-                            ],
-                          ),
-                        ),
-                      ),
                     Expanded(
                       child: LayoutBuilder(
                         builder: (context, chatConstraints) => Column(
@@ -1980,7 +1929,6 @@ class _ChatScreenState extends State<ChatScreen>
                               controller: _input,
                               focusNode: _inputFocus,
                               sessionId: s?.id,
-                              coordinator: widget.startupCoordinator,
                               running: s == null
                                   ? false
                                   : _agent.busyFor(s.id),
@@ -2072,10 +2020,6 @@ class _ChatScreenState extends State<ChatScreen>
                                     }
                                     if (result.popup == 'permission') {
                                       _showModeSheetFromCommand(context);
-                                      return;
-                                    }
-                                    if (result.popup == 'controlDisclosure') {
-                                      await _enableControlMode(context);
                                       return;
                                     }
                                     if (result.popup == 'preset') {
@@ -6551,10 +6495,6 @@ class _InputBar extends StatefulWidget {
   /// hand focus to the composer after moving text into it.
   final FocusNode? focusNode;
 
-  /// Startup coordinator observed so runtime plugin skills mounted by the
-  /// `skill.mount` item refresh the slash suggestions without rebuilding the
-  /// transcript. Defaults to the process singleton.
-  final StartupCoordinator? coordinator;
   final bool running;
 
   /// Approval takeover: when an approval/question card is pending, the
@@ -6578,7 +6518,6 @@ class _InputBar extends StatefulWidget {
     required this.running,
     required this.layout,
     required this.availableHeight,
-    this.coordinator,
     this.locked = false,
     this.editingQueue = false,
     this.commandBusy = false,
@@ -6596,18 +6535,9 @@ class _InputBarState extends State<_InputBar> {
   bool get locked => widget.locked;
   VoidCallback get onSend => widget.onSend;
 
-  StartupCoordinator get _coordinator =>
-      widget.coordinator ?? StartupCoordinator.I;
-
-  /// Last observed `skill.mount` state, so the composer rebuilds exactly when
-  /// runtime skills finish mounting (and not on every startup transition).
-  StartupItemState? _skillMountState;
-
   @override
   void initState() {
     super.initState();
-    _skillMountState = _currentSkillMountState();
-    _coordinator.addListener(_onStartupChanged);
     controller.addListener(_onTextChanged);
     _onTextChanged();
   }
@@ -6630,35 +6560,13 @@ class _InputBarState extends State<_InputBar> {
         if (mounted) _onTextChanged();
       });
     }
-    if (oldWidget.coordinator != widget.coordinator) {
-      (oldWidget.coordinator ?? StartupCoordinator.I).removeListener(
-        _onStartupChanged,
-      );
-      _skillMountState = _currentSkillMountState();
-      _coordinator.addListener(_onStartupChanged);
-    }
   }
 
   @override
   void dispose() {
     _mentionFilesTimer?.cancel();
-    _coordinator.removeListener(_onStartupChanged);
     controller.removeListener(_onTextChanged);
     super.dispose();
-  }
-
-  StartupItemState? _currentSkillMountState() {
-    for (final item in _coordinator.snapshot.items) {
-      if (item.id == 'skill.mount') return item.state;
-    }
-    return null;
-  }
-
-  void _onStartupChanged() {
-    final next = _currentSkillMountState();
-    if (next == _skillMountState) return;
-    _skillMountState = next;
-    if (mounted) setState(() {});
   }
 
   /// True while the composer is in slash mode (text starts with `/` and the
@@ -7554,7 +7462,6 @@ class _InputBarState extends State<_InputBar> {
                           if (!locked) onSend();
                         },
                       ),
-                      const _ControlServiceNotice(),
                       if (widget.editingQueue)
                         Padding(
                           padding: const EdgeInsets.only(top: 6),
@@ -9492,7 +9399,11 @@ class _StudioFolderChip extends StatelessWidget {
 
     if (choice == null || !context.mounted) return;
     if (choice == 'studio') {
-      openStudio(context);
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(
+          content: Text('Studio moves to the cloud in this build.'),
+        ),
+      );
       return;
     }
     if (choice == 'sandbox') {
@@ -9770,10 +9681,6 @@ Future<void> _pickAccessMode(
   AgentMode m,
   String? sessionId,
 ) async {
-  if (m == AgentMode.control) {
-    await _enableControlMode(context);
-    return;
-  }
   final session = AppState.I.sessionById(sessionId);
   final current = AgentMode.values.firstWhere(
     (x) => x.name == session?.mode,
@@ -9824,347 +9731,6 @@ Future<void> _pickAccessMode(
   } else {
     _agent.setMode(m);
   }
-}
-
-Future<void> _enableControlMode(BuildContext context) async {
-  // P8 Task 10: control mode drives the on-device AccessibilityService —
-  // it cannot exist on the thin client (the whole control UI dies with
-  // wave 13; the battery-exemption and setMode(control) call sites below
-  // stay compiled but are unreachable on the cloud path).
-  if (Distribution.cloudExecution) {
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Control mode is not available in the cloud version of Ovid.',
-        ),
-      ),
-    );
-    return;
-  }
-  if (!Distribution.controlModeAvailable) {
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      const SnackBar(content: Text(Distribution.controlUnavailableMessage)),
-    );
-    return;
-  }
-  final app = AppState.I;
-  // Show the disclosure only once. After acceptance, switching to Control
-  // must not re-prompt.
-  if (!app.controlDisclosureAccepted) {
-    final accepted = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Enable Control mode'),
-        content: const SingleChildScrollView(
-          child: Text(kControlModeDisclosure),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Not now'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Enable Control'),
-          ),
-        ],
-      ),
-    );
-    if (accepted != true) return;
-    app.controlDisclosureAccepted = true;
-  }
-  AgentService.I.setMode(AgentMode.control);
-  // If the accessibility service is enabled but unbound after an app
-  // restart, absorb the OS rebind window now (pure wait, no programmatic
-  // toggle) — control mode must not need a manual off/on toggle to start
-  // working.
-  unawaited(DeviceControlService.I.refreshServiceBinding());
-  // Battery exemption once: control mode means permanent presence, which
-  // Doze/OEM killers will end without the exemption. Asked only on first
-  // enable, and only when not already exempt — never a nag.
-  if (!app.controlBatteryPromptShown) {
-    await app.markControlBatteryPromptShown();
-    bool exempt = true;
-    try {
-      exempt = (await DeviceControlService.I.backgroundHealth()).batteryExempt;
-    } catch (e) {
-      Diag.swallow('chat_screen', e);
-    }
-    if (!exempt) {
-      try {
-        await AgentService.I.requestBatteryExemption();
-      } catch (e) {
-        Diag.swallow('chat_screen', e);
-      }
-    }
-  }
-  // Control mode survives the background only through the persistent
-  // notification (Android mandates it for a foreground service). If the
-  // user turned notifications off, say so once with a one-tap fix instead
-  // of letting control runs die silently in the background.
-  if (!app.notificationsEnabled && context.mounted) {
-    final enable = await showDialog<bool>(
-      context: context,
-      builder: (d) => AlertDialog(
-        title: const Text('Keep Ovid alive in the background?'),
-        content: const Text(
-          'Control mode drives your device while the app is backgrounded. '
-          'Android only allows that with a persistent notification. Turn '
-          'notifications on so runs survive the background.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(d, false),
-            child: const Text('Not now'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(d, true),
-            child: const Text('Turn on'),
-          ),
-        ],
-      ),
-    );
-    if (enable == true) {
-      await app.setNotificationsEnabled(true);
-    }
-  }
-  // Only deep-link to Settings when the accessibility service is not yet
-  // enabled — an already-granted service must not re-open Settings.
-  var enabled = false;
-  try {
-    enabled = await DeviceControlService.I.isEnabled();
-  } catch (e) {
-    Diag.swallow('chat_screen', e);
-  }
-  if (enabled) return;
-  try {
-    await DeviceControlService.I.openAccessibilitySettings();
-  } catch (_) {
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Could not open Accessibility Settings. Use the inline retry.',
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
-}
-
-class _ControlServiceNotice extends StatefulWidget {
-  const _ControlServiceNotice();
-  @override
-  State<_ControlServiceNotice> createState() => _ControlServiceNoticeState();
-}
-
-class _ControlServiceNoticeState extends State<_ControlServiceNotice>
-    with WidgetsBindingObserver {
-  bool? _enabled;
-
-  /// Four-state native binding status. `_enabled` alone is NOT enough: it is a
-  /// Settings-level check, so it stays true when Android has the service
-  /// switched on but has never rebound it after a force-stop — the exact state
-  /// where Control mode is broken and this notice used to stay silent.
-  String? _serviceState;
-  String? _error;
-  Timer? _retryTimer;
-  bool? _batteryExempt;
-  String _manufacturer = '';
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    if (_agent.mode == AgentMode.control) {
-      _refresh();
-    }
-  }
-
-  @override
-  void dispose() {
-    _retryTimer?.cancel();
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed &&
-        _agent.mode == AgentMode.control) {
-      _refresh(isResume: true);
-    }
-  }
-
-  Future<void> _refresh({bool isResume = false}) async {
-    if (_agent.mode != AgentMode.control) return;
-    _retryTimer?.cancel();
-    final enabled = await DeviceControlService.I.isEnabled().catchError(
-      (_) => false,
-    );
-    final state = await DeviceControlService.I.serviceState().catchError(
-      (_) => 'disabled',
-    );
-    if (!mounted) return;
-    if (mounted) {
-      setState(() {
-        _enabled = enabled;
-        _serviceState = state;
-      });
-    }
-    if (isResume && !enabled && _enabled != true) {
-      // Retry once after 600ms on resume in case the OS is still binding the service
-      _retryTimer = Timer(const Duration(milliseconds: 600), () async {
-        if (!mounted || _agent.mode != AgentMode.control) return;
-        final retryEnabled = await DeviceControlService.I
-            .isEnabled()
-            .catchError((_) => false);
-        if (mounted) setState(() => _enabled = retryEnabled);
-      });
-    }
-    await _refreshHealth();
-  }
-
-  /// Background-health snapshot for OEM-killer guidance. Fail-closed toward
-  /// silence: an unreadable state hides the guidance row instead of nagging.
-  Future<void> _refreshHealth() async {
-    try {
-      final health = await DeviceControlService.I.backgroundHealth();
-      if (!mounted || _agent.mode != AgentMode.control) return;
-      setState(() {
-        _batteryExempt = health.batteryExempt;
-        _manufacturer = health.manufacturer;
-      });
-    } catch (e) {
-      Diag.swallow('chat_screen', e);
-    }
-  }
-
-  Future<void> _retry() async {
-    try {
-      await DeviceControlService.I.openAccessibilitySettings();
-      if (mounted) setState(() => _error = null);
-    } catch (_) {
-      if (mounted) {
-        setState(() => _error = 'Could not open Accessibility Settings.');
-      }
-    }
-    await _refresh();
-  }
-
-  @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-    animation: _agent,
-    builder: (_, _) {
-      if (_enabled == null) {
-        _refresh();
-      }
-      if (_agent.mode != AgentMode.control) {
-        return const SizedBox.shrink();
-      }
-      final showOffWarning = _enabled == false;
-      // Enabled in Settings but Android is not going to rebind it. Needs a
-      // different message and the same Settings action — "wait, it will bind
-      // on its own" is false in this state.
-      final showStaleWarning =
-          _enabled == true && _serviceState == DeviceControlService.staleState;
-      // OEM-killer guidance: service is up, but this ROM kills background
-      // apps without the battery exemption. Pixel-class ROMs never match.
-      final showHealthGuidance =
-          _enabled == true &&
-          _batteryExempt == false &&
-          DeviceControlService.isKillerOem(_manufacturer);
-      if (!showOffWarning && !showStaleWarning && !showHealthGuidance) {
-        return const SizedBox.shrink();
-      }
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (showOffWarning)
-            Row(
-              children: [
-                Icon(
-                  Icons.warning_amber_rounded,
-                  size: 15,
-                  color: Aether.warnLight,
-                ),
-                const SizedBox(width: 5),
-                Expanded(
-                  child: Text(
-                    'Control service is off',
-                    style: TextStyle(fontSize: 11, color: Aether.warnLight),
-                  ),
-                ),
-                TextButton(
-                  onPressed: _retry,
-                  child: const Text('Open Accessibility Settings'),
-                ),
-              ],
-            ),
-          if (showStaleWarning)
-            Row(
-              children: [
-                Icon(
-                  Icons.sync_problem_rounded,
-                  size: 15,
-                  color: Aether.warnLight,
-                ),
-                const SizedBox(width: 5),
-                Expanded(
-                  child: Text(
-                    'On in Settings but Android has not restarted it — '
-                    'toggle it off and on',
-                    style: TextStyle(fontSize: 11, color: Aether.warnLight),
-                  ),
-                ),
-                TextButton(
-                  onPressed: _retry,
-                  child: const Text('Open Accessibility Settings'),
-                ),
-              ],
-            ),
-          if (showHealthGuidance)
-            Row(
-              children: [
-                Icon(
-                  Icons.battery_alert_outlined,
-                  size: 15,
-                  color: Aether.warnLight,
-                ),
-                const SizedBox(width: 5),
-                Expanded(
-                  child: Text(
-                    'This device may kill Ovid in the background — exempt it to stay present',
-                    style: TextStyle(fontSize: 11, color: Aether.warnLight),
-                  ),
-                ),
-                TextButton(
-                  onPressed: () async {
-                    try {
-                      await AgentService.I.requestBatteryExemption();
-                    } catch (e) {
-                      Diag.swallow('chat_screen', e);
-                    }
-                    await _refreshHealth();
-                  },
-                  child: const Text('Fix'),
-                ),
-              ],
-            ),
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.only(left: 20),
-              child: Text(
-                _error!,
-                style: TextStyle(fontSize: 11, color: Aether.danger),
-              ),
-            ),
-        ],
-      );
-    },
-  );
 }
 
 /// ═══════════════ web-IDE style markdown renderer ═══════════════
@@ -10609,133 +10175,9 @@ class _OvidInlineCodeBuilder extends MarkdownElementBuilder {
 /// continues), and offers Retry on failure. It observes [AppState] through
 /// its own AnimatedBuilder so installer progress never rebuilds the chat
 /// transcript or the composer.
-class _RuntimeInstallBanner extends StatelessWidget {
-  const _RuntimeInstallBanner();
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: AppState.I,
-      builder: (context, _) {
-        final app = AppState.I;
-        if (!app.showRuntimeInstallBanner) return const SizedBox.shrink();
-        final failed = app.runtimeInstallState == RuntimeInstallState.failed;
-        final progress = app.runtimeInstallProgress;
-        return Container(
-          margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-          padding: const EdgeInsets.fromLTRB(12, 9, 8, 9),
-          decoration: BoxDecoration(
-            color: Aether.surface,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: failed ? Aether.danger : Aether.accent,
-              width: 1,
-            ),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  if (!failed)
-                    const SizedBox(
-                      width: 15,
-                      height: 15,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  else
-                    Icon(
-                      Icons.warning_amber_rounded,
-                      size: 17,
-                      color: Aether.danger,
-                    ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      failed
-                          ? 'Background setup needs attention'
-                          : 'Setting up Node.js + Python…',
-                      style: const TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  if (failed)
-                    TextButton(
-                      onPressed: () => unawaited(
-                        StudioSetupCoordinator.I.retryFromRuntimeBanner(),
-                      ),
-                      style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: const Size(0, 30),
-                      ),
-                      child: const Text(
-                        'Retry',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                    ),
-                  IconButton(
-                    onPressed: app.dismissRuntimeInstallBanner,
-                    icon: const Icon(Icons.close, size: 16),
-                    color: Aether.textFaint,
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.all(4),
-                    constraints: const BoxConstraints(),
-                    tooltip: failed ? 'Dismiss' : 'Hide (keeps installing)',
-                  ),
-                ],
-              ),
-              if (progress >= 0 && !failed) ...[
-                const SizedBox(height: 7),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: progress.clamp(0.0, 1.0),
-                    minHeight: 4,
-                    backgroundColor: Aether.surfaceAlt,
-                    valueColor: AlwaysStoppedAnimation(Aether.accent),
-                  ),
-                ),
-              ],
-              if (app.runtimeInstallLine.isNotEmpty) ...[
-                const SizedBox(height: 5),
-                Text(
-                  app.runtimeInstallLine,
-                  style: TextStyle(
-                    fontFamily: Aether.mono,
-                    fontSize: 10.5,
-                    height: 1.5,
-                    color: Aether.textFaint,
-                  ),
-                ),
-              ],
-              if (!failed)
-                Padding(
-                  padding: const EdgeInsets.only(top: 3),
-                  child: Text(
-                    'Chat works meanwhile — agent tools that need Node/Python will install them on demand.',
-                    style: TextStyle(fontSize: 10.5, color: Aether.textFaint),
-                  ),
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// Image-row file facts, resolved once per path with an async `stat` and
-/// shared across rebuilds and remounts.
 final Map<String, ({bool exists, int size})> _imageFileInfoCache = {};
 const _imageFileInfoCacheCap = 512;
 
-/// Resolves whether [path] exists and its size off the build path. Until the
-/// first stat lands the file is assumed present (the image itself falls back
-/// on a load error), so a row never flashes "missing".
 class _ImageFileInfo extends StatefulWidget {
   const _ImageFileInfo({required this.path, required this.builder});
 

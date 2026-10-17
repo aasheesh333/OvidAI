@@ -483,8 +483,8 @@ void main() {
       expect(AppState.createForTest().shareBrowserOnRestart, isTrue);
     });
 
-    test('the restart merge runs as a startup task', () {
-      expect(stateSrc.contains("id: 'session.shareOnRestart'"), isTrue);
+    test('the restart merge runs as a boot stage', () {
+      expect(stateSrc.contains("'session.shareOnRestart'"), isTrue);
       expect(stateSrc.contains('SessionDataSharing.I.runOnStartup'), isTrue);
     });
 
@@ -506,17 +506,15 @@ void main() {
       // empty session list and report "only one session exists". Search
       // INSIDE the list builder: the class's constructor definition appears
       // earlier in the file and would satisfy a naive indexOf.
-      final listStart = stateSrc.indexOf(
-        'Future<List<StartupTask>> _buildReadinessTasks()',
-      );
-      expect(listStart, greaterThan(-1));
+      final init = stateSrc.indexOf('Future<void> _initializeReadiness()');
+      expect(init, greaterThan(-1));
       final restoreAt = stateSrc.indexOf(
-        '_SessionRestoreStartupTask(this)',
-        listStart,
+        '_maybeFinishSessionRestore()',
+        init,
       );
       final shareAt = stateSrc.indexOf(
-        "id: 'session.shareOnRestart'",
-        listStart,
+        "'session.shareOnRestart'",
+        init,
       );
       expect(restoreAt, greaterThan(-1));
       expect(shareAt, greaterThan(-1));

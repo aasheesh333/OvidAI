@@ -2,14 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../core/agent_notification_service.dart';
-import '../core/agent_service.dart';
+import '../core/cloud/cloud_session_store.dart';
+import '../core/cloud/cloud_ws.dart';
 import '../core/connection_service.dart';
-import '../core/device_control_service.dart';
 import '../core/github_service.dart';
 import '../core/firebase_service.dart';
 import '../core/mcp_service.dart';
-import '../core/startup_coordinator.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import 'chat_screen.dart';
@@ -216,12 +214,9 @@ class TelemetryConsentPrompter {
 /// else (Studio, Browser, Plugins, Settings) lives behind icons/drawer.
 ///
 /// Extracted from `main.dart` so the first-launch setup gate and the app
-/// entry point share one shell. An optional [startupCoordinator] is threaded
-/// to the chat screen so the startup dashboard can be exercised in isolation.
+/// entry point share one shell.
 class OvidShell extends StatefulWidget {
-  const OvidShell({super.key, this.startupCoordinator});
-
-  final StartupCoordinator? startupCoordinator;
+  const OvidShell({super.key});
 
   @override
   State<OvidShell> createState() => _OvidShellState();
@@ -249,10 +244,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    AgentService.I.onControlTaskCompleted = _revealControlChat;
-    // Foreground-notification wiring (agent keep-alive): registers the
-    // notification Stop-button handler.
-    unawaited(AgentNotificationService.I.init());
     // Ask for telemetry consent once (Play policy) after first frame.
     _consent.attach(() => context);
     // First-run welcome notice moved to LoginGate (post-login overlay).
@@ -261,16 +252,8 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     _persistWarned = _persistApp.lastSessionPersistFailed;
   }
 
-  void _revealControlChat(String sessionId) {
-    if (!mounted) return;
-    Navigator.of(context).popUntil((route) => route.isFirst);
-  }
-
   @override
   void dispose() {
-    if (AgentService.I.onControlTaskCompleted == _revealControlChat) {
-      AgentService.I.onControlTaskCompleted = null;
-    }
     _persistApp.removeListener(_onPersistStateChanged);
     WidgetsBinding.instance.removeObserver(this);
     _consent.detach();
@@ -279,33 +262,22 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // ── App lifecycle → MCP/plugin lifecycle (the lifecycle coordinator tier-2 parity) ──
-    // resume  → respawn every service the user wants connected
-    // NOTE: `paused` intentionally does NOTHING to MCP — tearing MCP down on
-    // background KILLED in-flight mcp__ tool calls mid-run. The foreground
-    // service keeps the process + Dart alive while backgrounded.
+    // ── Lifecycle inversion (thin client) ───────────────────────────────
+    // Runs execute detached on the cloud gateway. The device only owns its
+    // UI and local caches: resume re-attaches the WS link and drains the
+    // outbox; backgrounding persists state; detaching tears the link down.
+    // NOTHING here keeps the process alive.
     switch (state) {
       case AppLifecycleState.resumed:
-        unawaited(AppState.I.reconnectServicesAfterResume());
-        // Connectivity may have changed while backgrounded.
+        unawaited(WsMultiplexer.I.connectIfNeeded());
         unawaited(ConnectionService.I.probe());
-        // If Ovid's accessibility service is enabled in Settings but the
-        // OS has not rebound it (app restart), absorb the rebind window
-        // now (pure wait — no programmatic toggle, which could disable the
-        // service in Settings) so control mode works without a manual
-        // off/on toggle.
-        unawaited(DeviceControlService.I.refreshServiceBinding());
+        unawaited(CloudSessionStore.I.flushOutbox());
+        // MCP/plugin services are local until Task 17; keep respawning them.
+        unawaited(AppState.I.reconnectServicesAfterResume());
         // A secure-storage read that FAILED at cold start is not a sign-out:
         // the token is still on disk and usually readable moments later. Retry
         // it here so Studio does not sit "logged out" for the whole launch.
         unawaited(GitHubService.I.retryRestoreFromUi());
-        // Control overlay is visible only while backgrounded.
-        unawaited(AgentService.I.setAppForegrounded(true));
-        // PR32: a run that survived the background must keep its
-        // notification (some OEMs drop it on pause).
-        if (AgentService.I.anyRunActive) {
-          AgentNotificationService.I.agentWorking('resumed — task running…');
-        }
         break;
       case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
@@ -313,18 +285,12 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
         // A pending coalesced session write must land before Android can
         // freeze the isolate (spec §5.4: flush on lifecycle pause).
         unawaited(AppState.I.flushSessionPersistence());
-        // Control overlay appears only once the app is backgrounded.
-        unawaited(AgentService.I.setAppForegrounded(false));
-        // PR32 keep-alive: while ANY agent run is active, make sure the
-        // foreground service is up BEFORE Android can freeze the isolate.
-        // (It normally starts at runTask; this covers races + OEM killers.)
-        if (AgentService.I.anyRunActive) {
-          AgentNotificationService.I.agentWorking('working in background…');
-        }
         break;
       case AppLifecycleState.detached:
-        // App detached from engine/activity; cleanup MCP without corrupting persisted runs.
+        // App detached from engine/activity; cleanup MCP without corrupting
+        // persisted runs, and close the cloud link (resume reconnects).
         unawaited(McpService.I.disconnectAll());
+        unawaited(WsMultiplexer.I.disconnect());
         break;
     }
   }
@@ -332,7 +298,7 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 840;
-    final chat = ChatScreen(startupCoordinator: widget.startupCoordinator);
+    final chat = const ChatScreen();
 
     return Scaffold(
       backgroundColor: Aether.bg,

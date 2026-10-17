@@ -6,7 +6,6 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'agent_service.dart';
-import 'distribution.dart';
 import 'presets.dart';
 import 'session_ledger.dart';
 import 'state.dart';
@@ -305,14 +304,12 @@ class CommandService {
                   '${modeOptionsForPicker().map(_permName).join(', ')}.',
             );
           }
-          if (target == AgentMode.control &&
-              !Distribution.controlModeAvailable) {
+          if (target == AgentMode.control) {
             return const CommandResult(
-              feedback: Distribution.controlUnavailableMessage,
+              feedback: 'Control mode was removed in this build.',
             );
           }
-          if ((target == AgentMode.drive || target == AgentMode.control) &&
-              !flags.contains('confirm')) {
+          if (target == AgentMode.drive && !flags.contains('confirm')) {
             // Strong modes are opt-in with an explicit acknowledgement rather
             // than a single word.
             return CommandResult(
@@ -321,9 +318,6 @@ class CommandService {
                   '`/permission ${_permName(target)} confirm` to accept '
                   'that risk.',
             );
-          }
-          if (target == AgentMode.control) {
-            return const CommandResult(popup: 'controlDisclosure');
           }
           agent.mode = target;
           return CommandResult(feedback: 'Permission → ${target.label}');

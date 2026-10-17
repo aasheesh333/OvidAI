@@ -6,7 +6,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/background_jobs.dart';
 import 'package:ovid_ai/core/background_notifications.dart';
 import 'package:ovid_ai/core/state.dart';
-import 'package:ovid_ai/core/studio_setup_coordinator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -158,15 +157,6 @@ void main() {
       );
       expect(images.kind, OvidNotificationKind.jobDone);
       expect(images.title, '4 images ready');
-
-      final sandbox = sandboxSetupNotification(StudioSetupStatus.ready, null)!;
-      expect(sandbox.route, NotificationRoutes.home);
-      expect(sandbox.channel, OvidChannel.agentUpdates);
-      expect(sandboxSetupNotification(StudioSetupStatus.running, null), isNull);
-      expect(
-        sandboxSetupNotification(StudioSetupStatus.failed, 'disk full')!.body,
-        'disk full',
-      );
     });
 
     test('ids are stable, in range, and replace per session', () {
@@ -328,7 +318,11 @@ void main() {
       JobCompletionWatcher(
         source: source,
         running: () => source.value,
-        onFinished: () => sandboxSetupNotification(StudioSetupStatus.ready, null),
+        onFinished: () => OvidNotification.jobDone(
+          title: 'Job done',
+          body: 'ok',
+          key: 'job:test',
+        ),
         post: (n) async {
           posted.add(n);
           return NotificationDelivery.system;
@@ -337,7 +331,7 @@ void main() {
       source.value = true;
       expect(posted, isEmpty);
       source.value = false;
-      expect(posted.single.title, 'Sandbox ready');
+      expect(posted.single.title, 'Job done');
       source.value = false;
       expect(posted, hasLength(1));
     });

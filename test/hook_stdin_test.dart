@@ -9,11 +9,11 @@ import 'package:ovid_ai/core/plugin_registry.dart';
 /// Hook stdin JSON (spec item 1): every hook child receives the full event
 /// payload as JSON on stdin, exactly like Claude Code (`json.load(sys.stdin)`).
 ///
-/// The production `_exec` path writes these bytes through
-/// `SandboxService.spawn`'s stdin pipe, but `spawn` needs the provisioned
-/// sandbox userland, which `flutter test` does not have — so these tests pin
-/// the contract one layer up, through the [HookService.stdinExecutorForTest]
-/// seam, which receives the exact bytes `_exec` would write.
+/// The production `_exec` path writes these bytes through the hook
+/// subprocess's stdin pipe, but `flutter test` has no provisioned hook
+/// runtime — so these tests pin the contract one layer up, through the
+/// [HookService.stdinExecutorForTest] seam, which receives the exact bytes
+/// `_exec` would write.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 

@@ -11,7 +11,6 @@ import 'diag.dart';
 import 'github_http_error.dart';
 import 'line_diff.dart';
 import 'studio_drafts.dart';
-import 'workspace_files.dart';
 
 /// Audit 2026-09-25 §2 — what one [RepoCache.sync] actually managed to fetch.
 /// Every way the working copy can end up PARTIAL is counted here so callers
@@ -976,7 +975,7 @@ class RepoCache extends ChangeNotifier {
       final next = pending.removeLast();
       final dir = next.dir;
       final prefix = next.prefix;
-      if (prefix.isNotEmpty && workspaceFilePath(root, prefix) == null) continue;
+      if (prefix.isNotEmpty && _workspaceFilePath(root, prefix) == null) continue;
       await for (final entry in dir.list(followLinks: false).timeout(
         deadlineAt.difference(DateTime.now()),
         onTimeout: (sink) {
@@ -997,7 +996,7 @@ class RepoCache extends ChangeNotifier {
         } else if (entry is File) {
           paths.add(path);
           try {
-            final safe = workspaceFilePath(root, path);
+            final safe = _workspaceFilePath(root, path);
             if (safe == null) throw StateError('Workspace path is a symlink: $path');
             final file = File(safe);
             final bytes = await file.openRead(0, 2 * 1024 * 1024 + 1)
@@ -1335,7 +1334,7 @@ class RepoCache extends ChangeNotifier {
     final root = workspaceFolder;
     if (root != null) {
       try {
-        final safe = workspaceFilePath(Directory(root), path);
+        final safe = _workspaceFilePath(Directory(root), path);
         if (safe == null) return null;
         if (_unsaved.contains(path)) return files[path];
         final file = File(safe);
@@ -1384,7 +1383,7 @@ class RepoCache extends ChangeNotifier {
     final root = workspaceFolder;
     if (root == null || _unsaved.contains(path)) return classify(files[path]);
     try {
-      final safe = workspaceFilePath(Directory(root), path);
+      final safe = _workspaceFilePath(Directory(root), path);
       if (safe == null) return classify(null);
       if (await FileSystemEntity.type(safe, followLinks: false) != FileSystemEntityType.file) {
         return classify(null);
@@ -1422,7 +1421,7 @@ class RepoCache extends ChangeNotifier {
 
   void _validateWorkspacePath(String path) {
     final root = workspaceFolder;
-    if (root != null && workspaceFilePath(Directory(root), path) == null) {
+    if (root != null && _workspaceFilePath(Directory(root), path) == null) {
       throw StateError('Path escapes workspace or uses a symlink: $path');
     }
   }
@@ -1567,7 +1566,7 @@ class RepoCache extends ChangeNotifier {
       throw const CommitFailure(CommitFailureKind.unsupported, 'Staging requires a repository-relative canonical file path');
     }
     if (workspaceFolder == null) return null;
-    final safe = workspaceFilePath(Directory(workspaceFolder!), path);
+    final safe = _workspaceFilePath(Directory(workspaceFolder!), path);
     if (safe == null) {
       throw const CommitFailure(CommitFailureKind.unsupported, 'Staging path escapes the workspace or uses a symlink');
     }
@@ -1855,7 +1854,7 @@ class RepoCache extends ChangeNotifier {
       String? current = deletions.contains(path) ? null : contents[path];
       if (workspace != null) {
         try {
-          final safe = workspaceFilePath(Directory(workspace), path);
+          final safe = _workspaceFilePath(Directory(workspace), path);
           if (safe == null) continue;
           final type = _checkedType(safe);
           if (entry.value == null) {
@@ -2119,4 +2118,38 @@ class _TransientExhausted extends GitHubHttpException {
   final Duration? retryAfter;
   @override
   String toString() => 'HTTP $status after $attempts attempts';
+}
+
+/// Resolve a file under an existing workspace. Refuse symlink components,
+/// including dangling links and links in not-yet-created parent paths.
+/// (Inlined from the deleted `workspace_files.dart` in P8 Task 13; this file
+/// itself is deleted with the local Studio in Task 15.)
+String? _workspaceFilePath(Directory workspace, String path) {
+  if (path.trim().isEmpty) return null;
+  String normalize(String value) {
+    final parts = <String>[];
+    for (final part in value.split('/')) {
+      if (part == '..') {
+        if (parts.isNotEmpty) parts.removeLast();
+      } else if (part.isNotEmpty && part != '.') {
+        parts.add(part);
+      }
+    }
+    return '/${parts.join('/')}';
+  }
+
+  final root = normalize(workspace.absolute.path);
+  final target = normalize(path.startsWith('/') ? path : '$root/$path');
+  final prefix = root == '/' ? root : '$root/';
+  if (!target.startsWith(prefix) || target == root) return null;
+  final canonical = workspace.resolveSymbolicLinksSync();
+  var current = canonical;
+  for (final segment in target.substring(prefix.length).split('/')) {
+    current = '$current/$segment';
+    if (FileSystemEntity.typeSync(current, followLinks: false) ==
+        FileSystemEntityType.link) {
+      return null;
+    }
+  }
+  return current;
 }
