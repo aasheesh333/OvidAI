@@ -8,6 +8,10 @@ export * from "./storageEnv.js";
 export * from "./rangeReader.js";
 export * from "./browserState.js";
 export * from "./contract.js";
+// T7-review carry (LOAD-BEARING): T10/11/12 consume the ActivityTracker via
+// the package root — this line is the reason the barrel reaches it.
+export * from "./activity.js";
+export * from "./hibernate.js";
 export * from "./archive/format.js";
 export * from "./archive/memberStream.js";
 export * from "./archive/pack.js";
