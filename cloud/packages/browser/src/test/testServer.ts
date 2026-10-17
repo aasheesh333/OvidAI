@@ -1,0 +1,129 @@
+/**
+ * Shared fixture server for every gated browser test. Plain node:http on
+ * 127.0.0.1:0 — no extra deps, no external network.
+ */
+
+import { createServer } from "node:http";
+import type { Server } from "node:http";
+
+/**
+ * Fixture page pins used by later tasks:
+ * - clickButton: a #btn at left:20 top:20 100x40 whose click sets #out to
+ *   "CLICKED" (hit-testing).
+ * - animated: full-viewport div cycling background-color every 100 ms —
+ *   screencast is damage-driven, so a static page emits 0 frames (research
+ *   §3.3) and this page guarantees damage.
+ * - spaShell: empty #root + 12 <script src> tags + ~3.5 KB nav text (the
+ *   react.dev-shaped false-positive case from research §2).
+ */
+
+export const FIXTURES = {
+  staticArticle: `<!doctype html>
+<html><head><title>Static article</title></head>
+<body>
+  <h1>A plain article</h1>
+  <p>Static content with no scripts at all. The readability extraction path
+  should parse this into a clean article body.</p>
+  <p>Second paragraph with a <a href="/spa">link to the SPA shell</a>.</p>
+</body></html>
+`,
+  spaShell: `<!doctype html>
+<html><head><title>SPA shell</title></head>
+<body>
+  <div id="root"></div>
+  ${Array.from({ length: 12 }, (_, i) => `<script src="/js/chunk-${i}.js"></script>`).join("\n  ")}
+  <nav>
+    <p>${"Navigation text block for the SPA shell fixture. ".repeat(80)}</p>
+  </nav>
+</body></html>
+`,
+  clickButton: `<!doctype html>
+<html><head><title>Click</title></head>
+<body>
+  <button id="btn" style="position:absolute;left:20px;top:20px;width:100px;height:40px;">Click me</button>
+  <div id="out"></div>
+  <script>
+    document.getElementById("btn").addEventListener("click", () => {
+      document.getElementById("out").textContent = "CLICKED";
+    });
+  </script>
+</body></html>
+`,
+  setCookie: `<!doctype html>
+<html><head><title>Cookie</title></head>
+<body><h1>Cookie page</h1><p>Sets a login cookie then renders static text.</p></body></html>
+`,
+  animated: `<!doctype html>
+<html><head><title>Animated</title></head>
+<body>
+  <div id="anim" style="position:fixed;left:0;top:0;width:100vw;height:100vh;background-color:red"></div>
+  <script>
+    let hue = 0;
+    setInterval(() => {
+      hue = (hue + 30) % 360;
+      document.getElementById("anim").style.backgroundColor = "hsl(" + hue + ", 100%, 50%)";
+    }, 100);
+  </script>
+</body></html>
+`,
+  bigDom: `<!doctype html>
+<html><head><title>Big DOM</title></head>
+<body>
+  <h1>Big DOM</h1>
+  ${Array.from({ length: 5000 }, (_, i) => `<p class="row-${i}">Row ${i} of the big DOM fixture.</p>`).join("\n  ")}
+</body></html>
+`,
+} as const;
+
+export interface TestPageServer {
+  origin: string;
+  url(path?: string): string;
+  close(): Promise<void>;
+}
+
+const ROUTES: Record<string, { body: string; type: string; headers?: Record<string, string> }> = {
+  "/": { body: FIXTURES.staticArticle, type: "text/html" },
+  "/spa": { body: FIXTURES.spaShell, type: "text/html" },
+  "/click": { body: FIXTURES.clickButton, type: "text/html" },
+  "/setcookie": {
+    body: FIXTURES.setCookie,
+    type: "text/html",
+    headers: { "Set-Cookie": "login_tok=abc123; Path=/" },
+  },
+  "/animated": { body: FIXTURES.animated, type: "text/html" },
+  "/big": { body: FIXTURES.bigDom, type: "text/html" },
+  "/attachment": { body: "file-bytes", type: "application/octet-stream", headers: { "Content-Disposition": "attachment" } },
+};
+
+export function startTestPageServer(): Promise<TestPageServer> {
+  return new Promise((resolve) => {
+    const server: Server = createServer((req, res) => {
+      const path = (req.url ?? "/").split("?")[0];
+      // /js/* chunks referenced by the SPA shell: 200 with a tiny body.
+      const route = ROUTES[path] ?? (path.startsWith("/js/") ? { body: "//chunk", type: "text/javascript" } : undefined);
+      if (!route) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("not found");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": route.type,
+        ...(route.headers ?? {}),
+      });
+      res.end(route.body);
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (addr === null || typeof addr === "string") throw new Error("no server address");
+      const origin = `http://127.0.0.1:${addr.port}`;
+      resolve({
+        origin,
+        url: (path?: string) => `${origin}${path ?? "/"}`,
+        close: () =>
+          new Promise<void>((r) => {
+            server.close(() => r());
+          }),
+      });
+    });
+  });
+}
