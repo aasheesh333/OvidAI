@@ -317,8 +317,9 @@ ovid_cloud) — 14-day local retention, optional R2 offsite.
   symptom → diagnose → act → verify playbook set for both stacks
   (worker/redis/Postgres/disk/sandbox/browser/R2/mint/LiteLLM) plus the ops
   drills (backup restore, dependency updates, rootfs rebuild, LiteLLM pin).
-  Use it before improvising during an incident; every destructive step there
-  carries the timestamped-backup + config-validation SAFETY rule.
+  Use it before improvising during an incident; its opening SAFETY rule
+  governs every Act step (timestamped backup + config validation before live
+  changes).
 
 ## 11. P2 activation — sandbox worker on the host (owner-run, ordered)
 

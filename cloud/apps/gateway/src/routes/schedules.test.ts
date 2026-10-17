@@ -384,15 +384,31 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway schedule routes (real postgres)", (
     const older = newId();
     await sleep(5);
     const newer = newId();
+    // The P4 final-review migration adds schedule_runs.session_id/
+    // trigger_kind (NOT NULL). This suite must run against both the committed
+    // schema and the working tree while that migration is in flight.
+    const [hasRunSession] = await db.$client.unsafe(
+      `SELECT 1 AS ok FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'schedule_runs'
+         AND column_name = 'session_id'`,
+    );
     for (const [id, scheduledFor] of [
       [older, "2026-01-01T00:00:00.000Z"],
       [newer, "2026-01-02T00:00:00.000Z"],
     ] as const) {
-      await db.$client.unsafe(
-        `INSERT INTO schedule_runs (id, schedule_id, scheduled_for, session_id, trigger_kind, status)
-         VALUES ($1, $2, $3, $4, 'cron', 'succeeded')`,
-        [id, schedule.id, scheduledFor, schedule.sessionId],
-      );
+      if (hasRunSession) {
+        await db.$client.unsafe(
+          `INSERT INTO schedule_runs (id, schedule_id, scheduled_for, session_id, trigger_kind, status)
+           VALUES ($1, $2, $3, $4, 'cron', 'succeeded')`,
+          [id, schedule.id, scheduledFor, schedule.sessionId],
+        );
+      } else {
+        await db.$client.unsafe(
+          `INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status)
+           VALUES ($1, $2, $3, 'succeeded')`,
+          [id, schedule.id, scheduledFor],
+        );
+      }
     }
 
     const first = await app.inject({

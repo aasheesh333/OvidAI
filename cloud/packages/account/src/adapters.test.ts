@@ -393,8 +393,20 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
       (${"99999999-9999-9999-8999-999999999999"}, ${UID}, ${SESSION}, 'artifact', ${`users/${UID}/artifacts/${SESSION}/a`}, 3, 'abc')`;
     await db.$client`INSERT INTO schedules (id, user_id, session_id, title, description, trigger, status) VALUES
       (${SCHEDULE}, ${UID}, ${SESSION}, 't', 'd', '{"type":"cron","expr":"* * * * *"}'::jsonb, 'pending')`;
-    await db.$client`INSERT INTO schedule_runs (id, schedule_id, scheduled_for, session_id, trigger_kind, status) VALUES
-      (${"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"}, ${SCHEDULE}, now(), ${SESSION}, 'cron', 'pending')`;
+    // The P4 final-review migration adds schedule_runs.session_id/
+    // trigger_kind (NOT NULL). This suite must run against both the committed
+    // schema and the working tree while that migration is in flight.
+    const [hasRunSession] = await db.$client`
+      SELECT 1 AS ok FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'schedule_runs'
+        AND column_name = 'session_id'`;
+    if (hasRunSession) {
+      await db.$client`INSERT INTO schedule_runs (id, schedule_id, scheduled_for, session_id, trigger_kind, status) VALUES
+        (${"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"}, ${SCHEDULE}, now(), ${SESSION}, 'cron', 'pending')`;
+    } else {
+      await db.$client`INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status) VALUES
+        (${"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"}, ${SCHEDULE}, now(), 'pending')`;
+    }
     await db.$client`INSERT INTO reports (id, reporter_uid, request_id, kind, reason, details, excerpt) VALUES
       (${"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"}, ${UID}, 'r1', 'k', 'r', 'd', 'e')`;
     await db.$client`INSERT INTO byok_keys (id, user_id, provider_id, endpoint, wrapped_dek, iv, ciphertext, tag) VALUES
