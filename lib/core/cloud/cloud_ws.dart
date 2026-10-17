@@ -435,6 +435,14 @@ class WsMultiplexer extends ChangeNotifier {
     _wantLink = false;
     _generation++; // invalidate any in-flight connect chain
     _connectFuture = null;
+    // Hygiene: a disposed link is down. Without this, a sync dispose inside
+    // the connecting-transition notifyListeners leaves linkState stuck at
+    // `connecting`, and connectIfNeeded's already-connecting branch would
+    // silently no-op — the same silent link death the identity guard in
+    // _connect() closes. (No notifyListeners: the notifier is being torn
+    // down; a later connect attempt surfaces the framework's own
+    // used-after-disposed error instead.)
+    _linkState = WsLinkState.disconnected;
     _cancelHeartbeat();
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
@@ -464,10 +472,18 @@ class WsMultiplexer extends ChangeNotifier {
     final pending = _connectFuture;
     if (pending != null) return pending;
     final generation = ++_generation;
-    final future = _connectInner(generation).whenComplete(() {
-      // Only the CURRENT chain may clear the slot — a stale chain's
-      // completion must not clobber a newer chain's future.
-      if (_generation == generation) _connectFuture = null;
+    // `late final` so the identity guard below can close over `future`
+    // (the whenComplete callback always runs on a later microtask, after
+    // the assignment).
+    late final Future<void> future;
+    future = _connectInner(generation).whenComplete(() {
+      // Identity-based clear: only THIS chain's own future may vacate the
+      // slot. A newer chain's future is protected (never clobbered by a
+      // stale completion), and a chain torn down synchronously INSIDE the
+      // connecting-transition notifyListeners — before the slot assignment
+      // below — self-heals the slot instead of leaving its dead future
+      // there to short-circuit every later _connect() (silent link death).
+      if (_connectFuture == future) _connectFuture = null;
     });
     _connectFuture = future;
     return future;

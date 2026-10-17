@@ -20,6 +20,8 @@ import 'dart:io' show HttpClient, HttpOverrides, SecurityContext;
 // for the next lockfile-allowed wave.
 // ignore: depend_on_referenced_packages
 import 'package:fake_async/fake_async.dart' show fakeAsync;
+import 'package:flutter/foundation.dart'
+    show FlutterError, FlutterErrorDetails;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ovid_ai/core/cloud/cloud_ws.dart';
 import 'package:ovid_ai/core/connection_service.dart';
@@ -864,6 +866,94 @@ void main() {
     expect(errors, isEmpty, reason: 'pty-scoped errors are not session errors');
     expect(events, isEmpty);
     await ws.disconnect();
+  });
+
+  test('(t) sync teardown inside the connecting transition: a later '
+      'connect starts a FRESH chain, not the dead future (fix round 2)',
+      () async {
+    final spy = SocketFactorySpy();
+    var mints = 0;
+    final ws = WsMultiplexer(
+      mintTicket: () async => 't${++mints}',
+      socketFactory: spy.fn,
+      prefs: await SharedPreferences.getInstance(),
+    );
+    // A linkState listener tears the link down SYNCHRONOUSLY inside the
+    // connecting-transition notifyListeners — the wedge window between the
+    // generation bump and the _connectFuture slot assignment in _connect().
+    late final void Function() wedgeListener;
+    wedgeListener = () {
+      if (ws.linkState == WsLinkState.connecting) ws.disconnect();
+    };
+    ws.addListener(wedgeListener);
+    ws.subscribe('s1').listen((_) {});
+    await pumpEventQueue();
+    expect(mints, 1, reason: 'the doomed chain minted once, then aborted');
+    expect(spy.sockets, isEmpty, reason: 'never attached');
+    expect(ws.linkState, WsLinkState.disconnected);
+
+    // Disarm the wedge; a subsequent connect must start a fresh chain. With
+    // the dead future left in the slot it would be a silent no-op (silent
+    // link death).
+    ws.removeListener(wedgeListener);
+    await ws.connectIfNeeded();
+    await pumpEventQueue();
+    expect(mints, 2, reason: 'fresh chain minted a new ticket');
+    expect(spy.sockets, hasLength(1));
+    expect(ws.linkState, WsLinkState.online);
+    expect(
+      spy.sockets.single.sentJson().where((f) => f['op'] == 'subscribe'),
+      hasLength(1),
+      reason: 'the fresh chain re-subscribed the session on open',
+    );
+    await ws.disconnect();
+  });
+
+  test('(u) sync DISPOSE inside the connecting transition: the framework '
+      'reports the ChangeNotifier contract violation LOUDLY and the '
+      'multiplexer never silently wedges (fix round 2)', () async {
+    final spy = SocketFactorySpy();
+    var mints = 0;
+    final ws = WsMultiplexer(
+      mintTicket: () async => 't${++mints}',
+      socketFactory: spy.fn,
+      prefs: await SharedPreferences.getInstance(),
+    );
+    late final void Function() disposeListener;
+    disposeListener = () {
+      if (ws.linkState == WsLinkState.connecting) ws.dispose();
+    };
+    ws.addListener(disposeListener);
+    final reported = <FlutterErrorDetails>[];
+    final previousOnError = FlutterError.onError;
+    FlutterError.onError = reported.add;
+    try {
+      ws.subscribe('s1').listen((_) {});
+      await pumpEventQueue();
+    } finally {
+      FlutterError.onError = previousOnError;
+    }
+    // dispose() DURING a notification is a ChangeNotifier contract
+    // violation — the framework's own assertion fires (loudly), so the
+    // failure mode is never silence. (The legal sync teardown inside the
+    // transition is disconnect(), whose wedge and fresh-chain self-heal
+    // are pinned by test (t).)
+    expect(
+      reported.any((details) =>
+          '${details.exception}'.contains(
+              'was called during the call to "notifyListeners()"')),
+      isTrue,
+      reason: 'the framework must report the dispose-during-notify misuse',
+    );
+    // The multiplexer's own teardown ran and nothing wedges: no socket
+    // attached, no reconnect churn, link state honestly down — and the
+    // connect slot self-healed via the identity guard.
+    expect(mints, 1);
+    expect(spy.sockets, isEmpty);
+    expect(ws.linkState, WsLinkState.disconnected);
+    await pumpEventQueue();
+    expect(mints, 1, reason: 'no reconnect after teardown');
+    expect(spy.sockets, isEmpty);
   });
 }
 
