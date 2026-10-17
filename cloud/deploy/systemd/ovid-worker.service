@@ -1,0 +1,39 @@
+# Ovid cloud worker — the systemd replacement for the P1 compose `worker`
+# service (DEPLOY.md §11 step 6-7 transitions it). Runs on the HOST (not in
+# Docker): SandboxManager needs cgroup.procs pre-setuid attach, the
+# /workspaces XFS volume and nftables adjacency, none of which survive a
+# container boundary.
+#
+# OWNER-GATED artifact: installed by DEPLOY.md §11 step 5, never by a task
+# agent. Everything here is pinned by that runbook; edit the copies in
+# /etc/systemd/system only via a repo change + reinstall.
+[Unit]
+Description=Ovid cloud worker (agent runs + SandboxManager)
+# docker.service: not a hard runtime dep (the worker talks to redis/postgres
+# over loopback proxies), but ordering after it keeps the proxy containers
+# up first on a fresh boot.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Slice=ovid-sandboxes.slice
+# research §8.1: root needed for cgroup.procs pre-setuid attach, /workspaces
+# binds, nftables adjacency; de-rooting path (Delegate=yes + leaf-first,
+# research §3 TEST C) documented in HARDENING item H
+User=root
+# G5 (P6 pre-flight ruling): caps the worker unit INSIDE the 10G slice —
+# worker proper ~2G + P6 browser pool ~2G run under this unit; jail envs get
+# the remaining ≥6G of the slice; slice MemoryMax=10G and the
+# Global-Constraints envelope arithmetic are unchanged
+MemoryMax=4096M
+WorkingDirectory=/opt/ovid-cloud/repo/cloud
+EnvironmentFile=/opt/ovid-cloud/worker.env
+ExecStart=/usr/bin/node apps/worker/dist/main.js
+Restart=always
+RestartSec=5
+# worker drains SIGTERM in ≤30 s (P1)
+TimeoutStopSec=35
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,9 @@
 
 Closes the spec §11 "VPS hardening (Phase 0)" items
 (`docs/superpowers/specs/2026-10-15-ovid-cloud-migration-design.md`) — Task 12
-of the P0+P1 spine plan. Companion to `DEPLOY.md` (activation runbook): this
+of the P0+P1 spine plan — plus **item H: the P2 sandbox surface** (worker on
+host systemd, uid block, egress filter, cgroup caps — activation in
+`DEPLOY.md` §11). Companion to `DEPLOY.md` (activation runbook): this
 file is about hardening **the box**, not about deploying the cloud stack.
 
 **How to use this file**
@@ -564,6 +566,128 @@ and was already recommended by the 2026-10-11 review (top-10 fix #6).
 
 ---
 
+## H. Sandbox surface (P2) — verification rows for untrusted-code hosting
+
+**Why.** P2 moves the worker onto the host (`ovid-worker.service`, systemd —
+`DEPLOY.md` §11) to run user agent sessions inside bwrap jails. That makes
+this box a multi-tenant code-execution host: the isolation stack (uid block,
+RO rootfs, cgroup caps, nftables egress filter, AppArmor mechanism state)
+is now part of the attack surface, and each row below is the recurring
+verification for one layer. Artifacts: `cloud/deploy/systemd/` (slice +
+worker unit), `cloud/deploy/net/install-nft.sh`, `cloud/deploy/rootfs/`,
+`cloud/deploy/sandbox/` (probe + `MECHANISM.md` decision record), compose
+loopback proxies. Activation is owner-run and ordered: `DEPLOY.md` §11.
+
+**H1 — sandbox uid block 200000–209999 stays reserved for jails only.**
+Sandbox uids are `200000 + slot` (spec §11); no human/system account may
+share the block or it inherits the block's egress rules and quota limits.
+
+```bash
+awk -F: '$3>=200000 && $3<=209999 {print}' /etc/passwd
+# → NO output (empty). Re-run after ANY useradd tooling change on this box.
+```
+
+**H2 — AppArmor mechanism state (mirror of `MECHANISM.md` DECISION).**
+The jail launcher runs bwrap as a sandbox uid (branch a `setuid`, the
+default) — or branch b (profile granted `userns_create`) if that is what the
+owner's probe decided. The kernel restriction itself **stays ON, always**:
+disabling `kernel.apparmor_restrict_unprivileged_userns` is on the
+MECHANISM.md avoid-list — it weakens the whole host, not just bwrap.
+
+```bash
+# branch b only (if MECHANISM.md DECISION says so):
+aa-status | grep ovid-sandbox          # → ovid-sandbox profile loaded
+# ALWAYS (branch a or b):
+sysctl kernel.apparmor_restrict_unprivileged_userns   # → 1 (never disable it)
+```
+
+**H3 — nft egress table `ovid_sandbox`.** Rendered by `install-nft.sh`
+(keyed to the same uid range the sandbox config validates). The rendered
+output for a given env is deterministic — verify against the golden render
+(Task 15 §7 egress drift check, `OVID_PUBLIC_IP=203.0.113.7` fixture).
+
+```bash
+nft list table inet ovid_sandbox        # → matches the rendered golden
+# monthly counter review: nonzero drop counters are EXPECTED (the internet
+# probes constantly); growth after quiet periods is a signal worth a look.
+nft list ruleset | grep -A2 counter
+```
+
+**H4 — worker runs as root inside `ovid-sandboxes.slice` (review item).**
+Rationale (research §8.1): pre-setuid cgroup.procs attach (a non-root
+parent cannot move a then-root child into the leaf cgroup), `/workspaces`
+binds, nftables adjacency. Review trigger: the de-rooting path is the
+research §3 TEST C `Delegate=yes` + leaf-first pattern — if the kernel
+proves delegate-based attach for an unprivileged worker, file the change
+(Delegate=yes on the unit, root dropped, launcher updated) as a P-followup.
+Until then: root worker, 4G unit cap, 10G slice — the slice is what
+protects the box.
+
+```bash
+systemctl show ovid-worker -p User,MemoryMax     # → User=root, MemoryMax=4294967296
+systemctl show ovid-sandboxes.slice -p CPUQuotaPerSecUSec,MemoryMax   # → 6s, 10737418240
+```
+
+**H5 — loopback proxies 5434/6391/6392 stay loopback-only.** The host
+worker's only path to the live stack's postgres/mint-redis and the queue
+redis; each backend requires its own password (postgres / live
+`REDIS_PASSWORD` / `REDIS_Q_PASSWORD`) — the socat relays terminate nothing.
+
+```bash
+ss -tlnp | grep -E '5434|6391|6392'      # → every bind is 127.0.0.1:…
+                                         #   (any 0.0.0.0/[::] bind here is a defect)
+```
+
+**H6 — `/workspaces` budget.** 32 G volume (XFS, project quotas) holding
+per-user workspaces + the warm-sandbox cache (`OVID_MAX_WARM_GB`, default
+8 G). Alert at 80 % — wire the threshold into whatever external pinger
+item F installed; the volume filling also starves new sandboxes
+(`minFreeGb` gate).
+
+```bash
+df -h /workspaces        # → alert if ≥ 80% Use%; tune OVID_MAX_WARM_GB in
+                         #   /opt/ovid-cloud/worker.env (restart ovid-worker) to
+                         #   trade warm-start latency for space
+```
+
+**H7 — rootfs rebuild cadence.** Monthly, or on a CVE scan hitting the
+pinned toolchain (`versions.env`): `build.sh` → `install.sh` (atomic
+`current` symlink flip, 2 revisions kept, smoke-jail gate runs inside) —
+instant rollback by re-pointing `current`. Current artifact revision:
+`ubuntu-noble-min-20261017-r2` (Task 10).
+
+```bash
+readlink /opt/ovid-rootfs/current   # → ubuntu-noble-min-20261017-r2 (or newer)
+ls -1d /opt/ovid-rootfs/ubuntu-noble-min-*   # → exactly 2 revisions
+```
+
+**H8 — per-env caps reference (what a jail gets — spec §7.3).**
+
+| Control | Value | Set by |
+|---|---|---|
+| `cpu.max` | `100000 100000` (1 core) | `OVID_SANDBOX_CPU_MAX` |
+| `memory.max` | `536870912` (512 MiB) | `OVID_SANDBOX_MEMORY_MAX_MB` |
+| `memory.swap.max` | `0` | `OVID_SANDBOX_SWAP_MAX_MB` |
+| `pids.max` | `64` | `OVID_SANDBOX_PIDS_MAX` |
+| slice (parent) | `CPUQuota=600%`, `MemoryMax=10G`, `MemorySwapMax=0` | `ovid-sandboxes.slice` |
+| worker unit (inside slice) | `MemoryMax=4096M` — worker ~2G + P6 browser pool ~2G | `ovid-worker.service` (G5) |
+| workspace quota | 500 MB (Pro 2048 MB) + agent store 2048 MB | XFS project quotas (`Task 8`) |
+| concurrency | `OVID_MAX_ACTIVE_SANDBOXES=24` | `worker.env` |
+
+```bash
+# spot-check a live jail (uid NNNNN): find its leaf and dump the caps
+cat /sys/fs/cgroup/ovid-sandboxes.slice/ovid-worker.service/ovid-env-*/*/cpu.max 2>/dev/null | sort -u
+# → 100000 100000 (plus the same shape for memory.max/…)
+```
+
+- [ ] Verified at P2 activation (§11 step 8): H1 empty, H2 state matches
+      MECHANISM.md DECISION, H3 table matches golden, H4 caps as tabled,
+      H5 loopback-only, H6 under 80 %, H7 two revisions · date · by
+- [ ] Recurring review (monthly): H3 counters, H6 budget, H7 rebuild
+      cadence — next: date · by
+
+---
+
 ## Spec §11 coverage map
 
 | Spec §11 hardening item | Where | State (2026-10-16) |
@@ -571,11 +695,15 @@ and was already recommended by the 2026-10-11 review (top-10 fix #6).
 | Disable root VNC/noVNC + vsftpd | item A | **owner pending** (services enabled+active, ports open) |
 | Key-only SSH | item B | **owner pending — per-device key-proof gate open** (1 `migrate` ed25519 key installed 2026-10-16 11:30, proven from a single source; step 2 must still pass on EVERY owner device; effective sshd is `passwordauthentication yes` today — see item B step 4 for the include-order fix) |
 | Cloudflare `trusted_proxies` in Caddy | item D | **DONE — already live, verified identical to official list** |
-| Container mem/cpu limits | `cloud/deploy/docker-compose.yml` (Task 11) | DONE for the cloud stack (gateway 1g/1cpu, worker 2g/2cpu, redis-q 1536m) |
+| Container mem/cpu limits | `cloud/deploy/docker-compose.yml` (Task 11) | DONE for the compose stack (gateway 1g/1cpu, redis-q 1536m, net-proxy-pg/mint 128m/0.5cpu); the WORKER left compose in P2 — its caps are host cgroup: unit 4G inside the 10G `ovid-sandboxes.slice` (item H) |
 | Log rotation | item E | **owner pending** (no daemon.json, uncapped) |
-| Pinned images | item G | **owner pending** (litellm floating); cloud images are built from committed source |
+| Pinned images | item G | **owner pending** (litellm floating); cloud images are built from committed source; P2 pinned `alpine/socat:1.8.1.3` (digest in compose comment) |
 | Healthchecks + uptime alerting | compose healthchecks (Task 11) + item F | healthchecks DONE for cloud stack; **external alerting owner pending** |
 | Redis split (mint cache vs cloud queue) | `cloud/deploy/docker-compose.yml` (Task 11) | DONE (separate `redis-q`, `noeviction`, ovid-cloud network only) |
+| P2 jail + uid block + RO rootfs | Tasks 5/7/8 + item H | artifacts DONE (shims, minimal /etc, rootfs pipeline, uid allocation); **activation owner-gated** — `DEPLOY.md` §11 |
+| P2 egress filter (nftables) | Task 11 + item H | artifacts DONE (renderer + golden, `install-nft.sh`, netns proof passed); **live load owner-gated** — `DEPLOY.md` §11 step 4 |
+| P2 cgroup caps + capacity envelope | Task 6 + item H | artifacts DONE (leaf-first bootstrap, per-env caps, 24-slot ring); slice + unit activation owner-gated — `DEPLOY.md` §11 steps 5/7 |
+| P2 no host /proc view | Task 15 §5 + item H | isolation-verification suite gates it (jails see a fresh `--proc`, not the host's); run the suite on the host at activation |
 
 ## Backup restore proof
 

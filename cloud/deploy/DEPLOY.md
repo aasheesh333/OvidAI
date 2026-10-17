@@ -1,13 +1,17 @@
 # Ovid Cloud — activation runbook (owner-run)
 
-Deploys the Ovid Cloud P0 spine (`gateway`, `worker`, `redis-q`) **alongside**
-the live `ovid-gateway` stack on the production VPS, provisions the
-`ovid_cloud` database on the live Postgres, routes `https://api.ovidsi.com/cloud/*`
-through the live Caddy, and installs nightly Postgres backups.
+Deploys the Ovid Cloud stack **alongside** the live `ovid-gateway` stack on
+the production VPS: the compose spine (`gateway`, `redis-q`, loopback
+proxies `net-proxy-pg`/`net-proxy-mint`), the `ovid_cloud` database on the
+live Postgres, the `https://api.ovidsi.com/cloud/*` route through the live
+Caddy, nightly Postgres backups, and — P2 — the **host systemd worker**
+(`ovid-worker.service` in `cloud/deploy/systemd/`) that runs user agent
+sessions inside bwrap sandboxes.
 
 Everything below is deliberately manual and ordered: each step has a
 verification gate and a rollback. Read §0 (facts + port collision) before
-starting.
+starting. P2 (sandboxes) activation is §11 — it assumes the compose spine
+is already up (§4–§6).
 
 ---
 
@@ -33,6 +37,16 @@ starting.
   credentials) — see §3 for the mount-vs-copy decision.
 - Disk at task time: ~44 GB free. Backups go to `/opt/ovid-backups/pg` with a
   2 GB free-space guard (see `backup/README.md`).
+- **The box is 8 vCPU / 22 GB RAM** — the P2 capacity envelope (slice
+  `CPUQuota=600%` + `MemoryMax=10G`, 24 concurrent sandboxes at 512 MiB) is
+  derived from that; the arithmetic lives in the P2 plan's Global
+  Constraints section and the per-env caps table in `HARDENING.md` item H.
+- **`/workspaces` does not exist yet** — the XFS volume (project quotas for
+  per-user workspace caps) is created by §11 step 3 and is a hard
+  prerequisite for the P2 worker. Nothing else in this runbook needs it.
+- P2 sandbox-hosting changes the box's threat model: a box that jails
+  untrusted user code needs the `HARDENING.md` items **and** item H
+  (sandbox surface) verified — see the cross-links there and in §11.
 
 ## 1. Layout + prerequisites
 
@@ -41,8 +55,10 @@ Checkout layout this runbook assumes (adjust unit paths if different):
 ```
 /opt/ovid-cloud/
 ├── repo/                 # git clone of the OvidAI monorepo (this repo)
-│   └── cloud/deploy/     # compose, Dockerfiles, provision.sh, backup/
+│   └── cloud/deploy/     # compose, Dockerfiles, provision.sh, backup/,
+│                         # systemd/ (P2 units), workspaces/, rootfs/, net/
 ├── backup.env            # optional: BACKUP_*/OVID_R2_* for the timer (§8)
+├── worker.env            # P2: the HOST worker's environment (§11 step 7)
 └── (repo/cloud/deploy/.env — the filled deploy env, git-ignored, §2)
 ```
 
@@ -73,13 +89,14 @@ Fill every `CHANGE_ME` (the template comments explain each var):
 | `DATABASE_URL` | same password, verbatim template otherwise |
 | `REDIS_Q_PASSWORD` + `REDIS_Q_URL` | fresh `openssl rand -hex 24`, kept equal |
 | `REDIS_MINT_URL` | password = `REDIS_PASSWORD` from `/opt/ovid-gateway/.env` (db **2** selector is part of the template URL) |
-| `OVID_DEFAULT_MODEL` | a model alias configured in the live LiteLLM (dashboard via SSH tunnel on `127.0.0.1:8081`) |
-| `GATEWAY_HOST_PORT` | leave `8082` (see §0) |
+| `GATEWAY_HOST_PORT` / `REDIS_Q_HOST_PORT` / `NET_PROXY_*_HOST_PORT` | leave `8082` / `6391` / `5434`+`6392` (see §0 + the proxy notes in `.env.example`) |
 | everything else | template values are correct for this box |
 
 `OVID_AUTH_MODE` must stay `firebase` with `NODE_ENV=production` (the gateway
-refuses `test` auth in production). `OVID_RUN_STALE_MS` stays commented unless
-overriding (an **empty** value makes the worker refuse to boot).
+refuses `test` auth in production). Worker vars (`OVID_DEFAULT_MODEL`,
+`OVID_LITELLM_BASE`, `OVID_RUN_STALE_MS`, …) moved to
+`/opt/ovid-cloud/worker.env` in P2 — see §11 step 7 and
+`worker.env.example`.
 
 ## 3. GOOGLE_APPLICATION_CREDENTIALS — mount vs copy (owner decision)
 
@@ -124,15 +141,18 @@ Gate: output ends with `compose config OK` + the next-steps block.
 
 ```bash
 cd /opt/ovid-cloud/repo/cloud/deploy
-docker compose up -d --build        # first run builds both images (a few minutes)
-docker compose ps                   # gate: all three Up, gateway (healthy)
-docker compose logs -f gateway worker   # no crash loops; worker logs "consuming agent-runs"
+docker compose up -d --build        # first run builds the gateway image (a few minutes)
+docker compose ps                   # gate: redis-q, gateway, net-proxy-pg, net-proxy-mint
+                                    # all Up; gateway (healthy)
+docker compose logs -f gateway      # no crash loops (P2: the WORKER is not a compose
+                                    # service — it runs as systemd ovid-worker, §11)
 ```
 
 Startup order is enforced by `depends_on`: `redis-q` must be **healthy**
-(auth'd `redis-cli ping`) before `gateway` starts; `worker` waits for
-`redis-q` healthy + `gateway` *started* (its health is deliberately not a
-gate — a degraded gateway must not stop run processing).
+(auth'd `redis-cli ping`) before `gateway` starts. The host worker (§11)
+reaches redis-q through the loopback port published by `redis-q` and the
+live stack's postgres/mint-redis through the `net-proxy-pg`/`net-proxy-mint`
+socat relays — all bound to `127.0.0.1` only.
 
 Loopback smoke (before any Caddy change — public traffic is untouched):
 
@@ -203,9 +223,10 @@ curl -sf https://api.ovidsi.com/v1/models >/dev/null && echo "live stack OK"
    watch replay + live deltas → run completes. (The WS path is deliberately
    NOT under `/cloud/v1` — `apps/gateway/src/routes/wsRoute.ts`; the Caddy
    `/cloud/*` handle covers both.)
-2. Degradation spot-check (optional): `docker compose stop worker` → message
-   accepted, run stays `queued` (503-style behaviours documented in the P0
-   plan); `docker compose start worker` → run picked up and processed.
+2. Degradation spot-check (optional): `sudo systemctl stop ovid-worker` →
+   message accepted, run stays `queued` (503-style behaviours documented in
+   the P0 plan); `sudo systemctl start ovid-worker` → run picked up and
+   processed. (P2: the worker is a systemd unit, not a compose service.)
 
 ## 8. Nightly backups
 
@@ -231,8 +252,9 @@ ovid_cloud) — 14-day local retention, optional R2 offsite.
 
 - [ ] `./provision.sh --dry-run` clean **before** the real run; real run ends
       `compose config OK`
-- [ ] `docker compose ps`: redis-q (healthy), gateway (healthy), worker Up;
-      no restart loops in `docker compose logs`
+- [ ] `docker compose ps`: redis-q (healthy), gateway (healthy),
+      net-proxy-pg + net-proxy-mint Up; no restart loops in
+      `docker compose logs`
 - [ ] `curl -sf http://127.0.0.1:8082/cloud/v1/health` → `status:"ok"`
 - [ ] `caddy validate` passed **before** reload; public
       `https://api.ovidsi.com/cloud/v1/health` → `status:"ok"`
@@ -243,23 +265,244 @@ ovid_cloud) — 14-day local retention, optional R2 offsite.
       produced `<ts>/*.dump.zst` passing `zstd -t`
 - [ ] Restore drill (§8) verified `\dt` count > 0 on a scratch postgres
 - [ ] No secrets committed: `cd /opt/ovid-cloud/repo && git status` clean
-      (`.env`, `backup.env` are ignored / outside the repo)
+      (`.env`, `worker.env`, `backup.env` are ignored / outside the repo)
 - [ ] WS maxPayload 262144 configured (I2)
 - [ ] per-connection subscription cap 64 (I3)
-- [ ] deferred: SIGTERM drain pending — gateway lacks a PID-1 signal handler
+- [ ] deferred: SIGTERM drain pending — **worker** has it (systemd unit
+      `TimeoutStopSec=35`), **gateway** lacks a PID-1 signal handler
 - [ ] deferred: mint deadline pending — no deadline on the mint HTTP call
 - [ ] deferred: WS error logging pending — silently skipped errors have no
       server-side log
 
+(P2 sandbox activation has its own checklist: §11 step 8.)
+
 ## 10. Redeploys + decommission
 
-- **Redeploy** (new code): `cd /opt/ovid-cloud/repo && git pull`, then
-  `cd cloud && pnpm install --frozen-lockfile && pnpm -r build` (host build
-  for migrate-cli), `cd deploy && ./provision.sh` (idempotent — applies new
-  migrations), `docker compose up -d --build` (rebuilds images, rolling
-  restart of gateway/worker only).
+- **Gateway / redis-q / proxies (compose services)**: `cd
+  /opt/ovid-cloud/repo && git pull`, then `cd cloud && pnpm install
+  --frozen-lockfile && pnpm -r build` (host build for migrate-cli), `cd
+  deploy && ./provision.sh` (idempotent — applies new migrations),
+  `docker compose up -d --build` (rebuilds the gateway image, rolling
+  restart of the compose services only).
+- **Worker (P2 — no longer a compose service)**: `cd
+  /opt/ovid-cloud/repo && git pull && pnpm install --frozen-lockfile &&
+  pnpm -r build && sudo systemctl restart ovid-worker`. The systemd unit
+  (`cloud/deploy/systemd/`) runs the host-built `apps/worker/dist/main.js`
+  directly — after a unit FILE changes, also `sudo systemd-analyze verify
+  /etc/systemd/system/ovid-worker.service && sudo systemctl daemon-reload`
+  before the restart. Gate: `journalctl -u ovid-worker -n 20` shows
+  `consuming agent-runs` again.
 - **Decommission**: §6 rollback (Caddy) → `docker compose down` (keep `-v`
-  off to retain queue data) → optionally
-  `sudo systemctl disable --now ovid-cloud-backup.timer` → the `ovid_cloud`
-  DB/role can stay dormant (backups keep covering it) or be dropped after a
-  final manual dump.
+  off to retain queue data) → §11 rollback (worker, nft table, /workspaces
+  volume, units) → optionally `sudo systemctl disable --now
+  ovid-cloud-backup.timer` → the `ovid_cloud` DB/role can stay dormant
+  (backups keep covering it) or be dropped after a final manual dump.
+
+## 11. P2 activation — sandbox worker on the host (owner-run, ordered)
+
+**What this does.** Moves the worker out of compose onto host systemd
+(`ovid-worker.service` in `cloud/deploy/systemd/`, parented by the
+`ovid-sandboxes.slice` cgroup slice), creates the `/workspaces` XFS volume,
+loads the sandbox egress nftables filter, and adds the loopback proxies the
+host worker uses to reach the compose network. Every step is **owner-run**
+(no task agent ever executes this section — the stop-condition is real: it
+installs host packages/units, creates the workspaces volume, loads live nft
+rules and transitions the worker deployment).
+
+**Ordering prerequisite.** Steps 5–7 assume the compose spine is up (§4–§6:
+gateway on 127.0.0.1:8082, redis-q, proxies). As of 2026-10-16 the P1 stack
+was NEVER activated on this box (no `ovid-cloud-*` containers running) — in
+that case run §2–§8 first (P1 activation, owner-run), or activate P2-only
+with the gateway absent and **record that decision in the log below** (runs
+will queue, nothing consumes them until the gateway routes messages).
+
+Each step has a gate; do not continue past a failed gate. Rollbacks are
+per-step and safe in reverse order.
+
+### Step 1 — host prerequisites
+
+```bash
+sudo apt-get install -y bubblewrap zstd xfs-progs util-linux
+# (bwrap is likely already present from the Task-1 probe; nftables too —
+#  install-nft.sh checks. node-pty compiles a native module in the host
+#  build, so a C toolchain is needed: apt-get install -y build-essential
+#  python3 make g++ if pnpm -r build fails on it.)
+
+cd /opt/ovid-cloud/repo/cloud
+corepack enable && pnpm install --frozen-lockfile && pnpm -r build
+```
+
+**Gate**: `pnpm -r build` exits 0 and `apps/worker/dist/main.js` exists.
+**Decision to record**: `deploy/sandbox/MECHANISM.md`'s DECISION line — run
+the probe (`sudo bash deploy/sandbox/sandbox-probe.sh`) if not yet filled;
+it decides `OVID_SANDBOX_LAUNCH` (`setuid` default vs `rootmap`) in
+`/opt/ovid-cloud/worker.env` (step 7) and branch-b AppArmor state
+(HARDENING item H).
+**Rollback**: none needed (host packages are inert until later steps).
+
+### Step 2 — rootfs (bwrap jail filesystem)
+
+```bash
+cd /opt/ovid-cloud/repo/cloud/deploy/rootfs
+./build.sh                 # ONLY if you want a fresh revision (docker-only,
+                           # safe); the CURRENT artifact revision is
+                           # dist/ubuntu-noble-min-20261017-r2.tar.zst (Task 10
+                           # rebuild — carries the cache-prune shim) and is
+                           # already built
+sudo bash install.sh       # picks the newest dist/ tarball, installs under
+                           # /opt/ovid-rootfs, flips `current` atomically,
+                           # prunes to 2 revisions, then runs smoke-jail.sh
+                           # itself
+```
+
+**Gate**: install.sh ends `==> running smoke-jail.sh` followed by
+`smoke-jail: OK (...)` — pinned node/pnpm/uv versions match `versions.env`
+AND the gcc shim refuses with the spec §7 copy, exit 126.
+**Note (host-gated suites)**: any host-gated test run (e.g.
+`OVID_SANDBOX_HOST_TESTS=1` suites) must point `OVID_ROOTFS` at an **r2**
+extract — `/opt/ovid-rootfs/current` after this step — NOT
+`/tmp/ovid-rootfs-test`, which is the stale **r1** scratch from earlier
+tasks (no `cache-prune` in its `ovid` shim).
+**Rollback**: back-flip the symlink to the previous revision (install.sh
+keeps 2):
+`sudo ln -sfn ubuntu-noble-min-<old> /opt/ovid-rootfs/current.tmp && sudo mv -T /opt/ovid-rootfs/current.tmp /opt/ovid-rootfs/current`
+
+### Step 3 — /workspaces XFS volume (project quotas)
+
+```bash
+sudo bash /opt/ovid-cloud/repo/cloud/deploy/workspaces/setup-workspaces.sh
+# optional: OVID_WORKSPACES_SIZE_GB=32 (default), image path and mount via
+# the env vars documented in the script header
+```
+
+**Gate** (both must hold):
+```bash
+stat -fc %T /workspaces   # → xfs
+mount | grep prjquota     # → the volume, mounted with prjquota
+```
+**Rollback**: `sudo umount /workspaces && sudo sed -i '\|/opt/ovid-workspaces.img|d' /etc/fstab` (delete the line added by the script; `sudo rm /opt/ovid-workspaces.img` only if the volume is being discarded for good — that destroys every user workspace).
+
+### Step 4 — sandbox egress filter (nftables)
+
+```bash
+# 1. Author the worker env early (full secrets land in step 7):
+sudo cp /opt/ovid-cloud/repo/cloud/deploy/worker.env.example /opt/ovid-cloud/worker.env
+sudo chmod 600 /opt/ovid-cloud/worker.env
+sudo $EDITOR /opt/ovid-cloud/worker.env   # set OVID_PUBLIC_IP — this box: 148.113.44.36
+
+# 2. Render + validate + install (idempotent; re-runs re-render + restart the unit):
+sudo bash -c 'set -a; source /opt/ovid-cloud/worker.env; set +a; \
+  bash /opt/ovid-cloud/repo/cloud/deploy/net/install-nft.sh'
+```
+
+**Gate**: script ends `table inet ovid_sandbox loaded:` + the table listing —
+`nft list table inet ovid_sandbox` works, and every `counter` line reads
+`counter packets 0 bytes 0` (freshly zeroed; nonzero counters expected only
+over time — HARDENING item H has the monthly review).
+**Rollback**: `sudo systemctl disable --now ovid-sandbox-nft && sudo nft delete table inet ovid_sandbox` (the unit's own ExecStop removes the table).
+
+### Step 5 — systemd units (slice + worker)
+
+```bash
+cd /opt/ovid-cloud/repo/cloud/deploy/systemd
+sudo install -m 644 ovid-sandboxes.slice ovid-worker.service /etc/systemd/system/
+sudo systemd-analyze verify /etc/systemd/system/ovid-sandboxes.slice /etc/systemd/system/ovid-worker.service
+# gate: no errors (warnings about ordering are acceptable — record them)
+sudo systemctl daemon-reload
+```
+
+Do **not** enable the worker yet — the env (step 7) must exist first.
+**Rollback**: `sudo rm /etc/systemd/system/ovid-sandboxes.slice /etc/systemd/system/ovid-worker.service && sudo systemctl daemon-reload`.
+
+### Step 6 — compose transition (worker out, proxies in)
+
+If a **P1 compose worker** is running on this box, retire it first — queue
+data (the `ovid-cloud-redis-q-data` volume) is untouched either way:
+
+```bash
+docker ps --filter name=ovid-cloud-worker --format '{{.Names}}'   # is P1's worker up?
+# from a checkout still holding the P1 compose file:
+docker compose stop worker && docker compose rm -f worker
+# or by container name once the P2 compose file is checked out:
+#   docker stop ovid-cloud-worker-1 && docker rm ovid-cloud-worker-1
+```
+
+Then bring up the P2 compose (picks up redis-q's loopback port + the
+`net-proxy-pg`/`net-proxy-mint` socat relays):
+
+```bash
+cd /opt/ovid-cloud/repo/cloud/deploy
+docker compose up -d
+```
+
+**Gates**:
+```bash
+curl -sf http://127.0.0.1:8082/cloud/v1/health            # → {"status":"ok",…}
+redis-cli --no-auth-warning -a "$REDIS_Q_PASSWORD" -p 6391 ping   # → PONG (auth'd)
+psql "postgres://ovid_cloud:$OVID_CLOUD_DB_PASSWORD@127.0.0.1:5434/ovid_cloud" -c 'select 1'
+                                                          # → 1 row (proxy → live pg)
+ss -tlnp | grep -E ':(5434|6391|6392)\b'                  # → 127.0.0.1 binds ONLY
+```
+(`REDIS_Q_PASSWORD`/`OVID_CLOUD_DB_PASSWORD` are in `deploy/.env` — source it
+in the shell running the gates.)
+**Rollback**: the worker compose service is restorable from git history
+(`git log -- cloud/deploy/docker-compose.yml`); `git checkout <P1-sha> --
+cloud/deploy/docker-compose.yml cloud/deploy/Dockerfile.worker && docker
+compose up -d --build` — and stop the systemd worker first (step 7 rollback)
+so the two workers do not both consume the queue.
+
+### Step 7 — worker env + enable
+
+```bash
+sudo $EDITOR /opt/ovid-cloud/worker.env   # complete every CHANGE_ME:
+#   DATABASE_URL password = OVID_CLOUD_DB_PASSWORD (deploy/.env)
+#   REDIS_Q_URL password  = REDIS_Q_PASSWORD        (deploy/.env)
+#   REDIS_MINT_URL password = REDIS_PASSWORD        (/opt/ovid-gateway/.env)
+#   OVID_DEFAULT_MODEL = a live LiteLLM alias; OVID_SANDBOX_LAUNCH per
+#   MECHANISM.md DECISION; OVID_PUBLIC_IP already set in step 4
+sudo chmod 600 /opt/ovid-cloud/worker.env
+
+sudo systemctl enable --now ovid-worker ovid-sandbox-nft
+```
+
+**Gates**:
+```bash
+systemctl is-active ovid-worker ovid-sandbox-nft          # → active active
+journalctl -u ovid-worker -n 50 --no-pager                 # → "consuming agent-runs" …
+                                                          #   and NO "RootfsUnavailable"
+cat /sys/fs/cgroup/ovid-sandboxes.slice/ovid-worker.service/cgroup.subtree_control
+                                                          # → cpu memory pids
+                                                          #   (leaf-first bootstrap ran)
+systemctl show ovid-sandboxes.slice -p CPUQuotaPerSecUSec # → 6s (600%)
+systemctl show ovid-worker -p MemoryMax                   # → 4294967296 (4G — G5)
+```
+**Rollback**: `sudo systemctl disable --now ovid-worker` (+ optionally
+`sudo nft delete table inet ovid_sandbox` if the filter is being removed
+too). The env file stays (harmless; contains secrets — `sudo rm` it if
+decommissioning).
+
+### Step 8 — functional smoke (owner, real session)
+
+From a real app build (or the Task-14 e2e harness pointed at production —
+real Firebase token + App Check): create session → POST a message whose
+agent run executes `run_shell {command:"echo …"}` and `write_file` → watch
+the WS event channel for the ordered `tool_started`/`tool_completed` events
+→ open a terminal via `pty_open` and type.
+
+**Gates (P2 checklist — all green = activated)**:
+- [ ] Run completes; `tool_completed` for `run_shell` carries the echoed
+      output; `write_file`'s file exists in the uid's workspace on
+      `/workspaces`
+- [ ] `tool_started`/`tool_completed` events arrived on the WS channel in
+      order (replay + live)
+- [ ] `pty_open` → terminal echoes; `/workspaces` file operations visible
+      through it
+- [ ] `nft list ruleset | grep -A2 counter` — the sandbox-uid drop counters
+      ticked if anything probed a blocked address; no unrelated table changed
+- [ ] HARDENING.md item H rows verified and dated
+
+**Known-deferred (carried, unchanged — see §9)**: gateway SIGTERM drain
+pending (the **worker** drains in ≤30 s — unit `TimeoutStopSec=35`), mint
+deadline pending, WS error logging pending; subscription cap 64 (I3) and WS
+maxPayload 262144 (I2) are done.
+

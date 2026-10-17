@@ -1,0 +1,17 @@
+# Ovid sandbox parent slice — the cgroup jail envs and the worker unit run in.
+# OWNER-GATED artifact: installed by DEPLOY.md §11 step 5, never by a task
+# agent. The caps below are the P2 capacity envelope (plan §"Global
+# Constraints", revised for the 8 vCPU / 22 GB box): 6 of 8 cores and 10 of
+# 22 GB are reserved for sandboxes, leaving 2 cores / 12 GB of headroom for
+# the gateway, Postgres, the live stack and the system — a runaway sandbox
+# workload OOM-kills INSIDE the slice long before the host (spec §7.3).
+# Worker unit (ovid-worker.service) caps itself at MemoryMax=4096M inside
+# this slice (G5); jail envs get the remainder (≥6G). HARDENING.md item H
+# carries the verification rows.
+[Unit]
+Description=Ovid sandbox parent slice (protects gateway/DB — spec §7.3, revised 8c/22GB envelope)
+
+[Slice]
+CPUQuota=600%
+MemoryMax=10G
+MemorySwapMax=0

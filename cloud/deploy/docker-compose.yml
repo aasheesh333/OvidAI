@@ -1,14 +1,26 @@
-# Ovid Cloud (P0 spine) — gateway + worker + dedicated queue Redis.
+# Ovid Cloud — gateway + dedicated queue Redis + loopback egress proxies.
 #
 # Runs ALONGSIDE the live ovid-gateway stack on the same VPS and joins its
 # internal network (external) to reach postgres / mint / mint-redis / litellm
 # by container DNS. redis-q is attached ONLY to the ovid-cloud network — the
 # live stack never sees it, and it never sees the live stack's redis.
 #
+# P2 transition: the WORKER is no longer a compose service. It jails user
+# code on the host (SandboxManager needs cgroup.procs writes, the
+# /workspaces volume and nftables adjacency — none survive a container
+# boundary) and now runs as a systemd unit: cloud/deploy/systemd/
+# ovid-worker.service + worker.env.example, activated by DEPLOY.md §11.
+# The host worker reaches its backends over loopback:
+#   • redis-q publishes 127.0.0.1:6391 (host port REDIS_Q_HOST_PORT);
+#   • net-proxy-pg / net-proxy-mint are socat relays on the internal network
+#     publishing 127.0.0.1:5434 → ovid-gateway-postgres-1:5432 and
+#     127.0.0.1:6392 → ovid-gateway-redis-1:6379 — the live stack itself is
+#     untouched (the relays only connect TO its container names).
+#
 # Activation is a manual, owner-run procedure: see DEPLOY.md (env authoring,
-# provisioning, compose up, Caddy route, backup timer). `docker compose
-# config -q` is the safe dry validation; NOTHING here touches the live stack
-# by itself.
+# provisioning, compose up, Caddy route, backup timer; P2: §11). `docker
+# compose config -q` is the safe dry validation; NOTHING here touches the
+# live stack by itself.
 #
 # Host-port note: 127.0.0.1:8081 on this box is ALREADY the live Caddy's
 # admin-dashboard listener (see /opt/ovid-gateway/caddy/Caddyfile, last block).
@@ -41,6 +53,12 @@ services:
   # fires first), and noeviction turns writes at that ceiling into OOM
   # errors instead of silently evicting jobs/events. AOF everysec: survives
   # restarts.
+  #
+  # P2: loopback-only host port for the SYSTEMD worker (it no longer shares
+  # this network namespace) — 127.0.0.1 binding, never 0.0.0.0: the queue is
+  # not for the internet. Password is embedded in REDIS_Q_URL in
+  # /opt/ovid-cloud/worker.env. ovid-cloud network ONLY — not reachable from
+  # the live stack.
   redis-q:
     image: redis:7-alpine
     restart: unless-stopped
@@ -61,6 +79,8 @@ services:
     environment:
       # Only so the healthcheck's in-container shell can interpolate it.
       REDIS_Q_PASSWORD: ${REDIS_Q_PASSWORD:?REDIS_Q_PASSWORD must be set in .env}
+    ports:
+      - "127.0.0.1:${REDIS_Q_HOST_PORT:-6391}:6379"
     volumes:
       - redis-q-data:/data
     mem_limit: 1536m
@@ -76,6 +96,56 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+  # Loopback egress proxies (P2): thin socat relays that give the HOST
+  # systemd worker a stable 127.0.0.1 path to the live stack's postgres and
+  # mint-redis over the shared internal network. The live ovid-gateway stack
+  # is NEVER modified — the relays merely connect to its container DNS names
+  # as clients. Backend auth is the live stack's own (postgres password /
+  # REDIS_PASSWORD) — the relays terminate nothing.
+  #
+  # Pinned image: alpine/socat:1.8.1.3
+  #   (socat 1.8.1.3, image created 2026-10-17,
+  #    digest sha256:22d77becaeeea8ef56b8c4bb2312323acafe85354be6a85714ff5050e3537842
+  #    resolved at Task-16 artifact time — re-pin deliberately, same policy
+  #    as HARDENING.md item G).
+  net-proxy-pg:
+    image: alpine/socat:1.8.1.3
+    restart: unless-stopped
+    # fork + reuseaddr: every host-side connection gets its own relay;
+    # restarts of the worker never exhaust the listener.
+    command:
+      [
+        "TCP-LISTEN:5432,fork,reuseaddr",
+        "TCP:ovid-gateway-postgres-1:5432",
+      ]
+    ports:
+      - "127.0.0.1:${NET_PROXY_PG_HOST_PORT:-5434}:5432"
+    networks: [internal]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  net-proxy-mint:
+    image: alpine/socat:1.8.1.3
+    restart: unless-stopped
+    command:
+      [
+        "TCP-LISTEN:6379,fork,reuseaddr",
+        "TCP:ovid-gateway-redis-1:6379",
+      ]
+    ports:
+      - "127.0.0.1:${NET_PROXY_MINT_HOST_PORT:-6392}:6379"
+    networks: [internal]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
   gateway:
     build:
@@ -119,24 +189,7 @@ services:
       retries: 3
       start_period: 15s
 
-  worker:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.worker
-    restart: unless-stopped
-    env_file: [.env]
-    depends_on:
-      redis-q: { condition: service_healthy }
-      # Ordering only — the worker does not call the gateway, so its health
-      # is deliberately NOT a gate (a degraded gateway must not stop runs).
-      gateway: { condition: service_started }
-    networks: [internal, ovid-cloud]
-    mem_limit: 2g
-    cpus: 2.0
-    pids_limit: 256
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    # The worker drains in-flight LiteLLM streams on SIGTERM — give it room.
-    stop_grace_period: 30s
+  # (No `worker` service any more — see the P2 note in the file header. The
+  # worker runs on the host as systemd unit ovid-worker.service
+  # (cloud/deploy/systemd/), activated by DEPLOY.md §11. The P1 compose
+  # worker this replaces is restorable from git history if ever needed.)
