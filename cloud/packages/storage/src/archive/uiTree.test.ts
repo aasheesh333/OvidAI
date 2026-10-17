@@ -201,6 +201,53 @@ describe("uiTree — fixture index", () => {
   });
 });
 
+describe("uiTree — non-ASCII budget (round 1, I1)", () => {
+  const N = 300;
+
+  function cjkIndex(): ArchiveIndex {
+    const files: FileRec[] = [];
+    for (let i = 0; i < N; i++) {
+      files.push({
+        // CJK names: 1 UTF-16 code unit per char but 3 UTF-8 bytes — a
+        // length-in-code-units budget would silently overshoot maxBytes.
+        path: `目录/文件名编号${String(i).padStart(3, "0")}.txt`,
+        type: 0,
+        size: 10,
+        mode: 0o644,
+        mtime: MTIME_SEC,
+        frameIndex: 0,
+        offsetInFrame: 0,
+        lengthInFrame: 10,
+        hashB64: "h",
+      });
+    }
+    return {
+      archiveVersion: 1,
+      format: "ovid-ws-grouped-v1",
+      zstdLevel: 9,
+      createdAt: NOW().toISOString(),
+      frames: [{ offset: 8, length: 1, decSize: 1, members: 1 }],
+      files,
+    };
+  }
+
+  it("emitted manifest is within maxBytes in BYTES (not UTF-16 units)", () => {
+    const tree = uiTree(cjkIndex(), { now: NOW });
+    const emitted = Buffer.byteLength(JSON.stringify(tree), "utf8");
+    expect(emitted).toBeLessThanOrEqual(UI_MANIFEST_MAX_BYTES);
+    expect(tree.truncated).toBe(true);
+    expect(visibleNonDirs(tree.roots)).toBeGreaterThan(0);
+    // visible + omitted closes over all 300 files
+    expect(visibleNonDirs(tree.roots) + sumOmitted(tree.roots)).toBe(N);
+  });
+
+  it("an explicit tiny maxBytes is also honored in bytes", () => {
+    const tree = uiTree(cjkIndex(), { now: NOW, maxBytes: 300 });
+    expect(Buffer.byteLength(JSON.stringify(tree), "utf8")).toBeLessThanOrEqual(300);
+    expect(tree.truncated).toBe(true);
+  });
+});
+
 describe("uiTree — synthetic 5000-file index", () => {
   const N = 5000;
 

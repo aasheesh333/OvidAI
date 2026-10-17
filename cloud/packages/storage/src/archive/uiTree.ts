@@ -178,6 +178,15 @@ function totalsOf(recs: TreeRec[]): { files: number; dirs: number; bytes: number
 // Budget fitting — never emit > maxBytes
 // ---------------------------------------------------------------------------
 
+/**
+ * Serialized size in UTF-8 BYTES. Never use string .length here: it counts
+ * UTF-16 code units, and a CJK filename is 1 unit but 3 bytes — a
+ * code-unit budget silently overshoots maxBytes (round-1 review I1).
+ */
+function jsonBytes(v: unknown): number {
+  return Buffer.byteLength(JSON.stringify(v), "utf8");
+}
+
 /** Bytes saved by a node's omission margin: omitted-count digit growth etc. */
 const TRIM_MARGIN = 16;
 
@@ -191,13 +200,13 @@ function fitNode(
   node: FileTreeNode,
   budget: number,
 ): { node: FileTreeNode; cost: number } | null {
-  const cost = JSON.stringify(node).length;
+  const cost = jsonBytes(node);
   if (cost <= budget) return { node, cost };
 
   const children = node.children;
   if (children === undefined || children.length === 0) return null; // leaf
 
-  const shellLen = JSON.stringify({ ...node, children: [] }).length;
+  const shellLen = jsonBytes({ ...node, children: [] });
   let inner = budget - shellLen - TRIM_MARGIN;
   if (inner < 0) return null;
 
@@ -216,15 +225,15 @@ function fitNode(
   const out: FileTreeNode = { ...node, children: kept };
   const baseOmitted = node.omitted ?? 0;
   if (omitted + baseOmitted > 0) out.omitted = omitted + baseOmitted;
-  const outLen = JSON.stringify(out).length;
+  const outLen = jsonBytes(out);
   if (outLen > budget) return null; // margin safety — drop the whole node
   return { node: out, cost: outLen };
 }
 
 function fitManifest(m: UiManifest, maxBytes: number): UiManifest {
-  if (JSON.stringify(m).length <= maxBytes) return m;
+  if (jsonBytes(m) <= maxBytes) return m;
 
-  const wrapperLen = JSON.stringify({ ...m, roots: [] }).length;
+  const wrapperLen = jsonBytes({ ...m, roots: [] });
   let budget = maxBytes - wrapperLen - TRIM_MARGIN;
   const kept: FileTreeNode[] = [];
   for (const root of m.roots) {
@@ -237,10 +246,10 @@ function fitManifest(m: UiManifest, maxBytes: number): UiManifest {
 
   let out: UiManifest = { ...m, roots: kept, truncated: true };
   // Hard guarantee, even if the margins above were optimistic.
-  while (out.roots.length > 0 && JSON.stringify(out).length > maxBytes) {
+  while (out.roots.length > 0 && jsonBytes(out) > maxBytes) {
     out = { ...out, roots: out.roots.slice(0, -1) };
   }
-  if (JSON.stringify(out).length > maxBytes) {
+  if (jsonBytes(out) > maxBytes) {
     throw new StorageError(
       `uiTree cannot fit a manifest within maxBytes=${maxBytes} (the empty wrapper alone is ${wrapperLen} bytes)`,
       { code: "ui_manifest_budget" },
