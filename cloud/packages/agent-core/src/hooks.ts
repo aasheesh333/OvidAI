@@ -44,6 +44,7 @@ import {
 import type {
   HookEngine,
   HookEvent,
+  HookFireResult,
   HookGateResult,
   HookStopResult,
   SandboxPort,
@@ -97,6 +98,16 @@ export interface HookDefinition {
   timeoutMs?: number;
   /** Dart's optional `if` predicate (`ToolName(arg-pattern)`). */
   if?: string;
+  /**
+   * The DECLARED event spelling (Dart `ovidSourceEvent`), e.g. `PreToolUse`,
+   * `on_turn_end`, `PostToolUseFailure`. Reported as OVID_HOOK_EVENT.
+   */
+  declaredEvent?: string;
+  /**
+   * Declared PostToolUse vs PostToolUseFailure. When set, a post_tool hook
+   * fires only for the matching outcome (Dart hook_service.dart:1266–1275).
+   */
+  sourceEvent?: "PostToolUse" | "PostToolUseFailure";
 }
 
 export interface HookSource {
@@ -123,13 +134,27 @@ export interface HookEngineDeps {
   ): void;
   /**
    * SandboxPort.exec is keyed by userId, while HookEngine methods receive only
-   * sessionId. Production wires a resolver; the fallback (userId ?? sessionId)
-   * keeps the port usable in tests and single-user harnesses.
+   * sessionId. At least one resolver is REQUIRED: a silent sessionId fallback
+   * would run hooks in the wrong jail (or read no hooks.json) with no error.
    */
   userId?: string;
   userIdForSession?(sessionId: string): string | undefined;
   /** Jail workspace reported to hooks; defaults to /workspace. */
   workspaceDir?: string;
+  /** The run's model id, exported as PLUGIN_MODEL and to prompt-hook ctx. */
+  model?: string;
+}
+
+function assertUserResolver(deps: {
+  userId?: string;
+  userIdForSession?: (sessionId: string) => string | undefined;
+}): void {
+  if (deps.userIdForSession === undefined && (deps.userId ?? "") === "") {
+    throw new Error(
+      "hooks: userIdForSession (or a static userId) is required — hooks must " +
+        "run in the session owner's jail, never a sessionId-keyed fallback",
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +244,16 @@ function isToolEvent(event: HookEvent): boolean {
   return event === "pre_tool" || event === "post_tool";
 }
 
+/** True when a post_tool payload describes a failed tool call. */
+export function isPostToolFailure(payload: Record<string, unknown>): boolean {
+  return (
+    payload["hook_event_name"] === "PostToolUseFailure" ||
+    payload["is_error"] === true ||
+    payload["error"] !== undefined ||
+    payload["ok"] === false
+  );
+}
+
 // ---------------------------------------------------------------------------
 // File hook source: workspace `.dsh/hooks.json`
 // ---------------------------------------------------------------------------
@@ -243,9 +278,20 @@ export interface FileHookSourceDeps {
  */
 export function createFileHookSource(deps: FileHookSourceDeps): HookSource {
   const path = deps.path ?? HOOK_FILE;
+  assertUserResolver(deps);
+  const userIdFor = (sessionId: string): string => {
+    const resolved = deps.userIdForSession?.(sessionId) ?? deps.userId;
+    if (resolved === undefined || resolved === "") {
+      throw new Error(
+        `hooks: no userId for session ${sessionId} — hooks must run in the ` +
+          "session owner's jail, never a sessionId-keyed fallback",
+      );
+    }
+    return resolved;
+  };
   return {
     async hooksFor(sessionId: string): Promise<readonly HookDefinition[]> {
-      const userId = deps.userIdForSession?.(sessionId) ?? deps.userId ?? sessionId;
+      const userId = userIdFor(sessionId);
       let raw: string;
       try {
         raw = await deps.sandbox.readFile(userId, path);
@@ -268,6 +314,15 @@ export function createFileHookSource(deps: FileHookSourceDeps): HookSource {
         if (!isRecord(entry)) return;
         const event = normalizeEvent(entry["event"]);
         if (event === null) return; // unsupported / cut event
+        const declaredEvent = String(entry["event"]).trim();
+        // PostToolUse and PostToolUseFailure both normalize to post_tool; the
+        // declared spelling filters success vs failure payloads.
+        const sourceEvent =
+          declaredEvent === "PostToolUseFailure"
+            ? ("PostToolUseFailure" as const)
+            : declaredEvent === "PostToolUse"
+              ? ("PostToolUse" as const)
+              : undefined;
         const declaredType =
           typeof entry["type"] === "string" ? entry["type"].trim() : "";
         // Agent-type hooks are not wired in the cloud (Dart production leaves
@@ -315,6 +370,8 @@ export function createFileHookSource(deps: FileHookSourceDeps): HookSource {
           ...(prompt !== undefined ? { prompt } : {}),
           ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           ...(typeof entry["if"] === "string" ? { if: entry["if"] } : {}),
+          declaredEvent,
+          ...(sourceEvent !== undefined ? { sourceEvent } : {}),
         });
       });
       return out;
@@ -604,12 +661,7 @@ export function buildHookStdinJson(
   const transcriptPath = String(
     redacted["transcript_path"] ?? redacted["transcriptPath"] ?? "",
   );
-  const isFailure =
-    event === "post_tool" &&
-    (redacted["hook_event_name"] === "PostToolUseFailure" ||
-      redacted["is_error"] === true ||
-      redacted["error"] !== undefined ||
-      redacted["ok"] === false);
+  const isFailure = event === "post_tool" && isPostToolFailure(redacted);
 
   const m: Record<string, unknown> = {
     session_id: sessionId,
@@ -681,6 +733,8 @@ export function buildHookEnv(o: {
   payload: Record<string, unknown>;
   secrets: readonly string[];
   workspace?: string;
+  model?: string;
+  stdinFile?: string;
 }): Record<string, string> {
   const workspace = o.workspace ?? HOOK_WORKSPACE;
   const payloadJson = cleanHookJson(
@@ -691,7 +745,10 @@ export function buildHookEnv(o: {
     }),
   );
   return {
-    OVID_HOOK_EVENT: o.definition.event,
+    // Legacy env contract: the DECLARED spelling (a hook registered as
+    // `on_turn_end` or `PreToolUse` sees exactly that), never the normalized
+    // internal name (Dart _envFor).
+    OVID_HOOK_EVENT: o.definition.declaredEvent ?? o.definition.event,
     OVID_HOOK_PLUGIN: o.definition.pluginId,
     OVID_HOOK_SESSION: o.sessionId,
     OVID_HOOK_PAYLOAD: payloadJson,
@@ -699,7 +756,7 @@ export function buildHookEnv(o: {
     PLUGIN_ID: o.definition.pluginId,
     PLUGIN_EVENT: o.event,
     PLUGIN_SESSION: o.sessionId,
-    PLUGIN_MODEL: "",
+    PLUGIN_MODEL: o.model ?? "",
     PLUGIN_PAYLOAD: payloadJson,
     PLUGIN_ROOT: "",
     PLUGIN_STORAGE: "",
@@ -710,6 +767,57 @@ export function buildHookEnv(o: {
     CLAUDE_PROJECT_DIR: workspace,
     CLAUDE_ENV_FILE: "",
     CLAUDE_CODE_REMOTE: "",
+    // Set only for the oversized-payload path (see wrapHookCommand): the hook
+    // reads its stdin JSON from this jail file instead of argv.
+    ...(o.stdinFile !== undefined ? { OVID_HOOK_STDIN_FILE: o.stdinFile } : {}),
+  };
+}
+
+/** argv payloads above this are delivered through a jail temp file. */
+export const HOOK_ARGV_PAYLOAD_LIMIT = 96 * 1024;
+
+/**
+ * The post_tool payload the LOOP should pass to `hooks.fireDetailed("post_tool")`
+ * (T16 wiring helper — loop.ts is owned by another task). It carries the FULL
+ * tool input and the UNTRUNCATED tool result; the engine bounds only the env
+ * copy (4000 chars) while stdin keeps the whole response.
+ *
+ * T16 call change (currently `result: rowContent.slice(0, 400)`, no input):
+ *
+ *   await deps.hooks.fireDetailed(
+ *     "post_tool",
+ *     sessionId,
+ *     buildPostToolPayload({
+ *       tool: call.name,
+ *       args: effectiveArgs,
+ *       result: rowContent,          // untruncated
+ *       ok: result.isError !== true,
+ *       toolUseId: call.id,
+ *     }),
+ *   );
+ *
+ * and apply `exit2Feedback`/`blockReasons`/`additionalContext`/
+ * `updatedToolOutput` to the tool row (Dart PostToolHookResult.apply).
+ */
+export function buildPostToolPayload(o: {
+  tool: string;
+  args: Record<string, unknown>;
+  result: string;
+  ok: boolean;
+  toolUseId?: string;
+  durationMs?: number;
+}): Record<string, unknown> {
+  return {
+    tool: o.tool,
+    tool_name: o.tool,
+    args: o.args,
+    tool_input: o.args,
+    result: o.result,
+    tool_response: o.result,
+    ok: o.ok,
+    is_error: !o.ok,
+    ...(o.toolUseId !== undefined ? { tool_use_id: o.toolUseId } : {}),
+    ...(o.durationMs !== undefined ? { duration_ms: o.durationMs } : {}),
   };
 }
 
@@ -717,8 +825,24 @@ export function buildHookEnv(o: {
  * SandboxPort.exec has no stdin pipe, so the payload is piped with printf.
  * Single-quote escaping is POSIX-safe and byte-exact; the fake SandboxPort in
  * tests decodes the same wrapper. (`json.load(sys.stdin)` parity.)
+ *
+ * E2BIG guard: Linux MAX_ARG_STRLEN is 128 KiB per argv element, and the
+ * environment competes for the same budget. A larger payload is written to
+ * `stdinFile` (workspace-relative, jail-absolute here) and redirected, so a
+ * large `file_write`/`tool_response` can never make a pre_tool gate silently
+ * fail open.
  */
-export function wrapHookCommand(command: string, stdinJson: string): string {
+export function wrapHookCommand(
+  command: string,
+  stdinJson: string,
+  o: { stdinFile?: string } = {},
+): string {
+  if (
+    stdinJson.length > HOOK_ARGV_PAYLOAD_LIMIT &&
+    o.stdinFile !== undefined
+  ) {
+    return `( ${command}\n) < '${o.stdinFile}'`;
+  }
   const quoted = `'${stdinJson.replace(/'/g, `'\\''`)}'`;
   return `printf '%s' ${quoted} | ( ${command}\n)`;
 }
@@ -737,6 +861,7 @@ interface HookOutputContract {
   permissionDecision: string | null;
   permissionDecisionReason: string | null;
   updatedInput: Record<string, unknown> | null;
+  updatedToolOutput: string | null;
 }
 
 const EMPTY_CONTRACT: HookOutputContract = {
@@ -749,6 +874,7 @@ const EMPTY_CONTRACT: HookOutputContract = {
   permissionDecision: null,
   permissionDecisionReason: null,
   updatedInput: null,
+  updatedToolOutput: null,
 };
 
 function nonEmptyString(value: unknown): string | null {
@@ -776,6 +902,7 @@ export function parseHookOutputContract(stdout: string): HookOutputContract {
     ? parsed["hookSpecificOutput"]
     : null;
   const updatedRaw = hso?.["updatedInput"];
+  const replaced = hso?.["updatedToolOutput"] ?? hso?.["updatedMCPToolOutput"];
   return {
     continueHooks: typeof parsed["continue"] === "boolean" ? parsed["continue"] : true,
     suppressOutput: parsed["suppressOutput"] === true,
@@ -792,6 +919,12 @@ export function parseHookOutputContract(stdout: string): HookOutputContract {
         : null,
     permissionDecisionReason: nonEmptyString(hso?.["permissionDecisionReason"]),
     updatedInput: isRecord(updatedRaw) ? updatedRaw : null,
+    updatedToolOutput:
+      replaced === undefined || replaced === null
+        ? null
+        : typeof replaced === "string"
+          ? replaced
+          : JSON.stringify(replaced),
   };
 }
 
@@ -923,6 +1056,7 @@ interface CommandResult {
 }
 
 export function createHookEngine(deps: HookEngineDeps): HookEngine {
+  assertUserResolver(deps);
   const workspace = deps.workspaceDir ?? HOOK_WORKSPACE;
   /** `${pluginId}\0${sessionId}` → consecutive failures (breaker). */
   const failures = new Map<string, number>();
@@ -941,8 +1075,16 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
 
   const secrets = (): readonly string[] => deps.secrets?.() ?? [];
 
-  const userIdFor = (sessionId: string): string =>
-    deps.userIdForSession?.(sessionId) ?? deps.userId ?? sessionId;
+  const userIdFor = (sessionId: string): string => {
+    const resolved = deps.userIdForSession?.(sessionId) ?? deps.userId;
+    if (resolved === undefined || resolved === "") {
+      throw new Error(
+        `hooks: no userId for session ${sessionId} — hooks must run in the ` +
+          "session owner's jail, never a sessionId-keyed fallback",
+      );
+    }
+    return resolved;
+  };
 
   function recordSuccess(pluginId: string, sessionId: string): void {
     failures.delete(breakerKey(pluginId, sessionId));
@@ -991,15 +1133,40 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
     event: HookEvent,
     payload: Record<string, unknown>,
   ): boolean {
+    // Declared PostToolUse vs PostToolUseFailure: both normalize to post_tool,
+    // so the outcome decides which declarations fire (Dart ovidSourceEvent).
+    if (event === "post_tool" && definition.sourceEvent !== undefined) {
+      const failure = isPostToolFailure(payload);
+      if ((definition.sourceEvent === "PostToolUseFailure") !== failure) {
+        return false;
+      }
+    }
     if (!matcherApplies(event, definition.matcher, payload)) return false;
     if (definition.if !== undefined && !ifPredicateMatches(definition.if, payload)) {
-      return false;
+      // Dart tests the predicate against the native payload AND every [CC]
+      // alias payload (`_hookMatches` → `_ccAliasPayloads`): `Bash(git …)`
+      // must gate the native `run_shell` tool.
+      if (!isToolEvent(event)) return false;
+      const native = String(payload["tool"] ?? payload["tool_name"] ?? "");
+      const rawInput = payload["tool_input"] ?? payload["args"] ?? payload["input"];
+      const input = isRecord(rawInput) ? rawInput : undefined;
+      const aliases = ccMatcherNames(native, input).map((alias) => ({
+        ...payload,
+        tool: alias,
+        tool_name: alias,
+      }));
+      if (!aliases.some((alias) => ifPredicateMatches(definition.if!, alias))) {
+        return false;
+      }
     }
     return true;
   }
 
   function timeoutMsFor(definition: HookDefinition, fallback: number): number {
     const declared = definition.timeoutMs ?? fallback;
+    // Dart: `timeoutS <= 0` means "use the default" (30 s command / 120 s
+    // prompt), not a 1 ms timeout.
+    if (!Number.isFinite(declared) || declared <= 0) return fallback;
     return Math.min(Math.max(declared, 1), HOOK_MAX_TIMEOUT_MS);
   }
 
@@ -1013,6 +1180,22 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
       cwd: workspace,
       secrets: secrets(),
     });
+    const userId = userIdFor(sessionId);
+    const callKey = `hook:${sessionId}:${definition.id}:${(callSeq += 1)}`;
+    // E2BIG guard: a >96 KiB payload cannot ride in one argv element, so it is
+    // written into the session jail and fed through a stdin redirect. Failing
+    // to write the file is a runtime failure (fail-open, retryable) — it must
+    // never become a silent hook skip with the gate half-run.
+    let stdinFile: string | undefined;
+    if (stdinJson.length > HOOK_ARGV_PAYLOAD_LIMIT) {
+      const relPath = `.dsh/tmp/hook-stdin-${callSeq}.json`;
+      try {
+        await deps.sandbox.writeFile(userId, relPath, stdinJson);
+      } catch {
+        return { kind: "runtime-unavailable", exitCode: -1, stdout: "", stderr: "" };
+      }
+      stdinFile = `${workspace}/${relPath}`;
+    }
     const env = buildHookEnv({
       definition,
       event,
@@ -1020,12 +1203,16 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
       payload,
       secrets: secrets(),
       workspace,
+      ...(deps.model !== undefined ? { model: deps.model } : {}),
+      ...(stdinFile !== undefined ? { stdinFile } : {}),
     });
-    const userId = userIdFor(sessionId);
-    const callKey = `hook:${sessionId}:${definition.id}:${(callSeq += 1)}`;
     try {
       const result = await deps.sandbox.exec(userId, {
-        cmd: wrapHookCommand(definition.command ?? "", stdinJson),
+        cmd: wrapHookCommand(
+          definition.command ?? "",
+          stdinJson,
+          stdinFile !== undefined ? { stdinFile } : {},
+        ),
         timeoutMs: timeoutMsFor(definition, HOOK_DEFAULT_TIMEOUT_MS),
         callKey,
         env,
@@ -1086,6 +1273,8 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
           session: sessionId,
           plugin: definition.pluginId,
           hook: definition.id,
+          stdin: scrubText(stdinJson, secrets()),
+          ...(deps.model !== undefined ? { model: deps.model } : {}),
         }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(
@@ -1122,11 +1311,33 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
 
   // ── observe events ──────────────────────────────────────────────────────
 
+  /**
+   * Secret values for publication scrubbing: explicit secrets + values under
+   * secret-looking payload keys + values under secret-looking keys in the
+   * hook's own decoded output (Dart `_safeOutput(raw, known)` includes the
+   * payload on BOTH the observe and gate paths).
+   */
+  function knownSecretsFor(
+    payload: Record<string, unknown>,
+    stdout?: string,
+  ): string[] {
+    const set = new Set<string>(secrets());
+    collectSecretValues(payload, set);
+    if (stdout !== undefined) {
+      try {
+        collectSecretValues(JSON.parse(stdout), set);
+      } catch {
+        // Non-JSON output contributes nothing beyond the explicit secrets.
+      }
+    }
+    return [...set];
+  }
+
   async function fireDetailedInner(
     event: HookEvent,
     sessionId: string,
     payload: Record<string, unknown>,
-  ): Promise<{ output: string; systemMessages: string[]; promptBlockReason: string | null }> {
+  ): Promise<HookFireResult> {
     const hooks = await definitionsFor(event, sessionId);
     const stdinJson = buildHookStdinJson(event, sessionId, payload, {
       cwd: workspace,
@@ -1135,6 +1346,11 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
     const collected: string[] = [];
     const systemMessages: string[] = [];
     const promptBlocks: string[] = [];
+    const hookOutputs: string[] = [];
+    const exit2Feedback: string[] = [];
+    const blockReasons: string[] = [];
+    const additionalContext: string[] = [];
+    let updatedToolOutput: string | null = null;
     let blockedReason: string | null = null;
     const promptContextParts: string[] = [];
 
@@ -1165,9 +1381,10 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
         recordFailure(definition.pluginId, sessionId);
         continue;
       }
+      const known = knownSecretsFor(payload, result.stdout);
       if (result.exitCode !== 0) {
-        const err = scrubText(result.stderr.trim(), secrets());
-        const out = scrubText(result.stdout.trim(), secrets());
+        const err = scrubText(result.stderr.trim(), known);
+        const out = scrubText(result.stdout.trim(), known);
         if (result.exitCode === 2) {
           if (EXIT2_BLOCKING_EVENTS.has(event)) {
             blockedReason =
@@ -1176,9 +1393,10 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
             break; // later hooks are skipped
           }
           if (event === "post_tool") {
-            // Feedback for the model; the tool already ran. The cloud
-            // HookFireResult has no exit2Feedback field and the loop's
-            // post_tool fire is observe-only — record it as success.
+            // Feedback for the model; the tool already ran (Dart
+            // PostToolHookResult.feedback). Never a breaker failure.
+            const diagnostic = err !== "" ? err : out;
+            if (diagnostic !== "") exit2Feedback.push(diagnostic);
             recordSuccess(definition.pluginId, sessionId);
             continue;
           }
@@ -1202,8 +1420,25 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
       const contract = parseHookOutputContract(result.stdout);
       const context = contract.suppressOutput
         ? ""
-        : scrubText(extractHookContext(result.stdout), secrets());
-      const trimmed = scrubText(result.stdout.trim(), secrets());
+        : scrubText(extractHookContext(result.stdout), known);
+      const trimmed = scrubText(result.stdout.trim(), known);
+      const isEnvelope = trimmed.startsWith("{") || trimmed.startsWith("[");
+      const published = contract.suppressOutput ? "" : trimmed;
+
+      if (published !== "") hookOutputs.push(published);
+      if (event === "post_tool") {
+        if (contract.decision === "block") {
+          blockReasons.push(
+            contract.reason ?? "blocked by a PostToolUse hook",
+          );
+        }
+        if (contract.additionalContext !== null) {
+          additionalContext.push(scrubText(contract.additionalContext, known));
+        }
+        if (contract.updatedToolOutput !== null) {
+          updatedToolOutput = scrubText(contract.updatedToolOutput, known);
+        }
+      }
 
       if (event === "session_start") {
         const contexts = sessionContexts.get(sessionId) ?? new Map<string, string>();
@@ -1214,22 +1449,26 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
         promptContextParts.push(context);
       }
 
-      if (trimmed !== "") {
+      if (published !== "") {
         const isContextEvent =
           event === "pre_request" || event === "user_prompt_submit";
-        collected.push(isContextEvent ? context : trimmed);
+        // A JSON envelope is protocol, never prompt context: expose the
+        // extracted `additionalContext` instead of the raw object.
+        collected.push(isContextEvent ? context : isEnvelope ? context : trimmed);
       }
       if (contract.systemMessage !== null) {
-        systemMessages.push(scrubText(contract.systemMessage, secrets()));
+        systemMessages.push(scrubText(contract.systemMessage, known));
       }
       if (!contract.continueHooks) break;
     }
 
     if (event === "user_prompt_submit") {
       const joined = promptContextParts.join("\n");
+      // Brief/map: the standing prompt context is bounded at 2 KB (Dart caps
+      // the fireDetailed output at 2048 BEFORE the run stores it).
       promptContexts.set(
         sessionId,
-        joined === "" ? null : capContext(joined, MAX_SESSION_CONTEXT_CHARS),
+        joined === "" ? null : capContext(joined, MAX_OBSERVE_OUTPUT_CHARS),
       );
     }
 
@@ -1242,6 +1481,11 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
       output,
       systemMessages,
       promptBlockReason: blockedReason ?? promptBlocks[0] ?? null,
+      exit2Feedback,
+      blockReasons,
+      additionalContext,
+      updatedToolOutput,
+      hookOutputs,
     };
   }
 
@@ -1250,11 +1494,20 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
     event: HookEvent,
     sessionId: string,
     payload: Record<string, unknown>,
-  ): Promise<{ output: string; systemMessages: string[]; promptBlockReason: string | null }> {
+  ): Promise<HookFireResult> {
     try {
       return await fireDetailedInner(event, sessionId, payload);
     } catch {
-      return { output: "", systemMessages: [], promptBlockReason: null };
+      return {
+        output: "",
+        systemMessages: [],
+        promptBlockReason: null,
+        exit2Feedback: [],
+        blockReasons: [],
+        additionalContext: [],
+        updatedToolOutput: null,
+        hookOutputs: [],
+      };
     }
   }
 

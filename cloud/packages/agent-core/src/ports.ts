@@ -55,10 +55,33 @@ export interface ApprovalGate {           // grants + bridge + events (Task 12)
 export type HookEvent = "session_start" | "user_prompt_submit" | "pre_request" | "post_request" | "pre_tool" | "post_tool" | "stop" | "subagent_stop" | "notification";
 export interface HookGateResult { decision: "allow" | "deny" | "ask"; updatedInput?: Record<string, unknown>; reason?: string | null; bypassPermission?: boolean; decidedByPlugin?: string | null; deniedByPlugin?: string | null; }
 export type HookStopResult = { veto: false } | { veto: true; reason: string | null; vetoedByPlugin: string | null };
+/**
+ * Full observe-fire result. `output`/`systemMessages`/`promptBlockReason` are
+ * the original three fields (loop.ts consumes them). The rest are ADDITIVE
+ * (T18 fix round) and carry the Dart `PostToolHookResult.fromFire` contract so
+ * the worker can apply post_tool decisions/context to the tool row:
+ *  • exit2Feedback       — exit 2 stderr on post_tool ("tool already ran");
+ *  • blockReasons        — `decision:"block"` reasons on post_tool;
+ *  • additionalContext   — extracted `additionalContext` values;
+ *  • updatedToolOutput   — `hookSpecificOutput.updatedToolOutput` replacement
+ *                          (last non-null wins), JSON-encoded when non-string;
+ *  • hookOutputs         — each successful hook's published stdout.
+ * T16 owns consuming these in the loop (see task-18-report.md).
+ */
+export interface HookFireResult {
+  output: string;
+  systemMessages: string[];
+  promptBlockReason: string | null;
+  exit2Feedback?: string[];
+  blockReasons?: string[];
+  additionalContext?: string[];
+  updatedToolOutput?: string | null;
+  hookOutputs?: string[];
+}
 export interface HookEngine {
   hasListeners(event: HookEvent, sessionId: string): Promise<boolean>;
   fire(event: HookEvent, sessionId: string, payload: Record<string, unknown>): Promise<void>;                       // observe-only
-  fireDetailed(event: HookEvent, sessionId: string, payload: Record<string, unknown>): Promise<{ output: string; systemMessages: string[]; promptBlockReason: string | null }>;
+  fireDetailed(event: HookEvent, sessionId: string, payload: Record<string, unknown>): Promise<HookFireResult>;
   fireGate(sessionId: string, payload: { tool: string; args: Record<string, unknown> }): Promise<HookGateResult>;   // pre_tool
   fireStop(sessionId: string, payload: Record<string, unknown>, event?: "stop" | "subagent_stop"): Promise<HookStopResult>;
   sessionContextFor(sessionId: string): string;

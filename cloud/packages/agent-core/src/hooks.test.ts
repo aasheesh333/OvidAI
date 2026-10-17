@@ -16,7 +16,11 @@ import { describe, expect, it } from "vitest";
 import type { SandboxPort } from "./ports.js";
 import { ccToolInput, nativeToolInput } from "./claudeCodeTools.js";
 import {
+  HOOK_ARGV_PAYLOAD_LIMIT,
   HOOK_BREAKER_THRESHOLD,
+  HOOK_DEFAULT_TIMEOUT_MS,
+  MAX_OBSERVE_OUTPUT_CHARS,
+  buildPostToolPayload,
   createFileHookSource,
   createHookEngine,
   parsePromptHookDecision,
@@ -56,6 +60,7 @@ function fakeSandbox() {
   const files = new Map<string, string>();
   const execCalls: ExecCall[] = [];
   const kills: Array<[string, string]> = [];
+  const writes: Array<{ userId: string; path: string; content: string }> = [];
   let handler: (call: ExecCall) => Promise<ExecResult> | ExecResult = () => ({
     exitCode: 0,
     stdout: "",
@@ -76,7 +81,8 @@ function fakeSandbox() {
       if (content === undefined) throw new Error(`no such file: ${path}`);
       return content;
     },
-    async writeFile(_userId, path, content) {
+    async writeFile(userId, path, content) {
+      writes.push({ userId, path, content });
       files.set(path, content);
     },
     async exists(_userId, path) {
@@ -102,6 +108,7 @@ function fakeSandbox() {
     files,
     execCalls,
     kills,
+    writes,
     setHandler(fn: (call: ExecCall) => Promise<ExecResult> | ExecResult) {
       handler = fn;
     },
@@ -127,6 +134,12 @@ function def(overrides: Partial<HookDefinition> & { event: HookDefinition["event
     ...(overrides.prompt !== undefined ? { prompt: overrides.prompt } : {}),
     ...(overrides.timeoutMs !== undefined ? { timeoutMs: overrides.timeoutMs } : {}),
     ...(overrides.if !== undefined ? { if: overrides.if } : {}),
+    ...(overrides.declaredEvent !== undefined
+      ? { declaredEvent: overrides.declaredEvent }
+      : {}),
+    ...(overrides.sourceEvent !== undefined
+      ? { sourceEvent: overrides.sourceEvent }
+      : {}),
   };
 }
 
@@ -142,6 +155,7 @@ function makeEngine(
     sandbox: fs.sandbox,
     sources: [staticSource(hooks)],
     promptEvaluator: async () => null,
+    userId: "u1",
     onNotification: (message, ctx) => notifications.push({ message, ...ctx }),
     ...extra,
   });
@@ -1082,7 +1096,7 @@ describe("createFileHookSource", () => {
         { event: "session_end", command: "nope" },
       ]),
     );
-    const source = createFileHookSource({ sandbox: fs.sandbox });
+    const source = createFileHookSource({ sandbox: fs.sandbox, userId: "u1" });
 
     const hooks = await source.hooksFor("s1");
     expect(hooks.map((h) => h.event)).toEqual(["pre_tool", "stop"]);
@@ -1093,10 +1107,351 @@ describe("createFileHookSource", () => {
 
   it("returns [] for a missing or malformed file", async () => {
     const fs = fakeSandbox();
-    const source = createFileHookSource({ sandbox: fs.sandbox });
+    const source = createFileHookSource({ sandbox: fs.sandbox, userId: "u1" });
     expect(await source.hooksFor("s1")).toEqual([]);
 
     fs.files.set(".dsh/hooks.json", "{not json");
     expect(await source.hooksFor("s1")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — review findings I1–I7 + minors
+// ---------------------------------------------------------------------------
+
+describe("fix round 1 — context caps (I1)", () => {
+  it("caps standing promptContextFor at 2048", async () => {
+    const fs = fakeSandbox();
+    fs.setHandler(() => ok("p".repeat(5000)));
+    const { engine } = makeEngine(fs, [
+      def({ event: "user_prompt_submit", command: "ctx" }),
+    ]);
+
+    await engine.fireDetailed("user_prompt_submit", "s1", { prompt: "hi" });
+    const ctx = engine.promptContextFor("s1")!;
+    expect(ctx.length).toBe(MAX_OBSERVE_OUTPUT_CHARS);
+    expect(ctx).toContain("[hook output truncated]");
+  });
+});
+
+describe("fix round 1 — PostToolUse/Failure filtering (I2)", () => {
+  const sourceWith = (fs: ReturnType<typeof fakeSandbox>) =>
+    createFileHookSource({ sandbox: fs.sandbox, userId: "u1" });
+
+  it("preserves the declared spelling and fires failure hooks only on failure", async () => {
+    const fs = fakeSandbox();
+    fs.files.set(
+      ".dsh/hooks.json",
+      JSON.stringify([
+        { event: "PostToolUseFailure", command: "notify", id: "fail" },
+        { event: "PostToolUse", command: "ok-hook", id: "ok" },
+      ]),
+    );
+    const { engine } = makeEngine(fs, []);
+    // Inject the file source instead of the static one.
+    const engine2 = createHookEngine({
+      sandbox: fs.sandbox,
+      sources: [sourceWith(fs)],
+      promptEvaluator: async () => null,
+      userId: "u1",
+    });
+
+    const defs = await sourceWith(fs).hooksFor("s1");
+    expect(defs.map((d) => d.declaredEvent)).toEqual(["PostToolUseFailure", "PostToolUse"]);
+    expect(defs.map((d) => d.sourceEvent)).toEqual([
+      "PostToolUseFailure",
+      "PostToolUse",
+    ]);
+
+    await engine2.fireDetailed("post_tool", "s1", {
+      tool: "Bash",
+      result: "ok",
+      ok: true,
+    });
+    expect(fs.execCalls).toHaveLength(1);
+    expect(fs.execCalls[0]!.o.env!.OVID_HOOK_EVENT).toBe("PostToolUse");
+
+    await engine2.fireDetailed("post_tool", "s1", {
+      tool: "Bash",
+      result: "boom",
+      ok: false,
+    });
+    expect(fs.execCalls).toHaveLength(2);
+    expect(fs.execCalls[1]!.o.env!.OVID_HOOK_EVENT).toBe("PostToolUseFailure");
+
+    // The unused static-source engine is only here to prove isolation.
+    expect(engine).toBeDefined();
+  });
+
+  it("a failure-only programmatic hook does not run on success", async () => {
+    const fs = fakeSandbox();
+    const { engine } = makeEngine(fs, [
+      def({ event: "post_tool", command: "notify", sourceEvent: "PostToolUseFailure" }),
+    ]);
+
+    await engine.fireDetailed("post_tool", "s1", { tool: "Bash", ok: true });
+    expect(fs.execCalls).toHaveLength(0);
+    await engine.fireDetailed("post_tool", "s1", { tool: "Bash", ok: false });
+    expect(fs.execCalls).toHaveLength(1);
+  });
+});
+
+describe("fix round 1 — post_tool result contract (I3/I7)", () => {
+  it("returns exit-2 feedback, block reason, context and updatedToolOutput", async () => {
+    const fs = fakeSandbox();
+    let n = 0;
+    fs.setHandler(() => {
+      n += 1;
+      if (n === 1) return { exitCode: 2, stdout: "", stderr: "rerun tests" };
+      return ok(
+        JSON.stringify({
+          decision: "block",
+          reason: "bad output",
+          hookSpecificOutput: {
+            additionalContext: "extra ctx",
+            updatedToolOutput: { replaced: true },
+          },
+        }),
+      );
+    });
+    const { engine } = makeEngine(fs, [
+      def({ id: "a", event: "post_tool", command: "a" }),
+      def({ id: "b", event: "post_tool", command: "b" }),
+    ]);
+
+    const result = await engine.fireDetailed("post_tool", "s1", {
+      tool: "Bash",
+      result: "out",
+      ok: true,
+    });
+    expect(result.exit2Feedback).toEqual(["rerun tests"]);
+    expect(result.blockReasons).toEqual(["bad output"]);
+    expect(result.additionalContext).toEqual(["extra ctx"]);
+    expect(result.updatedToolOutput).toBe(JSON.stringify({ replaced: true }));
+  });
+
+  it("does not leak a JSON envelope into output for non-context events", async () => {
+    const fs = fakeSandbox();
+    fs.setHandler(() =>
+      ok(JSON.stringify({ hookSpecificOutput: { additionalContext: "ctx" } })),
+    );
+    const { engine } = makeEngine(fs, [
+      def({ event: "session_start", command: "ctx" }),
+    ]);
+
+    const result = await engine.fireDetailed("session_start", "s1", {});
+    expect(result.output).toBe("ctx");
+    expect(result.output).not.toContain("hookSpecificOutput");
+  });
+
+  it("buildPostToolPayload carries full input and untruncated result", () => {
+    const big = "r".repeat(10_000);
+    const payload = buildPostToolPayload({
+      tool: "file_write",
+      args: { path: "/w/x", content: "hello" },
+      result: big,
+      ok: true,
+      toolUseId: "call-1",
+    });
+    expect(payload["tool_input"]).toEqual({ path: "/w/x", content: "hello" });
+    expect(payload["tool_response"]).toBe(big);
+    expect(payload["is_error"]).toBe(false);
+    expect(payload["tool_use_id"]).toBe("call-1");
+  });
+});
+
+describe("fix round 1 — E2BIG stdin path (I4)", () => {
+  it("writes an oversized payload to the jail and redirects stdin", async () => {
+    const fs = fakeSandbox();
+    const { engine } = makeEngine(fs, [
+      def({ event: "pre_tool", matcher: "Bash", command: "guard" }),
+    ]);
+    const content = "x".repeat(HOOK_ARGV_PAYLOAD_LIMIT + 1000);
+
+    await engine.fireGate("s1", {
+      tool: "run_shell",
+      args: { command: content },
+    });
+
+    expect(fs.writes).toHaveLength(1);
+    const write = fs.writes[0]!;
+    expect(write.path).toMatch(/^\.dsh\/tmp\/hook-stdin-\d+\.json$/);
+    const stdin = JSON.parse(write.content) as Record<string, unknown>;
+    expect((stdin["tool_input"] as Record<string, unknown>)["command"]).toBe(content);
+
+    const cmd = fs.execCalls[0]!.o.cmd;
+    expect(cmd).toContain(`< '/workspace/${write.path}'`);
+    expect(cmd).not.toContain("printf");
+    expect(fs.execCalls[0]!.o.env!.OVID_HOOK_STDIN_FILE).toBe(`/workspace/${write.path}`);
+  });
+
+  it("keeps the argv path for a payload below the limit", async () => {
+    const fs = fakeSandbox();
+    const { engine } = makeEngine(fs, [
+      def({ event: "pre_tool", matcher: "Bash", command: "guard" }),
+    ]);
+
+    await engine.fireGate("s1", { tool: "run_shell", args: { command: "ls" } });
+    expect(fs.writes).toHaveLength(0);
+    expect(fs.execCalls[0]!.o.cmd).toContain("printf");
+    expect(fs.execCalls[0]!.o.env!.OVID_HOOK_STDIN_FILE).toBeUndefined();
+  });
+});
+
+describe("fix round 1 — observe scrubbing includes payload secrets (I5)", () => {
+  it("scrubs a payload secret value echoed into context", async () => {
+    const fs = fakeSandbox();
+    fs.setHandler(() => ok("context sk-payload-secret"));
+    const { engine } = makeEngine(fs, [
+      def({ event: "pre_request", command: "ctx" }),
+    ]);
+
+    const result = await engine.fireDetailed("pre_request", "s1", {
+      api_key: "sk-payload-secret",
+    });
+    expect(result.output).toBe("context [REDACTED]");
+    expect(result.output).not.toContain("sk-payload-secret");
+  });
+});
+
+describe("fix round 1 — loud userId requirement (I6)", () => {
+  it("createHookEngine throws without a user resolver", () => {
+    expect(() =>
+      createHookEngine({
+        sandbox: fakeSandbox().sandbox,
+        sources: [],
+        promptEvaluator: async () => null,
+      }),
+    ).toThrow(/userIdForSession/);
+  });
+
+  it("createFileHookSource throws without a user resolver", () => {
+    expect(() =>
+      createFileHookSource({ sandbox: fakeSandbox().sandbox }),
+    ).toThrow(/userIdForSession/);
+  });
+});
+
+describe("fix round 1 — minors", () => {
+  it("OVID_HOOK_EVENT keeps the declared alias spelling", async () => {
+    const fs = fakeSandbox();
+    fs.files.set(
+      ".dsh/hooks.json",
+      JSON.stringify([{ event: "on_turn_end", command: "true" }]),
+    );
+    const { engine } = makeEngine(fs, []);
+    const engine2 = createHookEngine({
+      sandbox: fs.sandbox,
+      sources: [createFileHookSource({ sandbox: fs.sandbox, userId: "u1" })],
+      promptEvaluator: async () => null,
+      userId: "u1",
+    });
+    expect(engine).toBeDefined();
+
+    await engine2.fireStop("s1", {});
+    expect(fs.execCalls[0]!.o.env!.OVID_HOOK_EVENT).toBe("on_turn_end");
+    expect(fs.execCalls[0]!.o.env!.PLUGIN_EVENT).toBe("stop");
+  });
+
+  it("timeoutS:0 means the default, not 1 ms", async () => {
+    const fs = fakeSandbox();
+    fs.files.set(
+      ".dsh/hooks.json",
+      JSON.stringify([{ event: "pre_tool", command: "true", timeoutS: 0 }]),
+    );
+    const engine = createHookEngine({
+      sandbox: fs.sandbox,
+      sources: [createFileHookSource({ sandbox: fs.sandbox, userId: "u1" })],
+      promptEvaluator: async () => null,
+      userId: "u1",
+    });
+
+    await engine.fireGate("s1", { tool: "Bash", args: {} });
+    expect(fs.execCalls[0]!.o.timeoutMs).toBe(HOOK_DEFAULT_TIMEOUT_MS);
+  });
+
+  it("wires PLUGIN_MODEL and prompt-hook ctx stdin/model", async () => {
+    const fs = fakeSandbox();
+    const seen: Array<Record<string, unknown>> = [];
+    const { engine } = makeEngine(
+      fs,
+      [def({ event: "pre_tool", type: "prompt", prompt: "rule" })],
+      {
+        model: "claude-test",
+        promptEvaluator: async (_prompt, ctx) => {
+          seen.push(ctx);
+          return "approve";
+        },
+      },
+    );
+    await engine.fireGate("s1", { tool: "Bash", args: {} });
+    expect(seen[0]!["model"]).toBe("claude-test");
+    expect(String(seen[0]!["stdin"])).toContain("PreToolUse");
+  });
+
+  it("PLUGIN_MODEL carries the run model for command hooks", async () => {
+    const fs = fakeSandbox();
+    const { engine } = makeEngine(
+      fs,
+      [def({ event: "pre_tool", command: "true" })],
+      { model: "claude-test" },
+    );
+    await engine.fireGate("s1", { tool: "Bash", args: {} });
+    expect(fs.execCalls[0]!.o.env!.PLUGIN_MODEL).toBe("claude-test");
+  });
+
+  it("last updatedInput rewrite wins", async () => {
+    const fs = fakeSandbox();
+    let n = 0;
+    fs.setHandler(() => {
+      n += 1;
+      return ok(
+        JSON.stringify({
+          hookSpecificOutput: {
+            permissionDecision: "allow",
+            updatedInput: { path: `/w/${n}.txt` },
+          },
+        }),
+      );
+    });
+    const { engine } = makeEngine(fs, [
+      def({ id: "a", event: "pre_tool", command: "a" }),
+      def({ id: "b", event: "pre_tool", command: "b" }),
+    ]);
+
+    const result = await engine.fireGate("s1", {
+      tool: "file_write",
+      args: { path: "/w/0.txt" },
+    });
+    expect(result.updatedInput).toMatchObject({ path: "/w/2.txt" });
+  });
+
+  it("honors the if predicate", async () => {
+    const fs = fakeSandbox();
+    const { engine } = makeEngine(fs, [
+      def({
+        event: "pre_tool",
+        matcher: "Bash",
+        command: "guard",
+        if: "Bash(git commit:*)",
+      }),
+    ]);
+
+    await engine.fireGate("s1", { tool: "run_shell", args: { command: "git commit -m x" } });
+    await engine.fireGate("s1", { tool: "run_shell", args: { command: "ls" } });
+    expect(fs.execCalls).toHaveLength(1);
+  });
+
+  it("a timed-out prompt hook fails open", async () => {
+    const { engine } = makeEngine(
+      fakeSandbox(),
+      [def({ event: "pre_tool", type: "prompt", prompt: "rule", timeoutMs: 5 })],
+      {
+        promptEvaluator: async () => new Promise<string | null>(() => {}),
+      },
+    );
+
+    const result = await engine.fireGate("s1", { tool: "Bash", args: {} });
+    expect(result.decision).toBe("allow");
   });
 });
