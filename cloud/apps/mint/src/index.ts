@@ -35,17 +35,30 @@ import { buildMintApps, type MintDeps } from "./app.js";
 import { createAlerter } from "./alerts.js";
 import { startMintBackgroundLoops } from "./background.js";
 import { createBillingService } from "./billing/service.js";
+import { setModelCatalogProjection } from "./catalog.js";
 import { loadMintEnv } from "./env.js";
 import { createAdmission } from "./images/admission.js";
+import { registerImagesAdminRoutes } from "./images/adminRoutes.js";
+import { CardManager, Discovered, createLiveCatalogProjection } from "./images/cardManager.js";
+import { createCardStore } from "./images/cardStore.js";
+import { catalogHash, publicCard, supports } from "./images/capabilities.js";
 import { parseModelInfo, PriceBook } from "./images/costing.js";
 import { createDirectEdit } from "./images/directEdit.js";
 import { createImageLedger } from "./images/ledger.js";
+import { LiteLLMProbeTransport, ProbeRunner } from "./images/probes.js";
+import {
+  alternatives,
+  missing,
+  parseModel,
+  pickBackends,
+  taskFromRequest,
+} from "./images/routing.js";
 import { registerImagesRoutes } from "./images/routes.js";
 import {
   createLiteLlmImageService,
   type ImageBackend,
 } from "./images/service.js";
-import { IMAGE_ALIAS, SIZES } from "./images/types.js";
+import { IMAGE_ALIAS } from "./images/types.js";
 import { createLiteLlmAdmin, type LiteLlmAdmin, type ModelInfoRow } from "./litellmAdmin.js";
 import { createProjection } from "./projection.js";
 import { createMintVerifier } from "./verifier.js";
@@ -57,17 +70,19 @@ import {
 } from "./windows.js";
 
 /**
- * Image backend discovery from LiteLLM `/model/info`.
+ * Image model discovery from LiteLLM `/model/info` (port of
+ * images_gateway._Discovery.discovered).
  *
- * Task 14's CardManager (capability cards + probing) has not landed on this
- * branch. Until it does, the mount derives the Task-13 `ImageBackend` rows
- * from LiteLLM's image-kind deployments and lets the service build legacy
- * cards (generate/edit, SIZES). The `cards` seam is intentionally left unset:
- * when T14 lands, replace `backends`/`cards` here with the CardManager — no
- * other wiring changes.
+ * Only identity fields are kept; credentials are never stored. A model is
+ * tagged `edit_transport: "direct"` only when the direct JSON transport is
+ * actually enabled for its discovered api_base — otherwise hints + probes
+ * decide instead of forcing "edit unsupported".
  */
-function imageBackendsFromModelInfo(rows: ModelInfoRow[]): ImageBackend[] {
-  const out: ImageBackend[] = [];
+function imageDiscoveredFromModelInfo(
+  rows: ModelInfoRow[],
+  directEdit: ReturnType<typeof createDirectEdit>,
+): Discovered[] {
+  const out: Discovered[] = [];
   const seen = new Set<string>();
   for (const row of rows) {
     const name = typeof row.model_name === "string" ? row.model_name.trim() : "";
@@ -79,20 +94,16 @@ function imageBackendsFromModelInfo(rows: ModelInfoRow[]): ImageBackend[] {
       (Array.isArray(modality) && modality.includes("image")) ||
       info.mode === "image_generation";
     if (!imageKind) continue;
-    const declared = Array.isArray(info.supported_sizes)
-      ? info.supported_sizes.filter(
-          (size): size is string =>
-            typeof size === "string" && (SIZES as readonly string[]).includes(size),
-        )
-      : [];
-    out.push({
-      model: name,
-      sizes: declared.length > 0 ? declared : SIZES,
-      // The Python config marks every configured image backend edit-capable;
-      // the direct-edit transport re-checks the discovered api_base host.
-      edit: true,
-      params: row.litellm_params ?? {},
-    });
+    const params = row.litellm_params ?? {};
+    const identity: Record<string, unknown> = {};
+    for (const key of ["model", "api_base", "custom_llm_provider", "edit_transport"]) {
+      const value = params[key];
+      if (value !== undefined && value !== null && value !== "") identity[key] = value;
+    }
+    if (identity.edit_transport !== "none" && directEdit.enabled_for(identity)) {
+      identity.edit_transport = "direct";
+    }
+    out.push(new Discovered(name, identity, info));
     seen.add(name);
   }
   return out;
@@ -155,8 +166,14 @@ export async function main(
   // upstream bound to 1.00 (images_gateway.py:
   // `os.environ.get("OVID_IMAGE_MAX_UPSTREAM_USD", "1.00")`). The bound is
   // validated below; an invalid value aborts the boot.
-  const images = buildImagesMount(mintDeps, cfg, litellm);
+  const images = await buildImagesMount(mintDeps, cfg, litellm, adminApp);
   registerImagesRoutes(publicApp, mintDeps, images.service, images.admission);
+  // L5 (T13 review): the private-name projection must track discovery, not a
+  // boot-time snapshot. This hook runs AFTER registerImagesRoutes' onReady
+  // (hooks execute in registration order), replacing its snapshot.
+  publicApp.addHook("onReady", async () => {
+    setModelCatalogProjection(createLiveCatalogProjection(images.manager, () => true));
+  });
 
   // Task 18 Step 3 (owner-gated Q1): installed-base first boot.
   // `import-first` copies live db2 state into Postgres (insert-if-absent,
@@ -200,6 +217,7 @@ export async function main(
 
   // Owned connections close with the apps (deploy scripts call app.close()).
   publicApp.addHook("onClose", async () => {
+    images.manager.stop();
     await background.stop();
     redis.disconnect();
     await db.$client.end({ timeout: 5 });
@@ -216,19 +234,21 @@ export async function main(
 }
 
 /**
- * Build the Task-13 images service + admission bridge. The upstream bound
- * defaults to Python's 1.00 when OVID_IMAGE_MAX_UPSTREAM_USD is unset. The
- * `cards` seam stays unset until Task 14's CardManager lands (legacy cards
- * are derived from the backends).
+ * Build the Task-14 images mount: the capability CardManager (discovery,
+ * extraction, budget-capped probes), the service/admission bridge, the
+ * owner-only admin routes, and the background worker. The upstream bound
+ * defaults to Python's 1.00 when OVID_IMAGE_MAX_UPSTREAM_USD is unset.
  */
-function buildImagesMount(
+async function buildImagesMount(
   mintDeps: MintDeps,
   cfg: ReturnType<typeof loadMintEnv>,
   litellm: LiteLlmAdmin,
-): {
+  adminApp: FastifyInstance,
+): Promise<{
   service: ReturnType<typeof createLiteLlmImageService>;
   admission: ReturnType<typeof createAdmission>;
-} {
+  manager: CardManager;
+}> {
   const raw = cfg.images.maxUpstreamCostUsd ?? "1.00";
   let maxUpstreamCost;
   try {
@@ -244,10 +264,88 @@ function buildImagesMount(
   const priceBook = new PriceBook(async () =>
     parseModelInfo(await litellm.modelInfo()),
   );
+  const directEdit = createDirectEdit(cfg);
+  const fetchImpl = mintDeps.fetchImpl ?? fetch;
+
+  // Background-only discovery + provider metadata fetch (never on a request
+  // path). The CardManager owns the cache; request paths read manager.cards().
+  const discover = async (): Promise<Discovered[]> =>
+    imageDiscoveredFromModelInfo(await litellm.modelInfo(), directEdit);
+  const fetchJson = async (url: string): Promise<unknown> => {
+    try {
+      const response = await fetchImpl(url, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (response.status !== 200) return null;
+      const text = await response.text();
+      if (text.length > 8 * 1024 * 1024) return null;
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  };
+
+  const store = createCardStore(mintDeps.db);
+  // Without the dedicated probe key cards stay static (Python parity).
+  const probeKey = cfg.images.probeKey;
+  const runner: ProbeRunner | null =
+    probeKey === null || probeKey === ""
+      ? null
+      : new ProbeRunner(
+          new LiteLLMProbeTransport(cfg.litellmBaseUrl, probeKey, {
+            masterKey: cfg.litellmMasterKey,
+            direct: {
+              enabled_for: (params) => directEdit.enabled_for(params),
+              post: (params, prompt, size, imageDataUrl) =>
+                directEdit.post(params, prompt, size, imageDataUrl),
+              settlementCost: (responseJson, bound) =>
+                directEdit.settlementCost(responseJson, bound),
+              editCost:
+                cfg.images.editCostUsd === null
+                  ? null
+                  : Number(cfg.images.editCostUsd),
+            },
+            paramsFor: (model: string): Record<string, unknown> | null =>
+              manager.paramsFor(model),
+          }),
+          store,
+          {
+            perProbeCap: cfg.images.probeMaxUsd,
+            dailyCap: cfg.images.probeDailyUsd,
+            maxSizes: cfg.images.probeMaxSizes,
+          },
+        );
+  const manager: CardManager = new CardManager(store, runner, {
+    fetchJson,
+    ttl: cfg.images.probeTtlS,
+    probeGap: cfg.images.probeStaggerS,
+  });
+  await manager.load();
+  // One discovery read at boot so the first request sees the models; a
+  // LiteLLM outage leaves the mount empty until the worker retries.
+  try {
+    manager.observe(await discover());
+  } catch (err) {
+    console.log(
+      `[mint] image discovery failed at boot: ${err instanceof Error ? err.name : String(err)}`,
+    );
+  }
+  // Extraction/probes run here, never on a user request path.
+  manager.start(discover, 60);
+
   const service = createLiteLlmImageService({
     ledger,
-    backends: async () => imageBackendsFromModelInfo(await litellm.modelInfo()),
-    directEdit: createDirectEdit(cfg),
+    backends: () =>
+      manager.cards().map((card): ImageBackend => ({
+        model: card.model,
+        sizes: card.sizes.native,
+        edit: supports(card, "edit"),
+        card,
+        params: manager.paramsFor(card.model) ?? {},
+      })),
+    cards: () => manager.cards(),
+    directEdit,
     fetchImpl: mintDeps.fetchImpl,
     litellmBaseUrl: cfg.litellmBaseUrl,
     maxUpstreamCost,
@@ -258,6 +356,16 @@ function buildImagesMount(
       const info = await litellm.keyInfo(keyId);
       const spend = info?.spend;
       return typeof spend === "number" && Number.isFinite(spend) ? spend : null;
+    },
+    // The exact capabilities.py/routing.py port (Task 14 M2).
+    routing: {
+      parseModel,
+      taskFromRequest,
+      missing,
+      pickBackends,
+      alternatives,
+      publicCard,
+      catalogHash,
     },
   });
   const admission = createAdmission({
@@ -270,5 +378,17 @@ function buildImagesMount(
       return typeof spend === "number" && Number.isFinite(spend) ? spend : null;
     },
   });
-  return { service, admission };
+  registerImagesAdminRoutes(adminApp, mintDeps, manager, {
+    wake: () => manager.wake(),
+    refreshPrices: async () => {
+      await priceBook.refresh();
+      try {
+        manager.observe(await discover());
+      } catch {
+        // A failed refresh keeps the previous discovery; the TTL retries.
+      }
+      manager.wake();
+    },
+  });
+  return { service, admission, manager };
 }

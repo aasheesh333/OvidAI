@@ -11,19 +11,35 @@ import {
   capacityRetrySeconds,
   type Receipt,
 } from "./types.js";
+import {
+  catalogHash as capabilitiesCatalogHash,
+  legacyCard as capabilitiesLegacyCard,
+  publicCard as capabilitiesPublicCard,
+  slugFor as capabilitiesSlugFor,
+  type Card,
+  type PublicCard,
+} from "./capabilities.js";
+import {
+  alternatives as routingAlternatives,
+  missing as routingMissing,
+  parseModel as routingParseModel,
+  pickBackends as routingPickBackends,
+  taskFromRequest as routingTaskFromRequest,
+  type Task,
+} from "./routing.js";
 import { MAX_BYTES, validateImage } from "./validateImage.js";
 
 /**
  * Port of deploy/images_gateway.py LiteLLMImageService.execute.
  *
- * Pipeline: validate -> route (Task 14 supplies the card/routing hooks) ->
+ * Pipeline: validate -> route (Task 14 cards/routing) ->
  * ledger.begin(discounted(MAX_UPSTREAM)) -> per candidate (cooldown skip,
  * direct-vs-LiteLLM forward, verified pre-dispatch refusal -> continue,
  * anything ambiguous -> unknown/409) -> cost determination -> settle.
  *
- * Task 14 has not landed in this wave, so this module ships deterministic
- * legacy cards/routing as the DEFAULT implementation behind the same
- * `routing`/`cards` seams Task 14 will inject.
+ * Task 14 supplies the exact capabilities.py/routing.py port; the legacy
+ * defaults below remain only for callers that construct a service without the
+ * injected hooks (old tests/configs).
  */
 
 export const IMAGE_BODY_LIMIT = Math.floor((MAX_BYTES * 4) / 3) + 65536;
@@ -36,22 +52,9 @@ const PRE_PROVIDER_REFUSAL_CODES = new Set([
 
 const COST_HEADER_KEYS = ["x-litellm-response-cost"];
 
-export interface ImageCard {
-  model: string;
-  slug: string;
-  sizes: { native: string[] };
-  operations: Record<string, { supported?: boolean; source?: string }>;
-  edit_transport?: string | null;
-  priced?: boolean;
-  aspect_ratios?: string[];
-  cost_tier?: "low" | "med" | "high" | string;
-  quality?: "low" | "med" | "high" | string;
-  speed?: "fast" | "medium" | "slow" | string;
-  text_rendering?: string;
-  latency_p50_s?: number;
-  state?: string;
-  max_inputs?: number;
-}
+/** Task 14: the card/task shapes are the capabilities.py/routing.py ports. */
+export type ImageCard = Card;
+export type ImageTask = Task;
 
 export interface ImageBackend {
   model: string;
@@ -59,17 +62,6 @@ export interface ImageBackend {
   edit: boolean;
   card?: ImageCard;
   params?: Record<string, unknown>;
-}
-
-export interface ImageTask {
-  operation: string;
-  size: string | null;
-  aspect_ratio: string | null;
-  n_inputs: number;
-  mask: boolean;
-  transparent: boolean;
-  text_rendering: boolean;
-  preference: "balanced" | "quality" | "speed" | "cost";
 }
 
 export interface RoutingHooks {
@@ -82,8 +74,8 @@ export interface RoutingHooks {
     unavailable?: (model: string) => boolean,
   ): ImageCard[];
   alternatives?(task: ImageTask, cards: ImageCard[]): string[];
-  publicCard?(card: ImageCard): Record<string, unknown>;
-  catalogHash?(cards: Record<string, unknown>[]): string;
+  publicCard?(card: ImageCard): PublicCard;
+  catalogHash?(cards: PublicCard[]): string;
 }
 
 export interface ImageServiceDeps {
@@ -157,233 +149,30 @@ function dataUrl(value: unknown): { b64: string; mime: string } {
   return { b64: match[2]!, mime: match[1]! };
 }
 
-function supports(card: ImageCard, operation: string): boolean {
-  return card.operations[operation]?.supported === true;
-}
-
-export function slugFor(model: string): string {
-  return `ovid-image:img-${createHash("sha256").update(`ovid-slug|${model}`).digest("hex").slice(0, 6)}`;
-}
-
-export function legacyCard(backend: ImageBackend): ImageCard {
+export function legacyCard(backend: ImageBackend): Card {
   const sizes = backend.sizes.length > 0 ? [...backend.sizes] : ["1024x1024"];
-  return {
-    model: backend.model,
-    slug: slugFor(backend.model),
-    sizes: { native: sizes },
-    operations: {
-      generate: { supported: true, source: "declared" },
-      edit: { supported: backend.edit === true, source: "declared" },
-    },
-    edit_transport: backend.card?.edit_transport ?? null,
-    priced: backend.card?.priced,
-  };
+  const card = capabilitiesLegacyCard(backend.model, sizes, backend.edit === true);
+  // M3 (T13 review): the composition root supplies litellm_params, not a
+  // prebuilt card. Python's discovery sets card["edit_transport"] from
+  // d.params.get("edit_transport") — without this, DirectEdit is unreachable.
+  const declared = backend.card?.edit_transport ?? backend.params?.edit_transport;
+  card.edit_transport = declared === "direct" || declared === "none" ? declared : null;
+  if (backend.card?.priced !== undefined) card.priced = backend.card.priced;
+  return card;
 }
 
-export function parseModel(value: unknown): string | null {
-  if (value === undefined || value === null || value === "") return null;
-  if (value === IMAGE_ALIAS) return null;
-  if (typeof value === "string" && /^ovid-image:img-[A-Za-z0-9]{6}$/.test(value)) return value;
-  throw new Error("invalid model");
-}
-
-const REQUIREMENTS = new Set([
-  "operation",
-  "aspect_ratio",
-  "transparent_background",
-  "text_rendering",
-]);
-const PREFERENCES = new Set(["balanced", "quality", "speed", "cost"]);
-/** routing.py TASK_OPERATIONS. */
-const TASK_OPERATIONS = new Set([
-  "generate",
-  "edit",
-  "inpaint",
-  "outpaint",
-  "reference_style",
-  "multi_image",
-  "remove_background",
-  "upscale",
-  "variations",
-]);
-/** capabilities.py SIZE_RE. */
-const SIZE_RE = /^[1-9][0-9]{2,3}x[1-9][0-9]{2,3}$/;
-/** routing.py aspect-ratio regex (rejects 0:0). */
-const ASPECT_RATIO_RE = /^[1-9][0-9]?:[1-9][0-9]?$/;
-
-export function taskFromRequest(
-  operation: "generate" | "edit",
-  body: Record<string, unknown>,
-): ImageTask {
-  if (operation !== "generate" && operation !== "edit") throw new Error("invalid operation");
-  if (!isPlainObject(body)) throw new Error("invalid body");
-
-  const preference = body.preference ?? "balanced";
-  if (typeof preference !== "string" || !PREFERENCES.has(preference)) throw new Error("invalid preference");
-
-  let op: string = operation;
-  let aspectRatio: string | null = null;
-  let transparent = false;
-  let textRendering = false;
-  if (body.requirements !== undefined && body.requirements !== null) {
-    if (!isPlainObject(body.requirements)) throw new Error("invalid requirements");
-    for (const key of Object.keys(body.requirements)) {
-      if (!REQUIREMENTS.has(key)) throw new Error("invalid requirement");
-    }
-    // routing.py: `op = req.get('operation') or operation` — an explicit
-    // operation (variations, remove_background, upscale, …) overrides the
-    // endpoint's default and is validated by the matrix below.
-    const requested = body.requirements.operation;
-    if (requested) {
-      if (typeof requested !== "string") throw new Error("invalid operation");
-      op = requested;
-    }
-    const ratio = body.requirements.aspect_ratio;
-    if (ratio !== undefined && (typeof ratio !== "string" || !ASPECT_RATIO_RE.test(ratio))) {
-      throw new Error("invalid aspect ratio");
-    }
-    aspectRatio = typeof ratio === "string" ? ratio : null;
-    transparent = body.requirements.transparent_background === true;
-    textRendering = body.requirements.text_rendering === true;
-  }
-  if (
-    !TASK_OPERATIONS.has(op) ||
-    (operation === "generate" && op !== "generate" && op !== "variations") ||
-    (operation === "edit" && op === "generate")
-  ) {
-    throw new Error("invalid operation");
-  }
-
-  const images = body.images;
-  if (images !== undefined) {
-    if (!Array.isArray(images)) throw new Error("invalid images");
-    if (images.length > 8) throw new Error("too many images");
-  }
-  const mask = operation === "edit" && body.mask !== undefined && body.mask !== null;
-  const extra = Array.isArray(images) ? images.length : 0;
-  if (mask && op === "edit") op = "inpaint";
-  if (1 + extra > 1 && op === "edit") op = "multi_image";
-
-  // routing.py normalize_size(): a syntactically valid size outside SIZES is
-  // accepted here and rejected later by routing (422, before admission).
-  let size: string | null = null;
-  if (body.size) {
-    if (typeof body.size !== "string" || !SIZE_RE.test(body.size)) {
-      throw new Error("invalid size");
-    }
-    size = body.size;
-  }
-
-  return {
-    operation: op,
-    size,
-    aspect_ratio: aspectRatio,
-    n_inputs: 1 + extra,
-    mask,
-    transparent,
-    text_rendering: textRendering,
-    preference: preference as ImageTask["preference"],
-  };
-}
-
-/** capabilities.py max_inputs(): derived from edit/multi_image support. */
-function maxInputs(card: ImageCard): number {
-  const multi = card.operations.multi_image;
-  if (multi?.supported === true) return card.max_inputs ?? 2;
-  return supports(card, "edit") ? 1 : 0;
-}
-
-export function missing(card: ImageCard, task: ImageTask): string[] {
-  const out: string[] = [];
-  if (!supports(card, "generate")) out.push("generate");
-  if (
-    (task.operation === "edit" || task.operation === "inpaint" || task.operation === "multi_image") &&
-    !supports(card, "edit")
-  ) {
-    out.push("edit");
-  }
-  if (task.operation === "inpaint" && !supports(card, "inpaint")) out.push("inpaint");
-  if (task.operation === "multi_image" && !supports(card, "multi_image")) out.push("multi_image");
-  if (task.transparent && !supports(card, "transparent_output")) out.push("transparent_output");
-  if (task.size !== null && !card.sizes.native.includes(task.size)) {
-    out.push(`size:${task.size}`);
-  }
-  if (
-    task.aspect_ratio !== null &&
-    Array.isArray(card.aspect_ratios) &&
-    card.aspect_ratios.length > 0 &&
-    !card.aspect_ratios.includes(task.aspect_ratio)
-  ) {
-    out.push(`aspect_ratio:${task.aspect_ratio}`);
-  }
-  if (
-    task.n_inputs > Math.max(maxInputs(card), 0) &&
-    task.operation !== "generate" &&
-    out.length === 0
-  ) {
-    out.push(`inputs:${task.n_inputs}`);
-  }
-  if (card.priced === false) out.push("unpriced");
-  return out;
-}
-
-function rank(value: string | undefined, order: string[]): number {
-  const index = value === undefined ? -1 : order.indexOf(value);
-  return index < 0 ? 0 : order.length - index;
-}
-
-export function score(card: ImageCard, task: ImageTask): number {
-  let total = 0;
-  if (task.preference === "cost") total += rank(card.cost_tier, ["low", "med", "high"]);
-  if (task.preference === "speed") total += rank(card.speed, ["fast", "medium", "slow"]);
-  if (task.preference === "quality") total += rank(card.quality, ["high", "med", "low"]);
-  if (card.state === "probed") total += 0.15;
-  if (task.text_rendering) total += 3 * (card.text_rendering === "good" ? 1 : 0);
-  return total;
-}
-
-export function pickBackends(
-  task: ImageTask,
-  cards: ImageCard[],
-  unavailable?: (model: string) => boolean,
-): ImageCard[] {
-  return cards
-    .map((card, index) => ({ card, index, value: score(card, task) }))
-    .filter(
-      (entry) =>
-        missing(entry.card, task).length === 0 && !(unavailable?.(entry.card.model) ?? false),
-    )
-    .sort((left, right) => right.value - left.value || left.index - right.index)
-    .map((entry) => entry.card);
-}
-
-export function alternatives(task: ImageTask, cards: ImageCard[]): string[] {
-  return pickBackends(task, cards).map((card) => card.slug);
-}
-
-export function publicCard(card: ImageCard): Record<string, unknown> {
-  const operations = Object.keys(card.operations).filter((operation) => supports(card, operation));
-  return {
-    slug: card.slug,
-    operations,
-    sizes: [...card.sizes.native],
-    aspect_ratios: card.aspect_ratios ?? [],
-    max_n: 1,
-    input: { max_images: card.max_inputs ?? 1, formats: ["png", "jpeg", "webp"] },
-    output_formats: ["png", "jpeg", "webp"],
-    cost_tier: card.cost_tier ?? "med",
-    quality: card.quality ?? "med",
-    speed: card.speed ?? "medium",
-    verified: card.state === "probed",
-  };
-}
-
-export function catalogHash(cards: Record<string, unknown>[]): string {
-  const sorted = [...cards].sort((left, right) =>
-    String(left.slug ?? "").localeCompare(String(right.slug ?? "")),
-  );
-  return createHash("sha256").update(JSON.stringify(sorted)).digest("hex").slice(0, 32);
-}
+// Task 14: the exact capabilities.py/routing.py port is the DEFAULT (the T13
+// approximations are gone). The production composition root also injects the
+// same functions explicitly; these re-exports keep the old import surface.
+export { slugFor, publicCard, catalogHash } from "./capabilities.js";
+export {
+  alternatives,
+  missing,
+  parseModel,
+  pickBackends,
+  score,
+  taskFromRequest,
+} from "./routing.js";
 
 export class CapacityCooldowns {
   private readonly until = new Map<string, number>();
@@ -480,13 +269,13 @@ export class LiteLlmImageService {
 
   private routing(): Required<Pick<RoutingHooks, "parseModel" | "taskFromRequest" | "missing" | "pickBackends" | "alternatives" | "publicCard" | "catalogHash">> {
     return {
-      parseModel: this.deps.routing?.parseModel ?? parseModel,
-      taskFromRequest: this.deps.routing?.taskFromRequest ?? taskFromRequest,
-      missing: this.deps.routing?.missing ?? missing,
-      pickBackends: this.deps.routing?.pickBackends ?? pickBackends,
-      alternatives: this.deps.routing?.alternatives ?? alternatives,
-      publicCard: this.deps.routing?.publicCard ?? publicCard,
-      catalogHash: this.deps.routing?.catalogHash ?? catalogHash,
+      parseModel: this.deps.routing?.parseModel ?? routingParseModel,
+      taskFromRequest: this.deps.routing?.taskFromRequest ?? routingTaskFromRequest,
+      missing: this.deps.routing?.missing ?? routingMissing,
+      pickBackends: this.deps.routing?.pickBackends ?? routingPickBackends,
+      alternatives: this.deps.routing?.alternatives ?? routingAlternatives,
+      publicCard: this.deps.routing?.publicCard ?? capabilitiesPublicCard,
+      catalogHash: this.deps.routing?.catalogHash ?? capabilitiesCatalogHash,
     };
   }
 
@@ -526,9 +315,9 @@ export class LiteLlmImageService {
     for (const operation of ["generate", "edit"]) {
       const sizes = new Set<string>();
       for (const card of publicCards) {
-        const advertised = Array.isArray(card.operations) ? (card.operations as unknown[]) : [];
-        if (!advertised.includes(operation)) continue;
-        for (const size of (card.sizes as string[] | undefined) ?? []) sizes.add(size);
+        // capabilities.public_card returns operations as an allow-list MAP.
+        if (!(operation in card.operations)) continue;
+        for (const size of card.sizes) sizes.add(size);
       }
       operations[operation] = [...sizes].sort();
     }
@@ -538,7 +327,7 @@ export class LiteLlmImageService {
       availability: "unknown",
       schema: 2,
       catalog_hash: routing.catalogHash(publicCards),
-      models: publicCards,
+      models: publicCards as unknown as Record<string, unknown>[],
     };
   }
 

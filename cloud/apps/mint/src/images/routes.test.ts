@@ -16,6 +16,7 @@ import type { ImageLedger, ImageLedgerOptions } from "./ledger.js";
 import {
   LiteLlmImageService,
   IMAGE_BODY_LIMIT,
+  legacyCard,
   missing,
   taskFromRequest,
   type ImageBackend,
@@ -469,8 +470,33 @@ describe("default routing fidelity", () => {
       operation: "edit",
       n_inputs: 2,
     };
-    expect(missing(card, inputs)).toContain("inputs:2");
+    // routing.py needs(): more than one input requires multi_image, so the
+    // capability reason wins before the max_inputs count is considered.
+    expect(missing(card, inputs)).toContain("multi_image");
     expect(missing(card, { ...inputs, n_inputs: 1 })).toEqual([]);
+
+    // A multi-image card with a smaller max_inputs reports the exact count.
+    const capped: ImageCard = {
+      ...card,
+      operations: {
+        ...card.operations,
+        multi_image: { supported: true, source: "probed", confidence: 0.9, max_inputs: 1 },
+      },
+    };
+    expect(missing(capped, inputs)).toContain("inputs:2");
+  });
+  it("derives edit_transport from discovered params (T13 M3)", () => {
+    expect(
+      legacyCard({
+        model: "image-a",
+        sizes: ["1024x1024"],
+        edit: true,
+        params: { model: "openai/cb/gpt-image-2", edit_transport: "direct" },
+      }).edit_transport,
+    ).toBe("direct");
+    expect(
+      legacyCard({ model: "image-a", sizes: ["1024x1024"], edit: true }).edit_transport,
+    ).toBeNull();
   });
 });
 
