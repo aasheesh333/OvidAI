@@ -253,7 +253,7 @@ steps or skip a gate.
 | 12 | Lightpanda install | Pinned 1.0.1 binary; without `OVID_LIGHTPANDA_BIN` tier-1 silently skips. | `[OWNER]` |
 | 13 | Chromium install | Pinned Chromium 156.0.8078.4 into the shared browser root. | `[OWNER]` |
 | 14 | Browser gated suites + memory bench | Re-prove Lightpanda 1.0.1 and measure the chromium tree on this box before activation. | `[OWNER]` |
-| 15 | Browser egress uid resolution | The docs and the parser disagree; see 3.13. Do not trust §(d) until this is resolved. | `[OWNER]` |
+| 15 | Browser egress uid **wiring** | Code fix landed (`469d3f9`): browsers now drop to uid 230000 with no root fallback. Remaining owner work is host state — set the uid in worker.env, re-run `install-nft.sh`, confirm `/opt/ovid-browsers` is traversable by 230000, then verify `ps` + `nft`. See 3.13. | `[OWNER]` |
 | 16 | R0 hardening A / B / C / E / F / G | Hard gate before real users; independent of the P2 order, but E+G batch into the activation window and C runs last. | `[OWNER]` |
 
 ### 3.1 Gate 0 — quiet tree + lockfile regeneration
@@ -383,10 +383,13 @@ works with every `counter` line at `counter packets 0 bytes 0` on a fresh
 load. Rollback: `sudo systemctl disable --now ovid-sandbox-nft && sudo nft
 delete table inet ovid_sandbox`.
 
-**Browser egress uid.** Do not fill `OVID_BROWSER_EGRESS_UID` until 3.13 is
-resolved. The renderer accepts a single uid or range **>= 100000** and rejects
-overlap with the sandbox range; see 3.13 for the contradiction with the
-"worker uid" wording.
+**Browser egress uid.** Fill `OVID_BROWSER_EGRESS_UID=230000` — the
+contradiction in 3.13 is resolved in code (`469d3f9`): the browser engine now
+drops to that uid with no root fallback, so the rendered rule actually
+matches. The renderer still requires a single uid or range **>= 100000** and
+rejects overlap with the sandbox range. Set it in worker.env and re-run
+`install-nft.sh` in the same window so the ruleset and the engine agree; see
+3.13 for the four-step verification.
 
 ### 3.8 Gate 7 — §11 step 5, systemd units
 
@@ -512,23 +515,49 @@ OVID_LIGHTPANDA_BIN=/opt/ovid-browsers/lightpanda-1.0.1/lightpanda \
 The real-binary gated suites must be green. Any divergence: stop, escalate,
 do not activate. Also run the memory bench (Gate 14 / §8).
 
-### 3.13 Gate 15 — browser egress uid (unresolved contradiction)
+### 3.13 Gate 15 — browser egress uid (**RESOLVED in code; one owner step left**)
 
-`BROWSERS.md` §(d) says the nftables drops are keyed to
-`OVID_BROWSER_EGRESS_UID` and calls it "the worker uid"; the worker unit runs
-`User=root` (uid 0). But `cloud/packages/sandbox/src/net.ts` requires the value
-to be **>= 100000** and to be a **distinct keyspace** from the sandbox range
-(200000–209999 production, 220000–229999 staging). There is no code path in
-`cloud/packages/browser` that drops browser processes to a dedicated uid — the
-Chromium and Lightpanda spawns inherit the worker's uid.
+**Former blocker, now fixed** (commit `469d3f9`, P6 egress-uid fix). The
+contradiction was real: `BROWSERS.md` §(d) called
+`OVID_BROWSER_EGRESS_UID` "the worker uid", the worker runs `User=root`
+(uid 0), the parser requires **>= 100000** and a keyspace distinct from the
+sandbox range (200000–209999 prod / 220000–229999 staging), and **no browser
+process ever dropped uid** — so the rendered `meta skuid <range>` rules
+matched nothing.
 
-Consequence: filling `OVID_BROWSER_EGRESS_UID=230000` renders rules that will
-not match a root-run browser; filling `0` is rejected by the parser. Leaving
-it empty makes the renderer omit the browser section entirely (no browser
-backstop at all). Until a dedicated browser uid is actually applied to the
-browser processes (or the ruleset is re-keyed to the real uid), §(d) is **not**
-a working backstop. This is a pre-activation blocker, not a value to guess.
-Record the chosen uid and the implementation evidence in the decision log.
+What the fix does now:
+
+- Browsers run under a **dedicated uid** (`OVID_BROWSER_EGRESS_UID`, ship
+  value `230000`), applied to **both** engines. Lightpanda spawns with
+  `{uid, gid}` directly. Playwright 1.64.1 has no `uid` launch option, so
+  Chromium goes through a generated root-owned 0755 `setpriv` shim used as
+  `executablePath`: it chowns Playwright's root-created `--user-data-dir`,
+  then `exec setpriv --reuid=<uid> --regid=<uid> --clear-groups <chromium>`.
+  Every child (zygote, renderers, crashpad) inherits the uid. Verified on the
+  host with real Chromium 156.0.8078.4: all processes at uid/gid 230000.
+- **No silent root fallback.** Engine construction throws when the worker is
+  non-root, the uid is invalid or overlaps the sandbox block, `setpriv` is
+  missing, Chromium is missing/non-executable, or a probe fails.
+- **Production refuses the inert combination.** `OVID_BROWSER_UID_DROP=disabled`
+  is rejected when `NODE_ENV=production`; a uid set together with `disabled`
+  is refused outright ("the rendered nftables browser rule would be inert");
+  and production requires the uid to be present.
+
+**The one remaining owner step** — the code and the ruleset must agree, and
+the ruleset is host state:
+
+1. Set `OVID_BROWSER_EGRESS_UID=230000` in `/opt/ovid-cloud/worker.env`
+   (both templates now ship it).
+2. Re-run `cloud/deploy/net/install-nft.sh` so the browser rule keys the same
+   uid the engine now applies.
+3. Confirm `/opt/ovid-browsers` and the installed Chromium are
+   traversable/executable by uid 230000 (production installs there, not under
+   `/root` — a `0700 /root` path would fail the boot probe, loudly).
+4. Verify after the worker starts: `ps -eo uid,cmd | grep -E 'chromium|lightpanda'`
+   shows **only** 230000, and `nft list table inet ovid_sandbox` shows the
+   matching `meta skuid` range.
+
+Record the uid and the `ps`/`nft` evidence in the decision log.
 
 ### 3.14 Gate 16 — R0 hardening (A/B/C/E/F/G)
 
