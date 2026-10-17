@@ -11,8 +11,18 @@
  * cold marker. R2 has zero egress fees, so the full re-download re-hash is
  * affordable and is the ONLY guarantee strong enough to justify deleting the
  * only other copy (per-file hashes protect hydration, but a corrupt upload
- * would otherwise destroy the source). A crash between the marker and the rm
- * is closed by reconcileStuckHibernations.
+ * would otherwise destroy the source).
+ *
+ * Crash windows, precisely: BEFORE the cold marker commits, a crash leaves
+ * the row 'hibernating' with the dir intact — reconcileStuckHibernations
+ * resets it to warm for a later re-pack. AFTER the marker commits (before or
+ * during the local rm), the workspace is DURABLY cold — archive verified,
+ * ledger written, data safety complete — and only local bytes linger on
+ * disk: the BullMQ retry skips stale_generation, reconcile scans
+ * 'hibernating' rows only, and reclamation of that residue is owned
+ * downstream (T9's wipe-a-present-dir-before-extract on hydrate; T10's
+ * reconcile delegation for never-reopened sessions — ledgered carry), not by
+ * this engine.
  *
  * @ovid/db / @ovid/events / @ovid/queue are consumed here ONLY through the
  * structural mirrors below — @ovid/storage cannot take a dependency on them
@@ -443,9 +453,25 @@ export async function hibernateWorkspace(
   }
 
   // (8) ONLY NOW is local data deleted — strictly after the verified upload
-  // AND the durable cold marker. A crash between (7) and (8) is closed by
-  // reconcileStuckHibernations.
-  await rmDir(dir, { recursive: true, force: true });
+  // AND the durable cold marker. Crash-window truth: BEFORE the cold marker
+  // commits, a crash leaves the row 'hibernating' + dir intact and
+  // reconcileStuckHibernations resets it to warm; AFTER it commits the
+  // workspace is durably cold and only local bytes linger — reclamation of
+  // that residue is T9's wipe-on-hydrate / T10's reconcile delegation
+  // (ledgered), not this engine's retry (a re-delivery skips
+  // stale_generation, so fs.rm is never re-attempted by the queue).
+  try {
+    await rmDir(dir, { recursive: true, force: true });
+  } catch (err) {
+    // The durable state is already cold and correct; the residue is local
+    // bytes. Loud and typed so the job's failure surface names it instead
+    // of propagating a raw fs error.
+    throw new StorageError(
+      `hibernate of session ${job.sessionId}: local evict (fs.rm) of ${dir} failed — ` +
+        "the workspace is durably cold; the leftover dir needs the T9/T10 reclaim path",
+      { code: "evict_local_failed", cause: err },
+    );
+  }
 
   // (9) event + durable mirror. The workspace is already cold; a failure
   // here must NOT restore warm (the dir is gone — warm would lie). The job

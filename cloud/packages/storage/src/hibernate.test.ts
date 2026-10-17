@@ -340,9 +340,19 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       ]);
     }
 
-    /** Re-warm rows a CRASHED earlier run of this suite may have stranded. */
+    /**
+     * Re-warm rows a CRASHED earlier run of THIS suite may have stranded.
+     * Scoped to sessions this suite family creates (title "hibernate-test")
+     * so a parallel-wave suite's in-flight 'hibernating' rows on this shared
+     * dev DB are never touched — the same only-our-rows discipline as the
+     * afterAll cleanup.
+     */
     async function clearStuckRows(): Promise<void> {
-      await db.$client.unsafe(`UPDATE file_manifests SET state = 'warm' WHERE state = 'hibernating'`);
+      await db.$client.unsafe(
+        `UPDATE file_manifests SET state = 'warm'
+          WHERE state = 'hibernating'
+            AND session_id IN (SELECT id FROM sessions WHERE title = 'hibernate-test')`,
+      );
     }
 
     // -- happy path ----------------------------------------------------------
