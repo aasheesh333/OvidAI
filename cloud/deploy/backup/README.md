@@ -133,6 +133,12 @@ has never been restored is a hope, not a plan.
 
 Proven restores are recorded here, newest first. A drill = the FOREIGN-postgres
 procedure above, run end-to-end on a scratch container, with cleanup verified.
+The quarterly drill checklist (and the post-activation port note: the cloud
+postgres proxy owns 5434, so use 5435 for the scratch container) is
+[`../RUNBOOKS.md`](../RUNBOOKS.md) → O-1. Record each result here using the
+**2026-10-16 entry below as the template**: date, backup run and free-space
+gate, `zstd -t` output, restore exit code, `pg_tables` count, cleanup
+confirmation, and the full-detail report path.
 
 - **2026-10-16 — Task-11 scratch restore drill: PASS.** One live `pg_backup.sh`
   run (read-only against the databases; dumps written to /tmp): discovered

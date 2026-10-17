@@ -306,6 +306,12 @@ ovid_cloud) — 14-day local retention, optional R2 offsite.
   volume, units) → optionally `sudo systemctl disable --now
   ovid-cloud-backup.timer` → the `ovid_cloud` DB/role can stay dormant
   (backups keep covering it) or be dropped after a final manual dump.
+- **Incident + ops procedures**: [`RUNBOOKS.md`](./RUNBOOKS.md) is the
+  symptom → diagnose → act → verify playbook set for both stacks
+  (worker/redis/Postgres/disk/sandbox/browser/R2/mint/LiteLLM) plus the ops
+  drills (backup restore, dependency updates, rootfs rebuild, LiteLLM pin).
+  Use it before improvising during an incident; every destructive step there
+  carries the timestamped-backup + config-validation SAFETY rule.
 
 ## 11. P2 activation — sandbox worker on the host (owner-run, ordered)
 
