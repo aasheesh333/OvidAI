@@ -55,6 +55,8 @@ export interface LiteLlmAdmin {
   keyGenerate(body: Record<string, unknown>): Promise<{ key: string; token?: string }>;
   /** POST /key/update — non-2xx logged, NOT thrown (Python parity). */
   keyUpdate(body: Record<string, unknown>): Promise<void>;
+  /** Same call as keyUpdate but returns the HTTP status (0 = network error). */
+  keyUpdateStatus(body: Record<string, unknown>): Promise<number>;
   /** GET /key/info?key= — 404/401/403 (any non-200) → null. */
   keyInfo(key: string): Promise<KeyInfo | null>;
   /** POST /key/block {key} — returns the HTTP status (0 = network error). */
@@ -67,6 +69,15 @@ export interface LiteLlmAdmin {
   userInfo(
     userId: string,
   ): Promise<{ spend: number; budget_duration?: string | null } | null>;
+  /**
+   * userInfo WITH the HTTP status: the budget-clock rule must tell a 404
+   * (user unknown → send the duration) from an outage (status 0/5xx → leave
+   * the clock alone). mint.py's ensure_user_budget branches on exactly this.
+   */
+  userInfoStatus(userId: string): Promise<{
+    status: number;
+    info: { spend: number; budget_duration?: string | null } | null;
+  }>;
   /** POST /user/update — returns the HTTP status (0 = network error). */
   userUpdate(body: Record<string, unknown>): Promise<number>;
   /** POST /team/new — throws on non-2xx. */
@@ -98,6 +109,12 @@ export function createLiteLlmAdmin(
   baseUrl: string,
   masterKey: string,
   fetchImpl: typeof fetch = fetch,
+  /**
+   * T3-review I1 carry: mint.py pins `litellm_client(timeout=20)`; undici's
+   * default would let a connected-but-silent LiteLLM hang a request-path call
+   * for ~300 s. Every admin fetch carries this AbortSignal timeout.
+   */
+  timeoutMs: number = 20_000,
 ): LiteLlmAdmin {
   const root = baseUrl.replace(/\/+$/, "");
 
@@ -119,6 +136,7 @@ export function createLiteLlmAdmin(
       method: opts.method,
       headers,
       body: opts.json === undefined ? undefined : JSON.stringify(opts.json),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   }
 
@@ -149,6 +167,39 @@ export function createLiteLlmAdmin(
     }
   }
 
+  /** user/info with the HTTP status (see userInfoStatus in the interface). */
+  async function userInfoStatus(userId: string): Promise<{
+    status: number;
+    info: { spend: number; budget_duration?: string | null } | null;
+  }> {
+    try {
+      const res = await request("/user/info", {
+        method: "GET",
+        params: { user_id: userId },
+      });
+      if (!res.ok) {
+        return { status: res.status, info: null };
+      }
+      const data = (await readJson(res)) as {
+        user_info?: { spend?: unknown; budget_duration?: unknown };
+      };
+      const info = data?.user_info ?? {};
+      return {
+        status: res.status,
+        info: {
+          spend: Number(info.spend ?? 0) || 0,
+          budget_duration:
+            info.budget_duration === undefined || info.budget_duration === null
+              ? null
+              : String(info.budget_duration),
+        },
+      };
+    } catch (err) {
+      console.log(`[mint] user/info error: ${errorName(err)}`);
+      return { status: 0, info: null };
+    }
+  }
+
   return {
     async keyGenerate(body) {
       const res = await request("/key/generate", { method: "POST", json: body });
@@ -166,6 +217,8 @@ export function createLiteLlmAdmin(
       // Python parity: key/update failures print the status, never raise.
       await logOnlyPost("/key/update", body);
     },
+
+    keyUpdateStatus: (body) => logOnlyPost("/key/update", body),
 
     async keyInfo(key) {
       try {
@@ -196,30 +249,11 @@ export function createLiteLlmAdmin(
     keyDelete: (keys) => logOnlyPost("/key/delete", { keys }),
 
     async userInfo(userId) {
-      try {
-        const res = await request("/user/info", {
-          method: "GET",
-          params: { user_id: userId },
-        });
-        if (!res.ok) {
-          return null;
-        }
-        const data = (await readJson(res)) as {
-          user_info?: { spend?: unknown; budget_duration?: unknown };
-        };
-        const info = data?.user_info ?? {};
-        return {
-          spend: Number(info.spend ?? 0) || 0,
-          budget_duration:
-            info.budget_duration === undefined || info.budget_duration === null
-              ? null
-              : String(info.budget_duration),
-        };
-      } catch (err) {
-        console.log(`[mint] user/info error: ${errorName(err)}`);
-        return null;
-      }
+      const { info } = await userInfoStatus(userId);
+      return info;
     },
+
+    userInfoStatus,
 
     userUpdate: (body) => logOnlyPost("/user/update", body),
 
@@ -236,7 +270,16 @@ export function createLiteLlmAdmin(
 
     async spendLogs(params) {
       try {
-        const res = await request("/spend/logs", { method: "GET", params });
+        // mint.py's _spend_logs sends api_key (LiteLLM's real query param);
+        // the wrapper's argument stays `key` for its callers.
+        const res = await request("/spend/logs", {
+          method: "GET",
+          params: {
+            api_key: params.key,
+            start_date: params.start_date,
+            end_date: params.end_date,
+          },
+        });
         if (!res.ok) {
           return [];
         }

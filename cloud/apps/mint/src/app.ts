@@ -4,6 +4,7 @@ import type { Redis } from "ioredis";
 import type { Alerter } from "./alerts.js";
 import type { MintEnv } from "./env.js";
 import type { LiteLlmAdmin } from "./litellmAdmin.js";
+import { registerUsageRoutes } from "./usage.js";
 
 /**
  * Mint's TWO Fastify apps:
@@ -106,6 +107,9 @@ export function buildMintApps(deps: MintDeps): {
   const publicApp = Fastify({ logger: false });
   installErrorHandling(publicApp);
   publicApp.get("/healthz", async () => ({ ok: true }));
+  // Task 5: the app-facing /usage contract. Later tasks register their own
+  // route groups here (Tasks 6–8, 12–15).
+  registerUsageRoutes(publicApp, deps);
 
   const adminApp = Fastify({ logger: false });
   installErrorHandling(adminApp);

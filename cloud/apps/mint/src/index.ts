@@ -7,6 +7,10 @@ export * from "./app.js";
 export * from "./planMath.js";
 export * from "./settings.js";
 export * from "./projection.js";
+// Task 5: window/budget machinery, the /usage contract and the model catalog.
+export * from "./windows.js";
+export * from "./usage.js";
+export * from "./catalog.js";
 
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";

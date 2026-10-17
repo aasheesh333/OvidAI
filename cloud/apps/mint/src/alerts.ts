@@ -14,7 +14,14 @@ import type { MintEnv } from "./env.js";
 
 export type Alerter = (kind: string, message: string, everyS?: number) => Promise<void>;
 
-export function createAlerter(redis: Redis, env: MintEnv): Alerter {
+export function createAlerter(
+  redis: Redis,
+  env: MintEnv,
+  /** Test seam; production uses the global fetch. */
+  fetchImpl: typeof fetch = fetch,
+  /** T3-review I1 carry: mint.py's alert client pins a 10 s timeout. */
+  timeoutMs: number = 10_000,
+): Alerter {
   return async (kind: string, message: string, everyS: number = 3600): Promise<void> => {
     const nowSeconds = Date.now() / 1000;
     const bucket = Math.floor(nowSeconds / everyS);
@@ -40,20 +47,22 @@ export function createAlerter(redis: Redis, env: MintEnv): Alerter {
     void (async () => {
       try {
         if (env.alertTelegramBotToken !== "" && env.alertTelegramChatId !== "") {
-          await fetch(
+          await fetchImpl(
             `https://api.telegram.org/bot${env.alertTelegramBotToken}/sendMessage`,
             {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({ chat_id: env.alertTelegramChatId, text }),
+              signal: AbortSignal.timeout(timeoutMs),
             },
           );
         }
         if (env.alertWebhookUrl !== "") {
-          await fetch(env.alertWebhookUrl, {
+          await fetchImpl(env.alertWebhookUrl, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ kind, text }),
+            signal: AbortSignal.timeout(timeoutMs),
           });
         }
       } catch (err) {

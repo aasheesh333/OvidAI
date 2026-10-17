@@ -120,6 +120,23 @@ describe("keyUpdate", () => {
     await startMock((_req, res) => json(res, 200, { success: true }));
     await expect(admin().keyUpdate({ key: "tok-1" })).resolves.toBeUndefined();
   });
+
+  it("keyUpdateStatus returns the HTTP status (0 on a network error)", async () => {
+    await startMock((_req, res) => json(res, 400, { error: "bad key" }));
+    expect(await admin().keyUpdateStatus({ key: "tok-1" })).toBe(400);
+    const down = createLiteLlmAdmin("http://127.0.0.1:1", MASTER_KEY);
+    expect(await down.keyUpdateStatus({ key: "tok-1" })).toBe(0);
+  });
+});
+
+describe("request timeout (T3-review I1 carry)", () => {
+  it("aborts a connected-but-silent admin call after the configured timeout", async () => {
+    await startMock(() => {
+      // never respond
+    });
+    const hung = createLiteLlmAdmin(baseUrl, MASTER_KEY, fetch, 40);
+    await expect(hung.keyGenerate({})).rejects.toThrow();
+  });
 });
 
 describe("keyInfo", () => {
@@ -181,6 +198,14 @@ describe("userInfo / userUpdate", () => {
     expect(await admin().userInfo("uid-404")).toBeNull();
   });
 
+  it("userInfoStatus distinguishes 404 from an outage (0/5xx) for the budget-clock rule", async () => {
+    await startMock((_req, res) => json(res, 404, { error: "no such user" }));
+    expect(await admin().userInfoStatus("uid-404")).toEqual({ status: 404, info: null });
+
+    await startMock((_req, res) => json(res, 500, { error: "boom" }));
+    expect(await admin().userInfoStatus("uid-1")).toEqual({ status: 500, info: null });
+  });
+
   it("userUpdate posts the body and returns the status", async () => {
     await startMock((_req, res) => json(res, 200, { success: true }));
     const status = await admin().userUpdate({ user_id: "uid-1", max_budget: 2 });
@@ -224,8 +249,10 @@ describe("spendLogs", () => {
       end_date: "2026-10-18",
     });
     expect(rows).toEqual([{ api_key: "tok-1", spend: 0.01, model: "gpt-x" }]);
+    // LiteLLM's /spend/logs query param is api_key (mint.py `_spend_logs`);
+    // the wrapper's argument is still named `key`.
     expect(lastQuery()).toEqual({
-      key: "tok-1",
+      api_key: "tok-1",
       start_date: "2026-10-01",
       end_date: "2026-10-18",
     });
