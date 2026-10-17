@@ -9,6 +9,7 @@ import {
 import type { MintDeps } from "./app.js";
 import { HttpContractError } from "./app.js";
 import { litellmMintOrGet } from "./keyMint.js";
+import { projectModelCatalog } from "./catalog.js";
 import { findPlan, storedTier, windowStr } from "./planMath.js";
 import { createProjection } from "./projection.js";
 import { getSettings } from "./settings.js";
@@ -244,15 +245,17 @@ export function registerMintRoutes(publicApp: FastifyInstance, deps: MintDeps): 
       }
       const body = result.body as { data?: unknown } | null;
       const rows = Array.isArray(body?.data) ? body.data : [];
-      const data = rows
-        .filter(
-          (row): row is { id: string } =>
-            typeof row === "object" &&
-            row !== null &&
-            typeof (row as { id?: unknown }).id === "string",
-        )
-        .map((row) => ({ id: row.id, object: "model", owned_by: "ovid" }));
-      return reply.headers(CATALOG_HEADERS).send({ object: "list", data });
+      const catalog = projectModelCatalog(
+        rows
+          .filter(
+            (row): row is { id: string } =>
+              typeof row === "object" &&
+              row !== null &&
+              typeof (row as { id?: unknown }).id === "string",
+          )
+          .map((row) => ({ model: row.id })),
+      );
+      return reply.headers(CATALOG_HEADERS).send(catalog);
     } catch (err) {
       console.log(`[mint] model catalog failed: ${errorName(err)}`);
       return reply

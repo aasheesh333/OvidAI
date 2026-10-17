@@ -1,4 +1,5 @@
 import type { MintDeps } from "./app.js";
+import { IMAGE_ALIAS } from "./images/types.js";
 import { AUTO_MODEL, DB2 } from "./planMath.js";
 
 /**
@@ -173,7 +174,56 @@ export async function refreshModelGroups(deps: MintDeps): Promise<void> {
  */
 export function availableModels(deps: MintDeps): { model: string }[] {
   void deps;
-  return Object.keys(lastCatalog.groups).map((name) => ({ model: name }));
+  return projectAvailableModels(
+    Object.keys(lastCatalog.groups).map((name) => ({ model: name })),
+  );
+}
+
+// ── Task 13: PublicCatalog masking hook ─────────────────────────────────────
+// The images mount installs the projection on the public app's onReady. Until
+// then (e.g. an isolated Task-6 /v1/models test) the passthrough is unchanged.
+
+export interface ModelCatalogProjection {
+  usage(rows: { model: string }[]): { model: string }[];
+  models(rows: { model: string }[]): {
+    object: "list";
+    data: { id: string; object: "model"; owned_by: "ovid"; output_modality?: "image" }[];
+  };
+}
+
+let modelCatalogProjection: ModelCatalogProjection | null = null;
+
+export function setModelCatalogProjection(projection: ModelCatalogProjection | null): void {
+  modelCatalogProjection = projection;
+}
+
+/** Test seam: drop the images mount's projection. */
+export function resetModelCatalogProjectionForTests(): void {
+  modelCatalogProjection = null;
+}
+
+/** /usage rows: hide private image backends, add the alias while mounted. */
+export function projectAvailableModels(rows: { model: string }[]): { model: string }[] {
+  return modelCatalogProjection === null ? rows : modelCatalogProjection.usage(rows);
+}
+
+/**
+ * /v1/models body. The images capability is deliberately not advertised to a
+ * text-key request: the public catalog removes the alias (its separate
+ * authenticated capability endpoint advertises it).
+ */
+export function projectModelCatalog(rows: { model: string }[]): {
+  object: "list";
+  data: { id: string; object: "model"; owned_by: "ovid"; output_modality?: "image" }[];
+} {
+  if (modelCatalogProjection === null) {
+    return {
+      object: "list",
+      data: rows.map((row) => ({ id: row.model, object: "model", owned_by: "ovid" })),
+    };
+  }
+  const catalog = modelCatalogProjection.models(rows);
+  return { object: "list", data: catalog.data.filter((row) => row.id !== IMAGE_ALIAS) };
 }
 
 /** Test seam: the catalog cache is process-wide like Python's _LAST_CATALOG. */
