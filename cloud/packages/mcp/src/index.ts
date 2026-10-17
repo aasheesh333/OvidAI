@@ -75,4 +75,37 @@ export * from "./clientRequests.js";
 export type { SamplingRequest, SamplingResult } from "./clientRequests.js";
 export * from "./toolNames.js";
 export * from "./router.js";
+// P5 Task 13: manifest normalization (CC/Codex/native adapters), capability
+// inference + grants, and the contribution registry. The adapters
+// (plugins/adapters/*) stay internal — adaptPlugin is the single entry
+// point; Task 14's installer consumes the registry and grant math from this
+// root (same barrel rule).
+export {
+  ManifestError,
+  adaptPlugin,
+  canonicalContributionId,
+  pluginManifestDigest,
+  type NormalizedPluginManifest,
+  type PluginAgent,
+  type PluginCapability,
+  type PluginCommand,
+  type PluginFormat,
+  type PluginHook,
+  type PluginMcpServerContribution,
+  type PluginSkill,
+} from "./plugins/manifest.js";
+export { inferRequestedCapabilities } from "./plugins/capabilities.js";
+export {
+  CAPABILITY_EXPLANATIONS,
+  capabilityDelta,
+  grantCovers,
+  type PluginGrantInput,
+} from "./plugins/grants.js";
+export {
+  contributionsFromManifest,
+  createContributionRegistry,
+  type ContributionRecord,
+  type ContributionRegistry,
+} from "./plugins/registry.js";
+
 
