@@ -7923,12 +7923,6 @@ block</pre>
         // ...and the heal must run from readiness after the first frame.
         expect(src, contains('Future<void> selfHealInBackground'));
         final main = File('lib/main.dart').readAsStringSync();
-        final state = File('lib/core/state.dart').readAsStringSync();
-        expect(
-          state,
-          contains('selfHealInBackground'),
-          reason: 'readiness owns sandbox maintenance',
-        );
         expect(
           main.indexOf('runApp('),
           lessThan(main.indexOf('_startReadiness()')),

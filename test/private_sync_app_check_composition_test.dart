@@ -12,7 +12,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setupFirebaseCoreMocks();
   test(
-    'registered sync and collaboration share real CloudAppCheck activation when account flag is off',
+    'registered collaboration uses real CloudAppCheck activation when account flag is off',
     () async {
       SharedPreferences.setMockInitialValues({});
       FlutterSecureStorage.setMockInitialValues({});
@@ -39,7 +39,6 @@ void main() {
       );
       expect(firebase.accountService.enabled, false);
       app.registerProductionAccountFeatures(firebaseService: firebase);
-      expect(await app.privateSync!.appCheckToken(), 'sdk-attestation');
       expect(await app.collaboration!.appCheckToken(), 'sdk-attestation');
       final activations = calls.where(
         (c) => c.method == 'FirebaseAppCheck#activate',
@@ -48,9 +47,8 @@ void main() {
       expect(activations.single.arguments['androidProvider'], 'playIntegrity');
       expect(
         calls.where((c) => c.method == 'FirebaseAppCheck#getToken'),
-        hasLength(2),
+        hasLength(1),
       );
-      await app.privateSync!.release();
       await app.collaboration!.release();
       AppState.resetTestInstance();
     },

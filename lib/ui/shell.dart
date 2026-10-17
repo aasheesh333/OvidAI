@@ -256,14 +256,6 @@ class _OvidShellState extends State<OvidShell> with WidgetsBindingObserver {
     // Ask for telemetry consent once (Play policy) after first frame.
     _consent.attach(() => context);
     // First-run welcome notice moved to LoginGate (post-login overlay).
-    // Studio first-open owns the sandbox install now (mandatory full
-    // install incl. Node.js/Python via openStudio). The shell still kicks
-    // the background job below, but it is verify-only unless the user
-    // explicitly retries — it never apt-updates at startup anymore.
-    // Idempotent — cheap disk probes no-op when the runtimes are present.
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => unawaited(AppState.I.maybeStartBackgroundRuntimeInstall()),
-    );
     // Durability watchdog.
     _persistApp.addListener(_onPersistStateChanged);
     _persistWarned = _persistApp.lastSessionPersistFailed;

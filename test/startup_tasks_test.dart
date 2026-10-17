@@ -736,24 +736,18 @@ void main() {
       );
     });
 
-    test('readiness wiring feeds recent failure memos into both tasks', () async {
+    test('readiness wiring feeds the recent failure memo into marketplace', () async {
       final now = DateTime.now();
       SharedPreferences.setMockInitialValues({
         'startup_last_failure_marketplace.refresh': now
-            .subtract(const Duration(hours: 1))
-            .toIso8601String(),
-        'startup_last_failure_sandbox.selfHeal': now
             .subtract(const Duration(hours: 1))
             .toIso8601String(),
       });
       final app = AppState.createForTest();
       final tasks = await app.buildReadinessTasks();
       final mp = tasks.whereType<MarketplaceRefreshTask>().single;
-      final sb = tasks.whereType<SandboxMaintenanceTask>().single;
       expect(mp.lastFailedAt, isNotNull);
-      expect(sb.lastFailedAt, isNotNull);
       expect((await mp.run()).state, StartupItemState.skipped);
-      expect((await sb.run()).state, StartupItemState.skipped);
     });
 
     test(
@@ -997,10 +991,6 @@ void main() {
       expect(
         ids.indexOf('mcp.connect:Fetch'),
         lessThan(ids.indexOf('firebase.initialize')),
-      );
-      expect(
-        ids.indexOf('firebase.initialize'),
-        lessThan(ids.indexOf('sandbox.selfHeal')),
       );
     });
 

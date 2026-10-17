@@ -6,7 +6,6 @@ void main() {
   test('app registration installs concrete account owners', () {
     final app = AppState.createForTest();
     app.registerProductionAccountFeatures();
-    expect(app.privateSync, isNotNull);
     expect(app.collaboration, isNotNull);
     app.setAccountFeaturesForeground(false);
     AppState.resetTestInstance();

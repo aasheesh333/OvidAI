@@ -7,9 +7,6 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
-import '../private_sync/file_outbox.dart';
-import '../private_sync/production.dart'
-    show configuredHttpsEndpoint, productionId, accountDirectoryName;
 import '../reset_coordinator.dart';
 import 'client.dart';
 import 'coordinator.dart';
@@ -36,6 +33,65 @@ class _Timer implements CollaborationTimer {
   final Timer timer;
   @override
   void cancel() => timer.cancel();
+}
+
+/// Absolute HTTPS endpoint or null. Collaboration metadata must never point
+/// at an arbitrary URL (no userinfo/query/fragment).
+Uri? _configuredHttpsEndpoint(String value) {
+  final uri = Uri.tryParse(value);
+  if (uri == null ||
+      uri.scheme != 'https' ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasQuery ||
+      uri.hasFragment) {
+    return null;
+  }
+  return uri;
+}
+
+String _productionId() => List.generate(
+  24,
+  (_) => Random.secure().nextInt(256),
+).map((n) => n.toRadixString(16).padLeft(2, '0')).join();
+
+String _accountDirectoryName(String uid) =>
+    sha256.convert(utf8.encode(uid)).toString();
+
+/// Atomic single-file persistence for the account-scoped collaboration
+/// metadata. The private-sync outbox that used to provide this helper was
+/// deleted (spec D6); collaboration only needs read + write-atomic here.
+class _AtomicAccountFile {
+  _AtomicAccountFile(this.file, {required this.owns});
+
+  final File file;
+  final bool Function() owns;
+  Future<void> _tail = Future.value();
+  int _sequence = 0;
+
+  Future<void> get drained => _tail;
+
+  Future<List<int>?> read() async {
+    await _tail;
+    return await file.exists() ? file.readAsBytes() : null;
+  }
+
+  Future<void> writeAtomically(List<int> bytes) {
+    final operation = _tail.then((_) async {
+      if (!owns()) throw StateError('Collaboration account changed.');
+      await file.parent.create(recursive: true);
+      final staged = File('${file.path}.tmp-$pid-${_sequence++}');
+      try {
+        await staged.writeAsBytes(bytes, flush: true);
+        if (!owns()) throw StateError('Collaboration account changed.');
+        staged.renameSync(file.path);
+      } finally {
+        if (await staged.exists()) await staged.delete();
+      }
+    });
+    _tail = operation.catchError((Object _) {});
+    return operation;
+  }
 }
 
 /// Runs one AI turn on THIS device's own provider/model/key and returns the
@@ -118,7 +174,7 @@ class CollaborationProduction extends ChangeNotifier {
   bool _foreground = false;
   Directory? _root;
   Map<String, dynamic> _metadata = {};
-  FileOutboxPersistence? _metadataFile;
+  _AtomicAccountFile? _metadataFile;
   _FencedBackend? _backend;
   CollaborationStore? _store;
   CollaborationClient? _client;
@@ -127,7 +183,7 @@ class CollaborationProduction extends ChangeNotifier {
   Future<void> _work = Future.value();
   String? invitationCode;
 
-  bool get configured => configuredHttpsEndpoint(endpoint) != null;
+  bool get configured => _configuredHttpsEndpoint(endpoint) != null;
   bool get available =>
       configured && _uid != null && accountReady() && currentUid() == _uid;
   String? get sessionToken =>
@@ -142,7 +198,7 @@ class CollaborationProduction extends ChangeNotifier {
   String? get shareLink {
     final token = sessionToken;
     final code = available ? _metadata['linkCode'] as String? : null;
-    final origin = configuredHttpsEndpoint(publicOrigin);
+    final origin = _configuredHttpsEndpoint(publicOrigin);
     if (token == null || code == null || origin == null) return null;
     return '${origin.toString().replaceFirst(RegExp(r'/+$'), '')}/s/$token/$code';
   }
@@ -190,9 +246,9 @@ class CollaborationProduction extends ChangeNotifier {
     final base = await rootDirectory();
     if (!_owns(epoch)) return;
     _root = Directory(
-      '${base.path}/collaboration/${accountDirectoryName(uid)}',
+      '${base.path}/collaboration/${_accountDirectoryName(uid)}',
     );
-    _metadataFile = FileOutboxPersistence(
+    _metadataFile = _AtomicAccountFile(
       File('${_root!.path}/session.json'),
       owns: () => _owns(epoch),
     );
@@ -219,7 +275,7 @@ class CollaborationProduction extends ChangeNotifier {
     if (!_owns(epoch)) return;
     _http = httpClientFactory();
     _client = CollaborationClient(
-      baseUri: configuredHttpsEndpoint(endpoint)!,
+      baseUri: _configuredHttpsEndpoint(endpoint)!,
       httpClient: _http,
       accessToken: () => _token(accessToken, epoch),
       appCheckToken: () => _token(appCheckToken, epoch),
@@ -239,7 +295,7 @@ class CollaborationProduction extends ChangeNotifier {
 
   Future<String> _requestKey(String operation) async {
     final key = 'request:$operation';
-    _metadata[key] ??= productionId();
+    _metadata[key] ??= _productionId();
     await _save();
     return _metadata[key] as String;
   }
@@ -498,7 +554,7 @@ class CollaborationProduction extends ChangeNotifier {
 
   Map<String, Object?> _event(String kind, CollaborationPayload payload) => {
     'schemaVersion': collaborationSchemaVersion,
-    'eventId': productionId(),
+    'eventId': _productionId(),
     'kind': kind,
     'payload': payload.toWire(),
   };

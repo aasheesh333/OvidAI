@@ -14,7 +14,6 @@ enum ResetStoreKind {
   account('account'),
   imageReceipts('image-receipts'),
   shares('shares'),
-  privateSync('private-sync'),
   collaboration('collaboration'),
   // Providers, plugins, MCP servers, custom presets and permission grants.
   configuration('configuration'),

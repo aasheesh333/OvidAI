@@ -227,7 +227,6 @@ void main() {
         'account',
         'image-receipts',
         'shares',
-        'private-sync',
         'collaboration',
         'configuration',
         'secrets',

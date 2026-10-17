@@ -220,9 +220,6 @@ extension _SettingsStateIntegration on AppState {
               (await ConversationShareService.production().localShareCount()) ==
                   0,
         ),
-        ResetStoreKind.privateSync: _accountLifecycle.asResetStore(
-          ResetStoreKind.privateSync.id,
-        ),
         ResetStoreKind.collaboration: _accountLifecycle.asResetStore(
           ResetStoreKind.collaboration.id,
         ),

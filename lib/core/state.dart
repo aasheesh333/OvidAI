@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' show Random;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -56,8 +57,7 @@ import 'settings_backup_service.dart';
 import 'skills.dart' show SkillService;
 import 'presets.dart';
 import 'reset_coordinator.dart';
-import 'private_sync/production.dart';
-import 'private_sync/dto.dart' as private_dto;
+import 'distribution.dart';
 import 'collaboration/production.dart';
 import 'startup_coordinator.dart';
 import 'startup_tasks.dart';
@@ -1064,9 +1064,16 @@ class MessageAttachment {
   };
 }
 
+/// Locally generated stable message identity. Cloud rows carry the server's
+/// message id instead (see `CloudAgentFacade`/`EventTranscriptProjector`).
+String _newMessageId() => List.generate(
+  24,
+  (_) => Random.secure().nextInt(256),
+).map((n) => n.toRadixString(16).padLeft(2, '0')).join();
+
 class Message {
-  /// Stable across pagination, persistence, and edits. Transcript edits under
-  /// this identity remain local and surface a sync conflict, never an overwrite.
+  /// Stable across pagination, persistence, and edits. Cloud rows use the
+  /// server's message id; local rows use a locally generated id.
   final String privateSyncId;
   final String role; // 'user' | 'assistant'
   MsgKind kind; // mutable — reasoning → text promote
@@ -1130,7 +1137,7 @@ class Message {
     DateTime? time,
     String? privateSyncId,
   }) : time = time ?? DateTime.now(),
-       privateSyncId = privateSyncId ?? productionId();
+       privateSyncId = privateSyncId ?? _newMessageId();
 
   /// Local file path for `MsgKind.imageGen` rows — the generated image
   /// saved into the session workspace (rendered in-chat, tappable to open).
@@ -2283,65 +2290,48 @@ class AppState extends ChangeNotifier {
   late final SessionBootstrapDecoder _sessionBootstrapDecoder;
   late final WorkspaceDeleter _workspaceDeleter;
   late AccountLifecycleIntegration _accountLifecycle;
-  PrivateSyncProduction? privateSync;
   CollaborationProduction? collaboration;
   Future<void>? _featureBinding;
   bool _featureBindQueued = false;
 
+  /// Shown when a live-collaboration turn is attempted on the thin client.
+  /// Collab EXECUTION is flag-gated OFF here (owner question Q6; the default
+  /// is reversible in Task 20 — collab v2 lands in P9).
+  static const String kCollaborationReadOnlyNotice =
+      'Collaboration is moving to the cloud — read-only for now';
+
   /// Called by main before readiness begins. Registers the actual singleton
-  /// owners with both account transitions and verified per-feature reset.
+  /// owners with account transitions and verified per-feature reset.
   void registerProductionAccountFeatures({FirebaseService? firebaseService}) {
-    if (privateSync != null) return;
+    if (collaboration != null) return;
     final firebase = firebaseService ?? FirebaseService.I;
     final appCheck = CloudAppCheck(
       initializeFirebase: firebase.initialize,
       activatedByFirebase: () => firebase.accountService.enabled,
     );
-    privateSync = PrivateSyncProduction(
-      rootDirectory: getApplicationSupportDirectory,
-      accountReady: () => firebase.isAvailable && firebase.accountReady,
-      currentUid: () => firebase.uid,
-      idToken: (force) => firebase.getIdToken(forceRefresh: force),
-      appCheckToken: appCheck.getToken,
-      snapshot: _privateTranscriptSnapshot,
-    );
     collaboration = CollaborationProduction(
-      // Each participant's turns run on THEIR device, model and key.
-      turnRunner: ({required providerId, required model, required messages}) =>
-          AgentService.I.completeCollaborationTurn(
-            providerId: providerId,
-            model: model,
-            messages: messages,
-          ),
+      // Each participant's turns run on THEIR device, model and key — except
+      // on the thin client, where collab execution is read-only for now.
+      turnRunner: _collaborationTurnRunner,
       rootDirectory: getApplicationSupportDirectory,
       accountReady: () => firebase.isAvailable && firebase.accountReady,
       currentUid: () => firebase.uid,
       accessToken: () => firebase.getIdToken(),
       appCheckToken: appCheck.getToken,
     );
-    final sync = privateSync!;
     final collab = collaboration!;
     _accountLifecycle = AccountLifecycleIntegration.production(
       dependencies: AccountLifecycleDependencies(
-        onFence: () {
-          sync.fence();
-          collab.fence();
-        },
+        onFence: collab.fence,
         onRevoke: () async {
           await _featureBinding;
-          await sync.release();
           await collab.release();
         },
         onBind: (_, _) => _queueProductionAccountBind(),
-        onClear: () async {
-          await sync.clear();
-          await collab.clear();
-        },
-        onVerifyEmpty: () async =>
-            await sync.verifyEmpty() && await collab.verifyEmpty(),
+        onClear: collab.clear,
+        onVerifyEmpty: collab.verifyEmpty,
       ),
       resetDependencies: {
-        ResetStoreKind.privateSync.id: sync.lifecycle,
         ResetStoreKind.collaboration.id: collab.lifecycle,
       },
     );
@@ -2350,8 +2340,54 @@ class AppState extends ChangeNotifier {
     _queueProductionAccountBind();
   }
 
+  /// Collab-turn path shared by the production runner and the gate test.
+  /// On the thin client it appends the read-only notice as a turn-tail row
+  /// and performs NO agent execution.
+  Future<String> _collaborationTurnRunner({
+    required String providerId,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+  }) async {
+    if (Distribution.cloudExecution) {
+      _appendCollabReadOnlyNotice();
+      throw StateError(kCollaborationReadOnlyNotice);
+    }
+    return AgentService.I.completeCollaborationTurn(
+      providerId: providerId,
+      model: model,
+      messages: messages,
+    );
+  }
+
+  void _appendCollabReadOnlyNotice() {
+    final session = activeSession;
+    if (session == null) return;
+    session.messages.add(
+      Message(
+        role: 'assistant',
+        kind: MsgKind.turnTail,
+        content: kCollaborationReadOnlyNotice,
+      ),
+    );
+    _markSessionDirty(session.id);
+    notifyListeners();
+    unawaited(persistSessions());
+  }
+
+  /// Test seam: drives the same collab-turn path the production runner uses.
+  @visibleForTesting
+  Future<String> collaborationTurnForTest({
+    required String providerId,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+  }) => _collaborationTurnRunner(
+    providerId: providerId,
+    model: model,
+    messages: messages,
+  );
+
   void _queueProductionAccountBind() {
-    if (_settingsBusy || _featureBindQueued || privateSync == null) return;
+    if (_settingsBusy || _featureBindQueued || collaboration == null) return;
     if (!FirebaseService.I.accountReady || !sessionAccountReady) return;
     _featureBindQueued = true;
     scheduleMicrotask(() {
@@ -2363,15 +2399,9 @@ class AppState extends ChangeNotifier {
       }
       final uid = FirebaseService.I.uid;
       if (uid == null) return;
-      final token = _sessionAccountToken;
       _featureBinding = () async {
         try {
-          await privateSync!.bind(uid, _deferredSessionGeneration);
-          if (!identical(token, _sessionAccountToken)) return;
           await collaboration!.bind(uid, _deferredSessionGeneration);
-        } catch (_) {
-          privateSync!.error =
-              'Account sync storage could not be opened. Reopen settings to retry.';
         } finally {
           _featureBinding = null;
         }
@@ -2380,81 +2410,9 @@ class AppState extends ChangeNotifier {
   }
 
   void setAccountFeaturesForeground(bool value) {
-    unawaited(privateSync?.setForeground(value));
     collaboration?.setForeground(value);
     if (value) _queueProductionAccountBind();
   }
-
-  Iterable<private_dto.SyncUploadRecord> _privateTranscriptSnapshot(
-    String device,
-  ) sync* {
-    yield* privateUsageSnapshot(device, usageAttempts);
-    // Explicit DTO projection only: provider keys, cookies, grants, workspaces,
-    // executable queues, and attachment bytes are never serialized here.
-    for (final provider in providers) {
-      try {
-        yield privateProviderMetadataRecord(
-          device,
-          providerId: provider.id,
-          modelId: provider.selectedModel,
-          endpoint: provider.baseUrl,
-          displayName: provider.name,
-          supportsStreaming: true, // Both supported API formats stream.
-        );
-      } on FormatException {
-        privateSync?.error =
-            'Provider metadata could not be exported safely and remains local.';
-      }
-    }
-    for (final session in sessions) {
-      for (var index = 0; index < session.messages.length; index++) {
-        final message = session.messages[index];
-        if (message.thinking ||
-            message.kind == MsgKind.streaming ||
-            (message.kind == MsgKind.tool && message.toolState == 'running')) {
-          continue;
-        }
-        final id = _privateMessageRecordId(session.id, message);
-        final text = message.kind == MsgKind.tool
-            ? [
-                message.content,
-                message.toolTitle,
-                message.toolSummary,
-                message.toolDetail,
-              ].whereType<String>().join('\n')
-            : message.content;
-        if (text.length > 262144) continue;
-        yield private_dto.SyncUploadRecord(
-          recordId: id,
-          sourceDeviceId: device,
-          conversationId: session.id,
-          createdAt: message.time.toUtc().toIso8601String(),
-          revision: 1,
-          payload: private_dto.TranscriptPayload(
-            messageId: id,
-            parentMessageId: null,
-            kind: message.kind == MsgKind.tool
-                ? private_dto.TranscriptKind.tool
-                : message.role == 'user'
-                ? private_dto.TranscriptKind.user
-                : message.role == 'system'
-                ? private_dto.TranscriptKind.system
-                : private_dto.TranscriptKind.assistant,
-            text: text,
-            providerMetadataRecordId: null,
-            requestPurpose: null,
-            displayTitle: session.title.length <= 256
-                ? session.title
-                : session.title.substring(0, 256),
-          ),
-        );
-      }
-    }
-  }
-
-  String _privateMessageRecordId(String sessionId, Message message) => sha256
-      .convert(utf8.encode('$sessionId:${message.privateSyncId}'))
-      .toString();
 
   /// Durable, secret-scrubbed startup status per canonical plugin/MCP id
   /// (Task 7, spec §5.8). Shared process-wide store.
@@ -3518,7 +3476,6 @@ class AppState extends ChangeNotifier {
     final marketplaceMemo = await _readStartupFailureMemo(
       'marketplace.refresh',
     );
-    final sandboxMemo = await _readStartupFailureMemo('sandbox.selfHeal');
     return [
       _LocalHydrationStartupTask(this),
       _PluginSafetyStartupTask(this),
@@ -3588,23 +3545,6 @@ class AppState extends ChangeNotifier {
           const Duration(seconds: 10),
         ),
         initialize: _initializeFirebaseForStartup,
-      ),
-      SandboxMaintenanceTask(
-        id: 'sandbox.selfHeal',
-        label: 'Maintain local sandbox',
-        timeout: _startupTimeout(
-          'sandbox.selfHeal',
-          const Duration(seconds: 30),
-        ),
-        isInstalled: () => sandboxInstalled,
-        startMaintenance: () =>
-            _runStartupStage('sandbox.selfHeal', _startSandboxMaintenance),
-        runtimesVerified: SandboxService.I.runtimesVerified,
-        runtimesRequested: () => SandboxService.I.runtimesRequested,
-        installInProgress: () => SandboxService.I.installInFlight,
-        installCoreRuntimes: verifyRuntimesForStartupSelfHeal,
-        enforceQuota: _enforceSandboxQuota,
-        lastFailedAt: sandboxMemo,
       ),
     ];
   }
@@ -3880,49 +3820,6 @@ class AppState extends ChangeNotifier {
     if (overridden) return true;
     return available ?? false;
   }
-
-  Future<void> _startSandboxMaintenance() async {
-    await SandboxService.I.selfHealInBackground();
-    unawaited(AgentService.I.prewarmBrowser());
-  }
-
-  /// Startup self-heal runtime step. The Studio first-open install owns the
-  /// apt path (see [studioFirstOpenDone]), so the boot self-heal NEVER
-  /// installs: it waits out a Studio install in flight instead of racing
-  /// it on the dpkg lock, then reports the verified truth. Missing
-  /// runtimes after the first-open flag is set are genuinely degraded;
-  /// before the flag is set they are "not installed yet" — the
-  /// [SandboxMaintenanceTask] runtimesRequested gate already reports those
-  /// as ready without burning the boot budget.
-  Future<bool> verifyRuntimesForStartupSelfHeal() async {
-    // BOUNDED wait. An install (Studio first-open, Health repair) is a
-    // multi-minute network job, while this task's whole budget is 30s
-    // (see `sandbox.selfHeal` in buildReadinessTasks). An unbounded
-    // `while (installInFlight) delay(2s)` therefore ALWAYS lost the race,
-    // the coordinator's `.timeout()` fired, and the row was pinned to
-    // "Degraded — Timed out after 30s" even though maintenance later
-    // succeeded. Wait only as long as the budget can actually absorb, then
-    // report the verified truth rather than spinning into a timeout.
-    final deadline = DateTime.now().add(_installWaitBudget);
-    while (SandboxService.I.installInFlight &&
-        DateTime.now().isBefore(deadline)) {
-      await Future.delayed(const Duration(seconds: 2));
-    }
-    return SandboxService.I.runtimesVerified();
-  }
-
-  /// How long [verifyRuntimesForStartupSelfHeal] may wait for an in-flight
-  /// install before it stops and reports what it knows. Kept inside the 30s
-  /// `sandbox.selfHeal` boot budget so the task returns a real verdict
-  /// instead of being abandoned by the coordinator deadline.
-  static const Duration _installWaitBudget = Duration(seconds: 20);
-
-  Future<void> _enforceSandboxQuota() => SandboxService.I.enforceWorkspaceQuota(
-    activeSandboxIds: sessions
-        .map((session) => session.sandboxId)
-        .whereType<String>()
-        .toSet(),
-  );
 
   Future<void> initializeReadiness() =>
       _readinessInitialization ??= _initializeReadiness();
@@ -7093,36 +6990,6 @@ class AppState extends ChangeNotifier {
     // A chat owns its subagents: deleting it deletes their transcripts and
     // workspaces too, otherwise orphan children linger invisibly forever.
     final doomed = <ChatSession>[?s, ...descendantsOf(id)];
-    final token = _sessionAccountToken;
-    if (privateSync?.enrolled == true) {
-      final deletedIds = {id, ...doomed.map((session) => session.id)};
-      await _loadDeferredSessionSnapshot();
-      if (!identical(token, _sessionAccountToken)) return;
-      // Discover descendants from saved lineage, not from loaded membership.
-      // Do not schedule destructive cleanup until sync intent is durable.
-      final parents = <String, String?>{};
-      for (final encoded in _deferredSessionJson ?? const <String>[]) {
-        try {
-          final row = jsonDecode(encoded) as Map<String, dynamic>;
-          if (row['id'] is String) {
-            parents[row['id'] as String] = row['parentId'] as String?;
-          }
-        } on FormatException {
-          continue;
-        }
-      }
-      var changed = true;
-      while (changed) {
-        changed = false;
-        for (final entry in parents.entries) {
-          if (deletedIds.contains(entry.value) && deletedIds.add(entry.key)) {
-            changed = true;
-          }
-        }
-      }
-      await privateSync!.recordLocalDeletion(conversationIds: deletedIds);
-      if (!identical(token, _sessionAccountToken)) return;
-    }
     if (_deferredSessionJson != null || _deferredSessionsPending) {
       _deferredDeletedSessionIds.add(id);
       _expandDeferredDeletedSessionIds();
@@ -7162,19 +7029,6 @@ class AppState extends ChangeNotifier {
     if (s == null) throw StateError('The conversation is no longer available.');
     final idx = index.clamp(0, s.messages.length);
     final removed = s.messages.skip(idx).toList();
-    final token = _sessionAccountToken;
-    if (privateSync?.enrolled == true) {
-      await privateSync!.recordLocalDeletion(
-        recordIds: {
-          for (final message in removed)
-            _privateMessageRecordId(sessionId, message),
-        },
-      );
-      if (!identical(token, _sessionAccountToken) ||
-          !identical(sessionById(sessionId), s)) {
-        throw StateError('The conversation changed. Retry the deletion.');
-      }
-    }
     s.messages.removeWhere(removed.contains);
     if (idx == 0) {
       s.compactedSummary = null;
@@ -7189,9 +7043,8 @@ class AppState extends ChangeNotifier {
 
   /// Undo for [deleteMessagesFrom]: re-appends [removed] at [index] when the
   /// conversation has not changed since (nothing was appended after the
-  /// truncation). Restored rows get fresh private-sync identities because
-  /// the originals were already tombstoned. Returns false when the undo is
-  /// no longer safe.
+  /// truncation). Restored rows get fresh local identities. Returns false
+  /// when the undo is no longer safe.
   bool restoreMessagesAt(
     String sessionId,
     int index,
@@ -7204,7 +7057,7 @@ class AppState extends ChangeNotifier {
     if (s == null || s.messages.length != index) return false;
     s.messages.addAll([
       for (final m in removed)
-        Message.fromJson({...m.toJson(), 'privateSyncId': productionId()}),
+        Message.fromJson({...m.toJson(), 'privateSyncId': _newMessageId()}),
     ]);
     if (index == 0 && compactedSummary != null) {
       s.compactedSummary = compactedSummary;
@@ -7718,13 +7571,6 @@ class AppState extends ChangeNotifier {
     if (!p.custom) {
       return '"${p.name}" is a built-in provider — it cannot be removed, '
           'only its API key can be cleared.';
-    }
-    if (privateSync?.enrolled == true) {
-      try {
-        await privateSync!.recordLocalDeletion(providerId: providerId);
-      } catch (_) {
-        return 'The provider deletion could not be saved for sync. Retry the deletion.';
-      }
     }
     // Clean up the stored API key.
     try {

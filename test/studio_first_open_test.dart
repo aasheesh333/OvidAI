@@ -262,42 +262,6 @@ void main() {
     });
   });
 
-  group('sandbox.selfHeal wiring', () {
-    test('verifies only — never apt-updates at boot', () async {
-      SandboxService.execCheckedOverrideForTest = (args, env) async => (1, '');
-
-      expect(await AppState.I.verifyRuntimesForStartupSelfHeal(), isFalse);
-      expect(
-        SandboxService.I.runtimesRequested,
-        isFalse,
-        reason: 'the boot self-heal must not enter the apt path',
-      );
-    });
-
-    test('waits out a Studio install in flight, then verifies', () async {
-      SandboxService.I.setInstallInFlightForTest(true);
-      SandboxService.execCheckedOverrideForTest = (args, env) async => (1, '');
-
-      var finished = false;
-      final future = AppState.I.verifyRuntimesForStartupSelfHeal().then((
-        value,
-      ) {
-        finished = true;
-        return value;
-      });
-      await Future.delayed(const Duration(milliseconds: 200));
-      expect(
-        finished,
-        isFalse,
-        reason: 'must wait while the Studio install owns dpkg',
-      );
-
-      SandboxService.I.setInstallInFlightForTest(false);
-      expect(await future, isFalse);
-      expect(SandboxService.I.runtimesRequested, isFalse);
-    });
-  });
-
   // Runs last: fakes an installed core and flips _runtimesRequested.
   group('explicit user retry', () {
     test('banner Retry IS the apt path', () async {
