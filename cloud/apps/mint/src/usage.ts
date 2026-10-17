@@ -21,6 +21,7 @@ import {
   type CatalogGroup,
 } from "./catalog.js";
 import type { SpendLogRow } from "./litellmAdmin.js";
+import type { BillingService } from "./billing/service.js";
 import { getOverride, getSettings, userFreeDaily } from "./settings.js";
 import {
   currentWindowStart,
@@ -575,7 +576,11 @@ function headerValue(v: string | string[] | undefined): string {
  * body is cached for USAGE_CACHE_S seconds under usagecache:{uid} — window
  * resets and dropUsageCache delete it.
  */
-export function registerUsageRoutes(publicApp: FastifyInstance, deps: MintDeps): void {
+export function registerUsageRoutes(
+  publicApp: FastifyInstance,
+  deps: MintDeps,
+  billing?: BillingService,
+): void {
   publicApp.post("/usage", async (request, reply) => {
     const authorization = headerValue(request.headers.authorization);
     if (!/^bearer /i.test(authorization)) {
@@ -605,9 +610,14 @@ export function registerUsageRoutes(publicApp: FastifyInstance, deps: MintDeps):
       }
     }
     const { body } = await computeUsage(deps, uid);
+    // Task 10 billing merge point: payload = {...body, ...usageFields(uid)}
+    // (billing_enabled / plan_expires_at / plan_auto_renews / plan_product_id
+    // / plans — exactly the server/billing README contract).
+    const payload: UsageBody =
+      billing === undefined ? body : { ...body, ...(await billing.usageFields(uid)) };
     if (deps.env.usageCacheS > 0) {
-      await deps.redis.set(cacheKey, JSON.stringify(body), "EX", deps.env.usageCacheS);
+      await deps.redis.set(cacheKey, JSON.stringify(payload), "EX", deps.env.usageCacheS);
     }
-    return reply.send(body);
+    return reply.send(payload);
   });
 }

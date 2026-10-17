@@ -28,6 +28,8 @@
     "decimal.js": "^10.4.3",
     "fastify": "^5.12.7",
     "firebase-admin": "^14.5.0",
+    "google-auth-library": "11.3.0",
+    "googleapis": "186.0.0",
     "ioredis": "^5.11.1",
     "zod": "^3.25.76"
   }
