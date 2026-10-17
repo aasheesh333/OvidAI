@@ -8,3 +8,8 @@ export * from "./storageEnv.js";
 export * from "./rangeReader.js";
 export * from "./browserState.js";
 export * from "./contract.js";
+export * from "./archive/format.js";
+export * from "./archive/memberStream.js";
+export * from "./archive/pack.js";
+export * from "./archive/readIndex.js";
+export * from "./archive/uiTree.js";
