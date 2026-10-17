@@ -1,8 +1,17 @@
 import { pathToFileURL } from "node:url";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { initializeApp, getApps } from "firebase-admin/app";
 import { Redis } from "ioredis";
-import { createDb, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, runs as runsRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import { createDb, byokKeysRepo, eventMirror as eventMirrorRepo, fileManifests as fileManifestsRepo, imagesRepo, runs as runsRepo, sharesRepo, users, workspaceObjects as workspaceObjectsRepo } from "@ovid/db";
+import {
+  createCloudCleanup,
+  createFirebaseAdmin,
+  createHttpKeyAdmin,
+  createLifecycle,
+  createNoopR2Deleter,
+  createPostgresDeletionStore,
+} from "@ovid/account";
 import { createRedisEventLog, createRedisSystemBus } from "@ovid/events";
 import {
   createBrowserEngine,
@@ -68,6 +77,7 @@ import { startSchedulerLoop } from "./schedulerTick.js";
 import { sweepStaleRuns } from "./staleRuns.js";
 import { createColdRowScan, createStuckHibernationScan, createStuckHydrationScan } from "./storageScans.js";
 import { createUnattendedApprovalHook } from "./unattended.js";
+import { startAccountDeletionSweeper } from "./accountSweep.js";
 
 export interface WorkerEnv {
   nodeEnv: string;
@@ -725,11 +735,69 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   }, SWEEP_INTERVAL_MS);
   warmSweeper.unref();
 
+  // ---- P9 Task 15: the durable account-deletion sweeper. ------------------
+  // A completed deletion request survives a process restart because the
+  // sweeper re-reads `account_deletions.due(now)` every pass (boot included)
+  // and the lifecycle checkpoints retry intent before effects. Opt-in via
+  // OVID_ACCOUNT_FIREBASE_APP_IDS (the App Check allowlist) — without it the
+  // adapter cannot verify disabled-token recovery, so the sweeper stays off.
+  const accountAppIds = new Set(
+    (env.OVID_ACCOUNT_FIREBASE_APP_IDS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value !== ""),
+  );
+  let accountSweeper: { stop(): Promise<void> } | null = null;
+  if (accountAppIds.size > 0) {
+    const firebaseApp = getApps()[0] ?? initializeApp();
+    const admin = createFirebaseAdmin(firebaseApp, accountAppIds);
+    const deletionStore = createPostgresDeletionStore(db);
+    const lifecycle = createLifecycle({
+      store: deletionStore,
+      admin,
+      data: createCloudCleanup({
+        db,
+        redisDb2: redisMint,
+        redisQueue: redisQ,
+        litellm: createHttpKeyAdmin(
+          cfg.litellmBaseUrl,
+          env.OVID_LITELLM_MASTER_KEY?.trim() ?? "",
+        ),
+        r2: createNoopR2Deleter(),
+        images: {
+          deleteAccount: async (uid) => {
+            await db.transaction(async (tx) => {
+              await imagesRepo.insertDeleted(tx, uid, Math.floor(Date.now() / 1000));
+              await imagesRepo.clearAccount(tx, uid);
+            });
+          },
+        },
+        shares: { deleteAccount: (uid) => sharesRepo.deleteAccount(db, uid) },
+        byok: { deleteAccount: (uid) => byokKeysRepo.deleteAccount(db, uid) },
+      }),
+    });
+    accountSweeper = startAccountDeletionSweeper({ lifecycle, store: deletionStore });
+    console.log("[account] deletion sweeper started");
+    if (env.OVID_LITELLM_MASTER_KEY?.trim() === undefined || env.OVID_LITELLM_MASTER_KEY.trim() === "") {
+      console.warn(
+        "[account] no OVID_LITELLM_MASTER_KEY — key block/delete will fail and retry",
+      );
+    }
+  } else {
+    console.log(
+      "[account] deletion sweeper disabled — set OVID_ACCOUNT_FIREBASE_APP_IDS to enable it",
+    );
+  }
+
   let shuttingDown: Promise<void> | null = null;
   const shutdown = (): Promise<void> => {
     shuttingDown ??= (async () => {
       clearInterval(sweeper);
       clearInterval(warmSweeper);
+      // P9 Task 15: stop the account sweeper before any connection closes —
+      // stop() awaits the in-flight finalize pass (durable checkpoints mean a
+      // forced kill is also safe).
+      await accountSweeper?.stop();
       // P4 Task 10: stop the scheduler loop and drain the mirror consumer
       // BEFORE the agent-runs worker drains (a mirror job only enqueues).
       schedulerLoop.stop();

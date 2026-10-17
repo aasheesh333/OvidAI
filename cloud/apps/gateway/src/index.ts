@@ -8,7 +8,15 @@ export * from "./wsPty.js";
 import { initializeApp } from "firebase-admin/app";
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
-import { createDb, newId } from "@ovid/db";
+import { createDb, newId, byokKeysRepo, imagesRepo, sharesRepo } from "@ovid/db";
+import {
+  createCloudCleanup,
+  createFirebaseAdmin,
+  createHttpKeyAdmin,
+  createLifecycle,
+  createNoopR2Deleter,
+  createPostgresDeletionStore,
+} from "@ovid/account";
 import { createRedisEventLog, createRedisSystemBus } from "@ovid/events";
 import {
   createEnvelopeCrypto,
@@ -19,6 +27,7 @@ import { createQueues } from "@ovid/queue";
 import { systemEventEnvelope } from "@ovid/shared";
 import { createActivityTracker, createStorage, loadStorageEnv } from "@ovid/storage";
 import { buildGateway } from "./app.js";
+import type { AccountRouteDeps } from "./routes/account.js";
 import { createFirebaseVerifier, createTestVerifier } from "./auth.js";
 import { loadGatewayEnv } from "./env.js";
 import { createHttpMintProvisioner, createMintRedisKeyProvider } from "./keys.js";
@@ -49,10 +58,68 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   const redisQ = new Redis(cfg.redisQUrl);
   const redisMint = new Redis(cfg.redisMintUrl);
 
+  // ADC / GOOGLE_APPLICATION_CREDENTIALS. Captured once: the account
+  // lifecycle's Firebase Admin adapter reuses the SAME app.
+  const firebaseApp =
+    cfg.authMode === "firebase" ? initializeApp() : null;
   const verifier =
-    cfg.authMode === "firebase"
-      ? createFirebaseVerifier(initializeApp()) // ADC / GOOGLE_APPLICATION_CREDENTIALS
-      : createTestVerifier();
+    firebaseApp !== null ? createFirebaseVerifier(firebaseApp) : createTestVerifier();
+
+  // P9 Task 15: the legacy account lifecycle. It is opt-in through
+  // OVID_ACCOUNT_FIREBASE_APP_IDS (no new REQUIRED gateway env): without a
+  // configured App Check allowlist the adapter refuses to operate, so the
+  // routes stay unregistered rather than silently accepting wrong apps.
+  const accountAppIds = new Set(
+    (env.OVID_ACCOUNT_FIREBASE_APP_IDS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value !== ""),
+  );
+  let account: AccountRouteDeps | undefined;
+  if (firebaseApp !== null && accountAppIds.size > 0) {
+    const admin = createFirebaseAdmin(firebaseApp, accountAppIds);
+    const deletionStore = createPostgresDeletionStore(db);
+    const lifecycle = createLifecycle({
+      store: deletionStore,
+      admin,
+      data: createCloudCleanup({
+        db,
+        redisDb2: redisMint,
+        redisQueue: redisQ,
+        litellm: createHttpKeyAdmin(
+          env.OVID_LITELLM_BASE?.trim() || "http://127.0.0.1:4000",
+          env.OVID_LITELLM_MASTER_KEY?.trim() ?? "",
+        ),
+        r2: createNoopR2Deleter(),
+        images: {
+          deleteAccount: async (uid) => {
+            await db.transaction(async (tx) => {
+              await imagesRepo.insertDeleted(tx, uid, Math.floor(Date.now() / 1000));
+              await imagesRepo.clearAccount(tx, uid);
+            });
+          },
+        },
+        shares: { deleteAccount: (uid) => sharesRepo.deleteAccount(db, uid) },
+        byok: { deleteAccount: (uid) => byokKeysRepo.deleteAccount(db, uid) },
+      }),
+    });
+    account = {
+      lifecycle,
+      verify: (token, attestation, opts) => admin.verify(token, attestation, opts),
+    };
+    if ((env.OVID_LITELLM_MASTER_KEY?.trim() ?? "") === "") {
+      console.warn(
+        "[gateway] account cleanup has no OVID_LITELLM_MASTER_KEY — key block/delete will fail and retry",
+      );
+    }
+    console.warn(
+      "[gateway] account cleanup R2 deleter is the no-op seam (P7 storage has no prefix-list primitive)",
+    );
+  } else if (cfg.authMode === "firebase") {
+    console.warn(
+      "[gateway] account lifecycle routes disabled — set OVID_ACCOUNT_FIREBASE_APP_IDS to enable them",
+    );
+  }
 
   // System channel hub (P5 Task 10): ONE shared sys:{uid}:out subscription
   // per uid across that uid's sockets; closed with the app below so every
@@ -152,6 +219,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       putMaxBytes: cfg.putMaxBytes,
       presignTtlSeconds: cfg.presignTtlSeconds,
       hydrateWaitMs: cfg.hydrateWaitMs,
+      ...(account !== undefined ? { account } : {}),
     },
     { logger: true },
   );

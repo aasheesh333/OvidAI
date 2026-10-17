@@ -12,6 +12,7 @@ import type { KeyProvider, MintProvisioner } from "@ovid/shared";
 import type { ApiError } from "@ovid/shared";
 import type { ActivityTracker, StorageAdapter } from "@ovid/storage";
 import { authHook, type Verifier } from "./auth.js";
+import { registerAccountRoutes, type AccountRouteDeps } from "./routes/account.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
@@ -170,6 +171,14 @@ export interface GatewayDeps {
    * network I/O. OPTIONAL for the same composition-compat reason.
    */
   byok?: ByokRouteOverrides;
+  /**
+   * P9 Task 15: the account deletion lifecycle. Registered at the gateway
+   * ROOT (legacy `/account/*` paths, outside `/cloud/v1`) with its own
+   * Firebase verifier so disabled-token recovery never touches the ordinary
+   * auth hook. OPTIONAL so existing compositions/tests stay source-compatible;
+   * main() wires it when OVID_ACCOUNT_FIREBASE_APP_IDS is configured.
+   */
+  account?: AccountRouteDeps;
 }
 
 export interface BuildGatewayOptions {
@@ -239,6 +248,13 @@ export function buildGateway(
   // Caddy can proxy that exact path verbatim (no rewrite); the API-prefixed
   // route below stays for direct/internal callers.
   registerMcpOauthPublicCallbackRoute(app, deps);
+
+  // P9 Task 15: legacy account lifecycle paths live at the ROOT (no
+  // /cloud/v1 prefix) and carry their own auth — the ordinary hook below
+  // never sees them.
+  if (deps.account !== undefined) {
+    registerAccountRoutes(app, deps.account);
+  }
   app.register(
     async (scope) => {
       registerHealthRoutes(scope, deps);

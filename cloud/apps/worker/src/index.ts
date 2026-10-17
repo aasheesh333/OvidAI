@@ -5,6 +5,7 @@
 // P2 Task 12: the tools/ modules join the public surface — Task 14's e2e and
 // P3 import createToolRegistry + the tool shapes from here (the roster seam).
 export * from "./approvalBridge.js";
+export * from "./accountSweep.js";
 export * from "./fileService.js";
 export * from "./liteLlm.js";
 export * from "./mcpRuntime.js";

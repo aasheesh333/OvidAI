@@ -22,6 +22,7 @@
     "vitest": "^2.1.9"
   },
   "dependencies": {
+    "@ovid/account": "workspace:*",
     "@ovid/agent-core": "workspace:*",
     "@ovid/browser": "workspace:*",
     "@ovid/db": "workspace:*",

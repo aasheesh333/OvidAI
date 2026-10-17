@@ -160,6 +160,31 @@ describe.skipIf(!RUN)("public mint endpoints (mintRoutes.ts)", () => {
     expect(fake.posts("/key/generate")).toHaveLength(1);
   });
 
+  it("fences /mint and /upgrade while a deletion tombstone is pending", async () => {
+    const uid = testUid("fenced");
+    await usersRepo.ensure(db, uid, null);
+    await db.$client`
+      INSERT INTO account_deletions (uid, state, delete_after, record)
+      VALUES (${uid}, 'pending', 0, '{}'::jsonb)`;
+    const mintRes = await mint(uid);
+    expect(mintRes.statusCode).toBe(403);
+    expect(mintRes.json()).toEqual({ detail: "account_deletion_pending" });
+    expect(fake.posts("/key/generate")).toHaveLength(0);
+
+    const upgradeRes = await app.inject({
+      method: "POST",
+      url: "/upgrade",
+      headers: { authorization: `Bearer ${uid}`, "x-firebase-appcheck": APPCHECK },
+      payload: { tier: "pro" },
+    });
+    expect(upgradeRes.statusCode).toBe(403);
+    expect(upgradeRes.json()).toEqual({ detail: "account_deletion_pending" });
+
+    // A cancelled tombstone (recovery) no longer fences.
+    await db.$client`UPDATE account_deletions SET state = 'cancelled' WHERE uid = ${uid}`;
+    expect((await mint(uid)).statusCode).toBe(200);
+  });
+
   it("web platform stores the key under user:{uid}:web:keyid and sends team_id", async () => {
     const uid = testUid("mintweb");
     const res = await mint(`web|${uid}`);

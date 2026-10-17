@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { accountDeletions } from "@ovid/db";
 import {
   clientIp,
   enforceIpSignupQuota,
@@ -102,6 +103,19 @@ function requireIdentityHeaders(
   }
 }
 
+/**
+ * P9 Task 15: the deletion tombstone check for the /mint hot path (the plan's
+ * PIN: a lightweight `accountDeletions.get` here; the full lifecycle.access
+ * lock is reserved for admin mutations and billing verify). A tombstone in
+ * any state except cancelled/active fences new keys and tier upgrades.
+ */
+async function requireNoDeletionFence(deps: MintDeps, uid: string): Promise<void> {
+  const row = await accountDeletions.get(deps.db, uid);
+  if (row !== null && row.state !== "cancelled" && row.state !== "active") {
+    throw new HttpContractError(403, "account_deletion_pending");
+  }
+}
+
 export function registerMintRoutes(publicApp: FastifyInstance, deps: MintDeps): void {
   /**
    * POST /mint — identity, anti-abuse, free-cap, then the idempotent mint.
@@ -119,6 +133,7 @@ export function registerMintRoutes(publicApp: FastifyInstance, deps: MintDeps): 
     if (await isBanned(deps, uid, ip)) {
       throw new HttpContractError(403, "account suspended");
     }
+    await requireNoDeletionFence(deps, uid);
     await enforceMintRateLimit(deps, ip);
     await enforceIpSignupQuota(deps, uid, ip);
 
@@ -157,6 +172,8 @@ export function registerMintRoutes(publicApp: FastifyInstance, deps: MintDeps): 
     requireIdentityHeaders(deps, headers);
     const identity = await deps.verifyIdentity(headers);
     const uid = identity.uid;
+
+    await requireNoDeletionFence(deps, uid);
 
     const payload = (request.body ?? {}) as { tier?: unknown };
     const requested = typeof payload.tier === "string" ? payload.tier : "";

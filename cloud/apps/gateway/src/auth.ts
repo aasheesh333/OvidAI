@@ -11,6 +11,13 @@ export interface AuthPrincipal {
   uid: string;
   email: string | null;
   authTime: number;
+  /**
+   * P9 Task 15: Firebase's sign-in provider, surfaced for the deletion
+   * fence/admission seam (Task 16 shares/reports). Optional so existing
+   * compositions remain source-compatible; the account routes use their own
+   * verifier and never depend on this field.
+   */
+  signInProvider?: string;
 }
 
 export type Verifier = (
@@ -73,6 +80,9 @@ export function createFirebaseVerifier(app: App): Verifier {
       uid: decoded.uid,
       email: decoded.email ?? null,
       authTime: decoded.auth_time,
+      ...(typeof decoded.firebase?.sign_in_provider === "string"
+        ? { signInProvider: decoded.firebase.sign_in_provider }
+        : {}),
     };
   };
 }
@@ -89,7 +99,7 @@ export function createTestVerifier(): Verifier {
     if (match === null) {
       throw new UnauthenticatedError("invalid test token");
     }
-    return { uid: match[1], email: null, authTime: 0 };
+    return { uid: match[1], email: null, authTime: 0, signInProvider: "google.com" };
   };
 }
 
