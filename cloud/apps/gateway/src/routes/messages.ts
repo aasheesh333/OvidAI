@@ -4,7 +4,7 @@ import { attachments, messages, runs, sessions, users, type Db, type MessageRow 
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import type { MessageDto, Page, SendMessageResponse } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
-import { MintHttpError } from "../keys.js";
+import { DEFAULT_MINT_TIMEOUT_MS, MintHttpError, MintTimeoutError } from "../keys.js";
 import { badRequest, isUuid, notFound, parsePageLimit, queryValue, sendError, zodBadRequest } from "./http.js";
 
 // Message routes — all mounted inside the authenticated /cloud/v1 scope.
@@ -117,6 +117,33 @@ function isUniqueViolation(err: unknown): boolean {
   return false;
 }
 
+/**
+ * P10 Task 2: bounded internal-mint call. The provisioner contract takes no
+ * signal (and P9 Task 9's post-cutover shape is not landed yet), so the
+ * deadline is enforced here with a race — every provisioner implementation
+ * (the current HTTP one included) is bounded, and the HTTP implementation
+ * ALSO passes its own AbortSignal to fetch so the socket is released.
+ */
+async function ensureKeyBounded(
+  deps: GatewayDeps,
+  idToken: string,
+  appCheck: string | null,
+): Promise<void> {
+  const timeoutMs = deps.mintTimeoutMs ?? DEFAULT_MINT_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      deps.mint.ensureKey(idToken, appCheck),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new MintTimeoutError(timeoutMs)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   app.post("/sessions/:id/messages", async (request, reply) => {
     const { id: sessionId } = request.params as { id: string };
@@ -192,8 +219,22 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     //    other failure collapses to 409 key_not_minted.
     const { idToken, appCheck } = mintIdentity(request);
     try {
-      await deps.mint.ensureKey(idToken, appCheck);
+      await ensureKeyBounded(deps, idToken, appCheck);
     } catch (err) {
+      // P10 Task 2: a deadline breach is a bounded, retryable dependency
+      // failure — NOT a "this account has no key" verdict.
+      if (
+        err instanceof MintTimeoutError ||
+        (typeof err === "object" && err !== null && (err as { name?: unknown }).name === "TimeoutError")
+      ) {
+        request.log.warn({ err, sessionId }, "key provisioning timed out; run not enqueued");
+        return sendError(
+          reply,
+          503,
+          "unavailable",
+          "Key provisioning timed out; please retry shortly.",
+        );
+      }
       if (err instanceof MintHttpError && (err.status === 402 || err.status === 429)) {
         return reply.code(err.status).send(err.body);
       }

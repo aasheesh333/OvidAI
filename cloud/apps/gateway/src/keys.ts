@@ -36,19 +36,53 @@ export class MintHttpError extends Error {
 }
 
 /**
+ * Thrown by createHttpMintProvisioner when the mint call exceeds its deadline.
+ * The messages route maps it to a bounded 503 `unavailable` (never a hung
+ * request, never a misleading key_not_minted).
+ */
+export class MintTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number, options?: { cause?: unknown }) {
+    super(`mint call exceeded its ${timeoutMs} ms deadline`, options);
+    this.name = "MintTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** P10 Task 2: default deadline for the gateway's internal-mint HTTP call. */
+export const DEFAULT_MINT_TIMEOUT_MS = 10_000;
+
+function isTimeoutError(err: unknown): boolean {
+  return (
+    err instanceof MintTimeoutError ||
+    (typeof err === "object" &&
+      err !== null &&
+      (err as { name?: unknown }).name === "TimeoutError")
+  );
+}
+
+/**
  * POSTs `{mintBaseUrl}/mint`, forwarding the caller's Authorization and
  * X-Firebase-AppCheck headers verbatim with an empty JSON body. Non-2xx
  * responses throw MintHttpError with status + body preserved (402/429
  * passthrough is the route's decision, made from those fields). Network
- * failures propagate as-is.
+ * failures propagate as-is; a deadline breach surfaces as MintTimeoutError.
  */
 export function createHttpMintProvisioner(
   mintBaseUrl: string,
   fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = DEFAULT_MINT_TIMEOUT_MS,
 ): MintProvisioner {
   const base = mintBaseUrl.replace(/\/+$/, "");
   return {
     async ensureKey(idToken, appCheck) {
+      // Fresh per call: AbortSignal.timeout is single-use and starts ticking
+      // at creation.
+      const deadline =
+        Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? AbortSignal.timeout(timeoutMs)
+          : undefined;
       const headers: Record<string, string> = {
         authorization: `Bearer ${idToken}`,
         "content-type": "application/json",
@@ -56,11 +90,20 @@ export function createHttpMintProvisioner(
       if (appCheck !== null) {
         headers["x-firebase-appcheck"] = appCheck;
       }
-      const res = await fetchImpl(`${base}/mint`, {
-        method: "POST",
-        headers,
-        body: "{}",
-      });
+      let res: Response;
+      try {
+        res = await fetchImpl(`${base}/mint`, {
+          method: "POST",
+          headers,
+          body: "{}",
+          ...(deadline !== undefined ? { signal: deadline } : {}),
+        });
+      } catch (err) {
+        if (isTimeoutError(err) || (deadline?.aborted ?? false)) {
+          throw new MintTimeoutError(timeoutMs, { cause: err });
+        }
+        throw err;
+      }
       const text = await res.text();
       let body: unknown = text;
       if (text !== "") {

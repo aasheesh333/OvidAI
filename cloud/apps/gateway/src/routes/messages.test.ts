@@ -10,7 +10,8 @@ import {
   type SendMessageResponse,
 } from "@ovid/shared";
 import { buildGateway } from "../app.js";
-import { MintHttpError } from "../keys.js";
+import { createHttpMintProvisioner, MintHttpError } from "../keys.js";
+import type { MintProvisioner } from "@ovid/shared";
 import type { AttachmentPresigner } from "./attachments.js";
 import { closeDb, openTestDb, TEST_DATABASE_URL, testUid } from "../test/db.js";
 import {
@@ -54,7 +55,15 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
 
   /** Fresh gateway per test so stub behavior (failing add/mint) never leaks. */
   function makeApp(
-    behavior: { failAdd?: boolean; mintThrows?: unknown; presigner?: AttachmentPresigner } = {},
+    behavior: {
+      failAdd?: boolean;
+      mintThrows?: unknown;
+      presigner?: AttachmentPresigner;
+      /** P10 Task 2: override the provisioner (e.g. a hung HTTP fetch seam). */
+      mint?: MintProvisioner;
+      /** P10 Task 2: bounded mint deadline (default 10000). */
+      mintTimeoutMs?: number;
+    } = {},
   ): TestApp {
     const { queues, adds } = stubQueues({ failAdd: behavior.failAdd });
     const mint = stubMint(behavior.mintThrows === undefined ? {} : { throws: behavior.mintThrows });
@@ -65,8 +74,11 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       verifier: stubVerifier(),
       tickets: stubTickets(),
       keys: stubKeys(),
-      mint,
+      mint: behavior.mint ?? mint,
       events: noopEvents,
+      ...(behavior.mintTimeoutMs !== undefined
+        ? { mintTimeoutMs: behavior.mintTimeoutMs }
+        : {}),
       ...(behavior.presigner !== undefined ? { presigner: behavior.presigner } : {}),
     });
     const handle = { app, adds, mint };
@@ -228,6 +240,28 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
 
     // Ordering pin: ensureKey runs BEFORE messages.append/runs.create — after
     // all four failures the session has NO message rows and NO run rows.
+    expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
+  });
+
+  it("mint call gets a deadline: a hung internal-mint fetch → bounded 503 unavailable, no writes", async () => {
+    // P10 Task 2. The real HTTP provisioner seam (createHttpMintProvisioner,
+    // the current pre-P9-T9 shape) with a fetch that never settles. Without
+    // GatewayDeps.mintTimeoutMs the route would hang forever; with it the
+    // request must answer 503 `unavailable` well under 1 s.
+    const neverFetch = (() => new Promise<Response>(() => {})) as typeof fetch;
+    const mint = createHttpMintProvisioner("http://mint.invalid", neverFetch);
+    const handle = makeApp({ mint, mintTimeoutMs: 50 });
+    const uid = testUid("msg-mintdeadline");
+    const sid = await createSession(handle, uid);
+
+    const started = Date.now();
+    const res = await sendMessage(handle, uid, sid, { content: "bounded" });
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThan(1_000);
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error.code).toBe("unavailable");
+    expect(handle.adds).toHaveLength(0);
     expect(await tableCounts(sid)).toEqual({ messages: 0, runs: 0 });
   });
 

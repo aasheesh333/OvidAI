@@ -94,6 +94,19 @@ export interface WsDeps {
   /** Terminal-over-WS bridge (Task 13); main wires createRedisPtyBridge(redisQ). */
   pty: PtyBridge;
   /**
+   * P10 Task 2: optional server-level socket registry. When wired (main()
+   * always does), every live socket is tracked from connect to close so the
+   * SIGTERM drain can close them all with 1001 "server restarting". Absent in
+   * pre-P10 compositions (the registry is purely additive).
+   */
+  registry?: WsSocketRegistry;
+  /**
+   * P10 Task 2: structured warning sink for caught WS/event-listener errors
+   * (P1 Task 8 deferral). buildGateway defaults this to the Fastify logger;
+   * absent in bare compositions so tests stay silent.
+   */
+  logger?: { warn(obj: unknown, msg?: string): void };
+  /**
    * Browser viewer channel (Task 9); main wires
    * `{ redisFactory: () => new Redis(cfg.redisQUrl) }`. OPTIONAL so pre-P6
    * compositions stay source-compatible: when absent, every browser_* frame
@@ -134,6 +147,75 @@ export interface WsConnectionOptions {
   pingIntervalMs?: number;
   /** Test seam: overrides BROWSER_VIEWER_HEARTBEAT_MS for the join heartbeat. */
   browserHeartbeatMs?: number;
+}
+
+/**
+ * P10 Task 2: server-level registry of live WS sockets. ws.ts otherwise keeps
+ * only per-connection bookkeeping, so a shutdown handler has no way to reach
+ * the sockets the HTTP server is holding. main() creates ONE registry, passes
+ * it through GatewayDeps, and hands `closeAll` to installShutdownHandlers.
+ */
+export interface WsSocketRegistry {
+  add(socket: WebSocket): void;
+  remove(socket: WebSocket): void;
+  /** Live socket count (observability/tests). */
+  readonly size: number;
+  /**
+   * Sends a close frame with `code`/`reason` to every live socket and
+   * resolves once all have emitted 'close' (bounded per-socket wait, so a
+   * wedged peer cannot stall the drain past its hard-exit budget).
+   */
+  closeAll(code: number, reason: string): Promise<void>;
+}
+
+const CLOSE_FLUSH_TIMEOUT_MS = 1_000;
+
+export function createWsSocketRegistry(): WsSocketRegistry {
+  const sockets = new Set<WebSocket>();
+  return {
+    add(socket) {
+      sockets.add(socket);
+    },
+    remove(socket) {
+      sockets.delete(socket);
+    },
+    get size() {
+      return sockets.size;
+    },
+    async closeAll(code, reason) {
+      const live = [...sockets];
+      await Promise.all(
+        live.map(
+          (socket) =>
+            new Promise<void>((resolve) => {
+              if (socket.readyState === socket.CLOSED) {
+                sockets.delete(socket);
+                resolve();
+                return;
+              }
+              let settled = false;
+              const finish = (): void => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+              };
+              const timer = setTimeout(finish, CLOSE_FLUSH_TIMEOUT_MS);
+              timer.unref?.();
+              socket.once("close", () => {
+                sockets.delete(socket);
+                finish();
+              });
+              try {
+                socket.close(code, reason);
+              } catch {
+                finish();
+              }
+            }),
+        ),
+      );
+    },
+  };
 }
 
 /** App-private close code (4000–4999 range) for a failed ticket handshake. */
@@ -218,9 +300,21 @@ export async function handleWsConnection(
   deps: WsDeps,
   opts: WsConnectionOptions = {},
 ): Promise<void> {
+  // P10 Task 2: track the live socket for the shutdown drain. Registered
+  // synchronously BEFORE the ticket verify so a SIGTERM at any point after
+  // accept still reaches this socket.
+  deps.registry?.add(socket);
+
+  /** P1 Task 8 deferral: caught WS/listener errors are never silent. */
+  const logWarn = (err: unknown, op: string, sessionId?: string): void => {
+    deps.logger?.warn({ err, sessionId, op }, "ws handler error");
+  };
+
   // ws emits 'error' before 'close' on abnormal teardown; an EventEmitter
   // 'error' with no listener throws. Teardown happens in the 'close' handler.
-  socket.on("error", () => {});
+  socket.on("error", (err) => {
+    logWarn(err, "socket_error");
+  });
 
   // ---- Teardown bookkeeping — registered BEFORE any await ----
   // 'close' is never replayed to a late listener: if the peer drops during
@@ -281,6 +375,7 @@ export async function handleWsConnection(
   };
   socket.on("close", () => {
     closed = true;
+    deps.registry?.remove(socket);
     void teardownAll();
   });
 
@@ -301,7 +396,9 @@ export async function handleWsConnection(
     ingest(raw);
   });
 
-  const verified = await verifyTicket(deps.tickets, url.searchParams.get("ticket"));
+  const verified = await verifyTicket(deps.tickets, url.searchParams.get("ticket"), (err) =>
+    logWarn(err, "ticket_verify"),
+  );
   if (verified === null) {
     send(socket, {
       op: "error",
@@ -407,7 +504,8 @@ export async function handleWsConnection(
         if (sub.buffering) sub.buffered.push(event);
         else sendEvent(sub, event);
       });
-    } catch {
+    } catch (err) {
+      logWarn(err, "subscribe", sessionId);
       if (subs.get(sessionId) === sub) subs.delete(sessionId);
       send(socket, {
         op: "error",
@@ -428,7 +526,8 @@ export async function handleWsConnection(
     let replay: SessionEvent[];
     try {
       replay = await deps.events.readSince(sessionId, lastEventId, REPLAY_LIMIT);
-    } catch {
+    } catch (err) {
+      logWarn(err, "replay", sessionId);
       if (subs.get(sessionId) === sub) subs.delete(sessionId);
       await unsubscribe().catch(() => {});
       send(socket, {
@@ -696,7 +795,8 @@ export async function handleWsConnection(
           },
         },
       });
-    } catch {
+    } catch (err) {
+      logWarn(err, "browser_attach", sessionId);
       send(socket, {
         op: "error",
         code: "internal",
@@ -770,7 +870,8 @@ export async function handleWsConnection(
         userId: uid,
         decision: msg.decision,
       });
-    } catch {
+    } catch (err) {
+      logWarn(err, "approval_response", msg.sessionId);
       send(socket, {
         op: "error",
         code: "internal",
@@ -809,7 +910,8 @@ export async function handleWsConnection(
     }
     try {
       await deps.systemHub.respond(uid, msg.id, msg.payload);
-    } catch {
+    } catch (err) {
+      logWarn(err, "system_response");
       send(socket, {
         op: "error",
         code: "internal",
@@ -858,7 +960,8 @@ export async function handleWsConnection(
         if (systemSub !== entry) return; // replaced or torn down: ignore
         send(socket, { op: "system", event });
       });
-    } catch {
+    } catch (err) {
+      logWarn(err, "subscribe_system");
       if (systemSub === entry) systemSub = null;
       send(socket, {
         op: "error",
@@ -966,9 +1069,10 @@ export async function handleWsConnection(
     chain = chain.then(async () => {
       try {
         await processFrame(raw);
-      } catch {
+      } catch (err) {
         // Unexpected failure (e.g. db outage during the ownership check):
         // report generically, keep the connection.
+        logWarn(err, "process_frame");
         send(socket, { op: "error", code: "internal", message: "Internal error." });
       }
     });
@@ -979,13 +1083,15 @@ export async function handleWsConnection(
 async function verifyTicket(
   tickets: TicketStore,
   ticket: string | null,
+  onError?: (err: unknown) => void,
 ): Promise<{ uid: string } | null> {
   if (ticket === null) return null;
   try {
     return await tickets.verify(ticket);
-  } catch {
+  } catch (err) {
     // Ticket-store outage: identity cannot be proven → reject like an invalid
-    // ticket (the client re-mints and retries).
+    // ticket (the client re-mints and retries). Logged, never silent.
+    onError?.(err);
     return null;
   }
 }

@@ -42,7 +42,7 @@ import { registerWorkspaceRoutes } from "./routes/workspace.js";
 import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
 import type { WorkerClient } from "./workerClient.js";
-import type { ApprovalPublisher, WsDeps } from "./ws.js";
+import type { ApprovalPublisher, WsDeps, WsSocketRegistry } from "./ws.js";
 import type { BrowserChannelDeps } from "./browserChannel.js";
 import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
 import type { SystemHub } from "./systemChannel.js";
@@ -154,6 +154,23 @@ export interface GatewayDeps {
    * one deliberate exception: it mirrors the presigner TTL, not row state.)
    */
   clock?: () => Date;
+  /**
+   * P10 Task 2: bounded deadline (ms) on the internal-mint key-provisioning
+   * call in POST /sessions/:id/messages. Default 10000. A timeout answers
+   * 503 `unavailable` (bounded), never a hung request.
+   */
+  mintTimeoutMs?: number;
+  /**
+   * P10 Task 2 (P1 Task 8 deferral): structured warning sink for caught
+   * WS/event-listener errors. Defaults to the Fastify logger when absent.
+   */
+  logger?: { warn(obj: unknown, msg?: string): void };
+  /**
+   * P10 Task 2: server-level live-socket registry. main() creates one and
+   * hands it to installShutdownHandlers via closeWs; absent → no tracking
+   * (pre-P10 compositions/tests stay source-compatible).
+   */
+  wsRegistry?: WsSocketRegistry;
   /**
    * P5 Task 15: envelope crypto for MCP/plugin secret sealing
    * (recordIds mcp_servers:{id} / plugins:{id}). main() wires it from
@@ -342,6 +359,10 @@ export function buildGateway(
       // P4 Task 11/12: the scheduler system bus rides the SAME field REST
       // publishes on, so WS subscribers see every lifecycle event.
       system: deps.system,
+      // P10 Task 2: live-socket tracking for the SIGTERM drain, and the
+      // structured warning sink for caught WS/listener errors.
+      registry: deps.wsRegistry,
+      logger: deps.logger ?? app.log,
     };
     registerWsRoute(scope, wsDeps);
   });
@@ -365,6 +386,76 @@ export function buildGateway(
   }
 
   return app;
+}
+
+/** Default graceful-drain budget before a forced exit. */
+export const DEFAULT_SHUTDOWN_DRAIN_MS = 10_000;
+/** Close code sent to live WS sockets on a restart drain (RFC 6455 going away). */
+export const WS_RESTART_CLOSE_CODE = 1001;
+/** Human-readable close reason the thin client observes on a restart. */
+export const WS_RESTART_CLOSE_REASON = "server restarting";
+
+export interface ShutdownHandlerOptions {
+  /** Hard-exit deadline measured from the signal. Default 10000 ms. */
+  drainMs?: number;
+  /**
+   * Closes every live WS socket with the restart code/reason. main() passes
+   * `createWsSocketRegistry().closeAll`; the return value is awaited so close
+   * frames flush before `app.close()` tears the server down.
+   */
+  closeWs?: (code: number, reason: string) => void | Promise<void>;
+  /** Test seam: process exit (default `process.exit`). */
+  exit?: (code: number) => void;
+}
+
+/**
+ * P10 Task 2: gateway SIGTERM/SIGINT drain.
+ *
+ * On the first signal: close every live WS socket with code 1001 reason
+ * "server restarting" (so reconnecting clients know a restart, not a
+ * failure), stop accepting / drain the Fastify server via `app.close()`, then
+ * exit 0. A `drainMs` hard-exit timer guarantees the process never outlives
+ * the orchestrator's stop grace period. Repeated signals are idempotent.
+ *
+ * Returns the shutdown function (awaitable in tests); installed by main().
+ */
+export function installShutdownHandlers(
+  app: FastifyInstance,
+  opts: ShutdownHandlerOptions = {},
+): () => Promise<void> {
+  const drainMs = opts.drainMs ?? DEFAULT_SHUTDOWN_DRAIN_MS;
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  let inFlight: Promise<void> | null = null;
+
+  const shutdown = (): Promise<void> => {
+    if (inFlight !== null) return inFlight;
+    inFlight = (async () => {
+      // Armed FIRST: even a wedged close path cannot outlive the budget.
+      const hardExit = setTimeout(() => exit(1), drainMs);
+      hardExit.unref?.();
+      try {
+        await opts.closeWs?.(WS_RESTART_CLOSE_CODE, WS_RESTART_CLOSE_REASON);
+      } catch (err) {
+        app.log.warn({ err }, "shutdown: closing ws sockets failed");
+      }
+      try {
+        await app.close();
+      } catch (err) {
+        app.log.warn({ err }, "shutdown: app.close failed");
+      } finally {
+        clearTimeout(hardExit);
+      }
+      exit(0);
+    })();
+    return inFlight;
+  };
+
+  const onSignal = (): void => {
+    void shutdown();
+  };
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
+  return shutdown;
 }
 
 /** Never-wired bridge fallback: every pty frame fails loudly with `internal`. */

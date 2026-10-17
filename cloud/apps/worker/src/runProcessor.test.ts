@@ -409,6 +409,82 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(await readMirror(seeded.sessionId)).toEqual(evts);
     });
 
+    it("stalled SSE stream → idle deadline aborts and retries as transient (first ladder rung 3000)", async () => {
+      // P10 Task 2. A real [OI] SSE server writes ONE delta then holds the
+      // response open. With RunDeps.streamIdleTimeoutMs the transport must be
+      // aborted, classified transient, and retried on the 3 s ladder rung;
+      // the second attempt (fresh idle arm) completes normally.
+      const seeded = await seedRun();
+      let requests = 0;
+      let firstRequestAborted = false;
+      const server = createServer((req, res) => {
+        req.on("data", () => {});
+        req.on("end", () => {
+          requests += 1;
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          if (requests === 1) {
+            res.write(
+              `data: ${JSON.stringify({
+                choices: [{ delta: { content: "partial" }, finish_reason: null }],
+              })}\n\n`,
+            );
+            res.on("close", () => {
+              firstRequestAborted = true;
+            });
+            return; // hold forever: only the idle watchdog can end this
+          }
+          res.write(
+            `data: ${JSON.stringify({
+              choices: [{ delta: { content: "recovered" }, finish_reason: null }],
+            })}\n\n`,
+          );
+          res.write(
+            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+          );
+          res.end("data: [DONE]\n\n");
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const litellmBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+      try {
+        await createAgentRunProcessor(
+          makeDeps(createOpenAiTransport(), {
+            litellmBaseUrl,
+            streamIdleTimeoutMs: 100,
+          }),
+        )(jobOf(seeded));
+
+        // The server saw the aborted first response (the abort reached the
+        // underlying fetch/socket, not just the processor's promise).
+        const abortDeadline = Date.now() + 1_000;
+        while (!firstRequestAborted && Date.now() < abortDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(firstRequestAborted).toBe(true);
+        expect(requests).toBe(2);
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+
+      const evts = await readEvents(seeded.sessionId);
+      expect(types(evts)).toEqual([
+        "run_started",
+        "message_delta",
+        "run_started_retry",
+        "message_delta",
+        "message_completed",
+        "run_completed",
+      ]);
+      expect(evts[2]!.payload).toEqual({ attempt: 2, nextBackoffMs: 3000 });
+      expect(sleeps).toEqual([3000]);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed", attempts: 2 });
+      const assistants = await assistantRows(seeded.sessionId);
+      expect(assistants.map((r) => r.content)).toEqual(["recovered"]);
+      expect(await readMirror(seeded.sessionId)).toEqual(evts);
+    }, 15_000);
+
     it("5 transients → run_failed(model_transient_exhausted), status failed, attempts 5, sleeps [3000, 9000, 27000, 60000]", async () => {
       const seeded = await seedRun();
       const { transport, calls } = stubTransport(

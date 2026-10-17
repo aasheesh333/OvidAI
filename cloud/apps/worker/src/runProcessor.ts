@@ -73,8 +73,11 @@ import {
 } from "@ovid/agent-core";
 import { createRedisApprovalBridge } from "./approvalBridge.js";
 import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   TerminalModelError,
   TransientModelError,
+  withAgentStreamIdleTimeout,
+  withLegacyStreamIdleTimeout,
   type ChatMessage,
   type ModelTransport,
   type ToolCall,
@@ -188,6 +191,13 @@ export interface RunDeps {
   tools: ToolRegistry;
   sleep?: (ms: number) => Promise<void>;
   /**
+   * P10 Task 2: per-chunk SSE idle deadline (ms). No delta for this long ⇒
+   * the in-flight request is aborted and classified TRANSIENT (enters the
+   * 3/9/27/60 s ladder). Default DEFAULT_STREAM_IDLE_TIMEOUT_MS (120 s);
+   * a fresh timer is armed for every attempt.
+   */
+  streamIdleTimeoutMs?: number;
+  /**
    * Cap on how long a job may wait for older active runs of the same session
    * (C1), in ms. Default DEFAULT_RUN_QUEUE_WAIT_MS; the worker entry point
    * reads OVID_RUN_QUEUE_WAIT_MS.
@@ -250,6 +260,11 @@ export interface FullRunDeps {
   /** C1 cap (env OVID_RUN_QUEUE_WAIT_MS); default 10 min. */
   runQueueWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * P10 Task 2: per-chunk SSE idle deadline (ms) for BOTH provider
+   * transports. Default 120000; a fresh timer is armed per attempt.
+   */
+  streamIdleTimeoutMs?: number;
   /** Optional P2 handle factory (production: SandboxManager.attach). */
   sandboxHandleFor?: (userId: string, tier: "free" | "pro") => Promise<SandboxHandle>;
   /**
@@ -661,6 +676,12 @@ export function createAgentRunProcessor(
   const sleep = deps.sleep ?? defaultSleep;
   const runQueueWaitMs = deps.runQueueWaitMs ?? DEFAULT_RUN_QUEUE_WAIT_MS;
   const cancelCheckIntervalMs = deps.cancelCheckIntervalMs ?? DEFAULT_CANCEL_CHECK_INTERVAL_MS;
+  // P10 Task 2: one idle-guarded view of the injected transport; every
+  // attempt (v0 and the tool engine) gets a fresh idle arm per stream call.
+  const transport = withLegacyStreamIdleTimeout(
+    deps.transport,
+    deps.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  );
 
   return async (job) => {
     const { runId, sessionId, userId } = job.data;
@@ -888,7 +909,7 @@ export function createAgentRunProcessor(
     // The engine's openai leg is P2's legacy transport adapted onto the
     // canonical seam; the anthropic leg is never selected (the LiteLLM
     // resolver always yields kind "litellm").
-    const legacy = adaptLegacyTransport(deps.transport);
+    const legacy = adaptLegacyTransport(transport);
 
     // Cancel polling needs the live engine; the engine needs the transport.
     let engine: ReturnType<typeof createAgentEngine> | undefined;
@@ -1006,7 +1027,7 @@ export function createAgentRunProcessor(
       };
 
       try {
-        const result = await deps.transport.stream(
+        const result = await transport.stream(
           {
             baseUrl: deps.litellmBaseUrl,
             apiKey: o.apiKey,
@@ -1289,8 +1310,18 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     return createCoreToolRegistry(coreTools);
   };
 
-  const openai = createOpenAiAgentTransport(providerEgress);
-  const anthropic = createAnthropicTransport(providerEgress);
+  // P10 Task 2: both provider transports carry the per-chunk SSE idle
+  // deadline; a stalled stream aborts and surfaces as TransientModelError,
+  // so the engine's 3/9/27/60 s ladder retries it.
+  const streamIdleTimeoutMs = deps.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  const openai = withAgentStreamIdleTimeout(
+    createOpenAiAgentTransport(providerEgress),
+    streamIdleTimeoutMs,
+  );
+  const anthropic = withAgentStreamIdleTimeout(
+    createAnthropicTransport(providerEgress),
+    streamIdleTimeoutMs,
+  );
 
   const processor = (async (job: {
     data: AgentRunJob & {

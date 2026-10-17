@@ -26,7 +26,7 @@ import {
 import { createQueues } from "@ovid/queue";
 import { systemEventEnvelope } from "@ovid/shared";
 import { createActivityTracker, createStorage, loadStorageEnv } from "@ovid/storage";
-import { buildGateway } from "./app.js";
+import { buildGateway, installShutdownHandlers } from "./app.js";
 import type { AccountRouteDeps } from "./routes/account.js";
 import { createFirebaseVerifier, createTestVerifier } from "./auth.js";
 import { loadGatewayEnv } from "./env.js";
@@ -34,7 +34,7 @@ import { createHttpMintProvisioner, createMintRedisKeyProvider } from "./keys.js
 import { createTicketStore } from "./tickets.js";
 import { createWorkerClient } from "./workerClient.js";
 import { createRedisPtyBridge } from "./wsPty.js";
-import { createRedisApprovalPublisher } from "./ws.js";
+import { createRedisApprovalPublisher, createWsSocketRegistry } from "./ws.js";
 import { createSystemHub } from "./systemChannel.js";
 
 /**
@@ -198,6 +198,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     token: cfg.internalToken,
   });
 
+  // P10 Task 2: ONE server-level registry of live WS sockets, used by the
+  // SIGTERM/SIGINT drain below to close them with 1001 "server restarting".
+  const wsRegistry = createWsSocketRegistry();
+
   const app = buildGateway(
     {
       db,
@@ -256,6 +260,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
         : {}),
       reports: accountAdmission !== undefined ? { admission: accountAdmission } : {},
       ...(account !== undefined ? { account } : {}),
+      // P10 Task 2: the shutdown drain reaches every live WS socket through
+      // this registry (installShutdownHandlers below passes closeWs).
+      wsRegistry,
     },
     { logger: true },
   );
@@ -272,5 +279,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   });
 
   await app.listen({ host: cfg.host, port: cfg.port });
+
+  // P10 Task 2: SIGTERM/SIGINT drain — close WS 1001 "server restarting",
+  // app.close(), hard-exit after 10 s. Installed AFTER listen so a signal
+  // that races startup never sees a half-composed app.
+  installShutdownHandlers(app, {
+    closeWs: (code, reason) => wsRegistry.closeAll(code, reason),
+  });
+
   return app;
 }

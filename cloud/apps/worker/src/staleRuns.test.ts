@@ -191,6 +191,24 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       }
     });
 
+    it("concurrent sweeps emit exactly one run_failed for the same stale row", async () => {
+      const stale = await seedRun("running", { startedAt: new Date(BASE) });
+
+      // Both sweeps list the row; only the winner of the conditional
+      // status='running' claim may emit. One event total, count sums to 1.
+      const [first, second] = await Promise.all([sweep(), sweep()]);
+      expect(first + second).toBe(1);
+
+      const evts = await readEvents(stale.sessionId);
+      expect(evts.map((e) => e.type)).toEqual(["run_failed"]);
+      expect(evts[0]!.payload).toEqual({ runId: stale.runId, code: "run_lost" });
+      expect(await readMirror(stale.sessionId)).toEqual(evts);
+      expect(await runRow(stale.runId)).toEqual({
+        status: "failed",
+        lastError: "run_lost: stale sweep",
+      });
+    });
+
     it("injected clock is authoritative: a run the REAL clock would call stale is fresh under the 2023 clock", async () => {
       // startedAt = BASE (Nov 2023): ~3 years stale under the real wall clock.
       const seeded = await seedRun("running", { startedAt: new Date(BASE) });
