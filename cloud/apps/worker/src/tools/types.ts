@@ -1,3 +1,4 @@
+import type { SessionMode } from "@ovid/agent-core";
 import type { SandboxHandle } from "@ovid/sandbox";
 import type { SessionEventType } from "@ovid/shared";
 
@@ -32,6 +33,15 @@ export interface ToolContext {
   sessionId: string;
   runId: string;
   emitEvent(type: SessionEventType, payload: Record<string, unknown>): Promise<void>;
+  /**
+   * P3 additive (ruling R2): the canonical agent-core ToolContext threads
+   * these through agentToolAdapter. ADDITIVE OPTIONAL fields — P2's own
+   * callers and tests construct the context without them and are unaffected.
+   */
+  callKey?: string;
+  signal?: AbortSignal;
+  mode?: SessionMode;
+  planMode?: boolean;
 }
 
 export interface AgentTool {
