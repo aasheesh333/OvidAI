@@ -11,6 +11,7 @@ export * from "./notify.js";
 export * from "./ptyBridge.js";
 export * from "./runProcessor.js";
 export * from "./sandboxAdapter.js";
+export * from "./schedulerTick.js";
 export * from "./staleRuns.js";
 export * from "./tools/agentToolAdapter.js";
 export * from "./tools/confinement.js";
