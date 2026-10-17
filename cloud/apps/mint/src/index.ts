@@ -11,14 +11,19 @@ export * from "./projection.js";
 export * from "./windows.js";
 export * from "./usage.js";
 export * from "./catalog.js";
+// Task 6: the public mint surface — verifier, idempotent key minting, routes.
+export * from "./verifier.js";
+export * from "./keyMint.js";
+export * from "./mintRoutes.js";
 
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
 import { createDb } from "@ovid/db";
-import { buildMintApps, HttpContractError, type MintIdentityVerifier } from "./app.js";
+import { buildMintApps } from "./app.js";
 import { createAlerter } from "./alerts.js";
 import { loadMintEnv } from "./env.js";
 import { createLiteLlmAdmin } from "./litellmAdmin.js";
+import { createMintVerifier } from "./verifier.js";
 
 /**
  * Composition root — intentionally untested-thin (later e2e tasks exercise
@@ -42,7 +47,7 @@ export async function main(
     litellm,
     env: cfg,
     alerter,
-    verifyIdentity: pendingVerifier,
+    verifyIdentity: createMintVerifier(cfg),
   });
 
   // Owned connections close with the apps (deploy scripts call app.close()).
@@ -60,13 +65,3 @@ export async function main(
   }
   return { publicApp, adminApp };
 }
-
-/**
- * LOUD placeholder until Task 6 lands verifier.ts (createMintVerifier): no
- * scaffold route calls it, so it can only fire if a route is added without
- * its verifier — in which case it refuses with a contract 503 rather than
- * silently treating anyone as verified.
- */
-const pendingVerifier: MintIdentityVerifier = async () => {
-  throw new HttpContractError(503, "identity verifier not wired (Task 6)");
-};

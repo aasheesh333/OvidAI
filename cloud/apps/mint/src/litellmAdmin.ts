@@ -59,6 +59,13 @@ export interface LiteLlmAdmin {
   keyUpdateStatus(body: Record<string, unknown>): Promise<number>;
   /** GET /key/info?key= — 404/401/403 (any non-200) → null. */
   keyInfo(key: string): Promise<KeyInfo | null>;
+  /**
+   * GET /key/info?key= WITH the HTTP status. Task 6's key-state rule must tell
+   * a gone key (401/403/404 → re-issue) from a LiteLLM outage (status 0/5xx →
+   * keep the key; never churn keys during an outage), exactly like mint.py's
+   * _key_state.
+   */
+  keyInfoStatus(key: string): Promise<{ status: number; info: KeyInfo | null }>;
   /** POST /key/block {key} — returns the HTTP status (0 = network error). */
   keyBlock(key: string): Promise<number>;
   /** POST /key/unblock {key} — returns the HTTP status (0 = network error). */
@@ -200,6 +207,34 @@ export function createLiteLlmAdmin(
     }
   }
 
+  /** key/info with the HTTP status (see keyInfoStatus in the interface). */
+  async function keyInfoStatus(key: string): Promise<{
+    status: number;
+    info: KeyInfo | null;
+  }> {
+    try {
+      const res = await request("/key/info", { method: "GET", params: { key } });
+      if (!res.ok) {
+        return { status: res.status, info: null };
+      }
+      // mint.py: data.get("info", data) or {} — the row is under "info"
+      // when present, otherwise the body itself is the row.
+      const data = await readJson(res);
+      if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) {
+        return { status: res.status, info: {} };
+      }
+      const obj = data as Record<string, unknown>;
+      const row = "info" in obj ? obj.info : obj;
+      if (row === null || row === undefined || typeof row !== "object" || Array.isArray(row)) {
+        return { status: res.status, info: {} };
+      }
+      return { status: res.status, info: row as KeyInfo };
+    } catch (err) {
+      console.log(`[mint] key/info error: ${errorName(err)}`);
+      return { status: 0, info: null };
+    }
+  }
+
   return {
     async keyGenerate(body) {
       const res = await request("/key/generate", { method: "POST", json: body });
@@ -221,28 +256,10 @@ export function createLiteLlmAdmin(
     keyUpdateStatus: (body) => logOnlyPost("/key/update", body),
 
     async keyInfo(key) {
-      try {
-        const res = await request("/key/info", { method: "GET", params: { key } });
-        if (!res.ok) {
-          return null;
-        }
-        // mint.py: data.get("info", data) or {} — the row is under "info"
-        // when present, otherwise the body itself is the row.
-        const data = await readJson(res);
-        if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) {
-          return {};
-        }
-        const obj = data as Record<string, unknown>;
-        const row = "info" in obj ? obj.info : obj;
-        if (row === null || row === undefined || typeof row !== "object" || Array.isArray(row)) {
-          return {};
-        }
-        return row as KeyInfo;
-      } catch (err) {
-        console.log(`[mint] key/info error: ${errorName(err)}`);
-        return null;
-      }
+      return (await keyInfoStatus(key)).info;
     },
+
+    keyInfoStatus,
 
     keyBlock: (key) => logOnlyPost("/key/block", { key }),
     keyUnblock: (key) => logOnlyPost("/key/unblock", { key }),

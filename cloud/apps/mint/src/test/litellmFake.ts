@@ -104,8 +104,17 @@ export class FakeLiteLlm {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
-  addKey(token: string, opts: Partial<FakeKey> = {}): string {
-    this.keys.set(token, {
+  /** Per-test isolation: keys, users, logs, calls and the generate counter. */
+  reset(): void {
+    this.keys.clear();
+    this.users.clear();
+    this.models.length = 0;
+    this.logs.length = 0;
+    this.calls.length = 0;
+    this.counter = 0;
+  }
+
+  addKey(token: string, opts: Partial<FakeKey> = {}): string {    this.keys.set(token, {
       token,
       spend: 0,
       max_budget: null,

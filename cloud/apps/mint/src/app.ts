@@ -4,6 +4,7 @@ import type { Redis } from "ioredis";
 import type { Alerter } from "./alerts.js";
 import type { MintEnv } from "./env.js";
 import type { LiteLlmAdmin } from "./litellmAdmin.js";
+import { registerMintRoutes } from "./mintRoutes.js";
 import { registerUsageRoutes } from "./usage.js";
 
 /**
@@ -58,6 +59,11 @@ export interface MintDeps {
   clock?: () => Date;
   /** Seams for later tasks' outbound calls (billing Play API, image probes). */
   fetchImpl?: typeof fetch;
+  /**
+   * Task 6: the mintlock wait (mint.py: 20 × 250 ms). Injectable so the
+   * route/key-mint tests can pin the 409 without a 5-second sleep.
+   */
+  mintLock?: { pollMs: number; polls: number };
 }
 
 /**
@@ -107,9 +113,10 @@ export function buildMintApps(deps: MintDeps): {
   const publicApp = Fastify({ logger: false });
   installErrorHandling(publicApp);
   publicApp.get("/healthz", async () => ({ ok: true }));
-  // Task 5: the app-facing /usage contract. Later tasks register their own
-  // route groups here (Tasks 6–8, 12–15).
+  // Task 5: the app-facing /usage contract. Task 6: /mint, /upgrade, /plans
+  // and /v1/models. Later tasks register their own route groups here.
   registerUsageRoutes(publicApp, deps);
+  registerMintRoutes(publicApp, deps);
 
   const adminApp = Fastify({ logger: false });
   installErrorHandling(adminApp);

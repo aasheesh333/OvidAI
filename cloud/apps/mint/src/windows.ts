@@ -282,7 +282,7 @@ export async function userBudgetTarget(
 }
 
 /** mint.py ensure_user_budget — the duration is sent only when it changes. */
-async function ensureUserBudget(
+export async function ensureUserBudget(
   deps: MintDeps,
   uid: string,
   tier: string,
