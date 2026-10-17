@@ -1,6 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attachments, eventMirror, grantsRepo, messages, runs, type Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
@@ -24,33 +23,45 @@ import type { ActivityTracker } from "@ovid/storage";
 import type { Redis } from "ioredis";
 import {
   adaptLegacyTransport,
+  commandPrePass,
   createAgentEngine,
   createAnthropicTransport,
   createApprovalGate,
+  createCommandRunner,
+  createCompactor,
   createExitPlanModeTool,
   createFetchUrlTool,
+  createFileHookSource,
   createGitTools,
   createGoalTodoTools,
   createGuardedEgressFetch,
+  createHookEngine,
   createMemoryTools,
   createOpenAiAgentTransport,
   createPostgresSessionStateStore,
   createRepoTools,
   createSandboxTools,
   createSessionSearchTool,
+  createSkillActivation,
+  createSkillCatalog,
+  createSkillTool,
   createSsrfGuard,
   createToolRegistry as createCoreToolRegistry,
   createWebSearchTool,
   findApplicableGrant,
   litellmKeyResolver,
   normalizeGrantHost,
+  presetById,
   type AgentTransport,
   type Compactor,
   type EgressFetch,
+  type EgressHopHook,
   type GitHubApiPort,
   type HookEngine,
   type SandboxPort,
+  type SessionMode,
   type SkillCatalog,
+  type SsrfGuard,
   type Tool as CoreTool,
   type ToolRegistry as CoreToolRegistry,
 } from "@ovid/agent-core";
@@ -233,13 +244,22 @@ export interface FullRunDeps {
   runQueueWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
   /** Optional P2 handle factory (production: SandboxManager.attach). */
-  sandboxHandleFor?: (userId: string) => Promise<SandboxHandle>;
+  sandboxHandleFor?: (userId: string, tier: "free" | "pro") => Promise<SandboxHandle>;
+  /**
+   * P3 Task 16 review I2: per-tier SandboxPort. Production wires one port per
+   * tier so the user's quota project is honoured (`free` 500 MB / `pro`
+   * 2048 MB); absent → `sandbox` serves both tiers (tests/dev).
+   */
+  sandboxForTier?: (tier: "free" | "pro") => SandboxPort;
   /**
    * Test-only egress override. Production MUST omit this: the default is the
-   * SSRF-guarded fetch (spec D3/§11). Tests inject a plain fetch to reach a
-   * loopback SSE mock (the T5-I1 pattern).
+   * provider-origin allowlist over the SSRF-guarded fetch (spec D3/§11).
+   * Tests inject a plain fetch to reach a loopback SSE mock (the T5-I1
+   * pattern).
    */
   egress?: EgressFetch;
+  /** Secrets scrubbed from hook payloads (env-provided; default none). */
+  hookSecrets?: () => readonly string[];
   /** Optional attachment seam (see RunAttachmentStorage). */
   storage?: RunAttachmentStorage;
   /** P7 Task 11: hydrate before the run (see RunDeps.ensureWarm). */
@@ -482,20 +502,85 @@ function withCancelPolling(
 }
 
 /**
+ * Provider egress (T16 review C1): the SSRF guard refuses loopback/private
+ * hosts and non-80/443 ports, but the deployment's LiteLLM endpoint IS
+ * `http://127.0.0.1:4000` (deploy/worker.env.example). Operator-configured
+ * provider origins are therefore trusted EXACTLY (scheme + host + port) and
+ * fetched directly; every other URL — every user-supplied URL — still goes
+ * through the full guarded fetch (SSRF check, per-hop checks, redirect cap).
+ *
+ * Redirects on a provider origin are REFUSED: a provider response is not a
+ * user grant, and following it could leave the trusted origin.
+ */
+export function createProviderEgress(o: {
+  guard: SsrfGuard;
+  providerBaseUrls: readonly string[];
+  fetchImpl?: typeof fetch;
+  maxRedirects?: number;
+  onHop?: EgressHopHook;
+}): EgressFetch {
+  const fetchImpl = o.fetchImpl ?? fetch;
+  const guarded = createGuardedEgressFetch(o.guard, fetchImpl, o.maxRedirects, o.onHop);
+  const trusted = new Set<string>();
+  for (const base of o.providerBaseUrls) {
+    try {
+      trusted.add(new URL(base).origin);
+    } catch {
+      // A malformed base URL is a config error the transport will surface;
+      // it grants nothing here.
+    }
+  }
+  return async (url, init) => {
+    let origin: string | null = null;
+    try {
+      origin = new URL(url).origin;
+    } catch {
+      origin = null;
+    }
+    if (origin === null || !trusted.has(origin)) return guarded(url, init);
+    const res = await fetchImpl(url, { ...init, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      // Release the body, then refuse: the provider must not redirect the
+      // worker's credentialed request to an unvetted destination.
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* already released */
+      }
+      throw new Error(`provider endpoint ${origin} returned a redirect; refusing to follow`);
+    }
+    return res;
+  };
+}
+
+/**
  * A SandboxHandle synthesized over a SandboxPort — the full processor's
  * fallback when no P2 handle factory is wired. Shell/job tools work (exec is
- * delegated with the canonical callKey); the host-side file tools need the
- * real handle (`sandboxHandleFor`).
+ * delegated with the canonical callKey), but the P2 host-side file tools
+ * resolve paths through `workspaceDir`, which this handle does NOT provide:
+ * a missing factory must fail LOUD, never silently read/write the worker
+ * host's filesystem (T16 review I5).
  */
 function portBackedHandle(
   port: SandboxPort,
   ctx: { userId: string; callKey: string },
 ): SandboxHandle {
+  const wiringError = (): never => {
+    throw new Error(
+      "worker wiring: FullRunDeps.sandboxHandleFor is required — the P2 " +
+        "host-side file tools need the real sandbox handle (refusing to fall " +
+        "back to the worker host filesystem)",
+    );
+  };
   return {
     userId: ctx.userId,
     uid: 0,
-    workspaceDir: join(tmpdir(), "ovid-full", ctx.userId),
-    homeDir: "",
+    get workspaceDir(): string {
+      return wiringError();
+    },
+    get homeDir(): string {
+      return wiringError();
+    },
     jailWorkspaceDir: "/workspace",
     async exec(req: ExecRequest): Promise<ExecResult> {
       const res = await port.exec(ctx.userId, {
@@ -1055,7 +1140,12 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     }
   };
 
-  const providerEgress: EgressFetch = deps.egress ?? createGuardedEgressFetch(guard);
+  const providerEgress: EgressFetch =
+    deps.egress ??
+    createProviderEgress({
+      guard,
+      providerBaseUrls: [deps.litellmBaseUrl, deps.anthropicBaseUrl],
+    });
   const toolEgress: EgressFetch =
     deps.egress ?? createGuardedEgressFetch(guard, fetch, 5, grantHop);
 
@@ -1080,35 +1170,54 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
   const githubConnected = deps.github !== null;
 
   const workerRegistry = createToolRegistry();
-  const p2Tools = adaptAgentTools(workerRegistry.tools, {
-    sandboxFor: async (ctx) =>
-      deps.sandboxHandleFor !== undefined
-        ? deps.sandboxHandleFor(ctx.userId)
-        : portBackedHandle(deps.sandbox, ctx),
-    emitEvent: async () => {},
-    emitEventFor: (ctx) => (type, payload) => sinkFor(ctx.sessionId).emit(type, payload),
-  });
 
-  const coreTools = [
-    ...p2Tools,
-    ...createSandboxTools({ sandbox: deps.sandbox }),
-    withGrantHop(
-      createFetchUrlTool({
-        egress: toolEgress,
-        guard,
-        approvals,
-        sandbox: deps.sandbox,
+  /**
+   * Per-run registry: the sandbox-backed tools bind the run's TIERED port
+   * (review I2) and the skill catalog/tool bind the run's userId (the catalog
+   * API carries only a sessionId). Building it per run is cheap and keeps
+   * per-user state out of the long-lived processor.
+   */
+  const buildRegistry = (o: {
+    sandbox: SandboxPort;
+    userId: string;
+    tier: "free" | "pro";
+    skills: SkillCatalog;
+  }): CoreToolRegistry => {
+    const p2Tools = adaptAgentTools(workerRegistry.tools, {
+      sandboxFor: async (ctx) =>
+        deps.sandboxHandleFor !== undefined
+          ? deps.sandboxHandleFor(ctx.userId, o.tier)
+          : portBackedHandle(o.sandbox, ctx),
+      emitEvent: async () => {},
+      emitEventFor: (ctx) => (type, payload) => sinkFor(ctx.sessionId).emit(type, payload),
+    });
+
+    const coreTools = [
+      ...p2Tools,
+      ...createSandboxTools({ sandbox: o.sandbox }),
+      withGrantHop(
+        createFetchUrlTool({
+          egress: toolEgress,
+          guard,
+          approvals,
+          sandbox: o.sandbox,
+        }),
+      ),
+      withGrantHop(createWebSearchTool({ egress: toolEgress })),
+      ...createGitTools({ sandbox: o.sandbox, approvals, github: deps.github }),
+      ...createRepoTools({ github: deps.github }),
+      ...(memoryEnabled ? createMemoryTools({ sandbox: o.sandbox }) : []),
+      ...createGoalTodoTools({ state, sinkFactory: sinkFor }),
+      createSessionSearchTool({ db: deps.db }),
+      createExitPlanModeTool({ state, approvals }),
+      // Task 17 (T16 review I4): the model-invocable skill tool.
+      createSkillTool({
+        catalog: o.skills,
+        onActivate: createSkillActivation(state),
       }),
-    ),
-    withGrantHop(createWebSearchTool({ egress: toolEgress })),
-    ...createGitTools({ sandbox: deps.sandbox, approvals, github: deps.github }),
-    ...createRepoTools({ github: deps.github }),
-    ...(memoryEnabled ? createMemoryTools({ sandbox: deps.sandbox }) : []),
-    ...createGoalTodoTools({ state, sinkFactory: sinkFor }),
-    createSessionSearchTool({ db: deps.db }),
-    createExitPlanModeTool({ state, approvals }),
-  ];
-  const registry = createCoreToolRegistry(coreTools);
+    ];
+    return createCoreToolRegistry(coreTools);
+  };
 
   const openai = createOpenAiAgentTransport(providerEgress);
   const anthropic = createAnthropicTransport(providerEgress);
@@ -1164,6 +1273,12 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
 
     try {
 
+    // Review I2: the user's tier drives the sandbox quota project on the
+    // full path exactly as it did on the compat path. Raw DB tier text:
+    // "free" → free, anything else → pro (P2 Task 12 convention).
+    const tier: "free" | "pro" = job.data.tier === "free" ? "free" : "pro";
+    const runSandbox = deps.sandboxForTier?.(tier) ?? deps.sandbox;
+
     // ---- attachments (never-silent) --------------------------------------
     // The compat path materializes into the attached workspace; the full
     // path needs a storage seam AND a P2 handle (host workspace). Without
@@ -1192,7 +1307,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
         await fail("attachment id has no attachment row for this session");
         return;
       }
-      const handle = await deps.sandboxHandleFor(userId);
+      const handle = await deps.sandboxHandleFor(userId, tier);
       const uploadsDir = join(handle.workspaceDir, "uploads");
       await mkdir(uploadsDir, { recursive: true });
       for (const row of rows) {
@@ -1208,6 +1323,117 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
     // ---- mode feeding (ruling R4): job.mode ?? state.mode ?? "auto" ------
     const sessionState = await state.get(sessionId);
     const mode = job.data.mode ?? sessionState.mode ?? "auto";
+
+    // ---- Task 17/18/19 (T16 review I4): the real per-run engines ---------
+    // Skills catalog: the SkillCatalog API carries only a sessionId, so the
+    // owner userId is bound per run (required by the factory).
+    const skills = createSkillCatalog({ sandbox: runSandbox, userId });
+
+    // Hooks: workspace `.dsh/hooks.json`, executing in the run owner's jail.
+    // A missing userId resolver is a hard error by design (never a
+    // sessionId-keyed fallback); the run's userId is the correct resolver.
+    const hooks = createHookEngine({
+      sandbox: runSandbox,
+      sources: [createFileHookSource({ sandbox: runSandbox, userId })],
+      // Prompt-type hooks need a model evaluator; none is wired in v1
+      // (command hooks are fully supported). Returning null = no verdict.
+      promptEvaluator: async () => null,
+      secrets: deps.hookSecrets ?? (() => []),
+      userIdForSession: () => userId,
+      onNotification: (message, ctx) => {
+        void sinkFor(ctx.sessionId)
+          .emit("system_note", { code: "hook_notification", message, pluginId: ctx.pluginId })
+          .catch(() => {});
+      },
+    });
+
+    // Compactor: per-run (state/sandbox/sink are per-session). The quiet
+    // summarizer call rides the same provider route as the run.
+    const compactor = createCompactor({
+      state,
+      sandbox: runSandbox,
+      sink: sinkFor(sessionId),
+      userId,
+      runId,
+      summarize: async (i) => {
+        const key = await keys.resolve(userId, "");
+        if (key === null) return null;
+        const baseUrl =
+          key.kind === "byok-anthropic"
+            ? key.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")
+            : key.baseUrl;
+        const transport =
+          key.kind === "byok-anthropic" ? anthropic : openai;
+        const res = await transport.stream(
+          {
+            model: key.model,
+            baseUrl,
+            apiKey: key.apiKey,
+            system: [{ role: "system", content: i.systemPrompt }],
+            messages: [{ role: "user", content: i.userPrompt }],
+            tools: [],
+            cacheMode: "none",
+          },
+          { onTextDelta() {} },
+          new AbortController().signal,
+        );
+        return res.content;
+      },
+    });
+
+    const registry = buildRegistry({
+      sandbox: runSandbox,
+      userId,
+      tier,
+      skills,
+    });
+
+    // ---- slash-command pre-pass (T16 review I4) --------------------------
+    // finish → message_completed with the feedback, no model call;
+    // rewrite → the rewritten prompt becomes the run's current turn.
+    let prompt = job.data.prompt;
+    const commandRunner = createCommandRunner({
+      state,
+      skills,
+      presets: presetById,
+      compact: async (sid) => {
+        const page = await messages.page(deps.db, sid, { limit: HISTORY_LIMIT });
+        const history = [...page.rows]
+          .reverse()
+          .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "system")
+          .map((r) => ({ role: r.role as "user" | "assistant" | "system", content: r.content }));
+        const out = await compactor.compactNow({
+          sessionId: sid,
+          messages: history,
+          windowTokens,
+        });
+        return out.status;
+      },
+      setMode: async (sid, next: SessionMode) => {
+        await state.patch(sid, { mode: next });
+        return `Mode set to ${next}.`;
+      },
+    });
+    const prePass = await commandPrePass(commandRunner, sessionId, prompt);
+    if (prePass.kind === "finish") {
+      // The feedback IS the turn's output: persist it, complete the run, and
+      // never call the model (Dart's composer-command contract).
+      const sink = sinkFor(sessionId);
+      await sink.emit("run_started", { runId });
+      const assistant = await messages.append(deps.db, {
+        sessionId,
+        role: "assistant",
+        content: prePass.feedback,
+      });
+      await sink.emit("message_completed", {
+        messageId: assistant.id,
+        content: prePass.feedback,
+      });
+      await sink.emit("run_completed", { runId });
+      await runs.finish(deps.db, runId, "completed");
+      return;
+    }
+    if (prePass.kind === "rewrite") prompt = prePass.prompt;
 
     // Cancel polling needs the live engine; build it per run (the engine is
     // cheap; the per-run binding is what keeps `cancel(sessionId)` pointed at
@@ -1235,10 +1461,10 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       defaultModel: deps.defaultModel,
       registry,
       approvals,
-      hooks: NOOP_HOOKS,
-      compactor: NOOP_COMPACTOR,
-      skills: NOOP_SKILLS,
-      sandbox: deps.sandbox,
+      hooks,
+      compactor,
+      skills,
+      sandbox: runSandbox,
       windowTokens,
       memoryEnabled,
       githubConnected,
@@ -1249,7 +1475,7 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
       runId,
       sessionId,
       userId,
-      prompt: job.data.prompt,
+      prompt,
       ...(job.data.tier !== undefined ? { tier: job.data.tier } : {}),
       ...(job.data.attachmentIds !== undefined
         ? { attachmentIds: job.data.attachmentIds }

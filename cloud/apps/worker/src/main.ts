@@ -441,10 +441,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     events,
     keys: createMintRedisKeyProvider(redisMint),
     redisQ,
-    // P2's manager adapted onto the canonical SandboxPort (Task 9).
+    // P2's manager adapted onto the canonical SandboxPort (Task 9). The
+    // provider egress inside the processor allowlists this configured
+    // LiteLLM origin (which is loopback in production) — user URLs stay
+    // fully guarded.
     sandbox: createSandboxPort(manager),
-    // The P2 six-tool roster adapts through the real per-user handle.
-    sandboxHandleFor: (userId) => manager.attach(userId),
+    // Review I2: one port per tier so the workspace quota project matches
+    // the user's plan (free 500 MB / pro 2048 MB), and the P2 handle the
+    // adapted six-tool roster needs is attached with the SAME tier.
+    sandboxForTier: (tier) => createSandboxPort(manager, { tier }),
+    sandboxHandleFor: (userId, tier) => manager.attach(userId, { tier }),
     github,
     litellmBaseUrl: cfg.litellmBaseUrl,
     defaultModel: cfg.defaultModel,

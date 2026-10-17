@@ -37,3 +37,17 @@ export * from "./guards.js";
 export * from "./steering.js";
 export * from "./loop.js";
 export * from "./engine.js";
+// ── P3 Tasks 17–20 barrel completion (T16 review I3) ───────────────────────
+// The real hook/skill/command/compaction/subagent engines were landed by
+// their own tasks with their wiring handed to Task 16; the worker imports
+// them from this barrel only (package.json exposes just ".").
+export * from "./hooks.js";
+export * from "./skillsLoader.js";
+export * from "./commands.js";
+export * from "./tools/skills.js";
+export * from "./compaction/checkpoint.js";
+export * from "./compaction/compactor.js";
+export * from "./compaction/ledger.js";
+export * from "./compaction/policy.js";
+export * from "./subagents.js";
+export * from "./tools/subagentTools.js";

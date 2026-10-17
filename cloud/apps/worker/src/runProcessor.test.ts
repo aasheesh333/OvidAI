@@ -49,6 +49,7 @@ import {
   type ModelTransport,
   type ToolCall,
 } from "./liteLlm.js";
+import { createSandboxPort } from "./sandboxAdapter.js";
 import { createAgentRunProcessor, type RunDeps } from "./runProcessor.js";
 import { createFullAgentRunProcessor, type FullRunDeps } from "./runProcessor.js";
 
@@ -1424,6 +1425,98 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       rmWs(sbx.workspaceDir);
     });
 
+    it("P3 compat: cancel-then-next-run — the cancelled run's terminal event precedes the successor's run_started", async () => {
+      // Two runs of ONE session, neither pre-claimed: run1 is processed by
+      // this test (cancel requested before it streams), run2 waits behind it
+      // in the C1 gate. The cancelled run's terminal event MUST land before
+      // run2's run_started (T16 review I1 — event-first, P8-T1 contract).
+      const userUid = uid("w9u");
+      await users.ensure(db, userUid, `${userUid}@stub.test`);
+      const session = await sessions.create(db, userUid);
+      createdSessions.push(session.id);
+      const promptMessage = await messages.append(db, {
+        sessionId: session.id,
+        role: "user",
+        content: "p",
+      });
+      const run1 = await runs.create(db, { sessionId: session.id, promptMessageId: promptMessage.id });
+
+      const sbx = makeFakeSandbox();
+      const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+      let modelStarted = false;
+      const t1: ModelTransport = {
+        async stream(_req, h) {
+          modelStarted = true;
+          h.onDelta("first");
+          // Stay in the model call past run1's drain points (the steering
+          // drain would otherwise MERGE the queued run2 into run1), then
+          // emit another delta so the cancel poll runs.
+          await new Promise((r) => setTimeout(r, 300));
+          h.onDelta("second");
+          await new Promise((r) => setTimeout(r, 50));
+          return { finishReason: "stop", toolCalls: [] };
+        },
+      };
+      const t2 = stubTransport([{ kind: "ok", deltas: ["second run"] }]);
+
+      const deps1 = makeDeps(t1, {
+        sandbox: sbx.manager,
+        tools: createToolRegistry(),
+        cancelCheckIntervalMs: 0,
+        sleep: realSleep,
+      });
+      const deps2 = makeDeps(t2.transport, {
+        sandbox: sbx.manager,
+        tools: createToolRegistry(),
+        sleep: realSleep,
+      });
+
+      const p1 = createAgentRunProcessor(deps1)({
+        data: { runId: run1.id, sessionId: session.id, userId: userUid, prompt: "p" },
+      });
+      // Wait until run1 is INSIDE its model call (its loop has passed the
+      // steering drain), then enqueue run2's processor so it waits in the
+      // C1 gate rather than being merged.
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        if (modelStarted) break;
+        if (Date.now() > deadline) throw new Error("run1 never called the model");
+        await realSleep(10);
+      }
+      // The row is created only AFTER run1 is inside its model call: a queued
+      // row existing at run1's first steering drain would be MERGED into
+      // run1 (that is the steering contract), leaving no successor to order.
+      const prompt2 = await messages.append(db, {
+        sessionId: session.id,
+        role: "user",
+        content: "p2",
+      });
+      const run2 = await runs.create(db, {
+        sessionId: session.id,
+        promptMessageId: prompt2.id,
+      });
+      const p2 = createAgentRunProcessor(deps2)({
+        data: { runId: run2.id, sessionId: session.id, userId: userUid, prompt: "p" },
+      });
+      await realSleep(50);
+      // Cancel run1 mid-model-call; the next delta's poll sees it.
+      await runs.requestCancel(db, run1.id, userUid);
+      await Promise.all([p1, p2]);
+
+      const evts = await readEvents(session.id);
+      const cancelIdx = evts.findIndex(
+        (e) => e.type === "run_failed" && e.payload.code === "cancelled",
+      );
+      const successorIdx = evts.findIndex(
+        (e) => e.type === "run_started" && e.payload.runId === run2.id,
+      );
+      expect(cancelIdx).toBeGreaterThanOrEqual(0);
+      expect(successorIdx).toBeGreaterThan(cancelIdx);
+      expect(await runRow(run1.id)).toMatchObject({ status: "cancelled" });
+      expect(await runRow(run2.id)).toMatchObject({ status: "completed" });
+      rmWs(sbx.workspaceDir);
+    });
+
     // -----------------------------------------------------------------------
     // P3 Task 16 — the full processor (createFullAgentRunProcessor).
     //
@@ -1523,9 +1616,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
         litellmBaseUrl,
         defaultModel: "full-default-model",
         anthropicBaseUrl: "https://anthropic.invalid",
-        // The SSE mock is on loopback; the production guard would (correctly)
-        // refuse it. Tests pass the plain fetch explicitly (T5-I1 pattern).
-        egress: fetch,
+        // NO egress override: the tests exercise the production provider
+        // egress, whose operator-origin allowlist admits the loopback SSE
+        // mock (T16 review C1). User-supplied URLs stay fully guarded.
         sleep: async (ms) => {
           sleeps.push(ms);
         },
@@ -1677,6 +1770,84 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(String(completed.payload.content)).toContain("READ-ONLY MODE");
       expect(evts.some((e) => e.type === "approval_requested")).toBe(false);
       expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+    });
+
+    it("full processor: provider egress admits the configured loopback LiteLLM origin, while a USER URL to it is still blocked", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakePort();
+      // The mock's turns are built AFTER listen (they embed its own URL).
+      const turns: Array<Array<Record<string, unknown>>> = [];
+      const sse = await startTurnSse(turns);
+      turns.push(
+        // The model asks to fetch the EXACT provider origin. The provider
+        // egress allowlists it for model calls; the TOOL egress must not.
+        toolCallTurn("call_f", "fetch_url", { url: `${sse.url}/secret` }),
+        textTurn("done"),
+      );
+
+      const processor = createFullAgentRunProcessor(makeFullDeps(sse.url, sbx.port));
+      try {
+        await processor(jobOf(seeded));
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+
+      // The model call itself SUCCEEDED through the default provider egress
+      // (the C1 regression: it used to throw SsrfBlockedError on loopback).
+      expect(sse.requests).toHaveLength(2);
+      const completed = (await readEvents(seeded.sessionId)).find(
+        (e) => e.type === "tool_completed",
+      )!;
+      expect(completed.payload).toMatchObject({ name: "fetch_url" });
+      expect(String(completed.payload.content)).toContain("fetch failed:");
+      expect(String(completed.payload.content)).toMatch(/not allowed|non-public|loopback/);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+    });
+
+    it("full processor: job tier drives the sandbox port and handle (free → free, else pro)", async () => {
+      const seeded = await seedRun();
+      const sbx = makeFakeSandbox({ execResult: { stdout: "hi\n" } });
+      const tierCalls: string[] = [];
+      const handleTiers: string[] = [];
+      const sse = await startTurnSse([
+        toolCallTurn("call_t", "run_shell", { command: "echo hi" }),
+        textTurn("done"),
+      ]);
+      const processor = createFullAgentRunProcessor(
+        makeFullDeps(sse.url, sbx.manager, {
+          sandboxForTier: (tier) => {
+            tierCalls.push(tier);
+            return createSandboxPort(sbx.manager, { tier });
+          },
+          sandboxHandleFor: async (_uid, tier) => {
+            handleTiers.push(tier);
+            return sbx.handle;
+          },
+        }),
+      );
+      try {
+        await processor({
+          data: {
+            runId: seeded.runId,
+            sessionId: seeded.sessionId,
+            userId: seeded.uid,
+            prompt: seeded.prompt,
+            tier: "free",
+          },
+        });
+      } finally {
+        await processor.close();
+        await sse.close();
+      }
+      expect(tierCalls).toEqual(["free"]);
+      expect(handleTiers).toEqual(["free"]);
+      // Every attach on the run's port/handle used the job tier (the port
+      // attaches lazily per call — skills discovery, hook source, tools).
+      expect(sbx.attachCalls.length).toBeGreaterThan(0);
+      expect(sbx.attachCalls.every((c) => c.tier === "free")).toBe(true);
+      expect(await runRow(seeded.runId)).toMatchObject({ status: "completed" });
+      rmWs(sbx.workspaceDir);
     });
 
     // -------------------------------------------------------------------------

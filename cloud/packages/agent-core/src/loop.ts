@@ -37,6 +37,7 @@ import {
   todoNudgeMessage,
   type GuardState,
 } from "./guards.js";
+import { applyCheckpoint } from "./compaction/compactor.js";
 import type { KeyResolver } from "./keys.js";
 import { presetById, type AgentPreset } from "./presets.js";
 import { canonicalTools, markCacheBreakpoints } from "./promptCache.js";
@@ -602,6 +603,22 @@ export async function runAgentLoop(
     }
   }
   let msgs: AgentMessage[] = history;
+  // Checkpoint replay (T16 review I4): a persisted compaction summary is the
+  // stable system row for every later run of the session. `foldBoundary: 0`
+  // keeps the whole (already HISTORY_LIMIT-bounded) history as the tail — the
+  // ledger's folded count indexes the FULL history, not this window, so
+  // slicing by it could drop retained messages.
+  msgs = applyCheckpoint(state.compaction, msgs, 0);
+  // The CURRENT turn's prompt is authoritative: a slash-command pre-pass
+  // (full processor) may have rewritten it (e.g. a skill invocation). The
+  // gateway persisted the raw composer line, so replace the trailing user row
+  // rather than appending a second copy.
+  if (msgs.length > 0) {
+    const last = msgs[msgs.length - 1]!;
+    if (last.role === "user" && last.content !== job.prompt) {
+      msgs[msgs.length - 1] = { ...last, content: job.prompt };
+    }
+  }
 
   const g: GuardState = newGuardState();
   // "forceCompact ONCE" is a RUN-level flag (Dart AS:12170 declares it before
@@ -611,11 +628,15 @@ export async function runAgentLoop(
   let toolRounds = 0;
 
   const cancelled = async (): Promise<LoopResult> => {
-    await runs.finish(deps.db, runId, "cancelled", CANCELLED_MESSAGE);
+    // P8-T1 / C1 EVENT-FIRST contract: the terminal event must precede the
+    // status flip. `runs.finish` removes the row from the active set, which
+    // unblocks the next same-session run — flipping first let a successor's
+    // run_started land before this run's terminal event (T16 review I1).
     await emit("run_cancelled", {
       runId,
       ...(rt.cancelReason !== undefined ? { reason: rt.cancelReason } : {}),
     });
+    await runs.finish(deps.db, runId, "cancelled", CANCELLED_MESSAGE);
     return { status: "cancelled", code: "cancelled", message: CANCELLED_MESSAGE };
   };
 
@@ -1245,11 +1266,11 @@ export async function runAgentLoop(
           messages: msgs,
           windowTokens: deps.windowTokens,
         });
-        if (compacted.compacted) {
-          // PR29: REBUILD from the compacted history; appending to the stale
-          // array was the "compaction not working" bug.
-          msgs = [...compacted.messages];
-        }
+        // T19 carry (T16 review I4): apply the RETURNED messages even when
+        // `compacted === false` — prune-only relief rewrites oversized tool
+        // rows without folding a summary, and discarding it would re-send the
+        // full output on the next turn.
+        msgs = [...compacted.messages];
         // Dart AS:12795–12801 appends the continuation nudge on EVERY budget
         // boundary (the plan's "if it folded … and inject" wording reads as
         // conditional; the map pins the always-append Dart behavior — the
