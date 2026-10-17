@@ -30,14 +30,85 @@ export * from "./billing/routes.js";
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
 import { createDb } from "@ovid/db";
+import { money } from "@ovid/money";
 import { buildMintApps, type MintDeps } from "./app.js";
 import { createAlerter } from "./alerts.js";
 import { createBillingService } from "./billing/service.js";
 import { loadMintEnv } from "./env.js";
-import { createLiteLlmAdmin } from "./litellmAdmin.js";
+import { createAdmission } from "./images/admission.js";
+import { parseModelInfo, PriceBook } from "./images/costing.js";
+import { createDirectEdit } from "./images/directEdit.js";
+import { createImageLedger } from "./images/ledger.js";
+import { registerImagesRoutes } from "./images/routes.js";
+import {
+  createLiteLlmImageService,
+  type ImageBackend,
+} from "./images/service.js";
+import { IMAGE_ALIAS, SIZES } from "./images/types.js";
+import { createLiteLlmAdmin, type LiteLlmAdmin, type ModelInfoRow } from "./litellmAdmin.js";
 import { createProjection } from "./projection.js";
 import { createMintVerifier } from "./verifier.js";
-import { reapplyUser } from "./windows.js";
+import {
+  effectiveTier,
+  freeCapRemaining,
+  reapplyUser,
+  tierBudget,
+} from "./windows.js";
+
+/**
+ * Image backend discovery from LiteLLM `/model/info`.
+ *
+ * Task 14's CardManager (capability cards + probing) has not landed on this
+ * branch. Until it does, the mount derives the Task-13 `ImageBackend` rows
+ * from LiteLLM's image-kind deployments and lets the service build legacy
+ * cards (generate/edit, SIZES). The `cards` seam is intentionally left unset:
+ * when T14 lands, replace `backends`/`cards` here with the CardManager — no
+ * other wiring changes.
+ */
+function imageBackendsFromModelInfo(rows: ModelInfoRow[]): ImageBackend[] {
+  const out: ImageBackend[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const name = typeof row.model_name === "string" ? row.model_name.trim() : "";
+    if (name === "" || name === IMAGE_ALIAS || seen.has(name)) continue;
+    const info = row.model_info ?? {};
+    const modality = info.output_modality;
+    const imageKind =
+      modality === "image" ||
+      (Array.isArray(modality) && modality.includes("image")) ||
+      info.mode === "image_generation";
+    if (!imageKind) continue;
+    const declared = Array.isArray(info.supported_sizes)
+      ? info.supported_sizes.filter(
+          (size): size is string =>
+            typeof size === "string" && (SIZES as readonly string[]).includes(size),
+        )
+      : [];
+    out.push({
+      model: name,
+      sizes: declared.length > 0 ? declared : SIZES,
+      // The Python config marks every configured image backend edit-capable;
+      // the direct-edit transport re-checks the discovered api_base host.
+      edit: true,
+      params: row.litellm_params ?? {},
+    });
+    seen.add(name);
+  }
+  return out;
+}
+
+/** Android key first, then web — the same namespace order as poolUserKeyIds. */
+async function firstUserKey(
+  redis: Redis,
+  uid: string,
+  suffix: "key" | "keyid",
+): Promise<string | null> {
+  for (const ns of ["", "web:"] as const) {
+    const value = await redis.get(`user:${uid}:${ns}${suffix}`);
+    if (value !== null && value !== "") return value;
+  }
+  return null;
+}
 
 /**
  * Composition root — intentionally untested-thin (later e2e tasks exercise
@@ -79,6 +150,13 @@ export async function main(
 
   const { publicApp, adminApp } = buildMintApps(mintDeps);
 
+  // Task 13: the images mount. Python always mounts it, defaulting the
+  // upstream bound to 1.00 (images_gateway.py:
+  // `os.environ.get("OVID_IMAGE_MAX_UPSTREAM_USD", "1.00")`). The bound is
+  // validated below; an invalid value aborts the boot.
+  const images = buildImagesMount(mintDeps, cfg, litellm);
+  registerImagesRoutes(publicApp, mintDeps, images.service, images.admission);
+
   // Owned connections close with the apps (deploy scripts call app.close()).
   publicApp.addHook("onClose", async () => {
     redis.disconnect();
@@ -110,4 +188,62 @@ export async function main(
     throw err;
   }
   return { publicApp, adminApp };
+}
+
+/**
+ * Build the Task-13 images service + admission bridge. The upstream bound
+ * defaults to Python's 1.00 when OVID_IMAGE_MAX_UPSTREAM_USD is unset. The
+ * `cards` seam stays unset until Task 14's CardManager lands (legacy cards
+ * are derived from the backends).
+ */
+function buildImagesMount(
+  mintDeps: MintDeps,
+  cfg: ReturnType<typeof loadMintEnv>,
+  litellm: LiteLlmAdmin,
+): {
+  service: ReturnType<typeof createLiteLlmImageService>;
+  admission: ReturnType<typeof createAdmission>;
+} {
+  const raw = cfg.images.maxUpstreamCostUsd ?? "1.00";
+  let maxUpstreamCost;
+  try {
+    maxUpstreamCost = money(raw);
+  } catch {
+    throw new Error(`OVID_IMAGE_MAX_UPSTREAM_USD must be a decimal, got: ${raw}`);
+  }
+  if (!maxUpstreamCost.greaterThan(0)) {
+    throw new Error(`OVID_IMAGE_MAX_UPSTREAM_USD must be positive, got: ${raw}`);
+  }
+
+  const ledger = createImageLedger(mintDeps.db);
+  const priceBook = new PriceBook(async () =>
+    parseModelInfo(await litellm.modelInfo()),
+  );
+  const service = createLiteLlmImageService({
+    ledger,
+    backends: async () => imageBackendsFromModelInfo(await litellm.modelInfo()),
+    directEdit: createDirectEdit(cfg),
+    fetchImpl: mintDeps.fetchImpl,
+    litellmBaseUrl: cfg.litellmBaseUrl,
+    maxUpstreamCost,
+    priceBook,
+    userKey: (uid) => firstUserKey(mintDeps.redis, uid, "key"),
+    userKeyId: (uid) => firstUserKey(mintDeps.redis, uid, "keyid"),
+    keySpend: async (keyId) => {
+      const info = await litellm.keyInfo(keyId);
+      const spend = info?.spend;
+      return typeof spend === "number" && Number.isFinite(spend) ? spend : null;
+    },
+  });
+  const admission = createAdmission({
+    effectiveTier: (uid) => effectiveTier(mintDeps, uid),
+    tierBudget: (uid, tier) => tierBudget(mintDeps, uid, tier),
+    freeCapRemaining: (uid) => freeCapRemaining(mintDeps, uid),
+    keySpend: async (keyId) => {
+      const info = await litellm.keyInfo(keyId);
+      const spend = info?.spend;
+      return typeof spend === "number" && Number.isFinite(spend) ? spend : null;
+    },
+  });
+  return { service, admission };
 }

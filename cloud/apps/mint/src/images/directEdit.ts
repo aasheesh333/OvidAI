@@ -41,7 +41,11 @@ export interface DirectEdit {
 export interface DirectEditOptions {
   fetchImpl?: typeof fetch;
   maxUpstreamCost?: Money;
+  /** Per-request timeout; Python's httpx.Client uses 120 s. */
+  timeoutMs?: number;
 }
+
+export const DEFAULT_DIRECT_EDIT_TIMEOUT_MS = 120_000;
 
 /** `openai/cb/gpt-image-2` -> `cb/gpt-image-2` (only a leading openai/). */
 export function providerModelId(litellmModel: unknown): string | null {
@@ -90,6 +94,7 @@ class HttpDirectEdit implements DirectEdit {
   private readonly editCost: Money | null;
   private readonly bound: Money;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(env: MintEnv, opts: DirectEditOptions = {}) {
     this.key = (env.images.inferhubApiKey ?? "").trim();
@@ -112,6 +117,7 @@ class HttpDirectEdit implements DirectEdit {
         : money("1.00");
     this.bound = opts.maxUpstreamCost ?? fallback;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_DIRECT_EDIT_TIMEOUT_MS;
   }
 
   get hasKey(): boolean {
@@ -171,9 +177,19 @@ class HttpDirectEdit implements DirectEdit {
     };
     const response = await this.fetchImpl(target.url, {
       method: "POST",
-      headers: { Authorization: `Bearer ${this.key}` },
+      headers: {
+        Authorization: `Bearer ${this.key}`,
+        // The provider contract is JSON-only. A string body without an
+        // explicit content-type makes undici send text/plain, which the
+        // provider rejects (directedit.py sends httpx `json=`).
+        "content-type": "application/json",
+        accept: "application/json",
+      },
       body: JSON.stringify(body),
       redirect: "manual",
+      // A silent provider must not pin the request (and its reservation)
+      // forever; aborting surfaces as a transport failure -> unknown.
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
     return {
       status: response.status,

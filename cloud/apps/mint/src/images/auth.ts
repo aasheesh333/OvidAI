@@ -108,7 +108,8 @@ class VerifierAuth implements ImagesAuth {
       throw new ImageError(401, "sign_in_required");
     }
     // Explicit alias scope is mandatory.
-    if (info.blocked === true || !(info.models ?? []).includes(IMAGE_ALIAS)) {
+    // verifier.py: `if info.get('blocked')` — any truthy value rejects.
+    if (info.blocked || !(info.models ?? []).includes(IMAGE_ALIAS)) {
       throw new ImageError(403, "image_access_denied");
     }
     if (info.user_id !== uid || (info.metadata ?? {}).ovid_uid !== uid) {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { Decimal } from "decimal.js";
 import { discounted, exactSum, money, type Money } from "@ovid/money";
@@ -13,7 +13,15 @@ import type { MintEnv } from "../env.js";
 import { createAdmission } from "./admission.js";
 import { createDirectEdit } from "./directEdit.js";
 import type { ImageLedger, ImageLedgerOptions } from "./ledger.js";
-import { LiteLlmImageService, IMAGE_BODY_LIMIT, type ImageBackend, type ImageCard } from "./service.js";
+import {
+  LiteLlmImageService,
+  IMAGE_BODY_LIMIT,
+  missing,
+  taskFromRequest,
+  type ImageBackend,
+  type ImageCard,
+  type ImageTask,
+} from "./service.js";
 import { registerImagesRoutes } from "./routes.js";
 import { ImageError, RECEIPT_RETENTION, REPLAY_RETENTION, type Receipt } from "./types.js";
 
@@ -418,6 +426,54 @@ beforeEach(() => {
   resetModelCatalogProjectionForTests();
 });
 
+describe("default routing fidelity", () => {
+  const card: ImageCard = {
+    model: "image-a",
+    slug: "ovid-image:img-aaaaaa",
+    sizes: { native: ["1024x1024"] },
+    operations: { generate: { supported: true }, edit: { supported: true } },
+    aspect_ratios: ["1:1"],
+  };
+
+  it("accepts requirements.operation with routing.py's matrix", () => {
+    expect(taskFromRequest("generate", { requirements: { operation: "variations" } }).operation).toBe(
+      "variations",
+    );
+    expect(
+      taskFromRequest("edit", { requirements: { operation: "remove_background" } }).operation,
+    ).toBe("remove_background");
+    expect(taskFromRequest("edit", { requirements: { operation: "inpaint" } }).operation).toBe(
+      "inpaint",
+    );
+    expect(() => taskFromRequest("generate", { requirements: { operation: "upscale" } })).toThrow();
+    expect(() => taskFromRequest("edit", { requirements: { operation: "generate" } })).toThrow();
+    expect(() => taskFromRequest("generate", { requirements: { operation: "bogus" } })).toThrow();
+  });
+
+  it("rejects 0:0 aspect ratios and accepts Python's ratio form", () => {
+    expect(
+      taskFromRequest("generate", { requirements: { aspect_ratio: "16:9" } }).aspect_ratio,
+    ).toBe("16:9");
+    expect(() => taskFromRequest("generate", { requirements: { aspect_ratio: "0:0" } })).toThrow();
+    expect(() => taskFromRequest("generate", { requirements: { aspect_ratio: "00:01" } })).toThrow();
+  });
+
+  it("uses Python's size:/aspect_ratio:/inputs: reason forms", () => {
+    expect(missing(card, taskFromRequest("edit", { size: "999x999" }))).toContain("size:999x999");
+    expect(
+      missing(card, taskFromRequest("generate", { requirements: { aspect_ratio: "16:9" } })),
+    ).toContain("aspect_ratio:16:9");
+
+    const inputs: ImageTask = {
+      ...taskFromRequest("edit", {}),
+      operation: "edit",
+      n_inputs: 2,
+    };
+    expect(missing(card, inputs)).toContain("inputs:2");
+    expect(missing(card, { ...inputs, n_inputs: 1 })).toEqual([]);
+  });
+});
+
 describe("images HTTP surface", () => {
   it("serves capabilities with an ETag round-trip and no private data", async () => {
     const h = await makeHarness(() => successResponse());
@@ -686,9 +742,10 @@ describe("images HTTP surface", () => {
     for (const payload of [
       { ...GEN_BODY, bogus: 1 },
       { ...GEN_BODY, prompt: "   " },
-      { ...GEN_BODY, size: "999x999" },
+      { ...GEN_BODY, size: "999x99" },
       { ...GEN_BODY, preference: "wow" },
       { ...GEN_BODY, requirements: { bogus: true } },
+      { ...GEN_BODY, requirements: { aspect_ratio: "0:0" } },
       { ...GEN_BODY, model: "prov/private" },
     ]) {
       const response = await h.app.inject({
@@ -700,6 +757,18 @@ describe("images HTTP surface", () => {
       expect(response.statusCode, JSON.stringify(payload)).toBe(400);
       expect(response.json()).toEqual({ error: { code: "invalid_image_request" } });
     }
+    expect(h.calls).toHaveLength(0);
+
+    // A syntactically valid size outside SIZES is not a request error: it
+    // fails capability routing with 422 (routing.py normalize_size + missing).
+    const unroutableSize = await h.app.inject({
+      method: "POST",
+      url: "/v1/images/generations",
+      headers: { ...HEADERS, "idempotency-key": "request-bad1" },
+      payload: { ...GEN_BODY, size: "999x999" },
+    });
+    expect(unroutableSize.statusCode).toBe(422);
+    expect(unroutableSize.json().error.code).toBe("unsupported_image_operation");
     expect(h.calls).toHaveLength(0);
 
     const unknownSlug = await h.app.inject({
@@ -936,6 +1005,113 @@ describe("images HTTP surface", () => {
     expect(directCalls).toHaveLength(1);
     expect(h.calls).toHaveLength(0);
     eqMoney(response.json().receipt.charged, "0.012");
+  });
+
+  it("logs a direct-provider credential rejection and keeps the reservation", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const direct = createDirectEdit(
+        {
+          images: {
+            inferhubApiKey: "sk-inferhub",
+            directEditHosts: "api.inferhub.dev",
+          },
+        } as unknown as MintEnv,
+        {
+          maxUpstreamCost: money("1.00"),
+          fetchImpl: (async () =>
+            jsonResponse(401, { error: { message: "provider secret" } })) as typeof fetch,
+        },
+      );
+      const cards: ImageCard[] = [
+        {
+          model: "image-a",
+          slug: "ovid-image:img-aaaaaa",
+          sizes: { native: ["1024x1024"] },
+          operations: { generate: { supported: true }, edit: { supported: true } },
+          edit_transport: "direct",
+        },
+      ];
+      const h = await makeHarness(() => successResponse(), {
+        backends: [
+          {
+            model: "image-a",
+            sizes: ["1024x1024"],
+            edit: true,
+            params: { model: "openai/cb/gpt-image-2", api_base: "https://api.inferhub.dev/v1" },
+          },
+        ],
+        cards,
+        directEdit: direct,
+      });
+      const response = await h.app.inject({
+        method: "POST",
+        url: "/v1/images/edits",
+        headers: HEADERS,
+        payload: EDIT_BODY,
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error).toEqual({ code: "image_request_pending" });
+      expect(response.json().receipt.state).toBe("unknown");
+      expect(response.json().receipt.charged).toBeNull();
+      expect(response.body).not.toContain("provider secret");
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("status=401"));
+      expect(
+        (await h.ledger.spent("u", { includePending: true })).equals(money("0.30")),
+      ).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("treats a direct-edit timeout as an ambiguous outcome (reservation retained)", async () => {
+    const direct = createDirectEdit(
+      {
+        images: {
+          inferhubApiKey: "sk-inferhub",
+          directEditHosts: "api.inferhub.dev",
+        },
+      } as unknown as MintEnv,
+      {
+        maxUpstreamCost: money("1.00"),
+        timeoutMs: 5,
+        fetchImpl: (async () => {
+          throw new DOMException("The operation timed out.", "TimeoutError");
+        }) as unknown as typeof fetch,
+      },
+    );
+    const cards: ImageCard[] = [
+      {
+        model: "image-a",
+        slug: "ovid-image:img-aaaaaa",
+        sizes: { native: ["1024x1024"] },
+        operations: { generate: { supported: true }, edit: { supported: true } },
+        edit_transport: "direct",
+      },
+    ];
+    const h = await makeHarness(() => successResponse(), {
+      backends: [
+        {
+          model: "image-a",
+          sizes: ["1024x1024"],
+          edit: true,
+          params: { model: "openai/cb/gpt-image-2", api_base: "https://api.inferhub.dev/v1" },
+        },
+      ],
+      cards,
+      directEdit: direct,
+    });
+    const response = await h.app.inject({
+      method: "POST",
+      url: "/v1/images/edits",
+      headers: HEADERS,
+      payload: EDIT_BODY,
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toEqual({ code: "image_request_pending" });
+    expect(response.json().receipt.state).toBe("unknown");
+    // The reservation is retained (never released on an ambiguous transport).
+    expect((await h.ledger.spent("u", { includePending: true })).equals(money("0.30"))).toBe(true);
   });
 
   it("changes catalog_hash when a card changes and honours a stale ETag", async () => {

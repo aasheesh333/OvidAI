@@ -187,8 +187,29 @@ export function parseModel(value: unknown): string | null {
   throw new Error("invalid model");
 }
 
-const REQUIREMENTS = new Set(["aspect_ratio", "transparent_background", "text_rendering"]);
+const REQUIREMENTS = new Set([
+  "operation",
+  "aspect_ratio",
+  "transparent_background",
+  "text_rendering",
+]);
 const PREFERENCES = new Set(["balanced", "quality", "speed", "cost"]);
+/** routing.py TASK_OPERATIONS. */
+const TASK_OPERATIONS = new Set([
+  "generate",
+  "edit",
+  "inpaint",
+  "outpaint",
+  "reference_style",
+  "multi_image",
+  "remove_background",
+  "upscale",
+  "variations",
+]);
+/** capabilities.py SIZE_RE. */
+const SIZE_RE = /^[1-9][0-9]{2,3}x[1-9][0-9]{2,3}$/;
+/** routing.py aspect-ratio regex (rejects 0:0). */
+const ASPECT_RATIO_RE = /^[1-9][0-9]?:[1-9][0-9]?$/;
 
 export function taskFromRequest(
   operation: "generate" | "edit",
@@ -200,6 +221,7 @@ export function taskFromRequest(
   const preference = body.preference ?? "balanced";
   if (typeof preference !== "string" || !PREFERENCES.has(preference)) throw new Error("invalid preference");
 
+  let op: string = operation;
   let aspectRatio: string | null = null;
   let transparent = false;
   let textRendering = false;
@@ -208,13 +230,28 @@ export function taskFromRequest(
     for (const key of Object.keys(body.requirements)) {
       if (!REQUIREMENTS.has(key)) throw new Error("invalid requirement");
     }
+    // routing.py: `op = req.get('operation') or operation` — an explicit
+    // operation (variations, remove_background, upscale, …) overrides the
+    // endpoint's default and is validated by the matrix below.
+    const requested = body.requirements.operation;
+    if (requested) {
+      if (typeof requested !== "string") throw new Error("invalid operation");
+      op = requested;
+    }
     const ratio = body.requirements.aspect_ratio;
-    if (ratio !== undefined && (typeof ratio !== "string" || !/^\d{1,2}:\d{1,2}$/.test(ratio))) {
+    if (ratio !== undefined && (typeof ratio !== "string" || !ASPECT_RATIO_RE.test(ratio))) {
       throw new Error("invalid aspect ratio");
     }
     aspectRatio = typeof ratio === "string" ? ratio : null;
     transparent = body.requirements.transparent_background === true;
     textRendering = body.requirements.text_rendering === true;
+  }
+  if (
+    !TASK_OPERATIONS.has(op) ||
+    (operation === "generate" && op !== "generate" && op !== "variations") ||
+    (operation === "edit" && op === "generate")
+  ) {
+    throw new Error("invalid operation");
   }
 
   const images = body.images;
@@ -224,10 +261,22 @@ export function taskFromRequest(
   }
   const mask = operation === "edit" && body.mask !== undefined && body.mask !== null;
   const extra = Array.isArray(images) ? images.length : 0;
+  if (mask && op === "edit") op = "inpaint";
+  if (1 + extra > 1 && op === "edit") op = "multi_image";
+
+  // routing.py normalize_size(): a syntactically valid size outside SIZES is
+  // accepted here and rejected later by routing (422, before admission).
+  let size: string | null = null;
+  if (body.size) {
+    if (typeof body.size !== "string" || !SIZE_RE.test(body.size)) {
+      throw new Error("invalid size");
+    }
+    size = body.size;
+  }
 
   return {
-    operation: mask ? "inpaint" : extra > 0 ? "multi_image" : operation,
-    size: typeof body.size === "string" ? body.size : null,
+    operation: op,
+    size,
     aspect_ratio: aspectRatio,
     n_inputs: 1 + extra,
     mask,
@@ -235,6 +284,13 @@ export function taskFromRequest(
     text_rendering: textRendering,
     preference: preference as ImageTask["preference"],
   };
+}
+
+/** capabilities.py max_inputs(): derived from edit/multi_image support. */
+function maxInputs(card: ImageCard): number {
+  const multi = card.operations.multi_image;
+  if (multi?.supported === true) return card.max_inputs ?? 2;
+  return supports(card, "edit") ? 1 : 0;
 }
 
 export function missing(card: ImageCard, task: ImageTask): string[] {
@@ -249,14 +305,23 @@ export function missing(card: ImageCard, task: ImageTask): string[] {
   if (task.operation === "inpaint" && !supports(card, "inpaint")) out.push("inpaint");
   if (task.operation === "multi_image" && !supports(card, "multi_image")) out.push("multi_image");
   if (task.transparent && !supports(card, "transparent_output")) out.push("transparent_output");
-  if (task.size !== null && !card.sizes.native.includes(task.size)) out.push("size");
+  if (task.size !== null && !card.sizes.native.includes(task.size)) {
+    out.push(`size:${task.size}`);
+  }
   if (
     task.aspect_ratio !== null &&
     Array.isArray(card.aspect_ratios) &&
     card.aspect_ratios.length > 0 &&
     !card.aspect_ratios.includes(task.aspect_ratio)
   ) {
-    out.push("aspect_ratio");
+    out.push(`aspect_ratio:${task.aspect_ratio}`);
+  }
+  if (
+    task.n_inputs > Math.max(maxInputs(card), 0) &&
+    task.operation !== "generate" &&
+    out.length === 0
+  ) {
+    out.push(`inputs:${task.n_inputs}`);
   }
   if (card.priced === false) out.push("unpriced");
   return out;
@@ -526,7 +591,14 @@ export class LiteLlmImageService {
     }
     if (
       typeof size !== "string" ||
-      (!(SIZES as readonly string[]).includes(size) && slug === null)
+      // routing.py: a syntactically valid non-SIZES size is not a request
+      // error; it fails capability routing with 422. Only sizes that
+      // normalize_size() rejected (already 400 above) or the empty string
+      // reach this branch with no task size and no explicit slug.
+      (body.size !== undefined &&
+        body.size !== null &&
+        !(SIZES as readonly string[]).includes(size) &&
+        !(slug !== null || task.size !== null))
     ) {
       throw new ImageError(400, "invalid_image_request");
     }
@@ -755,12 +827,21 @@ export class LiteLlmImageService {
       if (options.mask !== null || options.extra.length > 0 || options.transparent) {
         throw new ImageError(422, "unsupported_image_operation");
       }
-      return this.deps.directEdit!.post(
+      const response = await this.deps.directEdit!.post(
         backend.params ?? {},
         options.prompt,
         options.size,
         `data:${options.imageMime};base64,${options.imageB64}`,
       );
+      if (response.status === 401 || response.status === 402 || response.status === 403) {
+        // Our provider credential/credit, not the user's: operator action
+        // needed (images_gateway.py logs the same signal). Never log the key
+        // or the provider body.
+        console.error(
+          `[mint] image provider rejected the gateway credential status=${response.status}`,
+        );
+      }
+      return response;
     }
 
     const headers: Record<string, string> = { Authorization: `Bearer ${key}` };

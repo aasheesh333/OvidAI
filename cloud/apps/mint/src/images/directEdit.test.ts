@@ -126,6 +126,10 @@ describe("DirectEdit (port of directedit.py)", () => {
     expect(seen[0]!.url).toBe("https://api.inferhub.dev/v1/images/edits");
     const headers = seen[0]!.init.headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${KEY}`);
+    // The provider contract is JSON-only. Without this explicit header undici
+    // sends text/plain and every edit is rejected (Python asserts the same).
+    expect(headers["content-type"]).toBe("application/json");
+    expect(seen[0]!.init.signal).toBeInstanceOf(AbortSignal);
     expect(JSON.stringify(headers)).not.toContain("sk-LITELLM");
     expect(JSON.parse(String(seen[0]!.init.body))).toEqual({
       model: MODEL,
@@ -135,6 +139,31 @@ describe("DirectEdit (port of directedit.py)", () => {
       response_format: "b64_json",
       image: "data:image/png;base64,AA==",
     });
+  });
+
+  it("aborts a silent provider after the configured timeout", async () => {
+    const direct = createDirectEdit(envWith(), {
+      maxUpstreamCost: money("1.00"),
+      timeoutMs: 20,
+      fetchImpl: ((_url: string | URL | Request, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal === null || signal === undefined) {
+            reject(new Error("missing abort signal"));
+            return;
+          }
+          signal.addEventListener("abort", () => reject(signal.reason));
+        })) as typeof fetch,
+    });
+
+    await expect(
+      direct.post(
+        { model: `openai/${MODEL}`, api_base: BASE },
+        "make it blue",
+        "1024x1024",
+        "data:image/png;base64,AA==",
+      ),
+    ).rejects.toMatchObject({ name: "TimeoutError" });
   });
 
   it("settles provider usage.cost when usable, capped by the bound", () => {
