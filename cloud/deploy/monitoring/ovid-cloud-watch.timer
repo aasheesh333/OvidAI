@@ -1,0 +1,12 @@
+# Ovid cloud watch — every 60 s, 90 s after boot.
+[Unit]
+Description=Run the Ovid cloud watch check every minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+Persistent=true
+Unit=ovid-cloud-watch.service
+
+[Install]
+WantedBy=timers.target

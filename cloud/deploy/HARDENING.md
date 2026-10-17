@@ -482,6 +482,13 @@ monitors, 5-minute checks, HTTP(s)/port/ping/keyword, email + mobile-push
 alerts, no credit card). It is external by construction — a same-box solution
 (Uptime Kuma) would be blind to whole-VPS outages, so it is not a substitute.
 
+**On-box layer (P10 Task 11):** `@ovid/watch`
+(`cloud/apps/watch`, units + runbook in
+`cloud/deploy/monitoring/MONITORING.md`) covers queue depth, worker lag,
+disk, redis memory and spend parity, alerting through mint's existing
+Telegram bot. It is complementary, not an external substitute: UptimeRobot
+stays the layer that reports a whole-VPS or network outage. Install both.
+
 **Setup (owner, ~10 minutes, zero server impact):**
 
 1. Sign up at `https://uptimerobot.com` with the owner email; install the

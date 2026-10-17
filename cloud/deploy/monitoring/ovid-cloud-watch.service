@@ -1,0 +1,26 @@
+# Ovid cloud watch — one-shot monitor (systemd timer)
+#
+# Installed by cloud/deploy/monitoring/MONITORING.md. The timer fires every
+# 60 s; each invocation collects the checks, diffs the persisted state, and
+# alerts only on edges (new failure / 30-min reminder / recovery).
+#
+# OWNER-GATED install: writes to /etc/systemd/system and sends real alerts.
+[Unit]
+Description=Ovid cloud watch (queue/worker/disk/redis/spend)
+Documentation=file:/opt/ovid-cloud/repo/cloud/deploy/monitoring/MONITORING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node /opt/ovid-cloud/repo/cloud/apps/watch/dist/main.js
+EnvironmentFile=-/opt/ovid-cloud/watch.env
+# Creates /var/lib/ovid-cloud-watch (the default WATCH_STATE_FILE lives here).
+StateDirectory=ovid-cloud-watch
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ovid-cloud-watch
+# Alerts use the on-box mint Telegram bot; no inbound listener is opened.
+TimeoutStartSec=120
