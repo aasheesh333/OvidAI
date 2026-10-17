@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { sessionEventSchema, type SessionEvent } from "./events.js";
 import { ptyBase64Data } from "./pty.js";
+import { browserInputEventSchema, type BrowserInputEvent, browserStateDtoSchema, type BrowserStateDto } from "./browser.js";
 
 export type WsClientMsg =
   | { op: "subscribe"; sessionId: string; lastEventId?: string | null }
@@ -11,7 +12,12 @@ export type WsClientMsg =
   | { op: "pty_attach"; ptyId: string; lastOffset?: number | null }
   | { op: "pty_input"; ptyId: string; data: string }
   | { op: "pty_resize"; ptyId: string; cols: number; rows: number }
-  | { op: "pty_close"; ptyId: string };
+  | { op: "pty_close"; ptyId: string }
+  // P6 Task 2 (browser channel) — additive discriminants only.
+  | { op: "browser_attach"; sessionId: string }
+  | { op: "browser_detach"; sessionId: string }
+  | { op: "browser_input"; sessionId: string; input: BrowserInputEvent }
+  | { op: "browser_takeover"; sessionId: string; enabled: boolean };
 
 export type WsServerMsg =
   | { op: "subscribed"; sessionId: string }
@@ -22,7 +28,9 @@ export type WsServerMsg =
   | { op: "pty_opened"; ptyId: string; sessionId: string }
   | { op: "pty_attached"; ptyId: string; truncated: boolean }
   | { op: "pty_output"; ptyId: string; data: string; offset: number }
-  | { op: "pty_exit"; ptyId: string; exitCode: number | null };
+  | { op: "pty_exit"; ptyId: string; exitCode: number | null }
+  // P6 Task 2 (browser channel) — additive discriminants only.
+  | { op: "browser_state"; sessionId: string; state: BrowserStateDto };
 
 /**
  * The error codes the WS server currently sends in `error` frames. The wire
@@ -101,6 +109,24 @@ const wsClientMsgSchema: z.ZodType<WsClientMsg> = z.discriminatedUnion("op", [
     op: z.literal("pty_close"),
     ptyId: ptyIdField,
   }),
+  z.object({
+    op: z.literal("browser_attach"),
+    sessionId: z.string().min(1),
+  }),
+  z.object({
+    op: z.literal("browser_detach"),
+    sessionId: z.string().min(1),
+  }),
+  z.object({
+    op: z.literal("browser_input"),
+    sessionId: z.string().min(1),
+    input: browserInputEventSchema,
+  }),
+  z.object({
+    op: z.literal("browser_takeover"),
+    sessionId: z.string().min(1),
+    enabled: z.boolean(),
+  }),
 ]);
 
 const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
@@ -142,6 +168,11 @@ const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
     op: z.literal("pty_exit"),
     ptyId: ptyIdField,
     exitCode: z.number().nullable(),
+  }),
+  z.object({
+    op: z.literal("browser_state"),
+    sessionId: z.string().min(1),
+    state: browserStateDtoSchema,
   }),
 ]);
 

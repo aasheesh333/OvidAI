@@ -74,3 +74,75 @@ describe("wsServerMsg", () => {
     expect(() => wsServerMsg({ op: "nope" })).toThrow();
   });
 });
+
+// P6 Task 2 — browser channel ops (additive discriminants; all NEW cases).
+describe("wsClientMsg browser ops (P6)", () => {
+  it("parses browser_attach", () => {
+    expect(wsClientMsg({ op: "browser_attach", sessionId: "s1" })).toEqual({
+      op: "browser_attach",
+      sessionId: "s1",
+    });
+  });
+
+  it("parses browser_detach", () => {
+    expect(wsClientMsg({ op: "browser_detach", sessionId: "s1" })).toEqual({
+      op: "browser_detach",
+      sessionId: "s1",
+    });
+  });
+
+  it("parses browser_input with a full tap event", () => {
+    const input = { op: "browser_input", sessionId: "s1", input: { type: "tap", x: 10, y: 20 } };
+    expect(wsClientMsg(input)).toEqual(input);
+  });
+
+  it("rejects browser_input with a malformed input event", () => {
+    expect(() =>
+      wsClientMsg({ op: "browser_input", sessionId: "s1", input: { type: "tap", x: "a", y: 20 } }),
+    ).toThrow();
+  });
+
+  it("parses browser_takeover", () => {
+    const input = { op: "browser_takeover", sessionId: "s1", enabled: true };
+    expect(wsClientMsg(input)).toEqual(input);
+  });
+});
+
+describe("wsServerMsg browser ops (P6)", () => {
+  const browserState = {
+    sessionId: "s1",
+    live: true,
+    url: "https://example.com",
+    title: "Example",
+    takeover: false,
+    screencast: true,
+    frameFormat: "jpeg" as const,
+    viewport: { width: 1280, height: 720 },
+  };
+
+  it("parses browser_state", () => {
+    const input = { op: "browser_state", sessionId: "s1", state: browserState };
+    expect(wsServerMsg(input)).toEqual(input);
+  });
+
+  it("rejects browser_state with a malformed state", () => {
+    expect(() =>
+      wsServerMsg({
+        op: "browser_state",
+        sessionId: "s1",
+        state: { ...browserState, frameFormat: "png" },
+      }),
+    ).toThrow();
+  });
+});
+
+// Regression pin: pre-existing ops unchanged after the P6 additions.
+describe("ws ops regression pin (P6)", () => {
+  it("still parses subscribe, ping; still rejects unknown ops", () => {
+    const sub = { op: "subscribe", sessionId: "s" };
+    expect(wsClientMsg(sub)).toEqual(sub);
+    expect(wsClientMsg({ op: "ping" })).toEqual({ op: "ping" });
+    expect(() => wsClientMsg({ op: "nope" })).toThrow();
+    expect(() => wsServerMsg({ op: "nope" })).toThrow();
+  });
+});
