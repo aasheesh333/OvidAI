@@ -15,6 +15,7 @@
  * end — malformed JSON → TerminalModelError naming the tool call.
  */
 
+import type { EgressFetch } from "../ports.js";
 import type {
   AgentMessage,
   AgentRequest,
@@ -190,7 +191,14 @@ function toWireMessages(messages: AgentMessage[]): Array<Record<string, unknown>
   });
 }
 
-export function createOpenAiAgentTransport(fetchImpl: typeof fetch = fetch): AgentTransport {
+/**
+ * T5-I1 (binding): NO raw-`fetch` default. Every construction site must pass
+ * the SSRF-guarded egress (`createGuardedEgressFetch`, ssrf.ts) explicitly —
+ * a silent default would bypass spec D3/§11. Tests that need a plain client
+ * pass `fetch` themselves; the P2-compat shim (transport/legacy.ts) keeps its
+ * own documented default so P2's suite stays unmodified.
+ */
+export function createOpenAiAgentTransport(fetchImpl: EgressFetch): AgentTransport {
   return {
     apiFormat: "openai",
     async stream(req: AgentRequest, h: AgentStreamHandlers, signal: AbortSignal): Promise<AgentResponse> {
@@ -204,6 +212,11 @@ export function createOpenAiAgentTransport(fetchImpl: typeof fetch = fetch): Age
             authorization: `Bearer ${req.apiKey}`,
             "content-type": "application/json",
             accept: "text/event-stream",
+            // Ruling R3: consecutive turns of one session share LiteLLM's
+            // stable-prefix cache. Only the openai-format leg sends it.
+            ...(req.promptCacheKey !== undefined
+              ? { prompt_cache_key: req.promptCacheKey }
+              : {}),
           },
           body: JSON.stringify({
             model: req.model,

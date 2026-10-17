@@ -45,6 +45,12 @@ export interface AgentRequest {
   system: AgentMessage[]; messages: AgentMessage[]; tools: ToolSpec[];
   maxTokens?: number; temperature?: number; effort?: "low" | "medium" | "high";
   cacheMode: PromptCacheMode;
+  // P3 Task 15 (ruling R3, additive): the openai-format prompt-cache key. The
+  // loop stamps the session id so consecutive turns of one session share
+  // LiteLLM's stable-prefix cache; createOpenAiAgentTransport sends it as the
+  // `prompt_cache_key` request header. The anthropic leg ignores it (native
+  // cache_control blocks carry the marks instead).
+  promptCacheKey?: string;
 }
 export interface AgentStreamHandlers { onTextDelta(text: string): void; onThinkingDelta?(text: string): void; }
 export interface AgentResponse { content: string; thinking: string; toolCalls: ToolCall[]; finishReason: string | null; usage: Usage | null; }

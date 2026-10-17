@@ -119,8 +119,14 @@ export function adaptLegacyTransport(t: LegacyModelTransport): AgentTransport {
  * the same ModelTransport the worker landed in P2 (tools in the request,
  * raw-arguments toolCalls in the result, model errors rethrown unwrapped) —
  * MUST satisfy P2's liteLlm.test.ts tool-call legs unchanged.
+ *
+ * P2-COMPAT DEFAULT (documented): unlike createOpenAiAgentTransport, this
+ * legacy shim keeps `fetchImpl = fetch` so P2's suite and the worker's
+ * re-export stay source-compatible unmodified (ruling R1). P3 production
+ * composition (Task 16) passes the guarded egress into the FULL engine's
+ * transports; this shim is only the bounded P2-compat path.
  */
-export function createLegacyOpenAiTransport(fetchImpl?: typeof fetch): LegacyModelTransport {
+export function createLegacyOpenAiTransport(fetchImpl: typeof fetch = fetch): LegacyModelTransport {
   const agent = createOpenAiAgentTransport(fetchImpl);
   return {
     async stream(req, h, signal) {

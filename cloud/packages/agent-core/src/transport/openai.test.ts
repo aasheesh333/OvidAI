@@ -96,7 +96,7 @@ function streamCall(
 ) {
   const deltas: string[] = [];
   const thinking: string[] = [];
-  const transport = createOpenAiAgentTransport();
+  const transport = createOpenAiAgentTransport(fetch);
   const controller = new AbortController();
   const promise = transport.stream(
     agentReq(overrides),
@@ -112,7 +112,7 @@ function streamCall(
 // ---------------------------------------------------------------------------
 
 it("is an openai-format AgentTransport", () => {
-  expect(createOpenAiAgentTransport().apiFormat).toBe("openai");
+  expect(createOpenAiAgentTransport(fetch).apiFormat).toBe("openai");
 });
 
 it("POSTs the agent streaming request shape (path, auth, system rows first, tools wire shape, temperature/max_tokens)", async () => {
@@ -169,6 +169,24 @@ it("trims trailing slashes on baseUrl before appending /chat/completions", async
   });
   await streamCall({ baseUrl: `${baseUrl}//` }).promise;
   expect(lastRequest!.url).toBe("/chat/completions");
+});
+
+it("sends the prompt_cache_key header when the request carries one (ruling R3)", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.end("data: [DONE]\n\n");
+  });
+  await streamCall({ promptCacheKey: "sess-123" }).promise;
+  expect(lastRequest!.headers["prompt_cache_key"]).toBe("sess-123");
+});
+
+it("omits the prompt_cache_key header when the request has no cache key", async () => {
+  await startMock((_req, res) => {
+    sseHead(res);
+    res.end("data: [DONE]\n\n");
+  });
+  await streamCall().promise;
+  expect(lastRequest!.headers["prompt_cache_key"]).toBeUndefined();
 });
 
 it("concatenates text deltas exactly when the SSE arrives in awkward chunks; empty deltas never fire", async () => {
