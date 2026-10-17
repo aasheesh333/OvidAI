@@ -116,7 +116,15 @@ export interface TestPageServer {
   close(): Promise<void>;
 }
 
-const ROUTES: Record<string, { body: string; type: string; headers?: Record<string, string> }> = {
+interface Route {
+  body: string;
+  type: string;
+  headers?: Record<string, string>;
+  /** When set, flush headers immediately then end the body only after this delay (never-ending page pin). */
+  hangMs?: number;
+}
+
+const ROUTES: Record<string, Route> = {
   "/": { body: FIXTURES.staticArticle, type: "text/html" },
   "/spa": { body: FIXTURES.spaShell, type: "text/html" },
   "/click": { body: FIXTURES.clickButton, type: "text/html" },
@@ -124,6 +132,17 @@ const ROUTES: Record<string, { body: string; type: string; headers?: Record<stri
     body: FIXTURES.setCookie,
     type: "text/html",
     headers: { "Set-Cookie": "login_tok=abc123; Path=/" },
+  },
+  // /setcookie-hang: Set-Cookie in the HEADERS, then the body never arrives —
+  // `goto` times out waiting for domcontentloaded while the cookie has already
+  // landed in the context. The I1 regression pin: a session created but never
+  // published (browser_open publishes only after a successful goto) must
+  // still be flushed by engine.close().
+  "/setcookie-hang": {
+    body: "",
+    type: "text/html",
+    headers: { "Set-Cookie": "hang_tok=xyz789; Path=/" },
+    hangMs: 5_000,
   },
   "/animated": { body: FIXTURES.animated, type: "text/html" },
   "/big": { body: FIXTURES.bigDom, type: "text/html" },
@@ -168,6 +187,16 @@ export function startTestPageServer(): Promise<TestPageServer> {
       if (!route) {
         res.writeHead(404, { "Content-Type": "text/plain" });
         res.end("not found");
+        return;
+      }
+      if (route.hangMs !== undefined) {
+        res.writeHead(200, {
+          "Content-Type": route.type,
+          ...(route.headers ?? {}),
+        });
+        res.flushHeaders(); // the Set-Cookie reaches the context NOW
+        const timer = setTimeout(() => res.end(route.body), route.hangMs);
+        res.on("close", () => clearTimeout(timer));
         return;
       }
       res.writeHead(200, {

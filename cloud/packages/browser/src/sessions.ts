@@ -79,6 +79,14 @@ export interface BrowserSessionRegistry {
   /** Registers a live handle; instruments entry.handle.page as tab 0. */
   open(entry: { sessionId: string; userId: string; handle: LiveContextHandle }): SessionBrowser;
   get(sessionId: string): SessionBrowser | null;
+  /**
+   * Every live session id — exactly the "context alive" set. The Task-14
+   * engine's close() enumerates this (its own published-live set is a
+   * subset: browser_open suppresses the creation notify and publishes only
+   * after a successful goto, so a timed-out first navigation leaves a
+   * registry session that was never published).
+   */
+  ids(): string[];
   /** Removes the entry only — the POOL owns context closing. */
   close(sessionId: string): SessionBrowser | null;
   activePage(sessionId: string): Page | null;
@@ -224,6 +232,7 @@ export function createBrowserSessionRegistry(opts: SessionRegistryOptions = {}):
   return {
     open,
     get,
+    ids: () => [...sessions.keys()],
     close,
     activePage,
     addTab,

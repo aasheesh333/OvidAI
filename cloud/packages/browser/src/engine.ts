@@ -269,6 +269,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
 
   /** The 10 s unref'd monitor: tab-follow restarts + load/overflow step-downs. */
   async function monitorPass(): Promise<void> {
+    if (closePromise !== null) return; // a close() already ran — never restart a cast
     const load = loadavg()[0];
     for (const [sessionId, entry] of [...casts]) {
       try {
@@ -276,7 +277,9 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
         if (active === null || active !== entry.page || entry.page.isClosed()) {
           // The screencast follows the active tab: restart it on the new page.
           await stopScreencast(sessionId);
-          if (bridge.viewerCount(sessionId) > 0) await startScreencastFor(sessionId);
+          if (closePromise === null && bridge.viewerCount(sessionId) > 0) {
+            await startScreencastFor(sessionId);
+          }
           continue;
         }
         if (load > cfg.screencastLoadMax || bridge.viewerCount(sessionId) > cfg.maxActiveScreencasts) {
@@ -297,8 +300,6 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   // State publishing
   // -------------------------------------------------------------------------
 
-  /** Every sessionId the engine has seen live (maintained in publishState). */
-  const liveSessions = new Set<string>();
   /** page.title() is async — the cache backs the sync publishState. */
   const titleCache = new Map<string, string>();
 
@@ -331,12 +332,10 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
   function publishState(sessionId: string): void {
     const session = registry.get(sessionId);
     if (session === null) {
-      liveSessions.delete(sessionId);
       titleCache.delete(sessionId);
       bridge.publishState(sessionId, deadState(sessionId));
       return;
     }
-    liveSessions.add(sessionId);
     const page = session.tabs[session.activeIndex] ?? session.handle.page;
     const viewport = page.viewportSize() ?? { width: cfg.screencast.width, height: cfg.screencast.height };
     bridge.publishState(sessionId, {
@@ -378,9 +377,20 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
    * ONE serial queue per session: input must be applied in redis arrival
    * order (T7/T8 carry — concurrent un-awaited dispatches would interleave at
    * the Playwright channel). Errors are logged, never thrown into redis.
+   * The queue entry is pruned when it drains, and on every session teardown —
+   * a long-lived worker must not accumulate empty arrays per session id.
    */
   const inputQueues = new Map<string, BrowserInputEvent[]>();
   const inputPumping = new Set<string>();
+
+  function pruneInputQueue(sessionId: string): void {
+    const queue = inputQueues.get(sessionId);
+    // A pumping loop re-creates nothing: it drains what exists and exits, so
+    // deleting an EMPTY queue here is always safe; a non-empty one (events
+    // raced the teardown) is left for its pump to drain against the dead
+    // session and then pruned by the pump itself.
+    if (queue !== undefined && queue.length === 0) inputQueues.delete(sessionId);
+  }
 
   function onInput(sessionId: string, event: BrowserInputEvent): void {
     let queue = inputQueues.get(sessionId);
@@ -409,6 +419,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
         }
       } finally {
         inputPumping.delete(sessionId);
+        pruneInputQueue(sessionId);
       }
     })();
   }
@@ -440,6 +451,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     await stopScreencast(sessionId);
     // capture → flush → registry.close → pool.releaseLive → notify {live:false}
     await releaseSessionOps(ops, sessionId);
+    pruneInputQueue(sessionId);
     await bridge.unwatch(sessionId);
     publishState(sessionId); // the pinned post-unwatch {live:false} publish
   }
@@ -463,6 +475,7 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
       registry.close(sessionId);
     }
     titleCache.delete(sessionId);
+    pruneInputQueue(sessionId);
     await bridge.unwatch(sessionId);
     publishState(sessionId);
   }
@@ -478,9 +491,21 @@ export async function createBrowserEngine(deps: BrowserEngineDeps): Promise<Brow
     closePromise = (async () => {
       clearInterval(monitorTimer);
       // Flush BEFORE any process dies (Review Focus #2): every live session
-      // goes through the full capture→flush→close path first.
-      for (const sessionId of [...liveSessions]) {
-        await releaseSession(sessionId);
+      // goes through the full capture→flush→close path first. The REGISTRY
+      // is the enumeration source (the "context alive" set) — the engine's
+      // published-live set is a subset, because browser_open suppresses the
+      // creation notify and publishes only after a successful goto, so a
+      // timed-out first navigation leaves an unpublished session whose
+      // Set-Cookie state must still be flushed (review I1).
+      for (const sessionId of registry.ids()) {
+        try {
+          await releaseSession(sessionId);
+        } catch (err) {
+          // Per-session isolation (review M3): one throwing context.close()
+          // must never abort the loop — bridge/research/pool teardown below
+          // has to run so the worker's shutdown() still exits 0.
+          log(`releaseSession failed during close for session ${sessionId} — continuing`, err);
+        }
       }
       // Safety net: casts without a registry entry (should not exist — every
       // teardown path stops them — but a leaked CDP session is exactly the

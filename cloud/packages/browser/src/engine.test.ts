@@ -50,6 +50,7 @@ import { createBrowserEngine, type BrowserEngine } from "./engine.js";
 import { chromiumExecutableExists } from "./pool.js";
 import { frameMagicFormat } from "./screencast.js";
 import { TAKEOVER_REFUSAL } from "./sessions.js";
+import { ensureSession } from "./sessionOps.js";
 import type { StorageStatePersistence } from "./stateStore.js";
 import { startTestPageServer, type TestPageServer } from "./test/testServer.js";
 import { acquireBrowserSuiteLock, sleep } from "./test/suiteLock.js";
@@ -172,6 +173,8 @@ interface EngineRig {
   conns: Redis[];
   flush: ReturnType<typeof vi.fn>;
   restore: ReturnType<typeof vi.fn>;
+  /** The persistence stub handed to the engine (for direct sessionOps calls). */
+  persistence: StorageStatePersistence;
   /** Mutable injected clock — frozen by default so nothing ages by accident. */
   clock: { t: number };
   wsRoot: string;
@@ -196,7 +199,7 @@ async function mkEngine(cfgOverrides: Partial<BrowserEngineConfig> = {}): Promis
     now: () => clock.t,
     log: () => {},
   });
-  return { engine, conns, flush, restore, clock, wsRoot };
+  return { engine, conns, flush, restore, persistence, clock, wsRoot };
 }
 
 function tool(engine: BrowserEngine, name: string) {
@@ -388,6 +391,44 @@ describe.skipIf(!GATED)("BrowserEngine facade (real redis + chromium, harness pl
     const [flushedUser, captured] = rig.flush.mock.calls[0] as [string, { cookies: Array<{ name: string }> }];
     expect(flushedUser).toBe("u1");
     expect(captured.cookies.some((c) => c.name === "login_tok")).toBe(true);
+  });
+
+  it("close() flushes a session that was never published: goto timeout AFTER Set-Cookie still persists the cookie (I1)", async () => {
+    const sid = randomUUID();
+    rig = await mkEngine();
+
+    // Reproduce browser_open's creation path exactly: the tools pass a
+    // notify-SUPPRESSED deps clone into ensureSession (they publish only after
+    // a successful goto), so a goto that times out leaves the session in the
+    // REGISTRY but never in the engine's published-live set.
+    const session = await ensureSession(
+      {
+        pool: rig.engine.pool,
+        registry: rig.engine.registry,
+        persistence: rig.persistence,
+        cfg: makeCfg(),
+        notifyState: undefined,
+        log: () => {},
+      },
+      { sessionId: sid, userId: "u1" },
+    );
+    // The response's Set-Cookie header reaches the context immediately; the
+    // body never arrives, so domcontentloaded never fires and goto times out.
+    await expect(
+      session.handle.page.goto(server.url("/setcookie-hang"), {
+        waitUntil: "domcontentloaded",
+        timeout: 1500,
+      }),
+    ).rejects.toThrow();
+
+    await rig.engine.close();
+
+    // The cookie landed in the context before the timeout; close() must have
+    // enumerated the REGISTRY (the "context alive" set) and flushed it.
+    expect(rig.flush).toHaveBeenCalledTimes(1);
+    const [flushedUser, captured] = rig.flush.mock.calls[0] as [string, { cookies: Array<{ name: string }> }];
+    expect(flushedUser).toBe("u1");
+    expect(captured.cookies.some((c) => c.name === "hang_tok")).toBe(true);
   });
 
   it("close(): state flushed, browser dead, every bridge connection quit, second close() no-throw", async () => {
