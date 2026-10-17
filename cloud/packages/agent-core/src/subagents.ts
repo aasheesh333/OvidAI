@@ -305,6 +305,9 @@ export interface SubagentSupervisorDeps {
   registry: ToolRegistry;
   /** Test seam; defaults to the @ovid/db-backed store above. */
   store?: SubagentStore;
+  /** Composition flags (T16) — the same defaults as the loop when absent. */
+  memoryEnabled?: boolean;
+  githubConnected?: boolean;
   now?: () => number;
 }
 
@@ -530,8 +533,8 @@ export function createSubagentSupervisor(deps: SubagentSupervisorDeps): Subagent
           mode: parent.mode,
           planMode: parent.planMode,
           isSubagent: parent.isSubagent,
-          memoryEnabled: true,
-          githubConnected: true,
+          memoryEnabled: deps.memoryEnabled ?? true,
+          githubConnected: deps.githubConnected ?? true,
           preset: presetById(parentState.presetId),
           activeSkillScopes: parentState.activeSkillScopes,
         },
