@@ -490,7 +490,6 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        liveHosts++
         super.onCreate(savedInstanceState)
         routeSessionSelection(intent)
     }
