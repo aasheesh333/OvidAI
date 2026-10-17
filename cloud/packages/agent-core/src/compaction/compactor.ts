@@ -14,11 +14,40 @@
 //   6. render, persist CompactionStateJson, emit compaction_completed;
 //   7. replay as [checkpoint system row, ...retained tail].
 //
+// Fold boundary (review round 1, I3): the Compactor input accepts an additive
+// `foldBoundary` — the number of leading messages already folded into the
+// persisted ledger — and the output returns the boundary of the RETURNED
+// array (0 = nothing folded, 1 = the checkpoint row at index 0 is not part of
+// the replayable conversation). Dart's equivalent is `s.compactedAtCount`.
+// The caller MUST pass the persisted boundary when it rebuilds history from
+// durable rows, otherwise a fresh run re-absorbs the whole history into the
+// cumulative ledger and duplicates every user message/action. `applyCheckpoint`
+// is the companion replay helper T16 should call when assembling a request.
+//
+// Per-session lock (review round 1, I2): Dart's `_compacting` set
+// (PR26/C3) is ported as an in-process Set. Single Node process authority is
+// the same assumption Task 12's approvals gate makes; a second concurrent
+// compaction on one session no-ops (auto) or returns Dart's busy string
+// (manual) instead of last-write-wins losing a ledger absorption.
+//
+// Pruner reachability (review round 1, I4): the brief pins 12 000 chars, but
+// T9's tool-layer `finish()` already spills every P3 sandbox/git result at
+// 6 000 and fetch_url at 8 000 (tools/spill.ts:15, tools/web.ts), and the
+// worker disables the loop-level spill (spillToolResults:false). Those rows
+// therefore never reach the pruner in the real flow. The reachable classes
+// are P2-adapter results (adapted through agentToolAdapter, no `finish()`),
+// MCP results (P5) and subagent report rows — exactly the rows the plan's F3
+// relief was meant to catch for oversized third-party output. The constant
+// stays at the brief-pinned 12 000; the unit test uses a 15 000-char
+// P2-adapter row (the real reachable class) plus a synthetic 30 000-char
+// boundary pin.
+//
 // Plan pin vs Dart: the checkpoint replays as a SYSTEM row (Dart: user row);
 // `cutoffMessageId` stays null because cloud AgentMessages carry no ids (T16
 // can populate it from durable message rows); `compactedAtCount` is the plan's
 // compaction COUNT (Dart's same-named session field is the fold boundary
-// INDEX).
+// INDEX) — the fold boundary is now carried separately as `foldBoundary` /
+// `ledger.folded`.
 
 import type {
   CompactionStateJson,
@@ -30,6 +59,7 @@ import type {
 import { spillToolOutput } from "../tools/spill.js";
 import type { AgentMessage, ToolCall } from "../types.js";
 import {
+  COMPACTED_SUMMARY_TAGS,
   compactedSystemBlock,
   finalizeCheckpoint,
   summarizerSystemPrompt,
@@ -74,20 +104,47 @@ export interface CompactorDeps {
   runId?: string;
 }
 
+/**
+ * Additive compaction input (review I3). `foldBoundary` is the number of
+ * leading messages already folded into the persisted ledger — Dart's
+ * `compactedAtCount` index. Omitted means 0 (a fresh history) unless the
+ * first row is a checkpoint system row, in which case it defaults to 1.
+ */
+export interface CompactionInput {
+  sessionId: string;
+  messages: AgentMessage[];
+  windowTokens: number;
+  foldBoundary?: number;
+}
+
+export interface CompactionOutcome {
+  compacted: boolean;
+  messages: AgentMessage[];
+  /**
+   * Index into the RETURNED messages array of the first replayable message:
+   * 0 when nothing was folded, 1 when `messages[0]` is the checkpoint system
+   * row. Callers use it to truncate before the next `maybeCompact`.
+   */
+  foldBoundary: number;
+}
+
 export interface CompactNowResult {
   compacted: boolean;
   messages: AgentMessage[];
   status: string;
   narrative: boolean;
+  foldBoundary: number;
 }
 
 export interface CompactorWithManual extends Compactor {
+  maybeCompact(i: CompactionInput): Promise<CompactionOutcome>;
   /** Manual `/compact [focus]` — the 24-message / 8000-token retention path. */
   compactNow(i: {
     sessionId: string;
     messages: AgentMessage[];
     windowTokens: number;
     focus?: string;
+    foldBoundary?: number;
   }): Promise<CompactNowResult>;
 }
 
@@ -131,6 +188,80 @@ function toolNameFor(
   return "tool";
 }
 
+/**
+ * A row produced by `applyCheckpoint` / `maybeCompact` — the stable system
+ * checkpoint block. Used to make replay and boundary detection idempotent.
+ */
+export function isCheckpointRow(m: AgentMessage | undefined): boolean {
+  return (
+    m !== undefined &&
+    m.role === "system" &&
+    m.content.includes("automatically generated checkpoint") &&
+    m.content.includes(COMPACTED_SUMMARY_TAGS.open)
+  );
+}
+
+function stableCheckpointRow(summary: string): AgentMessage {
+  return {
+    role: "system",
+    content: compactedSystemBlock(summary),
+    volatile: false,
+  };
+}
+
+/**
+ * Replay helper for the request assembler (T16): given the persisted
+ * compaction state and the current history, return the stable checkpoint
+ * system row followed by the UNFOLDED tail.
+ *
+ * Boundary resolution, in order:
+ *  1. an explicit [foldBoundary] (the caller knows its window);
+ *  2. a leading checkpoint row in [messages] (strip it — idempotent replay);
+ *  3. the ledger's cumulative `folded` count (a full history rebuilt from
+ *     durable rows, oldest-first).
+ *
+ * With no persisted summary the messages pass through unchanged.
+ */
+export function applyCheckpoint(
+  compaction: CompactionStateJson | null,
+  messages: readonly AgentMessage[],
+  foldBoundary?: number,
+): AgentMessage[] {
+  const summary = compaction?.summary?.trim() ?? "";
+  if (summary.length === 0) return [...messages];
+  let tail: readonly AgentMessage[];
+  if (foldBoundary !== undefined) {
+    tail = messages.slice(clamp(foldBoundary, 0, messages.length));
+  } else if (isCheckpointRow(messages[0])) {
+    tail = messages.slice(1);
+  } else {
+    const ledger = CompactionLedger.of(compaction);
+    const folded = ledger?.foldedMessages ?? 0;
+    tail = messages.slice(clamp(folded, 0, messages.length));
+  }
+  return [stableCheckpointRow(summary), ...tail];
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+/** Resolve the fold boundary for an input array (review I3). */
+function boundaryOf(
+  messages: readonly AgentMessage[],
+  foldBoundary: number | undefined,
+): number {
+  const leading = isCheckpointRow(messages[0]) ? 1 : 0;
+  return clamp(foldBoundary ?? leading, leading, messages.length);
+}
+
+/**
+ * The summarizer replay. Dart's tool-card content is empty/short and the
+ * body lives in `toolDetail`, so it renders `Assistant: [tool X]` plus one
+ * `[tool output]` line. A cloud tool row's `content` IS the output, so the
+ * assistant line carries only the marker — emitting the content there too
+ * would send every tool result twice (review I1).
+ */
 function replaySpan(
   span: readonly AgentMessage[],
   calls: ReadonlyMap<string, ToolCall>,
@@ -140,16 +271,20 @@ function replaySpan(
     // The checkpoint system row (or any standing system row) is not part of
     // the conversation span Dart replays; Dart skips MsgKind.compact.
     if (m.role === "system") continue;
-    const tool =
-      m.role === "tool" && m.toolCallId !== undefined
-        ? calls.get(m.toolCallId)?.name
-        : undefined;
-    const who = m.role === "user" ? "User" : "Assistant";
-    const prefix = m.role === "tool" ? `[tool ${tool ?? "tool"}] ` : "";
-    out.push(`${who}: ${prefix}${m.content}`);
-    if (m.role === "tool" && m.content.trim().length > 0) {
-      out.push(`  [tool output] ${cleanTruncate(m.content.trim(), 2_000)}`);
+    if (m.role === "tool") {
+      const tool =
+        m.toolCallId !== undefined
+          ? (calls.get(m.toolCallId)?.name ?? "tool")
+          : "tool";
+      out.push(`Assistant: [tool ${tool}]`);
+      const detail = m.content.trim();
+      if (detail.length > 0) {
+        out.push(`  [tool output] ${cleanTruncate(detail, 2_000)}`);
+      }
+      continue;
     }
+    const who = m.role === "user" ? "User" : "Assistant";
+    out.push(`${who}: ${m.content}`);
   }
   return out.join("\n");
 }
@@ -171,6 +306,9 @@ function checkpointStateOf(
 export function createCompactor(deps: CompactorDeps): CompactorWithManual {
   const workspaceRelDir = deps.workspaceRelDir ?? "";
   const workingFolder = deps.workingFolder ?? null;
+  // PR26/C3: one compaction at a time per session (Dart `_compacting`).
+  // Single-process authority, the same assumption the approvals gate makes.
+  const compacting = new Set<string>();
 
   /** Spill every tool row at/over the pinned threshold. Pure (new array). */
   async function pruneRows(messages: readonly AgentMessage[]): Promise<{
@@ -266,26 +404,36 @@ export function createCompactor(deps: CompactorDeps): CompactorWithManual {
   }
 
   /**
-   * Fold `[0, cutoff)` and apply the checkpoint. Shared by auto and manual.
-   * Returns the rebuilt request (checkpoint system row + retained tail) and
-   * the fresh-narrative flag.
+   * Fold `[from, cutoff)` and apply the checkpoint. Shared by auto and
+   * manual. Returns the rebuilt request (checkpoint system row + retained
+   * tail) and the fresh-narrative flag.
    */
   async function applyCompaction(o: {
     sessionId: string;
     messages: AgentMessage[];
     windowTokens: number;
+    from: number;
     cutoff: number;
     focus?: string;
-  }): Promise<{ messages: AgentMessage[]; narrative: boolean; checkpoint: Checkpoint; folded: number }> {
-    const { sessionId, messages, windowTokens, cutoff } = o;
+  }): Promise<{
+    messages: AgentMessage[];
+    narrative: boolean;
+    checkpoint: Checkpoint;
+    folded: number;
+  }> {
+    const { sessionId, messages, windowTokens, from, cutoff } = o;
     const state = await deps.state.get(sessionId);
     const prior = CompactionLedger.of(state.compaction);
-    const span = messages.slice(0, cutoff);
+    const span = messages.slice(from, cutoff);
     // Cumulative: the previous ledger absorbs ONLY the new span. A session
     // with no ledger (fresh, or old LLM-only format) absorbs its whole
     // retained prefix and adopts the legacy summary as prior narrative.
     const ledger = buildLedger(prior, span);
-    if (prior === null && state.compaction?.summary !== null && state.compaction?.summary !== undefined) {
+    if (
+      prior === null &&
+      state.compaction?.summary !== null &&
+      state.compaction?.summary !== undefined
+    ) {
       const legacy = state.compaction.summary.trim();
       if (legacy.length > 0) ledger.narrative = legacy;
     }
@@ -298,6 +446,7 @@ export function createCompactor(deps: CompactorDeps): CompactorWithManual {
       o.focus,
       windowTokens,
     );
+    const folded = cutoff - from;
     const checkpoint = finalizeCheckpoint(ledger, {
       state: checkpointStateOf(
         state,
@@ -305,7 +454,7 @@ export function createCompactor(deps: CompactorDeps): CompactorWithManual {
         messages.length - cutoff,
       ),
       windowTokens,
-      folded: cutoff,
+      folded,
       narrative,
       focus: o.focus ?? null,
     });
@@ -323,82 +472,102 @@ export function createCompactor(deps: CompactorDeps): CompactorWithManual {
     const fresh = narrative !== null && narrative.trim().length > 0;
     await deps.sink.emit("compaction_completed", {
       ...(deps.runId !== undefined ? { runId: deps.runId } : {}),
-      folded: cutoff,
+      folded,
       retained: messages.length - cutoff,
       narrative: fresh,
     });
 
     return {
-      messages: [
-        {
-          role: "system",
-          content: compactedSystemBlock(checkpoint.text),
-          volatile: false,
-        },
-        ...messages.slice(cutoff),
-      ],
+      messages: [stableCheckpointRow(checkpoint.text), ...messages.slice(cutoff)],
       narrative: fresh,
       checkpoint,
-      folded: cutoff,
+      folded,
     };
   }
 
   return {
     async maybeCompact(i) {
-      const { sessionId, messages, windowTokens } = i;
-      const threshold = compactionThresholdTokens(windowTokens);
-      let measured = measuredTokens(messages);
-      if (measured < threshold) {
-        return { compacted: false, messages };
+      const from = boundaryOf(i.messages, i.foldBoundary);
+      // PR26/C3: a concurrent compaction on this session is a no-op, never a
+      // second absorption from a stale base. (JS Set.add returns the Set, not
+      // a boolean — test membership before adding.)
+      if (compacting.has(i.sessionId)) {
+        return { compacted: false, messages: i.messages, foldBoundary: from };
       }
-
-      // F3: prune BEFORE spending a model call.
-      const pruned = await pruneRows(messages);
-      if (pruned.pruned > 0) {
-        measured = measuredTokens(pruned.messages);
-        await note("context_pruned", {
-          pruned: pruned.pruned,
-          message:
-            `context pruned: ${pruned.pruned} oversized tool output(s) ` +
-            `spilled to disk (~${Math.round((measured / windowTokens) * 100)}% now)`,
-        });
+      compacting.add(i.sessionId);
+      try {
+        const { sessionId, messages, windowTokens } = i;
+        const threshold = compactionThresholdTokens(windowTokens);
+        let measured = measuredTokens(messages);
         if (measured < threshold) {
-          // Pressure relieved without a summary. The plan returns the pruned
-          // rows with compacted:false (the loop currently applies a
-          // compacted:false result as-is — T16 wiring note).
-          return { compacted: false, messages: pruned.messages };
+          return { compacted: false, messages, foldBoundary: from };
         }
-      }
 
-      // Retain the newest ~16% of the window verbatim; scale DOWN when the
-      // absolute trigger fired (retaining 160k of a 1M window would fold
-      // nothing). Always keep >=6 retained and >=4 foldable messages.
-      let retain = Math.floor(windowTokens * COMPACTION.retainRatio);
-      const scaled = Math.floor(measured * 0.25);
-      if (scaled < retain) retain = scaled;
-      let tail = 0;
-      let cutoff = pruned.messages.length;
-      while (cutoff > 0) {
-        if (
-          tail >= retain &&
-          pruned.messages.length - cutoff >= 6 &&
-          cutoff >= 4
-        ) {
-          break;
+        // F3: prune BEFORE spending a model call.
+        const pruned = await pruneRows(messages);
+        if (pruned.pruned > 0) {
+          measured = measuredTokens(pruned.messages);
+          await note("context_pruned", {
+            pruned: pruned.pruned,
+            message:
+              `context pruned: ${pruned.pruned} oversized tool output(s) ` +
+              `spilled to disk (~${Math.round((measured / windowTokens) * 100)}% now)`,
+          });
+          if (measured < threshold) {
+            // Pressure relieved without a summary. The pruned rows are
+            // returned with compacted:false; the caller must apply them
+            // (T16 carry 3).
+            return {
+              compacted: false,
+              messages: pruned.messages,
+              foldBoundary: from,
+            };
+          }
         }
-        tail += estimateMessageTokens(pruned.messages[cutoff - 1]!.content);
-        cutoff -= 1;
-      }
-      cutoff = snapCutoff(pruned.messages, 0, cutoff, 4);
-      if (cutoff < 4) return { compacted: false, messages: pruned.messages };
 
-      const applied = await applyCompaction({
-        sessionId,
-        messages: pruned.messages,
-        windowTokens,
-        cutoff,
-      });
-      return { compacted: true, messages: applied.messages };
+        // Retain the newest ~16% of the window verbatim; scale DOWN when the
+        // absolute trigger fired (retaining 160k of a 1M window would fold
+        // nothing). Always keep >=6 retained and >=4 foldable messages.
+        let retain = Math.floor(windowTokens * COMPACTION.retainRatio);
+        const scaled = Math.floor(measured * 0.25);
+        if (scaled < retain) retain = scaled;
+        let tail = 0;
+        let cutoff = pruned.messages.length;
+        while (cutoff > from) {
+          if (
+            tail >= retain &&
+            pruned.messages.length - cutoff >= 6 &&
+            cutoff - from >= 4
+          ) {
+            break;
+          }
+          tail += estimateMessageTokens(pruned.messages[cutoff - 1]!.content);
+          cutoff -= 1;
+        }
+        cutoff = snapCutoff(pruned.messages, from, cutoff, 4);
+        if (cutoff - from < 4) {
+          return {
+            compacted: false,
+            messages: pruned.messages,
+            foldBoundary: from,
+          };
+        }
+
+        const applied = await applyCompaction({
+          sessionId,
+          messages: pruned.messages,
+          windowTokens,
+          from,
+          cutoff,
+        });
+        return { compacted: true, messages: applied.messages, foldBoundary: 1 };
+      } catch {
+        // Compaction failure is non-fatal (Dart `_maybeCompactLocked`): the
+        // run continues with full history.
+        return { compacted: false, messages: i.messages, foldBoundary: from };
+      } finally {
+        compacting.delete(i.sessionId);
+      }
     },
 
     async pruneOversizedToolResults(i) {
@@ -410,60 +579,92 @@ export function createCompactor(deps: CompactorDeps): CompactorWithManual {
     },
 
     async compactNow(i) {
-      const { sessionId, messages, windowTokens } = i;
-      // Manual retention: newest slice bounded by BOTH message count and
-      // tokens, always >=6 retained and >=4 foldable (Dart compactNow).
-      let tail = 0;
-      let cutoff = messages.length;
-      while (cutoff > 0) {
-        const retained = messages.length - cutoff;
-        if (
-          retained >= 6 &&
-          (tail >= COMPACTION.manualRetainTokens ||
-            retained >= COMPACTION.manualRetainMessages) &&
-          cutoff >= 4
-        ) {
-          break;
-        }
-        tail += estimateMessageTokens(messages[cutoff - 1]!.content);
-        cutoff -= 1;
-      }
-      cutoff = snapCutoff(messages, 0, cutoff, 4);
-      if (cutoff < 4) {
-        const left = messages.length;
+      const from = boundaryOf(i.messages, i.foldBoundary);
+      if (compacting.has(i.sessionId)) {
         return {
           compacted: false,
-          messages,
+          messages: i.messages,
           narrative: false,
-          status:
-            left <= 0
-              ? "Nothing to compact — this chat is already fully compacted."
-              : `Nothing to compact yet — only ${left} message(s) after the ` +
-                "last checkpoint (need ≥4 foldable + retained tail).",
+          foldBoundary: from,
+          status: "Compaction is already running in this chat.",
         };
       }
-      const focus = (i.focus ?? "").trim();
-      const applied = await applyCompaction({
-        sessionId,
-        messages,
-        windowTokens,
-        cutoff,
-        ...(focus.length > 0 ? { focus } : {}),
-      });
-      const foldedTokens = measuredTokens(messages.slice(0, cutoff));
-      const human =
-        `compacted ${applied.folded} message(s) (~${fmtK(foldedTokens)} ` +
-        "tokens folded into the checkpoint)";
-      return {
-        compacted: true,
-        messages: applied.messages,
-        narrative: applied.narrative,
-        status: applied.narrative
-          ? `Session compacted — ${human}. View the checkpoint row in the transcript.`
-          : "Session compacted from the transcript only — the model returned " +
-            "no summary, so every user message and the work log were kept " +
-            `verbatim (${human}).`,
-      };
+      compacting.add(i.sessionId);
+      try {
+        const { sessionId, messages, windowTokens } = i;
+        // Manual retention: newest slice bounded by BOTH message count and
+        // tokens, always >=6 retained and >=4 foldable (Dart compactNow).
+        let tail = 0;
+        let cutoff = messages.length;
+        while (cutoff > from) {
+          const retained = messages.length - cutoff;
+          if (
+            retained >= 6 &&
+            (tail >= COMPACTION.manualRetainTokens ||
+              retained >= COMPACTION.manualRetainMessages) &&
+            cutoff - from >= 4
+          ) {
+            break;
+          }
+          tail += estimateMessageTokens(messages[cutoff - 1]!.content);
+          cutoff -= 1;
+        }
+        cutoff = snapCutoff(messages, from, cutoff, 4);
+        if (cutoff - from < 4) {
+          const left = messages.length - from;
+          return {
+            compacted: false,
+            messages,
+            narrative: false,
+            foldBoundary: from,
+            status:
+              left <= 0
+                ? "Nothing to compact — this chat is already fully compacted."
+                : `Nothing to compact yet — only ${left} message(s) after the ` +
+                  "last checkpoint (need ≥4 foldable + retained tail).",
+          };
+        }
+        const focus = (i.focus ?? "").trim();
+        const applied = await applyCompaction({
+          sessionId,
+          messages,
+          windowTokens,
+          from,
+          cutoff,
+          ...(focus.length > 0 ? { focus } : {}),
+        });
+        const foldedTokens = measuredTokens(messages.slice(from, cutoff));
+        const human =
+          `compacted ${applied.folded} message(s) (~${fmtK(foldedTokens)} ` +
+          "tokens folded into the checkpoint)";
+        return {
+          compacted: true,
+          messages: applied.messages,
+          narrative: applied.narrative,
+          foldBoundary: 1,
+          status: applied.narrative
+            ? `Session compacted — ${human}. View the checkpoint row in the transcript.`
+            : "Session compacted from the transcript only — the model returned " +
+              "no summary, so every user message and the work log were kept " +
+              `verbatim (${human}).`,
+        };
+      } catch (err) {
+        // Dart parity: report honestly and leave history untouched.
+        return {
+          compacted: false,
+          messages: i.messages,
+          narrative: false,
+          foldBoundary: from,
+          status:
+            `Compaction failed: ${
+              err instanceof Error
+                ? (err.message.split("\n")[0] ?? err.message)
+                : String(err)
+            } — history is untouched.`,
+        };
+      } finally {
+        compacting.delete(i.sessionId);
+      }
     },
   };
 }

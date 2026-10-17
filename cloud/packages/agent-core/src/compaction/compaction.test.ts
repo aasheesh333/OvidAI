@@ -36,7 +36,7 @@ import {
   summarizerSystemPrompt,
   summarizerUserPrompt,
 } from "./checkpoint.js";
-import { createCompactor } from "./compactor.js";
+import { applyCheckpoint, createCompactor, isCheckpointRow } from "./compactor.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -278,8 +278,13 @@ describe("compaction policy", () => {
     }
     // Prefers the user-turn start that keeps at least half the intended fold.
     expect(snapCutoff(msgs, 0, 5)).toBe(4);
-    // No safe cut before the start -> the fold is clamped to the end.
-    expect(snapCutoff([{ role: "tool", toolCallId: "t", content: "r" }], 0, 1, 2)).toBe(1);
+    // No safe cut anywhere -> fold nothing (the final Dart branch).
+    const allTools: AgentMessage[] = [
+      { role: "tool", toolCallId: "a", content: "ra" },
+      { role: "tool", toolCallId: "b", content: "rb" },
+      { role: "tool", toolCallId: "c", content: "rc" },
+    ];
+    expect(snapCutoff(allTools, 0, 1)).toBe(0);
   });
 
   it("splitsToolRun detects a tail starting on a tool row", () => {
@@ -329,6 +334,25 @@ describe("compaction ledger", () => {
     expect(r.actions.at(-1)?.kind).toBe("mcp");
     expect(r.actions.at(-1)?.note).toBe("created issue #42");
     expect(r.toJson()).toEqual(json);
+  });
+
+  it("round-trips the attachment wire key `a`", () => {
+    const row = {
+      role: "user",
+      content: "see the spec",
+      attachments: ["spec.pdf (/ws/uploads/spec.pdf)"],
+    } as AgentMessage;
+    const l = new CompactionLedger();
+    l.absorb([row]);
+    const json = l.toJson();
+    expect(json.users[0]).toEqual({
+      s: 1,
+      t: "see the spec",
+      a: ["spec.pdf (/ws/uploads/spec.pdf)"],
+    });
+    expect(CompactionLedger.fromJson(json).userMessages[0]!.attachments).toEqual([
+      "spec.pdf (/ws/uploads/spec.pdf)",
+    ]);
   });
 
   it("stores user rows verbatim and clips oversized pastes with the exact marker", () => {
@@ -549,6 +573,78 @@ describe("compactor", () => {
     expect(event.payload.folded).toBe(msgs.length - tail.length);
   });
 
+  it("replays each tool output exactly once in the summarizer prompt (review I1)", async () => {
+    const { state, summarizeCalls, compactor } = setup();
+    await patchState(state, "s2b");
+    const marker = "UNIQUE-TOOL-OUTPUT-MARKER";
+    const msgs: AgentMessage[] = [
+      { role: "user", content: "goal" },
+      ...toolPair("run_shell", { command: "cat big.log" }, `${marker}\n${"x".repeat(7_990)}`),
+    ];
+    for (let i = 0; i < 20; i += 1) {
+      msgs.push({ role: i % 2 === 0 ? "user" : "assistant", content: "y".repeat(100) });
+    }
+    const r = await compactor.maybeCompact({ sessionId: "s2b", messages: msgs, windowTokens: 2_000 });
+    expect(r.compacted).toBe(true);
+    const prompt = summarizeCalls[0]!.userPrompt;
+    // The tool result is the `[tool output]` line ONLY; the assistant marker
+    // line must not repeat it (Dart's tool-card content is empty/short).
+    expect(prompt.split(marker)).toHaveLength(2);
+    expect(prompt).toContain("Assistant: [tool run_shell]");
+    expect(prompt).toContain("  [tool output] ");
+  });
+
+  it("serializes concurrent compactions per session (review I2)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started!: () => void;
+    const summarizeStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const { state, compactor } = setup({
+      summarize: async () => {
+        started();
+        await gate;
+        return "## Decisions\n- d";
+      },
+    });
+    await patchState(state, "s2c");
+    const msgs = session(200);
+
+    // First compaction holds the session lock across the model call.
+    const first = compactor.maybeCompact({
+      sessionId: "s2c",
+      messages: msgs,
+      windowTokens: 32_000,
+    });
+    await summarizeStarted;
+    // A second AUTO compaction no-ops; the MANUAL path reports Dart's busy
+    // string instead of a second fold from the same base.
+    const second = await compactor.maybeCompact({
+      sessionId: "s2c",
+      messages: msgs,
+      windowTokens: 32_000,
+    });
+    const busy = await compactor.compactNow({
+      sessionId: "s2c",
+      messages: msgs,
+      windowTokens: 32_000,
+    });
+    release();
+    const r1 = await first;
+
+    expect(r1.compacted).toBe(true);
+    expect(second.compacted).toBe(false);
+    expect(busy.compacted).toBe(false);
+    expect(busy.status).toBe("Compaction is already running in this chat.");
+    const compaction = (await state.get("s2c")).compaction!;
+    // One absorption, one count increment — no lost ledger entry.
+    expect(compaction.compactedAtCount).toBe(1);
+    expect(CompactionLedger.fromJson(compaction.ledger).compactions).toBe(1);
+  });
+
   it("replays the checkpoint as a system row with the full preamble", async () => {
     const { state, compactor } = setup();
     await patchState(state, "s3");
@@ -563,6 +659,70 @@ describe("compactor", () => {
     expect(block).toContain(
       "This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context.",
     );
+  });
+
+  it("applyCheckpoint prepends the stable row and truncates at the fold boundary (review I3)", async () => {
+    const { state, compactor } = setup();
+    await patchState(state, "fb1");
+    const msgs = session(200);
+    const r = await compactor.maybeCompact({
+      sessionId: "fb1",
+      messages: msgs,
+      windowTokens: 32_000,
+    });
+    expect(r.foldBoundary).toBe(1);
+    const saved = (await state.get("fb1")).compaction!;
+
+    // Idempotent on the in-memory array: the leading checkpoint row is
+    // stripped and exactly one is re-prepended.
+    const replay = applyCheckpoint(saved, r.messages);
+    expect(isCheckpointRow(replay[0])).toBe(true);
+    expect(replay.filter(isCheckpointRow)).toHaveLength(1);
+    expect(replay.slice(1)).toEqual(r.messages.slice(1));
+
+    // A full history rebuilt from durable rows uses the cumulative ledger's
+    // `folded` count as the boundary (no checkpoint row present).
+    const replayDb = applyCheckpoint(saved, msgs);
+    expect(isCheckpointRow(replayDb[0])).toBe(true);
+    expect(replayDb.slice(1)).toEqual(msgs.slice(msgs.length - (r.messages.length - 1)));
+
+    // No compaction -> pass-through.
+    expect(applyCheckpoint(null, msgs)).toEqual(msgs);
+  });
+
+  it("absorbs only the span after an explicit fold boundary (no re-absorption)", async () => {
+    const { state, compactor } = setup();
+    await patchState(state, "fb2");
+    const first = session(200);
+    const r1 = await compactor.maybeCompact({
+      sessionId: "fb2",
+      messages: first,
+      windowTokens: 32_000,
+    });
+    const ledger1 = CompactionLedger.of((await state.get("fb2")).compaction)!;
+    expect(ledger1.foldedMessages).toBe(first.length - (r1.messages.length - 1));
+
+    // Simulate a NEW run: history rebuilt from durable rows, boundary passed.
+    const grown = [...first];
+    for (let k = 200; k < 260; k += 1) addTurn(grown, k);
+    const r2 = await compactor.maybeCompact({
+      sessionId: "fb2",
+      messages: grown,
+      windowTokens: 32_000,
+      foldBoundary: ledger1.foldedMessages,
+    });
+    expect(r2.compacted).toBe(true);
+    const ledger2 = CompactionLedger.of((await state.get("fb2")).compaction)!;
+    expect(ledger2.compactions).toBe(2);
+    // Every user row appears exactly once, in order.
+    expect(ledger2.userMessages.map((u) => u.seq)).toEqual(
+      Array.from({ length: ledger2.userMessages.length }, (_, i) => i + 1),
+    );
+    const retained = r2.messages.length - 1;
+    const totalUserRows = grown
+      .slice(0, grown.length - retained)
+      .filter((m) => m.role === "user").length;
+    expect(ledger2.userMessages).toHaveLength(totalUserRows);
   });
 
   it("keeps every user instruction, path, todo and the last turns across three compactions", async () => {
@@ -581,15 +741,23 @@ describe("compactor", () => {
     await patchState(state, "s4");
     let msgs = session(200);
     const foldedUserCounts: number[] = [];
+    let totalFolded = 0;
     const calls = 3;
     for (let n = 0; n < calls; n += 1) {
       const before = msgs.length;
       const r = await compactor.maybeCompact({ sessionId: "s4", messages: msgs, windowTokens: 16_000 });
       expect(r.compacted).toBe(true);
       const retained = r.messages.length - 1;
-      const folded = before - retained;
+      // Rounds 2+ pass [checkpoint row, ...tail]; the row is not a real
+      // message, so it must not count as folded (review Minor 3).
+      const realInput = before - (n === 0 ? 0 : 1);
+      const folded = realInput - retained;
+      totalFolded += folded;
+      const start = n === 0 ? 0 : 1;
       foldedUserCounts.push(
-        msgs.slice(0, folded).filter((m) => m.role === "user").length,
+        msgs
+          .slice(start, start + folded)
+          .filter((m) => m.role === "user").length,
       );
       msgs = r.messages;
       if (n < calls - 1) {
@@ -600,6 +768,7 @@ describe("compactor", () => {
     const checkpoint = (await state.get("s4")).compaction!;
     const ledger = CompactionLedger.fromJson(checkpoint.ledger)!;
     expect(ledger.compactions).toBe(3);
+    expect(ledger.foldedMessages).toBe(totalFolded);
     expect(ledger.goal).toBe(GOAL);
     const expectedUsers = foldedUserCounts.reduce((a, b) => a + b, 0);
     expect(ledger.userMessages).toHaveLength(expectedUsers);
@@ -747,8 +916,8 @@ describe("compactor", () => {
 // ── pruning ────────────────────────────────────────────────────────────────
 
 describe("oversized tool-result pruning", () => {
-  const bigRow = (chars: number): AgentMessage[] => {
-    const c = call("run_shell", { command: "cat huge.log" });
+  const bigRow = (chars: number, tool = "run_shell"): AgentMessage[] => {
+    const c = call(tool, { command: "cat huge.log" });
     return [
       { role: "user", content: "hi" },
       { role: "assistant", content: "", toolCalls: [c] },
@@ -757,7 +926,7 @@ describe("oversized tool-result pruning", () => {
     ];
   };
 
-  it("spills a 20k tool row and makes ZERO summarizer calls when pressure is relieved", async () => {
+  it("spills a 30k tool row and makes ZERO summarizer calls when pressure is relieved", async () => {
     const { state, writes, summarizeCalls, compactor } = setup();
     await patchState(state, "p1");
     const msgs = bigRow(30_000);
@@ -796,6 +965,26 @@ describe("oversized tool-result pruning", () => {
     expect(writes).toHaveLength(1);
   });
 
+  it("prunes a P2-adapter-sized row — the reachable class in the real flow (review I4)", async () => {
+    // T9's finish() already spills P3 sandbox/git rows at 6k and fetch_url at
+    // 8k, so those never reach the 12k trigger. P2-adapter rows (adapted
+    // through agentToolAdapter) and MCP/subagent rows do not pass through
+    // finish(), so a 15k P2 row is the class the pruner actually sees.
+    const { state, writes, summarizeCalls, compactor } = setup();
+    await patchState(state, "p4");
+    const msgs = bigRow(15_000, "read_file");
+    const r = await compactor.maybeCompact({
+      sessionId: "p4",
+      messages: msgs,
+      windowTokens: 4_000,
+    });
+    expect(r.compacted).toBe(false);
+    expect(summarizeCalls).toHaveLength(0);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.content).toBe("z".repeat(15_000));
+    expect(r.messages[2]!.content).toContain(".spill/");
+  });
+
   it("does not prune below the pressure threshold", async () => {
     const { compactor, writes } = setup();
     const r = await compactor.pruneOversizedToolResults({
@@ -828,6 +1017,47 @@ describe("manual compact", () => {
     const retained = r.messages.length - 1;
     expect(retained).toBe(24);
     expect(r.messages[1]!.role).toBe("user");
+  });
+
+  it("uses the 8_000-token retention bound when it wins first", async () => {
+    const { state, compactor } = setup();
+    await patchState(state, "m1b");
+    // ~1,004 tokens per row: the token bound (8,000) fires at 8 retained
+    // rows, well before the 24-message bound.
+    const msgs: AgentMessage[] = [];
+    for (let i = 0; i < 40; i += 1) {
+      msgs.push({
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: "w".repeat(4_000),
+      });
+    }
+    const r = await compactor.compactNow({
+      sessionId: "m1b",
+      messages: msgs,
+      windowTokens: 32_000,
+    });
+    expect(r.compacted).toBe(true);
+    expect(r.messages.length - 1).toBe(8);
+  });
+
+  it("reports 'already fully compacted' when only the checkpoint row is left", async () => {
+    const { state, compactor } = setup();
+    await patchState(state, "m1c");
+    await state.patch("m1c", {
+      compaction: {
+        ledger: null,
+        summary: "# Session checkpoint",
+        cutoffMessageId: null,
+        compactedAtCount: 1,
+      },
+    });
+    const r = await compactor.compactNow({
+      sessionId: "m1c",
+      messages: [{ role: "system", content: compactedSystemBlock("# Session checkpoint") }],
+      windowTokens: 32_000,
+    });
+    expect(r.compacted).toBe(false);
+    expect(r.status).toContain("already fully compacted");
   });
 
   it("reports honestly when nothing is foldable", async () => {
