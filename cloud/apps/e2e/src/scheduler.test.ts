@@ -1256,6 +1256,113 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect((await scheduleRow(dto.id))!.status).toBe("completed");
     }, 40_000);
 
+    // ---- Flow G: H1 — a safe schedule cannot mutate -----------------------
+
+    it("flow G (H1) — a default `safe` schedule enqueues mode safe and a mutating tool is denied read-only, never approval-prompted", async () => {
+      const user = uid("e2e-sched-g");
+      createdUids.push(user);
+      const at = new Date(Date.now() + 3_600_000);
+      // No autonomy: the default is `safe` (spec §8).
+      const dto = await createScheduleRest(user, {
+        title: "Read only",
+        description: "try to mutate",
+        trigger: { kind: "at", at: at.toISOString() },
+      });
+
+      const captured: AgentRunJob[] = [];
+      const fakeQueues = {
+        agentRuns: {
+          add: async (_name: string, data: AgentRunJob) => {
+            captured.push(data);
+            return { id: data.runId };
+          },
+        },
+        schedules: { add: async () => ({}) },
+      } as unknown as QueueServices;
+
+      clockNow = new Date(at.getTime() + 1_000);
+      expect(
+        await fireScheduleOccurrence(
+          { db, queues: fakeQueues, system, clock: () => clockNow },
+          dto.id,
+          { expectedScheduledFor: at },
+        ),
+      ).toBe("fired");
+      expect(captured).toHaveLength(1);
+      const job = captured[0]!;
+      // H1 pin: without this projection the run inherits the session's
+      // `auto` mode and the mutation below reaches the approval gate.
+      expect(job.mode).toBe("safe");
+
+      const execs: string[] = [];
+      const fakeSandbox = {
+        async exec(_userId: string, o: { cmd: string }) {
+          execs.push(o.cmd);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+        async killCall() {},
+        async readFile() {
+          return "";
+        },
+        async writeFile() {},
+        async exists() {
+          return false;
+        },
+        async listDir() {
+          return [];
+        },
+        async jobStart() {
+          return { jobId: "job-1" };
+        },
+        async jobOutput() {
+          return { output: "", running: false, exitCode: 0 };
+        },
+        async jobList() {
+          return [];
+        },
+        async jobKill() {},
+      } as unknown as FullRunDeps["sandbox"];
+
+      const turnSse = await startTurnSse([
+        toolCallTurn("call_safe_1", "run_shell", {
+          command: "rm -rf /tmp/ovid-safe-autonomy",
+        }),
+        textTurn("blocked, continuing"),
+      ]);
+      const processor = createFullAgentRunProcessor({
+        db,
+        events,
+        keys: runKeys,
+        redisQ: redis,
+        sandbox: fakeSandbox,
+        github: null,
+        litellmBaseUrl: turnSse.url,
+        defaultModel: "e2e-model",
+        anthropicBaseUrl: "https://anthropic.invalid",
+        approvalTimeoutMs: 250,
+        sleep: async () => {},
+      });
+      try {
+        await processor({ data: job });
+      } finally {
+        await processor.close();
+        await turnSse.close();
+      }
+
+      const evts = await events.readSince(dto.sessionId, null, 500);
+      // The read-only gate fires BEFORE the destructive-command approval.
+      expect(evts.some((e) => e.type === "approval_requested")).toBe(false);
+      const completed = evts.find((e) => e.type === "tool_completed")!;
+      expect(completed.payload).toMatchObject({ isError: true });
+      expect(String(completed.payload.content)).toContain("READ-ONLY MODE");
+      expect(execs).toEqual([]);
+      expect((await runRow(job.runId))!.status).toBe("completed");
+
+      clockNow = new Date(at.getTime() + 2_000);
+      expect(await settleScheduleRuns(schedulerDeps)).toBe(1);
+      expect((await scheduleRow(dto.id))!.status).toBe("completed");
+    }, 40_000);
+
     // ---- Cross-flow invariants --------------------------------------------
 
     it("cross-flow invariants — no failed/errored worker jobs", () => {
