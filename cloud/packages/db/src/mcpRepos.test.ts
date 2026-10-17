@@ -64,7 +64,7 @@ describe.skipIf(!TEST_DATABASE_URL)("mcp/plugin repos against real postgres", ()
       // Every table any migration creates (the P8-T3 rerunnability invariant —
       // this list is kept in sync with repos.test.ts and moneyRepos.test.ts).
       await admin.unsafe(
-        `DROP TABLE IF EXISTS grants, file_manifests, workspace_objects, attachments, session_event_mirror, session_agent_state, runs, messages, sessions, users,` +
+        `DROP TABLE IF EXISTS schedules, schedule_runs, devices, notifications, grants, file_manifests, workspace_objects, attachments, session_event_mirror, session_agent_state, runs, messages, sessions, users,` +
           ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
           ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
           ` shares, share_forks, reports, account_deletions, byok_keys,` +

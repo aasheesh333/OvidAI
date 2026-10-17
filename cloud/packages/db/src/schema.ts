@@ -13,7 +13,15 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { UiManifest, WorkspaceState } from "@ovid/shared";
+import type {
+  ScheduleAutonomy,
+  ScheduleLastResult,
+  ScheduleRunStatus,
+  ScheduleStatus,
+  ScheduleTrigger,
+  UiManifest,
+  WorkspaceState,
+} from "@ovid/shared";
 
 // All timestamptz columns use precision 3 (milliseconds): JS Dates are ms-precision,
 // so stored values round-trip losslessly — which the keyset cursor in sessions.list
@@ -706,3 +714,124 @@ export const sessionAgentState = pgTable("session_agent_state", {
 });
 
 export type SessionAgentStateRow = typeof sessionAgentState.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// P4 Task 3: scheduler persistence (schedules / schedule_runs / devices /
+// notifications).
+//
+// The claim ledger is schedule_runs' UNIQUE(schedule_id, scheduled_for): a
+// worker claims an occurrence by INSERTing its row — exactly one concurrent
+// claimer wins, the rest take the 23505 (spec §8 idempotency key). schedule_id
+// cascades so deleting a schedule never leaves orphan occurrences behind;
+// run_id deliberately does NOT cascade (runs are the transcript's own
+// lifecycle — the scheduler only references them).
+//
+// Wire shapes ($type<>): trigger/last_result/status/autonomy come from
+// @ovid/shared (P4 Task 1/2), so the JSONB and text columns are typed at the
+// same seam the gateway and scheduler use.
+// ---------------------------------------------------------------------------
+
+export const schedules = pgTable(
+  "schedules",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid),
+    // Bound or dedicated session — ALWAYS materialized at creation.
+    sessionId: char("session_id", { length: 36 })
+      .notNull()
+      .references(() => sessions.id),
+    title: text("title").notNull(),
+    description: text("description").notNull(),
+    trigger: jsonb("trigger").notNull().$type<ScheduleTrigger>(),
+    autonomy: text("autonomy").notNull().default("safe").$type<ScheduleAutonomy>(),
+    status: text("status").notNull().default("pending").$type<ScheduleStatus>(),
+    pausedReason: text("paused_reason"),
+    maxRetries: integer("max_retries").notNull().default(0),
+    nextRunAt: timestamptz("next_run_at"),
+    lastResult: jsonb("last_result").$type<ScheduleLastResult | null>(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("schedules_user_id_idx").on(t.userId),
+    // Due-scan for the scheduler tick.
+    index("schedules_status_next_run_at_idx").on(t.status, t.nextRunAt),
+  ],
+);
+
+export const scheduleRuns = pgTable(
+  "schedule_runs",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    scheduleId: char("schedule_id", { length: 36 })
+      .notNull()
+      .references(() => schedules.id, { onDelete: "cascade" }),
+    // The occurrence this row claims — half of the idempotency key.
+    scheduledFor: timestamptz("scheduled_for").notNull(),
+    runId: char("run_id", { length: 36 }).references(() => runs.id),
+    status: text("status").notNull().$type<ScheduleRunStatus>(),
+    attempt: integer("attempt").notNull().default(1),
+    ranLate: boolean("ran_late").notNull().default(false),
+    retryAt: timestamptz("retry_at"),
+    error: text("error"),
+    autoDenied: jsonb("auto_denied")
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<Array<{ toolName: string; summary: string; ts: string }>>(),
+    startedAt: timestamptz("started_at"),
+    finishedAt: timestamptz("finished_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // THE claim ledger (spec §8): one row per (schedule, occurrence).
+    uniqueIndex("schedule_runs_claim_uq").on(t.scheduleId, t.scheduledFor),
+    index("schedule_runs_schedule_id_id_idx").on(t.scheduleId, t.id),
+    index("schedule_runs_status_retry_at_idx").on(t.status, t.retryAt),
+    index("schedule_runs_run_id_idx").on(t.runId),
+  ],
+);
+
+export const devices = pgTable(
+  "devices",
+  {
+    // FCM registration token — the natural primary key (re-registration is an
+    // upsert, never a duplicate row).
+    token: text("token").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid),
+    platform: text("platform").notNull().default("android"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [index("devices_user_id_idx").on(t.userId)],
+);
+
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: char("id", { length: 36 }).primaryKey(), // UUIDv7
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.uid),
+    // NULL = the no-device record (delivery was skipped; kept for the inbox).
+    deviceToken: text("device_token"),
+    kind: text("kind").notNull(),
+    channel: text("channel").notNull(),
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    route: text("route").notNull(),
+    data: jsonb("data").notNull().$type<Record<string, string>>(),
+    status: text("status").notNull().default("sent"), // sent|failed|skipped_no_devices
+    error: text("error"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("notifications_user_id_idx").on(t.userId)],
+);
+
+export type ScheduleRow = typeof schedules.$inferSelect;
+export type ScheduleRunRow = typeof scheduleRuns.$inferSelect;
+export type DeviceRow = typeof devices.$inferSelect;
+export type NotificationRow = typeof notifications.$inferSelect;

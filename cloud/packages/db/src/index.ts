@@ -6,10 +6,14 @@ export * from "./moneyRepos.js";
 export * as schema from "./schema.js";
 export type {
   AttachmentRow,
+  DeviceRow,
   FileManifestRow,
   GrantRow,
   MessageRow,
+  NotificationRow,
   RunRow,
+  ScheduleRow,
+  ScheduleRunRow,
   SessionEventMirrorRow,
   SessionRow,
   UserRow,
