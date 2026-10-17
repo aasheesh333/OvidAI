@@ -148,12 +148,30 @@ export function buildGateway(
 
 /** Never-wired bridge fallback: every pty frame fails loudly with `internal`. */
 function unavailablePtyBridge(): PtyBridge {
-  const reject = (): Promise<never> =>
-    Promise.reject(new PtyBridgeError("internal", "Terminal bridge not configured."));
+  let warned = false;
+  // C1 caveat (review round-1 Minor 2): loud SERVER-side too — one log line
+  // per composition (not per frame), so an operator composing a gateway
+  // without a bridge learns it from the log, not from client reports.
+  const warnOnce = (): void => {
+    if (warned) return;
+    warned = true;
+    console.warn(
+      "[gateway] WS terminal op refused: no PtyBridge configured (GatewayDeps.pty missing)",
+    );
+  };
+  const reject = (): Promise<never> => {
+    warnOnce();
+    return Promise.reject(new PtyBridgeError("internal", "Terminal bridge not configured."));
+  };
   return {
     open: reject,
     attach: reject,
-    send: async () => {},
-    lookup: async () => null,
+    send: async () => {
+      warnOnce();
+    },
+    lookup: async () => {
+      warnOnce();
+      return null;
+    },
   };
 }

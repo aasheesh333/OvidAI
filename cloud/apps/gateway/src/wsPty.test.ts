@@ -266,6 +266,74 @@ describe.skipIf(!TEST_REDIS_URL)("createRedisPtyBridge (real redis, harness play
     expect(outSeen).toHaveLength(1);
   }, 15_000);
 
+  it("frame order (review round-1 Important 1): buffered beyond-endOffset live tail arrives AFTER ack + snapshot — ACK → SNAPSHOT → LIVE, each offset exactly once", async () => {
+    const bridge = createRedisPtyBridge(redis);
+    const ptyId = randomUUID();
+    const ctl = await tap([ptyCtlChannel(ptyId)]);
+    const order: string[] = [];
+
+    // The `order` log proxies the socket: "ACK" + "SNAP:n" are pushed in the
+    // continuation that runs when the bridge resolves — the exact point where
+    // the ws dispatch sends pty_opened/pty_attached and the snapshot frames —
+    // and "LIVE:n" is onOut (a live pty_output frame on the socket).
+    const attached = (async () => {
+      const res = await bridge.attach(
+        ptyId,
+        null,
+        (m) => {
+          if (m.type === "output") order.push(`LIVE:${m.offset}`);
+        },
+        PTY_REPLY_TIMEOUT_MS,
+      );
+      order.push("ACK");
+      for (const c of res.chunks) order.push(`SNAP:${c.offset}`);
+      return res;
+    })();
+
+    const ctlMsg = parsePtyCtlMsg(JSON.parse((await ctl.next()).message));
+    const channels = (await redis.pubsub("CHANNELS", ptyOutChannel(ptyId))) as unknown as string[];
+    expect(channels).toContain(ptyOutChannel(ptyId)); // pty:out subscribed before the ctl went out
+
+    // The race window: BEFORE the attach_reply lands, TWO live chunks are
+    // published — one fully covered by the upcoming snapshot (dropped), one
+    // BEYOND its endOffset (buffered inside the bridge). Redis delivers
+    // publishes in order, so both are in the pre-snapshot buffer when the
+    // reply arrives — the buffered-beyond-end path.
+    await redis.publish(
+      ptyOutChannel(ptyId),
+      JSON.stringify({ type: "output", ptyId, offset: 0, data: b64("covered") }),
+    );
+    await redis.publish(
+      ptyOutChannel(ptyId),
+      JSON.stringify({ type: "output", ptyId, offset: 7, data: b64("beyond") }),
+    );
+    await redis.publish(
+      (ctlMsg as { replyChannel: string }).replyChannel,
+      JSON.stringify({
+        type: "attach_reply",
+        ptyId,
+        truncated: false,
+        chunks: [{ offset: 0, data: b64("covered") }],
+        endOffset: 7,
+      }),
+    );
+
+    const res = await attached;
+    expect(res.chunks).toEqual([{ offset: 0, data: b64("covered") }]);
+    expect(res.endOffset).toBe(7);
+
+    // The buffered tail is flushed from a macrotask; let it fire.
+    await sleep(100);
+
+    // Pinned frame order: ack first, snapshot second, buffered live tail
+    // last. A pre-ack flush (the bug) would show LIVE:7 before ACK.
+    expect(order).toEqual(["ACK", "SNAP:0", "LIVE:7"]);
+    // Exactly once: offset 7 arrives exactly once, offset 0 only via the
+    // snapshot (never LIVE — the covered chunk is dropped, snapshot wins).
+    expect(order.filter((o) => o === "LIVE:7")).toHaveLength(1);
+    expect(order.includes("LIVE:0")).toBe(false);
+  }, 15_000);
+
   it("attach_failed → rejects with the pty_gone code through", async () => {
     const bridge = createRedisPtyBridge(redis);
     const ptyId = randomUUID();

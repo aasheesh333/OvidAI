@@ -219,11 +219,20 @@ function makeBridge(redis: Redis, effectiveTimeout: (ms: number) => number): Pty
             deliver(m);
           }
         };
-        // Resolve BEFORE flushing the buffered live tail: the awaiting caller
-        // (the ws dispatch) runs its continuation microtask — ack frame, then
-        // snapshot frames — before this later-queued microtask delivers the
-        // first live frame, so the ack always precedes live output.
-        queueMicrotask(flush);
+        // The buffered live tail is flushed from a MACROTASK, not a microtask.
+        // queueMicrotask(flush) would enqueue the flush BEFORE the promise
+        // resolution queues the awaiting caller's continuation, so the
+        // buffered beyond-endOffset chunks would reach onOut — the socket —
+        // AHEAD of the ack (pty_opened/pty_attached) and the snapshot frames
+        // (microtasks run FIFO; verified empirically under Node 22). A
+        // setTimeout(0) fires only after every pending microtask — including
+        // the caller's resume, which sends ack + snapshot synchronously — has
+        // drained, pinning the frame order ACK → SNAPSHOT → live on both the
+        // open and the attach path. A lazy flush (armed on the next live
+        // message) would also work but leaves the window open when no further
+        // output arrives.
+        const flushTimer = setTimeout(flush, 0);
+        flushTimer.unref?.();
 
         return {
           truncated: reply.truncated,
