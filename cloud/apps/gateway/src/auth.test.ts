@@ -284,6 +284,9 @@ describe("loadGatewayEnv", () => {
     REDIS_Q_URL: "redis://q:6379",
     REDIS_MINT_URL: "redis://mint:6379",
     MINT_BASE_URL: "http://mint:8000",
+    // P7 Task 12 additions (required in firebase mode).
+    OVID_WORKER_INTERNAL_URL: "http://worker:8091",
+    OVID_INTERNAL_TOKEN: "internal-token",
   };
 
   it("throws when NODE_ENV=production and OVID_AUTH_MODE=test", () => {
@@ -313,11 +316,15 @@ describe("loadGatewayEnv", () => {
       "REDIS_Q_URL",
       "REDIS_MINT_URL",
       "MINT_BASE_URL",
+      "OVID_WORKER_INTERNAL_URL",
     ] as const) {
       const raw = { ...fullRaw, NODE_ENV: "development" };
       delete raw[missing];
       expect(() => loadGatewayEnv(raw)).toThrow(new RegExp(missing));
     }
+    const noToken = { ...fullRaw, NODE_ENV: "development" };
+    delete noToken.OVID_INTERNAL_TOKEN;
+    expect(() => loadGatewayEnv(noToken)).toThrow(/OVID_INTERNAL_TOKEN/);
   });
 
   it("respects explicit values", () => {
@@ -331,6 +338,13 @@ describe("loadGatewayEnv", () => {
       redisQUrl: "redis://q:6379",
       redisMintUrl: "redis://mint:6379",
       mintBaseUrl: "http://mint:8000",
+      workerInternalUrl: "http://worker:8091",
+      internalToken: "internal-token",
+      fileInlineMaxBytes: 1_048_576,
+      putMaxBytes: 8_388_608,
+      presignTtlSeconds: 3600,
+      hydrateWaitMs: 20_000,
+      redisCUrl: "redis://q:6379",
     });
   });
 

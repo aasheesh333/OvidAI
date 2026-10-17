@@ -7,10 +7,35 @@ export interface GatewayEnv {
   redisQUrl: string;
   redisMintUrl: string;
   mintBaseUrl: string;
+  /**
+   * P7 Task 12: the worker file service's container-internal base URL
+   * (e.g. `http://127.0.0.1:8091`). Required in firebase mode; test mode
+   * defaults to "" (dev/test compositions inject a stub WorkerClient).
+   */
+  workerInternalUrl: string;
+  /** Shared container secret the file service checks on every request. */
+  internalToken: string;
+  /** OVID_FILE_INLINE_MAX_BYTES — mirrors the worker's inline cap (default 1 MiB). */
+  fileInlineMaxBytes: number;
+  /** OVID_PUT_MAX_BYTES — decoded-body cap for PUT /workspace/file (default 8 MiB). */
+  putMaxBytes: number;
+  /** OVID_PRESIGN_TTL_SECONDS — clamped into 60..86400 (default 3600). */
+  presignTtlSeconds: number;
+  /** OVID_HYDRATE_WAIT_MS — how long PUT waits for a cold workspace to warm (default 20 s). */
+  hydrateWaitMs: number;
+  /** REDIS_C_URL — cache-class redis (activity keys); falls back to redisQUrl. */
+  redisCUrl: string;
 }
 
 const DEFAULT_PORT = 8081;
 const DEFAULT_HOST = "127.0.0.1";
+
+const DEFAULT_FILE_INLINE_MAX_BYTES = 1_048_576;
+const DEFAULT_PUT_MAX_BYTES = 8_388_608;
+const DEFAULT_PRESIGN_TTL_SECONDS = 3600;
+const PRESIGN_TTL_MIN_SECONDS = 60;
+const PRESIGN_TTL_MAX_SECONDS = 86_400;
+const DEFAULT_HYDRATE_WAIT_MS = 20_000;
 
 /**
  * Validate + default the gateway's environment.
@@ -67,6 +92,46 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     return value;
   };
 
+  // P7 Task 12 knobs. Byte/wait values must be positive integers when set —
+  // anything else is a deployment misconfiguration and fails loudly. The
+  // presign TTL CLAMPS (never a 400 at boot for an aggressive operator
+  // value); a missing REDIS_C_URL is a documented dev fallback, not an error.
+  const positiveInt = (name: string, fallback: number): number => {
+    const text = raw[name]?.trim();
+    if (text === undefined || text === "") return fallback;
+    const n = Number(text);
+    if (!Number.isInteger(n) || n < 1) {
+      throw new Error(`${name} must be a positive integer, got: ${text}`);
+    }
+    return n;
+  };
+
+  const fileInlineMaxBytes = positiveInt("OVID_FILE_INLINE_MAX_BYTES", DEFAULT_FILE_INLINE_MAX_BYTES);
+  const putMaxBytes = positiveInt("OVID_PUT_MAX_BYTES", DEFAULT_PUT_MAX_BYTES);
+  const hydrateWaitMs = positiveInt("OVID_HYDRATE_WAIT_MS", DEFAULT_HYDRATE_WAIT_MS);
+
+  let presignTtlSeconds = positiveInt("OVID_PRESIGN_TTL_SECONDS", DEFAULT_PRESIGN_TTL_SECONDS);
+  presignTtlSeconds = Math.min(
+    PRESIGN_TTL_MAX_SECONDS,
+    Math.max(PRESIGN_TTL_MIN_SECONDS, presignTtlSeconds),
+  );
+
+  // REDIS_C_URL is optional: activity keys share the queue redis in dev
+  // (same fallback the worker documents with a boot-time warning).
+  const redisCUrl = raw.REDIS_C_URL?.trim() || (raw.REDIS_Q_URL?.trim() ?? "");
+
+  // The internal token is required (non-empty) in firebase mode; it is
+  // INVOKED from the return object so the required-var evaluation order
+  // stays pinned (DATABASE_URL…MINT_BASE_URL, then the worker URL, then the
+  // token — a missing var surfaces distinctly, never masked).
+  const requiredInternalToken = (): string => {
+    const value = raw.OVID_INTERNAL_TOKEN?.trim() ?? "";
+    if (authMode === "firebase" && value === "") {
+      throw new Error("OVID_INTERNAL_TOKEN is required when OVID_AUTH_MODE=firebase");
+    }
+    return value;
+  };
+
   return {
     nodeEnv,
     port,
@@ -76,5 +141,12 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     redisQUrl: requiredUrl("REDIS_Q_URL"),
     redisMintUrl: requiredUrl("REDIS_MINT_URL"),
     mintBaseUrl: requiredUrl("MINT_BASE_URL"),
+    workerInternalUrl: requiredUrl("OVID_WORKER_INTERNAL_URL"),
+    internalToken: requiredInternalToken(),
+    fileInlineMaxBytes,
+    putMaxBytes,
+    presignTtlSeconds,
+    hydrateWaitMs,
+    redisCUrl,
   };
 }

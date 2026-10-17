@@ -11,11 +11,13 @@ import type { FastifyInstance } from "fastify";
 import { createDb } from "@ovid/db";
 import { createRedisEventLog } from "@ovid/events";
 import { createQueues } from "@ovid/queue";
+import { createActivityTracker, createStorage, loadStorageEnv } from "@ovid/storage";
 import { buildGateway } from "./app.js";
 import { createFirebaseVerifier, createTestVerifier } from "./auth.js";
 import { loadGatewayEnv } from "./env.js";
 import { createHttpMintProvisioner, createMintRedisKeyProvider } from "./keys.js";
 import { createTicketStore } from "./tickets.js";
+import { createWorkerClient } from "./workerClient.js";
 import { createRedisPtyBridge } from "./wsPty.js";
 import { createRedisApprovalPublisher } from "./ws.js";
 import { createSystemHub } from "./systemChannel.js";
@@ -49,6 +51,26 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   // per-uid subscriber is released on shutdown.
   const systemHub = createSystemHub(redisQ);
 
+  // P7 Task 12: storage (presignGet for artifact URLs), the activity tracker
+  // (cache-class redis — REDIS_C_URL falls back to the queue redis with one
+  // warning, same dev-only fallback the worker documents), and the worker
+  // file-service proxy (the gateway's only view of workspace bytes).
+  const storage = createStorage(loadStorageEnv(env));
+  const redisCRaw = env.REDIS_C_URL?.trim();
+  const redisC =
+    redisCRaw !== undefined && redisCRaw !== "" ? new Redis(redisCRaw) : redisQ;
+  if (redisC === redisQ) {
+    console.warn(
+      "[gateway] REDIS_C_URL is not set — activity keys share REDIS_Q_URL " +
+        "(dev-only; production should dedicate a cache redis)",
+    );
+  }
+  const activity = createActivityTracker(redisC);
+  const worker = createWorkerClient({
+    baseUrl: cfg.workerInternalUrl,
+    token: cfg.internalToken,
+  });
+
   const app = buildGateway(
     {
       db,
@@ -76,6 +98,15 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       // plugin progress / oauth notices); client responses go back on
       // sys:{uid}:in.
       systemHub,
+      // Workspace surfaces (P7 Task 12): presigning, activity bumps, the
+      // worker file-service proxy, and the route knobs from the environment.
+      storage,
+      activity,
+      worker,
+      inlineMaxBytes: cfg.fileInlineMaxBytes,
+      putMaxBytes: cfg.putMaxBytes,
+      presignTtlSeconds: cfg.presignTtlSeconds,
+      hydrateWaitMs: cfg.hydrateWaitMs,
     },
     { logger: true },
   );
@@ -85,6 +116,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     await queues.agentRuns.close();
     await systemHub.close();
     redisQ.disconnect();
+    if (redisC !== redisQ) redisC.disconnect();
     redisMint.disconnect();
     await db.$client.end({ timeout: 5 });
   });

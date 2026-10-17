@@ -9,7 +9,9 @@ import type { EventLog } from "@ovid/events";
 import type { QueueServices } from "@ovid/queue";
 import type { KeyProvider, MintProvisioner } from "@ovid/shared";
 import type { ApiError } from "@ovid/shared";
+import type { ActivityTracker, StorageAdapter } from "@ovid/storage";
 import { authHook, type Verifier } from "./auth.js";
+import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerHealthRoutes } from "./routes/health.js";
@@ -17,8 +19,10 @@ import { registerImportRoutes } from "./routes/import.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
+import { registerWorkspaceRoutes } from "./routes/workspace.js";
 import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
+import type { WorkerClient } from "./workerClient.js";
 import type { ApprovalPublisher, WsDeps } from "./ws.js";
 import type { BrowserChannelDeps } from "./browserChannel.js";
 import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
@@ -80,6 +84,41 @@ export interface GatewayDeps {
    * composition root wires it.
    */
   presigner?: AttachmentPresigner;
+  /**
+   * P7 Task 12: storage adapter (presignGet) for artifact download URLs.
+   * OPTIONAL only so pre-P7 compositions (spine e2e + P1 suites) stay
+   * source-compatible; when absent the artifact URL route answers a loud 503
+   * storage_not_configured instead of silently no-opping. main() wires
+   * createStorage(loadStorageEnv(env)).
+   */
+  storage?: StorageAdapter;
+  /**
+   * P7 Task 12: session activity tracker — the Studio-interaction signal the
+   * hibernator consults. OPTIONAL for the same composition-compat reason;
+   * when absent bumps are skipped with ONE server-side warning (a read must
+   * never fail over a missing auxiliary dep). main() wires
+   * createActivityTracker(redisC).
+   */
+  activity?: ActivityTracker;
+  /**
+   * P7 Task 12: the worker file-service proxy — the gateway's only view of
+   * workspace bytes. OPTIONAL for the same composition-compat reason; when
+   * absent every workspace tree/file route answers a loud 503
+   * file_service_not_configured. main() wires
+   * createWorkerClient({ baseUrl: workerInternalUrl, token: internalToken }).
+   */
+  worker?: WorkerClient;
+  /**
+   * P7 Task 12 knobs (defaults resolved inside the routes when absent):
+   * inlineMaxBytes mirrors the WORKER's inline cap (the worker owns the
+   * inline-vs-redirect decision — kept for composition parity); putMaxBytes
+   * caps a PUT's decoded content; presignTtlSeconds signs artifact URLs;
+   * hydrateWaitMs bounds PUT's wait for a cold workspace to warm.
+   */
+  inlineMaxBytes?: number;
+  putMaxBytes?: number;
+  presignTtlSeconds?: number;
+  hydrateWaitMs?: number;
   /**
    * Reserved for time-sensitive logic (Task 8 WS heartbeats, TTL math); the
    * REST routes deliberately use DB time (repos) so pagination and ordering
@@ -170,6 +209,8 @@ export function buildGateway(
       registerAttachmentRoutes(scope, deps);
       registerRunRoutes(scope, deps);
       registerImportRoutes(scope, deps);
+      registerWorkspaceRoutes(scope, deps);
+      registerArtifactRoutes(scope, deps);
     },
     { prefix: API_PREFIX },
   );

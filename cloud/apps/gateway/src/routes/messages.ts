@@ -279,6 +279,14 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     }
 
     // 6. Bump session activity and answer 202 — the run executes async.
+    // P7 Task 12: a send is the strongest activity signal — the tracker the
+    // hibernator consults. Best-effort by design (pinned): a redis blip must
+    // never fail an otherwise-accepted send. WS watching does NOT bump
+    // (passive — pinned in Task 10's trigger rationale); P2 (pty) and P6
+    // (browser) add their own bumps at their channels.
+    if (deps.activity !== undefined) {
+      void deps.activity.bump(sessionId).catch(() => {});
+    }
     await sessions.touch(deps.db, sessionId);
     const body: SendMessageResponse = {
       runId: run.id,

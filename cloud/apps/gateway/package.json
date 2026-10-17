@@ -28,6 +28,7 @@
     "@ovid/events": "workspace:*",
     "@ovid/queue": "workspace:*",
     "@ovid/shared": "workspace:*",
+    "@ovid/storage": "workspace:*",
     "fastify": "^5.12.7",
     "firebase-admin": "^14.5.0",
     "ioredis": "^5.11.1",
