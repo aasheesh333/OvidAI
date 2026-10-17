@@ -391,6 +391,10 @@ sudo chmod 600 /opt/ovid-cloud/worker.env
 sudo $EDITOR /opt/ovid-cloud/worker.env   # set OVID_PUBLIC_IP — this box: 148.113.44.36
 
 # 2. Render + validate + install (idempotent; re-runs re-render + restart the unit):
+#    NOTE: sourcing worker.env in a shell requires the space-valued
+#    OVID_SANDBOX_CPU_MAX to be quoted — worker.env.example ships it quoted;
+#    the systemd EnvironmentFile consumer reads the value identically with
+#    or without quotes. Keep it that way if you hand-edit.
 sudo bash -c 'set -a; source /opt/ovid-cloud/worker.env; set +a; \
   bash /opt/ovid-cloud/repo/cloud/deploy/net/install-nft.sh'
 ```

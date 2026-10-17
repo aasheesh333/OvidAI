@@ -676,7 +676,7 @@ ls -1d /opt/ovid-rootfs/ubuntu-noble-min-*   # → exactly 2 revisions
 
 ```bash
 # spot-check a live jail (uid NNNNN): find its leaf and dump the caps
-cat /sys/fs/cgroup/ovid-sandboxes.slice/ovid-worker.service/ovid-env-*/*/cpu.max 2>/dev/null | sort -u
+cat /sys/fs/cgroup/ovid-sandboxes.slice/ovid-worker.service/sandbox-*/cpu.max 2>/dev/null | sort -u
 # → 100000 100000 (plus the same shape for memory.max/…)
 ```
 
