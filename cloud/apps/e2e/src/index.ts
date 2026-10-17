@@ -7,3 +7,8 @@
  * home for shared harness code that must survive the build.
  */
 export const E2E_PACKAGE = "@ovid/e2e";
+
+// P10 Task 8 security-corpus surfaces (consumed by Task 14's acceptance
+// gate): `capabilityGate()` + `SKIPPED_SECURITY` + the summary formatter.
+export * from "./security/skipReport.js";
+export * from "./security/denylist-corpus.js";
