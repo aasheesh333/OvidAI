@@ -645,6 +645,70 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
     expect(await tableCounts(sid)).toEqual({ messages: 1, runs: 0 });
   });
 
+  // -------------------------------------------------------------------------
+  // Review round 1 (IMPORTANT): the 409 window. Between the winner's
+  // message-commit and its runs.create, a same-key concurrent send observes
+  // "message exists, no run" — the conflict state — and must NOT conclude
+  // 409: the run is about to appear. The route re-checks (bounded: 3 tries,
+  // 25ms apart) before answering 409; if the run appears, it replays 202.
+  // -------------------------------------------------------------------------
+
+  it("409-window healing: a same-key send landing between the winner's message-commit and its runs.create → 202 replay once the run appears", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-heal");
+    const sid = await createSession(handle, uid);
+
+    // The race window state, exactly: the winner's message row is committed
+    // but its run row is not yet created (simulated with direct repo writes —
+    // the route has no timing seam of its own).
+    const seeded = await messages.append(db, {
+      sessionId: sid,
+      role: "user",
+      content: "winner's message",
+      clientMsgId: "c-heal",
+    });
+    // The winner's runs.create lands ~30ms in — inside the healing window
+    // (re-checks at ~25/50/75ms), comfortably between the first and second.
+    const winnerRun = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return runs.create(db, { sessionId: sid, promptMessageId: seeded.id });
+    })();
+
+    const res = await sendMessage(handle, uid, sid, { content: "retry", clientMsgId: "c-heal" });
+    const run = await winnerRun;
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({
+      runId: run.id,
+      userMessageId: seeded.id,
+      status: "queued",
+    });
+
+    // The healing path inserted and enqueued NOTHING of its own.
+    expect(handle.adds).toHaveLength(0);
+    expect(await tableCounts(sid)).toEqual({ messages: 1, runs: 1 });
+  });
+
+  it("concurrent same-key sends (real 23505 race): both 202 with identical ids, exactly one message row and one run row", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-race");
+    const sid = await createSession(handle, uid);
+
+    // Two sends racing on the same key: both pass the pre-check (no message
+    // yet), both append — one insert wins, the loser takes the 23505 catch,
+    // re-resolves, and heals into the winner's replay answer.
+    const [a, b] = await Promise.all([
+      sendMessage(handle, uid, sid, { content: "race", clientMsgId: "c-race" }),
+      sendMessage(handle, uid, sid, { content: "race (twin)", clientMsgId: "c-race" }),
+    ]);
+    expect(a.statusCode).toBe(202);
+    expect(b.statusCode).toBe(202);
+    expect(b.json()).toEqual(a.json());
+
+    // Exactly one message, one run, one enqueue — the loser created nothing.
+    expect(handle.adds).toHaveLength(1);
+    expect(await tableCounts(sid)).toEqual({ messages: 1, runs: 1 });
+  });
+
   it("clientMsgId bounds and per-session scope: empty → 400, > 64 chars → 400, same id under ANOTHER session → 202 fresh run", async () => {
     const handle = makeApp();
     const uid = testUid("msg-cmbounds");

@@ -79,6 +79,34 @@ async function resolveClientMsgId(
     : { kind: "conflict" };
 }
 
+// Review round 1 (IMPORTANT): the 409 window. A message row commits BEFORE
+// its runs.create — a same-key concurrent send that resolves inside that gap
+// observes "message exists, no run", which is the conflict shape, but the run
+// is merely not there YET. Concluding 409 there would make a client that
+// regenerates its key on 409 defeat the whole idempotency feature. So a
+// conflict verdict is re-checked a bounded number of times before it is
+// believed; if the run appears, the answer becomes the 202 replay.
+const CONFLICT_HEAL_RETRIES = 3;
+const CONFLICT_HEAL_DELAY_MS = 25;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** resolveClientMsgId, plus bounded healing of the transient conflict window. */
+async function resolveClientMsgIdHealing(
+  db: Db,
+  sessionId: string,
+  clientMsgId: string,
+): Promise<ClientMsgIdResolution> {
+  let resolved = await resolveClientMsgId(db, sessionId, clientMsgId);
+  for (let attempt = 0; attempt < CONFLICT_HEAL_RETRIES && resolved.kind === "conflict"; attempt++) {
+    await sleep(CONFLICT_HEAL_DELAY_MS);
+    resolved = await resolveClientMsgId(db, sessionId, clientMsgId);
+  }
+  return resolved;
+}
+
 /** postgres unique-violation (23505), searching drizzle's .cause chain for the driver error. */
 function isUniqueViolation(err: unknown): boolean {
   let e: unknown = err;
@@ -115,10 +143,11 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
     //     a retry whose attachmentIds went stale/garbage must still replay
     //     the original answer (the ORIGINAL send already succeeded), and a
     //     conflicting id must never create rows. Runs before mint too, so a
-    //     replay touches no side effects at all.
+    //     replay touches no side effects at all. Conflict verdicts heal
+    //     (bounded re-check) — the winner's run may not exist yet.
     const clientMsgId = parsed.data.clientMsgId;
     if (clientMsgId !== undefined) {
-      const resolved = await resolveClientMsgId(deps.db, sessionId, clientMsgId);
+      const resolved = await resolveClientMsgIdHealing(deps.db, sessionId, clientMsgId);
       if (resolved.kind === "replay") {
         const body: SendMessageResponse = {
           runId: resolved.runId,
@@ -191,7 +220,10 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       });
     } catch (err) {
       if (clientMsgId === undefined || !isUniqueViolation(err)) throw err;
-      const resolved = await resolveClientMsgId(deps.db, sessionId, clientMsgId);
+      // The losing side of a concurrent same-key race — and it may be landing
+      // inside the winner's message-commit→runs.create gap, so the verdict
+      // heals the same way (bounded re-check) before any 409 is answered.
+      const resolved = await resolveClientMsgIdHealing(deps.db, sessionId, clientMsgId);
       if (resolved.kind === "replay") {
         const body: SendMessageResponse = {
           runId: resolved.runId,
