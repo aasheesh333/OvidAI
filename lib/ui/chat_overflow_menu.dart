@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../core/agent_service.dart';
+import '../core/cloud/agent_surface.dart';
+import '../core/cloud/cloud_agent_facade.dart';
+import '../core/distribution.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
@@ -9,6 +12,11 @@ import 'conversation_share_sheet.dart';
 import 'session_actions.dart';
 import 'trajectory_screen.dart';
 import 'usage_screen.dart';
+
+/// P8 Task 10 — the shared dual-path binding (same pattern as
+/// chat_screen/sidebar).
+AgentSurface get _agent =>
+    Distribution.cloudExecution ? CloudAgentFacade.I : AgentService.I;
 
 /// Items of the chat header's ⋮ menu.
 enum ChatMenuAction {
@@ -59,10 +67,10 @@ class ChatOverflowMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: AgentService.I,
+      animation: _agent,
       builder: (context, _) {
         final s = session;
-        final jobs = s == null ? const [] : AgentService.I.jobsFor(s.id);
+        final jobs = s == null ? const [] : _agent.jobsFor(s.id);
         final running = jobs.where((j) => j.state == 'running').length;
         final l10n = context.l10n;
         final actions = chatMenuActionsFor(s, jobs.length);

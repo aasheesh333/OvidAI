@@ -312,6 +312,27 @@ class CloudSessionStore extends ChangeNotifier {
   String? cachedCursorFor(String serverSessionId) =>
       _cacheMemory[serverSessionId]?.cursor;
 
+  /// Writes [messages] into the offline READ cache for [serverSessionId]
+  /// (P8 Task 10 — the terminal-event cache write). Live deltas are not
+  /// persisted per-delta; the facade calls this when a run terminalizes so a
+  /// cold offline start still shows the latest turn. The [cursor] stays the
+  /// cache's recorded high-water mark (the multiplexer owns the live replay
+  /// cursor separately) and the messageId replay guard keeps a re-subscribe
+  /// exactly-once.
+  Future<void> persistTranscript(
+    String serverSessionId,
+    List<Message> messages,
+    String? cursor,
+  ) async {
+    await _ready;
+    final entry = _CachedTranscript(
+      messages: _dedupe(messages),
+      cursor: cursor,
+    );
+    _cacheMemory[serverSessionId] = entry;
+    await _writeCache(serverSessionId, entry);
+  }
+
   /// Pages the session transcript (newest-first wire → oldest-first model),
   /// writes the offline cache and seeds the projection.
   ///
@@ -523,6 +544,14 @@ class CloudSessionStore extends ChangeNotifier {
 
   /// The last flush failure (surfaced by Task 10), or null.
   ({String code, String message})? get outboxError => _outboxError;
+
+  /// Dismisses the last flush failure without touching the queue. A later
+  /// flush failure records a fresh one.
+  void clearOutboxError() {
+    if (_outboxError == null) return;
+    _outboxError = null;
+    notifyListeners();
+  }
 
   /// Queues [content] durably. The entry gets a fresh 32-hex `clientMsgId`
   /// (Task 4 idempotency) and is persisted before this future completes, so

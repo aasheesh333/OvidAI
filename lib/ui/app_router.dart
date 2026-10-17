@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../core/cloud/cloud_session_store.dart';
+import '../core/distribution.dart';
 import '../core/share_link_resolver.dart'
     show ShareLinkResolver, ShareViewerRoute;
 import '../core/state.dart';
@@ -131,6 +135,18 @@ class AppRouter {
         return true;
       case ChatRoute(:final sessionId):
         if (AppState.I.sessionById(sessionId) == null) {
+          // P8 Task 10: `/c/<id>` accepts SERVER ids on the thin client —
+          // a server row not yet reconciled into AppState (a cold-start
+          // notification tap) triggers the reconciliation now; the tap
+          // itself still reports not-found and the next open lands once
+          // the list has loaded.
+          if (Distribution.cloudExecution) {
+            unawaited(
+              CloudSessionStore.I.ready
+                  .then((_) => CloudSessionStore.I.refreshSessions())
+                  .catchError((Object _) {}),
+            );
+          }
           notFound();
           return false;
         }

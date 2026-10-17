@@ -1,11 +1,20 @@
 import 'package:flutter/material.dart';
 
 import '../core/agent_service.dart';
+import '../core/cloud/agent_surface.dart';
+import '../core/cloud/cloud_agent_facade.dart';
 import '../core/diag.dart';
+import '../core/distribution.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
 import 'widgets/aether_confirm.dart';
+
+/// P8 Task 10 — the shared dual-path binding (same pattern as
+/// chat_screen/sidebar): busy state comes from the cloud facade on the thin
+/// client, from `AgentService.I` on the default build.
+AgentSurface get _agent =>
+    Distribution.cloudExecution ? CloudAgentFacade.I : AgentService.I;
 
 /// Session-level actions shared by the sidebar row menu and the chat
 /// header's overflow menu, so both surfaces rename/delete identically.
@@ -96,9 +105,9 @@ Future<bool> askDeleteSessionConfirmed(
   final descendants = app.descendantsOf(session.id);
   final doomed = [session, ...descendants];
   final runningDescendantCount = descendants
-      .where((candidate) => AgentService.I.busyFor(candidate.id))
+      .where((candidate) => _agent.busyFor(candidate.id))
       .length;
-  final runningRoot = AgentService.I.busyFor(session.id);
+  final runningRoot = _agent.busyFor(session.id);
   final sandboxCount = doomed
       .map((candidate) => candidate.sandboxId ?? candidate.id)
       .toSet()

@@ -103,6 +103,10 @@ class CloudAgentFacade extends ChangeNotifier
       <String, List<_QueuedCloudMessage>>{};
   int _nextQueueId = 1;
 
+  /// Sessions whose queue drain has a POST in flight (the `_drainQueue`
+  /// re-entrancy guard — Task 10).
+  final Set<String> _draining = <String>{};
+
   /// Staged attachments per session (server id → files). No workspace copy:
   /// the bytes are uploaded straight from the staged file path.
   final Map<String, List<({String name, String path, int size})>>
@@ -113,6 +117,11 @@ class CloudAgentFacade extends ChangeNotifier
   /// errors). Keyed by server session id.
   final Map<String, (String code, String message)> _errors =
       <String, (String, String)>{};
+
+  /// `x-ovid-resets-at` of the recorded error (402 `daily_limit_reached`
+  /// carries the epoch-ms instant the allowance resets), keyed like
+  /// [_errors]. Cleared with it.
+  final Map<String, DateTime?> _errorResetsAt = <String, DateTime?>{};
 
   final Map<String, Future<void>> _modePatches = <String, Future<void>>{};
   Future<void>? _lastHardStop;
@@ -248,7 +257,26 @@ class CloudAgentFacade extends ChangeNotifier
       _clearError(serverId);
     }
     _notify();
+    // Terminal cache write (Task 9 carry, Task 10): live deltas are not
+    // persisted per-delta, so THIS is what makes a cold offline start show
+    // the latest turn — the settled projection is written to the store's
+    // offline READ CACHE.
+    unawaited(_persistTerminal(serverId, state));
     unawaited(_drainQueue(serverId));
+  }
+
+  Future<void> _persistTerminal(String serverId, _SessionCloudState state) async {
+    final store = _store;
+    if (store == null || _disposed) return;
+    try {
+      await store.persistTranscript(
+        serverId,
+        state.projection.messages,
+        store.cachedCursorFor(serverId),
+      );
+    } catch (_) {
+      // A failed cache write never surfaces as a run error.
+    }
   }
 
   void _onProjectionChanged(String serverId, _SessionCloudState state) {
@@ -280,8 +308,10 @@ class CloudAgentFacade extends ChangeNotifier
     }
   }
 
-  void _recordError(String serverId, String code, String message) {
+  void _recordError(String serverId, String code, String message,
+      {DateTime? resetsAt}) {
     _errors[serverId] = (code, message);
+    _errorResetsAt[serverId] = resetsAt;
     final state = _sessions[serverId];
     if (state != null) {
       state.runState = _copyRunState(
@@ -294,6 +324,7 @@ class CloudAgentFacade extends ChangeNotifier
 
   void _clearError(String serverId) {
     _errors.remove(serverId);
+    _errorResetsAt.remove(serverId);
     final state = _sessions[serverId];
     if (state != null && state.runState.lastErrorCode != null) {
       state.runState = _copyRunState(state.runState, clearError: true);
@@ -389,7 +420,7 @@ class CloudAgentFacade extends ChangeNotifier
       _notify();
     } on CloudApiException catch (e) {
       _revertMode(serverId, previousExplicit, previousEffective);
-      _recordError(serverId, e.code, e.message);
+      _recordError(serverId, e.code, e.message, resetsAt: e.resetsAt);
       _notify();
     } catch (e) {
       _revertMode(serverId, previousExplicit, previousEffective);
@@ -471,17 +502,32 @@ class CloudAgentFacade extends ChangeNotifier
     // freshTurn/expandRefsFor/scheduledTask are local-loop concepts; the
     // cloud run is admitted server-side. They stay in the signature for
     // AgentSurface parity only.
-    final id = _serverId(sessionId);
+    String? id = _serverId(sessionId);
     if (id == null) {
       _recordError('', 'no_session', 'No chat session is selected.');
       _notify();
       return;
     }
 
-    if (_store?.offline ?? false) {
+    // Create-on-first-send (Task 9): an unmapped LOCAL session gets its
+    // server session before the first POST — the store's shared in-flight
+    // future keeps concurrent first sends to one create. Server ids the
+    // store already knows pass through `ensureServerSession` untouched.
+    final store = _store;
+    if (store != null && sessionId != null && sessionId.isNotEmpty) {
+      try {
+        id = await store.ensureServerSession(sessionId);
+      } on CloudApiException catch (e) {
+        _recordError(sessionId, e.code, e.message, resetsAt: e.resetsAt);
+        _notify();
+        return;
+      }
+    }
+
+    if (store?.offline ?? false) {
       // Checked BEFORE `_stateFor` so an enqueue-only send does not open a
       // subscription (review round 1, Minor 3).
-      await _store!.enqueue(id, originalPrompt);
+      await store!.enqueue(id, originalPrompt);
       return;
     }
 
@@ -532,10 +578,13 @@ class CloudAgentFacade extends ChangeNotifier
         state.queuedBehindActiveRun = queuedBehindActiveRun;
       }
       _attachments.remove(id);
-      _errors.remove(id);
+      // A freshly accepted send clears any stale recorded error (mode PATCH
+      // failures, a previous 402) — Task 10's composer decides draft
+      // acceptance on `runState.lastErrorCode == null`.
+      _clearError(id);
       _notify();
     } on CloudApiException catch (e) {
-      _recordError(id, e.code, e.message);
+      _recordError(id, e.code, e.message, resetsAt: e.resetsAt);
       _notify();
     } catch (e) {
       _recordError(id, 'internal', '$e');
@@ -595,7 +644,7 @@ class CloudAgentFacade extends ChangeNotifier
         _notify();
         unawaited(_drainQueue(state.serverId));
       } else {
-        _recordError(state.serverId, e.code, e.message);
+        _recordError(state.serverId, e.code, e.message, resetsAt: e.resetsAt);
         _notify();
       }
     } catch (e) {
@@ -868,24 +917,44 @@ class CloudAgentFacade extends ChangeNotifier
   }
 
   /// Sends the queue head as the next run once the session is idle.
+  ///
+  /// Re-entrancy guarded (T8 carry, owned by Task 10): a row enqueued while
+  /// the head's POST is in flight would otherwise find `busyFor` still false
+  /// (busy only flips on `run_started`) and dispatch the SECOND head
+  /// concurrently — out of order. The in-flight flag serializes drains per
+  /// session; a successful drain re-checks the queue so rows queued during
+  /// the POST still leave in order.
   Future<void> _drainQueue(String serverId) async {
     if (_disposed) return;
     final queue = _queues[serverId];
     if (queue == null || queue.isEmpty) return;
     if (busyFor(serverId)) return;
     if (_store?.offline ?? false) return;
-    final head = queue.removeAt(0);
-    _notify();
-    await runTask(head.text, sessionId: serverId);
-    final state = _sessions[serverId];
-    final failed = state != null &&
-        !state.runState.busy &&
-        state.runState.lastErrorCode != null;
-    if (failed && !_disposed) {
-      // Never drop a user's queued message on a send failure; the error is
-      // surfaced through run state.
-      queue.insert(0, head);
+    if (!_draining.add(serverId)) return;
+    var dispatched = false;
+    try {
+      final head = queue.removeAt(0);
+      dispatched = true;
       _notify();
+      await runTask(head.text, sessionId: serverId);
+      final state = _sessions[serverId];
+      final failed = state != null &&
+          !state.runState.busy &&
+          state.runState.lastErrorCode != null;
+      if (failed && !_disposed) {
+        // Never drop a user's queued message on a send failure; the error is
+        // surfaced through run state.
+        queue.insert(0, head);
+        dispatched = false;
+        _notify();
+      }
+    } finally {
+      _draining.remove(serverId);
+    }
+    if (_disposed || !dispatched) return;
+    // Rows queued while the POST was in flight dispatch now, in order.
+    if (_queues[serverId]?.isNotEmpty == true && !busyFor(serverId)) {
+      unawaited(_drainQueue(serverId));
     }
   }
 
@@ -1052,6 +1121,30 @@ class CloudAgentFacade extends ChangeNotifier
   @visibleForTesting
   TranscriptProjection? projectionForTest(String sessionId) =>
       _sessions[_serverId(sessionId) ?? sessionId]?.projection;
+
+  // -------------------------------------------------------------------------
+  // Task 10 — the chat rewire's read surface (cloud-only; the default build
+  // renders ChatSession.messages straight from AgentService).
+  // -------------------------------------------------------------------------
+
+  /// The live transcript list chat_screen renders under
+  /// `Distribution.cloudExecution` (oldest-first; null before the session
+  /// was first used — the caller falls back to `ChatSession.messages`).
+  /// Accepts a local or server session id.
+  List<Message>? transcriptFor(String sessionId) =>
+      _sessions[_serverId(sessionId) ?? sessionId]?.projection.messages;
+
+  /// `x-ovid-resets-at` of the last recorded error for [sessionId], or null.
+  /// The 402 countdown in the chat's error row derives from this.
+  DateTime? errorResetsAtFor(String sessionId) =>
+      _errorResetsAt[_serverId(sessionId) ?? sessionId];
+
+  /// Dismisses the recorded error for [sessionId] (the chat error row's
+  /// dismiss action). A later failure records a fresh one.
+  void clearErrorFor(String sessionId) {
+    _clearError(_serverId(sessionId) ?? sessionId);
+    _notify();
+  }
 
   /// The run state for [sessionId], including errors recorded before any
   /// projection existed (mode PATCH, send failures).

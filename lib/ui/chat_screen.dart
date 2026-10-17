@@ -14,6 +14,10 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../core/theme.dart';
 import '../core/distribution.dart';
+import '../core/cloud/agent_surface.dart';
+import '../core/cloud/cloud_agent_facade.dart';
+import '../core/cloud/cloud_session_store.dart';
+import '../core/cloud/models.dart' show OutboxEntry;
 import 'content_report_sheet.dart';
 import '../core/format.dart';
 import '../core/voice_input_service.dart';
@@ -98,6 +102,14 @@ class _ChatTextScaler extends TextScaler {
   int get hashCode => Object.hash(inherited, zoom);
 }
 
+/// P8 Task 10 — the dual-path binding every member access goes through.
+/// The thin client binds to the cloud facade, the default build keeps
+/// `AgentService.I`; BOTH arms stay compiled (Global Constraints: dies in
+/// pieces — the deletion waves start at Task 12). Later screen tasks reuse
+/// this exact pattern.
+AgentSurface get _agent =>
+    Distribution.cloudExecution ? CloudAgentFacade.I : AgentService.I;
+
 class ChatTranscript extends StatefulWidget {
   final ChatSession session;
   final ScrollController? scrollController;
@@ -148,7 +160,7 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     return AnimatedBuilder(
       animation: Listenable.merge([
         AppState.I,
-        AgentService.I.liveBubbleTicksFor(session.id),
+        _agent.liveBubbleTicksFor(session.id),
       ]),
       builder: (_, _) {
         assert(() {
@@ -419,7 +431,7 @@ class _StatsLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([AppState.I, AgentService.I]),
+      animation: Listenable.merge([AppState.I, _agent]),
       builder: (_, _) {
         final s = AppState.I.activeSession;
         if (s == null) return const SizedBox.shrink();
@@ -430,7 +442,7 @@ class _StatsLine extends StatelessWidget {
         final window = AgentService.contextWindowForSession(s);
         final used = analytics.contextTokens > 0
             ? analytics.contextTokens
-            : AgentService.I.measuredContextTokens(s);
+            : _agent.measuredContextTokens(s);
         final frac = (used / window).clamp(0.0, 1.0);
         final pct = frac * 100;
         if (analytics.turns == 0 && used == 0) return const SizedBox.shrink();
@@ -618,7 +630,7 @@ class _StatsLine extends StatelessWidget {
     required int window,
     required int used,
   }) {
-    final agent = AgentService.I;
+    final agent = _agent;
     final analytics = AppState.I.activeSession?.analytics;
     final sys = analytics?.contextSystemTokens ?? agent.sessionSystemTokens;
     final tool = analytics?.contextToolTokens ?? agent.sessionToolTokens;
@@ -1022,7 +1034,12 @@ class _ChatScreenState extends State<ChatScreen>
     Skill skill,
     String sessionId,
   ) {
-    final reason = AgentService.I.skillUnavailableReason(skill, sessionId);
+    // P8 Task 10: the thin client has no local skills runtime — the reason
+    // is a local concept (the member's call site dies with the on-device
+    // runtime; kept compiled for the default build).
+    final reason = Distribution.cloudExecution
+        ? null
+        : AgentService.I.skillUnavailableReason(skill, sessionId);
     final canonicalId = skill.canonicalId;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1066,6 +1083,55 @@ class _ChatScreenState extends State<ChatScreen>
     unawaited(
       ComposerDraftStore.I.load().then((_) => _restorePersistedDraft()),
     );
+    if (Distribution.cloudExecution) unawaited(_bootCloud());
+  }
+
+  /// P8 Task 10 boot path (binding carries from Task 9):
+  ///
+  ///  * await [CloudSessionStore.ready] — the sync getters are empty until
+  ///    the persisted map/outbox load completes;
+  ///  * flush the outbox AFTER ready, unconditionally — the facade only
+  ///    flushes on a TRUE→FALSE offline EDGE, so a launch that is ALREADY
+  ///    online would otherwise strand a persisted outbox (I-2);
+  ///  * reconcile the session list while online (server rows become
+  ///    ChatSessions, the sidebar reads them);
+  ///  * load the active session's transcript, which also refreshes the
+  ///    offline READ CACHE so a cold start shows the latest turn.
+  Future<void> _bootCloud() async {
+    final store = CloudSessionStore.I;
+    await store.ready;
+    if (!mounted) return;
+    unawaited(store.flushOutbox());
+    if (!store.offline) {
+      try {
+        await store.refreshSessions();
+      } catch (e) {
+        Diag.swallow('chat_screen.bootCloud', e);
+      }
+    }
+    if (!mounted) return;
+    final active = AppState.I.activeSessionId;
+    if (active != null) unawaited(_loadCloudTranscript(active));
+  }
+
+  /// Server transcripts already loaded in this screen instance — live WS
+  /// events keep them fresh after the first page.
+  final Set<String> _cloudTranscriptsLoaded = <String>{};
+
+  /// Pages the active session's transcript through the store (seed + cache
+  /// write). A local-only session (never sent) has no server transcript —
+  /// the REST failure is swallowed and the empty chat renders.
+  Future<void> _loadCloudTranscript(String sessionId) async {
+    if (!mounted || !Distribution.cloudExecution) return;
+    if (!_cloudTranscriptsLoaded.add(sessionId)) return;
+    try {
+      final store = CloudSessionStore.I;
+      await store.ready;
+      final serverId = store.serverIdFor(sessionId) ?? sessionId;
+      await store.loadTranscript(serverId);
+    } catch (e) {
+      Diag.swallow('chat_screen.loadCloudTranscript', e);
+    }
   }
 
   ValueNotifier<String?>? _fallbackNotice;
@@ -1144,6 +1210,15 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
+  /// The transcript list the chat renders (P8 Task 10): the thin client
+  /// renders the facade's live projection — cloud sessions keep
+  /// `ChatSession.messages` empty, so message actions that mutate local
+  /// history decline gracefully (`_canChangeHistory` finds no rows). The
+  /// default build renders the session's own list, unchanged.
+  List<Message> _messagesOf(ChatSession s) => Distribution.cloudExecution
+      ? (CloudAgentFacade.I.transcriptFor(s.id) ?? s.messages)
+      : s.messages;
+
   /// The bounded folded window for [s], recomputed only when its inputs
   /// change (Task 4). Streaming token appends mutate the live message in
   /// place, so the identity/last-kind checks keep the cache warm across
@@ -1151,7 +1226,7 @@ class _ChatScreenState extends State<ChatScreen>
   TranscriptWindow _transcriptWindow(ChatSession s) {
     final showReasoning = AppState.I.showReasoning;
     final compact = !AppState.I.conversationFull;
-    final messages = s.messages;
+    final messages = _messagesOf(s);
     final count = messages.length;
     final last = count == 0 ? null : messages.last;
     final lastKind = last?.kind;
@@ -1335,7 +1410,7 @@ class _ChatScreenState extends State<ChatScreen>
   Widget build(BuildContext context) {
     final app = AppState.I;
     return AnimatedBuilder(
-      animation: Listenable.merge([app, AgentService.I]),
+      animation: Listenable.merge([app, _agent]),
       builder: (_, _) {
         final s = app.activeSession;
         // Restore the draft that belongs to THIS session — never leak
@@ -1349,6 +1424,9 @@ class _ChatScreenState extends State<ChatScreen>
               _draftBindScheduledFor = null;
             }
             _bindDraft(s.id);
+            // Thin client: the newly active session's server transcript is
+            // paged (seed + offline cache write) the first time it opens.
+            unawaited(_loadCloudTranscript(s.id));
           });
         }
         final wide = MediaQuery.sizeOf(context).width >= 840;
@@ -1403,47 +1481,51 @@ class _ChatScreenState extends State<ChatScreen>
                 onPressed: () => openStudio(context),
               ),
               // Browser button with agent-activity status dot (top-right).
-              AnimatedBuilder(
-                animation: AgentService.I,
-                builder: (_, _) {
-                  final a = AgentService.I;
-                  final dotColor = a.browserBusy
-                      ? Aether.accent
-                      : (a.browserReady
-                            ? Aether.successLight
-                            : Aether.textFaint);
-                  return Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      IconButton(
-                        key: const ValueKey('chat-header-browser'),
-                        tooltip: context.l10n.chatHeaderBrowser,
-                        icon: const Icon(Icons.public, size: 19),
-                        onPressed: () => Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const BrowserScreen(),
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        top: 10,
-                        right: 10,
-                        child: IgnorePointer(
-                          child: Container(
-                            width: 7,
-                            height: 7,
-                            decoration: BoxDecoration(
-                              color: dotColor,
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Aether.bg, width: 1.5),
+              // P8 Task 10: hidden when `!Distribution.cloudBrowser` — the
+              // on-device WebView browser is not part of the thin client;
+              // Task 16 re-points the button at the P6 screencast screen.
+              if (Distribution.cloudBrowser)
+                AnimatedBuilder(
+                  animation: _agent,
+                  builder: (_, _) {
+                    final a = _agent;
+                    final dotColor = a.browserBusy
+                        ? Aether.accent
+                        : (a.browserReady
+                              ? Aether.successLight
+                              : Aether.textFaint);
+                    return Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        IconButton(
+                          key: const ValueKey('chat-header-browser'),
+                          tooltip: context.l10n.chatHeaderBrowser,
+                          icon: const Icon(Icons.public, size: 19),
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const BrowserScreen(),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  );
-                },
-              ),
+                        Positioned(
+                          top: 10,
+                          right: 10,
+                          child: IgnorePointer(
+                            child: Container(
+                              width: 7,
+                              height: 7,
+                              decoration: BoxDecoration(
+                                color: dotColor,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: Aether.bg, width: 1.5),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
               ChatOverflowMenu(
                 session: s,
                 onJobs: (id) => _showJobsPopover(context, id),
@@ -1472,6 +1554,17 @@ class _ChatScreenState extends State<ChatScreen>
                     const _GoalBar(),
                     const _TodoDock(),
                     const _StatsLine(),
+                    // Thin client only: the offline prompt outbox chip and
+                    // the cloud error-envelope row (402/409/503).
+                    if (Distribution.cloudExecution) ...[
+                      _CloudOutboxChip(
+                        sessionId: AppState.I.activeSessionId,
+                      ),
+                      _CloudErrorRow(
+                        sessionId: AppState.I.activeSessionId,
+                        onRetry: _retryFailedCloudPrompt,
+                      ),
+                    ],
                     _QueueDock(
                       sessionId: AppState.I.activeSessionId,
                       onEdited: () => setState(() {}),
@@ -1482,7 +1575,7 @@ class _ChatScreenState extends State<ChatScreen>
                           return;
                         }
                         if (_input.text.isNotEmpty ||
-                            AgentService.I.pendingAttachments.isNotEmpty) {
+                            _agent.pendingAttachments.isNotEmpty) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text(
@@ -1512,32 +1605,39 @@ class _ChatScreenState extends State<ChatScreen>
                     // below the app header. Its own AnimatedBuilder observes
                     // the coordinator so startup transitions never rebuild the
                     // transcript or the composer.
-                    ConstrainedBox(
-                      constraints: BoxConstraints(maxHeight: panelCap),
-                      child: SingleChildScrollView(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            StartupProgressPanel(
-                              coordinator: widget.startupCoordinator,
-                              onOpenPlugins: (canonicalId) => _openPlugins(
-                                context,
-                                focusCanonicalId: canonicalId,
+                    //
+                    // P8 Task 10: the startup/sandbox-install apparatus is
+                    // on-device only — the whole panel (and the runtime
+                    // install banner below it, incl. `onInstallSandbox`) is
+                    // hidden on the thin client; it dies with wave 13.
+                    if (!Distribution.cloudExecution)
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxHeight: panelCap),
+                        child: SingleChildScrollView(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              StartupProgressPanel(
+                                coordinator: widget.startupCoordinator,
+                                onOpenPlugins: (canonicalId) => _openPlugins(
+                                  context,
+                                  focusCanonicalId: canonicalId,
+                                ),
+                                onInstallSandbox: () => openStudio(context),
+                                sandboxInstalled:
+                                    AppState.I.sandboxInstalled,
                               ),
-                              onInstallSandbox: () => openStudio(context),
-                              sandboxInstalled: AppState.I.sandboxInstalled,
-                            ),
-                            const _RuntimeInstallBanner(),
-                          ],
+                              const _RuntimeInstallBanner(),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
                     Expanded(
                       child: LayoutBuilder(
                         builder: (context, chatConstraints) => Column(
                           children: [
                             Expanded(
-                              child: s == null || s.messages.isEmpty
+                              child: s == null || _messagesOf(s).isEmpty
                                   ? const _EmptyState()
                                   : Stack(
                                       children: [
@@ -1571,10 +1671,10 @@ class _ChatScreenState extends State<ChatScreen>
                                                   ),
                                                 ),
                                             child: AnimatedBuilder(
-                                              animation: AgentService.I,
+                                              animation: _agent,
                                               builder: (_, _) {
-                                                final typing = AgentService.I
-                                                    .busyFor(s.id);
+                                                final typing =
+                                                    _agent.busyFor(s.id);
                                                 // Bounded, cached fold (Task 4): the
                                                 // folded window is reused across streaming
                                                 // tokens; only the message count / last
@@ -1589,9 +1689,20 @@ class _ChatScreenState extends State<ChatScreen>
                                                 // "Produced" card — files written by
                                                 // this run surface as a card under the
                                                 // final answer (tap → Studio).
-                                                final produced = AgentService
-                                                    .I
-                                                    .producedFiles;
+                                                // P8 Task 10: on-device
+                                                // workspace files only — the
+                                                // thin client has no local
+                                                // produced-files channel (the
+                                                // `hostDirOf` share action
+                                                // below is unreachable there).
+                                                final produced =
+                                                    Distribution.cloudExecution
+                                                        ? const <({
+                                                            String path,
+                                                            int size
+                                                          })>[]
+                                                        : AgentService
+                                                            .I.producedFiles;
                                                 final showProduced =
                                                     !typing &&
                                                     produced.isNotEmpty;
@@ -1734,9 +1845,9 @@ class _ChatScreenState extends State<ChatScreen>
                                                           animation:
                                                               Listenable.merge([
                                                                 AppState.I,
-                                                                AgentService
-                                                                    .I
-                                                                    .liveBubbleTicks,
+                                                                _agent
+                                                                    .liveBubbleTicksFor(
+                                                                        s.id),
                                                               ]),
                                                           builder: (_, _) {
                                                             // Streaming ticks rebuild only
@@ -1837,7 +1948,7 @@ class _ChatScreenState extends State<ChatScreen>
                                 maxHeight: math.min(
                                   480,
                                   chatConstraints.maxHeight *
-                                      (AgentService.I.pendingApproval != null
+                                      (_agent.pendingApproval != null
                                           ? 0.45
                                           : 0.30),
                                 ),
@@ -1845,7 +1956,7 @@ class _ChatScreenState extends State<ChatScreen>
                               child: SingleChildScrollView(
                                 // A new request starts at the top, even if the user
                                 // previously scrolled through queued work.
-                                key: ObjectKey(AgentService.I.pendingApproval),
+                                key: ObjectKey(_agent.pendingApproval),
                                 child: Center(
                                   child: ConstrainedBox(
                                     constraints: BoxConstraints(
@@ -1854,7 +1965,7 @@ class _ChatScreenState extends State<ChatScreen>
                                     // Blocking decisions take priority over passive
                                     // status and queued work in this bounded area.
                                     child:
-                                        AgentService.I.pendingApproval != null
+                                        _agent.pendingApproval != null
                                         ? const _ApprovalDock()
                                         : dockColumn,
                                   ),
@@ -1870,10 +1981,10 @@ class _ChatScreenState extends State<ChatScreen>
                               coordinator: widget.startupCoordinator,
                               running: s == null
                                   ? false
-                                  : AgentService.I.busyFor(s.id),
+                                  : _agent.busyFor(s.id),
                               // approval takeover parity: a pending approval LOCKS
                               // the composer — the user answers the card, not the box.
-                              locked: AgentService.I.pendingApproval != null,
+                              locked: _agent.pendingApproval != null,
                               editingQueue: _queueEdits.containsKey(s?.id),
                               commandBusy: _executingCommand,
                               onCancelQueueEdit: () => setState(() {
@@ -1883,7 +1994,7 @@ class _ChatScreenState extends State<ChatScreen>
                                 if (s == null ||
                                     _boundSessionId != s.id ||
                                     AppState.I.activeSessionId != s.id ||
-                                    AgentService.I.pendingApproval != null ||
+                                    _agent.pendingApproval != null ||
                                     _executingCommand) {
                                   return;
                                 }
@@ -1898,7 +2009,7 @@ class _ChatScreenState extends State<ChatScreen>
                                 if (t.isEmpty) return;
                                 final edit = _queueEdits[s.id];
                                 if (edit != null) {
-                                  final agent = AgentService.I;
+                                  final agent = _agent;
                                   final index = agent
                                       .queuedMessageIdsFor(s.id)
                                       .indexOf(edit.id);
@@ -2066,9 +2177,9 @@ class _ChatScreenState extends State<ChatScreen>
                                 // ── web-IDE busy behavior: typing while running either
                                 // queues the message (default) or interrupts the current
                                 // run and sends immediately, per the user's setting. ──
-                                if (AgentService.I.busyFor(s.id)) {
+                                if (_agent.busyFor(s.id)) {
                                   if (AppState.I.sendWhileBusyInterrupt) {
-                                    AgentService.I.stopRequested(
+                                    _agent.stopRequested(
                                       sessionId: s.id,
                                     );
                                     // fall through to send
@@ -2137,7 +2248,7 @@ class _ChatScreenState extends State<ChatScreen>
                   m,
                   TextStyle(fontSize: 11, color: Aether.textMuted),
                 ),
-                trailing: AgentService.I.mode == m
+                trailing: _agent.mode == m
                     ? Icon(Icons.check, size: 16, color: Aether.accent)
                     : null,
                 onTap: () async {
@@ -2219,7 +2330,7 @@ class _ChatScreenState extends State<ChatScreen>
         !identical(app.sessionById(session.id), session)) {
       return false;
     }
-    final agent = AgentService.I;
+    final agent = _agent;
     final pending = agent.pendingAttachments;
     final paths = pending.map((a) => a.path).toSet();
     final previousIds = agent.queuedMessageIdsFor(session.id).toSet();
@@ -2230,7 +2341,19 @@ class _ChatScreenState extends State<ChatScreen>
         .any((id) => !previousIds.contains(id))) {
       return false;
     }
-    pending.removeWhere((a) => paths.contains(a.path));
+    // Ownership transfer of staged files. The DEFAULT arm keeps the original
+    // captured-list mutation: `pendingAttachments` is the originating
+    // session's live list, so a session switch triggered by the enqueue
+    // notification must not retarget the removal. The CLOUD arm serves an
+    // unmodifiable view from the facade, so it goes through the surface's
+    // removeAttachment (the send is always for the active session there).
+    if (Distribution.cloudExecution) {
+      for (final path in paths) {
+        agent.removeAttachment(path);
+      }
+    } else {
+      pending.removeWhere((a) => paths.contains(a.path));
+    }
     app.refresh();
     return true;
   }
@@ -2246,6 +2369,12 @@ class _ChatScreenState extends State<ChatScreen>
     if (session == null ||
         app.activeSessionId != session.id ||
         !identical(app.sessionById(session.id), session)) {
+      return;
+    }
+    if (Distribution.cloudExecution) {
+      // P8 Task 10: no local provider validation and no local optimistic
+      // row — the run is admitted server-side and the facade owns staging.
+      unawaited(_sendCloudPrompt(session, t, onAccepted: onAccepted));
       return;
     }
     final provider = app.providerForSession(session);
@@ -2277,7 +2406,7 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
 
-    final agent = AgentService.I;
+    final agent = _agent;
     if (agent.busyFor(session.id)) {
       if (_enqueuePrompt(session, t)) onAccepted?.call();
       return;
@@ -2293,15 +2422,70 @@ class _ChatScreenState extends State<ChatScreen>
     });
     // @file/@session references expand into model-visible context blocks
     // (the composer mention expander file-reference parity) before the run starts.
-    AgentService.I.runTask(t, sessionId: session.id, expandRefsFor: session);
+    _agent.runTask(t, sessionId: session.id, expandRefsFor: session);
     // An ADMITTED run owns the staged files from this tick on: runTask
     // snapshots them onto the submitted row synchronously at admission, so
     // the composer's staging area must hand them over now instead of
     // waiting for the first provider response — a mid-run cancel then keeps
     // them on the message row rather than resurrecting them as new chips.
-    if (AgentService.I.busyFor(session.id)) {
-      AgentService.I.clearAttachment();
+    if (_agent.busyFor(session.id)) {
+      _agent.clearAttachment();
     }
+  }
+
+  /// The last cloud prompt whose send FAILED — the error row's Retry
+  /// affordance re-sends it. Null once a send is accepted.
+  String? _lastFailedCloudPrompt;
+
+  /// Cloud send path (P8 Task 10). The facade POSTs, appends the optimistic
+  /// user row to the live projection and owns staged attachments. The draft
+  /// is only cleared when the send was ACCEPTED — a 402/409/503 envelope
+  /// keeps the composed text so nothing is lost (Review Focus #4); the
+  /// error row explains and, for 5xx, offers Retry.
+  Future<void> _sendCloudPrompt(
+    ChatSession session,
+    String text, {
+    VoidCallback? onAccepted,
+  }) async {
+    final facade = CloudAgentFacade.I;
+    if (facade.busyFor(session.id)) {
+      if (_enqueuePrompt(session, text)) onAccepted?.call();
+      return;
+    }
+    await facade.runTask(text, sessionId: session.id);
+    if (!mounted) return;
+    final accepted = facade.runStateFor(session.id).lastErrorCode == null;
+    if (!accepted) {
+      _lastFailedCloudPrompt = text;
+      return;
+    }
+    _lastFailedCloudPrompt = null;
+    // Local cosmetic parity with the local path's first-prompt auto title
+    // and recency touch (the server transcript renders from the
+    // projection; the row title is what the sidebar shows).
+    if (session.title.isEmpty || session.title == 'New chat') {
+      session.title = AppState.autoTitle(text);
+      session.touch();
+      AppState.I.refresh();
+    }
+    onAccepted?.call();
+    // New user message → snap to bottom so the user sees the answer start.
+    _atBottom = true;
+    Future.delayed(const Duration(milliseconds: 80), () {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+  }
+
+  /// Retry affordance for a retryable cloud envelope (5xx `unavailable`):
+  /// re-sends the preserved draft through the same send path.
+  Future<void> _retryFailedCloudPrompt() async {
+    final text = _lastFailedCloudPrompt;
+    final session = AppState.I.activeSession;
+    if (text == null || session == null) return;
+    _lastFailedCloudPrompt = null;
+    await _sendCloudPrompt(session, text);
   }
 
   /// Background jobs popover (the jobs panel ui-jobs): one row per job with label,
@@ -2314,9 +2498,9 @@ class _ChatScreenState extends State<ChatScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) => AnimatedBuilder(
-        animation: AgentService.I,
+        animation: _agent,
         builder: (_, _) {
-          final jobs = AgentService.I.jobsFor(sessionId);
+          final jobs = _agent.jobsFor(sessionId);
           return SafeArea(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
@@ -2420,7 +2604,7 @@ class _ChatScreenState extends State<ChatScreen>
                                         size: 18,
                                         color: Aether.danger,
                                       ),
-                                      onPressed: () => AgentService.I
+                                      onPressed: () => _agent
                                           .killJobFor(sessionId, j.id),
                                     ),
                                 ],
@@ -5085,6 +5269,11 @@ class _ProducedFilesCard extends StatelessWidget {
                     color: Aether.textMuted,
                   ),
                   onPressed: () async {
+                    // P8 Task 10: no local host directory on the thin client
+                    // — this card is never built there (produced files are a
+                    // local-workspace concept), so the call site is dead on
+                    // the cloud path; kept compiled for the default build.
+                    if (Distribution.cloudExecution) return;
                     final dir = await AgentService.I.hostDirOf(f.path);
                     if (!sheetCtx.mounted) return;
                     if (dir == null) {
@@ -5399,7 +5588,7 @@ class _MessageView extends StatelessWidget {
     final canEdit =
         input != null &&
         !session.isSubagent &&
-        !AgentService.I.busyFor(session.id);
+        !_agent.busyFor(session.id);
     if (canEdit && isUser && isLast) {
       add(Icons.edit_outlined, 'Edit & resend', () async {
         await _editAndTruncate(context, m.content);
@@ -5532,7 +5721,7 @@ class _MessageView extends StatelessWidget {
           return;
         }
         onAction();
-        AgentService.I.runTask(
+        _agent.runTask(
           lastUser.content,
           sessionId: session.id,
           expandRefsFor: session,
@@ -5605,7 +5794,7 @@ class _MessageView extends StatelessWidget {
       !session.isSubagent &&
       AppState.I.activeSessionId == session.id &&
       identical(AppState.I.sessionById(session.id), session) &&
-      !AgentService.I.busyFor(session.id) &&
+      !_agent.busyFor(session.id) &&
       msgIndex < session.messages.length &&
       identical(session.messages[msgIndex], m);
 
@@ -5640,7 +5829,7 @@ class _MessageView extends StatelessWidget {
         identical(AppState.I, app) &&
         app.activeSessionId == session.id &&
         identical(app.sessionById(session.id), session) &&
-        !AgentService.I.busyFor(session.id);
+        !_agent.busyFor(session.id);
     return current ? removed : null;
   }
 
@@ -5670,7 +5859,7 @@ class _MessageView extends StatelessWidget {
       duration: const Duration(seconds: 8),
       onUndo: () {
         final restored =
-            !AgentService.I.busyFor(sessionId) &&
+            !_agent.busyFor(sessionId) &&
             AppState.I.restoreMessagesAt(
               sessionId,
               snapshot.index,
@@ -5695,7 +5884,7 @@ class _MessageView extends StatelessWidget {
             AppState.I.activeSessionId == sessionId &&
             composer.text == stagedText) {
           composer.clear();
-          final pending = AgentService.I.pendingAttachments;
+          final pending = _agent.pendingAttachments;
           for (final file in stagedFiles) {
             pending.remove(file);
           }
@@ -5733,7 +5922,7 @@ class _MessageView extends StatelessWidget {
 
   bool _stageEdit(BuildContext context, String text) {
     if (!_canChangeHistory) return false;
-    final pending = AgentService.I.pendingAttachments;
+    final pending = _agent.pendingAttachments;
     String? error;
     if (input!.text.isNotEmpty || pending.isNotEmpty) {
       error = 'Finish the current draft before editing a message.';
@@ -5955,7 +6144,7 @@ class _MessageView extends StatelessWidget {
     final hasBody = m.content.trim().isNotEmpty;
     final isUser = m.role == 'user';
     final live =
-        hasBody && !m.thinking && AgentService.I.busyFor(session.id as String);
+        hasBody && !m.thinking && _agent.busyFor(session.id as String);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -6197,10 +6386,10 @@ class _AttachmentChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([AgentService.I, AppState.I]),
+      animation: Listenable.merge([_agent, AppState.I]),
       builder: (context, _) {
-        final atts = AgentService.I.pendingAttachments;
-        final staging = AgentService.I.stagingAttachmentCount;
+        final atts = _agent.pendingAttachments;
+        final staging = _agent.stagingAttachmentCount;
         final sessionId = AppState.I.activeSessionId;
         if (atts.isEmpty && staging == 0) return const SizedBox.shrink();
         return Padding(
@@ -6216,7 +6405,7 @@ class _AttachmentChip extends StatelessWidget {
             onOpenImage: (path) => _openFullscreenImage(context, File(path)),
             onRemove: (a) {
               if (AppState.I.activeSessionId == sessionId && a.path != null) {
-                AgentService.I.removeAttachment(a.path!);
+                _agent.removeAttachment(a.path!);
               }
             },
           ),
@@ -6524,6 +6713,18 @@ class _InputBarState extends State<_InputBar> {
   ) async {
     var root = '';
     final entries = <FileSystemEntity>[];
+    // P8 Task 10: no local workspace on the thin client — `@file:` rows
+    // never list (the workspaceRootFor call site dies with the on-device
+    // workspace; kept compiled for the default build).
+    if (Distribution.cloudExecution) {
+      if (!mounted || key != _mentionFilesPendingKey) return;
+      setState(() {
+        _mentionFilesKey = key;
+        _mentionFiles = (root: root, entries: entries);
+        _mentionFilesPendingKey = null;
+      });
+      return;
+    }
     try {
       final ws = AgentService.I.workspaceRootFor(parent);
       root = ws.path;
@@ -6622,52 +6823,60 @@ class _InputBarState extends State<_InputBar> {
     }
     // Connected MCP server tools — the model can call these, so the composer
     // should be able to point at them too.
-    for (final entry in McpService.I.connectedTools.entries) {
-      for (final t in entry.value) {
-        final desc = (t.description ?? '').trim();
-        add(
-          2,
-          '${entry.key} ${t.name}',
-          _SlashSuggestion(
-            icon: Icons.extension_outlined,
-            name: t.name,
-            description: desc.isEmpty
-                ? 'MCP tool · ${entry.key}'
-                : '${entry.key} · $desc',
-            hint: '',
-            insert: 'Use the ${entry.key} MCP tool "${t.name}" to ',
-            group: 'MCP tools',
-          ),
-        );
+    // P8 Task 10: hidden while `Distribution.cloudPlugins` is false — the
+    // MCP/plugin runtime is dark on the thin client until P5 (these entries
+    // die fully in Task 17).
+    if (!Distribution.cloudPlugins) {
+      for (final entry in McpService.I.connectedTools.entries) {
+        for (final t in entry.value) {
+          final desc = (t.description ?? '').trim();
+          add(
+            2,
+            '${entry.key} ${t.name}',
+            _SlashSuggestion(
+              icon: Icons.extension_outlined,
+              name: t.name,
+              description: desc.isEmpty
+                  ? 'MCP tool · ${entry.key}'
+                  : '${entry.key} · $desc',
+              hint: '',
+              insert: 'Use the ${entry.key} MCP tool "${t.name}" to ',
+              group: 'MCP tools',
+            ),
+          );
+        }
       }
     }
     // Installed + enabled plugins that add agent tools.
+    // P8 Task 10: same `Distribution.cloudPlugins` gate as the MCP rows.
     final sessionId = widget.sessionId ?? '';
-    for (final p in AppState.I.plugins.where((p) {
-      if (!p.installed || !p.enabled || p.migrationRequired) return false;
-      final runtimeId = p.runtimeId;
-      if (runtimeId != null) {
-        return PluginContributionRegistry.I.isPluginActiveForSession(
-          runtimeId,
-          sessionId,
+    if (!Distribution.cloudPlugins) {
+      for (final p in AppState.I.plugins.where((p) {
+        if (!p.installed || !p.enabled || p.migrationRequired) return false;
+        final runtimeId = p.runtimeId;
+        if (runtimeId != null) {
+          return PluginContributionRegistry.I.isPluginActiveForSession(
+            runtimeId,
+            sessionId,
+          );
+        }
+        return p.source == null || AppState.I.legacyPluginExecutionAllowed;
+      })) {
+        add(
+          3,
+          p.name,
+          _SlashSuggestion(
+            icon: Icons.widgets_outlined,
+            name: p.name,
+            description: p.description.isEmpty
+                ? '${p.category} plugin'
+                : p.description,
+            hint: '',
+            insert: 'Use the ${p.name} plugin to ',
+            group: 'Plugins',
+          ),
         );
       }
-      return p.source == null || AppState.I.legacyPluginExecutionAllowed;
-    })) {
-      add(
-        3,
-        p.name,
-        _SlashSuggestion(
-          icon: Icons.widgets_outlined,
-          name: p.name,
-          description: p.description.isEmpty
-              ? '${p.category} plugin'
-              : p.description,
-          hint: '',
-          insert: 'Use the ${p.name} plugin to ',
-          group: 'Plugins',
-        ),
-      );
     }
     scored.sort((a, b) {
       final c = a.score.compareTo(b.score);
@@ -6682,7 +6891,7 @@ class _InputBarState extends State<_InputBar> {
     final app = AppState.I;
     final parent = app.sessionById(widget.sessionId);
     if (parent == null) return const [];
-    final agent = AgentService.I;
+    final agent = _agent;
     var query = _mentionQuery.toLowerCase();
     // File rows insert `@file:<rel>`; strip the prefix so descending into
     // an inserted `@file:src/` keeps matching inside that folder.
@@ -7006,7 +7215,7 @@ class _InputBarState extends State<_InputBar> {
     var ok = 0;
     final errors = <String>[];
     for (final f in files) {
-      final err = await AgentService.I.attachFile(
+      final err = await _agent.attachFile(
         f.path!,
         f.name,
         sessionId: sessionId,
@@ -7399,7 +7608,7 @@ class _InputBarState extends State<_InputBar> {
                   // ── Stateful primary / stop button (web-IDE InputBar pattern) ──
                   AnimatedBuilder(
                     animation: Listenable.merge([
-                      AgentService.I,
+                      _agent,
                       controller,
                       ConnectionService.I,
                     ]),
@@ -7409,18 +7618,18 @@ class _InputBarState extends State<_InputBar> {
                       final sessionId = widget.sessionId ?? '';
                       final hasSession = widget.sessionId != null;
                       final runningNow =
-                          hasSession && AgentService.I.busyFor(sessionId);
+                          hasSession && _agent.busyFor(sessionId);
                       final hasDraft = controller.text.trim().isNotEmpty;
                       final hasQueued =
                           hasSession &&
-                          AgentService.I
+                          _agent
                               .queuedMessagesFor(sessionId)
                               .isNotEmpty;
                       void stop() {
                         if (hasSession) {
-                          AgentService.I.stopRequested(sessionId: sessionId);
+                          _agent.stopRequested(sessionId: sessionId);
                         } else {
-                          AgentService.I.hardStopAll();
+                          _agent.hardStopAll();
                         }
                       }
 
@@ -7439,9 +7648,9 @@ class _InputBarState extends State<_InputBar> {
                           !locked &&
                           !widget.commandBusy &&
                           !offline &&
-                          AgentService.I.pendingApproval == null &&
+                          _agent.pendingApproval == null &&
                           (!widget.editingQueue ||
-                              AgentService.I.pendingAttachments.isEmpty);
+                              _agent.pendingAttachments.isEmpty);
                       final interrupt = AppState.I.sendWhileBusyInterrupt;
                       final actionLabel = widget.editingQueue
                           ? 'Save'
@@ -7586,10 +7795,10 @@ class _TypingBubble extends StatelessWidget {
     // status line from the run, so retries/backoffs/compaction are visible
     // instead of a permanent generic label.
     return AnimatedBuilder(
-      animation: AgentService.I,
+      animation: _agent,
       builder: (_, _) {
         final sid = AppState.I.activeSessionId;
-        final status = sid == null ? null : AgentService.I.statusFor(sid);
+        final status = sid == null ? null : _agent.statusFor(sid);
         final label = (status == null || status.trim().isEmpty)
             ? 'Working…'
             : status.trim();
@@ -7961,6 +8170,190 @@ class _TodoDockState extends State<_TodoDock> {
   }
 }
 
+/// P8 Task 10 — offline prompt outbox chip: prompts composed while offline
+/// (or queued before the process died) render here until the reconnect
+/// flush sends them. Read-only; the flush is automatic on the
+/// offline→online edge and at boot.
+class _CloudOutboxChip extends StatelessWidget {
+  const _CloudOutboxChip({this.sessionId});
+
+  final String? sessionId;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: CloudSessionStore.I,
+      builder: (_, _) {
+        final sid = sessionId;
+        final entries = sid == null
+            ? const <OutboxEntry>[]
+            : CloudSessionStore.I.outboxFor(sid);
+        if (entries.isEmpty) return const SizedBox.shrink();
+        return Padding(
+          key: const ValueKey('cloud-outbox-chip'),
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            decoration: BoxDecoration(
+              color: Aether.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Aether.warnLight.withValues(alpha: 0.4)),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.cloud_upload_outlined,
+                  size: 15,
+                  color: Aether.warnLight,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '${entries.length} queued message${entries.length == 1 ? '' : 's'} · '
+                    'sends automatically when you are back online',
+                    style: TextStyle(fontSize: 11.5, color: Aether.textMuted),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// P8 Task 10 — the cloud error-envelope row (spec §15 UX):
+///
+///  * 402 `daily_limit_reached` — the server message VERBATIM plus a
+///    countdown derived from `x-ovid-resets-at`; the composed draft is kept.
+///  * 409 `key_not_minted` — the server message plus a provider-settings
+///    action.
+///  * 409 `run_conflict` — SILENT state refresh (the prompt was already
+///    accepted; no row renders).
+///  * 503 `unavailable` / other 5xx — the server message plus a Retry
+///    affordance that re-sends the preserved draft.
+class _CloudErrorRow extends StatefulWidget {
+  const _CloudErrorRow({this.sessionId, this.onRetry});
+
+  final String? sessionId;
+  final Future<void> Function()? onRetry;
+
+  @override
+  State<_CloudErrorRow> createState() => _CloudErrorRowState();
+}
+
+class _CloudErrorRowState extends State<_CloudErrorRow> {
+  /// A 409 `run_conflict` refresh is fired once per recorded error.
+  String? _conflictRefreshedKey;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([CloudAgentFacade.I, CloudSessionStore.I]),
+      builder: (_, _) {
+        final facade = CloudAgentFacade.I;
+        final sid = widget.sessionId;
+        final run = sid == null ? null : facade.runStateFor(sid);
+        final code = run?.lastErrorCode;
+        // The outbox flush's last failure surfaces through the same row when
+        // no session-scoped error is recorded (a reconnect flush failure).
+        final outboxError = code == null ? CloudSessionStore.I.outboxError : null;
+        final effectiveCode = code ?? outboxError?.code;
+        final message =
+            code != null ? (run?.lastErrorMessage ?? '') : (outboxError?.message ?? '');
+        final resetsAt = sid == null ? null : facade.errorResetsAtFor(sid);
+        if (effectiveCode == null) return const SizedBox.shrink();
+        if (effectiveCode == 'run_conflict') {
+          // Silent state refresh: the server already accepted the prompt.
+          final key = '$effectiveCode:$message';
+          if (_conflictRefreshedKey != key) {
+            _conflictRefreshedKey = key;
+            unawaited(
+              CloudSessionStore.I.ready
+                  .then((_) => CloudSessionStore.I.refreshSessions())
+                  .catchError((Object e) {}),
+            );
+          }
+          return const SizedBox.shrink();
+        }
+        final countdown = resetsAt == null
+            ? null
+            : 'Resets in '
+              '${resetsAt.difference(DateTime.now()).inMinutes.clamp(0, 1 << 31)} min';
+        final retryable =
+            effectiveCode == 'unavailable' || effectiveCode == 'internal';
+        return Padding(
+          key: const ValueKey('cloud-error-row'),
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+            decoration: BoxDecoration(
+              color: Aether.danger.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Aether.danger.withValues(alpha: 0.4)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.error_outline, size: 15, color: Aether.danger),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // The server message, VERBATIM.
+                      Text(
+                        message.isEmpty ? effectiveCode : message,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: Aether.text,
+                        ),
+                      ),
+                      if (countdown != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          countdown,
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            color: Aether.textMuted,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (effectiveCode == 'key_not_minted')
+                  TextButton(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const SettingsScreen(),
+                      ),
+                    ),
+                    child: const Text('Provider settings'),
+                  ),
+                if (retryable && widget.onRetry != null)
+                  TextButton(
+                    onPressed: () => unawaited(widget.onRetry!()),
+                    child: const Text('Retry'),
+                  ),
+                TextButton(
+                  key: const ValueKey('cloud-error-dismiss'),
+                  onPressed: code != null
+                      ? (sid == null ? null : () => facade.clearErrorFor(sid))
+                      : CloudSessionStore.I.clearOutboxError,
+                  child: const Text('Dismiss'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _QueueDock extends StatelessWidget {
   final String? sessionId;
   final VoidCallback onEdited;
@@ -7975,7 +8368,7 @@ class _QueueDock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final agent = AgentService.I;
+    final agent = _agent;
     return AnimatedBuilder(
       animation: agent,
       builder: (_, _) {
@@ -8130,7 +8523,7 @@ const queueRowActions = <QueueRowAction>[
 
 class _QueueRowState extends State<_QueueRow> {
   void _delete() {
-    final agent = AgentService.I;
+    final agent = _agent;
     final id = widget.id;
     if (id != null) {
       agent.removeQueuedMessageById(id);
@@ -8143,7 +8536,7 @@ class _QueueRowState extends State<_QueueRow> {
   /// Quick send: pull this row to the front of the queue and stop the
   /// current run so the message starts immediately.
   void _quickSend() {
-    final agent = AgentService.I;
+    final agent = _agent;
     final id = widget.id;
     if (id != null) {
       agent.quickSendQueuedMessage(id);
@@ -8393,9 +8786,9 @@ class _ApprovalDockState extends State<_ApprovalDock> {
   void _decide(ApprovalRequest req, {required bool ok, bool always = false}) {
     if (!_armed || !identical(req, _shown)) return;
     if (always) {
-      AgentService.I.approveAlwaysRequest(req);
+      _agent.approveAlwaysRequest(req);
     } else {
-      AgentService.I.approveRequest(req, ok);
+      _agent.approveRequest(req, ok);
     }
   }
 
@@ -8415,14 +8808,14 @@ class _ApprovalDockState extends State<_ApprovalDock> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([AgentService.I, AppState.I]),
+      animation: Listenable.merge([_agent, AppState.I]),
       builder: (_, _) {
-        final req = AgentService.I.pendingApproval;
+        final req = _agent.pendingApproval;
         if (req == null) {
           // Another session may be waiting on an approval this dock cannot
           // show, because it renders the foreground session's bucket. Say so
           // instead of letting it auto-deny in silence.
-          final elsewhere = AgentService.I.pendingApprovalsElsewhere;
+          final elsewhere = _agent.pendingApprovalsElsewhere;
           if (elsewhere.isEmpty) return const SizedBox.shrink();
           return _OtherSessionsApprovalRow(items: elsewhere);
         }
@@ -8775,8 +9168,12 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                 ),
                 child: const Text('Skip', style: TextStyle(fontSize: 12)),
                 onPressed: () {
-                  if (identical(AgentService.I.pendingApproval, widget.req)) {
-                    AgentService.I.approve(false);
+                  // P8 Task 10: re-pointed off the legacy no-arg `approve`
+                  // onto the surface's approveRequest flow so the questions
+                  // card stays answerable on the facade (the member itself
+                  // dies with Task 19).
+                  if (identical(_agent.pendingApproval, widget.req)) {
+                    _agent.approveRequest(widget.req, false);
                   }
                 },
               ),
@@ -8794,7 +9191,7 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                 onPressed: _allAnswered
                     ? () {
                         if (!identical(
-                          AgentService.I.pendingApproval,
+                          _agent.pendingApproval,
                           widget.req,
                         )) {
                           return;
@@ -8803,7 +9200,8 @@ class _QuestionsCardState extends State<_QuestionsCard> {
                           final a = _answerFor(q);
                           if (a != null) widget.req.answers[q.id] = a;
                         }
-                        AgentService.I.approve(true);
+                        // P8 Task 10: same re-point as the Skip action.
+                        _agent.approveRequest(widget.req, true);
                       }
                     : null,
                 child: const Text('Answer', style: TextStyle(fontSize: 12)),
@@ -8905,16 +9303,23 @@ class _StudioFolderChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([AppState.I, AgentService.I]),
+      animation: Listenable.merge([AppState.I, _agent]),
       builder: (_, _) {
         final s = AppState.I.activeSession;
         final isStudio =
-            AgentService.I.mode == AgentMode.studio ||
+            _agent.mode == AgentMode.studio ||
             (s?.mode == AgentMode.studio.name);
         if (!isStudio) return const SizedBox.shrink();
 
         final folder = (s?.workspaceFolder ?? '').trim();
-        final repo = (AgentService.I.sessionRepoFull ?? '').trim();
+        // P8 Task 10: no connected local repo on the thin client — the chip
+        // falls back to the pinned-folder/sandbox label (the sessionRepoFull
+        // call site dies with the on-device repo registry; kept compiled for
+        // the default build).
+        final repo = (Distribution.cloudExecution
+                ? ''
+                : AgentService.I.sessionRepoFull ?? '')
+            .trim();
         final hasFolder = folder.isNotEmpty;
         final hasRepo = repo.isNotEmpty;
         // The REPO NAME wins. The folder branch used to come first, and for a
@@ -9182,7 +9587,7 @@ class _PlanChip extends StatelessWidget {
         if (!on && pending == null) return const SizedBox.shrink();
         return GestureDetector(
           onTap: () {
-            AgentService.I.planMode = false;
+            _agent.planMode = false;
           },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
@@ -9222,9 +9627,9 @@ class _ModeChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: AgentService.I,
+      animation: _agent,
       builder: (_, _) {
-        final m = AgentService.I.mode;
+        final m = _agent.mode;
         return GestureDetector(
           onTap: () => _showModeSheet(context),
           child: Container(
@@ -9299,7 +9704,7 @@ class _ModeChip extends StatelessWidget {
                       height: 1.4,
                     ),
                   ),
-                  trailing: AgentService.I.mode == m
+                  trailing: _agent.mode == m
                       ? Icon(Icons.check, size: 18, color: Aether.accent)
                       : null,
                   onTap: () async {
@@ -9362,11 +9767,11 @@ Future<void> _pickAccessMode(
   final session = AppState.I.sessionById(sessionId);
   final current = AgentMode.values.firstWhere(
     (x) => x.name == session?.mode,
-    orElse: () => AgentService.I.mode,
+    orElse: () => _agent.mode,
   );
   if (_skipsApprovals(m) && current != m) {
     final key = sessionId ?? '';
-    final running = sessionId != null && AgentService.I.busyFor(sessionId);
+    final running = sessionId != null && _agent.busyFor(sessionId);
     if (running || !_fullAccessConfirmedSessions.contains(key)) {
       if (!context.mounted) return;
       final ok = await showDialog<bool>(
@@ -9405,13 +9810,27 @@ Future<void> _pickAccessMode(
   if (sessionId != null) {
     // The chat may have been deleted while the dialog was open.
     if (AppState.I.sessionById(sessionId) == null) return;
-    AgentService.I.setMode(m, sessionId: sessionId);
+    _agent.setMode(m, sessionId: sessionId);
   } else {
-    AgentService.I.setMode(m);
+    _agent.setMode(m);
   }
 }
 
 Future<void> _enableControlMode(BuildContext context) async {
+  // P8 Task 10: control mode drives the on-device AccessibilityService —
+  // it cannot exist on the thin client (the whole control UI dies with
+  // wave 13; the battery-exemption and setMode(control) call sites below
+  // stay compiled but are unreachable on the cloud path).
+  if (Distribution.cloudExecution) {
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Control mode is not available in the cloud version of Ovid.',
+        ),
+      ),
+    );
+    return;
+  }
   if (!Distribution.controlModeAvailable) {
     ScaffoldMessenger.maybeOf(context)?.showSnackBar(
       const SnackBar(content: Text(Distribution.controlUnavailableMessage)),
@@ -9549,7 +9968,7 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (AgentService.I.mode == AgentMode.control) {
+    if (_agent.mode == AgentMode.control) {
       _refresh();
     }
   }
@@ -9564,13 +9983,13 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed &&
-        AgentService.I.mode == AgentMode.control) {
+        _agent.mode == AgentMode.control) {
       _refresh(isResume: true);
     }
   }
 
   Future<void> _refresh({bool isResume = false}) async {
-    if (AgentService.I.mode != AgentMode.control) return;
+    if (_agent.mode != AgentMode.control) return;
     _retryTimer?.cancel();
     final enabled = await DeviceControlService.I.isEnabled().catchError(
       (_) => false,
@@ -9588,7 +10007,7 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
     if (isResume && !enabled && _enabled != true) {
       // Retry once after 600ms on resume in case the OS is still binding the service
       _retryTimer = Timer(const Duration(milliseconds: 600), () async {
-        if (!mounted || AgentService.I.mode != AgentMode.control) return;
+        if (!mounted || _agent.mode != AgentMode.control) return;
         final retryEnabled = await DeviceControlService.I
             .isEnabled()
             .catchError((_) => false);
@@ -9603,7 +10022,7 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
   Future<void> _refreshHealth() async {
     try {
       final health = await DeviceControlService.I.backgroundHealth();
-      if (!mounted || AgentService.I.mode != AgentMode.control) return;
+      if (!mounted || _agent.mode != AgentMode.control) return;
       setState(() {
         _batteryExempt = health.batteryExempt;
         _manufacturer = health.manufacturer;
@@ -9627,12 +10046,12 @@ class _ControlServiceNoticeState extends State<_ControlServiceNotice>
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: AgentService.I,
+    animation: _agent,
     builder: (_, _) {
       if (_enabled == null) {
         _refresh();
       }
-      if (AgentService.I.mode != AgentMode.control) {
+      if (_agent.mode != AgentMode.control) {
         return const SizedBox.shrink();
       }
       final showOffWarning = _enabled == false;

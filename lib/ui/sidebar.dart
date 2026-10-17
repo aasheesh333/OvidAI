@@ -4,11 +4,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/connection_service.dart';
+import '../core/distribution.dart';
 import '../core/firebase_service.dart';
 import '../core/session_history_store.dart';
 import '../core/theme.dart';
 import '../core/state.dart';
 import '../core/agent_service.dart';
+import '../core/cloud/agent_surface.dart';
+import '../core/cloud/cloud_agent_facade.dart';
+import '../core/cloud/cloud_session_store.dart';
 import 'profile_avatar.dart';
 import 'settings_screen.dart';
 import 'trajectory_screen.dart';
@@ -71,6 +75,12 @@ class SessionSummary {
 class _SessionRowKey extends ValueKey<String> {
   const _SessionRowKey(super.value);
 }
+
+/// P8 Task 10 — the sidebar's dual-path binding (the same pattern
+/// chat_screen uses): the thin client reads busy/title state off the cloud
+/// facade, the default build off `AgentService.I`. Both arms stay compiled.
+AgentSurface get _agent =>
+    Distribution.cloudExecution ? CloudAgentFacade.I : AgentService.I;
 
 /// The sidebar's list state: root-session rows, most recent activity first
 /// (F-046), plus the active id.
@@ -145,6 +155,35 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
   String _query = '';
   final TextEditingController _searchController = TextEditingController();
   final SidebarSessionsNotifier _sessions = SidebarSessionsNotifier();
+
+  /// P8 Task 10: on the thin client the session list is the store's
+  /// reconciliation output — refresh it once at mount (offline: the list
+  /// renders from the local cache read-only, spec §12).
+  @override
+  void initState() {
+    super.initState();
+    if (Distribution.cloudExecution) {
+      unawaited(
+        CloudSessionStore.I.ready.then((_) async {
+          if (CloudSessionStore.I.offline) return;
+          await CloudSessionStore.I.refreshSessions();
+        }).catchError((Object _) {}),
+      );
+    }
+  }
+
+  /// Pull-to-refresh (thin client): re-walks the gateway's session pages
+  /// into AppState; the notifier the rows already listen to re-renders.
+  Future<void> _refreshCloudSessions() async {
+    final store = CloudSessionStore.I;
+    await store.ready;
+    if (store.offline) return; // read-only cache while offline (spec §12)
+    try {
+      await store.refreshSessions();
+    } catch (_) {
+      // A failed refresh keeps the last reconciled list.
+    }
+  }
 
   /// Message-content search (F-047) runs 200 ms after the last keystroke;
   /// title matches render immediately.
@@ -454,13 +493,21 @@ class _SessionsSidebarState extends State<SessionsSidebar> {
                         );
                       }
 
-                      return CustomScrollView(
+                      final scrollView = CustomScrollView(
                         keyboardDismissBehavior:
                             ScrollViewKeyboardDismissBehavior.onDrag,
                         slivers: [
                           for (final section in sections)
                             sectionSliver(section),
                         ],
+                      );
+                      // P8 Task 10: pull-to-refresh reconciles the gateway's
+                      // session list on the thin client (the default build
+                      // has no server list to pull).
+                      if (!Distribution.cloudExecution) return scrollView;
+                      return RefreshIndicator(
+                        onRefresh: _refreshCloudSessions,
+                        child: scrollView,
                       );
                     },
                   ),
@@ -1145,22 +1192,26 @@ class _SessionTileState extends State<_SessionTile> {
                 _rename(context);
               },
             ),
-            ListTile(
-              dense: true,
-              leading: Icon(
-                Icons.auto_awesome_outlined,
-                size: 19,
-                color: Aether.accent,
+            // P8 Task 10: title GENERATION is an on-device agent concern —
+            // the facade member is inert until the owning server task wires
+            // it, so the action is hidden on the thin client.
+            if (!Distribution.cloudExecution)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  Icons.auto_awesome_outlined,
+                  size: 19,
+                  color: Aether.accent,
+                ),
+                title: const Text(
+                  'Regenerate title',
+                  style: TextStyle(fontSize: 13.5),
+                ),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _regenerateTitle(context);
+                },
               ),
-              title: const Text(
-                'Regenerate title',
-                style: TextStyle(fontSize: 13.5),
-              ),
-              onTap: () {
-                Navigator.pop(sheetCtx);
-                _regenerateTitle(context);
-              },
-            ),
           ],
         ),
       ),
@@ -1177,7 +1228,7 @@ class _SessionTileState extends State<_SessionTile> {
         duration: Duration(seconds: 2),
       ),
     );
-    await AgentService.I.regenerateSessionTitle(session);
+    await _agent.regenerateSessionTitle(session);
     if (session.title == previous) {
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(
@@ -1200,7 +1251,7 @@ class _RunningBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
-      valueListenable: AgentService.I.busyListenable(sessionId),
+      valueListenable: _agent.busyListenable(sessionId),
       builder: (_, running, _) {
         if (!running) return const SizedBox.shrink();
         return Row(
