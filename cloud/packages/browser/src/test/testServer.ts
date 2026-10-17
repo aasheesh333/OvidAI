@@ -9,7 +9,9 @@ import type { Server } from "node:http";
 /**
  * Fixture page pins used by later tasks:
  * - clickButton: a #btn at left:20 top:20 100x40 whose click sets #out to
- *   "CLICKED" (hit-testing).
+ *   "CLICKED" (hit-testing); a #in text input at left:20 top:80 (typing and
+ *   insertText targets); a document keydown handler setting #out to
+ *   "KEY_ENTER" on Enter (P6 Task 7 input-injection pins).
  * - animated: full-viewport div cycling background-color every 100 ms —
  *   screencast is damage-driven, so a static page emits 0 frames (research
  *   §3.3) and this page guarantees damage.
@@ -41,10 +43,14 @@ export const FIXTURES = {
 <html><head><title>Click</title></head>
 <body>
   <button id="btn" style="position:absolute;left:20px;top:20px;width:100px;height:40px;">Click me</button>
+  <input id="in" style="position:absolute;left:20px;top:80px;width:200px;height:30px;">
   <div id="out"></div>
   <script>
     document.getElementById("btn").addEventListener("click", () => {
       document.getElementById("out").textContent = "CLICKED";
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") document.getElementById("out").textContent = "KEY_ENTER";
     });
   </script>
 </body></html>

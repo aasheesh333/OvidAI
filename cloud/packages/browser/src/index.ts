@@ -1,4 +1,5 @@
 export * from "./config.js";
+export * from "./input.js";
 export * from "./pool.js";
 export * from "./screencast.js";
 export * from "./sessions.js";
