@@ -76,9 +76,14 @@ describe("billing routes (routes.ts)", () => {
   function app(
     billing: BillingService,
     deps: MintDeps = routeDeps(),
+    // The route-level tests never own a real db: inject a no-op fence unless a
+    // test is explicitly exercising the deletion fence.
+    opts: Parameters<typeof registerBillingRoutes>[3] = {
+      deletionFence: async () => {},
+    },
   ): FastifyInstance {
     const instance = Fastify({ logger: false });
-    registerBillingRoutes(instance, deps, billing);
+    registerBillingRoutes(instance, deps, billing, opts);
     return instance;
   }
 
@@ -107,6 +112,32 @@ describe("billing routes (routes.ts)", () => {
     });
     expect(res.statusCode).toBe(403);
     expect(res.json()).toEqual({ ok: false, error: { code: "account_blocked" } });
+  });
+
+  it("verify: deletion-pending account → 403 before any billing work (H1)", async () => {
+    const verify = vi.fn(async () => ({ status: 200, payload: { ok: true } }));
+    let fencedUid = "";
+    const server = app(stubBilling({ verify }), routeDeps(), {
+      deletionFence: async (uid) => {
+        fencedUid = uid;
+        throw new HttpContractError(403, "account_deletion_pending");
+      },
+    });
+    const res = await server.inject({
+      method: "POST",
+      url: "/billing/verify",
+      headers: headers(),
+      payload: { purchase_token: "t", product_id: "ovid_plus_monthly" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({
+      ok: false,
+      error: { code: "account_deletion_pending" },
+    });
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(fencedUid).toBe("u1");
+    // LOAD-BEARING: the fence runs before the purchase is bound.
+    expect(verify).not.toHaveBeenCalled();
   });
 
   it("verify: status + payload pass through with no-store (200 and 202)", async () => {

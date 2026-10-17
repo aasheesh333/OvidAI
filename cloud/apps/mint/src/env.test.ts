@@ -172,6 +172,30 @@ describe("loadMintEnv required vars", () => {
   });
 });
 
+describe("MINT_PROJECTION_MODE (Task 18 activation switch)", () => {
+  it("defaults to authoritative", () => {
+    expect(loadMintEnv(baseEnv()).projectionMode).toBe("authoritative");
+  });
+
+  it("accepts import-first (installed-base first boot)", () => {
+    expect(
+      loadMintEnv({ ...baseEnv(), MINT_PROJECTION_MODE: "import-first" }).projectionMode,
+    ).toBe("import-first");
+  });
+
+  it("is case/whitespace tolerant", () => {
+    expect(
+      loadMintEnv({ ...baseEnv(), MINT_PROJECTION_MODE: "  Import-First " }).projectionMode,
+    ).toBe("import-first");
+  });
+
+  it("refuses any other value, naming the variable", () => {
+    expect(() =>
+      loadMintEnv({ ...baseEnv(), MINT_PROJECTION_MODE: "authorative" }),
+    ).toThrow(/MINT_PROJECTION_MODE/);
+  });
+});
+
 describe("ALLOW_TEST_UPGRADE gate", () => {
   it("ALLOW_TEST_UPGRADE=true + NODE_ENV=production → throws naming ALLOW_TEST_UPGRADE", () => {
     expect(() =>

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import postgres from "postgres";
 import { createDb, migrate, type Db } from "./client.js";
+import { billingUsers } from "./billingRepos.js";
 import { newId, users as usersRepo } from "./repos.js";
 import { imageDeletedAccounts, plans as plansTable } from "./schema.js";
 import {
@@ -630,5 +631,27 @@ describe.skipIf(!TEST_DATABASE_URL)("money repos against real postgres", () => {
       }),
     ).rejects.toThrow("boom");
     await withUidLock(db, "lock-uid", async () => {}); // would hit the 30 s lock timeout if leaked
+  });
+
+  // -------------------------------------------------------------------------
+  // M6 — a billing-only user must be in the boot-resync scope
+  // -------------------------------------------------------------------------
+
+  it("billingUsers.setTier marks the uid mint_provisioned (M6)", async () => {
+    const uid = newId();
+    // A Play purchase verified BEFORE the user ever called /mint.
+    await billingUsers.setTier(db, uid, "pro", null);
+    const [row] = await db.$client`
+      SELECT tier, mint_provisioned FROM users WHERE uid = ${uid}`;
+    expect(row).toEqual({ tier: "pro", mint_provisioned: true });
+    // resyncAtBoot iterates this predicate; the paid tier must survive a
+    // Redis loss (restart without persistence / flush).
+    expect(await plansRepo.mintUids(db)).toContain(uid);
+
+    // A later tier change keeps the flag (never un-provisions the uid).
+    await billingUsers.setTier(db, uid, "free", null);
+    const [after] = await db.$client`
+      SELECT tier, mint_provisioned FROM users WHERE uid = ${uid}`;
+    expect(after).toEqual({ tier: "free", mint_provisioned: true });
   });
 });

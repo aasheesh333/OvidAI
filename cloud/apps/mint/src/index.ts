@@ -29,7 +29,7 @@ export * from "./billing/routes.js";
 
 import { Redis } from "ioredis";
 import type { FastifyInstance } from "fastify";
-import { createDb } from "@ovid/db";
+import { createDb, accountDeletions } from "@ovid/db";
 import { money } from "@ovid/money";
 import { buildMintApps, type MintDeps } from "./app.js";
 import { createAlerter } from "./alerts.js";
@@ -380,6 +380,12 @@ async function buildImagesMount(
     effectiveTier: (uid) => effectiveTier(mintDeps, uid),
     tierBudget: (uid, tier) => tierBudget(mintDeps, uid, tier),
     freeCapRemaining: (uid) => freeCapRemaining(mintDeps, uid),
+    // P9 final review H1: the same tombstone rule as /mint, /upgrade and
+    // /internal/mint-key (cancelled/active never fence).
+    deletionPending: async (uid) => {
+      const row = await accountDeletions.get(mintDeps.db, uid);
+      return row !== null && row.state !== "cancelled" && row.state !== "active";
+    },
     keySpend: async (keyId) => {
       const info = await litellm.keyInfo(keyId);
       const spend = info?.spend;

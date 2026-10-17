@@ -69,6 +69,25 @@ describe.skipIf(!TEST_DATABASE_URL)("createPostgresDeletionStore (real postgres)
     expect(raw!.record).toMatchObject({ uid: "store-roundtrip", request_id: "request-store-roundtrip" });
   });
 
+  it("stores and queries a fractional delete_after (Python clock parity, C1)", async () => {
+    // server/account/domain.py's default clock is time.time(): FRACTIONAL.
+    // The column is `double precision` in Python (schema.sql) and must accept
+    // these values through the real Postgres store — a bigint column raised
+    // 22P02 and made account deletion dead in production (P9 final review C1).
+    const store = createPostgresDeletionStore(db);
+    const uid = "store-fractional";
+    const deadline = NOW + 0.25;
+    await store.locked(uid, async (s) => s.save(row({ uid, delete_after: deadline })));
+
+    const read = await store.locked(uid, async (s) => s.get(uid));
+    expect(read!.delete_after).toBe(deadline);
+    expect((await accountDeletions.get(db, uid))!.deleteAfter).toBe(deadline);
+
+    // The sweeper clock is fractional too: not due before, due after.
+    expect(await store.due(NOW + 0.1)).not.toContain(uid);
+    expect(await store.due(NOW + 0.5)).toContain(uid);
+  });
+
   it("due() delegates the exact Python eligibility/order (unattempted before poison)", async () => {
     const store = createPostgresDeletionStore(db);
     // Due now, unattempted.

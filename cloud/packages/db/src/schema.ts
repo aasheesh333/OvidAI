@@ -3,6 +3,7 @@ import {
   boolean,
   char,
   customType,
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -429,7 +430,7 @@ export const reports = pgTable(
 export const accountDeletions = pgTable("account_deletions", {
   uid: text("uid").primaryKey(),
   state: text("state").notNull(),
-  deleteAfter: bigint("delete_after", { mode: "number" }).notNull(),
+  deleteAfter: doublePrecision("delete_after").notNull(),
   record: jsonb("record").notNull().$type<Record<string, unknown>>(),
   updatedAt: timestamptz("updated_at").notNull().defaultNow(),
 });

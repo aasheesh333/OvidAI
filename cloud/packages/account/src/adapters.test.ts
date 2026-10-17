@@ -67,8 +67,12 @@ class FakeRedis {
 class FakeKeyAdmin implements KeyAdmin {
   blocked: string[] = [];
   deletedKeys: string[] = [];
+  /** LiteLLM-side ownership; includes keys whose Redis mapping was lost. */
+  listTokens: string[] = [];
   blockStatus = 200;
   deleteStatus = 200;
+  listCalls: string[] = [];
+  listThrows = false;
   async keyBlock(key: string): Promise<number> {
     this.blocked.push(key);
     return this.blockStatus;
@@ -76,6 +80,11 @@ class FakeKeyAdmin implements KeyAdmin {
   async keyDelete(keys: string[]): Promise<number> {
     this.deletedKeys.push(...keys);
     return this.deleteStatus;
+  }
+  async listKeys(userId: string): Promise<string[]> {
+    this.listCalls.push(userId);
+    if (this.listThrows) throw new Error("key list failed");
+    return [...this.listTokens];
   }
 }
 
@@ -229,6 +238,42 @@ describe("createHttpKeyAdmin", () => {
     expect(await admin.keyBlock("tok")).toBe(0);
     expect(await admin.keyDelete(["tok"])).toBe(0);
   });
+
+  it("enumerates owned keys from GET /key/list?user_id= (H4)", async () => {
+    const calls: Array<{ url: string; method: string | undefined; auth: string | null }> = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        method: init?.method,
+        auth: new Headers(init?.headers).get("authorization"),
+      });
+      return new Response(
+        JSON.stringify({ keys: ["tok-a", { token: "tok-b" }, { key: "tok-c" }, 7, ""] }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const admin = createHttpKeyAdmin("https://litellm.invalid/", "sk-master", fetchImpl);
+    expect(await admin.listKeys("u1")).toEqual(["tok-a", "tok-b", "tok-c"]);
+    expect(calls).toEqual([
+      {
+        url: "https://litellm.invalid/key/list?user_id=u1",
+        method: "GET",
+        auth: "Bearer sk-master",
+      },
+    ]);
+  });
+
+  it("fails loudly when the key list cannot be read (never finalize blind)", async () => {
+    const down = createHttpKeyAdmin("https://litellm.invalid", "sk", (async () => {
+      throw new Error("down");
+    }) as typeof fetch);
+    await expect(down.listKeys("u1")).rejects.toThrow("key list failed");
+
+    const notFound = createHttpKeyAdmin("https://litellm.invalid", "sk", (async () => {
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch);
+    await expect(notFound.listKeys("u1")).rejects.toThrow("key list failed");
+  });
 });
 
 describe("createNoopR2Deleter", () => {
@@ -348,8 +393,8 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
       (${"99999999-9999-9999-8999-999999999999"}, ${UID}, ${SESSION}, 'artifact', ${`users/${UID}/artifacts/${SESSION}/a`}, 3, 'abc')`;
     await db.$client`INSERT INTO schedules (id, user_id, session_id, title, description, trigger, status) VALUES
       (${SCHEDULE}, ${UID}, ${SESSION}, 't', 'd', '{"type":"cron","expr":"* * * * *"}'::jsonb, 'pending')`;
-    await db.$client`INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status) VALUES
-      (${"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"}, ${SCHEDULE}, now(), 'pending')`;
+    await db.$client`INSERT INTO schedule_runs (id, schedule_id, scheduled_for, session_id, trigger_kind, status) VALUES
+      (${"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"}, ${SCHEDULE}, now(), ${SESSION}, 'cron', 'pending')`;
     await db.$client`INSERT INTO reports (id, reporter_uid, request_id, kind, reason, details, excerpt) VALUES
       (${"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"}, ${UID}, 'r1', 'k', 'r', 'd', 'e')`;
     await db.$client`INSERT INTO byok_keys (id, user_id, provider_id, endpoint, wrapped_dek, iv, ciphertext, tag) VALUES
@@ -472,6 +517,63 @@ describe.skipIf(!TEST_DATABASE_URL)("createCloudCleanup (real postgres)", () => 
 
     // Idempotent replay: every step tolerates already-deleted rows.
     await runAllSteps(ctx);
+  });
+
+  it("includes an orphaned LiteLLM key with no Redis keyid mapping (H4)", async () => {
+    await seed();
+    // The Redis mapping was lost (flush/dual-run/manual provisioning), but
+    // LiteLLM still knows the key belongs to the uid.
+    keys.listTokens = ["tok-orphan"];
+    const ctx = await cleanup.prepare(UID);
+    expect(keys.listCalls).toEqual([UID]);
+    expect(ctx.tokens.sort()).toEqual(["tok-a", "tok-b", "tok-orphan"]);
+
+    await cleanup.revokeKeys(UID, ctx);
+    expect(keys.blocked.sort()).toEqual(["tok-a", "tok-b", "tok-orphan"]);
+    await cleanup.deletionSteps()[0]!.run(UID, ctx);
+    expect(keys.deletedKeys.sort()).toEqual(["tok-a", "tok-b", "tok-orphan"]);
+  });
+
+  it("retries rather than finalize when LiteLLM key enumeration fails (H4)", async () => {
+    await seed();
+    keys.listThrows = true;
+    await expect(cleanup.prepare(UID)).rejects.toThrow("key list failed");
+  });
+
+  it("re-asserts child deletes in the terminal stage so a late write cannot wedge (H3)", async () => {
+    await seed();
+    const ctx = await cleanup.prepare(UID);
+    await cleanup.revokeKeys(UID, ctx);
+
+    // Checkpoint every stage EXCEPT the terminal `sql` stage (a durable
+    // lifecycle never re-runs a completed checkpoint).
+    const steps = cleanup.deletionSteps();
+    const terminalIndex = steps.findIndex((step) => step.name === "sql");
+    expect(terminalIndex).toBeGreaterThan(0);
+    for (const step of steps.slice(0, terminalIndex)) {
+      await step.run(UID, ctx);
+    }
+
+    // A concurrent gateway write lands AFTER the sessions checkpoint but
+    // BEFORE `DELETE FROM users`. sessions.user_id has no ON DELETE CASCADE,
+    // so a terminal stage that only deleted `users` would fail here forever.
+    const lateSession = "32323232-3232-7232-8232-323232323232";
+    await db.$client`INSERT INTO sessions (id, user_id) VALUES (${lateSession}, ${UID})`;
+    await db.$client`INSERT INTO messages (id, session_id, role, content) VALUES
+      (${"34343434-3434-7434-8434-343434343434"}, ${lateSession}, 'user', 'late')`;
+
+    const terminal = steps[terminalIndex]!;
+    await expect(terminal.run(UID, ctx)).resolves.toBeUndefined();
+    const [sessions] = await db.$client`SELECT count(*)::int AS n FROM sessions WHERE user_id = ${UID}`;
+    const [messages] = await db.$client`SELECT count(*)::int AS n FROM messages WHERE session_id = ${lateSession}`;
+    const [users] = await db.$client`SELECT count(*)::int AS n FROM users WHERE uid = ${UID}`;
+    expect({ sessions: sessions.n, messages: messages.n, users: users.n }).toEqual({
+      sessions: 0,
+      messages: 0,
+      users: 0,
+    });
+    // Idempotent replay of the terminal stage.
+    await expect(terminal.run(UID, ctx)).resolves.toBeUndefined();
   });
 
   it("fails the gateway stage on an unacknowledged key deletion (never assumes 404 success)", async () => {

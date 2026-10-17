@@ -154,6 +154,16 @@ export interface KeyAdmin {
   keyBlock(key: string): Promise<number>;
   /** POST /key/delete {keys} — returns the HTTP status (0 = network failure). */
   keyDelete(keys: string[]): Promise<number>;
+  /**
+   * GET /key/list?user_id= — every LiteLLM key owned by the uid (P9 final
+   * review H4). Redis `user:{uid}:*keyid` is only a cache: a key whose
+   * mapping was lost (flush/dual-run/manual provisioning) is still a live
+   * bearer credential and must be enumerated from the authority.
+   *
+   * Throws on a non-2xx or network failure: the cleanup retries rather than
+   * marking an account deleted with an unknown set of live keys.
+   */
+  listKeys(userId: string): Promise<string[]>;
 }
 
 /** mint.py pins a 20 s LiteLLM admin timeout; a hung delete must not pin a uid. */
@@ -183,6 +193,42 @@ export function createHttpKeyAdmin(
   return {
     keyBlock: (key) => post("/key/block", { key }),
     keyDelete: (keys) => post("/key/delete", { keys }),
+    async listKeys(userId: string): Promise<string[]> {
+      const url = new URL("/key/list", baseUrl);
+      url.searchParams.set("user_id", userId);
+      let res: Response;
+      try {
+        res = await fetchImpl(url, {
+          method: "GET",
+          headers: { authorization: `Bearer ${masterKey}` },
+          signal: AbortSignal.timeout(KEY_ADMIN_TIMEOUT_MS),
+        });
+      } catch {
+        throw new Error("key list failed");
+      }
+      if (!ok(res.status)) throw new Error("key list failed");
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        return [];
+      }
+      const raw = (body as { keys?: unknown } | null)?.keys;
+      if (!Array.isArray(raw)) return [];
+      const tokens: string[] = [];
+      for (const item of raw) {
+        if (typeof item === "string" && item !== "") {
+          tokens.push(item);
+        } else if (item !== null && typeof item === "object") {
+          // Some LiteLLM versions return full key objects; accept either the
+          // hashed `token` or a plain `key` field.
+          const record = item as Record<string, unknown>;
+          const token = record.token ?? record.key;
+          if (typeof token === "string" && token !== "") tokens.push(token);
+        }
+      }
+      return tokens;
+    },
   };
 }
 
@@ -267,6 +313,40 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
     return row?.t !== null && row?.t !== undefined;
   }
 
+  /**
+   * Delete every sessions-owned row for the uid, then the sessions themselves.
+   * Idempotent, and called by BOTH the `sessions` stage and the terminal
+   * `sql` stage (P9 final review H3): `sessions.user_id` has no ON DELETE
+   * CASCADE, so a session created after the first checkpoint would otherwise
+   * make `DELETE FROM users` fail on every retry — the stage checkpoint
+   * prevents the child delete from ever being re-run and wedges the deletion.
+   *
+   * Live ids are captured BEFORE the delete so an event stream for a session
+   * created after prepare() is removed too.
+   */
+  async function deleteSessionScope(uid: string, ctx: CleanupContext): Promise<void> {
+    const live = (await db.$client`
+      SELECT id FROM sessions WHERE user_id = ${uid}`) as Array<{ id: string }>;
+    await db.$client`DELETE FROM schedule_runs WHERE schedule_id IN (SELECT id FROM schedules WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM schedules WHERE user_id = ${uid}`;
+    await db.$client`DELETE FROM grants WHERE user_id = ${uid}`;
+    await db.$client`DELETE FROM attachments WHERE user_id = ${uid}`;
+    await db.$client`DELETE FROM session_event_mirror WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM session_agent_state WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
+    await db.$client`DELETE FROM file_manifests WHERE user_id = ${uid}`;
+    await db.$client`DELETE FROM workspace_objects WHERE user_id = ${uid}`;
+    await db.$client`DELETE FROM sessions WHERE user_id = ${uid}`;
+    const ids = new Set<string>([
+      ...((ctx.session_ids as string[] | undefined) ?? []),
+      ...live.map((row) => row.id),
+    ]);
+    if (ids.size > 0) {
+      await redisQueue.del(...[...ids].map((id) => `sess:${id}:events`));
+    }
+  }
+
   const steps: CleanupStep[] = [
     {
       // Delete via LiteLLM as well to evict its key caches. A non-2xx (or a
@@ -285,23 +365,7 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
       // sessions, so they are cleared here too. Each delete is idempotent, and
       // the later named stages re-assert their own scope.
       name: "sessions",
-      run: async (uid, ctx) => {
-        await db.$client`DELETE FROM schedule_runs WHERE schedule_id IN (SELECT id FROM schedules WHERE user_id = ${uid})`;
-        await db.$client`DELETE FROM schedules WHERE user_id = ${uid}`;
-        await db.$client`DELETE FROM grants WHERE user_id = ${uid}`;
-        await db.$client`DELETE FROM attachments WHERE user_id = ${uid}`;
-        await db.$client`DELETE FROM session_event_mirror WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
-        await db.$client`DELETE FROM session_agent_state WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
-        await db.$client`DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
-        await db.$client`DELETE FROM runs WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${uid})`;
-        await db.$client`DELETE FROM file_manifests WHERE user_id = ${uid}`;
-        await db.$client`DELETE FROM workspace_objects WHERE user_id = ${uid}`;
-        await db.$client`DELETE FROM sessions WHERE user_id = ${uid}`;
-        const ids = (ctx.session_ids as string[] | undefined) ?? [];
-        if (ids.length > 0) {
-          await redisQueue.del(...ids.map((id) => `sess:${id}:events`));
-        }
-      },
+      run: (uid, ctx) => deleteSessionScope(uid, ctx),
     },
     {
       name: "workspaces",
@@ -356,8 +420,25 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
       // All remaining uid-bearing rows, then the users row. Money history
       // (billing_purchases, image_jobs) is deliberately retained/tombstoned by
       // its own stage — never silently erased here.
+      //
+      // P9 final review H3: this is the TERMINAL stage and always runs (its
+      // checkpoint is written only after success). Re-assert every child
+      // delete here so a concurrent write between an earlier checkpoint and
+      // `DELETE FROM users` cannot wedge the deletion on an FK forever.
       name: "sql",
-      run: async (uid) => {
+      run: async (uid, ctx) => {
+        // Re-assert the session-owned scope FIRST (the FK that used to wedge).
+        await deleteSessionScope(uid, ctx);
+        if (await tableExists("browser_states")) {
+          await db.$client`DELETE FROM browser_states WHERE user_id = ${uid}`;
+        }
+        // Re-assert the stages that can be raced by a late write.
+        await deps.byok.deleteAccount(uid);
+        await deps.images.deleteAccount(uid);
+        await deps.shares.deleteAccount(uid);
+        await db.$client`DELETE FROM reports WHERE reporter_uid = ${uid}`;
+        await r2.deletePrefix(`users/${uid}/`);
+
         await db.$client`DELETE FROM mcp_oauth_flows WHERE user_id = ${uid}`;
         await db.$client`DELETE FROM mcp_oauth_tokens WHERE user_id = ${uid}`;
         await db.$client`DELETE FROM mcp_servers WHERE user_id = ${uid}`;
@@ -399,6 +480,11 @@ export function createCloudCleanup(deps: CloudCleanupDeps): CloudCleanup {
         const value = await redisDb2.get(key);
         if (typeof value === "string" && value !== "") tokens.add(value);
       }
+      // P9 final review H4: Redis is a cache, not the ownership authority.
+      // Enumerate LiteLLM by user_id so an orphaned key (lost Redis mapping,
+      // dual-run, manual provisioning) is blocked and deleted too. A failure
+      // here fails the attempt and retries — never finalize with live keys.
+      for (const token of await litellm.listKeys(uid)) tokens.add(token);
       const sessions = (await db.$client`
         SELECT id FROM sessions WHERE user_id = ${uid}`) as Array<{ id: string }>;
       return { tokens: [...tokens], session_ids: sessions.map((s) => s.id) };

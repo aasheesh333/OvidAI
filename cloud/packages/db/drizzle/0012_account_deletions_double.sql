@@ -1,0 +1,1 @@
+ALTER TABLE "account_deletions" ALTER COLUMN "delete_after" SET DATA TYPE double precision;

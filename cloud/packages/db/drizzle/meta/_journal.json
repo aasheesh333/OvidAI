@@ -85,6 +85,13 @@
       "when": 1792258455809,
       "tag": "0011_mint_provisioned",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792279200491,
+      "tag": "0012_account_deletions_double",
+      "breakpoints": true
     }
   ]
 }

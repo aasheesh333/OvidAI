@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { HttpContractError, type MintDeps } from "../app.js";
 import { isBanned } from "../antiAbuse.js";
+import { requireNoDeletionFence } from "../mintRoutes.js";
 import { BillingError } from "./domain.js";
 import { pubsubPushVerifier } from "./pushAuth.js";
 import type { BillingService } from "./service.js";
@@ -45,11 +46,23 @@ function sendUnavailable(reply: FastifyReply): FastifyReply {
     .send({ ok: false, error: { code: "billing_unavailable" } });
 }
 
+export interface BillingRouteOptions {
+  /**
+   * P9 final review H1: the account-deletion fence. Production uses the same
+   * lightweight tombstone check as /mint, /upgrade and /internal/mint-key;
+   * tests inject a deterministic seam.
+   */
+  deletionFence?(uid: string): Promise<void>;
+}
+
 export function registerBillingRoutes(
   publicApp: FastifyInstance,
   deps: MintDeps,
   billing: BillingService,
+  opts: BillingRouteOptions = {},
 ): void {
+  const deletionFence =
+    opts.deletionFence ?? ((uid: string) => requireNoDeletionFence(deps, uid));
   // A SCOPED plugin so the tolerant JSON parser below cannot change the
   // legacy 400-on-malformed-JSON behavior of every other mint route.
   publicApp.register(async (scope) => {
@@ -98,6 +111,9 @@ export function registerBillingRoutes(
             .header("Cache-Control", "no-store")
             .send({ ok: false, error: { code: "account_blocked" } });
         }
+        // P9 final review H1: a pending/fenced/deleting account must not bind
+        // purchase tokens or change tiers during its 24 h grace window.
+        await deletionFence(uid);
 
         const body = request.body === MALFORMED_BODY ? null : request.body;
         const result = await billing.verify(uid, body);
@@ -108,6 +124,13 @@ export function registerBillingRoutes(
       } catch (err) {
         if (err instanceof BillingError) {
           return sendBillingError(reply, err);
+        }
+        if (err instanceof HttpContractError) {
+          // The deletion fence's 403 account_deletion_pending.
+          return reply
+            .code(err.status)
+            .header("Cache-Control", "no-store")
+            .send({ ok: false, error: { code: err.detail } });
         }
         // Never leak driver internals; the client sees the retryable code.
         request.log.error({ err }, "billing.verify failed");

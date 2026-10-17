@@ -2,6 +2,7 @@ export * from "./client.js";
 export * from "./repos.js";
 export * from "./moneyRepos.js";
 export * from "./imagesRepos.js";
+export * from "./billingRepos.js";
 export * from "./scheduleRepos.js";
 export * from "./scheduleService.js";
 export * from "./deviceRepos.js";

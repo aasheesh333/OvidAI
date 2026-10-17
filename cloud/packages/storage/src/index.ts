@@ -4,6 +4,9 @@ export * from "./workspacePaths.js";
 export * from "./adapter.js";
 export * from "./fsAdapter.js";
 export * from "./r2Adapter.js";
+// P9 final review H2: real ListObjectsV2 + DeleteObjects prefix deletion for
+// account cleanup (the StorageAdapter only deletes single keys).
+export * from "./prefixDeleter.js";
 export * from "./storageEnv.js";
 export * from "./rangeReader.js";
 export * from "./browserState.js";

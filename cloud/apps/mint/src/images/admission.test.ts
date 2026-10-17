@@ -88,6 +88,38 @@ describe("images admission", () => {
     }
   });
 
+  it("fences a deletion-pending account before any budget read (H1)", async () => {
+    const calls: string[] = [];
+    const admission = createAdmission(
+      deps({
+        deletionPending: async (uid) => {
+          calls.push(`fence:${uid}`);
+          return true;
+        },
+        effectiveTier: async () => {
+          calls.push("tier");
+          return "pro";
+        },
+        keySpend: async () => {
+          calls.push("spend");
+          return 0;
+        },
+      }),
+    );
+    const error = await imageError(admission(identity, async () => ({})));
+    expect(error.status).toBe(403);
+    expect(error.code).toBe("account_deletion_pending");
+    // LOAD-BEARING: no tier/budget/spend read and no upstream fn call.
+    expect(calls).toEqual(["fence:alice"]);
+  });
+
+  it("does not fence an active (or cancelled) account", async () => {
+    const admission = createAdmission(deps({ deletionPending: async () => false }));
+    await expect(admission(identity, async () => ({ ok: true }))).resolves.toEqual({
+      ok: true,
+    });
+  });
+
   it("re-reads the effective tier at admission time, not the auth-time tier", async () => {
     const admission = createAdmission(
       deps({

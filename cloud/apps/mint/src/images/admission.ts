@@ -21,6 +21,14 @@ export interface AdmissionDeps {
   tierBudget(uid: string, tier: string): Promise<{ budget: number; duration: string }>;
   freeCapRemaining(uid: string): Promise<number>;
   keySpend(keyId: string): Promise<number | null>;
+  /**
+   * P9 final review H1: true while an account-deletion tombstone is pending/
+   * fenced/deleting. Checked before any budget read so a user in the 24 h
+   * grace window cannot keep generating/editing and spending. Optional so
+   * unit tests that predate the fence keep their shape; the composition root
+   * always supplies it.
+   */
+  deletionPending?(uid: string): Promise<boolean>;
 }
 
 export type Admission = (
@@ -37,6 +45,11 @@ export type Admission = (
  */
 export function createAdmission(deps: AdmissionDeps): Admission {
   return async (identity, fn) => {
+    // P9 final review H1: the account-deletion fence runs FIRST — before the
+    // tier/budget reads and before any upstream work or spend.
+    if (deps.deletionPending !== undefined && (await deps.deletionPending(identity.uid))) {
+      throw new ImageError(403, "account_deletion_pending");
+    }
     const tier = await deps.effectiveTier(identity.uid);
     const { budget, duration } = await deps.tierBudget(identity.uid, tier);
     if (tier === "free" && (await deps.freeCapRemaining(identity.uid)) <= 0) {

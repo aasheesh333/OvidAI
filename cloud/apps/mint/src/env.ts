@@ -16,6 +16,13 @@ export interface MintEnv {
   adminPort: number; // default 8092
   databaseUrl: string;
   redisDb2Url: string;
+  /**
+   * Task 18 activation switch. `authoritative` (default): Postgres is the
+   * authority and boot resync overwrites db2. `import-first`: the one-shot
+   * installed-base import from db2 runs BEFORE resync (insert-if-absent), so
+   * the first TS boot cannot wipe Python-written state. Never FLUSHes db2.
+   */
+  projectionMode: "authoritative" | "import-first";
   litellmBaseUrl: string;
   litellmMasterKey: string;
   adminMasterKey: string; // OVID_ADMIN_MASTER_KEY (console)
@@ -209,6 +216,25 @@ function parsePlayProducts(raw: NodeJS.ProcessEnv): Record<string, string> | nul
 }
 
 /**
+ * MINT_PROJECTION_MODE — Task 18's activation switch.
+ * Unset/blank → authoritative (steady state). `import-first` is used for the
+ * FIRST boot of the installed-base cutover only; it runs the insert-if-absent
+ * db2 → Postgres import before the authoritative resync.
+ */
+function projectionModeVar(raw: NodeJS.ProcessEnv): "authoritative" | "import-first" {
+  const value = (raw.MINT_PROJECTION_MODE ?? "").trim().toLowerCase();
+  if (value === "" || value === "authoritative") {
+    return "authoritative";
+  }
+  if (value === "import-first") {
+    return "import-first";
+  }
+  throw new Error(
+    `MINT_PROJECTION_MODE must be "authoritative" or "import-first", got: ${value}`,
+  );
+}
+
+/**
  * Validate + default the mint environment. Throws naming the offending
  * variable on anything invalid; refuses ALLOW_TEST_UPGRADE when
  * NODE_ENV=production (the /upgrade test hatch must never exist in prod).
@@ -250,6 +276,7 @@ export function loadMintEnv(raw: NodeJS.ProcessEnv): MintEnv {
     adminPort,
     databaseUrl,
     redisDb2Url,
+    projectionMode: projectionModeVar(raw),
     litellmBaseUrl,
     litellmMasterKey,
     adminMasterKey,

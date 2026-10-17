@@ -389,9 +389,9 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway schedule routes (real postgres)", (
       [newer, "2026-01-02T00:00:00.000Z"],
     ] as const) {
       await db.$client.unsafe(
-        `INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status)
-         VALUES ($1, $2, $3, 'succeeded')`,
-        [id, schedule.id, scheduledFor],
+        `INSERT INTO schedule_runs (id, schedule_id, scheduled_for, session_id, trigger_kind, status)
+         VALUES ($1, $2, $3, $4, 'cron', 'succeeded')`,
+        [id, schedule.id, scheduledFor, schedule.sessionId],
       );
     }
 

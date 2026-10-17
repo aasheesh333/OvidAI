@@ -26,7 +26,7 @@ import {
 } from "@ovid/mcp";
 import { createQueues } from "@ovid/queue";
 import { systemEventEnvelope } from "@ovid/shared";
-import { createActivityTracker, createStorage, loadStorageEnv } from "@ovid/storage";
+import { createActivityTracker, createR2PrefixDeleterFromEnv, createStorage, loadStorageEnv } from "@ovid/storage";
 import { buildGateway, installShutdownHandlers } from "./app.js";
 import type { AccountRouteDeps } from "./routes/account.js";
 import { createFirebaseVerifier, createTestVerifier } from "./auth.js";
@@ -64,6 +64,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
   const redisQ = new Redis(cfg.redisQUrl);
   const redisMint = new Redis(cfg.redisMintUrl);
 
+  // P9 final review H2: a REAL R2 prefix deleter (ListObjectsV2 +
+  // DeleteObjects). The no-op seam is only kept for dev/no-R2 compositions;
+  // enabling account deletion without it would report a completed deletion
+  // while users/{uid}/ objects remain.
+  const r2Deleter = createR2PrefixDeleterFromEnv(env);
+
   // ADC / GOOGLE_APPLICATION_CREDENTIALS. Captured once: the account
   // lifecycle's Firebase Admin adapter reuses the SAME app.
   const firebaseApp =
@@ -86,6 +92,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
     | (<T>(principal: { uid: string; authTime: number; signInProvider?: string }, fn: (uid: string) => Promise<T>) => Promise<T>)
     | undefined;
   if (firebaseApp !== null && accountAppIds.size > 0) {
+    if (r2Deleter === null) {
+      console.warn(
+        "[gateway] account deletion is enabled but OVID_R2_* is not configured — " +
+          "workspace/browser objects under users/{uid}/ will NOT be deleted (H2). " +
+          "Configure R2 before enabling deletion in production.",
+      );
+    }
     const admin = createFirebaseAdmin(firebaseApp, accountAppIds);
     const deletionStore = createPostgresDeletionStore(db);
     const lifecycle = createLifecycle({
@@ -99,7 +112,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
           env.OVID_LITELLM_BASE?.trim() || "http://127.0.0.1:4000",
           env.OVID_LITELLM_MASTER_KEY?.trim() ?? "",
         ),
-        r2: createNoopR2Deleter(),
+        r2: r2Deleter ?? createNoopR2Deleter(),
         images: {
           deleteAccount: async (uid) => {
             await db.transaction(async (tx) => {

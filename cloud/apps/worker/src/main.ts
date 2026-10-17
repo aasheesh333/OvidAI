@@ -30,6 +30,7 @@ import {
 import {
   awaitWarm,
   createActivityTracker,
+  createR2PrefixDeleterFromEnv,
   createSandboxManagerEviction,
   createStorage,
   diskAlertFractionFromEnv,
@@ -837,6 +838,16 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   );
   let accountSweeper: { stop(): Promise<void> } | null = null;
   if (accountAppIds.size > 0) {
+    // P9 final review H2: the real R2 ListObjectsV2 + DeleteObjects deleter.
+    // Without R2 configured the no-op seam remains, but it is called out
+    // loudly: deletion must not be enabled in production without it.
+    const r2Deleter = createR2PrefixDeleterFromEnv(env);
+    if (r2Deleter === null) {
+      console.warn(
+        "[account] deletion is enabled but OVID_R2_* is not configured — " +
+          "workspace/browser objects under users/{uid}/ will NOT be deleted (H2)",
+      );
+    }
     const firebaseApp = getApps()[0] ?? initializeApp();
     const admin = createFirebaseAdmin(firebaseApp, accountAppIds);
     const deletionStore = createPostgresDeletionStore(db);
@@ -851,7 +862,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
           cfg.litellmBaseUrl,
           env.OVID_LITELLM_MASTER_KEY?.trim() ?? "",
         ),
-        r2: createNoopR2Deleter(),
+        r2: r2Deleter ?? createNoopR2Deleter(),
         images: {
           deleteAccount: async (uid) => {
             await db.transaction(async (tx) => {
