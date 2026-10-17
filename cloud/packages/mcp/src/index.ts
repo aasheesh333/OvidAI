@@ -49,7 +49,11 @@ export {
 // exports map blocks deep imports).
 export * from "./plugins/input.js";
 export * from "./plugins/errors.js";
-export { validateAndExtractArchive } from "./plugins/archive.js";
+export {
+  validateAndExtractArchive,
+  type ArchiveValidationInput,
+  type ArchiveValidationResult,
+} from "./plugins/archive.js";
 export {
   createSourceResolver,
   MAX_METADATA_BYTES,

@@ -13,6 +13,10 @@ import { dirname, join, resolve as resolvePath, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { ConfigParseError, parseMcpConfig } from "../configParse.js";
 import {
+  TooManyRedirectsError,
+  followGuardedRedirects,
+} from "../native/fetch.js";
+import {
   SsrfBlockedError,
   createGuardedFetch,
   type GuardedFetch,
@@ -60,6 +64,12 @@ export interface SourceResolverDeps {
   githubApiBase?: string;
   npmRegistryBase?: string;
   stagingRoot?: string;
+  /**
+   * GitHub API token. Defaults to GITHUB_API_TOKEN (the worker's existing
+   * variable). Without it the unauthenticated API allows only ~60 requests
+   * per hour, which the per-file blob downloads exhaust almost immediately.
+   */
+  githubToken?: string;
 }
 
 export interface SourceResolver {
@@ -251,10 +261,17 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
     "",
   );
   const stagingRoot = deps.stagingRoot ?? join(tmpdir(), "ovid-plugin-staging");
+  const githubToken = deps.githubToken ?? process.env.GITHUB_API_TOKEN;
 
+  /**
+   * Every resolver request goes through followGuardedRedirects: the stack is
+   * told redirect:"manual" and each Location is re-entered through the
+   * injected guard, so a public 302 to 169.254.169.254 (or any internal
+   * host) is classified and refused before the hop is followed.
+   */
   async function guardedFetch(url: string, init?: RequestInit): Promise<Response> {
     try {
-      return await fetchImpl(url, init);
+      return await followGuardedRedirects(fetchImpl, url, init);
     } catch (error) {
       if (
         error instanceof SsrfBlockedError ||
@@ -264,14 +281,29 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
           `source URL was blocked by the egress guard: ${error.message}`,
         );
       }
+      if (error instanceof TooManyRedirectsError) {
+        throw new PluginSourceError("source URL redirected too many times");
+      }
       throw error;
     }
   }
 
+  function githubHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      accept: "application/vnd.github+json",
+      "user-agent": "ovid-plugin-resolver",
+    };
+    if (githubToken !== undefined && githubToken !== "") {
+      headers.authorization = `Bearer ${githubToken}`;
+    }
+    return headers;
+  }
+
   async function createStagingDir(): Promise<string> {
-    await mkdir(stagingRoot, { recursive: true });
+    await mkdir(stagingRoot, { recursive: true, mode: 0o700 });
     const dir = join(stagingRoot, uuidv7());
-    await mkdir(dir, { recursive: false });
+    // 0700: staged configs may contain literal credentials (pasted input).
+    await mkdir(dir, { recursive: false, mode: 0o700 });
     return dir;
   }
 
@@ -288,9 +320,7 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
     const treeUrl =
       `${githubApiBase}/repos/${encodeURIComponent(input.owner)}/` +
       `${encodeURIComponent(input.repo)}/git/trees/${encodeGitRef(ref)}?recursive=1`;
-    const treeResponse = await guardedFetch(treeUrl, {
-      headers: { accept: "application/vnd.github+json", "user-agent": "ovid-plugin-resolver" },
-    });
+    const treeResponse = await guardedFetch(treeUrl, { headers: githubHeaders() });
     if (!treeResponse.ok) {
       throw new PluginSourceError(`GitHub tree request failed (${treeResponse.status})`);
     }
@@ -302,6 +332,10 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
     const tree = decodeJson(treeBytes, "GitHub tree metadata");
     if (!isRecord(tree) || !Array.isArray(tree.tree)) {
       throw new PluginSourceError("GitHub tree response has an unexpected shape");
+    }
+    if (tree.truncated === true) {
+      // A partial tree would silently install an incomplete plugin.
+      throw new PluginSourceError("GitHub tree is truncated (too many entries)");
     }
 
     let total = 0;
@@ -315,7 +349,16 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
       if (path === "" || typeof raw.sha !== "string") {
         throw new PluginSourceError("GitHub tree entry is missing path/sha");
       }
-      const normalized = normalizeArchivePath(path);
+      let normalized: string;
+      try {
+        normalized = normalizeArchivePath(path);
+      } catch (error) {
+        // One failure family for every GitHub validation rejection.
+        if (error instanceof ArchiveUnsafeError) {
+          throw new PluginSourceError(error.message);
+        }
+        throw error;
+      }
       if (normalized === "") {
         throw new PluginSourceError("GitHub tree entry resolves to the repository root");
       }
@@ -323,9 +366,7 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
       const blobUrl =
         `${githubApiBase}/repos/${encodeURIComponent(input.owner)}/` +
         `${encodeURIComponent(input.repo)}/git/blobs/${encodeURIComponent(raw.sha)}`;
-      const blobResponse = await guardedFetch(blobUrl, {
-        headers: { accept: "application/vnd.github+json", "user-agent": "ovid-plugin-resolver" },
-      });
+      const blobResponse = await guardedFetch(blobUrl, { headers: githubHeaders() });
       if (!blobResponse.ok) {
         throw new PluginSourceError(`GitHub blob request failed (${blobResponse.status})`);
       }
@@ -343,8 +384,21 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
           ? Buffer.from(blob.content, "base64")
           : Buffer.from(blob.content, "utf8");
 
+      // Count every downloaded blob toward the aggregate BEFORE branching:
+      // a symlink blob is still bytes the worker downloaded and decoded.
+      total += data.length;
+      if (total > MAX_PAYLOAD_BYTES) {
+        throw new PluginSourceError(
+          `GitHub source exceeds ${MAX_PAYLOAD_BYTES} bytes`,
+        );
+      }
+
       if (mode === "120000") {
         // Symlink blob: validate the target, then never materialise the link.
+        // Same 4096-byte target cap as ZIP symlink entries.
+        if (data.length > 4096) {
+          throw new PluginSourceError("GitHub symlink target is unreasonably large");
+        }
         const target = data.toString("utf8");
         try {
           assertSafeLinkTarget(normalized, target, "symlink");
@@ -357,12 +411,6 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
         continue;
       }
 
-      total += data.length;
-      if (total > MAX_PAYLOAD_BYTES) {
-        throw new PluginSourceError(
-          `GitHub source exceeds ${MAX_PAYLOAD_BYTES} bytes`,
-        );
-      }
       const absolute = safeStagingPath(stagingDir, normalized);
       await mkdir(dirname(absolute), { recursive: true });
       await writeFile(absolute, data);
@@ -520,7 +568,9 @@ export function createSourceResolver(deps: SourceResolverDeps = {}): SourceResol
       throw new PluginSourceError("pasted config declares no MCP servers");
     }
 
-    const servers: Record<string, unknown> = {};
+    // Null prototype: a server literally named "__proto__" must survive
+    // rather than hit the prototype setter.
+    const servers: Record<string, unknown> = Object.create(null);
     for (const entry of imported) {
       const { name, ...rest } = entry;
       servers[name] = rest;

@@ -18,7 +18,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve as resolvePath, sep } from "node:path";
 import { inflateRawSync } from "node:zlib";
-import { MAX_METADATA_BYTES, MAX_PAYLOAD_BYTES } from "./constants.js";
+import { MAX_ENTRIES, MAX_METADATA_BYTES, MAX_PAYLOAD_BYTES } from "./constants.js";
 import { ArchiveUnsafeError } from "./errors.js";
 
 export { ArchiveUnsafeError } from "./errors.js";
@@ -174,6 +174,12 @@ function isZeroBlock(block: Buffer): boolean {
   return true;
 }
 
+function assertEntryBudget(count: number): void {
+  if (count >= MAX_ENTRIES) {
+    throw new ArchiveUnsafeError(`archive exceeds ${MAX_ENTRIES} entries`);
+  }
+}
+
 function verifyTarChecksum(header: Buffer): void {
   const expected = parseTarNumber(header.subarray(148, 156));
   let unsigned = 0;
@@ -230,8 +236,10 @@ function parseTar(bytes: Buffer): ArchiveEntry[] {
           `archive declared payload exceeds ${MAX_PAYLOAD_BYTES} bytes`,
         );
       }
+      assertEntryBudget(entries.length);
       entries.push({ normalized, kind: "file", size, dataOffset });
     } else if (type === "5") {
+      assertEntryBudget(entries.length);
       entries.push({ normalized, kind: "dir", size: 0, dataOffset });
     } else if (type === "2" || type === "1") {
       if (normalized === "") {
@@ -243,6 +251,7 @@ function parseTar(bytes: Buffer): ArchiveEntry[] {
         linkname,
         type === "2" ? "symlink" : "hardlink",
       );
+      assertEntryBudget(entries.length);
       entries.push({
         normalized,
         kind: type === "2" ? "symlink" : "hardlink",
@@ -319,6 +328,7 @@ function parseZip(bytes: Buffer): ArchiveEntry[] {
   let declaredTotal = 0;
 
   for (let index = 0; index < totalEntries; index++) {
+    assertEntryBudget(entries.length);
     if (pointer + 46 > centralEnd) {
       throw new ArchiveUnsafeError("truncated zip central directory");
     }
@@ -399,10 +409,12 @@ function parseZip(bytes: Buffer): ArchiveEntry[] {
       );
     }
 
-    if (kind === "file") {
-      if (normalized === "") {
+    if (kind === "file" || kind === "symlink") {
+      if (kind === "file" && normalized === "") {
         throw new ArchiveUnsafeError("archive file entry resolves to the root");
       }
+      // Symlink targets are capped at 4096 bytes each but still count toward
+      // the aggregate: thousands of links must not inflate pass 1 memory.
       declaredTotal += uncompressedSize;
       if (declaredTotal > MAX_PAYLOAD_BYTES) {
         throw new ArchiveUnsafeError(

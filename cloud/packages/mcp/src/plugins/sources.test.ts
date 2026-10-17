@@ -7,6 +7,8 @@ import { gzipSync } from "node:zlib";
 import { parseMcpConfig } from "../configParse.js";
 import { createGuardedFetch, type GuardedFetch } from "../ssrf.js";
 import { buildTar, buildZip } from "./__fixtures__/builders.js";
+import { pluginSourceInputSchema as sharedSchema } from "@ovid/shared";
+import { pluginSourceInputSchema } from "./input.js";
 import {
   MAX_METADATA_BYTES,
   MAX_PASTE_BYTES,
@@ -200,6 +202,91 @@ describe("createSourceResolver — github", () => {
     ).rejects.toBeInstanceOf(PluginSourceError);
     expect(calls).toEqual([]);
   });
+
+  it("sends the configured GitHub token on tree and blob requests", async () => {
+    const seen: Array<string | null> = [];
+    const { fetchImpl } = fakeFetch([
+      [
+        /\/git\/trees\/main\?recursive=1$/,
+        (_url, init) => {
+          const headers = (init?.headers ?? {}) as Record<string, string>;
+          seen.push(headers.authorization ?? null);
+          return json({
+            sha: "s",
+            tree: [{ path: "plugin.json", type: "blob", mode: "100644", sha: "b1" }],
+          });
+        },
+      ],
+      [
+        "/git/blobs/b1",
+        (_url, init) => {
+          const headers = (init?.headers ?? {}) as Record<string, string>;
+          seen.push(headers.authorization ?? null);
+          return json({
+            content: Buffer.from("{}").toString("base64"),
+            encoding: "base64",
+          });
+        },
+      ],
+    ]);
+
+    const resolved = await createSourceResolver({
+      fetchImpl,
+      stagingRoot,
+      githubToken: "tok-123",
+    }).resolve({ kind: "github", owner: "acme", repo: "plugin", ref: "main" });
+
+    expect(seen).toEqual(["Bearer tok-123", "Bearer tok-123"]);
+    await resolved.discard();
+  });
+
+  it("rejects oversized GitHub symlink targets and counts symlink bytes", async () => {
+    const hugeTarget = Buffer.from("a".repeat(4097));
+    const { fetchImpl } = fakeFetch([
+      [
+        /\/git\/trees\/HEAD\?recursive=1$/,
+        () =>
+          json({
+            sha: "s",
+            tree: [{ path: "link", type: "blob", mode: "120000", sha: "b1" }],
+          }),
+      ],
+      [
+        "/git/blobs/b1",
+        () =>
+          json({
+            content: hugeTarget.toString("base64"),
+            encoding: "base64",
+          }),
+      ],
+    ]);
+
+    await expect(
+      createSourceResolver({ fetchImpl, stagingRoot }).resolve({
+        kind: "github",
+        owner: "acme",
+        repo: "plugin",
+      }),
+    ).rejects.toBeInstanceOf(PluginSourceError);
+    expect(await readdir(stagingRoot)).toEqual([]);
+  });
+
+  it("rejects a truncated GitHub tree instead of installing a partial plugin", async () => {
+    const { fetchImpl } = fakeFetch([
+      [
+        /\/git\/trees\/HEAD\?recursive=1$/,
+        () => json({ sha: "s", truncated: true, tree: [] }),
+      ],
+    ]);
+    await expect(
+      createSourceResolver({ fetchImpl, stagingRoot }).resolve({
+        kind: "github",
+        owner: "acme",
+        repo: "plugin",
+      }),
+    ).rejects.toBeInstanceOf(PluginSourceError);
+    expect(await readdir(stagingRoot)).toEqual([]);
+  });
 });
 
 describe("createSourceResolver — npm", () => {
@@ -372,6 +459,33 @@ describe("createSourceResolver — zip", () => {
     ).rejects.toBeInstanceOf(PluginSourceError);
     expect(calls).toEqual([]);
   });
+
+  it("re-guards every redirect hop (302 to cloud metadata is blocked)", async () => {
+    const calls: string[] = [];
+    const underlying: typeof fetch = async (url) => {
+      calls.push(String(url));
+      return new Response(null, {
+        status: 302,
+        headers: { location: "http://169.254.169.254/latest/meta-data/" },
+      });
+    };
+    const guarded = createGuardedFetch({
+      resolver: async (host) => (host === "public.example" ? ["93.184.216.34"] : []),
+      fetchImpl: underlying,
+    });
+
+    await expect(
+      createSourceResolver({ fetchImpl: guarded, stagingRoot }).resolve({
+        kind: "zip",
+        url: "http://public.example/plugin.zip",
+      }),
+    ).rejects.toBeInstanceOf(PluginSourceError);
+
+    // The public hop was fetched once; the internal redirect target was
+    // classified and refused BEFORE any request reached it.
+    expect(calls).toEqual(["http://public.example/plugin.zip"]);
+    expect(await readdir(stagingRoot)).toEqual([]);
+  });
 });
 
 describe("createSourceResolver — paste", () => {
@@ -436,6 +550,23 @@ describe("createSourceResolver — paste", () => {
     }
   });
 
+  it("preserves a server literally named __proto__", async () => {
+    // A JSON object literal cannot express this key (it sets the prototype),
+    // so pass raw JSON.
+    const raw = '{"mcpServers":{"__proto__":{"command":"npx"}}}';
+
+    const resolved = await createSourceResolver({ stagingRoot }).resolve({
+      kind: "paste",
+      label: "proto",
+      config: raw,
+    });
+    const parsed = JSON.parse(
+      await readFile(join(resolved.stagingDir, ".mcp.json"), "utf8"),
+    ) as { mcpServers: Record<string, unknown> };
+    expect(Object.keys(parsed.mcpServers)).toContain("__proto__");
+    await resolved.discard();
+  });
+
   it("rejects a paste over 1 MiB and discards staging", async () => {
     await expect(
       createSourceResolver({ stagingRoot }).resolve({
@@ -476,5 +607,12 @@ describe("createSourceResolver — lifecycle", () => {
     expect(MAX_PAYLOAD_BYTES).toBe(64 * 1024 * 1024);
     expect(MAX_METADATA_BYTES).toBe(4 * 1024 * 1024);
     expect(MAX_PASTE_BYTES).toBe(1024 * 1024);
+  });
+
+  it("re-exports the same contract/schema as @ovid/shared", () => {
+    expect(pluginSourceInputSchema).toBe(sharedSchema);
+    expect(
+      pluginSourceInputSchema.safeParse({ kind: "paste", label: "x", config: "{}" }).success,
+    ).toBe(true);
   });
 });

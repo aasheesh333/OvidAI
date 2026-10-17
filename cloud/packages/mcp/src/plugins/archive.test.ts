@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildTar, buildZip } from "./__fixtures__/builders.js";
-import { MAX_PAYLOAD_BYTES } from "./constants.js";
+import { MAX_ENTRIES, MAX_PAYLOAD_BYTES } from "./constants.js";
 import {
   ArchiveUnsafeError,
   validateAndExtractArchive,
@@ -127,6 +127,19 @@ describe("validateAndExtractArchive — tar", () => {
     ).rejects.toBeInstanceOf(ArchiveUnsafeError);
     await expectEmptyDest();
   });
+
+  it("rejects an archive with more than MAX_ENTRIES entries", async () => {
+    const archive = buildTar(
+      Array.from({ length: MAX_ENTRIES + 1 }, (_, i) => ({
+        name: `f${i}.txt`,
+        data: new Uint8Array(),
+      })),
+    );
+    await expect(
+      validateAndExtractArchive({ bytes: archive, format: "tar" }, dest),
+    ).rejects.toBeInstanceOf(ArchiveUnsafeError);
+    await expectEmptyDest();
+  });
 });
 
 describe("validateAndExtractArchive — zip", () => {
@@ -216,6 +229,19 @@ describe("validateAndExtractArchive — zip", () => {
   it("rejects non-zip input", async () => {
     await expect(
       validateAndExtractArchive({ bytes: Buffer.from("not a zip"), format: "zip" }, dest),
+    ).rejects.toBeInstanceOf(ArchiveUnsafeError);
+    await expectEmptyDest();
+  });
+
+  it("rejects an archive with more than MAX_ENTRIES entries", async () => {
+    const archive = buildZip(
+      Array.from({ length: MAX_ENTRIES + 1 }, (_, i) => ({
+        name: `f${i}.txt`,
+        data: new Uint8Array(),
+      })),
+    );
+    await expect(
+      validateAndExtractArchive({ bytes: archive, format: "zip" }, dest),
     ).rejects.toBeInstanceOf(ArchiveUnsafeError);
     await expectEmptyDest();
   });
