@@ -9,7 +9,12 @@ export type SessionEventType =
   | "run_completed"
   | "system_note"
   | "tool_started"
-  | "tool_completed";
+  | "tool_completed"
+  // P7 Task 3 additions (workspace/artifact protocol) — keep the union and
+  // the zod enum array below in the same order.
+  | "artifact_created"
+  | "workspace_hibernated"
+  | "workspace_hydrated";
 
 export interface SessionEvent {
   sessionId: string;
@@ -34,6 +39,9 @@ export const sessionEventSchema: z.ZodType<SessionEvent> = z.object({
     "system_note",
     "tool_started",
     "tool_completed",
+    "artifact_created",
+    "workspace_hibernated",
+    "workspace_hydrated",
   ]),
   payload: z.record(z.string(), z.unknown()),
   ts: z.string().min(1),
