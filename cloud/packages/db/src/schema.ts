@@ -2,6 +2,7 @@ import {
   bigint,
   boolean,
   char,
+  customType,
   index,
   integer,
   jsonb,
@@ -19,6 +20,16 @@ import type { UiManifest, WorkspaceState } from "@ovid/shared";
 // relies on (no sub-ms truncation drift between DB value and cursor).
 const timestamptz = (name: string) =>
   timestamp(name, { withTimezone: true, precision: 3 });
+
+// Postgres tsvector has no built-in drizzle column type — a minimal custom
+// type (P3 Task 13). The column is GENERATED (never inserted or updated by
+// drizzle; only referenced inside SQL expressions), so the JS-side mapping
+// is an opaque string.
+const tsvector = customType<{ data: string; driverData: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 export const users = pgTable("users", {
   uid: text("uid").primaryKey(),
@@ -67,10 +78,20 @@ export const messages = pgTable(
     // is partial (WHERE client_msg_id IS NOT NULL), so keyed and keyless
     // messages never collide.
     clientMsgId: text("client_msg_id"),
+    // P3 Task 13: FTS source for searchMessages (repos.ts). A STORED generated
+    // tsvector over the message body — never written directly; queries use
+    // `search_vector @@ tsquery` with the messages_search_gin GIN index. The
+    // 'simple' dictionary mirrors Dart's unicode61 literal-terms semantics:
+    // no stemming, punctuation dropped, case folded.
+    searchVector: tsvector("search_vector").generatedAlwaysAs(
+      sql`to_tsvector('simple', content)`,
+    ),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [
     index("messages_session_id_id_idx").on(t.sessionId, t.id),
+    // Full-text search index for searchMessages.
+    index("messages_search_gin").using("gin", t.searchVector),
     // Per-session idempotency: one row per (session, clientMsgId); keyless
     // rows are exempt via the partial predicate.
     uniqueIndex("messages_session_client_msg_id_idx")
@@ -662,3 +683,26 @@ export const grants = pgTable(
 );
 
 export type GrantRow = typeof grants.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// P3 Task 13: session agent state (todos / goal / preset / plan-mode /
+// compaction / mode pinning / skill scopes).
+//
+// The row stores the WHOLE SessionAgentState JSON (agent-core ports.ts is the
+// parity reference). @ovid/db cannot import @ovid/agent-core (dependency
+// direction: agent-core → db), so the typed shape lives with the repo
+// (sessionState in repos.ts) and this column stays structurally typed; the
+// typed seam is createPostgresSessionStateStore in agent-core's stateStore.ts.
+// One row per session, created by the first sessionState.patch; the FK to
+// sessions keeps state from existing without its session.
+// ---------------------------------------------------------------------------
+
+export const sessionAgentState = pgTable("session_agent_state", {
+  sessionId: char("session_id", { length: 36 })
+    .primaryKey()
+    .references(() => sessions.id),
+  // '{}' until the first patch; reads fold it over the zero state (repos.ts).
+  state: jsonb("state").notNull().default({}).$type<Record<string, unknown>>(),
+});
+
+export type SessionAgentStateRow = typeof sessionAgentState.$inferSelect;

@@ -13,6 +13,7 @@ import {
   pluginGrants as pluginGrantsTable,
   plugins as pluginsTable,
   runs as runsTable,
+  sessionAgentState as sessionAgentStateTable,
   sessions as sessionsTable,
   sessionEventMirror,
   users as usersTable,
@@ -1504,3 +1505,193 @@ export const grantsRepo = {
     return removed.length > 0;
   },
 };
+
+// ---------------------------------------------------------------------------
+// session state (P3 Task 13 — the Postgres SessionStateStore backing store).
+//
+// GET-VS-PATCH SEMANTICS (the pinned ruling replacing T1's fake):
+//   get():   a PURE READ. A missing row answers the Task-1 zero state
+//            computed in memory — NO row is materialized (T1's fake
+//            materializes-and-caches; the Postgres store never writes on
+//            read, so a read can never fail on a locked row or create
+//            state for a session that has none).
+//   patch(): an ATOMIC UPSERT. The stored JSON is the merge of the existing
+//            state and the patch — jsonb `||`, i.e. the Object.assign
+//            semantics of T1's fake (top-level keys replace wholesale;
+//            arrays replace wholesale). The insert seeds the zero state, so
+//            every row stores the WHOLE SessionAgentState. A patch for an
+//            unknown session raises the sessions FK violation (23503) —
+//            loud, never a silent zero row.
+// ---------------------------------------------------------------------------
+
+/** SessionMode mirrored from @ovid/agent-core types.ts (db cannot import it). */
+type SessionModeJson = "safe" | "auto" | "drive" | "studio";
+
+/**
+ * Structural port of @ovid/agent-core's SessionAgentState (ports.ts — the
+ * parity reference). agent-core's stateStore.ts assigns this type to the
+ * canonical interface, so any drift between the two shapes fails compilation
+ * there — the seam IS the drift alarm.
+ */
+export interface SessionAgentStateJson {
+  todos: Array<{ content: string; status: "pending" | "in_progress" | "completed" }>;
+  goal: { objective: string; notes: string } | null;
+  presetId: string | null;
+  planMode: boolean;
+  planPreMode: SessionModeJson | null;
+  pendingPlanMode: boolean | null;
+  compaction: { ledger: unknown; summary: string | null; cutoffMessageId: string | null; compactedAtCount: number } | null;
+  mode: SessionModeJson;
+  modelPin: string | null;
+  activeSkillScopes: string[];
+}
+
+/** The Task-1 zero state (mode "auto" per Dart state.dart:1611). */
+export function zeroSessionAgentState(): SessionAgentStateJson {
+  return {
+    todos: [],
+    goal: null,
+    presetId: null,
+    planMode: false,
+    planPreMode: null,
+    pendingPlanMode: null,
+    compaction: null,
+    mode: "auto",
+    modelPin: null,
+    activeSkillScopes: [],
+  };
+}
+
+export const sessionState = {
+  /**
+   * The session's agent state; a missing row folds to the zero state WITHOUT
+   * writing anything (see the get-vs-patch note above).
+   */
+  async get(db: Db, sessionId: string): Promise<SessionAgentStateJson> {
+    const [row] = await db
+      .select({ state: sessionAgentStateTable.state })
+      .from(sessionAgentStateTable)
+      .where(eq(sessionAgentStateTable.sessionId, sessionId));
+    // patch() always stores the complete merged state; the zero-fold is
+    // defensive for rows written by any other hand.
+    return { ...zeroSessionAgentState(), ...(row?.state ?? {}) };
+  },
+
+  /**
+   * Atomic shallow-merge upsert of the whole-state JSON. ONE statement:
+   *   INSERT (sessionId, zero || patch)
+   *   ON CONFLICT (session_id) DO UPDATE SET state = state || patch
+   * so concurrent patches can never lose one another's keys (last writer
+   * wins per key — same observable outcome as the T1 fake).
+   */
+  async patch(db: Db, sessionId: string, p: Partial<SessionAgentStateJson>): Promise<void> {
+    await db
+      .insert(sessionAgentStateTable)
+      .values({ sessionId, state: { ...zeroSessionAgentState(), ...p } })
+      .onConflictDoUpdate({
+        target: sessionAgentStateTable.sessionId,
+        set: {
+          // The table-qualified column in DO UPDATE SET is the EXISTING row.
+          state: sql`COALESCE(${sessionAgentStateTable.state}, '{}'::jsonb) || ${JSON.stringify(p)}::jsonb`,
+        },
+      });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// messages FTS search (P3 Task 13 — searchMessages over the generated
+// search_vector column; the cloud port of Dart's SessionSearch).
+//
+// Dart parity carried over: literal-term AND (plainto_tsquery), quoted
+// phrases match the literal phrase (websearch_to_tsquery, session_search.dart
+// _literalQuery), cover-density ranking (ts_rank_cd ≈ bm25's role), snippet
+// excerpts with Dart's →/← highlight markers, limit clamp at 100
+// (maxLimit), offset clamp at 100000 (maxCursor), query clamp at 4096 UTF-16
+// units (maxQueryLength) with NULs replaced. Ownership is enforced by the
+// sessions join: a cross-user query returns ZERO ROWS, never an error.
+// ---------------------------------------------------------------------------
+
+/** Dart SessionSearch.maxLimit parity. */
+export const MESSAGES_SEARCH_MAX_LIMIT = 100;
+/** Dart SessionSearch.maxCursor parity (0-based offset bound). */
+export const MESSAGES_SEARCH_MAX_OFFSET = 100_000;
+/** Dart SessionSearch.maxQueryLength parity (UTF-16 code units). */
+export const MESSAGES_SEARCH_MAX_QUERY_UTF16 = 4096;
+
+export interface SearchMessagesOptions {
+  limit?: number;
+  offset?: number;
+  /** Restrict to one session (still ownership-checked via the join). */
+  sessionId?: string;
+}
+
+export interface SearchMessagesRow {
+  messageId: string;
+  sessionId: string;
+  role: string;
+  rank: number;
+  snippet: string;
+}
+
+/**
+ * Full-text search over message bodies, scoped to `userId`. Returns the
+ * ranked page (ts_rank_cd DESC, then session id and message id for stable
+ * ties — Dart's ORDER BY rank, sessionId, …, rowid) plus `total` = the count
+ * over the same filter (paging math without a second search).
+ */
+export async function searchMessages(
+  db: Db,
+  userId: string,
+  query: string,
+  o: SearchMessagesOptions = {},
+): Promise<{ rows: SearchMessagesRow[]; total: number }> {
+  // Clamps first — a query that clamps to nothing answers empty without
+  // touching Postgres (Dart's empty-matchQuery early return).
+  const q = query
+    .slice(0, MESSAGES_SEARCH_MAX_QUERY_UTF16)
+    .replace(/\u0000/g, " ")
+    .trim();
+  if (q === "") return { rows: [], total: 0 };
+  const limit = Math.min(Math.max(o.limit ?? 20, 0), MESSAGES_SEARCH_MAX_LIMIT);
+  const offset = Math.min(Math.max(o.offset ?? 0, 0), MESSAGES_SEARCH_MAX_OFFSET);
+
+  // Literal-phrase parity: a double-quoted run switches the whole query to
+  // websearch grammar ("…" = literal adjacent phrase, other terms still AND);
+  // otherwise plainto ANDs every term with no operator interpretation. An
+  // unterminated quote fails the regex and degrades to plainto — Dart's
+  // '"red' case (three bare-term hits).
+  const tsQuery = /"[^"]+"/.test(q)
+    ? sql`websearch_to_tsquery('simple', ${q})`
+    : sql`plainto_tsquery('simple', ${q})`;
+
+  const where = and(
+    eq(sessionsTable.userId, userId),
+    sql`${messagesTable.searchVector} @@ ${tsQuery}`,
+    o.sessionId !== undefined ? eq(messagesTable.sessionId, o.sessionId) : undefined,
+  );
+
+  const rank = sql<number>`ts_rank_cd(${messagesTable.searchVector}, ${tsQuery})::float8`;
+  const rows = await db
+    .select({
+      messageId: messagesTable.id,
+      sessionId: messagesTable.sessionId,
+      role: messagesTable.role,
+      rank,
+      snippet: sql<string>`ts_headline('simple', ${messagesTable.content}, ${tsQuery}, 'StartSel=→, StopSel=←, MaxFragments=2, MaxWords=12, MinWords=3')`,
+    })
+    .from(messagesTable)
+    .innerJoin(sessionsTable, eq(messagesTable.sessionId, sessionsTable.id))
+    .where(where)
+    .orderBy(desc(rank), asc(messagesTable.sessionId), asc(messagesTable.id))
+    .limit(limit)
+    .offset(offset);
+
+  const [countRow] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(messagesTable)
+    .innerJoin(sessionsTable, eq(messagesTable.sessionId, sessionsTable.id))
+    .where(where);
+
+  return { rows, total: countRow?.total ?? 0 };
+}
+
