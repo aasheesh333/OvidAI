@@ -71,6 +71,29 @@ describe("renderNftRuleset — sandbox range", () => {
     expect(rs).toContain("set blocked_v6");
   });
 
+  it("defaults carry CGNAT and the FULL app-guard v6 set (P6 Finding 2 parity)", () => {
+    // Literal pins, not a loop over the exported arrays: dropping a range
+    // from DEFAULT_BLOCKED_* must fail here (the parametric test above would
+    // still pass). The list must never be narrower than the browser app
+    // guard in cloud/packages/browser/src/url.ts `isNonPublicAddress`.
+    const rs = renderNftRuleset(BASE);
+    expect(DEFAULT_BLOCKED_V4).toContain("100.64.0.0/10");
+    expect(rs).toContain("100.64.0.0/10");
+    const v6 = [
+      "::1/128",
+      "fe80::/10",
+      "fc00::/7",
+      "fec0::/10",
+      "ff00::/8",
+      "2002::/16",
+      "64:ff9b::/96",
+    ];
+    for (const cidr of v6) {
+      expect(DEFAULT_BLOCKED_V6, `DEFAULT_BLOCKED_V6 missing ${cidr}`).toContain(cidr);
+      expect(rs, `rendered ruleset missing ${cidr}`).toContain(cidr);
+    }
+  });
+
   it("output chain: filter hook, priority 0, policy accept", () => {
     expect(renderNftRuleset(BASE)).toContain(
       "type filter hook output priority 0; policy accept;",

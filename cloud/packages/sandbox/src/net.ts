@@ -32,15 +32,31 @@ export interface EgressConfig {
   browserAllowedV4?: string[];
 }
 
+// Keep these defaults in sync with the browser app guard
+// (cloud/packages/browser/src/url.ts `isNonPublicAddress`): the nftables
+// backstop must never be NARROWER than the app-level check it backs up, or a
+// rebound/resolved address slips past the TOCTOU-prone guard. CGNAT and the
+// v6 special-purpose ranges were added for P6 final-review parity (Finding 2).
 export const DEFAULT_BLOCKED_V4: readonly string[] = [
   "10.0.0.0/8",
+  "100.64.0.0/10", // CGNAT (app guard: 100.64/10)
   "127.0.0.0/8",
   "169.254.0.0/16",
   "172.16.0.0/12",
   "192.168.0.0/16",
 ];
 
-export const DEFAULT_BLOCKED_V6: readonly string[] = ["::1/128", "fe80::/10", "fc00::/7"];
+// v6 parity with url.ts: loopback, link-local, ULA, site-local, multicast,
+// 6to4, and NAT64.
+export const DEFAULT_BLOCKED_V6: readonly string[] = [
+  "::1/128",
+  "fe80::/10",
+  "fc00::/7",
+  "fec0::/10",
+  "ff00::/8",
+  "2002::/16",
+  "64:ff9b::/96",
+];
 
 export const DEFAULT_EGRESS_TABLE = "ovid_sandbox";
 

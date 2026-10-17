@@ -57,7 +57,11 @@ bash cloud/deploy/install-lightpanda.sh
 PLAYWRIGHT_BROWSERS_PATH=/opt/ovid-browsers/ms-playwright \
   node cloud/node_modules/playwright-core/cli.js install chromium --with-deps
 
-# 3. Fill /opt/ovid-cloud/worker.env's "Browser engine (P6)" block
+# 3. EGRESS FIRST (see §(d)): install/refresh the ruleset and check
+#    OVID_SANDBOX_EXTRA_BLOCKED / the rendered config before starting the
+#    engine — otherwise the browser uid runs without the filter.
+
+# 4. Fill /opt/ovid-cloud/worker.env's "Browser engine (P6)" block
 #    (OVID_MASTER_KEY, OVID_BROWSER_STATE_DIR, OVID_LIGHTPANDA_BIN,
 #    PLAYWRIGHT_BROWSERS_PATH; see worker.env.example) and restart
 #    ovid-worker.service so the fail-fast env checks run at boot.
@@ -194,17 +198,36 @@ rules mirroring the app guard's FULL block list:
 ```bash
 # v4
 nft add rule inet ovid_egress output meta skuid <uid> ip daddr \
-  { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 100.64.0.0/10, <OVID_PUBLIC_IP> } counter drop
+  { 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, <OVID_PUBLIC_IP> } counter drop
 # v6
 nft add rule inet ovid_egress output meta skuid <uid> ip6 daddr \
-  { ::1, fc00::/7, fe80::/10 } counter drop
+  { ::1, fe80::/10, fc00::/7, fec0::/10, ff00::/8, 2002::/16, 64:ff9b::/96 } counter drop
 ```
 
-(Parity with `assertPublicHost` — the earlier v4-only sketch missed 127/8,
-CGNAT, and the IPv6 ranges.) **Both placed AFTER allow rules** for the
-specific internal endpoints the worker itself needs (Postgres / Redis /
-mint / LiteLLM addresses — matched by address+port so the broad 127/8 drop
-cannot starve the worker's own services).
+**Parity with `assertPublicHost`:** the v4 set matches the app guard's
+RFC1918 + CGNAT + link-local ranges, and the v6 set matches it range for
+range (loopback, link-local, ULA, site-local, multicast, 6to4, NAT64). Both
+are defaults in `cloud/packages/sandbox/src/net.ts` (`DEFAULT_BLOCKED_V4` /
+`DEFAULT_BLOCKED_V6`) — no `OVID_SANDBOX_EXTRA_BLOCKED` entry is needed for
+them; keep those defaults at least as wide as the app guard. **The loopback
+rule is intentionally NOT parity** — see below.
+
+**Loopback (deliberately broader than the sandbox uid's treatment):** the
+browser uid is allowed the **WHOLE of `127.0.0.0/8` and `::1`**, not
+address+port. Chromium's own DevTools listener binds an ephemeral loopback
+port and the engine calls LiteLLM on `:4000`; a narrow port allow would
+break the browser, so the renderer hardcodes the whole range and rejects
+loopback entries in `OVID_BROWSER_EGRESS_ALLOW`. The sandbox uid, by
+contrast, has loopback dropped. **Residual risk:** the browser process can
+open loopback connections to any host service; it holds no DB/mint
+credentials, but that surface is reachable. **Owner-gate follow-up:** a
+netns per browser context, or a dedicated loopback port allowlist once the
+DevTools port can be pinned.
+
+**Both drop rules are placed AFTER the browser section's accept rules**
+for the internal endpoints the worker itself needs (`browserAllowedV4`,
+address-scoped — the renderer does not match on port) and after the
+hardcoded `127.0.0.0/8` + `::1` loopback accepts.
 
 **DNS-rebinding caveat (spec §11):** the app-level resolve-check is
 TOCTOU-prone — a public name can resolve to a private address after the
@@ -265,6 +288,14 @@ first session's feed.
 
 **Input coordinate space:** page CSS pixels within `state.viewport` (the
 fixed 1280×800 cast viewport — no device-pixel-ratio math client-side).
+
+**Client contract — no input before the screencast is live (T14-I2,
+binding on P8):** the client **MUST NOT** send any `browser_input` until it
+has received a `browser_state` frame with `screencast: true`. For ~3 s
+after attach the engine is still running the WebP probe against an internal
+`data:` fixture; input sent during that window is applied to the fixture
+and **silently lost** — neither the gateway nor the engine gates it. Queue
+input locally and flush it once the first `screencast: true` state arrives.
 
 **Takeover semantics:** while `takeover:true`, the agent's `browser_*`
 interaction tools refuse (`TAKEOVER_REFUSAL`), but **frames keep flowing**
