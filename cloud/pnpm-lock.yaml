@@ -172,6 +172,9 @@ importers:
 
   apps/e2e:
     dependencies:
+      '@ovid/browser':
+        specifier: workspace:*
+        version: link:../../packages/browser
       '@ovid/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -181,6 +184,9 @@ importers:
       '@ovid/gateway':
         specifier: workspace:*
         version: link:../gateway
+      '@ovid/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
       '@ovid/queue':
         specifier: workspace:*
         version: link:../../packages/queue
@@ -190,6 +196,9 @@ importers:
       '@ovid/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@ovid/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       '@ovid/worker':
         specifier: workspace:*
         version: link:../worker
@@ -351,17 +360,42 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.20.5)
 
+  apps/watch:
+    dependencies:
+      ioredis:
+        specifier: ^5.11.1
+        version: 5.11.1
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
+    devDependencies:
+      '@types/node':
+        specifier: ^22.20.5
+        version: 22.20.5
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@types/node@22.20.5)
+
   apps/worker:
     dependencies:
       '@ovid/agent-core':
         specifier: workspace:*
         version: link:../../packages/agent-core
+      '@ovid/browser':
+        specifier: workspace:*
+        version: link:../../packages/browser
       '@ovid/db':
         specifier: workspace:*
         version: link:../../packages/db
       '@ovid/events':
         specifier: workspace:*
         version: link:../../packages/events
+      '@ovid/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
       '@ovid/queue':
         specifier: workspace:*
         version: link:../../packages/queue
@@ -371,6 +405,15 @@ importers:
       '@ovid/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@ovid/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
+      fastify:
+        specifier: ^5.12.7
+        version: 5.12.7
+      firebase-admin:
+        specifier: ^14.5.0
+        version: 14.5.0
       ioredis:
         specifier: ^5.11.1
         version: 5.11.1

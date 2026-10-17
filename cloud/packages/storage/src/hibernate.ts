@@ -382,9 +382,17 @@ export async function hibernateWorkspace(
   // The user came back: a fresh activity key beats the idle threshold. (A
   // missing key is UNKNOWN, not "long ago" — the sweeper's enqueue-side rule
   // owns the row.updatedAt fallback; this job-side check only skips.)
-  const lastActivityMs = await deps.activity.read(job.sessionId);
-  if (lastActivityMs !== null && clock().getTime() - lastActivityMs < idleMs) {
-    return { status: "skipped", reason: "recent_activity" };
+  //
+  // EXEMPT: reason "manual". The idle threshold is a policy heuristic for the
+  // sweeper's idle/pressure evictions; a user explicitly asking to hibernate
+  // must not be refused for the next three minutes merely because their last
+  // PUT/GET (or the hydrate that served it) bumped activity. Every other
+  // verify gate — active run, warm dir, generation claim — still applies.
+  if (job.reason !== "manual") {
+    const lastActivityMs = await deps.activity.read(job.sessionId);
+    if (lastActivityMs !== null && clock().getTime() - lastActivityMs < idleMs) {
+      return { status: "skipped", reason: "recent_activity" };
+    }
   }
   // Nothing warm on disk: a cold row re-delivery is a no-op; anything else
   // was never warm (a stranded 'hibernating' row is reconcile's business).

@@ -31,6 +31,7 @@
     "@ovid/queue": "workspace:*",
     "@ovid/sandbox": "workspace:*",
     "@ovid/shared": "workspace:*",
+    "@ovid/storage": "workspace:*",
     "@ovid/worker": "workspace:*",
     "ioredis": "^5.11.1"
   }

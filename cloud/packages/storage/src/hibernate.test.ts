@@ -229,8 +229,13 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       await fileManifestsRepo.upsertWarm(db, { sessionId: sid, userId: uid, workspaceBytes });
     }
 
-    function jobFor(uid: string, sid: string, generation: number): HibernateJobInput {
-      return { sessionId: sid, userId: uid, generation, reason: "idle" };
+    function jobFor(
+      uid: string,
+      sid: string,
+      generation: number,
+      reason: HibernateJobInput["reason"] = "idle",
+    ): HibernateJobInput {
+      return { sessionId: sid, userId: uid, generation, reason };
     }
 
     /** The real-repo stuck-row scan injected into the deps (raw SQL — the test cannot import drizzle-orm, and @ovid/db has no such repo yet). */
@@ -479,6 +484,26 @@ describe.skipIf(!TEST_DATABASE_URL || !TEST_REDIS_URL)(
       expect(res).toEqual({ status: "skipped", reason: "recent_activity" });
       expect(await pathExists(dir)).toBe(true);
       expect(h.evictCalls).toHaveLength(0);
+    });
+
+    it("manual reason bypasses recent_activity: an explicit hibernate right after a write still packs", async () => {
+      const uid = await seedUser();
+      const sid = await seedSession(uid);
+      const dir = workspaceDir(wsRoot, uid, sid);
+      await seedWorkspace(dir);
+      await seedWarmRow(uid, sid);
+
+      // The user's PUT (and the hydrate that served it) bumped activity 10 s
+      // ago. The sweeper would skip, but the explicit control must not: the
+      // manual POST hibernate is the user overriding the idle policy.
+      const h = makeHarness({ bumpAtMs: T0, nowMs: T0 + 10_000 });
+      await h.activity.bump(sid);
+      const res = await hibernateWorkspace(h.deps, jobFor(uid, sid, 1, "manual"));
+
+      expect(res.status).toBe("hibernated");
+      expect(res.generation).toBe(1);
+      expect(await pathExists(dir)).toBe(false);
+      expect((await fileManifestsRepo.get(db, sid))!.state).toBe("cold");
     });
 
     it("skips stale_generation: a job two generations ahead dedupes re-deliveries", async () => {
