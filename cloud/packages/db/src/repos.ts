@@ -295,6 +295,22 @@ export const messages = {
   },
 
   /**
+   * P3 Task 14 (steering drain): a message row by id — the prompt row behind
+   * a run's promptMessageId. Single pk read (the id is a globally-unique
+   * UUIDv7; the gateway persists the user row BEFORE creating the run, so a
+   * claimed run's prompt always resolves). No session scoping for the same
+   * reason as runs.getByPromptMessageId.
+   */
+  async get(db: Db, messageId: string): Promise<MessageRow | null> {
+    const rows = await db
+      .select()
+      .from(messagesTable)
+      .where(eq(messagesTable.id, messageId))
+      .limit(1);
+    return rows[0] ?? null;
+  },
+
+  /**
    * P8 Task 4: the message holding (sessionId, clientMsgId), or null. The
    * lookup behind the send-message route's idempotent-replay branch — the
    * partial unique index guarantees at most one match.
@@ -450,6 +466,23 @@ export const runs = {
       .where(and(eq(runsTable.id, runId), eq(runsTable.status, "queued")))
       .returning({ id: runsTable.id });
     return claimed.length > 0;
+  },
+
+  /**
+   * P3 Task 14 (steering drain): the session's QUEUED runs, oldest-first —
+   * (createdAt, id), the same determinism as activeForSession. The steering
+   * drain claims and merges these into the active run; the activeRunId
+   * exclusion itself lives in the caller (the drain), because this signature
+   * is session-scoped per the plan.
+   */
+  async listQueuedForSession(db: Db, sessionId: string): Promise<RunRow[]> {
+    return db
+      .select()
+      .from(runsTable)
+      .where(
+        and(eq(runsTable.sessionId, sessionId), eq(runsTable.status, "queued")),
+      )
+      .orderBy(asc(runsTable.createdAt), asc(runsTable.id));
   },
 
   /**
