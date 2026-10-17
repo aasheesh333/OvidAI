@@ -578,4 +578,94 @@ describe.skipIf(!TEST_DATABASE_URL)("gateway message routes (real postgres)", ()
       expect("attachmentIds" in add.data).toBe(false);
     }
   });
+
+  // -------------------------------------------------------------------------
+  // P8 Task 4: clientMsgId idempotency — a retried send with the same
+  // (sessionId, clientMsgId) replays the ORIGINAL answer instead of inserting
+  // a second message/run; a clientMsgId owned by a run-less message is a 409.
+  // -------------------------------------------------------------------------
+
+  it("send with clientMsgId twice → second is a REPLAY: 202 with the identical runId/userMessageId, exactly one message row, one run row, one queue add", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-cmid");
+    const sid = await createSession(handle, uid);
+
+    const first = await sendMessage(handle, uid, sid, { content: "once", clientMsgId: "c-retry-1" });
+    expect(first.statusCode).toBe(202);
+    const firstBody = first.json() as SendMessageResponse;
+
+    // The retry may carry different content — the replay answers with the
+    // ORIGINAL run/message ids either way (the original send already landed).
+    const second = await sendMessage(handle, uid, sid, { content: "once (retry)", clientMsgId: "c-retry-1" });
+    expect(second.statusCode).toBe(202);
+    expect(second.json()).toEqual(firstBody);
+    expect(second.json()).toEqual({
+      runId: firstBody.runId,
+      userMessageId: firstBody.userMessageId,
+      status: "queued",
+    });
+
+    // No second message, no second run, no second enqueue.
+    expect(handle.adds).toHaveLength(1);
+    expect(handle.adds[0]!.data).toMatchObject({ runId: firstBody.runId });
+    expect(await tableCounts(sid)).toEqual({ messages: 1, runs: 1 });
+
+    // The replay wins even when the retry's attachmentIds are garbage: the
+    // conflict check runs BEFORE attachment validation (a retry whose
+    // attachments went stale must still replay, not 400).
+    const third = await sendMessage(handle, uid, sid, {
+      content: "once (retry 2)",
+      clientMsgId: "c-retry-1",
+      attachmentIds: [newId()],
+    });
+    expect(third.statusCode).toBe(202);
+    expect(third.json()).toEqual(firstBody);
+    expect(handle.adds).toHaveLength(1);
+    expect(await tableCounts(sid)).toEqual({ messages: 1, runs: 1 });
+  });
+
+  it("clientMsgId already used by a message with NO run → 409 run_conflict, nothing written or enqueued", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-cmconf");
+    const sid = await createSession(handle, uid);
+    // A run-less message holding the clientMsgId (e.g. seeded by the import
+    // route): a new send must NOT silently create a second message/run for it.
+    await messages.append(db, {
+      sessionId: sid,
+      role: "user",
+      content: "seeded by import",
+      clientMsgId: "c-imported",
+    });
+
+    const res = await sendMessage(handle, uid, sid, { content: "conflicting", clientMsgId: "c-imported" });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe("run_conflict");
+
+    expect(handle.adds).toHaveLength(0);
+    expect(await tableCounts(sid)).toEqual({ messages: 1, runs: 0 });
+  });
+
+  it("clientMsgId bounds and per-session scope: empty → 400, > 64 chars → 400, same id under ANOTHER session → 202 fresh run", async () => {
+    const handle = makeApp();
+    const uid = testUid("msg-cmbounds");
+    const sidA = await createSession(handle, uid);
+    const sidB = await createSession(handle, uid);
+
+    for (const clientMsgId of ["", "x".repeat(65)]) {
+      const res = await sendMessage(handle, uid, sidA, { content: "x", clientMsgId });
+      expect(res.statusCode, JSON.stringify(clientMsgId)).toBe(400);
+      expect(res.json().error.code).toBe("bad_request");
+    }
+
+    // 64 chars exactly is fine.
+    const ok = await sendMessage(handle, uid, sidA, { content: "max len", clientMsgId: "y".repeat(64) });
+    expect(ok.statusCode).toBe(202);
+
+    // Idempotency is PER SESSION: the same clientMsgId under session B is a
+    // brand-new message/run, not a conflict.
+    const other = await sendMessage(handle, uid, sidB, { content: "elsewhere", clientMsgId: "y".repeat(64) });
+    expect(other.statusCode).toBe(202);
+    expect((other.json() as SendMessageResponse).runId).not.toBe((ok.json() as SendMessageResponse).runId);
+    expect(await tableCounts(sidB)).toEqual({ messages: 1, runs: 1 });
+  });
 });

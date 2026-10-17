@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   attachmentDtoSchema,
   attachmentUploadResponseSchema,
+  importReportSchema,
   messageDtoSchema,
   pageSchema,
   runCancelResponseSchema,
@@ -146,6 +147,26 @@ describe("rest schemas", () => {
     expect(() => attachmentDtoSchema.parse({ ...dto, size: 0 })).toThrow();
     expect(() => attachmentDtoSchema.parse({ ...dto, size: -1 })).toThrow();
     expect(() => attachmentDtoSchema.parse({ ...dto, size: 1.5 })).toThrow();
+  });
+
+  it("importReportSchema parses a valid report (P8 Task 4 import answer)", () => {
+    const report = { sessionId: "018f3e11-0000-7000-8000-000000000000", imported: 3, skipped: 0 };
+    expect(importReportSchema.parse(report)).toEqual(report);
+    expect(importReportSchema.parse({ ...report, imported: 0, skipped: 3 })).toEqual({
+      ...report,
+      imported: 0,
+      skipped: 3,
+    });
+  });
+
+  it("importReportSchema rejects a missing field, negative/non-integer counts, and unknown keys", () => {
+    const report = { sessionId: "s1", imported: 1, skipped: 0 };
+    const { skipped: _noSkipped, ...missingSkipped } = report;
+    expect(() => importReportSchema.parse(missingSkipped)).toThrow();
+    expect(() => importReportSchema.parse({ ...report, imported: -1 })).toThrow();
+    expect(() => importReportSchema.parse({ ...report, imported: 1.5 })).toThrow();
+    expect(() => importReportSchema.parse({ ...report, extra: 1 })).toThrow();
+    expect(() => importReportSchema.parse({ ...report, sessionId: "" })).toThrow();
   });
 
   describe("sanitizeAttachmentName", () => {

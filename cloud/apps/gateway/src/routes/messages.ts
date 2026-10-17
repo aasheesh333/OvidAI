@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { attachments, messages, runs, sessions, users, type MessageRow } from "@ovid/db";
+import { attachments, messages, runs, sessions, users, type Db, type MessageRow } from "@ovid/db";
 import { AGENT_RUN_JOB_NAME } from "@ovid/queue";
 import type { MessageDto, Page, SendMessageResponse } from "@ovid/shared";
 import type { GatewayDeps } from "../app.js";
@@ -39,12 +39,55 @@ export function toMessageDto(row: MessageRow): MessageDto {
 // attachmentIds (P8 Task 3, additive + optional): uuid-shaped ids of
 // attachments created via POST /sessions/:id/attachments; validated against
 // the session's attachment rows below (unknown or cross-session id → 400).
+// clientMsgId (P8 Task 4, additive + optional): caller-chosen idempotency
+// key (1–64 chars). A re-send with the same (session, clientMsgId) replays
+// the original answer instead of inserting a second message/run.
 const sendMessageBody = z
   .object({
     content: z.string(),
     attachmentIds: z.array(z.string().uuid()).optional(),
+    clientMsgId: z.string().min(1).max(64).optional(),
   })
   .strict();
+
+/**
+ * P8 Task 4: resolve a (sessionId, clientMsgId) that already exists.
+ * - "none": no row holds the key — the send proceeds.
+ * - "replay": the existing message produced a run → the route answers 202
+ *   with the ORIGINAL {runId, userMessageId, status:"queued"} and inserts
+ *   nothing (SendMessageResponse's status union is literally "queued" — the
+ *   replay replays the original answer verbatim; run liveness is the client's
+ *   to poll via GET /runs/:id).
+ * - "conflict": the message has NO run (e.g. imported history holds the id)
+ *   → 409 run_conflict, still inserting nothing.
+ */
+type ClientMsgIdResolution =
+  | { kind: "none" }
+  | { kind: "replay"; runId: string; userMessageId: string }
+  | { kind: "conflict" };
+
+async function resolveClientMsgId(
+  db: Db,
+  sessionId: string,
+  clientMsgId: string,
+): Promise<ClientMsgIdResolution> {
+  const existing = await messages.findByClientMsgId(db, sessionId, clientMsgId);
+  if (existing === null) return { kind: "none" };
+  const run = await runs.getByPromptMessageId(db, existing.id);
+  return run !== null
+    ? { kind: "replay", runId: run.id, userMessageId: existing.id }
+    : { kind: "conflict" };
+}
+
+/** postgres unique-violation (23505), searching drizzle's .cause chain for the driver error. */
+function isUniqueViolation(err: unknown): boolean {
+  let e: unknown = err;
+  for (let depth = 0; e instanceof Error && depth < 5; depth++) {
+    if ((e as { code?: unknown }).code === "23505") return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): void {
   app.post("/sessions/:id/messages", async (request, reply) => {
@@ -68,7 +111,33 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       return badRequest(reply, "content must be a non-empty string.");
     }
 
-    // 2b. Attachment validation (P8 Task 3) — BEFORE any write (no orphan
+    // 2b. clientMsgId idempotency (P8 Task 4) — BEFORE attachment validation:
+    //     a retry whose attachmentIds went stale/garbage must still replay
+    //     the original answer (the ORIGINAL send already succeeded), and a
+    //     conflicting id must never create rows. Runs before mint too, so a
+    //     replay touches no side effects at all.
+    const clientMsgId = parsed.data.clientMsgId;
+    if (clientMsgId !== undefined) {
+      const resolved = await resolveClientMsgId(deps.db, sessionId, clientMsgId);
+      if (resolved.kind === "replay") {
+        const body: SendMessageResponse = {
+          runId: resolved.runId,
+          userMessageId: resolved.userMessageId,
+          status: "queued",
+        };
+        return reply.code(202).send(body);
+      }
+      if (resolved.kind === "conflict") {
+        return sendError(
+          reply,
+          409,
+          "run_conflict",
+          "This clientMsgId is already used by a message that has no run.",
+        );
+      }
+    }
+
+    // 2c. Attachment validation (P8 Task 3) — BEFORE any write (no orphan
     //     rows on a 400). Every id must resolve to an attachment row of THIS
     //     session; getForSession is session-scoped, so a valid id belonging to
     //     another session counts as unknown.
@@ -108,12 +177,36 @@ export function registerMessageRoutes(app: FastifyInstance, deps: GatewayDeps): 
       );
     }
 
-    // 5. Persist the user message, create the run row, then enqueue.
-    const userMessage = await messages.append(deps.db, {
-      sessionId,
-      role: "user",
-      content,
-    });
+    // 5. Persist the user message, create the run row, then enqueue. With a
+    //    clientMsgId the insert is guarded by the per-session partial unique
+    //    index: a concurrent same-key send that raced past the check above
+    //    resolves here into the same replay/409 answer — never a 500.
+    let userMessage: MessageRow;
+    try {
+      userMessage = await messages.append(deps.db, {
+        sessionId,
+        role: "user",
+        content,
+        ...(clientMsgId !== undefined ? { clientMsgId } : {}),
+      });
+    } catch (err) {
+      if (clientMsgId === undefined || !isUniqueViolation(err)) throw err;
+      const resolved = await resolveClientMsgId(deps.db, sessionId, clientMsgId);
+      if (resolved.kind === "replay") {
+        const body: SendMessageResponse = {
+          runId: resolved.runId,
+          userMessageId: resolved.userMessageId,
+          status: "queued",
+        };
+        return reply.code(202).send(body);
+      }
+      return sendError(
+        reply,
+        409,
+        "run_conflict",
+        "This clientMsgId is already used by a message that has no run.",
+      );
+    }
     const run = await runs.create(deps.db, {
       sessionId,
       promptMessageId: userMessage.id,

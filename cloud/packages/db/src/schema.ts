@@ -8,7 +8,9 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // All timestamptz columns use precision 3 (milliseconds): JS Dates are ms-precision,
 // so stored values round-trip losslessly — which the keyset cursor in sessions.list
@@ -52,9 +54,21 @@ export const messages = pgTable(
       .references(() => sessions.id),
     role: text("role").notNull(), // "user" | "assistant" | "system" | "tool"
     content: text("content").notNull(),
+    // P8 Task 4: caller-chosen idempotency key for the send-message and
+    // history-import paths. NULL for all pre-P8 rows — the unique index below
+    // is partial (WHERE client_msg_id IS NOT NULL), so keyed and keyless
+    // messages never collide.
+    clientMsgId: text("client_msg_id"),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
-  (t) => [index("messages_session_id_id_idx").on(t.sessionId, t.id)],
+  (t) => [
+    index("messages_session_id_id_idx").on(t.sessionId, t.id),
+    // Per-session idempotency: one row per (session, clientMsgId); keyless
+    // rows are exempt via the partial predicate.
+    uniqueIndex("messages_session_client_msg_id_idx")
+      .on(t.sessionId, t.clientMsgId)
+      .where(sql`client_msg_id IS NOT NULL`),
+  ],
 );
 
 export const runs = pgTable(

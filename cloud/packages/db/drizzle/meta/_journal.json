@@ -29,6 +29,13 @@
       "when": 1792214092730,
       "tag": "0003_bright_gorgon",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792215574672,
+      "tag": "0004_confused_namora",
+      "breakpoints": true
     }
   ]
 }

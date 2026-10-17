@@ -159,3 +159,29 @@ export const runCancelResponseSchema: z.ZodType<RunCancelResponse> = z.object({
   runId: z.string().min(1),
   status: z.enum(["cancelling", "cancelled"]),
 });
+
+// ---------------------------------------------------------------------------
+// P8 Task 4: bulk history import (Android thin-client transcripts+sessions)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /cloud/v1/import/sessions answer. `sessionId` is the imported-into
+ * session — freshly created when the request omitted `sessionId`, otherwise
+ * the continuation id the caller passed (re-sends return the SAME id).
+ * `imported` = rows this call inserted; `skipped` = messages whose
+ * (session, clientMsgId) already existed — duplicates are skipped, never
+ * duplicated or rewritten.
+ */
+export interface ImportReport {
+  sessionId: string;
+  imported: number;
+  skipped: number;
+}
+
+export const importReportSchema: z.ZodType<ImportReport> = z
+  .object({
+    sessionId: z.string().min(1),
+    imported: z.number().int().min(0),
+    skipped: z.number().int().min(0),
+  })
+  .strict();

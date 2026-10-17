@@ -13,6 +13,7 @@ import { authHook, type Verifier } from "./auth.js";
 import { registerAttachmentRoutes } from "./routes/attachments.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerImportRoutes } from "./routes/import.js";
 import { registerMessageRoutes } from "./routes/messages.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
@@ -136,6 +137,7 @@ export function buildGateway(
       registerMessageRoutes(scope, deps);
       registerAttachmentRoutes(scope, deps);
       registerRunRoutes(scope, deps);
+      registerImportRoutes(scope, deps);
     },
     { prefix: API_PREFIX },
   );

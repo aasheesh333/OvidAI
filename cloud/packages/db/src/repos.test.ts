@@ -202,6 +202,86 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
     expect(await messages.page(db, empty.id, { limit: 10 })).toEqual({ rows: [], nextCursor: null });
   });
 
+  it("messages.append with clientMsgId + findByClientMsgId: per-session key, run-less conflict rows, unique index enforces it", async () => {
+    const uid = await seedUser();
+    const a = await sessions.create(db, uid, "a");
+    const b = await sessions.create(db, uid, "b");
+
+    const m = await messages.append(db, {
+      sessionId: a.id,
+      role: "user",
+      content: "hello",
+      clientMsgId: "c-1",
+    });
+    expect(m.clientMsgId).toBe("c-1");
+
+    // Found by (sessionId, clientMsgId)…
+    expect(await messages.findByClientMsgId(db, a.id, "c-1")).toMatchObject({ id: m.id });
+    // …but NOT from another session, and unknown ids → null (per-session key).
+    expect(await messages.findByClientMsgId(db, b.id, "c-1")).toBeNull();
+    expect(await messages.findByClientMsgId(db, a.id, "c-missing")).toBeNull();
+
+    // Messages WITHOUT clientMsgId never collide (partial index).
+    await messages.append(db, { sessionId: a.id, role: "user", content: "no key 1" });
+    await messages.append(db, { sessionId: a.id, role: "user", content: "no key 2" });
+    expect((await messages.page(db, a.id, { limit: 10 })).rows).toHaveLength(3);
+
+    // The partial unique index is the real guard: a same-(session, id) append
+    // raises 23505 (drizzle wraps the driver error; walk .cause).
+    let violated: unknown = null;
+    try {
+      await messages.append(db, { sessionId: a.id, role: "user", content: "dupe", clientMsgId: "c-1" });
+    } catch (err) {
+      violated = err;
+    }
+    expect(violated).not.toBeNull();
+    let e: unknown = violated;
+    let code: unknown = null;
+    for (let depth = 0; e instanceof Error && depth < 5; depth++) {
+      code = (e as { code?: unknown }).code ?? code;
+      e = (e as { cause?: unknown }).cause;
+    }
+    expect(code).toBe("23505");
+  });
+
+  it("messages.importBulk: single-statement insert, ON CONFLICT skips duplicates (imported vs skipped counts), client createdAt fidelity", async () => {
+    const uid = await seedUser();
+    const s = await sessions.create(db, uid, "import");
+    const rows = [
+      { clientMsgId: "i-1", role: "user" as const, content: "q", createdAt: new Date("2025-01-02T03:04:05.678Z") },
+      { clientMsgId: "i-2", role: "assistant" as const, content: "a", createdAt: new Date("2025-01-02T03:04:09.000Z") },
+      { clientMsgId: "i-3", role: "user" as const, content: "t", createdAt: new Date("2025-01-02T03:05:00.123Z") },
+    ];
+
+    const first = await messages.importBulk(db, s.id, rows);
+    expect(first).toEqual({ imported: 3, skipped: 0 });
+
+    // Timestamp fidelity: stored createdAt values are the client's, verbatim.
+    const page = await messages.page(db, s.id, { limit: 10 });
+    const byContent = new Map(page.rows.map((m) => [m.content, m]));
+    expect(byContent.get("q")!.createdAt.toISOString()).toBe("2025-01-02T03:04:05.678Z");
+    expect(byContent.get("a")!.createdAt.toISOString()).toBe("2025-01-02T03:04:09.000Z");
+    expect(byContent.get("t")!.clientMsgId).toBe("i-3");
+
+    // Exact re-send: everything conflicts → skipped, nothing duplicated.
+    const again = await messages.importBulk(db, s.id, rows);
+    expect(again).toEqual({ imported: 0, skipped: 3 });
+    expect((await messages.page(db, s.id, { limit: 10 })).rows).toHaveLength(3);
+
+    // Mixed batch: only the new ids import.
+    const mixed = await messages.importBulk(db, s.id, [
+      rows[0]!,
+      { clientMsgId: "i-4", role: "user" as const, content: "new", createdAt: new Date("2025-01-02T03:06:00.000Z") },
+      rows[1]!,
+    ]);
+    expect(mixed).toEqual({ imported: 1, skipped: 2 });
+    expect((await messages.page(db, s.id, { limit: 10 })).rows).toHaveLength(4);
+
+    // The same clientMsgIds under a DIFFERENT session import cleanly (per-session key).
+    const other = await sessions.create(db, uid, "import 2");
+    expect(await messages.importBulk(db, other.id, rows)).toEqual({ imported: 3, skipped: 0 });
+  });
+
   it("runs: create → activeForSession → claimNext race → finish clears active", async () => {
     const uid = await seedUser();
     const s = await sessions.create(db, uid, "run session");

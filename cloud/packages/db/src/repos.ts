@@ -148,10 +148,23 @@ function decodeSessionCursor(
 }
 
 export const sessions = {
-  async create(db: Db, userId: string, title?: string | null): Promise<SessionRow> {
+  async create(
+    db: Db,
+    userId: string,
+    title?: string | null,
+    createdAt?: Date,
+  ): Promise<SessionRow> {
     const [row] = await db
       .insert(sessionsTable)
-      .values({ id: newId(), userId, title: title ?? null })
+      .values({
+        id: newId(),
+        userId,
+        title: title ?? null,
+        // P8 Task 4 (history import): a client-supplied createdAt preserves
+        // the original transcript's creation time (spec §13.3 timestamp
+        // fidelity); omitted → column default (now), untouched.
+        ...(createdAt !== undefined ? { createdAt } : {}),
+      })
       .returning();
     return row!;
   },
@@ -237,13 +250,85 @@ export const sessions = {
 export const messages = {
   async append(
     db: Db,
-    m: { sessionId: string; role: MessageRole; content: string },
+    m: { sessionId: string; role: MessageRole; content: string; clientMsgId?: string },
   ): Promise<MessageRow> {
     const [row] = await db
       .insert(messagesTable)
-      .values({ id: newId(), sessionId: m.sessionId, role: m.role, content: m.content })
+      .values({
+        id: newId(),
+        sessionId: m.sessionId,
+        role: m.role,
+        content: m.content,
+        // Omitted → NULL (exempt from the per-session unique index; the
+        // key present → a duplicate (session, clientMsgId) raises 23505,
+        // which the send-message route resolves into a replay/409.
+        ...(m.clientMsgId !== undefined ? { clientMsgId: m.clientMsgId } : {}),
+      })
       .returning();
     return row!;
+  },
+
+  /**
+   * P8 Task 4: the message holding (sessionId, clientMsgId), or null. The
+   * lookup behind the send-message route's idempotent-replay branch — the
+   * partial unique index guarantees at most one match.
+   */
+  async findByClientMsgId(
+    db: Db,
+    sessionId: string,
+    clientMsgId: string,
+  ): Promise<MessageRow | null> {
+    const rows = await db
+      .select()
+      .from(messagesTable)
+      .where(
+        and(eq(messagesTable.sessionId, sessionId), eq(messagesTable.clientMsgId, clientMsgId)),
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  },
+
+  /**
+   * P8 Task 4: bulk history-import insert — ONE statement,
+   * INSERT … ON CONFLICT (session_id, client_msg_id) DO NOTHING RETURNING id,
+   * so re-sent clientMsgIds are skipped, never duplicated (and never raise).
+   * `imported` = rows that landed; `skipped` = rows already present. Rows
+   * carry the CLIENT's createdAt (timestamp fidelity, spec §13.3); ids are
+   * fresh UUIDv7s. In-batch duplicate clientMsgIds are handled by the same
+   * ON CONFLICT skip (only the first lands).
+   */
+  async importBulk(
+    db: Db,
+    sessionId: string,
+    rows: ReadonlyArray<{
+      clientMsgId: string;
+      role: MessageRole;
+      content: string;
+      createdAt: Date;
+    }>,
+  ): Promise<{ imported: number; skipped: number }> {
+    if (rows.length === 0) return { imported: 0, skipped: 0 };
+    const inserted = await db
+      .insert(messagesTable)
+      .values(
+        rows.map((r) => ({
+          id: newId(),
+          sessionId,
+          role: r.role,
+          content: r.content,
+          clientMsgId: r.clientMsgId,
+          createdAt: r.createdAt,
+        })),
+      )
+      .onConflictDoNothing({
+        target: [messagesTable.sessionId, messagesTable.clientMsgId],
+        // The arbiter is the PARTIAL unique index; inference needs the same
+        // predicate the index declares (drizzle's `where` on a DO NOTHING
+        // conflict is the target's index predicate).
+        where: sql`${messagesTable.clientMsgId} IS NOT NULL`,
+      })
+      .returning({ id: messagesTable.id });
+    return { imported: inserted.length, skipped: rows.length - inserted.length };
   },
 
   /**
@@ -292,6 +377,23 @@ export const runs = {
       })
       .returning();
     return row!;
+  },
+
+  /**
+   * P8 Task 4: the run prompted by this message, or null. The send-message
+   * route's idempotent-replay branch uses it to distinguish "retry of a send
+   * that already produced a run" (202 replay) from "clientMsgId held by a
+   * run-less message" (409 run_conflict). promptMessageId is globally unique
+   * (it references a freshly appended message), so no session scoping needed.
+   */
+  async getByPromptMessageId(db: Db, promptMessageId: string): Promise<RunRow | null> {
+    const rows = await db
+      .select()
+      .from(runsTable)
+      .where(eq(runsTable.promptMessageId, promptMessageId))
+      .orderBy(asc(runsTable.createdAt))
+      .limit(1);
+    return rows[0] ?? null;
   },
 
   /** Oldest still-active (queued|running) run for the session, or null. */
