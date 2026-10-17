@@ -9,7 +9,7 @@ import {
   decideMissedRun,
 } from "@ovid/shared";
 import { AGENT_RUN_JOB_NAME, addScheduleMirrorJob, type QueueServices } from "@ovid/queue";
-import type { SettleDeps } from "./schedulerSettle.js";
+import { settleScheduleRuns as defaultSettle, type SettleDeps } from "./schedulerSettle.js";
 
 /**
  * P4 Task 8: the scheduler's firing engine — occurrence claiming, the
@@ -284,7 +284,11 @@ export async function fireScheduleOccurrence(
     throw err;
   }
 
-  if (postCommit !== null) await postCommit();
+  // TypeScript's control-flow analysis cannot see assignments made inside the
+  // transaction callback and still believes the initializer's `null`; widen
+  // the read back to the declared union before calling.
+  const afterCommit = postCommit as (() => Promise<void>) | null;
+  if (afterCommit !== null) await afterCommit();
   return outcome;
 }
 
@@ -349,14 +353,12 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickReport>
  */
 export interface SchedulerLoopDeps extends SchedulerDeps, SettleDeps {
   /**
-   * Task-9 forward seam (remove when schedulerSettle.ts lands): until the
-   * real settle exists the loop settles nothing. This is the ONLY stubbed
-   * contract — everything else here is final.
+   * Settle-pass override (the Task-8 forward seam, now defaulted to the real
+   * Task-9 reconciler). Tests substitute a counting stub; production passes
+   * the plain deps and the loop settles before every tick.
    */
   settleScheduleRuns?: (deps: SettleDeps) => Promise<number>;
 }
-
-const noopSettle = async (_deps: SettleDeps): Promise<number> => 0;
 
 export function startSchedulerLoop(
   deps: SchedulerLoopDeps,
@@ -368,7 +370,7 @@ export function startSchedulerLoop(
     ticking = true;
     void (async () => {
       try {
-        await (deps.settleScheduleRuns ?? noopSettle)(deps);
+        await (deps.settleScheduleRuns ?? defaultSettle)(deps);
         await runSchedulerTick(deps);
       } catch (err) {
         console.error("[scheduler] pass failed", err);
