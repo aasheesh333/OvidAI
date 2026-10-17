@@ -47,6 +47,7 @@ import {
   type RunTime,
 } from "./loop.js";
 import { TOOL_TIMEOUT_MESSAGE } from "./tools/spill.js";
+import { createSandboxTools } from "./tools/sandboxTools.js";
 import { convertMessagesToAnthropic } from "./transport/anthropic.js";
 import { createToolRegistry, type AgentRequest, type AgentResponse, type AgentTransport, type Tool, type ToolContext, type ToolResult } from "./types.js";
 import { TerminalModelError, TransientModelError } from "./transport/errors.js";
@@ -548,7 +549,10 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
       "run_completed",
     ]);
     expect(payloads(c.events, "tool_started")[0]).toMatchObject({ runId: c.job.runId, callId: "c1", name: "echo_tool", args: { q: "hi" } });
+    // M-6: the P2 wire aliases stay present (P8's projector consumes `input`).
+    expect(payloads(c.events, "tool_started")[0]!.input).toEqual({ q: "hi" });
     expect(payloads(c.events, "tool_completed")[0]).toMatchObject({ callId: "c1", name: "echo_tool", ok: true });
+    expect(payloads(c.events, "tool_completed")[0]!.isError).toBe(false);
     expect(echo.calls[0]!.args).toEqual({ q: "hi" });
 
     // The second request carries the assistant tool_calls row and the tool row
@@ -693,6 +697,8 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     expect(echo.calls).toHaveLength(0);
     const row = c.requests[1]!.messages.find((m) => m.role === "tool")!;
     expect(row.content).toBe("DENIED by hook (p1): not allowed");
+    // M-1: a denied call never executed → no post_tool.
+    expect(hooks.fired).not.toContain("post_tool");
   });
 
   it("fires post_tool after tool_completed (F11 ordering)", async () => {
@@ -861,12 +867,301 @@ describe.skipIf(!TEST_DATABASE_URL)("runAgentLoop (real postgres)", () => {
     expect(result).toEqual({ status: "completed" });
     expect(payloads(c.events, "system_note")[0]).toMatchObject({ code: "hook_block_ignored" });
     const systemTexts = c.requests[0]!.system.map((m) => m.content);
-    expect(systemTexts[0]).toBe("[plugin hook]\nnote one");
-    expect(systemTexts[1]).toBe("[plugin hook context — on_pre_request]\nhook context");
+    // Dart insertion order (M-5): the output row rides above the reversed
+    // systemMessages; standing contexts would ride above both.
+    expect(systemTexts[0]).toBe("[plugin hook context — on_pre_request]\nhook context");
+    expect(systemTexts[1]).toBe("[plugin hook]\nnote one");
+  });
+
+  // ── plan mode: asks nothing (I-1) ────────────────────────────────────────
+
+  it("plan mode denies an outside-workspace read outright — no approval card", async () => {
+    const reader = tool("file_read");
+    const approvals = recordingApprovals("allow");
+    const c = await makeCtx({
+      tools: [reader],
+      approvals,
+      statePatch: { planMode: true },
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "file_read", args: { path: "/etc/passwd" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+
+    expect(approvals.requests).toHaveLength(0);
+    expect(reader.calls).toHaveLength(0);
+    const row = c.requests[1]!.messages.find((m) => m.role === "tool")!;
+    expect(row.content).toMatch(/^DENIED: file_read may not access targets outside/);
+  });
+
+  it("plan mode still allows an in-workspace read with no card", async () => {
+    const reader = tool("file_read");
+    const approvals = recordingApprovals("deny");
+    const c = await makeCtx({
+      tools: [reader],
+      approvals,
+      statePatch: { planMode: true },
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "file_read", args: { path: "src/index.ts" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(approvals.requests).toHaveLength(0);
+    expect(reader.calls).toHaveLength(1);
+  });
+
+  // ── destructive confirmation: all three families (I-2) ───────────────────
+
+  it("job_start destructive payload prompts (drive mode too) and denies without running", async () => {
+    const jobStart = tool("job_start");
+    const approvals = recordingApprovals("deny");
+    const c = await makeCtx({
+      tools: [jobStart],
+      approvals,
+      mode: "drive",
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "job_start", args: { command: "rm -rf /var/data" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(approvals.requests).toHaveLength(1);
+    expect(approvals.requests[0]!.tool).toBe("job_start");
+    expect(jobStart.calls).toHaveLength(0);
+  });
+
+  it("run_code destructive payload prompts (drive mode too) and denies without running", async () => {
+    const runCode = tool("run_code");
+    const approvals = recordingApprovals("deny");
+    const c = await makeCtx({
+      tools: [runCode],
+      approvals,
+      mode: "drive",
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "run_code", args: { lang: "python", code: "os.system('rm -rf /')" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(approvals.requests).toHaveLength(1);
+    expect(approvals.requests[0]!.tool).toBe("run_code");
+    expect(runCode.calls).toHaveLength(0);
+  });
+
+  it("a benign run_code payload raises no destructive card", async () => {
+    const runCode = tool("run_code");
+    const approvals = recordingApprovals("deny");
+    const c = await makeCtx({
+      tools: [runCode],
+      approvals,
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "run_code", args: { lang: "python", code: "print(1)" } }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(approvals.requests).toHaveLength(0);
+    expect(runCode.calls).toHaveLength(1);
+  });
+
+  it("matches the Dart defaultDeniedCommands clauses (chmod/chown/dd/reboot/fork bomb)", async () => {
+    for (const cmd of [
+      "chmod -R 777 /",
+      "chown -R root /",
+      "dd if=/dev/zero of=/dev/sda",
+      "reboot",
+      ":(){ :|:& };:",
+      "find / -name x -delete",
+      "echo x > /dev/sda",
+    ]) {
+      const shell = tool("run_shell");
+      const approvals = recordingApprovals("deny");
+      const c = await makeCtx({
+        tools: [shell],
+        approvals,
+        mode: "drive",
+        script: [
+          { text: "", toolCalls: [{ id: "c1", name: "run_shell", args: { cmd } }] },
+          { text: "done" },
+        ],
+      });
+      await runAgentLoop(c.job, c.deps, c.rt);
+      expect(approvals.requests, cmd).toHaveLength(1);
+      expect(shell.calls, cmd).toHaveLength(0);
+    }
+  });
+
+  // ── sandbox availability is a RUN failure (I-3) ──────────────────────────
+
+  it("SandboxAdmissionError from a tool terminalizes the run as sandbox_busy", async () => {
+    const failing: Tool = {
+      spec: { name: "run_shell", description: "x", parameters: { type: "object" } },
+      timeoutMs: 1_000,
+      async execute() {
+        const err = new Error("admission timed out");
+        err.name = "SandboxAdmissionError";
+        throw err;
+      },
+    };
+    const c = await makeCtx({
+      tools: [failing],
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "run_shell", args: { cmd: "ls" } }] },
+        { text: "never" },
+      ],
+    });
+    const result = await runAgentLoop(c.job, c.deps, c.rt);
+    expect(result).toMatchObject({ status: "failed", code: "sandbox_busy" });
+    expect(payloads(c.events, "run_failed")).toEqual([
+      { code: "sandbox_busy", message: "admission timed out" },
+    ]);
+    expect((await c.runRow())!.status).toBe("failed");
+  });
+
+  it("SandboxCapacityError / RootfsUnavailable terminalize as sandbox_unavailable", async () => {
+    for (const name of ["SandboxCapacityError", "RootfsUnavailable"]) {
+      const failing: Tool = {
+        spec: { name: "run_shell", description: "x", parameters: { type: "object" } },
+        timeoutMs: 1_000,
+        async execute() {
+          const err = new Error(`${name} boom`);
+          err.name = name;
+          throw err;
+        },
+      };
+      const c = await makeCtx({
+        tools: [failing],
+        script: [
+          { text: "", toolCalls: [{ id: "c1", name: "run_shell", args: { cmd: "ls" } }] },
+          { text: "never" },
+        ],
+      });
+      const result = await runAgentLoop(c.job, c.deps, c.rt);
+      expect(result, name).toMatchObject({ status: "failed", code: "sandbox_unavailable" });
+    }
+  });
+
+  it("sandboxTools.run rethrows typed sandbox failures instead of making them tool errors", async () => {
+    const sandbox = stubSandbox();
+    sandbox.exec = async () => {
+      const err = new Error("sandbox gate full");
+      err.name = "SandboxAdmissionError";
+      throw err;
+    };
+    const registry = createSandboxTools({ sandbox });
+    const runCode = registry.find((t) => t.spec.name === "run_code")!;
+    const c = await makeCtx({
+      tools: [runCode],
+      sandbox,
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "run_code", args: { lang: "python", code: "print(1)" } }] },
+        { text: "never" },
+      ],
+    });
+    const result = await runAgentLoop(c.job, c.deps, c.rt);
+    expect(result).toMatchObject({ status: "failed", code: "sandbox_busy" });
+  });
+
+  // ── residual test gaps (M-7) ─────────────────────────────────────────────
+
+  it("pins runs.bumpAttempt per model attempt", async () => {
+    const c = await makeCtx({
+      script: [{ error: new TransientModelError("503") }, { text: "ok" }],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect((await c.runRow())!.attempts).toBe(2);
+  });
+
+  it("the turnsWithoutProgress gate stops transient retries below the attempt cap", async () => {
+    // Turn 1: 4 retries (twp 4) then success (decays to 3).
+    // Turn 2: 3 retries push twp to 6; the 4th transient hits the gate and
+    // fails instead of using the 5th attempt.
+    const script: Scripted[] = [
+      { error: new TransientModelError("503") },
+      { error: new TransientModelError("503") },
+      { error: new TransientModelError("503") },
+      { error: new TransientModelError("503") },
+      { text: "", toolCalls: [{ id: "c1", name: "echo_tool", args: {} }] },
+      { error: new TransientModelError("503") },
+      { error: new TransientModelError("503") },
+      { error: new TransientModelError("503") },
+      { error: new TransientModelError("503") },
+      { error: new TransientModelError("503") },
+      { text: "unreachable" },
+    ];
+    const c = await makeCtx({ tools: [tool("echo_tool")], script });
+    const result = await runAgentLoop(c.job, c.deps, c.rt);
+    expect(result).toMatchObject({ status: "failed", code: "model_transient_exhausted" });
+    // 4 retries on turn 1 + 3 on turn 2 = 7 retry events (not 8).
+    expect(payloads(c.events, "run_started_retry")).toHaveLength(7);
+  });
+
+  it("fires session_start once and post_request after every response", async () => {
+    const hooks = recordingHooks();
+    const c = await makeCtx({
+      hooks,
+      tools: [tool("echo_tool")],
+      script: [
+        { text: "", toolCalls: [{ id: "c1", name: "echo_tool", args: {} }] },
+        { text: "done" },
+      ],
+    });
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(hooks.fired.filter((e) => e === "session_start")).toHaveLength(1);
+    expect(hooks.fired.filter((e) => e === "user_prompt_submit")).toHaveLength(1);
+    expect(hooks.fired.filter((e) => e === "post_request")).toHaveLength(2);
+  });
+
+  it("lands a pending plan-mode transition as the run unwinds", async () => {
+    const c = await makeCtx({ script: [{ text: "done" }] });
+    const baseStream = c.transport.stream;
+    c.deps.transports = {
+      openai: {
+        apiFormat: "openai",
+        async stream(req, h, signal) {
+          const res = await baseStream(req, h, signal);
+          // The user flips plan mode while the LAST turn is still open.
+          await c.state.patch(c.job.sessionId, { pendingPlanMode: true });
+          return res;
+        },
+      },
+      anthropic: c.transport,
+    };
+    const result = await runAgentLoop(c.job, c.deps, c.rt);
+    expect(result).toEqual({ status: "completed" });
+    expect((await c.state.get(c.job.sessionId)).planMode).toBe(true);
+    expect((await c.state.get(c.job.sessionId)).pendingPlanMode).toBeNull();
+    expect(payloads(c.events, "plan_mode_changed")).toHaveLength(1);
+  });
+
+  it("strips a /v1 suffix from an anthropic route base (T5-C1)", async () => {
+    const c = await makeCtx({ script: [{ text: "done" }] });
+    c.deps.keys = {
+      async resolve() {
+        return { kind: "byok-anthropic", apiKey: "sk-ant", baseUrl: "https://api.anthropic.com/v1/", model: "claude-test" };
+      },
+    };
+    await runAgentLoop(c.job, c.deps, c.rt);
+    expect(c.requests[0]!.baseUrl).toBe("https://api.anthropic.com");
+  });
+
+  it("recovers from overflow at most ONCE per run (M-2)", async () => {
+    const compactor = recordingCompactor(() => ({ compacted: true, messages: [{ role: "user", content: "c" }] }));
+    const c = await makeCtx({
+      compactor,
+      script: [
+        { error: new TerminalModelError("maximum context length exceeded") },
+        { error: new TerminalModelError("maximum context length exceeded") },
+      ],
+    });
+    const result = await runAgentLoop(c.job, c.deps, c.rt);
+    expect(result).toMatchObject({ status: "failed", code: "model_terminal" });
+    expect(compactor.calls).toHaveLength(1);
   });
 
   // ── stop / todo / steering ───────────────────────────────────────────────
-
   it("Stop veto without cancel injects the exact veto row and continues", async () => {
     let stops = 0;
     const hooks = recordingHooks();

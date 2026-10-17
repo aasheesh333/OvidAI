@@ -51,6 +51,7 @@ import type {
   SkillCatalog,
   TodoItem,
 } from "./ports.js";
+import { sandboxFailureCode } from "./ports.js";
 import { computeToolRoster, isToolPermitted, modePolicy, type RosterContext } from "./roster.js";
 import { resolveRoute, type ResolvedRoute } from "./routing.js";
 import { drainQueuedRuns } from "./steering.js";
@@ -261,25 +262,54 @@ function isReadOnlyShellCommand(cmd: string): boolean {
 }
 
 /**
- * Destructive-command confirmation (Dart `_destructivePatterns`, AS:18320–…):
- * applies in EVERY mode — Full Access included — and, like the plan-mode
- * "asks nothing" rule, is checked BEFORE the ordinary user prompt so a hook
- * `permissionDecision:"allow"` can never widen it.
+ * Destructive-command confirmation (Dart `SandboxService.defaultDeniedCommands`
+ * — sandbox_service.dart:3691–3701 — plus Dart's `_destructivePatterns`
+ * escapes). Applies to run_shell, job_start AND run_code payloads (Dart
+ * AS:19108 `_maybeApprove` gate); every mode, Full Access included (the
+ * plan's step 10 wording — Dart itself auto-allows in drive, so this is the
+ * spec-correct stricter behavior), and it is checked BEFORE the ordinary
+ * user prompt so a hook `permissionDecision:"allow"` can never widen it.
  */
 const DESTRUCTIVE_PATTERNS: readonly RegExp[] = [
-  /\brm\s+(-{1,2}[a-zA-Z-]*[rf][a-zA-Z-]*\s+)+/,
-  /\brm\s+[^|;&]*\s\.\.\//,
+  // SandboxService.defaultDeniedCommands, verbatim.
+  /\brm\s+(-{1,2}[a-zA-Z-]*[rf][a-zA-Z-]*\s+)+(\/[^\s]*|\$HOME\b|\$PREFIX\b|~)/,
+  /\bdd\s+[^|]*if=\/dev\/(block|zero|random)/,
+  /\bmkfs(\.\w+)?\s/,
+  /:\s*\(\s*\)\s*\{.*\}\s*;\s*:/,
+  /\bchmod\s+-R\s+777\s+\//,
+  /\bchown\s+-R\s+\S+\s+\/\s*$/,
+  /\b(reboot|shutdown|halt)\b/,
+  />\s*\/dev\/sd[a-z]/,
+  /\bfind\s+\/[^|;&]*-delete\b/,
+  // Dart _destructivePatterns escapes beyond the default set.
+  /\brm\s+(-{1,2}[a-zA-Z-]*[rf][a-zA-Z-]*\s+)+\.\.\//,
   /\bfind\b[^|;&]*\s-delete\b/,
-  /\bmkfs\b/,
-  /\bdd\s+[^|;&]*\bof=/,
-  /\b(shutdown|reboot|halt|poweroff)\b/,
+  // Additional git-destructive commands (cloud addition; confirmation only).
   /\bgit\s+reset\s+--hard\b/,
   /\bgit\s+clean\s+-[a-zA-Z]*f/,
-  /:\s*\(\s*\)\s*\{/,
 ];
 
 export function isDestructiveShellCommand(cmd: string): boolean {
   return DESTRUCTIVE_PATTERNS.some((re) => re.test(cmd));
+}
+
+/**
+ * The payload text the destructive classifier inspects — the three tool
+ * families Dart gates (run_shell/job_start/run_code). null = not a gated
+ * family.
+ */
+function destructivePayloadOf(name: string, args: Record<string, unknown>): string | null {
+  if (name === "run_shell") return shellCommandOf(args);
+  if (name === "job_start") {
+    return typeof args.command === "string" ? args.command : "";
+  }
+  if (name === "run_code") {
+    const parts: string[] = [];
+    if (typeof args.code === "string") parts.push(args.code);
+    if (typeof args.lang === "string") parts.push(args.lang);
+    return parts.join("\n");
+  }
+  return null;
 }
 
 function shellCommandOf(args: Record<string, unknown>): string {
@@ -526,6 +556,9 @@ export async function runAgentLoop(
   let msgs: AgentMessage[] = history;
 
   const g: GuardState = newGuardState();
+  // "forceCompact ONCE" is a RUN-level flag (Dart AS:12170 declares it before
+  // the turn loop), not a per-turn allowance.
+  let overflowRecovered = false;
   let stopHookActive = false;
   let toolRounds = 0;
 
@@ -649,12 +682,12 @@ export async function runAgentLoop(
       const stable = deps.systemPromptOverride ?? parts.stable;
       const volatile = deps.systemPromptOverride !== undefined ? "" : parts.volatile;
 
-      const baseSystem: AgentMessage[] = [];
+      const standingRows: AgentMessage[] = [];
       if (sessionContext.trim() !== "") {
-        baseSystem.push({ role: "system", content: `[session_start hook]\n${sessionContext}` });
+        standingRows.push({ role: "system", content: `[session_start hook]\n${sessionContext}` });
       }
       if (promptContext !== null && promptContext.trim() !== "") {
-        baseSystem.push({
+        standingRows.push({
           role: "system",
           content: `[user_prompt_submit hook]\n${promptContext}`,
         });
@@ -662,22 +695,26 @@ export async function runAgentLoop(
       // The stable block is the LAST non-volatile content-bearing system row
       // (hook notes insert BEFORE it), so markCacheBreakpoints lands the
       // system mark here — the cache-stable prefix (Task 3/7 invariant).
-      baseSystem.push({ role: "system", content: stable });
-      if (volatile.trim() !== "") {
-        baseSystem.push({ role: "system", content: volatile, volatile: true });
-      }
+      const volatileRows: AgentMessage[] =
+        volatile.trim() !== "" ? [{ role: "system", content: volatile, volatile: true }] : [];
 
       // ── 4. pre_request hook notes (leading system rows; observe-only) ──
+      // Dart inserts each note at index 0, so the LAST systemMessage ends up
+      // first; the output row is inserted after the loop and therefore rides
+      // ABOVE all of them (AS:12238–12246). Standing session/prompt contexts
+      // are inserted later still and ride first (AS:12263–12273) — the final
+      // order is: session context, prompt context, pre_request output,
+      // reversed pre_request notes, stable block, volatile block.
       const preRequest = await deps.hooks.fireDetailed("pre_request", sessionId, { turn });
       const hookRows: AgentMessage[] = [];
-      for (const sm of preRequest.systemMessages) {
-        hookRows.push({ role: "system", content: `[plugin hook]\n${sm}` });
-      }
       if (preRequest.output.trim() !== "") {
         hookRows.push({
           role: "system",
           content: `[plugin hook context — on_pre_request]\n${preRequest.output}`,
         });
+      }
+      for (const sm of [...preRequest.systemMessages].reverse()) {
+        hookRows.push({ role: "system", content: `[plugin hook]\n${sm}` });
       }
       if (preRequest.promptBlockReason !== null) {
         // An observe-only hook can never halt the run (Dart AS:12249–12255).
@@ -686,7 +723,12 @@ export async function runAgentLoop(
           reason: preRequest.promptBlockReason,
         });
       }
-      const systemRows = [...hookRows, ...baseSystem];
+      const systemRows: AgentMessage[] = [
+        ...standingRows,
+        ...hookRows,
+        { role: "system", content: stable },
+        ...volatileRows,
+      ];
 
       // ── 5. steering drain — EVERY request, including the first ─────────
       const injected = await drainQueuedRuns(
@@ -727,7 +769,6 @@ export async function runAgentLoop(
 
       // ── 6. model call (+ step 8 overflow recovery) ─────────────────────
       let response: AgentResponse | null = null;
-      let overflowRecovered = false;
       for (;;) {
         const attempt = await callModel(buildRequest());
         if (attempt.kind === "cancelled") return await cancelled();
@@ -937,47 +978,13 @@ export async function runAgentLoop(
             isError: true,
           };
         }
-        // Destructive-command confirmation (Dart parity): every mode,
-        // including Full Access; deliberately NOT skippable by a hook
-        // `permissionDecision:"allow"` (bypassPermission is not consulted).
-        if (
-          result === null &&
-          call.name === "run_shell" &&
-          isDestructiveShellCommand(shellCommandOf(effectiveArgs))
-        ) {
-          const decision = await deps.approvals.approve(
-            {
-              sessionId,
-              runId,
-              userId,
-              mode,
-              planMode: state.planMode,
-              unattended: job.unattended,
-              signal: abortSignal,
-            },
-            {
-              approvalId: randomUUID(),
-              kind: "tool",
-              tool: "run_shell",
-              summary: "Destructive command",
-              detail: shellCommandOf(effectiveArgs),
-              allowAlways: false,
-              pathTargets: [],
-              hostTargets: [],
-            },
-          );
-          if (decision !== "allow" && decision !== "always") {
-            result = { content: "DENIED by user", isError: true };
-          }
-        }
-        if (
-          result === null &&
-          !bypassPermission &&
-          policy.approvalForOutside &&
-          policy.confineToWorkspace
-        ) {
-          const outside = outsideWorkspaceTargets(effectiveArgs);
-          if (outside.length > 0) {
+        // Destructive-command confirmation (Dart parity): run_shell,
+        // job_start and run_code payloads; every mode, including Full Access;
+        // deliberately NOT skippable by a hook `permissionDecision:"allow"`
+        // (bypassPermission is not consulted).
+        if (result === null) {
+          const payload = destructivePayloadOf(call.name, effectiveArgs);
+          if (payload !== null && isDestructiveShellCommand(payload)) {
             const decision = await deps.approvals.approve(
               {
                 sessionId,
@@ -992,17 +999,63 @@ export async function runAgentLoop(
                 approvalId: randomUUID(),
                 kind: "tool",
                 tool: call.name,
-                summary: `Access outside the workspace: ${outside.join(", ")}`,
-                detail:
-                  `${call.name} wants to touch targets outside the session workspace:\n` +
-                  outside.join("\n"),
-                allowAlways: true,
-                pathTargets: outside,
+                summary: "Destructive command",
+                detail: payload,
+                allowAlways: false,
+                pathTargets: [],
                 hostTargets: [],
               },
             );
             if (decision !== "allow" && decision !== "always") {
               result = { content: "DENIED by user", isError: true };
+            }
+          }
+        }
+        // Plan mode asks NOTHING (Dart AS:19083–19099): a plan-allowed read
+        // whose target is outside the workspace is refused OUTRIGHT — no
+        // approval card is ever raised while planning.
+        if (
+          result === null &&
+          policy.approvalForOutside &&
+          policy.confineToWorkspace
+        ) {
+          const outside = outsideWorkspaceTargets(effectiveArgs);
+          if (outside.length > 0) {
+            if (state.planMode) {
+              result = {
+                content:
+                  `DENIED: ${call.name} may not access targets outside the session ` +
+                  `workspace while planning (${outside.join(", ")}). Plan mode asks ` +
+                  "nothing — write the step into the plan instead.",
+                isError: true,
+              };
+            } else if (!bypassPermission) {
+              const decision = await deps.approvals.approve(
+                {
+                  sessionId,
+                  runId,
+                  userId,
+                  mode,
+                  planMode: state.planMode,
+                  unattended: job.unattended,
+                  signal: abortSignal,
+                },
+                {
+                  approvalId: randomUUID(),
+                  kind: "tool",
+                  tool: call.name,
+                  summary: `Access outside the workspace: ${outside.join(", ")}`,
+                  detail:
+                    `${call.name} wants to touch targets outside the session workspace:\n` +
+                    outside.join("\n"),
+                  allowAlways: true,
+                  pathTargets: outside,
+                  hostTargets: [],
+                },
+              );
+              if (decision !== "allow" && decision !== "always") {
+                result = { content: "DENIED by user", isError: true };
+              }
             }
           }
         }
@@ -1037,9 +1090,12 @@ export async function runAgentLoop(
               },
             });
           } catch (err) {
-            // Tool failures are model-visible results, never run crashes
-            // (Dart parity). Typed sandbox admission errors are the worker
-            // adapter's run-failure mapping (T9-I1 / Task 16).
+            // T9-I1 carry: sandbox availability failures terminalize the RUN
+            // (P1/P2 run_failed codes) — never a model-visible tool error the
+            // model would fruitlessly retry.
+            const sandboxCode = sandboxFailureCode(err);
+            if (sandboxCode !== null) return await failed(sandboxCode, messageOf(err));
+            // Any other tool failure is a model-visible result (Dart parity).
             result = { content: `tool error: ${messageOf(err)}`, isError: true };
           }
         }
@@ -1080,13 +1136,17 @@ export async function runAgentLoop(
 
         // F11: the loop fires the FULL HookEvent set. post_tool is
         // fire-and-forget and observe-only (Task 18 implements the engine).
-        void deps.hooks
-          .fire("post_tool", sessionId, {
-            tool: call.name,
-            result: rowContent.slice(0, 400),
-            ok: result.isError !== true,
-          })
-          .catch(() => {});
+        // Dart fires PostToolUse only after `_dispatchInner` — a hook/roster/
+        // mode/approval denial never reaches it (M-1).
+        if (dispatched) {
+          void deps.hooks
+            .fire("post_tool", sessionId, {
+              tool: call.name,
+              result: rowContent.slice(0, 400),
+              ok: result.isError !== true,
+            })
+            .catch(() => {});
+        }
 
         msgs.push({ role: "tool", toolCallId: call.id, content: rowContent });
       }

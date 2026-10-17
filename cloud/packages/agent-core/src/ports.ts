@@ -17,6 +17,27 @@ export interface SandboxPort {            // adapter over the P2 SandboxManager 
   jobList(userId: string): Promise<Array<{ jobId: string; cmd: string; running: boolean }>>;
   jobKill(userId: string, jobId: string): Promise<void>;
 }
+
+/**
+ * Sandbox availability failures that are RUN-level, not tool-level (P3 Task
+ * 15 / T9-I1 carry). The worker's SandboxPort adapter rethrows the sandbox
+ * package's typed errors (SandboxAdmissionError / SandboxCapacityError /
+ * RootfsUnavailable); agent-core cannot import @ovid/sandbox (dependency
+ * direction + lockfile rule), so classification is by the stable class NAME
+ * the sandbox package pins — the same names its own wire mapping keys on
+ * (worker ptyBridge.ts: `SandboxAdmissionError → sandbox_busy`,
+ * `SandboxCapacityError → sandbox_unavailable`).
+ */
+export type SandboxFailureCode = "sandbox_busy" | "sandbox_unavailable";
+
+export function sandboxFailureCode(err: unknown): SandboxFailureCode | null {
+  const name = (err as { name?: unknown } | null)?.name;
+  if (name === "SandboxAdmissionError") return "sandbox_busy";
+  if (name === "SandboxCapacityError" || name === "RootfsUnavailable") {
+    return "sandbox_unavailable";
+  }
+  return null;
+}
 export type EgressFetch = (url: string, init?: RequestInit) => Promise<Response>;   // SSRF-guarded (Task 2)
 export type ApprovalDecision = "allow" | "deny" | "always";
 export interface ApprovalRequest {

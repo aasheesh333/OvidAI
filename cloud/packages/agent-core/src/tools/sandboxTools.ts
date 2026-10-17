@@ -13,7 +13,7 @@
  * the Dart _toolTimeoutFor map.
  */
 
-import type { SandboxPort } from "../ports.js";
+import { sandboxFailureCode, type SandboxPort } from "../ports.js";
 import type { Tool, ToolContext, ToolResult } from "../types.js";
 import {
   applyMultiEdit,
@@ -104,6 +104,10 @@ async function run(body: () => Promise<ToolResult>): Promise<ToolResult> {
   try {
     return await body();
   } catch (err) {
+    // T9-I1 carry: sandbox availability failures are RUN-level, not a
+    // model-visible tool error. Rethrow so the loop terminalizes the run
+    // (sandbox_busy / sandbox_unavailable) instead of inviting a retry.
+    if (sandboxFailureCode(err) !== null) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const content = /outside the workspace/.test(msg) ? `confined: ${msg}` : msg;
     return { content, isError: true };

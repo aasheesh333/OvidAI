@@ -161,6 +161,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     db,
     events,
     keys: createMintRedisKeyProvider(redisMint),
+    // T15 fix-round M-4: this is the P2-COMPAT path (bounded mode) and the
+    // legacy shim's documented raw-`fetch` default is still in force here.
+    // Task 16's full-engine construction site MUST pass
+    // createGuardedEgressFetch(...) — createOpenAiAgentTransport no longer
+    // accepts an unguarded default (T5-I1).
     transport: createOpenAiTransport(),
     litellmBaseUrl: cfg.litellmBaseUrl,
     defaultModel: cfg.defaultModel,
