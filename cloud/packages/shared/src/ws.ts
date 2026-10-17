@@ -3,6 +3,7 @@ import { sessionEventSchema, type SessionEvent } from "./events.js";
 import { ptyBase64Data } from "./pty.js";
 import { browserInputEventSchema, type BrowserInputEvent, browserStateDtoSchema, type BrowserStateDto } from "./browser.js";
 import { systemEventEnvelopeSchema, type SystemEventEnvelope } from "./system.js";
+import { systemEventSchema, type SystemEvent } from "./schedules.js";
 
 export type WsClientMsg =
   | { op: "subscribe"; sessionId: string; lastEventId?: string | null }
@@ -34,7 +35,12 @@ export type WsClientMsg =
   // gateway forwards the payload to sys:{uid}:in for the worker's pending
   // request. There is deliberately no ack frame — the request itself
   // resolving IS the confirmation (a late answer is a no-op on the worker).
-  | { op: "system_response"; id: string; payload: Record<string, unknown> };
+  | { op: "system_response"; id: string; payload: Record<string, unknown> }
+  // P4 Task 2 (scheduler system channel) — additive discriminants only. The
+  // client asks the gateway to relay this uid's scheduler events; the
+  // gateway answers with `system_subscribed` and then `system` frames.
+  | { op: "subscribe_system" }
+  | { op: "unsubscribe_system" };
 
 export type WsServerMsg =
   | { op: "subscribed"; sessionId: string }
@@ -55,7 +61,12 @@ export type WsServerMsg =
   // P5 Task 10 (system channel) — additive discriminant only. A system event
   // pushed to this uid's sockets via the gateway's system hub (worker bus or
   // gateway-originated, e.g. the MCP OAuth callback).
-  | { op: "system_event"; event: SystemEventEnvelope };
+  | { op: "system_event"; event: SystemEventEnvelope }
+  // P4 Task 2 (scheduler system channel) — additive discriminants only. Ack
+  // for `subscribe_system`, then one `system` frame per scheduler event of
+  // the ticket's uid until `unsubscribe_system` or close.
+  | { op: "system_subscribed" }
+  | { op: "system"; event: SystemEvent };
 
 /**
  * The error codes the WS server currently sends in `error` frames. The wire
@@ -188,6 +199,12 @@ const wsClientMsgSchema = z.discriminatedUnion("op", [
     id: z.string().min(1),
     payload: z.record(z.string(), z.unknown()),
   }),
+  z.object({
+    op: z.literal("subscribe_system"),
+  }),
+  z.object({
+    op: z.literal("unsubscribe_system"),
+  }),
 ]) as unknown as z.ZodType<WsClientMsg>;
 
 const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
@@ -243,6 +260,13 @@ const wsServerMsgSchema: z.ZodType<WsServerMsg> = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("system_event"),
     event: systemEventEnvelopeSchema,
+  }),
+  z.object({
+    op: z.literal("system_subscribed"),
+  }),
+  z.object({
+    op: z.literal("system"),
+    event: systemEventSchema,
   }),
 ]);
 
