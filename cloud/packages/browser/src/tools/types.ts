@@ -22,6 +22,7 @@ import type { BrowserEngineConfig } from "../config.js";
 import { BrowserPoolBusyError, type BrowserPool } from "../pool.js";
 import type { BrowserSessionRegistry } from "../sessions.js";
 import type { StorageStatePersistence } from "../stateStore.js";
+import { wireDownloads } from "./downloadWiring.js";
 
 export interface BrowserToolContext {
   sessionId: string;
@@ -65,6 +66,12 @@ export interface BrowserToolsDeps {
   /** Engine → bridge.publishState hook (Task 14). */
   notifyState?(sessionId: string): void;
   now?(): number;
+  /**
+   * Test seam for the download byte ceiling (Task 13). Production omits it;
+   * `browser_download` then uses DOWNLOAD_MAX_BYTES (50 MB). The refusal copy
+   * stays "50 MB" regardless — it describes the production policy.
+   */
+  downloadMaxBytes?: number;
 }
 
 /** Every failure content starts with this (except takeover/URL refusals). */
@@ -153,8 +160,17 @@ export function defineBrowserTool(deps: BrowserToolsDeps, spec: BrowserToolSpec)
       }
       const refusal = deps.registry.refuseReasonIfTakeover(ctx.sessionId);
       if (refusal !== null) return { content: refusal };
+      // Page-initiated downloads (Task 13) are wired per live context. Wire
+      // before the body for an existing session and after it for the call
+      // that just created one (browser_open), so a subsequent click/link
+      // download is always captured.
+      const existing = deps.registry.get(ctx.sessionId);
+      if (existing !== null) wireDownloads(deps, existing);
       try {
-        return await spec.execute(parsed.data, ctx, deps);
+        const result = await spec.execute(parsed.data, ctx, deps);
+        const current = deps.registry.get(ctx.sessionId);
+        if (current !== null) wireDownloads(deps, current);
+        return result;
       } catch (err) {
         if (err instanceof BrowserToolFailure) return { content: err.content };
         if (err instanceof BrowserPoolBusyError) return { content: err.message };

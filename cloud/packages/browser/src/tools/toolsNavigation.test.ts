@@ -335,24 +335,43 @@ describe.skipIf(!chromiumExecutableExists())("browser tools I", () => {
   // Roster pin
   // -------------------------------------------------------------------------
 
-  it("exposes the sorted 17-tool roster with model-facing schemas", () => {
+  it("exposes the final sorted 36-tool roster with model-facing schemas", () => {
     const expected = [
       "browser_back",
+      "browser_click",
       "browser_close_tab",
+      "browser_console",
+      "browser_cookies",
+      "browser_dialog",
+      "browser_double_click",
+      "browser_download",
+      "browser_drag",
       "browser_evaluate",
+      "browser_fill",
       "browser_find",
       "browser_forward",
+      "browser_hover",
       "browser_list_tabs",
+      "browser_long_press",
       "browser_navigate",
+      "browser_network",
       "browser_new_tab",
       "browser_open",
       "browser_outline",
+      "browser_popups",
+      "browser_press_key",
       "browser_read",
       "browser_reload",
       "browser_resize",
       "browser_screenshot",
+      "browser_scroll",
+      "browser_select",
       "browser_snapshot",
+      "browser_swipe",
       "browser_switch_tab",
+      "browser_tap_at",
+      "browser_type",
+      "browser_upload",
       "browser_wait_for",
     ];
     const defs = createBrowserTools(deps);

@@ -57,7 +57,21 @@ export const FIXTURES = {
 <html><head><title>Click</title></head>
 <body>
   <button id="btn" style="position:absolute;left:20px;top:20px;width:100px;height:40px;">Click me</button>
-  <input id="in" style="position:absolute;left:20px;top:80px;width:200px;height:30px;">
+  <form id="frm" style="position:absolute;left:20px;top:80px;" onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'SUBMITTED:' + document.getElementById('in').value;">
+    <input id="in" style="width:200px;height:30px;">
+    <button id="submit-btn" type="submit">Submit</button>
+  </form>
+  <input id="in2" style="position:absolute;left:20px;top:120px;width:200px;height:30px;">
+  <select id="sel" style="position:absolute;left:20px;top:160px;">
+    <option value="a">A</option>
+    <option value="b">B</option>
+  </select>
+  <button id="prompt-btn" style="position:absolute;left:20px;top:200px;width:100px;height:40px;" onclick="setTimeout(function () { var v = prompt('p?'); document.getElementById('out').textContent = 'PROMPT:' + v; }, 100);">Prompt</button>
+  <button id="popup-btn" style="position:absolute;left:20px;top:250px;width:100px;height:40px;" onclick="window.open('/spa', '_blank');">Popup</button>
+  <div id="drop1" draggable="true" ondragstart="event.dataTransfer.setData('text/plain', 'one');" style="position:absolute;left:20px;top:300px;width:100px;height:50px;background:#ddd;">Drop 1</div>
+  <div id="drop2" ondragover="event.preventDefault();" ondrop="event.preventDefault(); document.getElementById('out').textContent = 'DROPPED:' + event.dataTransfer.getData('text/plain');" style="position:absolute;left:200px;top:300px;width:100px;height:50px;background:#eee;">Drop 2</div>
+  <input id="file" type="file" onchange="document.getElementById('out').textContent = 'FILE:' + this.files[0].name;" style="position:absolute;left:20px;top:370px;">
+  <a id="dl" href="/attachment" style="position:absolute;left:20px;top:410px;">Download file</a>
   <div id="out"></div>
   <script>
     document.getElementById("btn").addEventListener("click", () => {
@@ -66,6 +80,7 @@ export const FIXTURES = {
     document.addEventListener("keydown", (e) => {
       if (e.key === "Enter") document.getElementById("out").textContent = "KEY_ENTER";
     });
+    console.log("click-fixture-ready");
   </script>
 </body></html>
 `,

@@ -11,5 +11,7 @@ export * from "./stateStore.js";
 export * from "./staticExtract.js";
 export * from "./storageState.js";
 export * from "./tools/definitions.js";
+export * from "./tools/interaction.js";
+export * from "./tools/transfers.js";
 export * from "./tools/types.js";
 export * from "./url.js";
