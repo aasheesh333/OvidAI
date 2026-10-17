@@ -1,3 +1,4 @@
+export * from "./caches.js";
 export * from "./cgroups.js";
 export * from "./config.js";
 export * from "./corpora.js";

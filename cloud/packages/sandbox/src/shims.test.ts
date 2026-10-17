@@ -213,4 +213,110 @@ describe("ovid shim (v1 package-install dispatch)", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("install");
   });
+
+  // --- Task 10: cache-prune + hardened dispatch -----------------------------
+
+  it("`ovid cache-prune` invokes `pnpm store prune` then `uv cache prune`", () => {
+    const log = stubLog();
+    const pnpmDir = makeStubDir("pnpm", log);
+    const uvDir = makeStubDir("uv", log);
+    const proj = projDir({}); // no manifest needed — prunes are store-global
+    const r = runShim("ovid", ["cache-prune"], {
+      cwd: proj,
+      path: `${pnpmDir}:${uvDir}:${process.env.PATH}`,
+    });
+    expect(r.status).toBe(0);
+    expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toEqual([
+      "pnpm",
+      "store",
+      "prune",
+      "uv",
+      "cache",
+      "prune",
+    ]);
+  });
+
+  it("`ovid cache-prune` exits non-zero when a prune fails (status propagates)", () => {
+    // pnpm stub exits 3 after logging — uv still runs, overall exit is 3.
+    const log = stubLog();
+    const pnpmDir = makeStubDir("pnpm", log);
+    const failStub = join(pnpmDir, "pnpm");
+    writeFileSync(failStub, `#!/bin/sh\n{ echo "pnpm"; for a in "$@"; do echo "$a"; done; } >> ${JSON.stringify(log)}\nexit 3\n`);
+    const uvDir = makeStubDir("uv", log);
+    const proj = projDir({});
+    const r = runShim("ovid", ["cache-prune"], {
+      cwd: proj,
+      path: `${pnpmDir}:${uvDir}:${process.env.PATH}`,
+    });
+    expect(r.status).toBe(3);
+    // uv ran too — one failing prune does not skip the other.
+    expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toEqual([
+      "pnpm",
+      "store",
+      "prune",
+      "uv",
+      "cache",
+      "prune",
+    ]);
+  });
+
+  it("`ovid cache-prune extra` rejects arguments (hardened: nothing user-supplied reaches pnpm/uv)", () => {
+    const log = stubLog();
+    const pnpmDir = makeStubDir("pnpm", log);
+    const uvDir = makeStubDir("uv", log);
+    const proj = projDir({});
+    const r = runShim("ovid", ["cache-prune", "--force"], {
+      cwd: proj,
+      path: `${pnpmDir}:${uvDir}:${process.env.PATH}`,
+    });
+    expect(r.status).toBe(2);
+    expect(r.stderr).not.toBe("");
+    expect(() => accessSync(log)).toThrow(); // neither prune invoked
+  });
+
+  it("`ovid install` precedence: package.json wins when BOTH manifests exist", () => {
+    const log = stubLog();
+    const pnpmDir = makeStubDir("pnpm", log);
+    const uvDir = makeStubDir("uv", log);
+    const proj = projDir({
+      "package.json": '{"name":"t","version":"0.0.0"}',
+      "pyproject.toml": "[project]\nname = 't'\n",
+    });
+    const r = runShim("ovid", ["install", "foo"], {
+      cwd: proj,
+      path: `${pnpmDir}:${uvDir}:${process.env.PATH}`,
+    });
+    expect(r.status).toBe(0);
+    expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toEqual([
+      "pnpm",
+      "add",
+      "foo",
+    ]); // uv never invoked
+  });
+
+  it("`ovid install` with no args and both manifests → `pnpm install --prefer-offline`", () => {
+    const log = stubLog();
+    const pnpmDir = makeStubDir("pnpm", log);
+    const uvDir = makeStubDir("uv", log);
+    const proj = projDir({
+      "package.json": '{"name":"t","version":"0.0.0","dependencies":{}}',
+      "pyproject.toml": "[project]\nname = 't'\n",
+    });
+    const r = runShim("ovid", ["install"], {
+      cwd: proj,
+      path: `${pnpmDir}:${uvDir}:${process.env.PATH}`,
+    });
+    expect(r.status).toBe(0);
+    expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toEqual([
+      "pnpm",
+      "install",
+      "--prefer-offline",
+    ]);
+  });
+
+  it("`ovid --help` mentions cache-prune", () => {
+    const r = runShim("ovid", ["--help"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("cache-prune");
+  });
 });

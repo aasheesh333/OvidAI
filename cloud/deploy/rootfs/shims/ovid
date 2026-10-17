@@ -1,7 +1,12 @@
 #!/bin/sh
 # ovid — v1 CLI dispatch for jailed workspaces: package installs go through
 # pnpm (package.json) or uv (pyproject.toml), never a native toolchain.
-# Task 10 extends this dispatcher; keep v1 behavior intact.
+# Task 10 adds `cache-prune` (pnpm store prune + uv cache prune — the P7
+# hibernate fast path) and hardens the dispatch; v1 install behavior (incl.
+# package.json-over-pyproject.toml precedence) is unchanged.
+# Hardening rules: `cache-prune` takes NO arguments — the two prune commands
+# are fixed, so nothing user-supplied can reach pnpm/uv through it; a failing
+# prune never skips the other (both run, worst exit status wins).
 case "${1:-}" in
   install)
     shift
@@ -19,6 +24,16 @@ case "${1:-}" in
     echo "ovid install: no package.json or pyproject.toml in $(pwd)" >&2
     exit 2
     ;;
+  cache-prune)
+    if [ "$#" -ne 1 ]; then
+      echo "ovid cache-prune: takes no arguments (try ovid --help)" >&2
+      exit 2
+    fi
+    rc=0
+    pnpm store prune || rc=$?
+    uv cache prune || rc=$?
+    exit $rc
+    ;;
   --help|-h|help)
     cat <<'EOF'
 ovid — package installs for cloud workspaces
@@ -28,6 +43,8 @@ usage:
                            pyproject.toml (uv); with no packages, install
                            everything already declared (pnpm install
                            --prefer-offline / uv sync)
+  ovid cache-prune         reclaim per-user store bytes: pnpm store prune +
+                           uv cache prune (stores live in /root/.cache)
   ovid --help              this help
 EOF
     ;;
