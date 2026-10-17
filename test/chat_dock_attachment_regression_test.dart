@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/skills.dart';
@@ -17,7 +16,6 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
@@ -42,7 +40,6 @@ void main() {
     AgentService.I.pendingApproval = null;
     AgentService.I.clearAttachment();
     AgentService.I.clearQueueForTest();
-    AgentNotificationService.I.resetForTest();
     AgentService.skillCatalogInputsForTest = null;
     AppState.resetTestInstance();
   });
@@ -164,7 +161,6 @@ void main() {
         app.activeSessionId = session.id;
         agent.clearQueueForTest();
         agent.runBucketForTest(session.id).activeRunId = null;
-        AgentNotificationService.I.resetForTest();
         await tester.pumpWidget(const SizedBox.shrink());
       },
     );
@@ -193,7 +189,6 @@ void main() {
     expect(agent.pendingAttachments.single.path, '/keep.txt');
     expect(tester.widget<TextField>(composer).controller!.text, 'Keep draft');
     run.activeRunId = null;
-    AgentNotificationService.I.resetForTest();
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -264,13 +259,9 @@ void main() {
       expect(agent.pendingAttachments, isEmpty);
       expect(tester.takeException(), isNull);
 
-      // Drain the run's unwind and the 600ms notification debounce its
-      // `think` emissions armed (AgentNotificationService.agentWorking).
-      // Binding invariants run BEFORE tearDowns, so a fake Timer left by
-      // the cancelled run fails the test even though tearDown resets the
-      // service. The run-end idle pass cancels the debounce; if the run
-      // is still unwinding, elapsing past the debounce window fires it
-      // instead (its platform invoke is swallowed in tests).
+      // Drain the run's unwind. Binding invariants run BEFORE tearDowns, so
+      // a fake Timer left by the cancelled run fails the test even though
+      // tearDown resets the service.
       for (var i = 0; i < 10 && agent.busyFor(session.id); i++) {
         await tester.pump(const Duration(milliseconds: 100));
       }

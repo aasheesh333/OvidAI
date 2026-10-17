@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -544,6 +545,19 @@ class FirebaseService extends ChangeNotifier {
       return revision == _authRevision && _user?.uid == u.uid ? token : null;
     } catch (e) {
       debugPrint('getIdToken failed: $e');
+      return null;
+    }
+  }
+
+  /// The current FCM registration token, or null when Firebase is not
+  /// configured (debug/local without google-services.json) or the platform
+  /// has no messaging support. Cloud push is best-effort: a missing token
+  /// just means the gateway cannot wake this device.
+  Future<String?> getFcmToken() async {
+    try {
+      return await FirebaseMessaging.instance.getToken();
+    } catch (e) {
+      debugPrint('getFcmToken failed: $e');
       return null;
     }
   }

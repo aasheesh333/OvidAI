@@ -6,7 +6,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/image_receipt_store.dart';
 import 'package:ovid_ai/core/ovid_cloud_service.dart';
@@ -355,7 +354,6 @@ void main() {
       FlutterSecureStorage.setMockInitialValues({});
       usageRoot = await Directory.systemTemp.createTemp('ovid-usage-auto-');
       AppState.usageRootOverrideForTest = usageRoot;
-      AgentNotificationService.I.resetForTest();
       AppState.resetTestInstance();
       AppState.createForTest().seenWelcomeVersion = AppState.welcomeVersion;
       AgentService.I.debugPauseScheduleTimerForTest(true);
@@ -364,7 +362,6 @@ void main() {
     tearDown(() async {
       AgentService.I.debugPauseScheduleTimerForTest(false);
       AgentService.I.resetUsageAttemptRecorderForTest();
-      AgentNotificationService.I.resetForTest();
       AppState.usageRootOverrideForTest = null;
       AppState.resetTestInstance();
       await usageRoot.delete(recursive: true);

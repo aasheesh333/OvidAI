@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 
-import '../core/agent_notification_service.dart';
 import '../core/agent_service.dart';
 import '../core/diag.dart';
 import '../core/schedule_coordinator.dart';
 import '../core/state.dart';
 import '../core/theme.dart';
 import '../l10n/l10n.dart';
-import 'background_reliability_card.dart';
 import 'user_error.dart';
 import 'widgets/aether_confirm.dart';
 import 'widgets/aether_primitives.dart';
@@ -50,7 +48,7 @@ import 'widgets/aether_primitives.dart';
 /// Preserves the public widget surface (`ScheduleScreen(sessionId: ...)`),
 /// listens on `AppState.I` + `AgentService.I`, and uses the real
 /// `editSchedule` / `cancelTask` / `resumeTask` task mutations plus the
-/// `AgentNotificationService.stopBackground` / `AgentService.resumeScheduledBackground`
+/// `AgentService.stopScheduledBackground` / `AgentService.resumeScheduledBackground`
 /// background toggle. Status strings {pending, running, paused, failed,
 /// completed, cancelled} remain the source of truth.
 class ScheduleScreen extends StatefulWidget {
@@ -96,8 +94,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       builder: (context, _) {
         final session = AppState.I.sessionById(widget.sessionId);
         final tasks = session?.schedules ?? const <Map<String, dynamic>>[];
-        final backgroundStopped =
-            agent.schedules.stopped || AgentNotificationService.I.backgroundStopped;
+        final backgroundStopped = agent.schedules.stopped;
 
         return Scaffold(
           backgroundColor: Aether.bg,
@@ -107,8 +104,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           body: ListView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
             children: [
-              // Missing notification/battery/exact-alarm grants, if any.
-              const BackgroundReliabilityCard(compact: true),
               _statusStrip(context, backgroundStopped),
               const SizedBox(height: 20),
               const AetherSectionTitle(eyebrow: 'Scheduled tasks'),
@@ -144,10 +139,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   Widget _statusStrip(BuildContext context, bool backgroundStopped) {
     final notes = <String>[];
-    final constraint = AgentNotificationService.I.backgroundConstraint;
-    if (constraint != null && constraint.isNotEmpty) {
-      notes.add('System constraint: $constraint');
-    }
     if (!AppState.I.keepAliveEnabled) {
       notes.add(
         'Background keep-alive is off. Future tasks may wait until you reopen Ovid.',
@@ -224,7 +215,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     if (!ok || !context.mounted) return;
     await _action(
       context,
-      () => AgentNotificationService.I.stopBackground(cancelRuns: false),
+      () => AgentService.I.stopScheduledBackground(),
     );
   }
 

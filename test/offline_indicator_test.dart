@@ -3,7 +3,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/connection_service.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -18,7 +17,6 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
@@ -30,7 +28,6 @@ void main() {
   tearDown(() {
     ConnectionService.debugInstance = null;
     AgentService.I.debugPauseScheduleTimerForTest(false);
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
   });
 

@@ -20,7 +20,6 @@ import '../core/theme.dart';
 import 'format.dart';
 import 'model_failure.dart';
 import 'voice_input_service.dart';
-import 'agent_notification_service.dart';
 import 'background_notifications.dart';
 import 'schedule_coordinator.dart';
 import 'state.dart';
@@ -6442,18 +6441,6 @@ user which one instead of assuming this one.''';
     if (kind == 'shellOut' && run.activeToolMsg != null) {
       _toolStreamFor(run, '$text\n');
     }
-    // Foreground-notification mirror (agent keep-alive): progress events
-    // update the ongoing notification; done/err retires it.
-    if ((kind == 'think' ||
-            kind == 'shell' ||
-            kind == 'file' ||
-            kind == 'nav') &&
-        (eventSessionId == null || busyFor(eventSessionId))) {
-      AgentNotificationService.I.agentWorking(text, sessionId: eventSessionId);
-    } else if ((kind == 'done' || kind == 'err') &&
-        !(run.controlRun && run.activeRunId != null)) {
-      AgentNotificationService.I.agentIdle(sessionId: eventSessionId);
-    }
     notifyListeners();
   }
 
@@ -11276,12 +11263,6 @@ user which one instead of assuming this one.''';
         sessionId: s.id,
       );
     }
-    // PR32: start the foreground service IMMEDIATELY at run start — the
-    // event-driven path (first `think` + 600ms debounce) left a window
-    // where the user could background the app before the service ever
-    // started, and Android froze the Dart isolate mid-run (the reported
-    // "agent stops if I mistakenly open the app again").
-    AgentNotificationService.I.agentWorking('starting task…', sessionId: s.id);
     return _runTaskBody(
       prompt,
       ctx,
@@ -12445,9 +12426,6 @@ ${await _agentsMdBlock()}
         // LLM session title (the title generator parity): one cheap background call after
         // the first real exchange — fire-and-forget, heuristic stays on fail.
         unawaited(maybeGenerateSessionTitle(ctx.session));
-        // Foreground notification retires with the run (covers error paths
-        // where no 'done'/'err' event ever fires).
-        AgentNotificationService.I.agentIdle(sessionId: pinnedSessionId);
         _startScheduleTimer();
         notifyListeners();
         // Queue auto-continue. On a Stop the scheduler already promoted the
@@ -21577,8 +21555,6 @@ ${await _agentsMdBlock()}
       _scheduleInitialization ??= _initializeSchedules();
 
   Future<void> _initializeSchedules() async {
-    await AgentNotificationService.I.refreshBackgroundState();
-    schedules.stopped = AgentNotificationService.I.backgroundStopped;
     try {
       await schedules.recover();
       _schedulesReady = true;
@@ -21633,10 +21609,6 @@ ${await _agentsMdBlock()}
 
   Future<void> wakeSchedules() async {
     if (!_schedulesReady || _scheduleTimerPaused) return;
-    await AgentNotificationService.I.refreshBackgroundState();
-    if (AgentNotificationService.I.backgroundStopped && !schedules.stopped) {
-      await schedules.stop();
-    }
     await schedules.tick();
     _startScheduleTimer();
   }
@@ -21650,13 +21622,7 @@ ${await _agentsMdBlock()}
   /// Resumes background execution and re-pends the tasks Stop paused.
   /// Returns how many tasks were resumed.
   Future<int> resumeScheduledBackground() async {
-    await AgentNotificationService.I.resumeBackground();
-    var resumed = 0;
-    if (AgentNotificationService.I.backgroundStopped) {
-      schedules.stopped = true;
-    } else {
-      resumed = await schedules.resumeStopped();
-    }
+    final resumed = await schedules.resumeStopped();
     _schedulesChanged();
     return resumed;
   }
@@ -21717,20 +21683,11 @@ ${await _agentsMdBlock()}
         'previously scheduled task; apply the normal tool and approval policies:]\n'
         '${entry.task['prompt']}';
     // Do NOT yank the user to another chat. Background work stays session-owned.
-    final wasVisible = AppState.I.activeSessionId == s.id;
     s.messages.add(Message(role: 'user', content: delivery));
     await _persistSchedules();
     // Stop can land during the transcript write as well as the claim write.
     if (schedules.stopped || entry.task['status'] != 'running') {
       return const ScheduleResult.failed('Stopped before execution');
-    }
-    if (!wasVisible) {
-      unawaited(
-        AgentNotificationService.I.agentWorking(
-          'reminder fired in "${s.title}"',
-          sessionId: s.id,
-        ),
-      );
     }
     _runFor(s.id).lastError = null;
     await runTask(

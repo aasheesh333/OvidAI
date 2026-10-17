@@ -10,7 +10,6 @@ import 'package:webview_flutter/webview_flutter.dart';
 // ignore: depend_on_referenced_packages
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/html_artifact.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -96,7 +95,6 @@ void main() {
   setUp(() {
     previousDark = Aether.dark;
     SharedPreferences.setMockInitialValues({});
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     AppState.createForTest().seenWelcomeVersion = AppState.welcomeVersion;
     AgentService.I
@@ -116,7 +114,6 @@ void main() {
     AgentService.I
       ..clearBrowserTabsForTest()
       ..debugPauseScheduleTimerForTest(false);
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
   });
 

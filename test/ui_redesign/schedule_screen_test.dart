@@ -10,7 +10,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/schedule_screen.dart';
@@ -36,18 +35,15 @@ void main() {
   late AppState app;
 
   setUp(() async {
-    // Native background Stop/Resume calls answer immediately so a Stop's
-    // serialized write never blocks a later Resume.
+    // Native schedule-alarm calls answer immediately so a Stop's serialized
+    // write never blocks a later Resume.
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_native, (call) async => true);
-    AgentNotificationService.I.resetForTest();
     SharedPreferences.setMockInitialValues({});
     FlutterSecureStorage.setMockInitialValues({});
     app = AppState.createForTest();
     AgentService.I.debugPauseScheduleTimerForTest(true);
     AgentService.I.schedules.stopped = false;
-    AgentNotificationService.I.backgroundStopped = false;
-    AgentNotificationService.I.backgroundConstraint = null;
     app.sessions.add(ChatSession(id: 's', title: 'My work', model: 'm'));
     app.activeSessionId = 's';
   });
@@ -55,8 +51,6 @@ void main() {
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_native, null);
-    AgentNotificationService.I.backgroundStopped = false;
-    AgentNotificationService.I.backgroundConstraint = null;
     AgentService.I.schedules.stopped = false;
     AppState.resetTestInstance();
   });
@@ -271,16 +265,15 @@ void main() {
     );
   });
 
-  testWidgets('background Stop toggles AgentNotificationService.stopBackground',
-      (tester) async {
+  testWidgets('background Stop pauses schedules', (tester) async {
     await _pumpScreen(tester);
-    expect(AgentNotificationService.I.backgroundStopped, isFalse);
+    expect(AgentService.I.schedules.stopped, isFalse);
     await tester.tap(find.text('Stop background execution'));
     await _settle(tester);
     expect(find.text('Pause background execution?'), findsOneWidget);
     await tester.tap(find.text('Pause schedules'));
     await _settle(tester);
-    expect(AgentNotificationService.I.backgroundStopped, isTrue);
+    expect(AgentService.I.schedules.stopped, isTrue);
     // The strip now shows the paused state and the Resume affordance.
     expect(find.text('Background execution paused'), findsOneWidget);
     expect(find.text('Resume background execution'), findsOneWidget);
@@ -301,7 +294,7 @@ void main() {
     expect(find.textContaining('across all chats'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await _settle(tester);
-    expect(AgentNotificationService.I.backgroundStopped, isFalse);
+    expect(AgentService.I.schedules.stopped, isFalse);
     expect(AgentService.I.busyFor('s'), isTrue);
     expect(run.cancelRequested, isFalse);
 
@@ -310,7 +303,7 @@ void main() {
     await _settle(tester);
     await tester.tap(find.text('Pause schedules'));
     await _settle(tester);
-    expect(AgentNotificationService.I.backgroundStopped, isTrue);
+    expect(AgentService.I.schedules.stopped, isTrue);
     expect(run.cancelRequested, isFalse);
   });
 
@@ -347,7 +340,7 @@ void main() {
       await tester.pump();
     }
     await _settle(tester);
-    expect(AgentNotificationService.I.backgroundStopped, isFalse);
+    expect(AgentService.I.schedules.stopped, isFalse);
     expect(s.schedules.first['status'], 'pending');
     expect(s.schedules.first.containsKey('error'), isFalse);
     // A task the user paused individually stays paused.

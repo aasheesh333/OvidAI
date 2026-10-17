@@ -19,7 +19,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
@@ -237,7 +236,6 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues(const <String, Object>{});
     FlutterSecureStorage.setMockInitialValues(const <String, String>{});
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
@@ -248,7 +246,6 @@ void main() {
 
   tearDown(() async {
     AgentService.I.debugPauseScheduleTimerForTest(false);
-    AgentNotificationService.I.resetForTest();
     Distribution.thinOverrideForTest = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();

@@ -1,21 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Foreground service (agent keep-alive): required on API 28+ for
-         startForeground(); the dataSync subtype permission is required on
-         API 34+. Missing these crashed the app on every agent message
-         (SecurityException: startForeground requires
-         android.permission.FOREGROUND_SERVICE). The specialUse subtype
-         covers the personal-assistant presence itself (not just transfers)
-         and needs its own permission plus the in-service property below. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Restore schedules and the background service after reboot/update.
-         Battery exemptions are user-managed (Settings > Notifications &
-         background card) and do not guarantee process survival on every OEM. -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Scheduled tasks fire on time via AlarmManager.setExactAndAllowWhileIdle.
          SCHEDULE_EXACT_ALARM is user-revocable on Android 12+ (checked with
@@ -115,19 +100,6 @@
                 <data android:scheme="com.dhanuk.ovidai" android:host="oauth" android:path="/callback" />
             </intent-filter>
         </activity>
-        <!-- Foreground service: keeps Ovid alive while the AI agent works,
-             while scheduled tasks run and, with "Keep Ovid active in
-             background" on, as a low-importance status notification. It is
-             START_STICKY and restarted after reboot/update (BootReceiver). -->
-        <service
-            android:name=".AgentForegroundService"
-            android:exported="false"
-            android:stopWithTask="false"
-            android:foregroundServiceType="dataSync|specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Personal AI coding assistant: keeps the agent run alive while working, driving the device, or listening for reminders, until the user stops it." />
-        </service>
         <!-- FileProvider for sharing files and images -->
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -138,34 +110,11 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_provider_paths" />
         </provider>
-        <!-- Receiver for the notification's Stop button. -->
-        <receiver
-            android:name=".AgentStopReceiver"
-            android:exported="false"/>
+        <!-- Re-register schedule alarms on time-zone changes. -->
         <receiver android:name=".ScheduleAlarmReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.TIMEZONE_CHANGED"/>
                 <action android:name="android.intent.action.TIME_SET"/>
-            </intent-filter>
-        </receiver>
-        <!-- Re-register schedule alarms after reboot (LOCKED_BOOT_COMPLETED
-             re-arms from device-protected storage before unlock), time
-             changes and app updates; with "Keep Ovid active in background"
-             on, BOOT_COMPLETED and MY_PACKAGE_REPLACED also restart the
-             foreground service, which boots the Dart runtime headlessly. -->
-        <receiver
-            android:name=".BootReceiver"
-            android:exported="true"
-            android:enabled="true"
-            android:directBootAware="true">
-            <intent-filter>
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED"/>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
-                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
             </intent-filter>
         </receiver>
         <!-- Periodic safety net for schedules when exact alarms are denied. -->

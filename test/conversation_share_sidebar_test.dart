@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/conversation_share_sheet.dart';
@@ -12,12 +11,10 @@ void main() {
     'session menu shares selected row without switching active chat',
     (tester) async {
       SharedPreferences.setMockInitialValues({});
-      AgentNotificationService.I.resetForTest();
       AppState.resetTestInstance();
       final app = AppState.createForTest();
       AgentService.I.debugPauseScheduleTimerForTest(true);
       addTearDown(() {
-        AgentNotificationService.I.resetForTest();
         AppState.resetTestInstance();
       });
       app.sessions

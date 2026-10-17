@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/session_search.dart';
@@ -52,7 +51,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     app.sessions.clear();
     app.activeSessionId = null;
-    AgentNotificationService.I.resetForTest();
     AgentService.I.debugPauseScheduleTimerForTest(true);
     voice.availabilityOverrideForTest = null;
     voice.startOverrideForTest = null;
@@ -67,7 +65,6 @@ void main() {
     voice.ensureMicrophonePermissionForTest = null;
     AgentService.llmOnceForTest = null;
     AgentService.setRunSessionForTest('');
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
   });
 

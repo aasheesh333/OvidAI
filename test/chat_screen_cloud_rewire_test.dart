@@ -20,7 +20,6 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/cloud/cloud_agent_facade.dart';
 import 'package:ovid_ai/core/cloud/cloud_rest.dart';
@@ -240,7 +239,6 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues(const <String, Object>{});
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     AppState.createForTest();
     Distribution.thinOverrideForTest = true;
@@ -251,7 +249,6 @@ void main() {
 
   tearDown(() async {
     AgentService.I.debugPauseScheduleTimerForTest(false);
-    AgentNotificationService.I.resetForTest();
     Distribution.thinOverrideForTest = null;
     CloudAgentFacade.resetForTest();
     CloudSessionStore.resetForTest();

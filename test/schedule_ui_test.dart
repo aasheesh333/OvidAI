@@ -10,7 +10,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/ui/sidebar.dart';
@@ -32,14 +31,10 @@ void main() {
     app = AppState.createForTest();
     AgentService.I.debugPauseScheduleTimerForTest(true);
     AgentService.I.schedules.stopped = false;
-    AgentNotificationService.I.backgroundStopped = false;
-    AgentNotificationService.I.backgroundConstraint = null;
     app.sessions.add(ChatSession(id: 's', title: 'My work', model: 'm'));
     app.activeSessionId = 's';
   });
   tearDown(() {
-    AgentNotificationService.I.backgroundStopped = false;
-    AgentNotificationService.I.backgroundConstraint = null;
     AgentService.I.schedules.stopped = false;
     AppState.resetTestInstance();
   });

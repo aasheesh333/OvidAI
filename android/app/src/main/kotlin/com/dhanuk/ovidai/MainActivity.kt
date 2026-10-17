@@ -2,7 +2,7 @@ package com.dhanuk.ovidai
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.embedding.engine.FlutterEngineCache
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
 import android.app.ActivityManager
@@ -36,17 +36,6 @@ import java.util.zip.ZipFile
 import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
 
-/** Rebind on every host attachment: a retained Dart engine need not re-register. */
-internal fun bindNotificationHostCallbacks(emit: (String) -> Unit, exitHost: () -> Unit) {
-    AgentNotificationBridge.stopHandler = {
-        emit("onAgentStop")
-    }
-    AgentNotificationBridge.exitHandler = {
-        emit("onAgentExit")
-        exitHost()
-    }
-}
-
 /** Notification tap: consume the app route extra once (see OvidNotifications). */
 internal fun routeNotificationIntent(intent: Intent?, openRoute: (String) -> Unit) {
     val route = intent?.getStringExtra(OvidNotifications.EXTRA_ROUTE) ?: return
@@ -64,14 +53,6 @@ internal fun routeSessionIntent(intent: Intent?, selectSession: (String) -> Unit
 }
 
 class MainActivity : FlutterActivity() {
-    // The foreground service keeps the process eligible for background work;
-    // retaining the engine keeps the actual Dart scheduler alive after UI close.
-    // Process death still requires reopen/reconciliation, never a second engine.
-    override fun provideFlutterEngine(context: Context): FlutterEngine? =
-        FlutterEngineCache.getInstance().get(OvidEngineHost.ENGINE_ID)
-
-    override fun shouldDestroyEngineWithHost(): Boolean = false
-
     private val channelName = "ovid/native"
     private val safExportRequestCode = 7407
 
@@ -109,45 +90,28 @@ class MainActivity : FlutterActivity() {
 
     private var webViewHandler: OvidWebViewHandler? = null
 
-    private fun refreshNotificationCallbacks(flutterEngine: FlutterEngine) {
-        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-        // The engine is retained; the Activity is not. Exit resolves only the
-        // current host and does not keep a destroyed Activity alive.
-        val host = java.lang.ref.WeakReference(this)
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        bindNotificationHostCallbacks(
-            emit = { method -> handler.post { channel.invokeMethod(method, null) } },
-            exitHost = {
-                handler.post {
-                    host.get()?.let { activity ->
-                        if (!activity.isDestroyed) {
-                            try { activity.finishAndRemoveTask() } catch (_: Exception) { }
-                        }
-                    }
-                }
-            },
-        )
-    }
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "ovid/html-artifact", HtmlArtifactViewFactory(flutterEngine.dartExecutor.binaryMessenger),
         )
-        FlutterEngineCache.getInstance().put(OvidEngineHost.ENGINE_ID, flutterEngine)
-        refreshNotificationCallbacks(flutterEngine)
-        BackgroundChannel.bindRuntime(flutterEngine)
+        val nativeChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        AgentNotificationBridge.scheduleHandler = {
+            main.post { nativeChannel.invokeMethod("onScheduleWake", null) }
+        }
+        AgentNotificationBridge.constraintHandler = { message ->
+            main.post { nativeChannel.invokeMethod("onBackgroundConstraint", message) }
+        }
         webViewHandler = OvidWebViewHandler(
             this,
             flutterEngine,
             flutterEngine.dartExecutor.binaryMessenger
         )
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        nativeChannel
             .setMethodCallHandler { call, rawResult ->
                 val result = rawResult
-                // Service, alarms, notifications: shared with the headless
-                // engine (BackgroundChannel) so both behave identically.
-                if (BackgroundChannel.handle(applicationContext, call, result)) {
+                if (handleNativeBackground(call, result)) {
                     return@setMethodCallHandler
                 }
                 when (call.method) {
@@ -235,32 +199,6 @@ class MainActivity : FlutterActivity() {
                             }
                         } catch (e: Exception) {
                             result.success(false)
-                        }
-                    }
-                    "getBackgroundHealth" -> {
-                        // Pure check for background-health guidance: reports
-                        // the manufacturer plus the battery-exemption state
-                        // WITHOUT opening any system UI (unlike
-                        // requestBatteryExemption above).
-                        try {
-                            val exempt = try {
-                                val pm = getSystemService(POWER_SERVICE) as PowerManager
-                                pm.isIgnoringBatteryOptimizations(packageName)
-                            } catch (_: Exception) {
-                                true
-                            }
-                            result.success(
-                                mapOf(
-                                    "manufacturer" to (Build.MANUFACTURER ?: ""),
-                                    "batteryExempt" to exempt,
-                                ),
-                            )
-                        } catch (e: Exception) {
-                            result.error(
-                                "HEALTH_FAILED",
-                                e.message ?: "Could not read background health.",
-                                null,
-                            )
                         }
                     }
                     "openAutoStartSettings" -> {
@@ -454,20 +392,73 @@ class MainActivity : FlutterActivity() {
                             }
                         }
                     }
-                    "agentStopHandler" -> {
-                        refreshNotificationCallbacks(flutterEngine)
-                        result.success(true)
-                    }
-                    "agentExitHandler" -> {
-                        refreshNotificationCallbacks(flutterEngine)
-                        result.success(true)
-                    }
                     "getSdkInt" -> {
                         result.success(Build.VERSION.SDK_INT)
                     }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /** Alarm + notification subset of the `ovid/native` channel. */
+    private fun handleNativeBackground(call: MethodCall, result: MethodChannel.Result): Boolean {
+        val app = applicationContext
+        when (call.method) {
+            "scheduleAlarm" -> try {
+                BackgroundScheduleState.arm(app, call.argument<Number>("at")?.toLong())
+                result.success(true)
+            } catch (e: Exception) {
+                BackgroundScheduleState.constraint(app, "Alarm unavailable: ${e.message}")
+                result.error("ALARM_UNAVAILABLE", e.message, null)
+            }
+            "notifyConfigure" -> {
+                val sounds = call.argument<Map<String, String>>("sounds") ?: emptyMap()
+                val enabled = call.argument<Map<String, Boolean>>("enabled") ?: emptyMap()
+                OvidNotifications.configure(app, sounds, enabled)
+                result.success(true)
+            }
+            "notifyPost" -> result.success(
+                OvidNotifications.post(
+                    app,
+                    call.argument<String>("channel") ?: OvidNotifications.AGENT,
+                    call.argument<Number>("id")?.toInt() ?: 2000,
+                    call.argument<String>("title") ?: "Ovid",
+                    call.argument<String>("body") ?: "",
+                    call.argument<String>("route"),
+                ),
+            )
+            "notifyCancel" -> {
+                call.argument<Number>("id")?.toInt()?.let { OvidNotifications.cancel(app, it) }
+                result.success(true)
+            }
+            "notifyOpenChannelSettings" -> result.success(
+                launchIntent(
+                    OvidNotifications.channelSettingsIntent(
+                        app, call.argument<String>("channel") ?: OvidNotifications.AGENT,
+                    ),
+                ),
+            )
+            "notifyOpenAppSettings" -> result.success(
+                launchIntent(OvidNotifications.appNotificationSettingsIntent(app)),
+            )
+            "bgSetKeepActive" -> {
+                BackgroundScheduleState.setKeepActive(
+                    app,
+                    call.argument<Boolean>("enabled") ?: false,
+                    call.argument<Boolean>("master") ?: true,
+                )
+                result.success(true)
+            }
+            else -> return false
+        }
+        return true
+    }
+
+    private fun launchIntent(intent: Intent): Boolean = try {
+        startActivity(intent)
+        true
+    } catch (_: Exception) {
+        false
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -512,21 +503,6 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         safExportCoordinator.cleanup()
-        val engine = flutterEngine
         super.onDestroy()
-        // The retained engine keeps running schedules after the UI closes:
-        // hand its channel back to the Activity-free background handler so
-        // calls never reach this destroyed Activity.
-        liveHosts = maxOf(0, liveHosts - 1)
-        if (liveHosts == 0 && engine != null &&
-            FlutterEngineCache.getInstance().get(OvidEngineHost.ENGINE_ID) === engine
-        ) {
-            BackgroundChannel.attachHeadless(applicationContext, engine)
-        }
-    }
-
-    companion object {
-        /// MainActivity instances between onCreate and onDestroy.
-        private var liveHosts = 0
     }
 }

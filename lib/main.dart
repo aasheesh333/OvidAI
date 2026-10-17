@@ -5,14 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'core/cert_pinning.dart';
+import 'core/cloud/push_service.dart';
 import 'core/diag.dart';
 import 'core/state.dart';
 import 'core/studio_drafts.dart';
-import 'core/agent_notification_service.dart';
-import 'core/agent_service.dart';
-import 'core/background_jobs.dart';
 import 'core/background_notifications.dart';
 import 'core/composer_drafts.dart';
+import 'core/firebase_service.dart';
 import 'core/mcp_client_requests.dart';
 import 'core/mcp_service.dart';
 import 'core/session_history_store.dart';
@@ -146,28 +145,13 @@ Future<void> main() async {
   // anymore. The sandbox (core + runtimes) installs on Studio first-open
   // via openStudio(); the sandboxInstalled detection above stays available
   // for guards elsewhere.
-  // Background runtime: the same entrypoint also runs headlessly when the
-  // foreground service / a schedule alarm boots Ovid after Android killed it
-  // (no Activity, no frames). Register the native bridge and notification
-  // channels now instead of waiting for the shell to build.
-  unawaited(AgentNotificationService.I.init());
-  unawaited(BackgroundNotifier.I.init());
-  attachBackgroundJobWatchers();
-  unawaited(
-    AgentService.I.schedulesSettled.then((_) async {
-      // Run tasks that fell due while Ovid was not running, then settle the
-      // service ("Ovid is active" with keep-alive on, stopped otherwise).
-      await AgentService.I.wakeSchedules();
-      AgentNotificationService.I.settleBackgroundService();
-    }),
-  );
+  //
+  // Runs execute detached on the cloud gateway; this process is a thin
+  // client. Push wakes it to show results — nothing here keeps it alive.
   runApp(const OvidApp());
   WidgetsBinding.instance.addPostFrameCallback((_) {
     unawaited(_startReadiness());
   });
-  // A headless engine never draws a frame; start readiness (sessions,
-  // schedules) anyway. initializeReadiness() is idempotent.
-  Timer(const Duration(seconds: 3), () => unawaited(_startReadiness()));
 }
 
 Future<void> _startReadiness() => AppState.I.initializeReadiness();
@@ -207,11 +191,20 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     // Rebuild the whole app when the user toggles the theme in Settings.
     AppState.I.addListener(_onThemeChanged);
     // Notification taps route through the app router (07 §1): back to the
-    // chat root, validated id, then select.
-    AgentNotificationService.I.selectSessionHandler = _openChatFromNotification;
-    AgentNotificationService.I.openRouteHandler = _openRouteFromNotification;
+    // chat root, validated id, then select. FCM is the delivery path now.
+    PushService.I.onOpenRoute = _openRouteFromNotification;
     BackgroundNotifier.I.inAppPresenter = _showInAppNotification;
+    // Firebase must be up before a token can be requested; LoginGate owns
+    // initialization, so start push as soon as readiness flips.
+    FirebaseService.I.addListener(_maybeStartPush);
+    _maybeStartPush();
     _restoreAndListenForLinks();
+  }
+
+  void _maybeStartPush() {
+    if (!FirebaseService.I.isAvailable) return;
+    FirebaseService.I.removeListener(_maybeStartPush);
+    unawaited(PushService.I.init());
   }
 
   bool _openChatFromNotification(String sessionId, [int attempt = 0]) {
@@ -230,6 +223,10 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
   void _openRouteFromNotification(String path, [int attempt = 0]) {
     final route = AppRouter.parse(Uri.parse(path));
     if (route == null) return;
+    // Chat taps keep the session-validation path (and its cold-start retry).
+    if (route is ChatRoute && _openChatFromNotification(route.sessionId, attempt)) {
+      return;
+    }
     if (AppRouter.go(route)) return;
     // Cold start: the navigator may not be attached for a few frames.
     if (appNavigatorKey.currentState == null && attempt < 10 && mounted) {
@@ -337,10 +334,6 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
       // drafts now instead of waiting for the debounce.
       unawaited(ComposerDraftStore.I.flush());
     }
-    if (state == AppLifecycleState.resumed) {
-      unawaited(AgentService.I.wakeSchedules());
-    }
-    // Android may kill a paused process: write pending Studio drafts now.
     if (state == AppLifecycleState.paused) {
       unawaited(StudioDraftStore.I.flush());
     }
@@ -364,13 +357,9 @@ class _OvidAppState extends State<OvidApp> with WidgetsBindingObserver {
     AppState.I.setAccountFeaturesForeground(false);
     WidgetsBinding.instance.removeObserver(this);
     AppState.I.removeListener(_onThemeChanged);
-    if (AgentNotificationService.I.selectSessionHandler ==
-        _openChatFromNotification) {
-      AgentNotificationService.I.selectSessionHandler = null;
-    }
-    if (AgentNotificationService.I.openRouteHandler ==
-        _openRouteFromNotification) {
-      AgentNotificationService.I.openRouteHandler = null;
+    FirebaseService.I.removeListener(_maybeStartPush);
+    if (PushService.I.onOpenRoute == _openRouteFromNotification) {
+      PushService.I.onOpenRoute = null;
     }
     if (BackgroundNotifier.I.inAppPresenter == _showInAppNotification) {
       BackgroundNotifier.I.inAppPresenter = null;

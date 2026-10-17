@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/session_ledger.dart';
 import 'package:ovid_ai/core/state.dart';
@@ -33,7 +32,6 @@ void main() {
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     AppState.createForTest().seenWelcomeVersion = AppState.welcomeVersion;
     agent
@@ -50,7 +48,6 @@ void main() {
     agent
       ..clearBrowserTabsForTest()
       ..debugPauseScheduleTimerForTest(false);
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     final root = SessionLedger.rootOverrideForTest;
     SessionLedger.rootOverrideForTest = null;

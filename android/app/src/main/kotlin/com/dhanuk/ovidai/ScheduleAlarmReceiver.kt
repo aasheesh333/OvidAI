@@ -66,7 +66,6 @@ object BackgroundScheduleState {
         mirror(context) { putBoolean("stopped", true) }
         try { arm(context, null) } catch (_: Exception) {}
         (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(REOPEN_ID)
-        context.stopService(Intent(context, AgentForegroundService::class.java))
     }
     fun resume(context: Context) {
         check(latch(context).resume()) { "Could not persist Resume" }
@@ -106,6 +105,12 @@ object BackgroundScheduleState {
     )
 
     /** Registers the next schedule wake-up ([at] epoch ms; null clears it). */
+    fun exactAlarmsAllowed(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        return try { alarms.canScheduleExactAlarms() } catch (_: Exception) { false }
+    }
+
     fun arm(context: Context, at: Long?) {
         val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pi = pending(context)
@@ -118,7 +123,7 @@ object BackgroundScheduleState {
             ScheduleFallbackJob.cancel(context)
             return
         }
-        armAt(context, alarms, pi, deadline, BackgroundChannel.exactAlarmsAllowed(context))
+        armAt(context, alarms, pi, deadline, exactAlarmsAllowed(context))
     }
 
     private fun armAt(context: Context, alarms: AlarmManager, pi: PendingIntent, deadline: Long, exact: Boolean) {
@@ -156,7 +161,7 @@ object BackgroundScheduleState {
         if (next <= 0) return
         val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val trigger = maxOf(next, System.currentTimeMillis() + 1000)
-        if (BackgroundChannel.exactAlarmsAllowed(context)) {
+        if (exactAlarmsAllowed(context)) {
             alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pending(context))
         } else {
             alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pending(context))
@@ -164,37 +169,19 @@ object BackgroundScheduleState {
     }
 
     /**
-     * A schedule deadline arrived. Start the foreground service, which boots
-     * the Dart runtime if Android killed it and then runs due tasks. If the
-     * user turned notifications off entirely, wake Dart without the service.
+     * A schedule deadline arrived. Runs execute detached in the cloud, so the
+     * alarm only needs to wake a live UI; there is no local runtime to boot.
      */
     fun fire(context: Context) {
         if (stopped(context)) return
-        if (!notificationsAllowed(context)) {
-            val wake = AgentNotificationBridge.scheduleHandler
-            if (wake != null) wake() else if (!OvidEngineHost.ensure(context)) notifyReopen(context)
-            return
-        }
-        try {
-            BackgroundChannel.startService(
-                context,
-                Intent(context, AgentForegroundService::class.java)
-                    .setAction(AgentForegroundService.ACTION_ALARM),
-            )
-        } catch (e: Exception) {
-            constraint(context, "Android refused to start Ovid for a scheduled task: ${e.message}")
-            val wake = AgentNotificationBridge.scheduleHandler
-            if (wake != null) wake() else notifyReopen(context)
-        }
+        val wake = AgentNotificationBridge.scheduleHandler
+        if (wake != null) wake() else notifyReopen(context)
     }
 
-    /** Last resort when no runtime can start: ask the user to open Ovid. */
+    /** Last resort when no UI is running: ask the user to open Ovid. */
     fun notifyReopen(context: Context) {
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
         OvidNotifications.ensureChannels(context)
-        val stop = PendingIntent.getBroadcast(context, 4103,
-            Intent(context, AgentStopReceiver::class.java).setAction(AgentForegroundService.ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         try {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.notify(REOPEN_ID, NotificationCompat.Builder(
@@ -204,9 +191,21 @@ object BackgroundScheduleState {
                 .setContentText("Open Ovid to run pending tasks")
                 .setContentIntent(OvidNotifications.openAppIntent(context, null, 4102))
                 .setAutoCancel(true)
-                .addAction(0, "Stop", stop).build())
+                .build())
         } catch (_: SecurityException) {
             constraint(context, "Notification permission denied; reopen Ovid to resume tasks.")
         }
     }
+}
+
+/**
+ * Static bridge: Dart registers callbacks at startup; the alarm receiver calls
+ * them when a live runtime is attached.
+ */
+object AgentNotificationBridge {
+    @Volatile
+    var scheduleHandler: (() -> Unit)? = null
+
+    @Volatile
+    var constraintHandler: ((String) -> Unit)? = null
 }

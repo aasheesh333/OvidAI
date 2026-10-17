@@ -1,9 +1,8 @@
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ovid_ai/core/background_jobs.dart';
 import 'package:ovid_ai/core/background_notifications.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -308,32 +307,6 @@ void main() {
       expect(calls.map((c) => c.$1), ['notifyConfigure', 'bgSetKeepActive']);
       final keep = calls.last.$2 as Map;
       expect(keep.keys, containsAll(['enabled', 'master']));
-    });
-  });
-
-  group('long-job watcher', () {
-    test('posts once when a running job finishes', () async {
-      final source = ValueNotifier<bool>(false);
-      final posted = <OvidNotification>[];
-      JobCompletionWatcher(
-        source: source,
-        running: () => source.value,
-        onFinished: () => OvidNotification.jobDone(
-          title: 'Job done',
-          body: 'ok',
-          key: 'job:test',
-        ),
-        post: (n) async {
-          posted.add(n);
-          return NotificationDelivery.system;
-        },
-      );
-      source.value = true;
-      expect(posted, isEmpty);
-      source.value = false;
-      expect(posted.single.title, 'Job done');
-      source.value = false;
-      expect(posted, hasLength(1));
     });
   });
 

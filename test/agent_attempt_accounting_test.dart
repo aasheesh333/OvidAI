@@ -6,7 +6,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/usage_attempt.dart';
@@ -25,7 +24,6 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({});
     usageRoot = await Directory.systemTemp.createTemp('ovid-accounting-');
     AppState.usageRootOverrideForTest = usageRoot;
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     final app = AppState.createForTest();
     app.seenWelcomeVersion = AppState.welcomeVersion;
@@ -41,7 +39,6 @@ void main() {
     ];
     AgentService.I.debugPauseScheduleTimerForTest(false);
     AgentService.I.resetUsageAttemptRecorderForTest();
-    AgentNotificationService.I.resetForTest();
     AppState.usageRootOverrideForTest = null;
     AppState.resetTestInstance();
     await usageRoot.delete(recursive: true);

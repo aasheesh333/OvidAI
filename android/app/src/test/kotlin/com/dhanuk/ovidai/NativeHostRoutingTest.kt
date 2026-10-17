@@ -1,7 +1,6 @@
 package com.dhanuk.ovidai
 
 import android.content.Intent
-import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -11,27 +10,6 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class NativeHostRoutingTest {
-    @After fun cleanup() {
-        AgentNotificationBridge.stopHandler = null
-        AgentNotificationBridge.exitHandler = null
-    }
-
-    @Test fun refreshedNotificationCallbacksTargetNewHostAndCancelBeforeDart() {
-        var oldExit = false
-        var newExit = false
-        val events = mutableListOf<String>()
-        bindNotificationHostCallbacks({ fail("Old host received $it") }, { oldExit = true })
-        bindNotificationHostCallbacks({
-            events.add(it)
-        }, { newExit = true })
-        AgentNotificationBridge.stopHandler!!.invoke()
-        assertEquals(listOf("onAgentStop"), events)
-        AgentNotificationBridge.exitHandler!!.invoke()
-        assertEquals(listOf("onAgentStop", "onAgentExit"), events)
-        assertFalse(oldExit)
-        assertTrue(newExit)
-    }
-
     @Test fun sessionIntentRoutesOnceAndIgnoresBlankSession() {
         val selections = mutableListOf<String>()
         val initial = Intent().putExtra("sessionId", "session-a")

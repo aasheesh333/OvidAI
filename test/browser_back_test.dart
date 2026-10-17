@@ -5,7 +5,6 @@ import 'package:webview_flutter/webview_flutter.dart';
 // ignore: depend_on_referenced_packages
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -34,7 +33,6 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
     AppState.createForTest().seenWelcomeVersion = AppState.welcomeVersion;
     AgentService.I
@@ -48,7 +46,6 @@ void main() {
     AgentService.I
       ..clearBrowserTabsForTest()
       ..debugPauseScheduleTimerForTest(false);
-    AgentNotificationService.I.resetForTest();
     AppState.resetTestInstance();
   });
 

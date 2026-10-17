@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:ovid_ai/core/agent_notification_service.dart';
 import 'package:ovid_ai/core/agent_service.dart';
 import 'package:ovid_ai/core/state.dart';
 import 'package:ovid_ai/core/theme.dart';
@@ -178,7 +177,6 @@ void main() {
   group('ChatScreen large history', () {
     setUp(() {
       SharedPreferences.setMockInitialValues({});
-      AgentNotificationService.I.resetForTest();
       AppState.resetTestInstance();
       final app = AppState.createForTest();
       app.seenWelcomeVersion = AppState.welcomeVersion;
@@ -190,7 +188,6 @@ void main() {
 
     tearDown(() {
       _clearFoldCounter();
-      AgentNotificationService.I.resetForTest();
       AppState.resetTestInstance();
     });
 
