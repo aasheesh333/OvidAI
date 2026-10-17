@@ -290,6 +290,31 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.20.5)
 
+  packages/agent-core:
+    dependencies:
+      '@ovid/db':
+        specifier: workspace:*
+        version: link:../db
+      '@ovid/events':
+        specifier: workspace:*
+        version: link:../events
+      '@ovid/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.20.5
+        version: 22.20.5
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@types/node@22.20.5)
+
   packages/db:
     dependencies:
       '@ovid/shared':
