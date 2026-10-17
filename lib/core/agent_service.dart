@@ -72,6 +72,7 @@ import 'ssrf_guard.dart';
 import 'image_studio.dart';
 import 'image_task.dart';
 import 'ovid_cloud_service.dart';
+import 'cloud/agent_surface.dart';
 
 /// A persistent browser tab — owns its WebView controller lazily so the
 /// page state survives across BrowserScreen open/close cycles.
@@ -1050,7 +1051,7 @@ typedef QueuedMessageSnapshot = ({
 /// Non-stream fallback: choices[0].message.* with reasoning_content support.
 
 ///                  ← tool results loop back to model till final answer
-class AgentService extends ChangeNotifier {
+class AgentService extends ChangeNotifier implements AgentSurface {
   AgentService._() {
     // Deleted sessions lose their run; all others keep running in parallel.
     // Task 8: session_end hooks fire here too (deleteSession calls this
@@ -1185,6 +1186,7 @@ class AgentService extends ChangeNotifier {
   /// to the RUNNING session's persisted mode; outside a run it resolves to
   /// the ACTIVE session's mode. Subagents are real sessions, so their mode
   /// resolves through the same path — no detached special case.
+  @override
   AgentMode get mode {
     final s = _runCtx?.session ?? AppState.I.activeSession;
     final resolved = AgentMode.values.firstWhere(
@@ -1426,6 +1428,7 @@ class AgentService extends ChangeNotifier {
   // read the ACTIVE session's run.
   String? get activeRunId => _runResolved.activeRunId;
   set activeRunId(String? v) => _runResolved.activeRunId = v;
+  @override
   ApprovalRequest? get pendingApproval => _runResolved.pendingApproval;
   set pendingApproval(ApprovalRequest? v) {
     _runResolved.pendingApproval = v;
@@ -1455,6 +1458,7 @@ class AgentService extends ChangeNotifier {
   /// stalled for the whole grace period and auto-denied, and the model reported
   /// "DENIED by user" although the user was never asked. Every permissioned tool
   /// in every background session failed that way, silently.
+  @override
   List<({String sessionId, String title, ApprovalRequest request})>
   get pendingApprovalsElsewhere {
     final activeId = AppState.I.activeSessionId;
@@ -1522,6 +1526,7 @@ class AgentService extends ChangeNotifier {
   /// per-run `AgentRun.planMode` shadow field is gone — it had five writers and
   /// zero readers, and a second copy of the policy that nothing consults is
   /// exactly how the two used to disagree.
+  @override
   bool get planMode =>
       (_runSession ?? AppState.I.activeSession)?.planMode ?? false;
 
@@ -1530,6 +1535,7 @@ class AgentService extends ChangeNotifier {
   bool get planModePending =>
       (_runSession ?? AppState.I.activeSession)?.planModePending != null;
 
+  @override
   set planMode(bool v) {
     final s = _runSession ?? AppState.I.activeSession;
     if (s == null) {
@@ -1679,6 +1685,7 @@ class AgentService extends ChangeNotifier {
 
   /// UI view: live background jobs of [sessionId] (jobs badge popover).
   /// A snapshot list of (id, name, state, elapsedSeconds, outputChars).
+  @override
   List<({int id, String name, String state, int elapsedSec, int outChars})>
   jobsFor(String sessionId) {
     final r = _runs[sessionId];
@@ -1768,6 +1775,7 @@ class AgentService extends ChangeNotifier {
   /// Stops only [sessionId]. If it has queued messages, the current turn is
   /// aborted while the queue remains available for immediate continuation.
   /// Returns whether a queued continuation was preserved.
+  @override
   bool stopRequested({required String sessionId}) {
     for (final e in schedules.entries().where(
       (e) => e.sessionId == sessionId && e.task['status'] == 'running',
@@ -1873,6 +1881,7 @@ class AgentService extends ChangeNotifier {
   /// their existing queued continuation behavior. Interactive shells outside
   /// any run (Studio terminal) are left alone — only run-scoped processes
   /// die, via each bucket's own cancel.
+  @override
   void hardStopAll() {
     unawaited(VoiceInputService.I.cancel());
     // Invalidate every in-flight device_* call first so no stale native
@@ -6456,11 +6465,13 @@ user which one instead of assuming this one.''';
   List<({String name, String path, int size})> _attachmentsFor(String sid) =>
       _pendingAttachments.putIfAbsent(sid, () => []);
 
+  @override
   List<({String name, String path, int size})> get pendingAttachments =>
       _attachmentsFor(AppState.I.activeSessionId ?? '');
 
   /// Files in the active chat still being copied into the workspace; the
   /// composer shows a placeholder tile for each.
+  @override
   int get stagingAttachmentCount =>
       _attachmentCopies[AppState.I.activeSessionId ?? ''] ?? 0;
 
@@ -6470,6 +6481,7 @@ user which one instead of assuming this one.''';
 
   /// Attach a local file: copy into the session workspace and stage it.
   /// Returns a human-readable error string, or null on success.
+  @override
   Future<String?> attachFile(
     String sourcePath,
     String fileName, {
@@ -6542,12 +6554,14 @@ user which one instead of assuming this one.''';
   }
 
   /// Remove one staged attachment by its unique path (composer chip ✕).
+  @override
   void removeAttachment(String path) {
     pendingAttachments.removeWhere((a) => a.path == path);
     notifyListeners();
   }
 
   /// Clear all staged attachments (after send).
+  @override
   void clearAttachment() {
     pendingAttachments.clear();
     notifyListeners();
@@ -6641,6 +6655,7 @@ user which one instead of assuming this one.''';
   /// this (not [busy]) so a background parallel run in session A never
   /// makes session B blink or show a wrong stop/send button.  This was the
   /// "both sessions blinking + old session shows send" bug.
+  @override
   bool busyFor(String sessionId) => _runs[sessionId]?.activeRunId != null;
 
   /// Per-session busy flags for list rows. Each notifier only fires when its
@@ -6650,6 +6665,7 @@ user which one instead of assuming this one.''';
 
   /// A listenable that tracks [busyFor] for [sessionId]. Synced on every
   /// [notifyListeners] and on every [AppState] refresh.
+  @override
   ValueListenable<bool> busyListenable(String sessionId) => _busyNotifiers
       .putIfAbsent(sessionId, () => ValueNotifier<bool>(busyFor(sessionId)));
 
@@ -6670,6 +6686,7 @@ user which one instead of assuming this one.''';
 
   /// Live status line for [sessionId] ("retrying in 9s…", "running npm test").
   /// Null when idle or when nothing has been reported yet.
+  @override
   String? statusFor(String sessionId) {
     final r = _runs[sessionId];
     if (r == null || r.activeRunId == null) return null;
@@ -6684,6 +6701,7 @@ user which one instead of assuming this one.''';
   /// Without it the target is `_runSession ?? activeSession`, which inside a
   /// background run's zone is the BACKGROUND session — a foreground mode pick
   /// must never change (or clear plan mode on) a different chat.
+  @override
   void setMode(AgentMode m, {String? sessionId}) {
     // Picking an access mode directly ends plan mode: the picker and the
     // enforcement gate must agree, and any plan-owned read-only is released
@@ -6853,6 +6871,7 @@ user which one instead of assuming this one.''';
   /// double-tap on Allow, or a tap that lands while the card is being swapped
   /// for the next tool's request, can never approve a request the user has
   /// not seen. Returns whether [req] was resolved.
+  @override
   bool approveRequest(ApprovalRequest req, bool ok, {String? note}) {
     if (!identical(pendingApproval, req)) return false;
     approve(ok, note: note);
@@ -6861,6 +6880,7 @@ user which one instead of assuming this one.''';
 
   /// [approveAlways] bound to the request the card rendered; see
   /// [approveRequest].
+  @override
   bool approveAlwaysRequest(ApprovalRequest req) {
     if (!identical(pendingApproval, req)) return false;
     approveAlways();
@@ -10701,6 +10721,7 @@ user which one instead of assuming this one.''';
   /// Measured context usage for [s]: the LAST billed promptTokens when we
   /// have one (exact ground truth — the provider counts what we actually
   /// sent), otherwise the chars/4 heuristic over system+history.
+  @override
   int measuredContextTokens(ChatSession s, {String systemPrompt = ''}) {
     final billed = lastPromptTokens;
     if (billed != null && billed > 0) return billed;
@@ -11350,6 +11371,7 @@ user which one instead of assuming this one.''';
     return null;
   }
 
+  @override
   Future<void> runTask(
     String originalPrompt, {
     String? sessionId,
@@ -14319,6 +14341,7 @@ ${await _agentsMdBlock()}
   /// transcript (subagent screen) that must ignore other sessions' streams.
   final Map<String, ValueNotifier<int>> _liveTicksBySession = {};
 
+  @override
   ValueListenable<int> liveBubbleTicksFor(String sessionId) =>
       _liveTicksBySession.putIfAbsent(sessionId, () => ValueNotifier<int>(0));
 

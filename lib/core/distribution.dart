@@ -14,6 +14,10 @@
 ///    Network Abuse (answer/9888379).
 ///  * Idle keep-alive — a foreground service with no user task is not an
 ///    approvable foreground-service use (answer/13392821).
+library;
+
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 class Distribution {
   const Distribution._();
 
@@ -24,6 +28,42 @@ class Distribution {
 
   /// True for the Google Play artifact.
   static bool get play => playOverrideForTest ?? _playDefine;
+
+  // -------------------------------------------------------------------------
+  // Thin client (P8) — the cloud-execution migration gates.
+  //
+  // Every consumer keeps BOTH paths compiled (Global Constraints: dies in
+  // pieces) and branches on these flags. `OVID_THIN_CLIENT=true` opts a
+  // sideload build into the cloud client before Play becomes the default.
+  // -------------------------------------------------------------------------
+
+  static const bool _thinDefine = bool.fromEnvironment('OVID_THIN_CLIENT');
+
+  /// Test seam: force thin-client mode on/off. Null falls through to the
+  /// compile-time define and the Play channel.
+  @visibleForTesting
+  static bool? thinOverrideForTest;
+
+  /// True when chat/runs execute in Ovid Cloud instead of on-device.
+  static bool get thinClient => thinOverrideForTest ?? (_thinDefine || play);
+
+  /// Chat + runs via cloud (Task 10 flips the consumers).
+  static bool get cloudExecution => thinClient;
+
+  /// Remote Studio is live only after Task 15.
+  static bool get cloudStudio => thinClient;
+
+  /// Cloud schedules are live only after Task 14.
+  static bool get cloudSchedules => thinClient;
+
+  /// Cloud browser is live only after Task 16.
+  static bool get cloudBrowser => thinClient;
+
+  /// MCP/plugin runtime is dark until P5.
+  static bool get cloudPlugins => false;
+
+  /// BYOK escrow is dark until the P9 escrow endpoints.
+  static bool get cloudByok => false;
 
   /// Accessibility-driven Control mode (sideload builds only).
   static bool get controlModeAvailable => !play;
