@@ -25,3 +25,8 @@ export * from "./configParse.js";
 // P5 Task 8: P9-aligned envelope crypto shim (deleted once P9's @ovid/escrow
 // lands and call sites swap imports — see crypto.ts header).
 export * from "./crypto.js";
+// P5 Task 9: MCP OAuth — RFC 9728/8414 discovery + DCR, server-side PKCE
+// flow with the sealed token store (Task 15's gateway routes consume
+// createOAuthFlow from this root; the exports map blocks deep imports).
+export * from "./oauth/discovery.js";
+export * from "./oauth/flow.js";
