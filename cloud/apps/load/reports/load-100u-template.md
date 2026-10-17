@@ -1,12 +1,13 @@
 # Ovid 100-user staging load report — TEMPLATE (not an executed run)
 
 > **STATUS: NOT EXECUTED.** This is the report skeleton for P10 Task 5. The
-> 100-user run is blocked on `cloud/deploy/Dockerfile.mint`, which is being
-> written by P9 Task 18 and does not exist yet. `staging.sh up` cannot compose
-> the mint service without it. Do **not** copy measured values into this file.
-> At execution, write the dated report to
-> `cloud/apps/load/reports/load-<YYYYMMDD>-100u.md` (the CLI `--out` path) and
-> commit that file instead of this template.
+> former blocker (`cloud/deploy/Dockerfile.mint` missing) is **CLEARED**:
+> `Dockerfile.mint` now exists and `docker-compose.staging.yml` builds it
+> (`dockerfile: deploy/Dockerfile.mint`), so `staging.sh up` can compose the
+> mint service. The run is still unexecuted — no measured values exist. Do
+> **not** copy measured values into this file. At execution, write the dated
+> report to `cloud/apps/load/reports/load-<YYYYMMDD>-100u.md` (the CLI
+> `--out` path) and commit that file instead of this template.
 >
 > Owner gate (Q3): default is same-machine staging in a maintenance window
 > (~45 min: up → run → down). If the production cloud stack is serving real
