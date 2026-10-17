@@ -8,8 +8,21 @@ import {
   AGENT_RUNS_STALLED_INTERVAL_MS,
   agentRunJobSchema,
   createAgentRunsWorker,
+  createHibernateWorker,
+  createHydrateWorker,
   createQueues,
+  HIBERNATE,
+  HIBERNATE_JOB_NAME,
+  hibernateJobSchema,
+  HYDRATE,
+  HYDRATE_JOB_NAME,
+  hydrateJobSchema,
+  STORAGE_JOB_CONCURRENCY,
+  STORAGE_JOB_DEFAULTS,
+  storageJobId,
   type AgentRunJob,
+  type HibernateJob,
+  type HydrateJob,
   type QueueServices,
 } from "./queues.js";
 
@@ -90,6 +103,94 @@ describe("AGENT_RUN_JOB_DEFAULTS", () => {
 });
 
 // ---------------------------------------------------------------------------
+// P7 Task 7 — hibernate/hydrate storage queues (pure contract tests).
+// ---------------------------------------------------------------------------
+
+describe("storage job ids and defaults", () => {
+  it("storageJobId composes `${sessionId}~${generation}` — the idempotent add id (spike §9.3; `~` not `:`: BullMQ rejects custom ids containing ':')", () => {
+    expect(storageJobId("sess-1", 3)).toBe("sess-1~3");
+    expect(storageJobId("s", 0)).toBe("s~0");
+  });
+
+  it("STORAGE_JOB_DEFAULTS pins 3 attempts with exponential 5 s backoff (storage retries are safe: generation-checked idempotency)", () => {
+    expect(STORAGE_JOB_DEFAULTS).toEqual({
+      attempts: 3,
+      backoff: { type: "exponential", delay: 5_000 },
+    });
+  });
+
+  it("STORAGE_JOB_CONCURRENCY is 2 — pack/extract are CPU+IO heavy on the 8-core box", () => {
+    expect(STORAGE_JOB_CONCURRENCY).toBe(2);
+  });
+});
+
+describe("hibernateJobSchema", () => {
+  const valid: HibernateJob = {
+    sessionId: "s1",
+    userId: "u1",
+    generation: 1,
+    reason: "idle",
+  };
+
+  it("round-trips a well-formed HibernateJob", () => {
+    expect(hibernateJobSchema.safeParse(valid)).toEqual({
+      success: true,
+      data: valid,
+    });
+  });
+
+  it("accepts every HibernateReason", () => {
+    for (const reason of ["idle", "pressure", "manual"] as const) {
+      expect(hibernateJobSchema.safeParse({ ...valid, reason }).success).toBe(true);
+    }
+  });
+
+  it("rejects a non-integer generation (1.5)", () => {
+    expect(
+      hibernateJobSchema.safeParse({ ...valid, generation: 1.5 }).success,
+    ).toBe(false);
+  });
+
+  it("rejects generation 0 — hibernate claims are row.generation + 1, so 1 is the floor", () => {
+    expect(hibernateJobSchema.safeParse({ ...valid, generation: 0 }).success).toBe(false);
+  });
+
+  it("rejects an unknown reason and empty ids", () => {
+    expect(hibernateJobSchema.safeParse({ ...valid, reason: "bogus" }).success).toBe(false);
+    expect(hibernateJobSchema.safeParse({ ...valid, sessionId: "" }).success).toBe(false);
+    expect(hibernateJobSchema.safeParse({ ...valid, userId: "" }).success).toBe(false);
+  });
+});
+
+describe("hydrateJobSchema", () => {
+  const valid: HydrateJob = {
+    sessionId: "s1",
+    userId: "u1",
+    generation: 0,
+    reason: "run",
+  };
+
+  it("round-trips a well-formed HydrateJob — generation 0 is valid (cold, never hibernated)", () => {
+    expect(hydrateJobSchema.safeParse(valid)).toEqual({ success: true, data: valid });
+  });
+
+  it("accepts every HydrateReason", () => {
+    for (const reason of ["run", "open", "write", "manual"] as const) {
+      expect(hydrateJobSchema.safeParse({ ...valid, reason }).success).toBe(true);
+    }
+  });
+
+  it("rejects negative and non-integer generations", () => {
+    expect(hydrateJobSchema.safeParse({ ...valid, generation: -1 }).success).toBe(false);
+    expect(hydrateJobSchema.safeParse({ ...valid, generation: 0.5 }).success).toBe(false);
+  });
+
+  it("rejects a reason from the wrong enum", () => {
+    expect(hydrateJobSchema.safeParse({ ...valid, reason: "idle" }).success).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Real-redis behavior. Parallel test suites share the dev redis, so this suite
 // scopes ALL its BullMQ keys behind a suite-unique prefix
 // (OVID_TEST_QUEUE_PREFIX + "-queue"; default "ovid-test-queue") — its
@@ -99,20 +200,21 @@ describe("AGENT_RUN_JOB_DEFAULTS", () => {
 // keys are off-limits).
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
+describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real redis", () => {
   const QUEUE_PREFIX = process.env.OVID_TEST_QUEUE_PREFIX
     ? `${process.env.OVID_TEST_QUEUE_PREFIX}-queue`
     : "ovid-test-queue";
   const connection: ConnectionOptions = { url: TEST_REDIS_URL! };
   let queues: QueueServices;
-  const openWorkers: Worker<AgentRunJob>[] = [];
+  type AnyWorker = Worker<AgentRunJob> | Worker<HibernateJob> | Worker<HydrateJob>;
+  const openWorkers: AnyWorker[] = [];
 
-  function trackWorker(w: Worker<AgentRunJob>): Worker<AgentRunJob> {
+  function trackWorker<T extends AnyWorker>(w: T): T {
     openWorkers.push(w);
     return w;
   }
 
-  async function closeWorker(w: Worker<AgentRunJob>): Promise<void> {
+  async function closeWorker(w: AnyWorker): Promise<void> {
     const i = openWorkers.indexOf(w);
     if (i >= 0) openWorkers.splice(i, 1);
     await w.close();
@@ -127,6 +229,8 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
     // Deterministic job counts: wipe only this suite's prefixed keys (also
     // shields the suite from leftovers of a previously crashed run).
     await queues.agentRuns.obliterate({ force: true });
+    await queues.hibernate.obliterate({ force: true });
+    await queues.hydrate.obliterate({ force: true });
   });
 
   afterAll(async () => {
@@ -138,6 +242,10 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
     if (queues) {
       await queues.agentRuns.obliterate({ force: true });
       await queues.agentRuns.close();
+      await queues.hibernate.obliterate({ force: true });
+      await queues.hibernate.close();
+      await queues.hydrate.obliterate({ force: true });
+      await queues.hydrate.close();
     }
   });
 
@@ -146,12 +254,22 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
     // contract with the deploy (compose env, monitoring, restore drills).
     const unscoped = createQueues(connection);
     expect(unscoped.agentRuns.opts.prefix).toBe("bull");
+    expect(unscoped.hibernate.opts.prefix).toBe("bull");
+    expect(unscoped.hydrate.opts.prefix).toBe("bull");
     await unscoped.agentRuns.close();
+    await unscoped.hibernate.close();
+    await unscoped.hydrate.close();
 
     const scoped = createQueues(connection, { prefix: "t:iso" });
     expect(scoped.agentRuns.opts.prefix).toBe("t:iso");
+    expect(scoped.hibernate.opts.prefix).toBe("t:iso"); // P1 prefix discipline: EVERY queue in createQueues threads the prefix
+    expect(scoped.hydrate.opts.prefix).toBe("t:iso");
     await scoped.agentRuns.obliterate({ force: true }); // only "t:iso" keys
+    await scoped.hibernate.obliterate({ force: true });
+    await scoped.hydrate.obliterate({ force: true });
     await scoped.agentRuns.close();
+    await scoped.hibernate.close();
+    await scoped.hydrate.close();
 
     const worker = trackWorker(
       createAgentRunsWorker(connection, async () => undefined, { prefix: "t:iso" }),
@@ -159,8 +277,16 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
     expect(worker.opts.prefix).toBe("t:iso"); // must match the add side or jobs never meet
     await closeWorker(worker);
 
+    const hworker = trackWorker(
+      createHibernateWorker(connection, async () => undefined, { prefix: "t:iso" }),
+    );
+    expect(hworker.opts.prefix).toBe("t:iso");
+    await closeWorker(hworker);
+
     // And this suite's own queues are prefixed.
     expect(queues.agentRuns.opts.prefix).toBe(QUEUE_PREFIX);
+    expect(queues.hibernate.opts.prefix).toBe(QUEUE_PREFIX);
+    expect(queues.hydrate.opts.prefix).toBe(QUEUE_PREFIX);
   });
 
   it("adding the same jobId twice dedupes: same job id, one job in the queue", async () => {
@@ -243,6 +369,177 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs queue against real redis", () => {
       }),
     );
     expect(worker.opts.concurrency).toBe(3);
+    await closeWorker(worker);
+  });
+
+  // -------------------------------------------------------------------------
+  // P7 Task 7 — hibernate/hydrate storage queues.
+  // -------------------------------------------------------------------------
+
+  it("exposes hibernate and hydrate queues with pinned names", () => {
+    expect(HIBERNATE).toBe("hibernate");
+    expect(HYDRATE).toBe("hydrate");
+    expect(HIBERNATE_JOB_NAME).toBe("hibernate-workspace");
+    expect(HYDRATE_JOB_NAME).toBe("hydrate-workspace");
+    expect(queues.hibernate.name).toBe("hibernate");
+    expect(queues.hydrate.name).toBe("hydrate");
+  });
+
+  it("adding the same storageJobId twice dedupes: same job id, one job in each queue", async () => {
+    const hjob: HibernateJob = {
+      sessionId: uid("sess"),
+      userId: uid("user"),
+      generation: 4,
+      reason: "pressure",
+    };
+    const hid = storageJobId(hjob.sessionId, hjob.generation);
+    const h1 = await queues.hibernate.add(HIBERNATE_JOB_NAME, hjob, {
+      jobId: hid,
+    });
+    const h2 = await queues.hibernate.add(HIBERNATE_JOB_NAME, hjob, {
+      jobId: hid,
+    });
+    expect(h2.id).toBe(h1.id);
+    expect(h1.id).toBe(hid);
+    const hcounts = await queues.hibernate.getJobCounts();
+    expect(Object.values(hcounts).reduce((a, b) => a + b, 0)).toBe(1);
+
+    const yjob: HydrateJob = {
+      sessionId: uid("sess"),
+      userId: uid("user"),
+      generation: 0,
+      reason: "open",
+    };
+    const yid = storageJobId(yjob.sessionId, yjob.generation);
+    const y1 = await queues.hydrate.add(HYDRATE_JOB_NAME, yjob, {
+      jobId: yid,
+    });
+    const y2 = await queues.hydrate.add(HYDRATE_JOB_NAME, yjob, {
+      jobId: yid,
+    });
+    expect(y2.id).toBe(y1.id);
+    expect(y1.id).toBe(yid);
+    const ycounts = await queues.hydrate.getJobCounts();
+    expect(Object.values(ycounts).reduce((a, b) => a + b, 0)).toBe(1);
+  });
+
+  it("applies STORAGE_JOB_DEFAULTS as both storage queues' default job options", async () => {
+    const job: HibernateJob = {
+      sessionId: uid("sess"),
+      userId: uid("user"),
+      generation: 1,
+      reason: "manual",
+    };
+    await queues.hibernate.add(HIBERNATE_JOB_NAME, job, {
+      jobId: storageJobId(job.sessionId, job.generation),
+    });
+    const stored = await queues.hibernate.getJob(
+      storageJobId(job.sessionId, job.generation),
+    );
+    expect(stored?.opts.attempts).toBe(3);
+    expect(stored?.opts.backoff).toEqual({ type: "exponential", delay: 5_000 });
+
+    const yjob: HydrateJob = {
+      sessionId: uid("sess"),
+      userId: uid("user"),
+      generation: 2,
+      reason: "run",
+    };
+    await queues.hydrate.add(HYDRATE_JOB_NAME, yjob, {
+      jobId: storageJobId(yjob.sessionId, yjob.generation),
+    });
+    const ystored = await queues.hydrate.getJob(
+      storageJobId(yjob.sessionId, yjob.generation),
+    );
+    expect(ystored?.opts.attempts).toBe(3);
+    expect(ystored?.opts.backoff).toEqual({ type: "exponential", delay: 5_000 });
+  });
+
+  it("createHibernateWorker consumes an added job (exact payload, concurrency 2 default)", async () => {
+    const processed: HibernateJob[] = [];
+    const worker = trackWorker(
+      createHibernateWorker(
+        connection,
+        async (job) => {
+          processed.push(job.data);
+        },
+        { prefix: QUEUE_PREFIX },
+      ),
+    );
+    expect(STORAGE_JOB_CONCURRENCY).toBe(2);
+    expect(worker.opts.concurrency).toBe(2);
+
+    const completed = new Promise<Job<HibernateJob>>((resolve, reject) => {
+      const timer = setTimeout(
+        () =>
+          reject(new Error("timed out waiting for hibernate worker completed event")),
+        5_000,
+      );
+      worker.once("completed", (job) => {
+        clearTimeout(timer);
+        resolve(job);
+      });
+    });
+
+    const payload: HibernateJob = {
+      sessionId: uid("sess"),
+      userId: uid("user"),
+      generation: 1,
+      reason: "idle",
+    };
+    const added = await queues.hibernate.add(HIBERNATE_JOB_NAME, payload, {
+      jobId: storageJobId(payload.sessionId, payload.generation),
+    });
+
+    const done = await completed;
+    expect(done.id).toBe(added.id);
+    expect(done.data).toEqual(payload); // payload round-trips through the queue
+    expect(done.opts.attempts).toBe(3); // add side and worker side share the defaults
+    expect(processed).toEqual([payload]);
+
+    await closeWorker(worker);
+  });
+
+  it("createHydrateWorker consumes an added job and honors a concurrency override", async () => {
+    const processed: HydrateJob[] = [];
+    const worker = trackWorker(
+      createHydrateWorker(
+        connection,
+        async (job) => {
+          processed.push(job.data);
+        },
+        { concurrency: 1, prefix: QUEUE_PREFIX },
+      ),
+    );
+    expect(worker.opts.concurrency).toBe(1);
+
+    const completed = new Promise<Job<HydrateJob>>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("timed out waiting for hydrate worker completed event")),
+        5_000,
+      );
+      worker.once("completed", (job) => {
+        clearTimeout(timer);
+        resolve(job);
+      });
+    });
+
+    const payload: HydrateJob = {
+      sessionId: uid("sess"),
+      userId: uid("user"),
+      generation: 0,
+      reason: "run",
+    };
+    const added = await queues.hydrate.add(HYDRATE_JOB_NAME, payload, {
+      jobId: storageJobId(payload.sessionId, payload.generation),
+    });
+
+    const done = await completed;
+    expect(done.id).toBe(added.id);
+    expect(done.data).toEqual(payload);
+    expect(done.opts.attempts).toBe(3);
+    expect(processed).toEqual([payload]);
+
     await closeWorker(worker);
   });
 });
