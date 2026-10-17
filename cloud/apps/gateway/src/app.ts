@@ -20,6 +20,7 @@ import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
 import type { WsDeps } from "./ws.js";
+import type { BrowserChannelDeps } from "./browserChannel.js";
 import { PtyBridgeError, type PtyBridge } from "./wsPty.js";
 
 export interface GatewayDeps {
@@ -39,6 +40,15 @@ export interface GatewayDeps {
    * instead of crashing — the fallback is loud, never a silent no-op.
    */
   pty?: PtyBridge;
+  /**
+   * P6 Task 9: the browser viewer channel's redis factory (each attach opens
+   * a dedicated ctl/input publisher + a frames/state subscriber). main()
+   * wires `{ redisFactory: () => new Redis(cfg.redisQUrl) }`. OPTIONAL only
+   * so pre-P6 compositions (spine e2e + P1 suites) stay source-compatible;
+   * when absent, every browser_* frame answers a loud `unavailable` error
+   * frame instead of crashing — the fallback is loud, never a silent no-op.
+   */
+  browser?: BrowserChannelDeps;
   /**
    * P8 Task 3: presigned-PUT seam for attachment uploads (ruling P8-Q3 —
    * structurally @ovid/storage's StorageAdapter.presignPut, so the R2 adapter
@@ -156,6 +166,7 @@ export function buildGateway(
       tickets: deps.tickets,
       events: deps.events,
       pty: deps.pty ?? unavailablePtyBridge(),
+      browser: deps.browser,
     };
     registerWsRoute(scope, wsDeps);
   });

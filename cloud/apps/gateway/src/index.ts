@@ -56,6 +56,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Fastif
       // Terminal-over-WS bridge (Task 13): ctl/out pub-sub + the pty registry
       // all live on the same queue Redis the worker PSUBSCRIBEs.
       pty: createRedisPtyBridge(redisQ),
+      // Browser viewer channel (P6 Task 9): each attach opens its own
+      // dedicated ctl/input publisher + frames/state subscriber on the queue
+      // Redis (the worker's browser bridge subscribes the matching channels).
+      browser: { redisFactory: () => new Redis(cfg.redisQUrl) },
     },
     { logger: true },
   );

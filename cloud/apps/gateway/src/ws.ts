@@ -5,6 +5,13 @@ import type { EventLog } from "@ovid/events";
 import { wsClientMsg, type PtyOutMsg, type SessionEvent, type WsClientMsg, type WsServerMsg } from "@ovid/shared";
 import { isUuid } from "./routes/http.js";
 import type { TicketStore } from "./tickets.js";
+import {
+  BROWSER_FRAME_HIGH_WATER,
+  BROWSER_VIEWER_HEARTBEAT_MS,
+  createBrowserAttach,
+  type BrowserAttach,
+  type BrowserChannelDeps,
+} from "./browserChannel.js";
 import { PTY_OPEN_TIMEOUT_MS, PTY_REPLY_TIMEOUT_MS, PtyBridgeError, type PtyBridge } from "./wsPty.js";
 
 /**
@@ -26,6 +33,12 @@ import { PTY_OPEN_TIMEOUT_MS, PTY_REPLY_TIMEOUT_MS, PtyBridgeError, type PtyBrid
  * not open/attach the pty go through the bridge's registry lookup. PTYS
  * SURVIVE socket close — 'close' only DETACHES the output subscriptions (an
  * explicit pty_close or a worker shutdown kills them).
+ *
+ * Task 9 adds the browser viewer ops (browser_*): one attach per socket
+ * holds TWO dedicated redis connections (a ctl/input publisher + a frames/
+ * state subscriber — a subscriber-mode connection cannot publish) and is
+ * torn down on detach, replace, and socket close. Frames reach the client
+ * as BINARY ws messages (image bytes only); state as browser_state ops.
  */
 
 export interface WsDeps {
@@ -34,11 +47,20 @@ export interface WsDeps {
   db: Db;
   /** Terminal-over-WS bridge (Task 13); main wires createRedisPtyBridge(redisQ). */
   pty: PtyBridge;
+  /**
+   * Browser viewer channel (Task 9); main wires
+   * `{ redisFactory: () => new Redis(cfg.redisQUrl) }`. OPTIONAL so pre-P6
+   * compositions stay source-compatible: when absent, every browser_* frame
+   * answers a loud `unavailable` error frame instead of crashing.
+   */
+  browser?: BrowserChannelDeps;
 }
 
 export interface WsConnectionOptions {
   /** Server-side protocol ping interval (default 30 s). Injectable for tests. */
   pingIntervalMs?: number;
+  /** Test seam: overrides BROWSER_VIEWER_HEARTBEAT_MS for the join heartbeat. */
+  browserHeartbeatMs?: number;
 }
 
 /** App-private close code (4000–4999 range) for a failed ticket handshake. */
@@ -128,6 +150,9 @@ export async function handleWsConnection(
   // the drain is synchronous, so no new window opens).
   const subs = new Map<string, Subscription>();
   const ptySubs = new Map<string, PtyEntry>();
+  // ONE browser attach per socket (Task 9): holds the dedicated redis
+  // publisher + subscriber; torn down on detach, replace, and socket close.
+  let browserAttach: BrowserAttach | null = null;
   let closed = false;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
 
@@ -137,6 +162,8 @@ export async function handleWsConnection(
     subs.clear();
     const ptyAll = [...ptySubs.values()];
     ptySubs.clear();
+    const browser = browserAttach;
+    browserAttach = null;
     // EVERY subscription must be torn down: each holds a dedicated redis
     // pub/sub connection (Task 4 duplicates the client), so a leak here is a
     // leaked connection per session per reconnect.
@@ -144,6 +171,9 @@ export async function handleWsConnection(
     // Terminal subs DETACH ONLY (ptys survive — never an implicit pty_close;
     // the reconnect's pty_attach picks the same pty back up).
     await Promise.all(ptyAll.map((p) => p.detach().catch(() => {})));
+    // The browser attach publishes viewer_leave and quits BOTH of its
+    // dedicated connections (awaited — same reclaim discipline as above).
+    if (browser !== null) await browser.detach().catch(() => {});
   };
   socket.on("close", () => {
     closed = true;
@@ -478,6 +508,109 @@ export async function handleWsConnection(
     }
   }
 
+  // ---- Browser viewer ops (Task 9) ------------------------------------------
+
+  /**
+   * Attach precondition for input/takeover: THIS connection must hold an
+   * active attach for THAT session (the attach itself proved ownership, so
+   * ops never re-query the db). Missing/mismatched → `not_attached`; the
+   * connection survives.
+   */
+  function requireBrowserAttach(sessionId: string): BrowserAttach | null {
+    const attach = browserAttach;
+    if (attach === null || attach.sessionId !== sessionId) {
+      send(socket, {
+        op: "error",
+        code: "not_attached",
+        message: "No active browser attach for this session.",
+        sessionId,
+      });
+      return null;
+    }
+    return attach;
+  }
+
+  async function handleBrowserAttach(sessionId: string): Promise<void> {
+    // Loud fallback for pre-P6 compositions (no browser deps wired).
+    if (deps.browser === undefined) {
+      send(socket, {
+        op: "error",
+        code: "unavailable",
+        message: "Browser channel not configured.",
+      });
+      return;
+    }
+    // Ownership FIRST, before any redis work — sessions.get is ownership-
+    // scoped (null on unknown id AND wrong owner; the uuid shape guard keeps
+    // client garbage away from the id column).
+    const owned = isUuid(sessionId) ? await sessions.get(deps.db, sessionId, uid) : null;
+    if (owned === null) {
+      send(socket, {
+        op: "error",
+        code: "forbidden",
+        message: "Session not found.",
+        sessionId,
+      });
+      return;
+    }
+
+    // ONE attach per socket: a second browser_attach REPLACES the first.
+    // The old viewer's leave is AWAITED before the new attach is created, so
+    // the ctl channel sees leave(v1) strictly before join(v2).
+    const previous = browserAttach;
+    browserAttach = null;
+    if (previous !== null) await previous.detach().catch(() => {});
+
+    let attach: BrowserAttach | null = null;
+    try {
+      attach = await createBrowserAttach({
+        redisFactory: deps.browser.redisFactory,
+        sessionId,
+        heartbeatMs: opts.browserHeartbeatMs ?? BROWSER_VIEWER_HEARTBEAT_MS,
+        handlers: {
+          onState: (state) => {
+            if (browserAttach !== attach) return; // replaced or torn down: ignore
+            send(socket, { op: "browser_state", sessionId, state });
+          },
+          onFrame: (image) => {
+            if (browserAttach !== attach) return; // replaced or torn down: ignore
+            if (closed || socket.readyState !== socket.OPEN) return;
+            // Review Focus #3 (slow client): never queue unbounded image
+            // bytes behind a stuck socket — anything still buffered above
+            // the high-water mark is DROPPED, and later frames flow once the
+            // client drains.
+            if (socket.bufferedAmount > BROWSER_FRAME_HIGH_WATER) return;
+            socket.send(image); // raw BINARY message: image bytes only
+          },
+        },
+      });
+    } catch {
+      send(socket, {
+        op: "error",
+        code: "internal",
+        message: "Browser attach failed.",
+        sessionId,
+      });
+      return;
+    }
+    if (closed || browserAttach !== null) {
+      // Socket died (or another attach won) mid-setup: don't leak the freshly
+      // created subscriber/publisher connections.
+      await attach.detach().catch(() => {});
+      return;
+    }
+    browserAttach = attach;
+    // Deliberately NO ack frame: the client learns the attach worked from
+    // the worker's first browser_state / binary frame (shared ws contract).
+  }
+
+  async function handleBrowserDetach(sessionId: string): Promise<void> {
+    const attach = browserAttach;
+    if (attach === null || attach.sessionId !== sessionId) return; // idempotent no-op
+    browserAttach = null;
+    await attach.detach().catch(() => {});
+  }
+
   async function processFrame(raw: string): Promise<void> {
     // Defense in depth for the chained-queue path: a frame that was still
     // waiting its turn when the socket died must not start db/redis work.
@@ -519,6 +652,24 @@ export async function handleWsConnection(
       case "pty_close":
         await handlePtyCtl(msg.ptyId, { type: "close" });
         return;
+      case "browser_attach":
+        await handleBrowserAttach(msg.sessionId);
+        return;
+      case "browser_detach":
+        await handleBrowserDetach(msg.sessionId);
+        return;
+      case "browser_input": {
+        // `input` was zod-validated by the shared wsClientMsg parse above —
+        // an off-schema event never gets this far (it answered bad_message).
+        const attach = requireBrowserAttach(msg.sessionId);
+        if (attach !== null) attach.publishInput(msg.input);
+        return;
+      }
+      case "browser_takeover": {
+        const attach = requireBrowserAttach(msg.sessionId);
+        if (attach !== null) attach.publishCtl({ type: "takeover", enabled: msg.enabled });
+        return;
+      }
     }
   }
 
