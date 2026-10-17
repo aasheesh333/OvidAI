@@ -7,16 +7,22 @@ import {
   AGENT_RUNS_DEFAULT_CONCURRENCY,
   AGENT_RUNS_STALLED_INTERVAL_MS,
   agentRunJobSchema,
+  addScheduleMirrorJob,
   createAgentRunsWorker,
   createHibernateWorker,
   createHydrateWorker,
   createQueues,
+  createScheduleFireWorker,
   HIBERNATE,
   HIBERNATE_JOB_NAME,
   hibernateJobSchema,
   HYDRATE,
   HYDRATE_JOB_NAME,
   hydrateJobSchema,
+  SCHEDULE_FIRE_JOB_NAME,
+  SCHEDULES,
+  scheduleFireJobSchema,
+  scheduleMirrorJobId,
   STORAGE_JOB_CONCURRENCY,
   STORAGE_JOB_DEFAULTS,
   storageJobId,
@@ -24,6 +30,7 @@ import {
   type HibernateJob,
   type HydrateJob,
   type QueueServices,
+  type ScheduleFireJob,
 } from "./queues.js";
 
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
@@ -119,6 +126,39 @@ describe("agentRunJobSchema", () => {
     ).toBe(false);
     expect(
       agentRunJobSchema.safeParse({ ...valid, unattended: "yes" }).success,
+    ).toBe(false);
+  });
+
+  it("P4 Task 6: parses a payload with the optional schedule ref; one without parses unchanged (additivity pin)", () => {
+    // A P1-era payload (pre-scheduler) must still parse — nothing new is
+    // required and absent keys stay absent.
+    expect(agentRunJobSchema.safeParse(valid)).toEqual({ success: true, data: valid });
+
+    // The scheduler's run ref rides the same agent-run job.
+    const withSchedule = {
+      ...valid,
+      schedule: { scheduleId: "sch-1", scheduleRunId: "sr-1", autonomy: "safe" as const },
+    };
+    expect(agentRunJobSchema.safeParse(withSchedule)).toEqual({
+      success: true,
+      data: withSchedule,
+    });
+
+    // Reject malformed refs: bad autonomy, empty ids, wrong shapes.
+    expect(
+      agentRunJobSchema.safeParse({
+        ...valid,
+        schedule: { scheduleId: "sch-1", scheduleRunId: "sr-1", autonomy: "full" },
+      }).success,
+    ).toBe(false);
+    expect(
+      agentRunJobSchema.safeParse({
+        ...valid,
+        schedule: { scheduleId: "", scheduleRunId: "sr-1", autonomy: "auto" },
+      }).success,
+    ).toBe(false);
+    expect(
+      agentRunJobSchema.safeParse({ ...valid, schedule: "sch-1" }).success,
     ).toBe(false);
   });
 });
@@ -218,6 +258,50 @@ describe("hydrateJobSchema", () => {
 });
 
 // ---------------------------------------------------------------------------
+// P4 Task 6 — schedules mirror queue (pure contract tests).
+// ---------------------------------------------------------------------------
+
+describe("scheduleFireJobSchema", () => {
+  const valid: ScheduleFireJob = {
+    scheduleId: "s1",
+    scheduledFor: "2026-10-17T00:00:00.000Z",
+  };
+
+  it("round-trips a well-formed ScheduleFireJob", () => {
+    expect(scheduleFireJobSchema.safeParse(valid)).toEqual({
+      success: true,
+      data: valid,
+    });
+  });
+
+  it("rejects missing or empty fields", () => {
+    expect(scheduleFireJobSchema.safeParse({ scheduleId: "s1" }).success).toBe(false);
+    expect(
+      scheduleFireJobSchema.safeParse({ scheduleId: "", scheduledFor: valid.scheduledFor })
+        .success,
+    ).toBe(false);
+    expect(
+      scheduleFireJobSchema.safeParse({ scheduleId: "s1", scheduledFor: "" }).success,
+    ).toBe(false);
+    expect(scheduleFireJobSchema.safeParse(null).success).toBe(false);
+  });
+});
+
+describe("scheduleMirrorJobId", () => {
+  it("composes `${scheduleId}~${scheduledForMs}` — the storageJobId `~` ruling (BullMQ rejects ':' in custom job ids)", () => {
+    // The plan's literal was `${scheduleId}:${scheduledForMs}`, but BullMQ
+    // (5.81.5) throws "Custom Id cannot contain :" on any non-3-part colon
+    // id — the same deviation storageJobId already ruled on. Consumers treat
+    // the id as opaque (add + getJob); `~` keeps the pinned semantics: same
+    // id for the same (schedule, occurrence) → idempotent re-adds.
+    expect(scheduleMirrorJobId("s", 123)).toBe("s~123");
+    expect(scheduleMirrorJobId("sched-9", 1_778_000_000_000)).toBe(
+      "sched-9~1778000000000",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Real-redis behavior. Parallel test suites share the dev redis, so this suite
 // scopes ALL its BullMQ keys behind a suite-unique prefix
 // (OVID_TEST_QUEUE_PREFIX + "-queue"; default "ovid-test-queue") — its
@@ -233,7 +317,11 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
     : "ovid-test-queue";
   const connection: ConnectionOptions = { url: TEST_REDIS_URL! };
   let queues: QueueServices;
-  type AnyWorker = Worker<AgentRunJob> | Worker<HibernateJob> | Worker<HydrateJob>;
+  type AnyWorker =
+    | Worker<AgentRunJob>
+    | Worker<HibernateJob>
+    | Worker<HydrateJob>
+    | Worker<ScheduleFireJob>;
   const openWorkers: AnyWorker[] = [];
 
   function trackWorker<T extends AnyWorker>(w: T): T {
@@ -258,6 +346,7 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
     await queues.agentRuns.obliterate({ force: true });
     await queues.hibernate.obliterate({ force: true });
     await queues.hydrate.obliterate({ force: true });
+    await queues.schedules.obliterate({ force: true });
   });
 
   afterAll(async () => {
@@ -273,6 +362,8 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
       await queues.hibernate.close();
       await queues.hydrate.obliterate({ force: true });
       await queues.hydrate.close();
+      await queues.schedules.obliterate({ force: true });
+      await queues.schedules.close();
     }
   });
 
@@ -283,20 +374,25 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
     expect(unscoped.agentRuns.opts.prefix).toBe("bull");
     expect(unscoped.hibernate.opts.prefix).toBe("bull");
     expect(unscoped.hydrate.opts.prefix).toBe("bull");
+    expect(unscoped.schedules.opts.prefix).toBe("bull");
     await unscoped.agentRuns.close();
     await unscoped.hibernate.close();
     await unscoped.hydrate.close();
+    await unscoped.schedules.close();
 
     const scoped = createQueues(connection, { prefix: "t:iso" });
     expect(scoped.agentRuns.opts.prefix).toBe("t:iso");
     expect(scoped.hibernate.opts.prefix).toBe("t:iso"); // P1 prefix discipline: EVERY queue in createQueues threads the prefix
     expect(scoped.hydrate.opts.prefix).toBe("t:iso");
+    expect(scoped.schedules.opts.prefix).toBe("t:iso"); // P4: the scheduler queue inherits the same discipline
     await scoped.agentRuns.obliterate({ force: true }); // only "t:iso" keys
     await scoped.hibernate.obliterate({ force: true });
     await scoped.hydrate.obliterate({ force: true });
+    await scoped.schedules.obliterate({ force: true });
     await scoped.agentRuns.close();
     await scoped.hibernate.close();
     await scoped.hydrate.close();
+    await scoped.schedules.close();
 
     const worker = trackWorker(
       createAgentRunsWorker(connection, async () => undefined, { prefix: "t:iso" }),
@@ -310,10 +406,17 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
     expect(hworker.opts.prefix).toBe("t:iso");
     await closeWorker(hworker);
 
+    const sfworker = trackWorker(
+      createScheduleFireWorker(connection, async () => undefined, { prefix: "t:iso" }),
+    );
+    expect(sfworker.opts.prefix).toBe("t:iso");
+    await closeWorker(sfworker);
+
     // And this suite's own queues are prefixed.
     expect(queues.agentRuns.opts.prefix).toBe(QUEUE_PREFIX);
     expect(queues.hibernate.opts.prefix).toBe(QUEUE_PREFIX);
     expect(queues.hydrate.opts.prefix).toBe(QUEUE_PREFIX);
+    expect(queues.schedules.opts.prefix).toBe(QUEUE_PREFIX);
   });
 
   it("adding the same jobId twice dedupes: same job id, one job in the queue", async () => {
@@ -566,6 +669,92 @@ describe.skipIf(!TEST_REDIS_URL)("agent-runs and storage queues against real red
     expect(done.data).toEqual(payload);
     expect(done.opts.attempts).toBe(3);
     expect(processed).toEqual([payload]);
+
+    await closeWorker(worker);
+  });
+
+  // -------------------------------------------------------------------------
+  // P4 Task 6 — schedules mirror queue.
+  // -------------------------------------------------------------------------
+
+  it("exposes the schedules queue with its pinned name and suite prefix", () => {
+    expect(SCHEDULES).toBe("schedules");
+    expect(SCHEDULE_FIRE_JOB_NAME).toBe("schedule-fire");
+    expect(queues.schedules.name).toBe("schedules");
+    // Isolation is additive with the queue: the schedules keys live under the
+    // same suite prefix as agent-runs (P1 fix-wave discipline).
+    expect(queues.schedules.opts.prefix).toBe(QUEUE_PREFIX);
+  });
+
+  it("addScheduleMirrorJob enqueues a delayed, idempotent mirror job (jobId = mirror id)", async () => {
+    const scheduleId = uid("sched");
+    const now = new Date();
+    const nextRunAt = new Date(now.getTime() + 5_000);
+
+    await addScheduleMirrorJob(queues, scheduleId, nextRunAt, now);
+
+    const counts = await queues.schedules.getJobCounts();
+    expect(counts.delayed).toBe(1); // future occurrence → delayed, not waiting
+
+    const mirrorId = scheduleMirrorJobId(scheduleId, nextRunAt.getTime());
+    const job = await queues.schedules.getJob(mirrorId);
+    expect(job?.id).toBe(mirrorId);
+    expect(job?.name).toBe(SCHEDULE_FIRE_JOB_NAME);
+    expect(job?.data).toEqual({
+      scheduleId,
+      scheduledFor: nextRunAt.toISOString(), // ISO of the occurrence
+    });
+    // defaultJobOptions {}: schedules jobs carry NO package defaults — the
+    // delay is per-add, and attempts stays BullMQ's own unset marker (0),
+    // i.e. neither agent-runs' pinned 1 nor storage's 3 applies here.
+    expect(job?.opts.attempts).toBe(0);
+
+    // Deterministic jobId → re-adding the same occurrence is a no-op.
+    await addScheduleMirrorJob(queues, scheduleId, nextRunAt, now);
+    const recount = await queues.schedules.getJobCounts();
+    expect(recount.delayed).toBe(1);
+  });
+
+  it("a past nextRunAt clamps the delay to ≥1 so the job fires through createScheduleFireWorker", async () => {
+    const processed: ScheduleFireJob[] = [];
+    const worker = trackWorker(
+      createScheduleFireWorker(
+        connection,
+        async (job) => {
+          processed.push(job.data);
+        },
+        { prefix: QUEUE_PREFIX },
+      ),
+    );
+
+    const completed = new Promise<Job<ScheduleFireJob>>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("timed out waiting for schedule-fire worker completed event")),
+        5_000,
+      );
+      worker.once("completed", (job) => {
+        clearTimeout(timer);
+        resolve(job);
+      });
+    });
+
+    const scheduleId = uid("sched");
+    const now = new Date();
+    const nextRunAt = new Date(now.getTime() - 10_000); // overdue occurrence
+    await addScheduleMirrorJob(queues, scheduleId, nextRunAt, now);
+
+    // A negative delay would throw/misfire; clamped to ≥1 the job is
+    // immediately waitable and the worker picks it up.
+    const done = await completed;
+    const mirrorId = scheduleMirrorJobId(scheduleId, nextRunAt.getTime());
+    expect(done.id).toBe(mirrorId);
+    expect(done.data).toEqual({
+      scheduleId,
+      scheduledFor: nextRunAt.toISOString(),
+    });
+    expect(processed).toEqual([
+      { scheduleId, scheduledFor: nextRunAt.toISOString() },
+    ]);
 
     await closeWorker(worker);
   });

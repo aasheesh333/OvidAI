@@ -24,6 +24,12 @@ export const HIBERNATE_JOB_NAME = "hibernate-workspace";
 /** Job name callers pass to `hydrate.add(HYDRATE_JOB_NAME, payload, …)`. */
 export const HYDRATE_JOB_NAME = "hydrate-workspace";
 
+/** Queue name — P4 scheduler: delayed mirror of upcoming schedule occurrences. */
+export const SCHEDULES = "schedules";
+
+/** Job name callers pass to `schedules.add(SCHEDULE_FIRE_JOB_NAME, payload, …)`. */
+export const SCHEDULE_FIRE_JOB_NAME = "schedule-fire";
+
 export interface AgentRunJob {
   runId: string;
   sessionId: string;
@@ -54,10 +60,23 @@ export interface AgentRunJob {
   autonomy?: "safe" | "auto";
   /** P3 Task 16 (additive): the run's access mode (ruling R4 — job wins over session state). */
   mode?: "safe" | "auto" | "drive" | "studio";
+  /**
+   * P4 Task 6 (additive, optional — old payloads still parse): the run was
+   * fired by the scheduler; ties the agent run back to its schedule row and
+   * occurrence so the worker can mark the run and re-arm cold retries with
+   * the schedule's own autonomy, not the sender's.
+   */
+  schedule?: ScheduleRunRef;
 }
 
 // Wire-format ids are plain nonempty strings (same convention as
 // @ovid/shared's sessionEventSchema); UUIDv7 shape is a DB-boundary concern.
+const scheduleRunRefSchema: z.ZodType<ScheduleRunRef> = z.object({
+  scheduleId: z.string().min(1),
+  scheduleRunId: z.string().min(1),
+  autonomy: z.enum(["safe", "auto"]),
+});
+
 export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   runId: z.string().min(1),
   sessionId: z.string().min(1),
@@ -68,6 +87,7 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   unattended: z.boolean().optional(),
   autonomy: z.enum(["safe", "auto"]).optional(),
   mode: z.enum(["safe", "auto", "drive", "studio"]).optional(),
+  schedule: scheduleRunRefSchema.optional(),
 });
 
 /** Why a workspace is being hibernated (warm → cold). */
@@ -115,6 +135,37 @@ export const hydrateJobSchema: z.ZodType<HydrateJob> = z.object({
   generation: z.number().int().min(0),
   reason: z.enum(["run", "open", "write", "manual"]),
 });
+
+/**
+ * P4 Task 6 — one mirrored schedule occurrence. The scheduleService re-arms
+ * this job after every state change (add/update/delete/pause); when it fires,
+ * the worker checks the schedule row is still pending with this nextRunAt
+ * (the row is the source of truth — the queue is only a wake-up mirror, so a
+ * stale job that lost the race resolves to "already handled" and skips).
+ */
+export interface ScheduleFireJob {
+  scheduleId: string;
+  /** ISO timestamp of the occurrence this mirror was armed for. */
+  scheduledFor: string;
+}
+
+// Wire-format ids are plain nonempty strings (same convention as
+// agentRunJobSchema); the DB boundary owns UUID shapes.
+export const scheduleFireJobSchema: z.ZodType<ScheduleFireJob> = z.object({
+  scheduleId: z.string().min(1),
+  scheduledFor: z.string().min(1),
+});
+
+/**
+ * P4 Task 6 — the scheduler's back-reference riding an agent-run job: which
+ * schedule fired, which occurrence row it created, and the schedule's own
+ * autonomy (stored grants vs read-only projection).
+ */
+export interface ScheduleRunRef {
+  scheduleId: string;
+  scheduleRunId: string;
+  autonomy: "safe" | "auto";
+}
 
 /**
  * Package-level default job options for agent-runs — callers must not drift.
@@ -175,6 +226,51 @@ export function storageJobId(sessionId: string, generation: number): string {
 }
 
 /**
+ * Idempotent job id for schedule mirror jobs — one queue entry per
+ * (schedule, occurrence): re-arming the SAME occurrence (schedule update
+ * that keeps nextRunAt, a redelivery after a crash) lands on the SAME
+ * BullMQ job instead of piling duplicates, so the mirror never double-fires.
+ *
+ * RULING (separator deviation from the plan's
+ * `${scheduleId}:${scheduledForMs}` literal): BullMQ (5.81.5) REJECTS custom
+ * job ids containing `:` unless they have the exact 3-part repeatable-job
+ * shape — "Custom Id cannot contain :" — the same constraint storageJobId
+ * already ruled on. Consumers treat the id as opaque (add + getJob), so `~`
+ * preserves the pinned semantics: same id for the same
+ * (schedule, occurrence) → idempotent re-adds. The pure format is pinned by
+ * test.
+ */
+export function scheduleMirrorJobId(
+  scheduleId: string,
+  scheduledForMs: number,
+): string {
+  return `${scheduleId}~${scheduledForMs}`;
+}
+
+/**
+ * P4 Task 6 — arm (or re-arm) the mirror job for a schedule's next
+ * occurrence. The deterministic jobId makes re-adds idempotent; the delay is
+ * the distance from `now` to `nextRunAt`, clamped to ≥1 ms because BullMQ
+ * does not accept a non-positive delay (an overdue occurrence must fire
+ * immediately, not throw).
+ */
+export async function addScheduleMirrorJob(
+  queues: QueueServices,
+  scheduleId: string,
+  nextRunAt: Date,
+  now: Date,
+): Promise<void> {
+  await queues.schedules.add(
+    SCHEDULE_FIRE_JOB_NAME,
+    { scheduleId, scheduledFor: nextRunAt.toISOString() },
+    {
+      jobId: scheduleMirrorJobId(scheduleId, nextRunAt.getTime()),
+      delay: Math.max(1, nextRunAt.getTime() - now.getTime()),
+    },
+  );
+}
+
+/**
  * Stalled-job check interval: a worker that dies mid-run stops renewing its
  * lock; after this interval BullMQ moves the stalled job to FAILED — with
  * `attempts: 1` it is NEVER redelivered to a live worker. The stale-run
@@ -200,6 +296,8 @@ export interface QueueServices {
   hibernate: Queue<HibernateJob>;
   /** P7: hydrate jobs (cold → warm). */
   hydrate: Queue<HydrateJob>;
+  /** P4: delayed mirror of upcoming schedule occurrences. */
+  schedules: Queue<ScheduleFireJob>;
 }
 
 /**
@@ -250,6 +348,22 @@ export function createQueues(
     ),
     hibernate: storageQueue<HibernateJob>(HIBERNATE),
     hydrate: storageQueue<HydrateJob>(HYDRATE),
+    // P4: built inline (not via storageQueue) — the brief pins
+    // defaultJobOptions {} (schedules jobs carry NO package defaults: the
+    // delay is per-add; attempts stay BullMQ's own) — but with the SAME
+    // prefix threading as every other queue: the caller's prefix scopes the
+    // `schedules` keys exactly like `agent-runs`, no special-casing.
+    schedules: new Queue<ScheduleFireJob>(
+      SCHEDULES,
+      // No prefix key at all when unset → BullMQ default ("bull"):
+      // production key layout is unchanged; test suites scope their own
+      // keys (see QueuePrefixOptions).
+      {
+        connection: withBlockingSafeRetries(connection),
+        ...(opts.prefix !== undefined ? { prefix: opts.prefix } : {}),
+        defaultJobOptions: {},
+      },
+    ),
   };
 }
 
@@ -316,5 +430,31 @@ export function createHydrateWorker(
     connection,
     processor,
     opts,
+  );
+}
+
+/**
+ * P4 Task 6 — worker for the schedules mirror queue. The prefix MUST equal
+ * the add-side createQueues prefix or mirror jobs never meet (P1 fix-wave
+ * mechanism, same as createAgentRunsWorker; production passes NO prefix —
+ * BullMQ default "bull"). Firing a schedule is one repo read plus an agent-run
+ * enqueue, so unlike the agent-runs/storage workers no package-level
+ * concurrency/stalledInterval constants are pinned here: an explicit
+ * `concurrency` opts wins, otherwise BullMQ's own worker defaults apply.
+ */
+export function createScheduleFireWorker(
+  connection: ConnectionOptions,
+  processor: Processor<ScheduleFireJob>,
+  opts: { concurrency?: number } & QueuePrefixOptions = {},
+): Worker<ScheduleFireJob> {
+  return new Worker<ScheduleFireJob>(
+    SCHEDULES,
+    processor,
+    {
+      connection: withBlockingSafeRetries(connection),
+      // must match the add-side queue's prefix or jobs never meet
+      ...(opts.prefix !== undefined ? { prefix: opts.prefix } : {}),
+      ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
+    },
   );
 }
