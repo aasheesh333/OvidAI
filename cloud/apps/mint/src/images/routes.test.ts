@@ -1033,6 +1033,66 @@ describe("images HTTP surface", () => {
     eqMoney(response.json().receipt.charged, "0.012");
   });
 
+  it("never takes the direct branch for a stale direct card when the transport is disabled", async () => {
+    // Regression (T14 review MEDIUM): the card persisted `direct`, but the
+    // discovered api_base is not allowlisted / the key is gone. The service
+    // must fall back to LiteLLM instead of throwing inside DirectEdit.post and
+    // turning the request into 409 with a retained reservation.
+    const directCalls: string[] = [];
+    const direct = createDirectEdit(
+      {
+        images: {
+          inferhubApiKey: "sk-inferhub",
+          directEditHosts: "api.inferhub.dev",
+          editCostUsd: "0.04",
+        },
+      } as unknown as MintEnv,
+      {
+        maxUpstreamCost: money("1.00"),
+        fetchImpl: (async (url: string | URL | Request) => {
+          directCalls.push(String(url));
+          return jsonResponse(200, { data: [{ b64_json: PNG_B64 }] });
+        }) as typeof fetch,
+      },
+    );
+    const cards: ImageCard[] = [
+      {
+        model: "image-a",
+        slug: "ovid-image:img-aaaaaa",
+        sizes: { native: ["1024x1024"] },
+        operations: { generate: { supported: true }, edit: { supported: true } },
+        edit_transport: "direct",
+      },
+    ];
+    const h = await makeHarness(() => successResponse(), {
+      backends: [
+        {
+          model: "image-a",
+          sizes: ["1024x1024"],
+          edit: true,
+          // Not on directEditHosts: enabled_for() is false.
+          params: { model: "openai/cb/gpt-image-2", api_base: "https://images.example.com/v1" },
+        },
+      ],
+      cards,
+      directEdit: direct,
+    });
+    const response = await h.app.inject({
+      method: "POST",
+      url: "/v1/images/edits",
+      headers: HEADERS,
+      payload: EDIT_BODY,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().receipt.state).toBe("confirmed");
+    eqMoney(response.json().receipt.charged, "0.03");
+    expect(directCalls).toHaveLength(0);
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]!.path).toBe("/v1/images/edits");
+    // Settled, not an ambiguous 409 with the reservation retained.
+    expect((await h.ledger.spent("u")).equals(money("0.03"))).toBe(true);
+  });
+
   it("logs a direct-provider credential rejection and keeps the reservation", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {

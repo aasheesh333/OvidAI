@@ -23,6 +23,8 @@ export interface DirectEditResponse {
   status: number;
   headers: Record<string, string>;
   json(): Promise<unknown>;
+  /** Raw body, for error classification when the provider did not send JSON. */
+  text(): Promise<string>;
 }
 
 export interface DirectEdit {
@@ -195,6 +197,7 @@ class HttpDirectEdit implements DirectEdit {
       status: response.status,
       headers: headersRecord(response.headers),
       json: () => response.json(),
+      text: () => response.text(),
     };
   }
 

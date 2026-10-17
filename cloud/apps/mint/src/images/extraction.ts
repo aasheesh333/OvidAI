@@ -114,6 +114,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Python truthiness: `[]`, `{}`, `""`, `0`, `False` and None are falsy. */
+function pyTruthy(value: unknown): boolean {
+  if (value === null || value === undefined || value === false || value === 0 || value === "") {
+    return false;
+  }
+  if (Array.isArray(value)) return value.length > 0;
+  if (isPlainObject(value)) return Object.keys(value).length > 0;
+  return true;
+}
+
 /** `_hints`: first family to define a key wins (dict.setdefault). */
 function hintsFor(name: string): FamilyHint {
   const merged: FamilyHint = {};
@@ -270,7 +280,11 @@ export function staticExtract(
     operations.edit = cap(inputModalities.includes("image"), "inferred", 0.6);
   }
 
-  let sizes = sizesFrom(merged.supported_sizes ?? merged.sizes);
+  // extraction.py: `merged.get('supported_sizes') or merged.get('sizes')` —
+  // Python truthiness, so an empty list falls through to `sizes`.
+  let sizes = sizesFrom(
+    pyTruthy(merged.supported_sizes) ? merged.supported_sizes : merged.sizes,
+  );
   if (sizes.length > 0) meta.sources.push("litellm.sizes");
   let sizesSource: "declared" | "inferred" = sizes.length > 0 ? "declared" : "inferred";
   const sizesConfidence = sizes.length > 0 ? 0.85 : 0.4;

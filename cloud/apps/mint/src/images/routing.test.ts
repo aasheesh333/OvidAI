@@ -258,6 +258,24 @@ describe("routing.py — task_from_request", () => {
     expect([t.operation, t.mask, t.n_inputs]).toEqual(["edit", false, 0]);
   });
 
+  it("uses Python truthiness for mask and requirement booleans", () => {
+    // bool({}) and bool([]) are False in Python; JS Boolean() would say true.
+    const empty = taskFromRequest("generate", {
+      mask: {},
+      requirements: { transparent_background: {}, text_rendering: [] },
+    });
+    expect([empty.mask, empty.transparent, empty.text_rendering]).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    const set = taskFromRequest("generate", {
+      mask: { any: true },
+      requirements: { transparent_background: [1], text_rendering: { on: true } },
+    });
+    expect([set.mask, set.transparent, set.text_rendering]).toEqual([true, true, true]);
+  });
+
   it("allows every TASK_OPERATION on the matching endpoint only", () => {
     for (const op of ["generate", "variations"]) {
       expect(taskFromRequest("generate", { requirements: { operation: op } }).operation).toBe(op);

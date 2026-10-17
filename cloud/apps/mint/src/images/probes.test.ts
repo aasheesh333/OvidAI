@@ -600,6 +600,37 @@ describe("probes.py — LiteLLM HTTP transport", () => {
     ).toBe(TRANSIENT);
   });
 
+  it("classifies a plain-text direct provider error from the raw body", async () => {
+    // A non-JSON provider body must not be reduced to JSON.stringify({}),
+    // which would make e.g. "insufficient quota" look transient.
+    const direct = {
+      enabled_for: () => true,
+      post: async () => ({
+        status: 429,
+        headers: {},
+        json: async () => {
+          throw new Error("not json");
+        },
+        text: async () => "insufficient quota for this project",
+      }),
+      settlementCost: () => money("0.04"),
+    };
+    const t = new LiteLLMProbeTransport("http://litellm", "sk-probe", {
+      masterKey: "master",
+      spendWait: 0,
+      clientFactory: () => new FakeClient(() => response(500, {})),
+      direct,
+      paramsFor: () => ({ model: "openai/cb/m", api_base: "https://api.inferhub.dev/v1" }),
+    });
+    const out = await t.call("cb/m", "edit", {
+      prompt: "p",
+      size: "1024x1024",
+      images: [pngBytes()],
+      direct: true,
+    });
+    expect(out.errorClass).toBe(BUDGET);
+  });
+
   it("falls back to the bounded key-spend delta", async () => {
     const spend = [0];
     const t = transport((request) => {

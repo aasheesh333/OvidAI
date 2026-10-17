@@ -1,5 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type {
+  FastifyError,
+  FastifyInstance,
+  FastifyReply,
+  FastifyRequest,
+} from "fastify";
 import type { MintEnv } from "../env.js";
 import type { CardManager } from "./cardManager.js";
 
@@ -63,6 +68,23 @@ export function registerImagesAdminRoutes(
       if (!authorized(deps, headerValue(request.headers.authorization))) {
         return forbidden(reply);
       }
+    });
+
+    // admin.py reads the reprobe body with request.json(), so a malformed or
+    // non-JSON body is always 400 {"error":{"code":"invalid_request"}}. Fastify
+    // raises 400/415 during body parsing, before the route handler runs; map
+    // those parse errors to the Python contract. Everything else keeps the
+    // default Fastify serialization.
+    scope.setErrorHandler((error: FastifyError, request, reply) => {
+      const statusCode = error.statusCode ?? 500;
+      if (
+        request.method === "POST" &&
+        request.url.split("?", 1)[0] === "/images/admin/reprobe" &&
+        (statusCode === 400 || statusCode === 415)
+      ) {
+        return reply.code(400).send({ error: { code: "invalid_request" } });
+      }
+      return reply.send(error);
     });
 
     scope.get("/images/admin/cards", async (_request, reply) => {

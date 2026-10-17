@@ -770,7 +770,12 @@ export interface DirectProbeEdit {
     prompt: string,
     size: string,
     imageDataUrl: string,
-  ): Promise<{ status: number; headers: Record<string, string>; json(): Promise<unknown> }>;
+  ): Promise<{
+    status: number;
+    headers: Record<string, string>;
+    json(): Promise<unknown>;
+    text(): Promise<string>;
+  }>;
   settlementCost(responseJson: unknown, bound: Money): Money;
   editCost?: number | null;
 }
@@ -943,7 +948,12 @@ export class LiteLLMProbeTransport implements ProbeTransport {
       };
     }
     const dataUrl = `data:image/png;base64,${Buffer.from(params.images![0]!).toString("base64")}`;
-    let response: { status: number; headers: Record<string, string>; json(): Promise<unknown> };
+    let response: {
+      status: number;
+      headers: Record<string, string>;
+      json(): Promise<unknown>;
+      text(): Promise<string>;
+    };
     try {
       response = await this.direct.post(lookup, params.prompt, params.size, dataUrl);
     } catch {
@@ -958,16 +968,22 @@ export class LiteLLMProbeTransport implements ProbeTransport {
     }
     const latency = Date.now() - started;
     if (response.status !== 200) {
+      // Read the raw body first: provider errors are often plain text, and
+      // classifying JSON.stringify({}) would turn e.g. "insufficient quota"
+      // into TRANSIENT instead of BUDGET (Python passes response.text).
+      let raw = "";
+      try {
+        raw = await response.text();
+      } catch {
+        raw = "";
+      }
       let parsed: unknown = {};
       try {
-        parsed = await response.json();
+        parsed = raw === "" ? {} : JSON.parse(raw);
       } catch {
         parsed = {};
       }
-      const text = (typeof parsed === "string" ? parsed : JSON.stringify(parsed) ?? "").slice(
-        0,
-        2000,
-      );
+      const text = raw.slice(0, 2000);
       return {
         ok: false,
         errorClass: classifyDirectError(response.status, {

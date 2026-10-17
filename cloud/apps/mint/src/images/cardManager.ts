@@ -286,9 +286,11 @@ export class CardManager {
   // -- thread -----------------------------------------------------------
   start(discover: () => Promise<Discovered[]> | Discovered[], intervalS = 60): void {
     if (this.looping) return;
+    // Claim the loop synchronously: two start() calls in the same tick must
+    // not both spawn a worker (the flag used to be set inside the async loop).
+    this.looping = true;
     this.stopped = false;
     const loop = async (): Promise<void> => {
-      this.looping = true;
       try {
         // Populate discovery before the first interval; probes still never
         // run on a request path.

@@ -479,12 +479,18 @@ export class LiteLlmImageService {
       if (this.cooldown.retryAfter(backend.model) > 0) continue;
 
       const card = ranked.find((entry) => entry.model === backend.model)!;
+      // Defense in depth (T14 review MEDIUM): a card can outlive the config
+      // that justified it. Never take the direct branch unless the transport
+      // is enabled for the backend's discovered params right now — a stale
+      // "direct" marker would otherwise throw inside DirectEdit.post and turn
+      // a recoverable request into 409 with the reservation retained.
       const direct =
         operation === "edit" &&
         card.edit_transport === "direct" &&
         this.deps.directEdit !== null &&
         this.deps.directEdit !== undefined &&
-        this.deps.directEdit.hasKey;
+        this.deps.directEdit.hasKey &&
+        this.deps.directEdit.enabled_for(backend.params);
       const spendBefore = keyId !== null && !direct ? await this.readSpend(keyId) : null;
 
       let response: UpstreamResponse;

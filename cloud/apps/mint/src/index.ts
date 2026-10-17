@@ -77,8 +77,14 @@ import {
  * tagged `edit_transport: "direct"` only when the direct JSON transport is
  * actually enabled for its discovered api_base — otherwise hints + probes
  * decide instead of forcing "edit unsupported".
+ *
+ * `edit_transport` is never copied from `litellm_params` (matching Python's
+ * `_Discovery`): a configured `"direct"` must not outlive the key/host gate,
+ * or a card would persist a direct marker whose call can never succeed and
+ * would hold a reservation on a doomed request. Only an explicit `"none"` is
+ * preserved; everything else derives solely from `enabled_for()`.
  */
-function imageDiscoveredFromModelInfo(
+export function imageDiscoveredFromModelInfo(
   rows: ModelInfoRow[],
   directEdit: ReturnType<typeof createDirectEdit>,
 ): Discovered[] {
@@ -96,11 +102,13 @@ function imageDiscoveredFromModelInfo(
     if (!imageKind) continue;
     const params = row.litellm_params ?? {};
     const identity: Record<string, unknown> = {};
-    for (const key of ["model", "api_base", "custom_llm_provider", "edit_transport"]) {
+    for (const key of ["model", "api_base", "custom_llm_provider"]) {
       const value = params[key];
       if (value !== undefined && value !== null && value !== "") identity[key] = value;
     }
-    if (identity.edit_transport !== "none" && directEdit.enabled_for(identity)) {
+    if (params.edit_transport === "none") {
+      identity.edit_transport = "none";
+    } else if (directEdit.enabled_for(identity)) {
       identity.edit_transport = "direct";
     }
     out.push(new Discovered(name, identity, info));

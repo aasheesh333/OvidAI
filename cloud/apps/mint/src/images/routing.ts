@@ -215,7 +215,7 @@ export function taskFromRequest(
     throw new Error("operation");
   }
   let operationValue = op;
-  const mask = Boolean(body.mask);
+  const mask = pyTruthy(body.mask);
   if (mask && operationValue === "edit") operationValue = "inpaint";
   const rawExtra = pyTruthy(body.images) ? body.images : [];
   if (!Array.isArray(rawExtra) || rawExtra.length > 8) throw new Error("images");
@@ -236,8 +236,8 @@ export function taskFromRequest(
     aspect_ratio: typeof ratio === "string" ? ratio : null,
     n_inputs: nInputs,
     mask,
-    transparent: Boolean(req.transparent_background),
-    text_rendering: Boolean(req.text_rendering),
+    transparent: pyTruthy(req.transparent_background),
+    text_rendering: pyTruthy(req.text_rendering),
     preference: preference as Preference,
   };
 }

@@ -410,4 +410,26 @@ describeDb("images admin routes (admin.py)", () => {
     expect(invalid.statusCode).toBe(400);
     expect(invalid.json()).toEqual({ error: { code: "invalid_request" } });
   });
+
+  it("maps malformed and unsupported-content-type reprobe bodies to invalid_request", async () => {
+    // admin.py reads request.json() directly: a parse failure is the same
+    // 400 invalid_request, not Fastify's {"detail":...}/415 default.
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/images/admin/reprobe",
+      headers: { ...auth, "content-type": "application/json" },
+      payload: "{",
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toEqual({ error: { code: "invalid_request" } });
+
+    const unsupportedType = await app.inject({
+      method: "POST",
+      url: "/images/admin/reprobe",
+      headers: { ...auth, "content-type": "application/xml" },
+      payload: "<model>cb/m</model>",
+    });
+    expect(unsupportedType.statusCode).toBe(400);
+    expect(unsupportedType.json()).toEqual({ error: { code: "invalid_request" } });
+  });
 });
