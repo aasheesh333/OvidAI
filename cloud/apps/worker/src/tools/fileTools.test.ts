@@ -263,4 +263,19 @@ describe("file tools (host-side over a tmpdir workspace)", () => {
     expect(r.content).not.toContain("bin.dat");
     expect(r.content).not.toContain("huge.txt");
   });
+
+  it("confinement: glob_files with an escaping path returns the pinned isError result, never throws", async () => {
+    const r = await createGlobFilesTool().execute(
+      { pattern: "**/*", path: "../../etc" },
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content.startsWith("confined: ")).toBe(true);
+  });
+
+  it("confinement: grep_files with an escaping path returns the pinned isError result, never throws", async () => {
+    const r = await createGrepFilesTool().execute({ pattern: "root", path: "/etc" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(r.content.startsWith("confined: ")).toBe(true);
+  });
 });

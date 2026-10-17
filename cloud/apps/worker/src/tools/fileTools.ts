@@ -96,15 +96,25 @@ async function walkFiles(dir: string, prefix: string, out: string[]): Promise<vo
  * Results stay WORKSPACE-relative (prefixed with the base) so the model can
  * feed them straight back into read_file/edit_file, whose paths are
  * workspace-relative too.
+ *
+ * Confinement failures return the pinned isError TOOL RESULT (never throw —
+ * the never-throws contract is part of the AgentTool seam, and Task 14 asserts
+ * the "confined:" prefix): an escaping base path on glob_files/grep_files is a
+ * benign model input, not an infra error.
  */
 async function searchRoot(
   ctx: { sandbox: { workspaceDir: string } },
   p: string | undefined,
-): Promise<{ dir: string; prefix: string }> {
+): Promise<{ dir: string; prefix: string } | { error: ToolResult }> {
   if (p === undefined) return { dir: ctx.sandbox.workspaceDir, prefix: "" };
-  const host = await resolveConfined(ctx.sandbox.workspaceDir, p);
-  const prefix = relative(ctx.sandbox.workspaceDir, host).split(sep).join("/");
-  return { dir: host, prefix };
+  try {
+    const host = await resolveConfined(ctx.sandbox.workspaceDir, p);
+    const prefix = relative(ctx.sandbox.workspaceDir, host).split(sep).join("/");
+    return { dir: host, prefix };
+  } catch (err) {
+    if (err instanceof ConfinementError) return { error: confinedErrorResult(err) };
+    throw err;
+  }
 }
 
 // -- glob → regex (translation pinned by the brief) --------------------------
@@ -301,9 +311,10 @@ export function createGlobFilesTool(): AgentTool {
       const parsed = schema.safeParse(input);
       if (!parsed.success) return invalidInput(parsed.error);
       const { pattern, path: base } = parsed.data;
-      const { dir, prefix } = await searchRoot(ctx, base);
+      const root = await searchRoot(ctx, base);
+      if ("error" in root) return root.error;
       const rels: string[] = [];
-      await walkFiles(dir, prefix, rels);
+      await walkFiles(root.dir, root.prefix, rels);
       const re = globToRegex(pattern);
       const matches = rels.filter((r) => re.test(r)).sort();
       const lines =
@@ -354,6 +365,7 @@ export function createGrepFilesTool(): AgentTool {
         };
       }
       const root = await searchRoot(ctx, base);
+      if ("error" in root) return root.error;
       const rels: string[] = [];
       await walkFiles(root.dir, root.prefix, rels);
       const out: string[] = [];
