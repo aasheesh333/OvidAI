@@ -709,6 +709,162 @@ void main() {
     expect(events2.map((e) => e.seq), ['6-0']);
     await ws.disconnect();
   });
+
+  test('(p) disconnect during an in-flight connect: the late socket never '
+      'attaches and nothing ever reconnects (fix I-1)', () async {
+    final prefs = await SharedPreferences.getInstance();
+    fakeAsync((async) {
+      final gate = Completer<void>();
+      final sockets = <FakeCloudSocket>[];
+      var mints = 0;
+      final ws = WsMultiplexer(
+        mintTicket: () async => 't${++mints}',
+        socketFactory: (Uri url) async {
+          final socket = FakeCloudSocket(url);
+          sockets.add(socket);
+          await gate.future; // hold the connect in flight
+          return socket;
+        },
+        prefs: prefs,
+        heartbeatInterval: const Duration(minutes: 10),
+      );
+      ws.subscribe('s1').listen((_) {});
+      async.elapse(const Duration(milliseconds: 10));
+      expect(ws.linkState, WsLinkState.connecting);
+      expect(mints, 1);
+
+      // User teardown while the connect is in flight.
+      ws.disconnect();
+      expect(ws.linkState, WsLinkState.disconnected);
+
+      // The factory now resolves with the late socket — it must be closed,
+      // never attached (no frames may leave on it).
+      gate.complete();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(sockets, hasLength(1));
+      expect(sockets.single.isClosed, isTrue,
+          reason: 'the stray socket must be closed, never attached');
+      expect(sockets.single.sent, isEmpty,
+          reason: 'no subscribe/ping frames after teardown');
+
+      // Nothing reconnects — advance past the entire backoff cap.
+      async.elapse(const Duration(seconds: 65));
+      expect(mints, 1, reason: 'no re-mint after teardown');
+      expect(sockets, hasLength(1));
+      expect(ws.linkState, WsLinkState.disconnected);
+    });
+  });
+
+  test('(q) a reconnect armed before disconnect never fires after it '
+      '(fix I-1 defense-in-depth)', () async {
+    final prefs = await SharedPreferences.getInstance();
+    fakeAsync((async) {
+      final spy = SocketFactorySpy();
+      var mints = 0;
+      final ws = WsMultiplexer(
+        mintTicket: () async => 't${++mints}',
+        socketFactory: spy.fn,
+        prefs: prefs,
+        heartbeatInterval: const Duration(minutes: 10),
+        jitterMs: () => 0,
+      );
+      ws.subscribe('s1').listen((_) {});
+      async.elapse(const Duration(milliseconds: 10));
+      expect(spy.sockets, hasLength(1));
+
+      // Server close → a reconnect is armed at +1s…
+      spy.sockets.last.close(1000);
+      async.elapse(const Duration(milliseconds: 20));
+      expect(ws.linkState, WsLinkState.disconnected);
+
+      // …then the user tears down: the armed timer must never fire.
+      ws.disconnect();
+      async.elapse(const Duration(seconds: 65));
+      expect(spy.sockets, hasLength(1), reason: 'no reconnect after teardown');
+      expect(mints, 1);
+      expect(ws.linkState, WsLinkState.disconnected);
+    });
+  });
+
+  test('(r) only the built replay-family literals trigger the mirror '
+      'fallback; other internal+sessionId frames are session errors '
+      '(fix I-2)', () async {
+    Future<(List<(String, String?)> calls, List<Object> errors)> run(
+      Map<String, Object?> frame,
+    ) async {
+      final mirrorCalls = <(String, String?)>[];
+      final spy = SocketFactorySpy();
+      final ws = await _build(spy, mirror: (sessionId, lastSeq) async {
+        mirrorCalls.add((sessionId, lastSeq));
+        return const <CloudSessionEvent>[];
+      });
+      final errors = <Object>[];
+      ws.subscribe('s1').listen((_) {}, onError: errors.add);
+      await pumpEventQueue();
+      spy.sockets.single.server(frame);
+      await pumpEventQueue();
+      await ws.disconnect();
+      return (mirrorCalls, errors);
+    }
+
+    // "Replay failed." (built ws.ts readSince catch) → mirror fallback.
+    final replay = await run({
+      'op': 'error',
+      'code': 'internal',
+      'message': 'Replay failed.',
+      'sessionId': 's1',
+    });
+    expect(replay.$1, [('s1', null)]);
+
+    // "Live subscription failed." (built ws.ts subscribe catch) → fallback,
+    // healed (no stream error).
+    final live = await run({
+      'op': 'error',
+      'code': 'internal',
+      'message': 'Live subscription failed.',
+      'sessionId': 's1',
+    });
+    expect(live.$1, [('s1', null)]);
+    expect(live.$2, isEmpty, reason: 'the fallback heals, no stream error');
+
+    // Another internal frame with a sessionId (the built ws.ts
+    // browser-attach failure shape) must NOT trigger the fallback —
+    // it is a session error.
+    final other = await run({
+      'op': 'error',
+      'code': 'internal',
+      'message': 'Browser attach failed.',
+      'sessionId': 's1',
+    });
+    expect(other.$1, isEmpty,
+        reason: 'non-replay internal frames are not replay degradation');
+    expect(other.$2, hasLength(1));
+    expect(other.$2.single,
+        isA<CloudWsError>().having((e) => e.code, 'code', 'internal'));
+  });
+
+  test('(s) ptyId-scoped error frames reach rawServerFrames (T15 seam, '
+      'fix I-3)', () async {
+    final spy = SocketFactorySpy();
+    final ws = await _build(spy);
+    final (events, errors) = await _subscribeAndListen(ws, 's1');
+    final raw = <Map<String, dynamic>>[];
+    ws.rawServerFrames.listen(raw.add);
+    spy.sockets.single.server(const {
+      'op': 'error',
+      'code': 'sandbox_busy',
+      'message': 'Sandbox admission timed out.',
+      'ptyId': 'p1',
+    });
+    await pumpEventQueue();
+    expect(raw, hasLength(1));
+    expect(raw.single['op'], 'error');
+    expect(raw.single['code'], 'sandbox_busy');
+    expect(raw.single['ptyId'], 'p1');
+    expect(errors, isEmpty, reason: 'pty-scoped errors are not session errors');
+    expect(events, isEmpty);
+    await ws.disconnect();
+  });
 }
 
 class _PinningProbeException implements Exception {}

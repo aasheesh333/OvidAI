@@ -282,6 +282,13 @@ class WsMultiplexer extends ChangeNotifier {
   /// and not a user disconnect since). Drives the offline→online retry.
   bool _wantLink = false;
 
+  /// Connect-generation counter: bumped on every NEW connect chain AND on
+  /// teardown (disconnect/dispose). An in-flight connect is valid only while
+  /// its own generation is current — this is what kills the
+  /// disconnect-vs-in-flight-connect race (a connect that was minting or
+  /// handshaking when the user tore the link down must never attach).
+  int _generation = 0;
+
   /// Consecutive failed connect cycles; reset by a `pong`/`subscribed`.
   int _attempt = 1;
 
@@ -363,6 +370,12 @@ class WsMultiplexer extends ChangeNotifier {
   Future<void> disconnect() async {
     _userDisconnecting = true;
     _wantLink = false;
+    // Invalidate any in-flight connect chain (mint/handshake in progress):
+    // its generation is now stale, so its next checkpoint aborts — and a
+    // later connectIfNeeded() starts a FRESH chain instead of awaiting the
+    // doomed one.
+    _generation++;
+    _connectFuture = null;
     _attempt = 1;
     _cancelHeartbeat();
     _reconnectTimer?.cancel();
@@ -419,6 +432,9 @@ class WsMultiplexer extends ChangeNotifier {
 
   @override
   void dispose() {
+    _wantLink = false;
+    _generation++; // invalidate any in-flight connect chain
+    _connectFuture = null;
     _cancelHeartbeat();
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
@@ -440,13 +456,24 @@ class WsMultiplexer extends ChangeNotifier {
   bool get _isOffline =>
       _connection?.status == ConnectionStatus.offline;
 
+  /// True when the user tore the link down (or a newer connect chain
+  /// superseded this one) while [generation] was in flight.
+  bool _isTornDown(int generation) => !_wantLink || generation != _generation;
+
   Future<void> _connect() {
-    return _connectFuture ??= _connectInner().whenComplete(() {
-      _connectFuture = null;
+    final pending = _connectFuture;
+    if (pending != null) return pending;
+    final generation = ++_generation;
+    final future = _connectInner(generation).whenComplete(() {
+      // Only the CURRENT chain may clear the slot — a stale chain's
+      // completion must not clobber a newer chain's future.
+      if (_generation == generation) _connectFuture = null;
     });
+    _connectFuture = future;
+    return future;
   }
 
-  Future<void> _connectInner() async {
+  Future<void> _connectInner(int generation) async {
     // The offline gate may have flipped between scheduling and firing.
     if (_isOffline) return;
 
@@ -459,9 +486,11 @@ class WsMultiplexer extends ChangeNotifier {
       ticket = await _mintTicket();
     } catch (err) {
       debugPrint('cloud ws: ticket mint failed: $err');
-      _onConnectFailure();
+      _onConnectFailure(generation);
       return;
     }
+    // disconnect() may have raced the mint — nothing exists yet to clean up.
+    if (_isTornDown(generation)) return;
 
     CloudSocket socket;
     try {
@@ -470,28 +499,36 @@ class WsMultiplexer extends ChangeNotifier {
       );
     } catch (err) {
       debugPrint('cloud ws: connect failed: $err');
-      _onConnectFailure();
+      _onConnectFailure(generation);
+      return;
+    }
+    // disconnect() raced the handshake: close the stray socket instead of
+    // attaching it (an attached stray would re-subscribe sessions and later
+    // trigger reconnection forever after user teardown).
+    if (_isTornDown(generation)) {
+      _closeQuietly(socket);
       return;
     }
 
-    if (_userDisconnecting) {
-      // disconnect() raced this connect — don't leave a stray socket.
-      try {
-        await socket.close();
-      } catch (_) {/* already dead */}
-      return;
-    }
-
-    _attach(socket);
+    _attach(socket, generation);
   }
 
-  void _onConnectFailure() {
+  void _onConnectFailure(int generation) {
+    // A torn-down chain must not touch link state or schedule reconnects —
+    // a newer chain may legitimately be connecting.
+    if (_isTornDown(generation)) return;
     _linkState = WsLinkState.disconnected;
     notifyListeners();
     _scheduleReconnect();
   }
 
-  void _attach(CloudSocket socket) {
+  void _attach(CloudSocket socket, int generation) {
+    // Defense in depth for the teardown race (checks already ran after the
+    // factory await, but nothing may attach once the link is unwanted).
+    if (_isTornDown(generation)) {
+      _closeQuietly(socket);
+      return;
+    }
     _socket = socket;
     _framesSub = socket.frames.listen(
       _onFrame,
@@ -526,7 +563,9 @@ class WsMultiplexer extends ChangeNotifier {
     _linkState = WsLinkState.disconnected;
     notifyListeners();
 
-    if (_userDisconnecting) return; // disconnect() owns what happens next
+    // Teardown owns what happens next (explicit disconnect, or the user
+    // tore the link down while this close was in flight) — never schedule.
+    if (_userDisconnecting || !_wantLink) return;
     if (_isOffline) return; // flip to online retries (_onConnectionChanged)
 
     // 4401 = ticket rejected → re-mint + reconnect silently (Review Focus
@@ -549,6 +588,9 @@ class WsMultiplexer extends ChangeNotifier {
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(delay, () {
       _reconnectTimer = null;
+      // Defense in depth: if teardown happened without the timer being
+      // canceled, never reconnect on a dead intent.
+      if (!_wantLink) return;
       unawaited(_connect());
     });
   }
@@ -600,6 +642,16 @@ class WsMultiplexer extends ChangeNotifier {
     _pingTimer = null;
     _pongTimer?.cancel();
     _pongTimer = null;
+  }
+
+  /// Closes a socket whose connect chain was invalidated (teardown race) —
+  /// best-effort, never throws, never reconnects.
+  void _closeQuietly(CloudSocket socket) {
+    try {
+      unawaited(socket.close().catchError((Object _) {}));
+    } catch (_) {
+      // Synchronous close failure — the socket is already dead.
+    }
   }
 
   void _detachSocketListeners() {
@@ -694,6 +746,20 @@ class WsMultiplexer extends ChangeNotifier {
     sub.events.add(event);
   }
 
+  /// The built server's ONLY replay-degradation signals (ws.ts): internal
+  /// error frames carrying these EXACT messages, each sent after the
+  /// server-side subscription was deleted ("Replay failed." — the
+  /// `readSince` catch; "Live subscription failed." — the `subscribe`
+  /// catch). Matched literally: other internal frames with a sessionId
+  /// (the browser-attach / approval-publish failure shapes the built ws.ts
+  /// also sends) are session errors, NOT replay degradation. Durable
+  /// long-term fix (ledgered carry): the additive `subscribed{trimmed}`
+  /// flag in @ovid/shared, consumed at `case 'subscribed'`.
+  static const Set<String> _replayDegradedMessages = <String>{
+    'Replay failed.',
+    'Live subscription failed.',
+  };
+
   void _onErrorFrame(Map<String, dynamic> msg) {
     final code = msg['code'];
     final message = msg['message'];
@@ -708,23 +774,29 @@ class WsMultiplexer extends ChangeNotifier {
             '($codeText: $messageText)');
         return;
       }
-      if (codeText == 'internal') {
-        // The BUILT server's ONLY replay-degradation signal (ws.ts sends
+      if (codeText == 'internal' &&
+          _replayDegradedMessages.contains(messageText)) {
+        // The built server's ONLY replay-degradation signal (ws.ts sends
         // "Replay failed." / "Live subscription failed." as internal error
         // frames and DELETES the server-side subscription). Fall back to the
         // DB event mirror for catch-up, then continue live.
         unawaited(_mirrorCatchUp(sub, messageText));
         return;
       }
-      // Non-recoverable for this session (forbidden, too_many_subscriptions,
-      // …): forward, never rethrow. The connection itself survives.
+      // Non-recoverable for this session (forbidden,
+      // too_many_subscriptions, non-replay internal failures, …): forward,
+      // never rethrow. The connection itself survives.
       sub.events.addError(CloudWsError(codeText, messageText));
       return;
     }
 
-    // Connection-level error (bad_message, unauthenticated, …) or a
-    // pty-scoped error (ptyId): logged only — pty consumers get their
-    // frames through rawServerFrames (Task 15 reconciles the pty lane).
+    // Channel-scoped error (ptyId): the Tasks 15/16 lane receives it
+    // through rawServerFrames — a pty consumer must be able to surface
+    // "terminal failed to open" on the seam it was given. Also logged.
+    final ptyId = msg['ptyId'];
+    if (ptyId is String && ptyId.isNotEmpty && !_rawFrames.isClosed) {
+      _rawFrames.add(msg);
+    }
     debugPrint('cloud ws: server error ($codeText: $messageText)');
   }
 
