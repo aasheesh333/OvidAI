@@ -1095,7 +1095,12 @@ export function createAgentRunProcessor(
         if (err instanceof TransientModelError) {
           if (attempt >= MAX_MODEL_ATTEMPTS) {
             await o.emit("run_failed", { code: "model_transient_exhausted" });
-            await runs.finish(deps.db, runId, "failed", err.message);
+            // The run row carries the canonical failure CODE, not the
+            // provider's transient message: the scheduler's settle pass
+            // classifies retryability on exactly this value
+            // (RETRYABLE_RUN_CODES), so a transient exhaustion must arm the
+            // schedule retry ladder rather than terminalize the occurrence.
+            await runs.finish(deps.db, runId, "failed", "model_transient_exhausted");
             return;
           }
           const nextBackoffMs = RETRY_BACKOFF_MS[attempt - 1]!;
