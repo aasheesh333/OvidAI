@@ -215,6 +215,10 @@ services:
       # inside the container — the HOST-side port is GATEWAY_HOST_PORT below.
       HOST: 0.0.0.0
       PORT: "8081"
+      # P5 Task 15: envelope master key for MCP/plugin secret sealing. It is
+      # also in .env (env_file above); listed explicitly so the gateway's
+      # dependency on it is visible here and matches the worker's key.
+      OVID_MASTER_KEY: ${OVID_MASTER_KEY}
     ports:
       - "127.0.0.1:${GATEWAY_HOST_PORT:-8082}:8081"
     volumes:

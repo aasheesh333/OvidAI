@@ -962,6 +962,8 @@ describe("gateway env additions", () => {
       ...firebase,
       OVID_WORKER_INTERNAL_URL: "http://127.0.0.1:8091",
       OVID_INTERNAL_TOKEN: "tok",
+      // P5 Task 15: required in firebase mode (envelope sealing).
+      OVID_MASTER_KEY: "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829",
       REDIS_C_URL: "redis://c",
       OVID_FILE_INLINE_MAX_BYTES: "2048",
       OVID_PUT_MAX_BYTES: "4096",

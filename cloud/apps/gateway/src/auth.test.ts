@@ -287,6 +287,9 @@ describe("loadGatewayEnv", () => {
     // P7 Task 12 additions (required in firebase mode).
     OVID_WORKER_INTERNAL_URL: "http://worker:8091",
     OVID_INTERNAL_TOKEN: "internal-token",
+    // P5 Task 15 additions (required in firebase mode).
+    OVID_MASTER_KEY: "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829",
+    OVID_MCP_REDIRECT_URI: "https://example.test/oauth/callback",
   };
 
   it("throws when NODE_ENV=production and OVID_AUTH_MODE=test", () => {
@@ -345,6 +348,8 @@ describe("loadGatewayEnv", () => {
       presignTtlSeconds: 3600,
       hydrateWaitMs: 20_000,
       redisCUrl: "redis://q:6379",
+      masterKey: "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829",
+      mcpRedirectUri: "https://example.test/oauth/callback",
     });
   });
 

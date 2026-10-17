@@ -6,6 +6,7 @@ import Fastify, {
 import websocket from "@fastify/websocket";
 import type { Db } from "@ovid/db";
 import type { EventLog } from "@ovid/events";
+import type { EnvelopeCrypto, OAuthFlow } from "@ovid/mcp";
 import type { QueueServices } from "@ovid/queue";
 import type { KeyProvider, MintProvisioner } from "@ovid/shared";
 import type { ApiError } from "@ovid/shared";
@@ -16,9 +17,14 @@ import { registerAttachmentRoutes } from "./routes/attachments.js";
 import type { AttachmentPresigner } from "./routes/attachments.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerImportRoutes } from "./routes/import.js";
+import { registerMcpCatalogRoutes } from "./routes/mcpCatalog.js";
+import { registerMcpOauthCallbackRoutes, registerMcpOauthRoutes } from "./routes/mcpOauth.js";
+import { registerMcpServerRoutes } from "./routes/mcpServers.js";
 import { registerMessageRoutes } from "./routes/messages.js";
+import { registerPluginRoutes } from "./routes/plugins.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
+import { registerSystemResponseRoutes } from "./routes/systemResponses.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
 import { registerWsRoute } from "./routes/wsRoute.js";
 import type { TicketStore } from "./tickets.js";
@@ -126,6 +132,21 @@ export interface GatewayDeps {
    * one deliberate exception: it mirrors the presigner TTL, not row state.)
    */
   clock?: () => Date;
+  /**
+   * P5 Task 15: envelope crypto for MCP/plugin secret sealing
+   * (recordIds mcp_servers:{id} / plugins:{id}). main() wires it from
+   * OVID_MASTER_KEY. OPTIONAL only so P1-only compositions stay
+   * source-compatible; when absent, any route that must seal answers a loud
+   * 503 `unavailable` instead of silently dropping secrets.
+   */
+  crypto?: EnvelopeCrypto;
+  /**
+   * P5 Task 15: the Task-9 server-side OAuth flow (start/callback/disconnect).
+   * main() wires createOAuthFlow with its system publisher routed through the
+   * SAME `systemHub` field above. OPTIONAL for the same composition-compat
+   * reason; absent → the oauth routes answer a loud 503 `unavailable`.
+   */
+  oauth?: OAuthFlow;
 }
 
 export interface BuildGatewayOptions {
@@ -185,10 +206,14 @@ export function buildGateway(
     return reply.code(404).send(body);
   });
 
-  // Public scope: health only (explicitly NO auth — orchestrator probes).
+  // Public scope: health + the MCP OAuth callback. Both are explicitly
+  // NO-auth: the orchestrator probes health, and the authorization server's
+  // browser redirect carries no Ovid credentials — the one-use `state` IS
+  // the bearer (validated atomically by the Task-9 flow).
   app.register(
     async (scope) => {
       registerHealthRoutes(scope, deps);
+      registerMcpOauthCallbackRoutes(scope, deps);
     },
     { prefix: API_PREFIX },
   );
@@ -211,6 +236,15 @@ export function buildGateway(
       registerImportRoutes(scope, deps);
       registerWorkspaceRoutes(scope, deps);
       registerArtifactRoutes(scope, deps);
+
+      // P5 Task 15: MCP servers/catalog/oauth (authed half), plugins, and the
+      // REST system-response path. Each answers a loud 503 when its optional
+      // dependency (crypto/oauth/systemHub/plugin queue) is not wired.
+      registerMcpServerRoutes(scope, deps);
+      registerMcpCatalogRoutes(scope, deps);
+      registerMcpOauthRoutes(scope, deps);
+      registerPluginRoutes(scope, deps);
+      registerSystemResponseRoutes(scope, deps);
     },
     { prefix: API_PREFIX },
   );

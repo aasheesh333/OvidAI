@@ -26,6 +26,7 @@
     "@fastify/websocket": "^11.3.4",
     "@ovid/db": "workspace:*",
     "@ovid/events": "workspace:*",
+    "@ovid/mcp": "workspace:*",
     "@ovid/queue": "workspace:*",
     "@ovid/shared": "workspace:*",
     "@ovid/storage": "workspace:*",

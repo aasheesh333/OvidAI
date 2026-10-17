@@ -25,6 +25,18 @@ export interface GatewayEnv {
   hydrateWaitMs: number;
   /** REDIS_C_URL — cache-class redis (activity keys); falls back to redisQUrl. */
   redisCUrl: string;
+  /**
+   * P5 Task 15: AES-256 master key (64 hex chars) for MCP/plugin envelope
+   * sealing. REQUIRED when authMode is `firebase`; in `test` mode an empty
+   * value is allowed (a composition that exercises the sealing routes injects
+   * a fixed key directly instead).
+   */
+  masterKey: string;
+  /**
+   * P5 Task 15: the MCP OAuth redirect URI registered with authorization
+   * servers (default `https://ovidsi.com/oauth/callback`).
+   */
+  mcpRedirectUri: string;
 }
 
 const DEFAULT_PORT = 8081;
@@ -36,6 +48,8 @@ const DEFAULT_PRESIGN_TTL_SECONDS = 3600;
 const PRESIGN_TTL_MIN_SECONDS = 60;
 const PRESIGN_TTL_MAX_SECONDS = 86_400;
 const DEFAULT_HYDRATE_WAIT_MS = 20_000;
+const DEFAULT_MCP_REDIRECT_URI = "https://ovidsi.com/oauth/callback";
+const MASTER_KEY_HEX_RE = /^[0-9a-fA-F]{64}$/;
 
 /**
  * Validate + default the gateway's environment.
@@ -132,6 +146,34 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     return value;
   };
 
+  // P5 Task 15: the envelope master key. Required in firebase mode (MCP
+  // secret sealing and plugin config sealing both refuse to operate without
+  // it); test mode may leave it empty. A present value must be exactly 64
+  // hex chars — a malformed key fails at boot, never half-works. INVOKED from
+  // the return object so the required-var evaluation order stays pinned
+  // (DATABASE_URL…MINT_BASE_URL, worker URL, internal token, then master key).
+  const requiredMasterKey = (): string => {
+    const value = raw.OVID_MASTER_KEY?.trim() ?? "";
+    if (value === "" && authMode === "firebase") {
+      throw new Error("OVID_MASTER_KEY is required when OVID_AUTH_MODE=firebase");
+    }
+    if (value !== "" && !MASTER_KEY_HEX_RE.test(value)) {
+      throw new Error("OVID_MASTER_KEY must be exactly 64 hex characters (32 bytes)");
+    }
+    return value;
+  };
+
+  // The callback is always a public https route; a malformed value is a
+  // deployment misconfiguration (the authorization server would reject it
+  // later anyway, but boot-time is where it is cheap to catch).
+  const mcpRedirectUri = raw.OVID_MCP_REDIRECT_URI?.trim() || DEFAULT_MCP_REDIRECT_URI;
+  try {
+    const u = new URL(mcpRedirectUri);
+    if (u.protocol !== "https:" && u.protocol !== "http:") throw new Error("bad scheme");
+  } catch {
+    throw new Error("OVID_MCP_REDIRECT_URI must be an absolute http(s) URL");
+  }
+
   return {
     nodeEnv,
     port,
@@ -148,5 +190,7 @@ export function loadGatewayEnv(raw: NodeJS.ProcessEnv): GatewayEnv {
     presignTtlSeconds,
     hydrateWaitMs,
     redisCUrl,
+    masterKey: requiredMasterKey(),
+    mcpRedirectUri,
   };
 }

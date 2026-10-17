@@ -1,6 +1,9 @@
 export * from "./browser.js";
 export * from "./events.js";
 export * from "./keys.js";
+// P5 Task 15: MCP/plugins REST DTOs (additive — consumed by the gateway
+// mcp/plugins routes and their tests).
+export * from "./mcpRest.js";
 export * from "./notifications.js";
 export * from "./pty.js";
 // P5 Task 12: plugin-source wire contract (additive — consumed by the REST
