@@ -36,6 +36,13 @@
       "when": 1792215574672,
       "tag": "0004_confused_namora",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792220376551,
+      "tag": "0005_violet_moonstone",
+      "breakpoints": true
     }
   ]
 }

@@ -34,8 +34,13 @@ describe.skipIf(!TEST_DATABASE_URL)("repos against real postgres", () => {
       // users table, so DROP TABLE users leaves it behind — drop it too, or
       // the re-applied migration's CREATE SEQUENCE would collide with it.
       await admin.unsafe(`DROP SEQUENCE IF EXISTS users_sandbox_uid_seq CASCADE`);
+      // Every table any migration creates (P8-T3 rerunnability invariant) —
+      // includes the P9 Task 2 money & accounts tables.
       await admin.unsafe(
-        `DROP TABLE IF EXISTS attachments, session_event_mirror, runs, messages, sessions, users CASCADE`,
+        `DROP TABLE IF EXISTS attachments, session_event_mirror, runs, messages, sessions, users,` +
+          ` plans, mint_settings, user_plan_overrides, mint_audit, billing_purchases, image_jobs,` +
+          ` image_deleted_accounts, image_cards, image_card_history, image_probe_log, image_probe_state,` +
+          ` shares, share_forks, reports, account_deletions, byok_keys CASCADE`,
       );
     } finally {
       await admin.end({ timeout: 5 });
