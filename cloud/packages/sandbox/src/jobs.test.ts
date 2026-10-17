@@ -483,6 +483,32 @@ describe("spawnLongRunning (G3)", () => {
     await proc.kill();
   });
 
+  it("a multi-byte character split across stdout chunks arrives intact (no U+FFFD)", async () => {
+    const fx = await freshFixture();
+    const proc = await fx.run({ argv: ["node", "mcp.js"] });
+    const lines: string[] = [];
+    proc.onStdoutLine((line) => lines.push(line));
+    const [rec] = fx.launcher.spawns;
+
+    // Bursty pipes split at arbitrary BYTE offsets: cut "é" (C3 A9) and the
+    // 4-byte "😀" mid-character across three chunks. Decoding each chunk
+    // independently corrupts the halves to U+FFFD; the splitter must buffer
+    // raw bytes and decode only completed lines.
+    const payload = Buffer.from('{"text":"héllo 😀"}\n', "utf8");
+    const eAccent = payload.indexOf(Buffer.from("é", "utf8"));
+    const emoji = payload.indexOf(Buffer.from("😀", "utf8"));
+    expect(eAccent).toBeGreaterThan(0);
+    expect(emoji).toBeGreaterThan(eAccent);
+    rec.child.stdout.write(payload.subarray(0, eAccent + 1)); // é's first byte
+    rec.child.stdout.write(payload.subarray(eAccent + 1, emoji + 2)); // ...through 😀's 2nd byte
+    rec.child.stdout.write(payload.subarray(emoji + 2)); // rest + "\n"
+    await tick;
+    expect(lines).toEqual(['{"text":"héllo 😀"}']);
+    expect(lines[0]).not.toContain("�");
+
+    await proc.kill();
+  });
+
   it("onExit fires with the stub exit code and the spawn-* leaf is removed from the tree", async () => {
     const fx = await freshFixture({ exitCode: 7 });
     const proc = await fx.run({ argv: ["/usr/local/bin/node", "x.js"] });

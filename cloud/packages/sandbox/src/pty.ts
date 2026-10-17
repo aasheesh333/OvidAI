@@ -133,7 +133,17 @@ export async function createPtySession(
     sessionId: req.sessionId,
     ring,
     write: (data: Buffer) => {
-      if (!exited) child.write(data.toString("utf8"));
+      // Kill-race guard (review round-1 Minor): the `exited` flag flips in the
+      // onExit callback, which can lag kill() by a tick — a write landing in
+      // that window reaches a dead pty master and node-pty surfaces a stream
+      // error synchronously. The write contract is fire-and-forget (echo is
+      // at best stale), so swallow instead of throwing to the caller.
+      if (exited) return;
+      try {
+        child.write(data.toString("utf8"));
+      } catch {
+        // pty master died between the guard and the write — nothing to deliver
+      }
     },
     resize: (c: number, r: number) => {
       if (!exited) child.resize(clampDim(c, 80), clampDim(r, 24));

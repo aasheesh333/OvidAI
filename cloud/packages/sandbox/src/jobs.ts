@@ -319,20 +319,27 @@ export async function spawnLongRunning(
   let killPromise: Promise<void> | undefined;
   const lineCbs: Array<(line: string) => void> = [];
   const exitCbs: Array<(code: number | null) => void> = [];
-  let stdoutBuf = "";
+  let stdoutBuf = Buffer.alloc(0);
 
   // stdin errors (EPIPE from an early-exiting child) must never crash the
   // worker — same reasoning as execOnce (fix-round I-2).
   child.stdin?.on("error", () => {});
 
   child.stdout?.on("data", (chunk: Buffer) => {
-    // Always split (partial-line state stays consistent for a consumer that
-    // registers late); lines emitted while no callback is attached are gone —
-    // onStdoutLine is a live subscription, not a replay.
-    stdoutBuf += chunk.toString("utf8");
-    const parts = stdoutBuf.split("\n");
-    stdoutBuf = parts.pop() ?? ""; // trailing partial (or empty) stays buffered
-    for (const line of parts) {
+    // UTF-8-safe line splitting (review round-1 Important): buffer RAW BYTES
+    // and split on 0x0A, decoding each completed line as a whole. Decoding
+    // per-chunk corrupts a multi-byte character that a bursty pipe split
+    // across a chunk boundary to U+FFFD — reachable for large (>64 KiB) MCP
+    // messages carrying non-ASCII text, where read boundaries are arbitrary
+    // byte offsets. A trailing partial line (or the empty remainder after a
+    // final "\n") stays buffered until the next 0x0A.
+    // Lines emitted while no callback is attached are gone — onStdoutLine is
+    // a live subscription, not a replay.
+    stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
+    let nl: number;
+    while ((nl = stdoutBuf.indexOf(0x0a)) !== -1) {
+      const line = stdoutBuf.subarray(0, nl).toString("utf8");
+      stdoutBuf = stdoutBuf.subarray(nl + 1);
       for (const cb of lineCbs) cb(line);
     }
   });
