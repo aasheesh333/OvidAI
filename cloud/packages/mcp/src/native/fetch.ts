@@ -35,11 +35,41 @@ export class TooManyRedirectsError extends Error {
   }
 }
 
+const CREDENTIAL_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);
+
+/**
+ * Return a copy of a HeadersInit with origin-bound credentials removed,
+ * preserving the caller's container shape (plain object / tuple array /
+ * Headers) so call sites and their tests keep seeing the shape they passed.
+ */
+function stripCredentialHeaders(headers: HeadersInit | undefined): HeadersInit | undefined {
+  if (headers === undefined) return undefined;
+  if (headers instanceof Headers) {
+    const copy = new Headers(headers);
+    for (const name of CREDENTIAL_HEADERS) copy.delete(name);
+    return copy;
+  }
+  if (Array.isArray(headers)) {
+    return headers.filter(([name]) => !CREDENTIAL_HEADERS.has(String(name).toLowerCase()));
+  }
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (!CREDENTIAL_HEADERS.has(name.toLowerCase())) out[name] = value;
+  }
+  return out;
+}
+
 /**
  * Fetch with manually-followed redirects: one fetchImpl call per hop
  * (each call re-guarded — the I1 fix), the stack itself never follows.
  * 303 always becomes GET; 301/302 demote non-GET/HEAD to GET (browser
  * behaviour); 307/308 preserve method and body.
+ *
+ * Credentials are ORIGIN-BOUND: on a cross-origin hop (including an
+ * https→http downgrade) `authorization`, `cookie` and `proxy-authorization`
+ * are stripped before the next request, matching the Fetch spec's
+ * redirect behaviour. The previous redirect:"follow" stack did this for
+ * free; a manual follower must reproduce it (T12 re-review NEW-1).
  */
 export async function followGuardedRedirects(
   fetchImpl: GuardedFetch,
@@ -47,10 +77,12 @@ export async function followGuardedRedirects(
   init: RequestInit = {},
 ): Promise<Response> {
   let current = url;
+  let currentOrigin = new URL(current).origin;
   let method = init.method ?? "GET";
   let body = init.body;
+  let headers = init.headers;
   for (let hops = 0; ; hops++) {
-    const res = await fetchImpl(current, { ...init, method, body, redirect: "manual" });
+    const res = await fetchImpl(current, { ...init, headers, method, body, redirect: "manual" });
     const location = res.headers.get("location");
     if (!REDIRECT_STATUSES.has(res.status) || location === null) return res;
     if (hops >= MAX_REDIRECTS) throw new TooManyRedirectsError();
@@ -61,7 +93,12 @@ export async function followGuardedRedirects(
       method = "GET";
       body = undefined;
     }
-    current = new URL(location, current).toString();
+    const next = new URL(location, current);
+    if (next.origin !== currentOrigin) {
+      headers = stripCredentialHeaders(headers);
+    }
+    currentOrigin = next.origin;
+    current = next.toString();
   }
 }
 

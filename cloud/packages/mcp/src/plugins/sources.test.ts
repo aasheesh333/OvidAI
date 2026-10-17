@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { parseMcpConfig } from "../configParse.js";
+import { followGuardedRedirects } from "../native/fetch.js";
 import { createGuardedFetch, type GuardedFetch } from "../ssrf.js";
 import { buildTar, buildZip } from "./__fixtures__/builders.js";
 import { pluginSourceInputSchema as sharedSchema } from "@ovid/shared";
@@ -614,5 +615,77 @@ describe("createSourceResolver — lifecycle", () => {
     expect(
       pluginSourceInputSchema.safeParse({ kind: "paste", label: "x", config: "{}" }).success,
     ).toBe(true);
+  });
+});
+
+describe("followGuardedRedirects — credential forwarding", () => {
+  const SECRET_HEADERS = {
+    authorization: "Bearer SECRET",
+    cookie: "session=SECRET",
+    "proxy-authorization": "Basic SECRET",
+  };
+
+  async function runChain(
+    from: string,
+    to: string,
+  ): Promise<Array<Record<string, string>>> {
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl: GuardedFetch = async (url, init) => {
+      const headers = new Headers(init?.headers);
+      seen.push({
+        authorization: headers.get("authorization") ?? "",
+        cookie: headers.get("cookie") ?? "",
+        "proxy-authorization": headers.get("proxy-authorization") ?? "",
+      });
+      if (seen.length === 1) {
+        return new Response(null, { status: 302, headers: { location: to } });
+      }
+      return new Response("ok", { status: 200 });
+    };
+    const res = await followGuardedRedirects(fetchImpl, from, {
+      headers: SECRET_HEADERS,
+    });
+    expect(res.status).toBe(200);
+    return seen;
+  }
+
+  it("preserves credentials on a same-origin hop", async () => {
+    const seen = await runChain(
+      "https://api.github.com/repos/a/b/git/trees/main",
+      "https://api.github.com/other",
+    );
+    expect(seen[0]?.authorization).toBe("Bearer SECRET");
+    expect(seen[1]?.authorization).toBe("Bearer SECRET");
+    expect(seen[1]?.cookie).toBe("session=SECRET");
+  });
+
+  it("strips credentials on a cross-origin hop", async () => {
+    const seen = await runChain(
+      "https://api.github.com/repos/a/b/git/trees/main",
+      "https://attacker.example/collect",
+    );
+    expect(seen[0]?.authorization).toBe("Bearer SECRET");
+    expect(seen[1]).toEqual({
+      authorization: "",
+      cookie: "",
+      "proxy-authorization": "",
+    });
+  });
+
+  it("strips credentials on an https→http downgrade (origin change)", async () => {
+    const seen = await runChain(
+      "https://api.github.com/repos/a/b/git/trees/main",
+      "http://api.github.com/repos/a/b/git/trees/main",
+    );
+    expect(seen[1]?.authorization).toBe("");
+  });
+
+  it("does not mutate the caller's Headers object", async () => {
+    const callerHeaders = new Headers(SECRET_HEADERS);
+    const fetchImpl: GuardedFetch = async () => new Response("ok", { status: 200 });
+    await followGuardedRedirects(fetchImpl, "https://a.example/x", {
+      headers: callerHeaders,
+    });
+    expect(callerHeaders.get("authorization")).toBe("Bearer SECRET");
   });
 });
