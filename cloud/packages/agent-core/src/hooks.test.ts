@@ -1333,6 +1333,28 @@ describe("fix round 1 — E2BIG stdin path (I4)", () => {
     expect(fs.execCalls[0]!.o.env!.OVID_HOOK_STDIN_FILE).toBeDefined();
   });
 
+  it("guards on ESCAPED argv bytes so quote-heavy payloads cannot bypass", async () => {
+    const fs = fakeSandbox();
+    const { engine } = makeEngine(fs, [
+      def({ event: "pre_tool", matcher: "Bash", command: "guard" }),
+    ]);
+    // 40k single quotes: raw ≈ 40 KB (well under 96 KiB) but each expands to
+    // `'\''` (4 bytes) → ~160 KB escaped. The old raw-byte guard took printf,
+    // died E2BIG, and failed the gate open.
+    const content = "'".repeat(40_000);
+    expect(Buffer.byteLength(content, "utf8")).toBeLessThan(HOOK_ARGV_PAYLOAD_LIMIT);
+
+    await engine.fireGate("s1", {
+      tool: "run_shell",
+      args: { command: content },
+    });
+
+    expect(fs.writes).toHaveLength(1);
+    expect(fs.execCalls[0]!.o.cmd).not.toContain("printf");
+    expect(fs.execCalls[0]!.o.cmd).toContain("< '/workspace/");
+    expect(fs.execCalls[0]!.o.env!.OVID_HOOK_STDIN_FILE).toBeDefined();
+  });
+
   it("keeps the argv path for a payload below the limit", async () => {
     const fs = fakeSandbox();
     const { engine } = makeEngine(fs, [

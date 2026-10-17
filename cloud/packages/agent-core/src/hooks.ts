@@ -821,9 +821,36 @@ export function buildPostToolPayload(o: {
   };
 }
 
-/** UTF-8 byte length (argv limits are bytes, not UTF-16 code units). */
+/** POSIX single-quote escaping (the ONE escape function, shared by the
+ * measurement and the emitted printf command so they cannot diverge). */
+function escapeSingleQuotes(value: string): string {
+  return value.replace(/'/g, `'\\''`);
+}
+
+/** The quoted argv element the printf path would emit for [stdinJson]. */
+function quotedHookPayload(stdinJson: string): string {
+  return `'${escapeSingleQuotes(stdinJson)}'`;
+}
+
+/** UTF-8 byte length of the RAW payload (for diagnostics/tests). */
 export function hookPayloadBytes(stdinJson: string): number {
   return Buffer.byteLength(stdinJson, "utf8");
+}
+
+/**
+ * UTF-8 byte length of the ESCAPED argv element the printf path emits. This
+ * is the number that matters: every `'` in the payload expands to `'\''`
+ * (4 bytes), so a quote-heavy payload can be under the raw limit yet blow
+ * MAX_ARG_STRLEN (128 KiB) many times over. Measuring the raw bytes would
+ * let such a payload take printf, die E2BIG, and fail the pre_tool gate open.
+ */
+export function hookArgvBytes(stdinJson: string): number {
+  return Buffer.byteLength(quotedHookPayload(stdinJson), "utf8");
+}
+
+/** True when the payload must take the jail-file stdin path. */
+export function hookStdinRequiresFile(stdinJson: string): boolean {
+  return hookArgvBytes(stdinJson) > HOOK_ARGV_PAYLOAD_LIMIT;
 }
 
 /**
@@ -833,8 +860,11 @@ export function hookPayloadBytes(stdinJson: string): number {
  *
  * E2BIG guard: Linux MAX_ARG_STRLEN is 128 KiB of UTF-8 BYTES per argv
  * element, and the environment competes for the same budget. The guard is
- * therefore BYTE-based: a CJK/emoji payload can be well under the limit in
- * JS string units yet far over it in bytes. A larger payload is written to
+ * therefore (a) BYTE-based — a CJK/emoji payload can be well under the limit
+ * in JS string units yet far over it in bytes — and (b) measured on the
+ * ESCAPED form actually emitted, since quote expansion is ~4x. The escaped
+ * string is built ONCE here and reused for the printf, so measurement and
+ * emission can never diverge. A payload over the limit is written to
  * `stdinFile` (workspace-relative, jail-absolute here) and redirected, so a
  * large `file_write`/`tool_response` can never make a pre_tool gate silently
  * fail open.
@@ -848,8 +878,9 @@ export function wrapHookCommand(
   stdinJson: string,
   o: { stdinFile?: string } = {},
 ): string {
+  const quoted = quotedHookPayload(stdinJson);
   if (
-    hookPayloadBytes(stdinJson) > HOOK_ARGV_PAYLOAD_LIMIT &&
+    Buffer.byteLength(quoted, "utf8") > HOOK_ARGV_PAYLOAD_LIMIT &&
     o.stdinFile !== undefined
   ) {
     // Feed stdin from the file, then remove it in the same shell invocation so
@@ -860,7 +891,6 @@ export function wrapHookCommand(
       `__ovid_hook_rc=$?; rm -f '${o.stdinFile}'; exit $__ovid_hook_rc`
     );
   }
-  const quoted = `'${stdinJson.replace(/'/g, `'\\''`)}'`;
   return `printf '%s' ${quoted} | ( ${command}\n)`;
 }
 
@@ -1199,15 +1229,15 @@ export function createHookEngine(deps: HookEngineDeps): HookEngine {
     });
     const userId = userIdFor(sessionId);
     const callKey = `hook:${sessionId}:${definition.id}:${(callSeq += 1)}`;
-    // E2BIG guard (BYTE-based): a >96 KiB UTF-8 payload cannot ride in one
-    // argv element, so it is written into the session jail and fed through a
-    // stdin redirect. Failing to write the file is a runtime failure
-    // (fail-open, retryable) — it must never become a silent hook skip with
-    // the gate half-run. `workspace` must be the jail mount point because the
-    // file path is workspace-relative for writeFile and jail-absolute for the
-    // shell redirect.
+    // E2BIG guard (ESCAPED UTF-8 bytes): a payload that cannot ride in one
+    // argv element — including quote expansion — is written into the session
+    // jail and fed through a stdin redirect. Failing to write the file is a
+    // runtime failure (fail-open, retryable) — it must never become a silent
+    // hook skip with the gate half-run. `workspace` must be the jail mount
+    // point because the file path is workspace-relative for writeFile and
+    // jail-absolute for the shell redirect.
     let stdinFile: string | undefined;
-    if (hookPayloadBytes(stdinJson) > HOOK_ARGV_PAYLOAD_LIMIT) {
+    if (hookStdinRequiresFile(stdinJson)) {
       const relPath = `.dsh/tmp/hook-stdin-${callSeq}.json`;
       try {
         await deps.sandbox.writeFile(userId, relPath, stdinJson);
