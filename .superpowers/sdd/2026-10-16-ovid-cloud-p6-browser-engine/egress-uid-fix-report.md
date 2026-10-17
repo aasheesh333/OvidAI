@@ -64,7 +64,8 @@ processes; there is no root fallback.
 
 ## 4. Commit
 
-`<FILLED AFTER COMMIT>`
+`469d3f9` — fix(browser): apply the dedicated egress uid to browser processes
+(report hash update committed separately so the hash is accurate).
 
 ## 5. Gate outputs
 
