@@ -32,14 +32,23 @@ account-dev) serves existing users; the cloud stack (`ovid-cloud` compose
 project + the host `ovid-worker.service`) is the new surface.
 
 ```bash
-# Before editing ANY live-stack file:
-cp <file> "<file>.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+# Before editing ANY live-stack file (set FILE first):
+FILE="${FILE:?set FILE to the live file you are editing}"
+cp "$FILE" "$FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 # Before applying a live compose change:
 cd /opt/ovid-gateway && docker compose -p ovid-gateway config -q
 # Before applying a Caddy change:
 docker exec ovid-gateway-caddy-1 caddy validate \
   --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
+
+> **NEVER paste a `<placeholder>` from this file into a shell.** The shell reads
+> `<x>` as *redirect stdin from a file named x* and `>` as a **truncating**
+> redirect, so `cp f.bak-<TS> f` becomes `cp f` with stdout redirected at `f` —
+> it **empties the file it was supposed to protect** before `cp` even fails.
+> Every command below therefore assigns its inputs to `"${VAR:?}"` first: the
+> `:?` makes the line abort loudly if the variable is unset instead of
+> silently doing something destructive. `bash -n` cannot catch this class.
 
 Hard prohibitions (data-loss / unrecoverable):
 
@@ -288,8 +297,11 @@ docker exec ovid-cloud-redis-q-1 redis-cli --no-auth-warning -a "$REDIS_Q_PASSWO
 
 **Act (decision tree, in order).**
 
-1. **Trim completed/failed job history** (safe; keeps wait/active/delayed).
-   BullMQ's own `clean` removes the ZSET entry and the job hash:
+1. **Trim completed/failed job history** **[OWNER]** — this deletes live job
+   records (BullMQ's own `clean` removes the ZSET entry and the job hash).
+   Safe for `wait`/`active`/`delayed`, but irreversible: a job you later need
+   for forensics is gone. Prefer trimming only `failed` first, and only when
+   the queue is actually the memory pressure:
 
    ```bash
    set -a; . /opt/ovid-cloud/worker.env; set +a     # REDIS_Q_URL = 127.0.0.1:6391
@@ -304,8 +316,11 @@ docker exec ovid-cloud-redis-q-1 redis-cli --no-auth-warning -a "$REDIS_Q_PASSWO
    }'
    ```
 
-2. **Trim session event streams** to the shipped retention (exact
-   `MAXLEN 10000`; keeps the newest events):
+2. **Trim session event streams** **[OWNER]** to the shipped retention (exact
+   `MAXLEN 10000`; keeps the newest events). This **discards live stream
+   events** — a client reconnecting afterwards replays a shorter history, and
+   a run's evidence may be gone. Never run it during an incident you are still
+   diagnosing:
 
    ```bash
    docker exec ovid-cloud-redis-q-1 sh -c '
@@ -407,9 +422,9 @@ still serve from Redis but new writes fail.
 
 ```bash
 docker ps --filter name=ovid-gateway-postgres-1 --format '{{.Names}}\t{{.Status}}'
-docker exec ovid-gateway-postgres-1 sh -c 'pg_isready -U "$POSTGRES_USER"'
+docker exec ovid-gateway-postgres-1 sh -c 'pg_isready -U "${POSTGRES_USER:-postgres}"'
 docker logs --tail=120 ovid-gateway-postgres-1
-docker exec ovid-gateway-postgres-1 sh -c 'psql -U "$POSTGRES_USER" -d ovid_cloud -Atc "SELECT 1"'
+docker exec ovid-gateway-postgres-1 sh -c 'psql -U "${POSTGRES_USER:-postgres}" -d ovid_cloud -Atc "SELECT 1"'
 df -h /                      # a full disk is a common Postgres failure
 docker exec ovid-cloud-redis-q-1 redis-cli --no-auth-warning -a "$REDIS_Q_PASSWORD" ping
 ```
@@ -433,7 +448,7 @@ docker compose -p ovid-gateway restart postgres    # [OWNER]
 **Verify.**
 
 ```bash
-docker exec ovid-gateway-postgres-1 sh -c 'psql -U "$POSTGRES_USER" -d ovid_cloud -Atc "SELECT 1"'
+docker exec ovid-gateway-postgres-1 sh -c 'psql -U "${POSTGRES_USER:-postgres}" -d ovid_cloud -Atc "SELECT 1"'
 curl -sf http://127.0.0.1:8082/cloud/v1/health    # db:true
 journalctl -u ovid-worker -n 30 --no-pager        # no DB connection errors
 ```
@@ -538,8 +553,9 @@ ps -eo uid,pid,ppid,etime,rss,cmd | awk '$1>=200000 && $1<210000'
 # expected: no output between sessions (empty is healthy)
 
 # Map a uid to its user (read-only)
-docker exec ovid-gateway-postgres-1 sh -c \
-  'psql -U "$POSTGRES_USER" -d ovid_cloud -Atc "SELECT uid FROM users WHERE sandbox_uid = <UID>"'
+SB_UID="${SB_UID:?set SB_UID to the sandbox uid from the ps output above}"
+docker exec ovid-gateway-postgres-1 psql -U "${POSTGRES_USER:-postgres}" -d ovid_cloud -Atc \
+  "SELECT uid FROM users WHERE sandbox_uid = $SB_UID"
 
 # Env cgroups and their process counts
 ls -d /sys/fs/cgroup/ovid-sandboxes.slice/ovid-worker.service/sandbox-* 2>/dev/null
@@ -558,10 +574,11 @@ nft list table inet ovid_sandbox 2>/dev/null | grep -A2 counter
 
   ```bash
   CGROOT=/sys/fs/cgroup/ovid-sandboxes.slice/ovid-worker.service
-  echo 1 | sudo tee "$CGROOT/sandbox-<UID>/cgroup.kill"
+  SB_UID="${SB_UID:?set SB_UID to the sandbox uid from the ps output above}"
+  echo 1 | sudo tee "$CGROOT/sandbox-$SB_UID/cgroup.kill"
   # poll until empty, then remove the env cgroup only if it has no children
-  cat "$CGROOT/sandbox-<UID>/cgroup.procs"     # expected: empty
-  sudo rmdir "$CGROOT/sandbox-<UID>"           # only if empty; EBUSY = still live
+  cat "$CGROOT/sandbox-$SB_UID/cgroup.procs"     # expected: empty
+  sudo rmdir "$CGROOT/sandbox-$SB_UID"           # only if empty; EBUSY = still live
   ```
 
 - If several envs are orphaned, the safest fix is a worker restart
@@ -979,7 +996,7 @@ mid-run also fails it rather than redelivering. `claimNext` claims only
 
 ```bash
 docker exec ovid-gateway-postgres-1 sh -c \
-  'psql -U "$POSTGRES_USER" -d ovid_cloud -c "
+  'psql -U "${POSTGRES_USER:-postgres}" -d ovid_cloud -c "
    SELECT id, session_id, status, started_at, attempts, last_error
      FROM runs
     WHERE status = '\''running'\''
@@ -1010,13 +1027,14 @@ docker exec ovid-cloud-redis-q-1 redis-cli --no-auth-warning -a "$REDIS_Q_PASSWO
 journalctl -u ovid-worker -n 40 --no-pager | grep 'stale-run sweep'
 # expected: "stale-run sweep (boot): terminalized N stranded run(s)"
 docker exec ovid-gateway-postgres-1 sh -c \
-  'psql -U "$POSTGRES_USER" -d ovid_cloud -Atc "
+  'psql -U "${POSTGRES_USER:-postgres}" -d ovid_cloud -Atc "
    SELECT count(*) FROM runs WHERE status = '\''running'\''
      AND started_at < now() - interval '\''10 minutes'\'';"'
 # expected: 0
 # Event check for a known session:
+SID="${SID:?set SID to the session id}"
 docker exec ovid-cloud-redis-q-1 redis-cli --no-auth-warning -a "$REDIS_Q_PASSWORD" \
-  XREVRANGE "sess:<SESSION_ID>:events" + - COUNT 5
+  XREVRANGE "sess:$SID:events" + - COUNT 5
 # expected: run_failed with payload {"runId":"…","code":"run_lost"}
 ```
 
@@ -1047,7 +1065,7 @@ missing/queued past the 2-minute lost-enqueue window. It is idempotent via a
 
 ```bash
 docker exec ovid-gateway-postgres-1 sh -c \
-  'psql -U "$POSTGRES_USER" -d ovid_cloud -c "
+  'psql -U "${POSTGRES_USER:-postgres}" -d ovid_cloud -c "
    SELECT sr.id, sr.schedule_id, sr.status, sr.attempt, sr.started_at,
           sr.run_id, r.status AS run_status, r.last_error
      FROM schedule_runs sr
@@ -1082,7 +1100,7 @@ docker exec ovid-cloud-redis-q-1 redis-cli --no-auth-warning -a "$REDIS_Q_PASSWO
 
 ```bash
 docker exec ovid-gateway-postgres-1 sh -c \
-  'psql -U "$POSTGRES_USER" -d ovid_cloud -Atc "
+  'psql -U "${POSTGRES_USER:-postgres}" -d ovid_cloud -Atc "
    SELECT count(*) FROM schedule_runs
     WHERE status = '\''running'\''
       AND started_at < now() - interval '\''10 minutes'\'';"'
@@ -1116,8 +1134,9 @@ disaster recovery)".
 
 ```bash
 # 1. A current backup exists and is intact
+TS="${TS:?set TS to a backup timestamp from: ls -1t /opt/ovid-backups/pg | head -3}"
 ls -1t /opt/ovid-backups/pg | head -3
-zstd -t /opt/ovid-backups/pg/<TS>/*.dump.zst
+zstd -t "/opt/ovid-backups/pg/$TS/"*.dump.zst
 
 # 2. Scratch restore target (loopback only; never the live port).
 #    NOTE: 5434 is the cloud postgres proxy once the stack is activated —
@@ -1128,7 +1147,7 @@ docker run -d --name ovid-restore-drill -e POSTGRES_PASSWORD=drill \
 # 3. Restore one database (litellm shown; repeat for ovid_cloud)
 docker exec ovid-restore-drill psql -U postgres -d postgres -q \
   -c 'CREATE ROLE litellm LOGIN;'
-zstd -dc /opt/ovid-backups/pg/<TS>/litellm.dump.zst | \
+zstd -dc "/opt/ovid-backups/pg/$TS/litellm.dump.zst" | \
   docker exec -i ovid-restore-drill psql -U postgres -d postgres -v ON_ERROR_STOP=1 -q
 
 # 4. Prove schema + data
@@ -1246,7 +1265,8 @@ ls -1d /opt/ovid-rootfs/ubuntu-noble-min-*        # exactly 2 revisions
 **Rollback (instant, no rebuild).**
 
 ```bash
-sudo ln -sfn ubuntu-noble-min-<previous> /opt/ovid-rootfs/current.tmp
+PREV="${PREV:?set PREV to the previous revision from: ls -1d /opt/ovid-rootfs/ubuntu-noble-min-*}"
+sudo ln -sfn "$PREV" /opt/ovid-rootfs/current.tmp
 sudo mv -T /opt/ovid-rootfs/current.tmp /opt/ovid-rootfs/current
 # Then restart the worker so new jails use it [OWNER]:
 sudo systemctl restart ovid-worker
@@ -1295,8 +1315,15 @@ smoke a chat completion → on trouble, roll back to the previous digest
 (one-line edit). Never upgrade during an incident; LiteLLM runs
 forward-only DB migrations.
 
-**Rollback.** `cp docker-compose.yml.bak-pin-<TS> docker-compose.yml &&
-docker compose -p ovid-gateway up -d litellm`.
+**Rollback.** Restore the pinned compose file, then re-up LiteLLM:
+
+```bash
+cd /opt/ovid-gateway
+TS="${TS:?set TS to the .bak-pin timestamp: ls -1 docker-compose.yml.bak-pin-*}"
+cp "docker-compose.yml.bak-pin-$TS" docker-compose.yml
+docker compose -p ovid-gateway config -q    # must be silent before up
+docker compose -p ovid-gateway up -d litellm
+```
 
 **Evidence.** `cloud/deploy/HARDENING.md` G (full rationale and commands).
 
