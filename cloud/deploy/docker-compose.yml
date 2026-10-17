@@ -197,6 +197,27 @@ services:
   # worker runs on the host as systemd unit ovid-worker.service
   # (cloud/deploy/systemd/), activated by DEPLOY.md §11. The P1 compose
   # worker this replaces is restorable from git history if ever needed.)
+  #
+  # P6 (browser engine) — worker envelope, BOTH variants (controller ruling
+  # R3; the worker proper gets ~2 GB, the browser pool gets ~2 GB; P2's
+  # sandbox slice keeps its own 10 G and the 22 GB box envelope is
+  # unchanged; full budget math: cloud/deploy/BROWSERS.md §(c)):
+  #   • LANDED (host systemd — this box): only the memory limit moves —
+  #     ovid-worker.service already carries MemoryMax=4096M (G5 pre-flight
+  #     ruling). The mounts become DIRECT host paths: /opt/ovid-browsers
+  #     (Lightpanda binary + ms-playwright chromium root, ro by convention)
+  #     and OVID_BROWSER_STATE_DIR=/opt/ovid-cloud/browser-states (plain
+  #     directory — NOT a named volume; the local-disk store until P7/R2).
+  #     Browser env vars live in worker.env (see worker.env.example
+  #     "Browser engine (P6)" block), not in this file's .env.
+  #   • If the compose-worker variant is ever restored from history, its
+  #     service stanza needs: mem_limit: 4g; environment passthrough of the
+  #     P6 browser vars (see .env.example "Browser engine (P6)" block);
+  #     volumes /opt/ovid-browsers:/opt/ovid-browsers:ro and
+  #     ovid-browser-states:/opt/ovid-cloud/browser-states (a named volume,
+  #     declared next to redis-q-data/mintdata above). The same 4G split
+  #     applies — never give the container less than 4 GB while the browser
+  #     pool is enabled.
 
   # P9 Task 3: the mint REPLACEMENT app — the Node port of server/mint/mint.py
   # (cloud/apps/mint). BUILD-ONLY for now:
