@@ -1114,6 +1114,13 @@ export function createFullAgentRunProcessor(deps: FullRunDeps): FullAgentRunProc
   // P4 Task 10: the P3-T12 timeout seam. The hook's presence (wired by
   // main.ts) installs the per-request policy; the gate still owns the
   // structural attended question/plan rule.
+  //
+  // P4-SEAM: P3's `timeoutPolicy(req, { unattended })` receives NO runId, so
+  // the hook's async `onApprovalRequested` / `onApprovalAutoDenied` cannot be
+  // called from this decision point. The 120 s default-deny IS wired here;
+  // if the P3 fix round widens the policy context with `runId` (or adds
+  // request/timeout callbacks), invoke the hook's two side-effect methods
+  // there. Boot logs `[scheduler] P3 tool/approval seam not wired` until then.
   const timeoutPolicy = unattendedTimeoutPolicy(
     deps.unattendedApprovalHook,
     deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS,
