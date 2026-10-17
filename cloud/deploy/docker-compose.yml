@@ -44,6 +44,10 @@ networks:
 volumes:
   redis-q-data:
     name: ovid-cloud-redis-q-data
+  # Mint's persistent state (audit JSONL + settings/limits mirrors —
+  # MINT_STATE_DIR=/data). Owned by ovid-cloud, never shared.
+  mintdata:
+    name: ovid-cloud-mintdata
 
 services:
   # Queue + session-event-log Redis, owned by ovid-cloud (never shared with
@@ -193,3 +197,38 @@ services:
   # worker runs on the host as systemd unit ovid-worker.service
   # (cloud/deploy/systemd/), activated by DEPLOY.md §11. The P1 compose
   # worker this replaces is restorable from git history if ever needed.)
+
+  # P9 Task 3: the mint REPLACEMENT app — the Node port of server/mint/mint.py
+  # (cloud/apps/mint). BUILD-ONLY for now:
+  #   • it sits behind the `mint` compose profile, so a plain
+  #     `docker compose up` NEVER builds or starts it (and its image,
+  #     deploy/Dockerfile.mint, is authored in Task 18 — building today would
+  #     fail anyway);
+  #   • activation (Caddy flips, .env authoring, the strangler cutover) is the
+  #     owner-gated Task 18. Nothing here touches the live Python mint.
+  # It joins `internal` (the live stack's network, external name
+  # ovid-gateway_internal) to reach ovid-gateway-redis-1 (db2) and
+  # ovid-gateway-litellm-1 by container DNS; both published ports stay
+  # loopback-bound — the public app is meant to sit behind Caddy, the admin
+  # console behind an SSH tunnel, never the internet.
+  mint:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.mint
+    restart: unless-stopped
+    profiles: [mint]
+    env_file: [.env]
+    environment:
+      # Structural overrides (win over .env): the container listener MUST be
+      # 0.0.0.0 for the published port to be reachable; ports are fixed
+      # in-container — HOST-side ports are the publications below.
+      HOST: 0.0.0.0
+      PUBLIC_PORT: "8091"
+      ADMIN_PORT: "8092"
+    ports:
+      - "127.0.0.1:8091:8091"
+      - "127.0.0.1:8092:8092"
+    volumes:
+      - mintdata:/data
+    networks: [internal]
+    mem_limit: 1g

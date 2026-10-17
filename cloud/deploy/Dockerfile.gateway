@@ -32,6 +32,10 @@ COPY packages/queue/package.json packages/queue/
 COPY apps/gateway/package.json apps/gateway/
 COPY apps/worker/package.json apps/worker/
 COPY apps/e2e/package.json apps/e2e/
+# P9 Task 3: apps/mint joined the workspace, so its manifest is now an
+# importer in the lockfile — --frozen-lockfile validates every importer's
+# presence. The gateway image never loads mint's code; only its manifest.
+COPY apps/mint/package.json apps/mint/
 # Built output the gateway loads at runtime — dist trees plus the drizzle/
 # folder (migrate() resolves it relative to the package root, client.ts).
 COPY --from=build /repo/packages/shared/dist ./packages/shared/dist
