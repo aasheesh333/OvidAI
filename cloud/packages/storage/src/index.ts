@@ -3,6 +3,8 @@ export * from "./keys.js";
 export * from "./workspacePaths.js";
 export * from "./adapter.js";
 export * from "./fsAdapter.js";
+export * from "./r2Adapter.js";
+export * from "./storageEnv.js";
 export * from "./rangeReader.js";
 export * from "./browserState.js";
 export * from "./contract.js";

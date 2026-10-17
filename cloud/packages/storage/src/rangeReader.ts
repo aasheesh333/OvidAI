@@ -1,16 +1,22 @@
 /**
  * Range readers: pread-style random access over stored objects. The fs branch
- * opens a file descriptor; the R2 branch (real HTTP range GETs) is added in
- * Task 2.
+ * opens a file descriptor; the R2 branch issues signed HTTP range GETs
+ * (R2Reader, Task 2).
  */
 
 import { open as fsOpen } from "node:fs/promises";
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 
-import { StorageError } from "./errors.js";
+import { NotFoundError, StorageError } from "./errors.js";
 
 export interface RangeReader {
   size(): Promise<number>;
   read(offset: number, length: number): Promise<Buffer>;
+  close(): Promise<void>;
 }
 
 export type ReaderSpec =
@@ -75,15 +81,100 @@ export class FdReader implements RangeReader {
   }
 }
 
+/** HTTP range GETs over an R2 object described by a reader spec. Task 2. */
+export class R2Reader implements RangeReader {
+  private readonly spec: Extract<ReaderSpec, { kind: "r2" }>;
+  private client: S3Client | null = null;
+  private sizePromise: Promise<number> | null = null;
+
+  constructor(spec: Extract<ReaderSpec, { kind: "r2" }>) {
+    this.spec = spec;
+  }
+
+  private s3(): S3Client {
+    if (this.client === null) {
+      this.client = new S3Client({
+        region: this.spec.region,
+        endpoint: this.spec.endpoint,
+        credentials: {
+          accessKeyId: this.spec.accessKeyId,
+          secretAccessKey: this.spec.secretAccessKey,
+        },
+        maxAttempts: 4,
+      });
+    }
+    return this.client;
+  }
+
+  async size(): Promise<number> {
+    if (this.sizePromise === null) {
+      this.sizePromise = (async () => {
+        try {
+          const res = await this.s3().send(
+            new HeadObjectCommand({ Bucket: this.spec.bucket, Key: this.spec.key }),
+          );
+          return res.ContentLength ?? 0;
+        } catch (err) {
+          throw new NotFoundError(
+            `r2 object vanished before read: ${this.spec.key}`,
+            { cause: err },
+          );
+        }
+      })();
+    }
+    return this.sizePromise;
+  }
+
+  async read(offset: number, length: number): Promise<Buffer> {
+    if (offset < 0 || length < 0) {
+      throw new StorageError(
+        `invalid read(${offset}, ${length}) — offsets must be non-negative`,
+      );
+    }
+    if (length === 0) return Buffer.alloc(0);
+    const res = await this.s3().send(
+      new GetObjectCommand({
+        Bucket: this.spec.bucket,
+        Key: this.spec.key,
+        Range: `bytes=${offset}-${offset + length - 1}`,
+      }),
+    );
+    const body = res.Body as AsyncIterable<unknown> | undefined;
+    if (body === undefined) {
+      throw new StorageError(
+        `r2 read of ${this.spec.key} returned no body (wanted ${length} at ${offset})`,
+        { code: "r2_short_read" },
+      );
+    }
+    const chunks: Buffer[] = [];
+    let got = 0;
+    for await (const chunk of body) {
+      const buf = Buffer.from(chunk as Uint8Array);
+      chunks.push(buf);
+      got += buf.length;
+    }
+    if (got !== length) {
+      throw new StorageError(
+        `r2 short read of ${this.spec.key}: wanted ${length} bytes at offset ${offset}, got ${got}`,
+        { code: "r2_short_read" },
+      );
+    }
+    return Buffer.concat(chunks, got);
+  }
+
+  async close(): Promise<void> {
+    this.client?.destroy();
+    this.client = null;
+  }
+}
+
 /**
- * Opens a RangeReader for a spec. Only the fs branch exists here; the R2
- * branch (HTTP range GETs with signed requests) lands in Task 2.
+ * Opens a RangeReader for a spec: fs → FdReader (one fd, positional reads);
+ * r2 → R2Reader (signed HTTP range GETs).
  */
 export async function openReader(spec: ReaderSpec): Promise<RangeReader> {
   if (spec.kind === "fs") {
     return new FdReader(spec.path);
   }
-  throw new StorageError("R2 range reader arrives in Task 2", {
-    code: "not_implemented",
-  });
+  return new R2Reader(spec);
 }

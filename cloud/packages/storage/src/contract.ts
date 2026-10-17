@@ -8,10 +8,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { StorageAdapter } from "./adapter.js";
 
-export function describeStorageContract(
-  name: string,
-  make: () => Promise<{ adapter: StorageAdapter; cleanup: () => Promise<void> }>,
-): void {
+export type StorageContractMake = () => Promise<{
+  adapter: StorageAdapter;
+  cleanup: () => Promise<void>;
+}>;
+
+function runStorageContract(name: string, make: StorageContractMake): void {
   describe(`StorageAdapter contract — ${name}`, () => {
     let adapter: StorageAdapter;
     let cleanup: () => Promise<void>;
@@ -78,3 +80,26 @@ export function describeStorageContract(
     });
   });
 }
+
+export type StorageContractSuite = {
+  (name: string, make: StorageContractMake): void;
+  /** Conditional skip — the R2 live suite (no credentials in CI → skipped). */
+  skipIf(cond: boolean): (name: string, make: StorageContractMake) => void;
+};
+
+export const describeStorageContract: StorageContractSuite = Object.assign(
+  (name: string, make: StorageContractMake): void => {
+    runStorageContract(name, make);
+  },
+  {
+    skipIf(cond: boolean): (name: string, make: StorageContractMake) => void {
+      return (name, make) => {
+        if (cond) {
+          describe.skip(`StorageAdapter contract — ${name} (skipped: no live credentials)`, () => {});
+          return;
+        }
+        runStorageContract(name, make);
+      };
+    },
+  },
+);
