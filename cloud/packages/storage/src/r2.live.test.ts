@@ -19,9 +19,17 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { StorageAdapter } from "./adapter.js";
-import { describeStorageContract } from "./contract.js";
+import { storageContractSuite } from "./contract.js";
 import { createR2Storage, loadR2Config, r2Endpoint, type R2Config } from "./r2Adapter.js";
 import { openReader } from "./rangeReader.js";
+
+const describeStorageContract = storageContractSuite({
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+});
 
 const cfg: R2Config | null = (() => {
   try {

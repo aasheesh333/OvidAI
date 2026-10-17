@@ -273,7 +273,17 @@ export function validateIndexForRead(index: ArchiveIndex, framesEnd: number): vo
       `frame chain ends at ${off} but the footer places the index frame at ${framesEnd}`,
     );
   }
+  // A path carried by two frames would make extraction order-dependent (and
+  // two threads can race the same `${dest}.part-${pid}` temp name) — reject
+  // it up front, mirroring recoverIndex's duplicate check.
+  const seenPaths = new Set<string>();
   index.files.forEach((rec, i) => {
+    if (seenPaths.has(rec.path)) {
+      throw new ArchiveCorruptError(
+        `files[${i}] duplicates member path '${rec.path}' across frames`,
+      );
+    }
+    seenPaths.add(rec.path);
     if (rec.frameIndex >= index.frames.length) {
       throw new ArchiveCorruptError(`files[${i}].frameIndex ${rec.frameIndex} is out of range`);
     }

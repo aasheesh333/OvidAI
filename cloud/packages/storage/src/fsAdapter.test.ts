@@ -1,16 +1,47 @@
+import { execFile as execFileCb } from "node:child_process";
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { Readable } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createFsStorage } from "./fsAdapter.js";
 import { KeyLayoutError } from "./errors.js";
-import { describeStorageContract } from "./contract.js";
+import { storageContractSuite } from "./contract.js";
+
+const execFile = promisify(execFileCb);
+const PKG_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const DIST_INDEX = join(PKG_DIR, "dist", "index.js");
+
+const describeStorageContract = storageContractSuite({
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+});
 
 describeStorageContract("fs", async () => {
   const root = await mkdtemp(join(tmpdir(), "ovid-storage-contract-"));
   return { adapter: createFsStorage(root), cleanup: () => rm(root, { recursive: true, force: true }) };
+});
+
+describe("package entry loads under plain Node", () => {
+  // The contract suite takes injected framework fns precisely so no src
+  // module imports vitest at runtime — dist/index.js must import cleanly
+  // in a bare node process (M2, T9-blocking). Skipped when dist/ has not
+  // been built yet (tests are usually run straight from src).
+  it.skipIf(!existsSync(DIST_INDEX))("dist/index.js imports in a child node process", async () => {
+    const { stderr } = await execFile(
+      process.execPath,
+      ["-e", "await import(process.argv[1])", DIST_INDEX],
+      { encoding: "utf8" },
+    );
+    expect(stderr).toBe("");
+  });
 });
 
 describe("createFsStorage — fs-specific pins", () => {

@@ -53,7 +53,7 @@ import {
   StorageError,
 } from "../errors.js";
 import { FOOTER_LEN, MEMBER_HEADER_LEN } from "./format.js";
-import { pack, type ArchiveIndex, type PackReport } from "./pack.js";
+import { pack, type ArchiveIndex, type FileRec, type PackReport } from "./pack.js";
 import { readIndex } from "./readIndex.js";
 import {
   decompressFrame,
@@ -523,6 +523,36 @@ describe("extract — read path over a rich fixture", () => {
     // partial tree left for the caller (Task 9 wipes and retries)
     const entries = await readdir(dest);
     expect(entries.length).toBeGreaterThan(0);
+  });
+
+  it("cross-frame duplicate member paths are rejected loudly (M1)", async () => {
+    // Handcraft an index carrying the same path in two different frames:
+    // extraction would be order-dependent (and two worker threads would
+    // race the same `${dest}.part-${pid}` temp name).
+    const target = "a/x/y/f-003.txt";
+    const rec = index.files.find((f) => f.path === target)!;
+    const solo = index.files.find((f) => f.path === "b/big-1.bin")!;
+    expect(solo.frameIndex).not.toBe(rec.frameIndex);
+    const dup: FileRec = {
+      ...rec,
+      frameIndex: solo.frameIndex,
+      offsetInFrame: 0,
+      lengthInFrame: 0,
+      size: 0,
+    };
+    const dupIndex: ArchiveIndex = { ...index, files: [...index.files, dup] };
+
+    const r = new FdReader(archivePath);
+    await expect(extractFile(r, dupIndex, target)).rejects.toThrowError(ArchiveCorruptError);
+    await expect(extractFile(r, dupIndex, target)).rejects.toThrowError(/duplicate/);
+    await r.close();
+
+    // extractAll rejects BEFORE pass 1 creates anything
+    const dest = join(tmp, "dup-out");
+    await expect(
+      extractAllInProcess({ kind: "fs", path: archivePath }, dupIndex, dest),
+    ).rejects.toThrowError(ArchiveCorruptError);
+    await expect(lstat(dest)).rejects.toThrowError();
   });
 
   it("extractAll default worker math never exceeds 4 or the frame count", async () => {

@@ -2,9 +2,14 @@
  * Shared StorageAdapter contract, run by the fs adapter's tests here and by
  * the R2 live tests in Task 2. Keeps the two adapters honest against the
  * same behavior set.
+ *
+ * The suite functions are INJECTED by the caller (storageContractSuite):
+ * this module must not import vitest at runtime — it is re-exported from
+ * src/index.ts, and a module-scope vitest import makes the compiled package
+ * entry (dist/index.js) throw "Vitest failed to access its internal state"
+ * under plain Node. Vitest appears here only as type-level
+ * `typeof import("vitest")` references, which tsc erases entirely.
  */
-
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { StorageAdapter } from "./adapter.js";
 
@@ -13,70 +18,83 @@ export type StorageContractMake = () => Promise<{
   cleanup: () => Promise<void>;
 }>;
 
-function runStorageContract(name: string, make: StorageContractMake): void {
-  describe(`StorageAdapter contract — ${name}`, () => {
+/** The vitest surface the contract needs — injected, never imported here. */
+export interface ContractFramework {
+  describe: typeof import("vitest").describe;
+  it: typeof import("vitest").it;
+  expect: typeof import("vitest").expect;
+  beforeAll: typeof import("vitest").beforeAll;
+  afterAll: typeof import("vitest").afterAll;
+}
+
+function runStorageContract(
+  f: ContractFramework,
+  name: string,
+  make: StorageContractMake,
+): void {
+  f.describe(`StorageAdapter contract — ${name}`, () => {
     let adapter: StorageAdapter;
     let cleanup: () => Promise<void>;
 
-    beforeAll(async () => {
+    f.beforeAll(async () => {
       const fx = await make();
       adapter = fx.adapter;
       cleanup = fx.cleanup;
     });
 
-    afterAll(async () => {
+    f.afterAll(async () => {
       await cleanup();
     });
 
-    it("Buffer put + getBuffer round-trips", async () => {
+    f.it("Buffer put + getBuffer round-trips", async () => {
       const body = Buffer.from("contract buffer body");
       const { key, bytes } = await adapter.put("contract/buffer.bin", body);
-      expect(bytes).toBe(body.length);
+      f.expect(bytes).toBe(body.length);
       const back = await adapter.getBuffer(key);
-      expect(back).not.toBeNull();
-      expect(back!.equals(body)).toBe(true);
+      f.expect(back).not.toBeNull();
+      f.expect(back!.equals(body)).toBe(true);
     });
 
-    it("stream put + get round-trips", async () => {
+    f.it("stream put + get round-trips", async () => {
       const { Readable } = await import("node:stream");
       const body = Readable.from(["a", "b", "c"]);
       const { key } = await adapter.put("contract/stream.bin", body);
       const stream = await adapter.get(key);
-      expect(stream).not.toBeNull();
+      f.expect(stream).not.toBeNull();
       const chunks: Buffer[] = [];
       for await (const c of stream!) chunks.push(c as Buffer);
-      expect(Buffer.concat(chunks).toString()).toBe("abc");
+      f.expect(Buffer.concat(chunks).toString()).toBe("abc");
     });
 
-    it("presignGet/presignPut return non-empty strings", async () => {
+    f.it("presignGet/presignPut return non-empty strings", async () => {
       await adapter.put("contract/presign.bin", Buffer.from("v"));
       const g = await adapter.presignGet("contract/presign.bin", 60);
       const p = await adapter.presignPut("contract/presign.bin", 60);
-      expect(typeof g).toBe("string");
-      expect(g.length).toBeGreaterThan(0);
-      expect(typeof p).toBe("string");
-      expect(p.length).toBeGreaterThan(0);
+      f.expect(typeof g).toBe("string");
+      f.expect(g.length).toBeGreaterThan(0);
+      f.expect(typeof p).toBe("string");
+      f.expect(p.length).toBeGreaterThan(0);
     });
 
-    it("metadata round-trips via head", async () => {
+    f.it("metadata round-trips via head", async () => {
       await adapter.put("contract/meta.bin", Buffer.from("v"), {
         contentType: "text/plain",
         metadata: { foo: "bar", n: "42" },
       });
       const head = await adapter.head("contract/meta.bin");
-      expect(head).not.toBeNull();
-      expect(head!.metadata).toEqual({ foo: "bar", n: "42" });
+      f.expect(head).not.toBeNull();
+      f.expect(head!.metadata).toEqual({ foo: "bar", n: "42" });
     });
 
-    it("delete-then-get is null", async () => {
+    f.it("delete-then-get is null", async () => {
       await adapter.put("contract/gone.bin", Buffer.from("v"));
       await adapter.delete("contract/gone.bin");
-      expect(await adapter.getBuffer("contract/gone.bin")).toBeNull();
-      expect(await adapter.head("contract/gone.bin")).toBeNull();
+      f.expect(await adapter.getBuffer("contract/gone.bin")).toBeNull();
+      f.expect(await adapter.head("contract/gone.bin")).toBeNull();
     });
 
-    it("head of a missing key is null", async () => {
-      expect(await adapter.head("contract/never-existed.bin")).toBeNull();
+    f.it("head of a missing key is null", async () => {
+      f.expect(await adapter.head("contract/never-existed.bin")).toBeNull();
     });
   });
 }
@@ -87,19 +105,30 @@ export type StorageContractSuite = {
   skipIf(cond: boolean): (name: string, make: StorageContractMake) => void;
 };
 
-export const describeStorageContract: StorageContractSuite = Object.assign(
-  (name: string, make: StorageContractMake): void => {
-    runStorageContract(name, make);
-  },
-  {
+/**
+ * Builds a StorageContractSuite bound to a concrete test framework. Callers
+ * pass their own vitest functions:
+ *
+ *   const describeStorageContract = storageContractSuite({
+ *     describe, it, expect, beforeAll, afterAll,
+ *   });
+ */
+export function storageContractSuite(f: ContractFramework): StorageContractSuite {
+  const run = (name: string, make: StorageContractMake): void => {
+    runStorageContract(f, name, make);
+  };
+  return Object.assign(run, {
     skipIf(cond: boolean): (name: string, make: StorageContractMake) => void {
       return (name, make) => {
         if (cond) {
-          describe.skip(`StorageAdapter contract — ${name} (skipped: no live credentials)`, () => {});
+          f.describe.skip(
+            `StorageAdapter contract — ${name} (skipped: no live credentials)`,
+            () => {},
+          );
           return;
         }
-        runStorageContract(name, make);
+        run(name, make);
       };
     },
-  },
-);
+  });
+}
