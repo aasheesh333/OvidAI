@@ -2,7 +2,10 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    // linkedom's bundled types intentionally shadow lib.dom declarations and
+    // only typecheck cleanly with skipLibCheck (per linkedom's docs).
+    "skipLibCheck": true
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"]

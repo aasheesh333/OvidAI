@@ -27,6 +27,20 @@ export const FIXTURES = {
   <p>Static content with no scripts at all. The readability extraction path
   should parse this into a clean article body.</p>
   <p>Second paragraph with a <a href="/spa">link to the SPA shell</a>.</p>
+  <p>Static extraction is the tier-one fast path: it parses the fetched HTML
+  with a DOM implementation and runs the readability heuristic without ever
+  launching a browser. When the markup already contains the full article
+  prose, this is dramatically cheaper than a chromium run and the pool is
+  never paid for at all.</p>
+  <p>Readability scores candidate nodes by link density and text volume,
+  then returns the article title, an optional byline, and a cleaned content
+  subtree. Turndown converts that subtree to markdown while preserving
+  anchors, so links inside the article body survive the conversion as
+  inline markdown links rather than being flattened to bare text.</p>
+  <p>Long-form prose in this fixture ensures the extracted text crosses the
+  minimum character threshold that decides whether the static path is
+  sufficient, or whether the caller must fall back to a full browser
+  render of the page.</p>
 </body></html>
 `,
   spaShell: `<!doctype html>
