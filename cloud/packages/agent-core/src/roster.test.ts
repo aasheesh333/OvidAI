@@ -442,6 +442,28 @@ describe("BUILT_IN_PRESETS / presetById", () => {
     expect(presetById(null)).toBeNull();
     expect(presetById("nope")).toBeNull();
   });
+
+  it("BUILT_IN_PRESETS is frozen at every level (objects + nested tool lists)", () => {
+    // The readonly types are compile-time only; Object.freeze makes the
+    // immutability real at runtime — a stray mutation of a shared built-in
+    // preset would leak into every session using it.
+    expect(Object.isFrozen(BUILT_IN_PRESETS)).toBe(true);
+    for (const p of BUILT_IN_PRESETS) {
+      expect(Object.isFrozen(p), p.id).toBe(true);
+      expect(Object.isFrozen(p.allowedTools), `${p.id}.allowedTools`).toBe(true);
+      expect(Object.isFrozen(p.deniedTools), `${p.id}.deniedTools`).toBe(true);
+    }
+  });
+
+  it("a preset denylist still applies to the skill tool (only the plan projection and skill-scope intersect exempt it)", () => {
+    // The C2 exemption is for activeSkillScopes ONLY: a preset that denies
+    // `skill` really removes it.
+    expect(
+      isToolPermitted("skill", ctx({ preset: preset({ deniedTools: ["skill"] }) })),
+    ).toBe(false);
+    // …and the built-in presets keep it (no built-in denies it).
+    expect(isToolPermitted("skill", ctx({ preset: presetById("minimal") }))).toBe(true);
+  });
 });
 
 // ── exit_plan_mode tool ─────────────────────────────────────────────────────

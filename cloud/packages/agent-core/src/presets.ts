@@ -149,13 +149,20 @@ const plan: AgentPreset = {
   temperature: null,
 };
 
-export const BUILT_IN_PRESETS: readonly AgentPreset[] = Object.freeze([
-  standard,
-  minimal,
-  studio,
-  code,
-  plan,
-].map((p) => Object.freeze(p)));
+// The nested tool lists are frozen too (runtime immutability at every
+// level), but the AgentPreset fields keep the brief's pinned `string[]`
+// type — the freeze is a runtime property, not a type change, hence the
+// casts (Object.freeze's Readonly<T> narrowing would otherwise bleed into
+// every consumer).
+export const BUILT_IN_PRESETS: readonly AgentPreset[] = Object.freeze(
+  [standard, minimal, studio, code, plan].map((p) =>
+    Object.freeze({
+      ...p,
+      allowedTools: Object.freeze(p.allowedTools) as string[],
+      deniedTools: Object.freeze(p.deniedTools) as string[],
+    }),
+  ),
+);
 
 /**
  * Look up a built-in preset by id. Null for a null/unknown id — callers
