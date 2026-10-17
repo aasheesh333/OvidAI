@@ -2,6 +2,10 @@
 .env
 .env.*
 !.env.example
+# P10 staging templates are documentation, not secrets (the filled
+# `.env.staging` / `.env.staging.mint` stay ignored above).
+!.env.staging.example
+!.env.staging.mint.example
 
 # Built rootfs tarballs (docker-export output) are artifacts, not source:
 # multi-hundred-MB zstd archives + per-build manifests and checksums.

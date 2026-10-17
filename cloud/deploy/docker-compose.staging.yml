@@ -1,0 +1,261 @@
+# Ovid Cloud P10 — ISOLATED staging composition.
+#
+# This is a SECOND compose project on the same box. It exists so P10's load
+# and chaos suites can run against a full cloud stack without touching the
+# live `ovid-gateway` stack or real `api.ovidsi.com` traffic.
+#
+# Isolation guarantees (binding — plan Global Constraints):
+#   • project name `ovid-cloud-staging`, its own bridge network, its own
+#     named volumes; it NEVER joins the live `ovid-gateway_internal` network
+#     and never references a live container name.
+#   • Postgres container, database `ovid_cloud_staging`, 127.0.0.1:15432.
+#   • redis-q instance 127.0.0.1:16379 with the SAME pinned command as
+#     cloud/deploy/docker-compose.yml (maxmemory 1400mb / noeviction / AOF
+#     everysec).
+#   • staging mint (the REAL P9 service, never an HTTP mock) with its own
+#     redis-mint db2 projection on 127.0.0.1:16380; mint on
+#     127.0.0.1:18091 (public) / 127.0.0.1:18092 (admin).
+#   • gateway 127.0.0.1:18082. Every published port is loopback-only.
+#   • the host-run staging worker (staging.sh worker-start) uses
+#     /workspaces-staging, uid base 220000 and its own file-service port.
+#   • the mock LiteLLM is the ONE non-loopback listener (0.0.0.0:14000) so
+#     the gateway container can reach it over the docker bridge at
+#     172.17.0.1:14000; the host firewall must keep 14000 closed externally.
+#
+# Safe dry validation (no side effects):
+#   docker compose --env-file .env.staging.example \
+#     -f docker-compose.staging.yml config -q
+# NEVER `up` this project outside P10 Tasks 5–7's maintenance window.
+#
+# `.env.staging` / `.env.staging.mint` are the operator-authored files
+# (copy the `.example` templates; both are gitignored). The gateway's
+# `environment:` block deliberately overrides the loopback URLs in
+# `.env.staging` with compose service names — the env file is also the
+# host-side view consumed by staging.sh and the host worker.
+
+name: ovid-cloud-staging
+
+networks:
+  staging:
+    name: ovid-cloud-staging
+    driver: bridge
+
+volumes:
+  staging-pg-data:
+    name: ovid-cloud-staging-pg-data
+  staging-redis-q-data:
+    name: ovid-cloud-staging-redis-q-data
+  staging-redis-mint-data:
+    name: ovid-cloud-staging-redis-mint-data
+  staging-mintdata:
+    name: ovid-cloud-staging-mintdata
+
+services:
+  # ── Staging Postgres ──────────────────────────────────────────────────────
+  # A dedicated container + database. The staging worker reaches it over
+  # 127.0.0.1:15432; the gateway/mint containers use the service name.
+  # 2 GB ceiling: staging data is small and the box's 22 GB envelope is
+  # shared with the live stack.
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ovid_cloud_staging
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${STAGING_PG_PASSWORD:-staging}
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - staging-pg-data:/var/lib/postgresql/data
+    mem_limit: 2g
+    cpus: 2.0
+    networks: [staging]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ovid_cloud_staging"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  # ── Staging queue/event-log Redis ─────────────────────────────────────────
+  # Command string copied VERBATIM from cloud/deploy/docker-compose.yml
+  # (redis-q): maxmemory 1400mb + noeviction is the loud-failure guarantee
+  # (AG3) — a full queue errors instead of silently evicting jobs/events.
+  # mem_limit 1536m keeps headroom for buffers/AOF-fork COW.
+  redis-q:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--maxmemory",
+        "1400mb",
+        "--maxmemory-policy",
+        "noeviction",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "everysec",
+        "--requirepass",
+        "${REDIS_Q_PASSWORD:-staging}",
+      ]
+    environment:
+      # Only so the healthcheck's in-container shell can interpolate it.
+      REDIS_Q_PASSWORD: ${REDIS_Q_PASSWORD:-staging}
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - staging-redis-q-data:/data
+    mem_limit: 1536m
+    networks: [staging]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli --no-auth-warning -a \"$$REDIS_Q_PASSWORD\" ping | grep -q PONG",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ── Staging mint's db2 projection ─────────────────────────────────────────
+  # The REAL P9 mint writes its config:limits / tier keys here (db 2). AOF on:
+  # the projection is recoverable from Postgres (P9 boot re-sync), but AOF
+  # avoids a cold gap after a restart.
+  redis-mint:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "noeviction",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "everysec",
+        "--requirepass",
+        "${REDIS_MINT_PASSWORD:-staging}",
+      ]
+    environment:
+      REDIS_MINT_PASSWORD: ${REDIS_MINT_PASSWORD:-staging}
+    ports:
+      - "127.0.0.1:16380:6379"
+    volumes:
+      - staging-redis-mint-data:/data
+    mem_limit: 512m
+    networks: [staging]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli --no-auth-warning -a \"$$REDIS_MINT_PASSWORD\" ping | grep -q PONG",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ── Staging gateway ───────────────────────────────────────────────────────
+  # Builds the SAME image as production (Dockerfile.gateway). The env_file is
+  # the host-side view (loopback URLs); the environment block below rewrites
+  # the backend URLs to compose service names for the container network.
+  # `OVID_AUTH_MODE` is interpolated so `staging.sh up --auth firebase` can
+  # flip it without editing the env file.
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    env_file: [.env.staging]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8081"
+      OVID_AUTH_MODE: ${STAGING_AUTH_MODE:-test}
+      DATABASE_URL: postgres://postgres:${STAGING_PG_PASSWORD:-staging}@postgres:5432/ovid_cloud_staging
+      REDIS_Q_URL: redis://:${REDIS_Q_PASSWORD:-staging}@redis-q:6379
+      REDIS_MINT_URL: redis://:${REDIS_MINT_PASSWORD:-staging}@redis-mint:6379/2
+      OVID_INTERNAL_MINT_URL: http://mint:8092
+      OVID_LITELLM_BASE: http://172.17.0.1:14000
+      # The staging worker's file service runs on the HOST (staging.sh
+      # worker-start) on its own port — never the live worker's 8091.
+      OVID_WORKER_INTERNAL_URL: http://host.docker.internal:18093
+    ports:
+      - "127.0.0.1:18082:8081"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis-q: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      mint: { condition: service_healthy }
+    # staging network ONLY — never ovid-gateway_internal.
+    networks: [staging]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      # 200 = ok; 503 (degraded) makes wget exit nonzero → unhealthy.
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:8081/cloud/v1/health || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Staging mint — the REAL P9 service, never a mock ──────────────────────
+  # Both listeners are loopback-bound. The public listener (18091) is for the
+  # load harness / gateway; the admin listener (18092) is the internal
+  # server-to-server mint surface (P9 Task 9 HMAC) and is never public.
+  mint:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.mint
+    restart: unless-stopped
+    env_file: [.env.staging.mint]
+    environment:
+      HOST: 0.0.0.0
+      PUBLIC_PORT: "8091"
+      ADMIN_PORT: "8092"
+      DATABASE_URL: postgres://postgres:${STAGING_PG_PASSWORD:-staging}@postgres:5432/ovid_cloud_staging
+      REDIS_DB2_URL: redis://:${REDIS_MINT_PASSWORD:-staging}@redis-mint:6379/2
+      LITELLM_BASE: http://172.17.0.1:14000
+    ports:
+      - "127.0.0.1:18091:8091"
+      - "127.0.0.1:18092:8092"
+    volumes:
+      - staging-mintdata:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis-mint: { condition: service_healthy }
+    networks: [staging]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      # The mint image may be alpine or slim; use Node's built-in fetch
+      # rather than assuming wget/curl is installed.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8091/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s

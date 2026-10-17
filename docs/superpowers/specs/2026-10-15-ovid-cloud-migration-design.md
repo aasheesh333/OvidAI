@@ -41,7 +41,7 @@ offline**, and state re-syncs on reconnect via replayable event streams.
   higher concurrency, extended storage.
 - G10. Replace the Python backend entirely (strangler migration; LiteLLM proxy + its Python
   quota hook are the only Python kept, retired last if ever).
-- G11. ≥100 concurrent connected users on the current VPS (12 vCPU / 30 GB), per §9 capacity model.
+- G11. ≥100 concurrent connected users on the current VPS (8 vCPU / 22 GB), per §9 capacity model.
 
 ## 3. Non-Goals
 
@@ -71,7 +71,7 @@ offline**, and state re-syncs on reconnect via replayable event streams.
 | D1 | **Full TypeScript rewrite** of the agent core (no Dart agentd). Node/TS everywhere except LiteLLM's Python hook. |
 | D2 | **Keep LiteLLM** as the model gateway. TS `mint` re-implementation keeps the `/mint`, `/usage`, `/plans`, `/v1/models` client contracts and the `ovid_pools.py` in-proxy hook semantics. |
 | D3 | **BYOK kept via server-side key escrow**: user provider keys uploaded, envelope-encrypted in Postgres, used by the server agent directly against the provider (bypassing LiteLLM) through the single SSRF-guarded egress client. |
-| D4 | **Current VPS** (this box: `vm-mtx87lmp`, 12 vCPU / 30 GB, live stack at `/opt/ovid-gateway`), re-provisioned; must handle **≥100 concurrent users**. |
+| D4 | **Current VPS** (this box: `vps-6bc54f43-vps-ovh-ca`, 8 vCPU / 22 GB / 193 GB — migrated 2026-10-16 from `vm-mtx87lmp`; live stack at `/opt/ovid-gateway`), re-provisioned; must handle **≥100 concurrent users**. |
 | D5 | **Control mode removed** (accessibility `device_*` tools, overlay). **Voice input stays on-device** (STT → text upstream). **On-device WebView browser removed**; browser is server-side per G6. |
 | D6 | Python backend replaced entirely (account, billing, collaboration, images, mint, reports, shares, sync). `private_sync` is **deleted, not ported** — server becomes authoritative for transcripts/memory/usage; the app keeps a read cache. |
 | D7 | Cloudflare **R2** for object storage (workspaces, browser states, artifacts, image results). Owner provisions bucket + API token (env vars `OVID_R2_*`); agents never see Cloudflare credentials. |
@@ -182,7 +182,7 @@ Three layers, all in SandboxManager:
 2. **PATH wrapper binaries** for the same list (installed ahead of real binaries in the jail),
    so interactive terminal use and indirect invocations also refuse with the same message.
 3. **cgroups v2 hard caps** as backstop: `cpu.max=100000 100000` (1 core sustained; burst via
-   `cpu.weight` within a parent slice capped at 10 cores total), `memory.max=512M`,
+   `cpu.weight` within a parent slice capped at 6 cores total), `memory.max=512M`,
    `memory.swap.max=0`, `pids.max=64` per active sandbox; parent slice
    `ovid-sandboxes.slice` protects gateway/DB.
 
@@ -220,17 +220,40 @@ grace 24 h (run late, flag `ran_late`); recurring grace ≤6 h → `runNow` if �
 `skipToNext` if more; beyond grace → `pauseForReview`. Server reboots never duplicate effects
 (claim ledger keyed by `(schedule_id, scheduled_for)`).
 
-## 9. Capacity Model (≥100 concurrent on 12 vCPU / 30 GB)
+## 9. Capacity Model (≥100 concurrent on 8 vCPU / 22 GB)
+
+> **Revised 2026-10-16 by P10 Task 1.** The box migrated to
+> `vps-6bc54f43-vps-ovh-ca` — **8 vCPU / 22 GB / 193 GB** (ledger ENVIRONMENT
+> SHIFT 2026-10-16). The earlier 12 vCPU / 30 GB budget is superseded. These
+> numbers adopt the converged sibling-plan artifacts — P2's sandbox slice,
+> P6's worker unit and browser knobs, and the ledger's `MAX_WARM_GB` — never
+> a pre-convergence draft.
 
 "Concurrent" = connected users with live sessions. Assumed profile: 30–50 agent runs in
 flight; ~80% of run wall-time is LLM streaming (near-zero CPU); 10–20 sandboxes executing
-commands at any instant. Memory budget: host+Docker 2 GB, Postgres 3 GB, Redis-Q 1.5 GB,
-Redis-C 1.5 GB, LiteLLM 1 GB, Caddy+misc 0.5 GB, gateway+worker (Node) 2 GB, browser pool
-(4 live Playwright contexts × 400 MB + Lightpanda pool) 2 GB ⇒ **~16 GB for sandboxes = 32
-simultaneous at the 512 MB cap**. Hibernation (3-min idle) keeps warm jails ≪ user count.
-CPU: sandboxes capped by parent slice at 10 cores; gateway/DB protected. Concurrency admission:
-worker enforces `MAX_ACTIVE_SANDBOXES` (default 32) and `MAX_LIVE_BROWSERS` (default 4) with
-queues; Free tier = 1 concurrent run, Pro = 3 (queue priority via BullMQ priority).
+commands at any instant. Memory envelope: host+Docker+systemd 2 GB, Postgres 3 GB,
+Redis-Q 1.5 GB (`mem_limit 1536m` / `maxmemory 1400mb`), Redis-C 0.5 GB, LiteLLM 1 GB,
+Caddy+misc 0.5 GB, gateway container 1 GB, worker systemd unit **`MemoryMax=4096M`**
+(worker proper ~2 GB + browser pool ~2 GB — 4 live Tier-2 contexts ≤600 MB + the Tier-1
+Lightpanda pool + chromium fallback; planned peak ≈1.3 GB, hard ceiling 2 GB) ⇒
+**non-sandbox ceilings ≈12 GB** (P2's envelope; caps are ceilings, not reservations —
+jails are ~2 MB resident per the P2 spike; P10 Task 5 measures the real envelope).
+Sandbox slice `ovid-sandboxes.slice` **`MemoryMax=10G`, `MemorySwapMax=0`** (P2's shipped
+artifact); 24 × 512 MB worst case binds at the 10 G slice first (per-env OOM, host
+protected) ⇒ `OVID_MAX_ACTIVE_SANDBOXES=24` (P2's env name; was 32). Per-jail caps
+unchanged: `memory.max=512M`, `memory.swap.max=0`, `pids.max=64`,
+`cpu.max="100000 100000"`. CPU: `ovid-sandboxes.slice` **`CPUQuota=600%`** (was 1000%;
+6 of 8 cores, leaving ~2 for gateway/DB/browser/LiteLLM). Browser knobs (P6 landed
+defaults): `MAX_LIVE_BROWSERS=4`, `MAX_ACTIVE_SCREENCASTS=3`, `MAX_TIER1_PROCESSES=8`.
+Disk: `MAX_WARM_GB=8` warm-workspace LRU cap (the single converged P2↔P7 knob; the owner
+may retune 8→12 at activation); disk alert at 80% (the box currently shows 136 GB free —
+the earlier 45 GB envelope note is superseded, but the cap/alert stay). Load profile
+(G11 on the revised box): **100 connected users, 30–50 in-flight runs, 10–20
+environments executing at any instant (cap 24 ⇒ admission queues, never rejects),
+browser tier ≤4 live, scheduled fires interleaved**. Hibernation (3-min idle) keeps warm
+jails ≪ user count. Concurrency admission: worker enforces `OVID_MAX_ACTIVE_SANDBOXES`
+(default 24) and `MAX_LIVE_BROWSERS` (default 4) with queues; Free tier = 1 concurrent
+run, Pro = 3 (queue priority via BullMQ priority).
 
 ## 10. Data Layer
 
@@ -348,7 +371,7 @@ scrollback/ring-buffer sizes beyond the minimums stated.
   P3's checklist-driven tasking.
 - R2. Lightpanda maturity — fallback defined in §15.
 - R3. 100-concurrent on a shared box — mitigated by §9 admission caps + Phase 0 hardening
-  (remove root desktop/VNC); honest ceiling: ~32 simultaneous active sandboxes.
+  (remove root desktop/VNC); honest ceiling: ~24 simultaneous active sandboxes.
 - R4. Escrow master key co-located with data — accepted v1 risk; documented for future KMS.
 - R5. Repo was flipped public once (signing key/Firebase config exposure noted in
   HARDENING_TRACKER) — Phase 0 includes secret rotation checklist (owner task).
