@@ -44,6 +44,16 @@ export interface AgentRunJob {
    * provider call. Absent/empty = no attachments.
    */
   attachmentIds?: string[];
+  /**
+   * P3 Task 16 (additive, optional — old payloads still parse): the run has
+   * no attending user, so approval cards may not wait forever; the gate's
+   * timeout applies to every request kind.
+   */
+  unattended?: boolean;
+  /** P3 Task 16 (additive): the caller's autonomy policy (carried, not gated). */
+  autonomy?: "safe" | "auto";
+  /** P3 Task 16 (additive): the run's access mode (ruling R4 — job wins over session state). */
+  mode?: "safe" | "auto" | "drive" | "studio";
 }
 
 // Wire-format ids are plain nonempty strings (same convention as
@@ -55,6 +65,9 @@ export const agentRunJobSchema: z.ZodType<AgentRunJob> = z.object({
   prompt: z.string().min(1),
   tier: z.string().min(1).optional(),
   attachmentIds: z.array(z.string().min(1)).optional(),
+  unattended: z.boolean().optional(),
+  autonomy: z.enum(["safe", "auto"]).optional(),
+  mode: z.enum(["safe", "auto", "drive", "studio"]).optional(),
 });
 
 /** Why a workspace is being hibernated (warm → cold). */

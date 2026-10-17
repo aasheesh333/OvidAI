@@ -94,6 +94,33 @@ describe("agentRunJobSchema", () => {
       agentRunJobSchema.safeParse({ ...valid, attachmentIds: [""] }).success,
     ).toBe(false);
   });
+
+  it("P3 Task 16: preserves unattended/autonomy/mode through validation (additive, old payloads unchanged)", () => {
+    // The fields the gateway sends for unattended runs and mode selection.
+    const enriched = {
+      ...valid,
+      unattended: true,
+      autonomy: "safe" as const,
+      mode: "drive" as const,
+    };
+    expect(agentRunJobSchema.safeParse(enriched)).toEqual({
+      success: true,
+      data: enriched,
+    });
+    // A payload WITHOUT the new fields parses unchanged — z.object must not
+    // strip anything that was absent, and nothing new is required.
+    expect(agentRunJobSchema.safeParse(valid)).toEqual({ success: true, data: valid });
+    // Reject values outside the pinned enums.
+    expect(
+      agentRunJobSchema.safeParse({ ...valid, autonomy: "full" }).success,
+    ).toBe(false);
+    expect(
+      agentRunJobSchema.safeParse({ ...valid, mode: "readonly" }).success,
+    ).toBe(false);
+    expect(
+      agentRunJobSchema.safeParse({ ...valid, unattended: "yes" }).success,
+    ).toBe(false);
+  });
 });
 
 describe("AGENT_RUN_JOB_DEFAULTS", () => {

@@ -52,7 +52,12 @@ import type {
   TodoItem,
 } from "./ports.js";
 import { sandboxFailureCode } from "./ports.js";
-import { computeToolRoster, modePolicy, type RosterContext } from "./roster.js";
+import {
+  computeToolRoster,
+  isToolPermitted,
+  modePolicy,
+  type RosterContext,
+} from "./roster.js";
 import { resolveRoute, type ResolvedRoute } from "./routing.js";
 import { drainQueuedRuns } from "./steering.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
@@ -138,10 +143,32 @@ export interface LoopDeps {
   sandbox: SandboxPort | null;
   /** Model context window for compaction (env, default 128_000). */
   windowTokens: number;
+  /**
+   * Deployment feature flags (P3 Task 16 carry M-3): the roster is computed
+   * from these, so the loop never advertises a tool family the composition
+   * cannot honor. Both default true (the T15 behavior) when absent.
+   */
+  memoryEnabled?: boolean;
+  githubConnected?: boolean;
+  /**
+   * P3 Task 16: spill oversized tool output to `.spill/` before the event /
+   * tool row (default true). The P2-compat path passes false so P2's caps
+   * stay byte-for-byte identical.
+   */
+  spillToolResults?: boolean;
   /** BOUNDED mode only (P2-compat passes 50); undefined = never-stop. */
   maxToolRounds?: number;
   /** BOUNDED mode only (P2-compat passes SYSTEM_PROMPT_V1). */
   systemPromptOverride?: string;
+  /**
+   * P3 Task 16 (P2-compat only): let a call that is absent from the
+   * advertised roster reach the registry anyway. P2's loop answered an
+   * unknown tool with `unknown_tool: <name>` (a model-visible result) rather
+   * than the roster denial; the compat path wraps its registry with exactly
+   * that fallback. The full path leaves this unset — roster admission stays
+   * the single gate.
+   */
+  allowUnrosteredTools?: boolean;
   sleep?: (ms: number) => Promise<void>;
   /** Injectable clock seam (P1 parity; the loop itself is clock-free). */
   now?: () => Date;
@@ -487,17 +514,17 @@ function presetFor(state: SessionAgentState): AgentPreset | null {
 function rosterContext(
   state: SessionAgentState,
   mode: SessionMode,
+  deps: Pick<LoopDeps, "memoryEnabled" | "githubConnected">,
   isSubagent = false,
 ): RosterContext {
   return {
     mode,
     planMode: state.planMode,
     isSubagent,
-    // The loop cannot know the deployment's feature flags (Task 16 owns the
-    // composition): advertise what the registry actually contains. The
-    // preset/plan/skill filters still apply.
-    memoryEnabled: true,
-    githubConnected: true,
+    // M-3 (T15 review): feature flags are composition inputs, not constants.
+    // Absent = the T15 default (true) for callers that never wired them.
+    memoryEnabled: deps.memoryEnabled ?? true,
+    githubConnected: deps.githubConnected ?? true,
     preset: presetFor(state),
     activeSkillScopes: state.activeSkillScopes,
   };
@@ -674,6 +701,14 @@ export async function runAgentLoop(
       // ── 1. cancel check ────────────────────────────────────────────────
       if (isCancelled(rt)) return await cancelled();
 
+      // Bounded mode (P2-compat): a run that has already used its tool-round
+      // budget may not make another model call — P2's `for round 1..N` never
+      // issued an (N+1)th request. Checked BEFORE the call so exactly N tool
+      // rounds reach the transport.
+      if (deps.maxToolRounds !== undefined && toolRounds >= deps.maxToolRounds) {
+        return await failed("tool_rounds_exhausted");
+      }
+
       // ── 2. pending plan mode at the turn boundary (G2) ─────────────────
       state = await deps.state.get(sessionId);
       if (state.pendingPlanMode !== null) {
@@ -769,7 +804,7 @@ export async function runAgentLoop(
         job.roster !== undefined
           ? canonicalTools(job.roster)
           : computeToolRoster(
-              rosterContext(state, mode, job.isSubagent ?? false),
+              rosterContext(state, mode, deps, job.isSubagent ?? false),
               availableSpecs(deps),
             );
       const rosterNames = new Set(roster.map((t) => t.name));
@@ -905,9 +940,6 @@ export async function runAgentLoop(
       }
 
       // ── 10. tool round (sequential, Dart parity) ───────────────────────
-      if (deps.maxToolRounds !== undefined && toolRounds >= deps.maxToolRounds) {
-        return await failed("tool_rounds_exhausted");
-      }
       toolRounds += 1;
 
       msgs.push({ role: "assistant", content, toolCalls });
@@ -982,7 +1014,21 @@ export async function runAgentLoop(
         }
 
         // Roster/permission gate — the SAME single source as the roster.
-        if (result === null && !rosterNames.has(call.name)) {
+        // A tool absent from the ADVERTISED roster is denied, unless the
+        // permission projection still admits it. The distinction matters for
+        // sandbox-backed tools: `availableSpecs` drops them when no sandbox
+        // is wired (nothing to advertise), but the dispatch gate must still
+        // admit them so the mode policy produces the pinned denial (the T15
+        // mode-policy tests). Permission is the conjunctive source of truth.
+        if (
+          result === null &&
+          !rosterNames.has(call.name) &&
+          !isToolPermitted(
+            call.name,
+            rosterContext(state, mode, deps, job.isSubagent ?? false),
+          ) &&
+          deps.allowUnrosteredTools !== true
+        ) {
           result = {
             content: `DENIED: ${call.name} is not available in ${
               state.planMode ? "plan" : mode
@@ -1148,7 +1194,7 @@ export async function runAgentLoop(
         // spilled (Dart AS:12759–12763 order).
         const guarded = recordToolResult(g, call.name, effectiveArgs, result.content);
         let rowContent = guarded.result;
-        if (deps.sandbox !== null) {
+        if (deps.spillToolResults !== false && deps.sandbox !== null) {
           rowContent = await spillToolOutput(
             { sandbox: deps.sandbox, userId, workspaceRelDir: "" },
             call.name,

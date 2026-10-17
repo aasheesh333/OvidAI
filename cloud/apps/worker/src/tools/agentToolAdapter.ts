@@ -31,9 +31,27 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 
 export interface AgentToolAdapterDeps {
   /** The sandbox handle the run's tools execute in (P2 ToolContext.sandbox). */
-  sandbox: SandboxHandle;
-  /** The run's session event sink (P2 ToolContext.emitEvent). */
+  sandbox?: SandboxHandle;
+  /**
+   * P3 Task 16 additive: resolves the handle PER DISPATCH from the canonical
+   * ctx. The full processor uses this to attach the right user's sandbox and
+   * to thread `ctx.callKey` into a port-backed handle. Takes precedence over
+   * `sandbox` when present.
+   */
+  sandboxFor?(ctx: CoreToolContext): SandboxHandle | Promise<SandboxHandle>;
+  /**
+   * The run's session event sink (P2 ToolContext.emitEvent).
+   */
   emitEvent(type: SessionEventType, payload: Record<string, unknown>): Promise<void>;
+  /**
+   * P3 Task 16 additive: a per-dispatch sink factory, so a processor-wide
+   * adapter can route events to the canonical ctx's session. Takes precedence
+   * over `emitEvent` when present (existing 2-arg deps stay untouched).
+   */
+  emitEventFor?(ctx: CoreToolContext): (
+    type: SessionEventType,
+    payload: Record<string, unknown>,
+  ) => Promise<void>;
 }
 
 export function adaptAgentTool(tool: AgentTool, deps: AgentToolAdapterDeps): Tool {
@@ -45,12 +63,18 @@ export function adaptAgentTool(tool: AgentTool, deps: AgentToolAdapterDeps): Too
     },
     timeoutMs: TOOL_TIMEOUT_MS[tool.name] ?? DEFAULT_TIMEOUT_MS,
     async execute(args, ctx: CoreToolContext): Promise<CoreToolResult> {
+      const sandbox = deps.sandboxFor !== undefined ? await deps.sandboxFor(ctx) : deps.sandbox;
+      if (sandbox === undefined) {
+        throw new Error("agentToolAdapter: no sandbox handle for dispatch");
+      }
+      const emitEvent =
+        deps.emitEventFor !== undefined ? deps.emitEventFor(ctx) : deps.emitEvent;
       const bridged: ToolContext = {
-        sandbox: deps.sandbox,
+        sandbox,
         userId: ctx.userId,
         sessionId: ctx.sessionId,
         runId: ctx.runId,
-        emitEvent: deps.emitEvent,
+        emitEvent,
         // additive fields (ruling R2)
         callKey: ctx.callKey,
         signal: ctx.signal,
