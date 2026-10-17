@@ -38,6 +38,7 @@ import {
   type McpRouter,
   type SandboxFiles,
   type SandboxSpawner,
+  type SourceResolver,
   type UserSystemBus,
 } from "@ovid/mcp";
 import { createUnavailableSandbox } from "./sandboxSeam.js";
@@ -46,6 +47,11 @@ export interface McpRuntime {
   router: McpRouter;
   registry: ContributionRegistry;
   installer: ReturnType<typeof createPluginInstaller>;
+  /**
+   * The one source resolver (I3): P3's catalog tools need it to derive the
+   * canonical plugin id at enqueue, exactly as the installer will.
+   */
+  resolver: SourceResolver;
   shutdown(): Promise<void>;
 }
 
@@ -62,6 +68,12 @@ export interface McpRuntimeDeps {
   /** Defaults to @ovid/mcp's SSRF-guarded fetch. */
   fetchImpl?: GuardedFetch;
   githubApiBase?: string;
+  /**
+   * GitHub API token for plugin-source resolution (M6). Passed explicitly so
+   * an embedded/test `main(env)` keeps the token instead of silently falling
+   * back to `process.env.GITHUB_API_TOKEN` (unauthenticated rate limits).
+   */
+  githubToken?: string;
   /**
    * Test seam (additive): inject the system bus instead of building the
    * Redis one. Production leaves this undefined.
@@ -112,6 +124,7 @@ export function createMcpRuntime(deps: McpRuntimeDeps): McpRuntime {
   const resolver = createSourceResolver({
     fetchImpl,
     ...(deps.githubApiBase !== undefined ? { githubApiBase: deps.githubApiBase } : {}),
+    ...(deps.githubToken !== undefined ? { githubToken: deps.githubToken } : {}),
   });
 
   const installer = createPluginInstaller({
@@ -134,5 +147,5 @@ export function createMcpRuntime(deps: McpRuntimeDeps): McpRuntime {
     return shuttingDown;
   };
 
-  return { router, registry, installer, shutdown };
+  return { router, registry, installer, resolver, shutdown };
 }

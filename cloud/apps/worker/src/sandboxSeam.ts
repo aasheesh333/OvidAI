@@ -28,7 +28,7 @@
  * tools and plugin installs fail cleanly.
  */
 
-import { chown, mkdir, readFile, readdir, rm, stat as statPath, writeFile } from "node:fs/promises";
+import { chown, lstat, mkdir, readFile, readdir, realpath, rm, stat as statPath, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { REFUSAL_MESSAGE, type SandboxHandle, type SandboxManager } from "@ovid/sandbox";
 import {
@@ -92,6 +92,18 @@ async function hostPath(handle: SandboxHandle, jailPath: string): Promise<string
   return resolveConfined(handle.workspaceDir, jailPath);
 }
 
+/**
+ * Map a workspace-relative cwd onto the jail-absolute cwd P2's exec/spawn
+ * expects (the same rule as sandboxAdapter.ts's `jailCwd`): absolute values
+ * pass through untouched; relative values are rooted at /workspace. Empty
+ * means "P2's default", so it is omitted from the request.
+ */
+function jailCwd(cwd?: string): string | undefined {
+  if (cwd === undefined || cwd === "") return undefined;
+  if (cwd.startsWith("/")) return cwd;
+  return `${WORKSPACE_ROOT}/${cwd}`;
+}
+
 function mapExecResult(res: {
   exitCode: number | null;
   stdout: string;
@@ -123,10 +135,11 @@ export function createSandboxSeam(deps: SandboxSeamDeps): SandboxSeam {
   const spawner: SandboxSpawner = {
     async spawn(uid, req) {
       const handle = await handleFor(uid);
+      const cwd = jailCwd(req.cwd);
       // P2's long-lived primitive is structurally SandboxedProcess.
       return handle.spawnProcess({
         argv: [req.command, ...req.args],
-        ...(req.cwd !== undefined ? { cwd: req.cwd } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
         ...(req.env !== undefined ? { env: req.env } : {}),
       });
     },
@@ -159,8 +172,14 @@ export function createSandboxSeam(deps: SandboxSeamDeps): SandboxSeam {
       const entries = await readdir(abs, { withFileTypes: true });
       const out: WorkspaceEntry[] = [];
       for (const entry of entries) {
-        const info = await statPath(join(abs, entry.name)).catch(() => null);
+        // M9: lstat (not stat) — a symlink must never be reported as a
+        // directory. `search_files` recurses on type === "dir", so a
+        // symlink-to-parent would otherwise become an unbounded walk. Links
+        // are skipped entirely (they are not workspace content, and the
+        // installer's archive validation already rejects them).
+        const info = await lstat(join(abs, entry.name)).catch(() => null);
         if (info === null) continue; // dangling symlink / raced deletion
+        if (info.isSymbolicLink()) continue;
         out.push({
           name: entry.name,
           type: info.isDirectory() ? "dir" : "file",
@@ -190,6 +209,14 @@ export function createSandboxSeam(deps: SandboxSeamDeps): SandboxSeam {
     async remove(uid, path) {
       const handle = await handleFor(uid);
       const abs = await hostPath(handle, path);
+      // C1 defense-in-depth: never rm -rf the workspace root, whatever the
+      // caller passed. Compare both the lexical path and the realpath (a
+      // symlink resolving to the root must not delete through it).
+      const rootReal = await realpath(handle.workspaceDir).catch(() => handle.workspaceDir);
+      const absReal = await realpath(abs).catch(() => null);
+      if (abs === handle.workspaceDir || absReal === rootReal) {
+        throw new Error("refusing to delete the workspace root");
+      }
       await rm(abs, { recursive: true, force: true });
     },
 
@@ -222,9 +249,10 @@ export function createSandboxSeam(deps: SandboxSeamDeps): SandboxSeam {
 
     async exec(uid, req: SandboxExecRequest): Promise<SandboxExecResult> {
       const handle = await handleFor(uid);
+      const cwd = jailCwd(req.cwd);
       const result = await handle.exec({
         argv: [req.command, ...req.args],
-        ...(req.cwd !== undefined ? { cwd: req.cwd } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
         ...(req.env !== undefined ? { env: req.env } : {}),
         ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
       });

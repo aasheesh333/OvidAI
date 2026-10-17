@@ -17,6 +17,7 @@ export {
   createCatalogTools,
   createMcpToolProvider,
   parsePluginSource,
+  type CatalogAgentToolDef,
   type CatalogToolDeps,
   type McpAgentTool,
   type McpToolContext,
@@ -30,6 +31,7 @@ export * from "./ptyBridge.js";
 export * from "./runProcessor.js";
 export * from "./sandboxAdapter.js";
 export * from "./sandboxSeam.js";
+export * from "./schedulerMirror.js";
 export * from "./schedulerSettle.js";
 export * from "./schedulerTick.js";
 export * from "./staleRuns.js";

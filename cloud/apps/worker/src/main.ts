@@ -213,6 +213,14 @@ export function loadWorkerEnv(raw: NodeJS.ProcessEnv): WorkerEnv {
   // this loader).
   const browserStateDir = raw.OVID_BROWSER_STATE_DIR?.trim() || null;
   const masterKeyRaw = raw.OVID_MASTER_KEY?.trim() ?? "";
+  // M5: the MCP runtime's envelope crypto requires exactly 64 hex chars
+  // (32 bytes). Validate HERE so a misconfigured key fails at boot naming
+  // OVID_MASTER_KEY instead of throwing an opaque crypto error later.
+  if (masterKeyRaw !== "" && !/^[0-9a-fA-F]{64}$/.test(masterKeyRaw)) {
+    throw new Error(
+      "OVID_MASTER_KEY must be exactly 64 hex characters (32 bytes; generate with `openssl rand -hex 32`)",
+    );
+  }
   if (browserStateDir !== null && masterKeyRaw === "") {
     throw new Error(
       "OVID_MASTER_KEY is required (non-empty) when OVID_BROWSER_STATE_DIR is set — refusing to persist browser login state unencrypted",
@@ -396,6 +404,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
           masterKey: cfg.masterKey,
           sandbox: mcpSandbox,
           fetchImpl: egress,
+          // M6: thread the configured token into plugin-source resolution
+          // (the resolver's process.env fallback misses an explicit `env`).
+          githubToken: cfg.githubToken ?? undefined,
         });
   if (mcpRuntime === null) {
     console.warn(

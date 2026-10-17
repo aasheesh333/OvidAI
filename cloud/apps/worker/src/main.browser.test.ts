@@ -20,6 +20,10 @@ const baseEnv = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
   ...overrides,
 });
 
+/** A well-formed OVID_MASTER_KEY (64 hex chars = 32 bytes). */
+const MASTER_KEY_HEX =
+  "ab7d31c4e59f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829";
+
 describe("worker browser env (P6 Task 14)", () => {
   it("OVID_BROWSER_STATE_DIR set + OVID_MASTER_KEY missing → throws naming OVID_MASTER_KEY", () => {
     expect(() =>
@@ -35,10 +39,10 @@ describe("worker browser env (P6 Task 14)", () => {
 
   it("both set → parsed onto the env", () => {
     const cfg = loadWorkerEnv(
-      baseEnv({ OVID_BROWSER_STATE_DIR: "/var/lib/ovid/browser-state", OVID_MASTER_KEY: "master-key" }),
+      baseEnv({ OVID_BROWSER_STATE_DIR: "/var/lib/ovid/browser-state", OVID_MASTER_KEY: MASTER_KEY_HEX }),
     );
     expect(cfg.browserStateDir).toBe("/var/lib/ovid/browser-state");
-    expect(cfg.masterKey).toBe("master-key");
+    expect(cfg.masterKey).toBe(MASTER_KEY_HEX);
   });
 
   it("neither set → masterKey:null and browserStateDir:null (boot path unaffected)", () => {
@@ -48,8 +52,24 @@ describe("worker browser env (P6 Task 14)", () => {
   });
 
   it("masterKey alone is fine — without a state dir, persistence stays off", () => {
-    const cfg = loadWorkerEnv(baseEnv({ OVID_MASTER_KEY: "master-key" }));
-    expect(cfg.masterKey).toBe("master-key");
+    const cfg = loadWorkerEnv(baseEnv({ OVID_MASTER_KEY: MASTER_KEY_HEX }));
+    expect(cfg.masterKey).toBe(MASTER_KEY_HEX);
     expect(cfg.browserStateDir).toBeNull();
+  });
+
+  it("OVID_MASTER_KEY must be 64 hex chars — malformed values throw naming the variable (M5)", () => {
+    expect(() => loadWorkerEnv(baseEnv({ OVID_MASTER_KEY: "master-key" }))).toThrow(
+      /OVID_MASTER_KEY/,
+    );
+    expect(() =>
+      loadWorkerEnv(baseEnv({ OVID_MASTER_KEY: "ab7d31c4" })),
+    ).toThrow(/OVID_MASTER_KEY/);
+    expect(() =>
+      loadWorkerEnv(baseEnv({ OVID_MASTER_KEY: "z".repeat(64) })),
+    ).toThrow(/OVID_MASTER_KEY/);
+    // Upper-case hex is valid (crypto.ts's regex is case-insensitive).
+    expect(
+      loadWorkerEnv(baseEnv({ OVID_MASTER_KEY: MASTER_KEY_HEX.toUpperCase() })).masterKey,
+    ).toBe(MASTER_KEY_HEX.toUpperCase());
   });
 });

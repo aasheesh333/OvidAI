@@ -32,6 +32,7 @@ import {
   ConfigParseError,
   PRO_REQUIRED_MESSAGE,
   ProRequiredError,
+  adaptPlugin,
   parseMcpConfig,
   type McpRouter,
   type McpServerSummary,
@@ -39,6 +40,7 @@ import {
   type PluginInstallJob,
   type PluginSourceInput,
   type RunContext,
+  type SourceResolver,
 } from "@ovid/mcp";
 import { pluginSourceInputSchema } from "@ovid/shared";
 import type { ModelToolSpec } from "./tools/types.js";
@@ -135,10 +137,13 @@ export function createMcpToolProvider(router: McpRouter): McpToolProvider {
     return [...listings].sort(byName).map((listing) => toolForListing(router, uid, listing));
   }
 
-  return {
+  const provider: McpToolProvider = {
     tools: listTools,
     async specs(uid: string): Promise<ModelToolSpec[]> {
-      const tools = await listTools(uid);
+      // M3: derive from tools() (the one roster fetch), never a second
+      // router.listTools pass — that would re-spawn stdio servers just to
+      // produce the model-facing specs.
+      const tools = await provider.tools(uid);
       return tools.map((tool) => ({
         type: "function" as const,
         function: {
@@ -149,6 +154,7 @@ export function createMcpToolProvider(router: McpRouter): McpToolProvider {
       }));
     },
   };
+  return provider;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +178,19 @@ export interface CatalogToolDeps {
   router: McpRouter;
   db: Db;
   queues: { pluginInstalls: PluginInstallQueue };
+  /**
+   * The runtime's source resolver (I3). REQUIRED: the enqueue path must write
+   * the SAME canonical `publisher/name` the installer derives from the
+   * adapted manifest. The old per-source heuristic (`paste/<label>`,
+   * package/URL slugs) produced ids the installer refuses with
+   * `plugin_id_mismatch`, so paste installs were guaranteed to fail.
+   *
+   * The source is staged once here to read the manifest id; the installer
+   * resolves it again at install time (T14 owns that transaction). A source
+   * that cannot be resolved/adapted is an isError result and is never
+   * enqueued.
+   */
+  resolver: Pick<SourceResolver, "resolve">;
 }
 
 const LIST_SCOPE = { type: "string", enum: ["curated", "custom", "all"] } as const;
@@ -237,19 +256,18 @@ const CATALOG_DEFS: ReadonlyArray<Pick<McpAgentTool, "name" | "description" | "p
 ];
 
 /**
- * Unbound catalog-tool metadata for P3's roster (names/schemas are stable).
- * Execution is bound by `createCatalogTools(deps)` — the unbound entries
- * return an explanatory isError result rather than throwing.
+ * M1: the exported catalog-tool METADATA (names/schemas are stable and safe
+ * to render), deliberately WITHOUT `execute`. Execution requires runtime
+ * deps (db/queues/resolver) and is bound by `createCatalogTools(deps)`; a
+ * consumer that needs callable tools must go through that factory. Omitting
+ * `execute` makes the unbound state a type error instead of a runtime
+ * "not bound" result.
  */
-export const CATALOG_AGENT_TOOLS: readonly McpAgentTool[] = CATALOG_DEFS.map((def) => ({
-  ...def,
-  async execute(): Promise<ToolResult> {
-    return toolResult(
-      `${def.name} is not bound: construct it with createCatalogTools({ router, db, queues })`,
-      true,
-    );
-  },
-}));
+export type CatalogAgentToolDef = Pick<McpAgentTool, "name" | "description" | "parameters">;
+
+export const CATALOG_AGENT_TOOLS: readonly CatalogAgentToolDef[] = CATALOG_DEFS.map(
+  (def) => ({ ...def }),
+);
 
 function parseScope(value: unknown): "curated" | "custom" | "all" | null {
   if (value === undefined) return "all";
@@ -266,15 +284,6 @@ function summaryItem(summary: McpServerSummary): Record<string, unknown> {
     hasSecrets: summary.hasSecrets,
     status: summary.status,
   };
-}
-
-function slug(segment: string): string {
-  const out = segment
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return out === "" ? "plugin" : out;
 }
 
 /** Parse the agent-facing source string into the shared wire contract. */
@@ -311,32 +320,30 @@ export function parsePluginSource(raw: string): PluginSourceInput {
 }
 
 /**
- * Best-effort canonical plugin id from the source string. The installer
- * re-derives the id from the manifest and refuses a mismatch
- * (`plugin_id_mismatch`) — the deferred queue processor must reconcile this
- * before calling the transaction (see the Task 16 report).
+ * I3: derive the canonical plugin id the SAME way the installer will — stage
+ * the source with the runtime's resolver and adapt its manifest (Task 13's
+ * normalization). Enqueueing a heuristic id (`paste/<label>`, a package or
+ * URL slug) made the installer refuse the job with `plugin_id_mismatch`.
+ *
+ * The staging tree is discarded immediately: this call only reads identity;
+ * the install transaction resolves the source again.
  */
-function pluginIdFor(source: PluginSourceInput): string {
-  switch (source.kind) {
-    case "github":
-      return `${slug(source.owner)}/${slug(source.repo)}`;
-    case "npm":
-      return source.package
-        .split("/")
-        .map(slug)
-        .join("/");
-    case "zip": {
-      const url = new URL(source.url);
-      const base = url.pathname.split("/").filter((p) => p !== "").pop() ?? "plugin";
-      return `${slug(url.hostname)}/${slug(base.replace(/\.zip$/i, ""))}`;
-    }
-    case "paste":
-      return `paste/${slug(source.label)}`;
+async function canonicalPluginId(
+  resolver: Pick<SourceResolver, "resolve">,
+  source: PluginSourceInput,
+): Promise<string> {
+  const resolved = await resolver.resolve(source);
+  try {
+    return (await adaptPlugin(resolved.stagingDir)).pluginId;
+  } finally {
+    await resolved.discard().catch(() => {
+      // discard is idempotent/best-effort; identity was already read.
+    });
   }
 }
 
 export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[] {
-  const { router, db, queues } = deps;
+  const { router, db, queues, resolver } = deps;
 
   const listTool: McpAgentTool = {
     ...CATALOG_DEFS[0]!,
@@ -446,7 +453,16 @@ export function createCatalogTools(deps: CatalogToolDeps): McpAgentTool[] {
         const tier = await usersRepo.getTier(db, ctx.uid);
         if (tier === "free") return toolResult(PRO_REQUIRED_MESSAGE, true);
 
-        const pluginId = pluginIdFor(source);
+        // I3: the row/job carry the manifest's canonical id, not a source
+        // heuristic — the installer refuses any mismatch. A source that
+        // cannot be resolved/adapted is a validation error (never enqueued).
+        let pluginId: string;
+        try {
+          pluginId = await canonicalPluginId(resolver, source);
+        } catch (err) {
+          return toolResult(`invalid_source: ${errorMessage(err)}`, true);
+        }
+
         const installId = randomUUID();
         // Queue status vocabulary (T15): queued → installing by the worker.
         await pluginsRepo.upsert(db, {

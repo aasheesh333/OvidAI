@@ -214,6 +214,53 @@ describe("createFilesystemHandler", () => {
     expect(await ws.read("u-1", "/workspace/tmp/x.txt")).toBeNull();
   });
 
+  it("delete_file refuses the workspace root (C1): '', '.', './', '/workspace', '/workspace/'", async () => {
+    const ws = new FakeWorkspace();
+    await ws.write("u-1", "/workspace/keep.txt", "keep");
+    await ws.write("u-1", "/workspace/notes/a.txt", "a");
+    const handler = createFilesystemHandler();
+
+    for (const path of ["", ".", "./", "/workspace", "/workspace/"]) {
+      const res = await handler.callTool("delete_file", { path }, makeCtx(ws));
+      expect(res.isError).toBe(true);
+      expect(res.text).toContain("workspace root");
+      // The whole tree survives every attempt.
+      expect(ws.files.get("u-1")?.get("/workspace/keep.txt")).toBe("keep");
+      expect(ws.files.get("u-1")?.get("/workspace/notes/a.txt")).toBe("a");
+    }
+
+    // A legitimate nested path MUST still delete.
+    const nested = await handler.callTool("delete_file", { path: "notes/a.txt" }, makeCtx(ws));
+    expect(nested.isError).toBe(false);
+    expect(await ws.read("u-1", "/workspace/notes/a.txt")).toBeNull();
+  });
+
+  it("search_files terminates on a self-referencing directory listing (M9 cycle guard)", async () => {
+    // A WorkspaceFiles implementation that reports a symlink as "dir" would
+    // otherwise recurse forever; the depth cap must terminate the walk.
+    const cyclic: WorkspaceFiles = {
+      async read() {
+        return null;
+      },
+      async write() {},
+      async stat() {
+        return { type: "dir", size: 0, mtime: MTIME };
+      },
+      async list() {
+        return [{ name: "loop", type: "dir", size: 0, mtime: MTIME }];
+      },
+      async remove() {},
+    };
+    const handler = createFilesystemHandler();
+    const res = await handler.callTool(
+      "search_files",
+      { path: ".", pattern: "never-matches" },
+      makeCtx(cyclic as unknown as FakeWorkspace),
+    );
+    expect(res.isError).toBe(false);
+    expect(JSON.parse(res.text)).toEqual([]);
+  });
+
   it("unknown tool → isError \"Unknown tool … for filesystem MCP\"", async () => {
     const handler = createFilesystemHandler();
     const res = await handler.callTool("chmod", { path: "a" }, makeCtx(new FakeWorkspace()));

@@ -122,6 +122,22 @@ function escapeRegExp(p: string): string {
   return p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Defense-in-depth bound for `search_files`. The seam's `list` drops
+ * symlinks, so a symlinked directory cycle is not expected to reach this
+ * walk — but the handler accepts ANY WorkspaceFiles implementation, and an
+ * implementation that reports a symlink as `"dir"` must not make the tool
+ * recurse forever. A depth cap terminates every cycle regardless of path
+ * spelling (a symlink cycle produces ever-growing lexical paths, so a
+ * visited-path set alone would not help).
+ */
+const MAX_SEARCH_DEPTH = 32;
+
+/** The workspace root is never a deletable path (C1). */
+function isWorkspaceRoot(safe: string): boolean {
+  return safe === WORKSPACE_ROOT;
+}
+
 export function createFilesystemHandler(): NativeMcpHandler {
   return {
     async initialize(): Promise<Record<string, unknown>> {
@@ -213,22 +229,34 @@ export function createFilesystemHandler(): NativeMcpHandler {
             const regExp = new RegExp(escapeRegExp(pattern), "i");
             const matches: string[] = [];
 
-            const walk = async (dirAbs: string, relBase: string): Promise<void> => {
+            const walk = async (dirAbs: string, relBase: string, depth: number): Promise<void> => {
+              if (depth > MAX_SEARCH_DEPTH) return; // cycle guard (see MAX_SEARCH_DEPTH)
               const entries = await ws.list(ctx.uid, dirAbs);
               for (const e of entries) {
                 const rel = relBase === "" ? e.name : `${relBase}/${e.name}`;
                 if (regExp.test(e.name) || regExp.test(rel)) matches.push(rel);
-                if (e.type === "dir") await walk(`${dirAbs}/${e.name}`, rel);
+                if (e.type === "dir") await walk(`${dirAbs}/${e.name}`, rel, depth + 1);
               }
             };
-            await walk(safe, relFromRoot(safe) === "." ? "" : relFromRoot(safe));
+            await walk(safe, relFromRoot(safe) === "." ? "" : relFromRoot(safe), 0);
             return toolResult(JSON.stringify(matches));
           }
 
           case "delete_file": {
             const relPath = args.path;
             if (typeof relPath !== "string") return toolResult("Missing path", true);
+            // C1: "" / "." / "./" / "/workspace" / "/workspace/" all normalize
+            // to the workspace root. Deleting it would wipe the user's whole
+            // jail (plugin installs, session files) — refuse it here, before
+            // stat/remove. Defense-in-depth in the worker seam repeats this
+            // check, because the handler is not the only WorkspaceFiles caller.
+            if (relPath.trim() === "") {
+              return toolResult("Access denied: refusing to delete the workspace root", true);
+            }
             const safe = resolve(relPath);
+            if (isWorkspaceRoot(safe)) {
+              return toolResult("Access denied: refusing to delete the workspace root", true);
+            }
             const stat = await ws.stat(ctx.uid, safe);
             if (stat === null) {
               return toolResult(`File or directory does not exist: ${relFromRoot(safe)}`, true);

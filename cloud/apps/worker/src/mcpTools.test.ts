@@ -8,6 +8,9 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createDb, migrate, mcpServers, plugins, schema, type Db } from "@ovid/db";
 import {
   CURATED_IDS,
@@ -19,6 +22,7 @@ import {
   type GuardedFetch,
   type McpRouter,
   type SandboxSpawner,
+  type SourceResolver,
   type UserSystemBus,
   type WorkspaceFiles,
 } from "@ovid/mcp";
@@ -127,6 +131,41 @@ function makeQueue(): { queue: PluginInstallQueue; added: AddedJob[] } {
   };
 }
 
+const resolverDirs: string[] = [];
+
+/** Stage a minimal native manifest so `adaptPlugin` derives `publisher/name`. */
+async function stageManifest(publisher: string, name: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "ovid-mcp-tools-"));
+  resolverDirs.push(dir);
+  await writeFile(
+    join(dir, "plugin.json"),
+    JSON.stringify({ name, author: publisher, version: "1.0.0" }),
+    "utf8",
+  );
+  return dir;
+}
+
+/**
+ * The resolver double for the enqueue path: it stages a manifest whose
+ * canonical id is `publisher/name` regardless of the source string, exactly
+ * like the real resolver + adaptPlugin pair does for github/npm/zip/paste.
+ */
+function fakeResolver(publisher: string, name: string): Pick<SourceResolver, "resolve"> {
+  return {
+    async resolve() {
+      const stagingDir = await stageManifest(publisher, name);
+      return {
+        stagingDir,
+        bytes: 0,
+        provenance: { kind: "test" },
+        async discard() {
+          await rm(stagingDir, { recursive: true, force: true });
+        },
+      };
+    },
+  };
+}
+
 function tool(tools: readonly McpAgentTool[], name: string): McpAgentTool {
   const found = tools.find((t) => t.name === name);
   if (found === undefined) throw new Error(`missing tool ${name}`);
@@ -141,6 +180,7 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP agent tools (canonical roster seam)", (
   }, 60_000);
 
   afterAll(async () => {
+    await Promise.all(resolverDirs.map((d) => rm(d, { recursive: true, force: true })));
     await db?.$client.end({ timeout: 5 });
   });
 
@@ -226,7 +266,7 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP agent tools (canonical roster seam)", (
       const id = await seedUser("free");
       const { queue, added } = makeQueue();
       const add = tool(
-        createCatalogTools({ router, db, queues: { pluginInstalls: queue } }),
+        createCatalogTools({ router, db, queues: { pluginInstalls: queue }, resolver: fakeResolver("unused", "unused") }),
         "catalog_add_mcp",
       );
 
@@ -252,7 +292,7 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP agent tools (canonical roster seam)", (
       const id = await seedUser("pro");
       const { queue } = makeQueue();
       const add = tool(
-        createCatalogTools({ router, db, queues: { pluginInstalls: queue } }),
+        createCatalogTools({ router, db, queues: { pluginInstalls: queue }, resolver: fakeResolver("unused", "unused") }),
         "catalog_add_mcp",
       );
 
@@ -279,7 +319,7 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP agent tools (canonical roster seam)", (
       const id = await seedUser("pro");
       const { queue } = makeQueue();
       const list = tool(
-        createCatalogTools({ router, db, queues: { pluginInstalls: queue } }),
+        createCatalogTools({ router, db, queues: { pluginInstalls: queue }, resolver: fakeResolver("unused", "unused") }),
         "catalog_list_mcp",
       );
 
@@ -306,7 +346,7 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP agent tools (canonical roster seam)", (
       const id = await seedUser("pro");
       const { queue, added } = makeQueue();
       const install = tool(
-        createCatalogTools({ router, db, queues: { pluginInstalls: queue } }),
+        createCatalogTools({ router, db, queues: { pluginInstalls: queue }, resolver: fakeResolver("acme", "demo") }),
         "agent_install_plugin",
       );
 
@@ -328,13 +368,87 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP agent tools (canonical roster seam)", (
     }
   });
 
+  it("agent_install_plugin paste enqueues the manifest's canonical id, never paste/<label> (I3)", async () => {
+    const router = makeRouter();
+    try {
+      const id = await seedUser("pro");
+      const { queue, added } = makeQueue();
+      // Previously the enqueue path derived `paste/pasted`; the installer
+      // derives `acme/pasted-demo` from the staged manifest and refused the
+      // job with plugin_id_mismatch. The job and row must carry the
+      // canonical id now.
+      const install = tool(
+        createCatalogTools({
+          router,
+          db,
+          queues: { pluginInstalls: queue },
+          resolver: fakeResolver("acme", "pasted-demo"),
+        }),
+        "agent_install_plugin",
+      );
+
+      const result = await install.execute(
+        {
+          source: JSON.stringify({
+            mcpServers: { demo: { command: "node", args: ["demo.js"] } },
+          }),
+        },
+        ctx(id),
+      );
+      expect(result.isError).not.toBe(true);
+      expect(added).toHaveLength(1);
+      expect(added[0]?.data).toMatchObject({
+        userId: id,
+        pluginId: "acme/pasted-demo",
+        mode: "install",
+        source: { kind: "paste", label: "pasted" },
+      });
+      expect((added[0]?.data as { source: { kind: string } }).source.kind).toBe("paste");
+
+      expect(await plugins.getByPluginId(db, id, "acme/pasted-demo")).not.toBeNull();
+      expect(await plugins.getByPluginId(db, id, "paste/pasted")).toBeNull();
+    } finally {
+      await router.shutdown();
+    }
+  });
+
+  it("agent_install_plugin with an unresolvable source returns isError and enqueues nothing", async () => {
+    const router = makeRouter();
+    try {
+      const id = await seedUser("pro");
+      const { queue, added } = makeQueue();
+      const install = tool(
+        createCatalogTools({
+          router,
+          db,
+          queues: { pluginInstalls: queue },
+          resolver: {
+            async resolve() {
+              throw new Error("source_unreachable");
+            },
+          },
+        }),
+        "agent_install_plugin",
+      );
+
+      const result = await install.execute({ source: "acme/missing" }, ctx(id));
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("invalid_source");
+      expect(result.content).toContain("source_unreachable");
+      expect(added).toHaveLength(0);
+      expect(await plugins.getByPluginId(db, id, "acme/missing")).toBeNull();
+    } finally {
+      await router.shutdown();
+    }
+  });
+
   it("agent_install_plugin as free returns pro_required and enqueues nothing", async () => {
     const router = makeRouter();
     try {
       const id = await seedUser("free");
       const { queue, added } = makeQueue();
       const install = tool(
-        createCatalogTools({ router, db, queues: { pluginInstalls: queue } }),
+        createCatalogTools({ router, db, queues: { pluginInstalls: queue }, resolver: fakeResolver("unused", "unused") }),
         "agent_install_plugin",
       );
 
@@ -362,7 +476,7 @@ describe.skipIf(!TEST_DATABASE_URL)("MCP agent tools (canonical roster seam)", (
 
       const { queue } = makeQueue();
       const installMcp = tool(
-        createCatalogTools({ router, db, queues: { pluginInstalls: queue } }),
+        createCatalogTools({ router, db, queues: { pluginInstalls: queue }, resolver: fakeResolver("unused", "unused") }),
         "agent_install_mcp",
       );
       const result = await installMcp.execute({ server: "github" }, ctx(id));
