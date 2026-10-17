@@ -402,6 +402,27 @@ sudo bash /opt/ovid-cloud/repo/cloud/deploy/workspaces/setup-workspaces.sh
 stat -fc %T /workspaces   # → xfs
 mount | grep prjquota     # → the volume, mounted with prjquota
 ```
+**Quota sanity check** (run once, right after the gate — [OWNER]; it writes a
+throwaway tree outside `users/`):
+
+```bash
+# Scratch project id 999999 — never reuse a real per-user project id.
+mkdir -p /workspaces/.quota-selftest
+xfs_quota -x -c 'project -s -p /workspaces/.quota-selftest 999999' /workspaces
+xfs_quota -x -c 'limit -p bhard=1m 999999' /workspaces
+dd if=/dev/zero of=/workspaces/.quota-selftest/probe bs=1M count=8 conv=fsync 2>&1 | tail -1
+# EXPECT: "No space left on device" (EDQUOT) — anything else means the byte
+# convention is wrong and every user cap is off by 512×.
+# Cleanup (always, even when the probe passed):
+xfs_quota -x -c 'limit -p bhard=0 999999' /workspaces
+xfs_quota -x -c 'project -C -p /workspaces/.quota-selftest 999999' /workspaces
+rm -rf /workspaces/.quota-selftest
+```
+
+Why: `cloud/packages/sandbox/src/quota.ts` defers its byte-convention
+re-verification to this activation gate. The probe is the only proof that the
+cap the manager applies is the cap the filesystem enforces.
+
 **Rollback**: `sudo umount /workspaces && sudo sed -i '\|/opt/ovid-workspaces.img|d' /etc/fstab` (delete the line added by the script; `sudo rm /opt/ovid-workspaces.img` only if the volume is being discarded for good — that destroys every user workspace).
 
 ### Step 4 — sandbox egress filter (nftables)
