@@ -135,17 +135,22 @@ class AppRouter {
         return true;
       case ChatRoute(:final sessionId):
         if (AppState.I.sessionById(sessionId) == null) {
-          // P8 Task 10: `/c/<id>` accepts SERVER ids on the thin client —
-          // a server row not yet reconciled into AppState (a cold-start
-          // notification tap) triggers the reconciliation now; the tap
-          // itself still reports not-found and the next open lands once
-          // the list has loaded.
+          // P8 Task 10: `/c/<id>` accepts SERVER ids on the thin client. A
+          // server row not yet reconciled into AppState (a warm-app
+          // notification tap) is reconciled now and the chat opens as soon
+          // as it lands; only a genuinely missing session shows "Chat not
+          // found". The wait is bounded (see [_reconcileTimeout]).
           if (Distribution.cloudExecution) {
             unawaited(
-              CloudSessionStore.I.ready
-                  .then((_) => CloudSessionStore.I.refreshSessions())
-                  .catchError((Object _) {}),
+              _openCloudChatWhenReconciled(
+                navigator,
+                sessionId,
+                notFound: notFound,
+              ),
             );
+            // Accepted: the reconciliation owns the outcome, including the
+            // not-found feedback if the row never appears.
+            return true;
           }
           notFound();
           return false;
@@ -173,6 +178,36 @@ class AppRouter {
         navigator.push(MaterialPageRoute(builder: (_) => page));
         return true;
     }
+  }
+
+  /// Upper bound on the reconciliation wait for an unknown `/c/<id>` on the
+  /// thin client, so a slow or offline list request cannot leave the tap
+  /// hanging without feedback.
+  static const Duration _reconcileTimeout = Duration(seconds: 5);
+
+  /// Reconcile server sessions, then open [sessionId] if it now exists.
+  ///
+  /// Runs detached from [go] (which stays synchronous for notification
+  /// handlers); on failure the caller-supplied [notFound] feedback is shown.
+  static Future<void> _openCloudChatWhenReconciled(
+    NavigatorState navigator,
+    String sessionId, {
+    required void Function() notFound,
+  }) async {
+    try {
+      await CloudSessionStore.I.ready.timeout(_reconcileTimeout);
+      await CloudSessionStore.I.refreshSessions().timeout(_reconcileTimeout);
+    } catch (_) {
+      // Offline / slow / failed reconciliation: fall through to the final
+      // lookup so the user still gets an answer.
+    }
+    if (!navigator.mounted) return;
+    if (AppState.I.sessionById(sessionId) == null) {
+      notFound();
+      return;
+    }
+    navigator.popUntil((r) => r.isFirst);
+    AppState.I.selectSession(sessionId);
   }
 
   /// Notification tap → that chat, visible.

@@ -1481,10 +1481,12 @@ class _ChatScreenState extends State<ChatScreen>
                 onPressed: () => openStudio(context),
               ),
               // Browser button with agent-activity status dot (top-right).
-              // P8 Task 10: hidden when `!Distribution.cloudBrowser` — the
-              // on-device WebView browser is not part of the thin client;
-              // Task 16 re-points the button at the P6 screencast screen.
-              if (Distribution.cloudBrowser)
+              // P8 Task 10: hidden on the thin client — the on-device WebView
+              // browser is not part of it; Task 16 re-points the button at the
+              // P6 screencast screen. The default/sideload build keeps the
+              // local browser. (`Distribution.cloudBrowser` is `thinClient`,
+              // so gating on it would invert this.)
+              if (!Distribution.cloudExecution)
                 AnimatedBuilder(
                   animation: _agent,
                   builder: (_, _) {
@@ -6805,28 +6807,35 @@ class _InputBarState extends State<_InputBar> {
         ),
       );
     }
-    for (final s in SkillService.I.userSkillsForSession(
-      widget.sessionId ?? '',
-    )) {
-      final invocation = s.canonicalId ?? s.name;
-      add(
-        1,
-        '$invocation ${s.name}',
-        _SlashSuggestion(
-          icon: Icons.auto_fix_high_outlined,
-          name: '/$invocation',
-          description: s.description.isEmpty ? 'Skill' : s.description,
-          hint: '',
-          group: 'Skills',
-        ),
-      );
+    // User-invocable skills come from the on-device skill registry, which the
+    // thin client does not run (Task 18 removes the local skill runtime).
+    // P8 Task 10: gate on the execution arm rather than `cloudPlugins` — the
+    // latter is hardcoded false and would be a no-op.
+    if (!Distribution.cloudExecution) {
+      for (final s in SkillService.I.userSkillsForSession(
+        widget.sessionId ?? '',
+      )) {
+        final invocation = s.canonicalId ?? s.name;
+        add(
+          1,
+          '$invocation ${s.name}',
+          _SlashSuggestion(
+            icon: Icons.auto_fix_high_outlined,
+            name: '/$invocation',
+            description: s.description.isEmpty ? 'Skill' : s.description,
+            hint: '',
+            group: 'Skills',
+          ),
+        );
+      }
     }
     // Connected MCP server tools — the model can call these, so the composer
     // should be able to point at them too.
-    // P8 Task 10: hidden while `Distribution.cloudPlugins` is false — the
-    // MCP/plugin runtime is dark on the thin client until P5 (these entries
-    // die fully in Task 17).
-    if (!Distribution.cloudPlugins) {
+    // P8 Task 10: hidden on the thin client — the MCP/plugin runtime is dark
+    // there until P5 (these entries die fully in Task 17). Gate on the
+    // execution arm: `Distribution.cloudPlugins` is hardcoded false and would
+    // leave this always visible.
+    if (!Distribution.cloudExecution) {
       for (final entry in McpService.I.connectedTools.entries) {
         for (final t in entry.value) {
           final desc = (t.description ?? '').trim();
@@ -6848,9 +6857,10 @@ class _InputBarState extends State<_InputBar> {
       }
     }
     // Installed + enabled plugins that add agent tools.
-    // P8 Task 10: same `Distribution.cloudPlugins` gate as the MCP rows.
+    // P8 Task 10: same execution-arm gate as the MCP rows (the plugin runtime
+    // is on-device only until P5; `cloudPlugins` is hardcoded false).
     final sessionId = widget.sessionId ?? '';
-    if (!Distribution.cloudPlugins) {
+    if (!Distribution.cloudExecution) {
       for (final p in AppState.I.plugins.where((p) {
         if (!p.installed || !p.enabled || p.migrationRequired) return false;
         final runtimeId = p.runtimeId;

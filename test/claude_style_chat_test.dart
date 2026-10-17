@@ -108,11 +108,7 @@ void main() {
   );
 
   group('header', () {
-    // P8 Task 10: the browser header button is hidden while
-    // `Distribution.cloudBrowser` is false (the on-device WebView browser is
-    // not part of the thin client; Task 16 re-points it at the cloud
-    // screencast). The default build shows Studio + ⋮.
-    testWidgets('shows Studio and ⋮; Browser only on the thin client', (
+    testWidgets('shows exactly three actions: Studio, Browser, ⋮', (
       tester,
     ) async {
       addSession('h1', [
@@ -122,16 +118,16 @@ void main() {
       await pumpChat(tester);
       final bar = tester.widget<AppBar>(find.byType(AppBar));
       final actions = bar.actions!.where((w) => w is! SizedBox).toList();
-      expect(actions, hasLength(2));
+      expect(actions, hasLength(3));
       expect(find.byKey(const ValueKey('chat-header-studio')), findsOneWidget);
-      expect(find.byKey(const ValueKey('chat-header-browser')), findsNothing);
+      expect(find.byKey(const ValueKey('chat-header-browser')), findsOneWidget);
       expect(find.byKey(const ValueKey('chat-header-more')), findsOneWidget);
       // The old share / new-session / jobs icons are gone from the header.
       final inBar = find.descendant(
         of: find.byType(AppBar),
         matching: find.byType(IconButton),
       );
-      expect(inBar, findsNWidgets(2 + (bar.automaticallyImplyLeading ? 0 : 0)));
+      expect(inBar, findsNWidgets(3 + (bar.automaticallyImplyLeading ? 0 : 0)));
       expect(find.byTooltip('Share chat'), findsNothing);
       expect(find.byTooltip('New session'), findsNothing);
       expect(find.byTooltip('Background jobs'), findsNothing);
@@ -762,9 +758,7 @@ void main() {
       await pumpChat(tester, size: const Size(320, 640), textScale: 2.0);
       expect(tester.takeException(), isNull);
       final bar = tester.widget<AppBar>(find.byType(AppBar));
-      // P8 Task 10: Browser is hidden while `Distribution.cloudBrowser` is
-      // false, so the default build has Studio + ⋮.
-      expect(bar.actions!.where((w) => w is! SizedBox), hasLength(2));
+      expect(bar.actions!.where((w) => w is! SizedBox), hasLength(3));
       await tester.tap(find.byKey(const ValueKey('chat-header-more')));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
