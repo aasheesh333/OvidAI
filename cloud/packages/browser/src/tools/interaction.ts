@@ -351,6 +351,12 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       return withSession(deps, ctx, async (_session, page) => {
         const lines: string[] = [];
         for (const [selector, text] of Object.entries(fields)) {
+          // Dart parity: a missing selector is reported and the batch
+          // continues rather than aborting after Playwright's timeout.
+          if ((await page.locator(selector).count()) === 0) {
+            lines.push(`MISSING ${selector}`);
+            continue;
+          }
           await page.fill(selector, text);
           lines.push(`filled ${selector} with ${text.length} chars`);
         }
@@ -506,7 +512,9 @@ function interactionSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       })
       .refine(
         (value) =>
-          [value.get, value.set, value.delete, value.clear].filter((item) => item !== undefined).length === 1,
+          [value.get, value.set, value.delete].filter((item) => item !== undefined).length +
+            (value.clear === true ? 1 : 0) ===
+          1,
         { message: "provide exactly one of get, set, delete, clear" },
       ),
     async execute(input, ctx) {

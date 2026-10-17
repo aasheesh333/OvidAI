@@ -197,6 +197,16 @@ describe.skipIf(!chromiumExecutableExists())("browser tools II", () => {
     expect(await page().evaluate('document.getElementById("in2").value')).toBe("two");
   });
 
+  it("browser_fill reports MISSING and continues (Dart parity)", async () => {
+    await open("/click");
+    const result = await exec("browser_fill", { fields: { "#in": "one", "#nope": "x", "#in2": "two" } });
+    const lines = result.content.split("\n");
+    expect(lines).toHaveLength(3);
+    expect(lines).toContain("MISSING #nope");
+    expect(await page().evaluate('document.getElementById("in").value')).toBe("one");
+    expect(await page().evaluate('document.getElementById("in2").value')).toBe("two");
+  });
+
   it("browser_select applies the option value", async () => {
     await open("/click");
     const result = await exec("browser_select", { selector: "#sel", value: "b" });
@@ -315,6 +325,25 @@ describe.skipIf(!chromiumExecutableExists())("browser tools II", () => {
     expect(existsSync(join(wsRoot, "browser", "downloads", "attachment"))).toBe(false);
   });
 
+  it("browser_download refuses a declared-oversize body before reading it", async () => {
+    deps.downloadMaxBytes = 100;
+    const started = Date.now();
+    const result = await exec("browser_download", { url: server.url("/attachment-slow") });
+    const elapsed = Date.now() - started;
+    expect(result.content).toBe("Download refused: file exceeds the 50 MB limit.");
+    // The fixture delays its body by 1.5 s; a Content-Length pre-check
+    // returns without waiting for (or buffering) a single body byte.
+    expect(elapsed).toBeLessThan(1_000);
+    expect(existsSync(join(wsRoot, "browser", "downloads", "attachment-slow"))).toBe(false);
+  });
+
+  it("browser_download aborts an undeclared stream at the cap", async () => {
+    deps.downloadMaxBytes = 50;
+    const result = await exec("browser_download", { url: server.url("/attachment-chunked") });
+    expect(result.content).toBe("Download refused: file exceeds the 50 MB limit.");
+    expect(existsSync(join(wsRoot, "browser", "downloads", "attachment-chunked"))).toBe(false);
+  });
+
   it("browser_download refuses an escaping filename", async () => {
     const result = await exec("browser_download", { url: server.url("/attachment"), filename: "../evil" });
     expect(result.content).toBe("Download refused: invalid filename.");
@@ -323,12 +352,31 @@ describe.skipIf(!chromiumExecutableExists())("browser tools II", () => {
   it("page-initiated downloads auto-save and appear in the network buffer", async () => {
     await open("/click");
     // The click itself may abort the navigation with net::ERR_ABORTED — the
-    // download event is what we are pinning.
+    // download event is what we are pinning. Wait for the network entry (it is
+    // pushed after saveAs completes) before reading the file.
     await exec("browser_click", { selector: "#dl" });
     const abs = join(wsRoot, "browser", "downloads", "attachment");
-    await until(() => existsSync(abs));
+    // Wait for the COMPLETE file (saveAs resolves before the network entry is
+    // pushed, but the file can appear mid-write) then assert the log entry.
+    await until(async () => {
+      try {
+        return (await stat(abs)).size === 10;
+      } catch {
+        return false;
+      }
+    });
     expect((await readFile(abs)).toString()).toBe("file-bytes");
     await until(() => (registry.get("s1")?.network.some((e) => e.url.endsWith("/attachment")) ?? false));
+  });
+
+  it("page-initiated downloads over the cap are refused, not saved", async () => {
+    deps.downloadMaxBytes = 1;
+    await open("/click");
+    await exec("browser_click", { selector: "#dl" });
+    await until(() =>
+      (registry.get("s1")?.network.some((e) => e.url.endsWith("/attachment") && e.failure !== null) ?? false),
+    );
+    expect(existsSync(join(wsRoot, "browser", "downloads", "attachment"))).toBe(false);
   });
 
   it("browser_upload uploads a workspace file and the fixture echoes its name", async () => {

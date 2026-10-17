@@ -143,6 +143,26 @@ export function startTestPageServer(): Promise<TestPageServer> {
         res.end(req.headers.cookie ?? "");
         return;
       }
+      // /attachment-slow: declares 2000 bytes but sends the body only after a
+      // delay. The bounded download must refuse from Content-Length alone,
+      // without waiting for (or buffering) the body.
+      if (path === "/attachment-slow") {
+        res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": "2000" });
+        // Flush headers now so the client can apply its Content-Length
+        // pre-check before the delayed body arrives.
+        res.flushHeaders();
+        const timer = setTimeout(() => res.end(Buffer.alloc(2000, 0x61)), 1_500);
+        res.on("close", () => clearTimeout(timer));
+        return;
+      }
+      // /attachment-chunked: no Content-Length (chunked), 2000 bytes total.
+      // The bounded download must abort mid-stream at the cap.
+      if (path === "/attachment-chunked") {
+        res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        for (let i = 0; i < 20; i++) res.write(Buffer.alloc(100, 0x62));
+        res.end();
+        return;
+      }
       // /js/* chunks referenced by the SPA shell: 200 with a tiny body.
       const route = ROUTES[path] ?? (path.startsWith("/js/") ? { body: "//chunk", type: "text/javascript" } : undefined);
       if (!route) {

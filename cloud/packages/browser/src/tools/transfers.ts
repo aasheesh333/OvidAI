@@ -1,12 +1,14 @@
 /**
  * Transfers (P6 Task 13): explicit downloads and workspace uploads.
  *
- * `browser_download` uses `context.request` so the fetch shares the session's
- * cookie jar (authenticated downloads work without re-login). The byte cap is
- * checked BEFORE writing; `BrowserToolsDeps.downloadMaxBytes` is a test seam
- * (production defaults to 50 MB). Filenames are single-component only — a
- * server-supplied basename or a caller-supplied `../` can never escape
- * `browser/downloads/`.
+ * `browser_download` shares the session's cookie jar (authenticated downloads
+ * work without re-login) and reads the body with a BOUNDED stream: the
+ * declared Content-Length is checked before any body byte is read, and an
+ * undeclared (chunked) body is aborted as soon as the running count crosses
+ * the cap. Nothing past the cap is ever buffered — a multi-GB URL cannot OOM
+ * the worker. `BrowserToolsDeps.downloadMaxBytes` is a test seam (production
+ * defaults to 50 MB). Filenames are single-component only — a server-supplied
+ * basename or a caller-supplied `../` can never escape `browser/downloads/`.
  *
  * `browser_upload` resolves the caller's path against the P2 workspace jail
  * and refuses anything outside it (Review Focus #4), then hands the absolute
@@ -15,22 +17,100 @@
  */
 
 import { mkdir, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import type { BrowserContext } from "playwright-core";
 import { z } from "zod";
 
 import { guardUrl, withSession } from "../sessionOps.js";
-import { sanitizeFilename } from "./downloadWiring.js";
+import { DOWNLOAD_MAX_BYTES, sanitizeFilename } from "./downloadWiring.js";
 import {
   TOOL_ERROR_PREFIX,
   defineBrowserTool,
+  messageOf,
   type BrowserToolDef,
   type BrowserToolSpec,
   type BrowserToolsDeps,
 } from "./types.js";
 
-/** Hard download ceiling (Dart parity). */
-export const DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+export { DOWNLOAD_MAX_BYTES };
+
+/** Fetch timeout for explicit downloads. */
+const DOWNLOAD_TIMEOUT_MS = 30_000;
+
+interface BoundedResponse {
+  status: number;
+  ok: boolean;
+  contentType: string | null;
+  body: Buffer | null;
+  tooLarge: boolean;
+}
+
+/**
+ * GET `url` with the context's cookies, reading at most `maxBytes` of body.
+ * `tooLarge` short-circuits before the body is touched when Content-Length
+ * declares more than the cap, and aborts mid-stream when it does not.
+ */
+async function boundedGet(
+  context: BrowserContext,
+  url: string,
+  maxBytes: number,
+): Promise<BoundedResponse> {
+  const cookies = await context.cookies(url);
+  const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+  const controller = new AbortController();
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: cookieHeader !== "" ? { cookie: cookieHeader } : {},
+      // Redirects keep the pre-existing T12 behavior (guardUrl gates the
+      // initial URL only; Task 16's nftables egress rules are the backstop).
+      redirect: "follow",
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]),
+    });
+  } catch (err) {
+    throw new Error(`download failed: ${messageOf(err)}`);
+  }
+
+  const base = {
+    status: response.status,
+    ok: response.ok,
+    contentType: response.headers.get("content-type"),
+  };
+  if (!response.ok) return { ...base, body: null, tooLarge: false };
+
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    controller.abort();
+    return { ...base, body: null, tooLarge: true };
+  }
+
+  if (response.body === null) return { ...base, body: Buffer.alloc(0), tooLarge: false };
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        // Stop the transfer at the boundary — never buffer the remainder.
+        controller.abort();
+        await reader.cancel().catch(() => {});
+        return { ...base, body: null, tooLarge: true };
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    controller.abort();
+    throw new Error(`download failed: ${messageOf(err)}`);
+  }
+
+  return { ...base, body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))), tooLarge: false };
+}
 
 /** Default filename from a URL's last path segment, or null when absent/invalid. */
 function defaultFilename(url: string): string | null {
@@ -64,16 +144,15 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       if (refusal !== null) return { content: refusal };
 
       return withSession(deps, ctx, async (session) => {
-        const response = await session.handle.context.request.get(url, { timeout: 30_000 });
-        if (!response.ok()) {
-          return { content: `${TOOL_ERROR_PREFIX}download failed: HTTP ${response.status()} ${url}` };
-        }
-
-        const body = await response.body();
         const limit = deps.downloadMaxBytes ?? DOWNLOAD_MAX_BYTES;
-        if (body.length > limit) {
+        const response = await boundedGet(session.handle.context, url, limit);
+        if (!response.ok) {
+          return { content: `${TOOL_ERROR_PREFIX}download failed: HTTP ${response.status} ${url}` };
+        }
+        if (response.tooLarge || response.body === null) {
           return { content: "Download refused: file exceeds the 50 MB limit." };
         }
+        const body = response.body;
 
         const requested = input.filename as string | undefined;
         const name =
@@ -88,14 +167,13 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
         await mkdir(dir, { recursive: true });
         await writeFile(join(dir, name), body);
 
-        const headers = response.headers();
         return {
           content: `saved ${body.length} bytes to ${relDir}/${name}`,
           artifacts: [
             {
               kind: "download",
               path: `${relDir}/${name}`,
-              mimeType: headers["content-type"] ?? "application/octet-stream",
+              mimeType: response.contentType ?? "application/octet-stream",
               bytes: body.length,
             },
           ],
@@ -122,7 +200,7 @@ function transferSpecs(deps: BrowserToolsDeps): BrowserToolSpec[] {
       const abs = resolve(root, input.path);
       const rel = relative(root, abs);
       // Review Focus #4: the jail check is path-level, before any file work.
-      if (rel.startsWith("..") || isAbsolute(rel)) {
+      if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
         return { content: "Upload refused: path escapes the session workspace." };
       }
 
