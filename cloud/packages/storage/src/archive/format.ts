@@ -11,7 +11,14 @@
  *   end   footer   indexFrameLen u64 LE | sha256(indexJson)[0..8] | "OVIDEND1"
  */
 
-import { StorageError } from "../errors.js";
+import { ArchiveCorruptError, ArchiveTruncatedError } from "../errors.js";
+
+export {
+  /** Archive bytes fail a structural check (code "archive_corrupt"). */
+  ArchiveCorruptError,
+  /** Archive is shorter than its own footer (code "archive_truncated"). */
+  ArchiveTruncatedError,
+};
 
 export const ARCHIVE_MAGIC = "OVIDWS01";
 export const ARCHIVE_END_MAGIC = "OVIDEND1";
@@ -32,17 +39,3 @@ export const MEMBER_HEADER_LEN = 32;
  * (v1 edge — larger members would need a streaming ZstdCompress pass).
  */
 export const MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024;
-
-/** Archive bytes fail a structural check (code "archive_corrupt"). */
-export class ArchiveCorruptError extends StorageError {
-  constructor(message: string, opts?: { cause?: unknown }) {
-    super(message, { code: "archive_corrupt", cause: opts?.cause });
-  }
-}
-
-/** Archive is shorter than its own footer (code "archive_truncated"). */
-export class ArchiveTruncatedError extends StorageError {
-  constructor(message: string, opts?: { cause?: unknown }) {
-    super(message, { code: "archive_truncated", cause: opts?.cause });
-  }
-}

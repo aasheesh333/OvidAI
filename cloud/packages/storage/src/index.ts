@@ -13,3 +13,6 @@ export * from "./archive/memberStream.js";
 export * from "./archive/pack.js";
 export * from "./archive/readIndex.js";
 export * from "./archive/uiTree.js";
+export * from "./archive/zstdFrames.js";
+export * from "./archive/extract.js";
+export * from "./archive/recover.js";
